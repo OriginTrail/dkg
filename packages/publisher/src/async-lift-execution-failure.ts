@@ -11,7 +11,6 @@ import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintr
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
 import { isDefinitivePreAcceptanceSendFailure, isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
-import { isPublisherFundingFailure } from './async-lift-wallet-funding.js';
 import { hasUnaccountedTransactionEvidence } from './async-lift-retry-disposition.js';
 import { buildLiftJobAcceptedReset, getLiftJobTransactionEvidence, isKnowledgeAssetVmPublishJobRequest } from './async-lift-publisher-utils.js';
 import {
@@ -214,7 +213,7 @@ export function executionFailureDisposition(
       && input.evidence?.neverDispatched === false && !isDefinitivePreAcceptanceSendFailure(input.error);
     if (policy === 'proof-first' || legacyNamedAmbiguity) return { kind: 'retain' };
   }
-  if (policy === 'proof-first' && isPublisherFundingFailure(input.error)
+  if (policy === 'proof-first' && (isPublisherNativeGasFailure(input.error) || isDefinitivePreAcceptanceSendFailure(input.error))
     && hasUnaccountedTransactionEvidence(current)) {
     return { kind: 'fail', failure: createLiftJobFailureMetadata({
       failedFromState: 'broadcast', code: 'wallet_unavailable',

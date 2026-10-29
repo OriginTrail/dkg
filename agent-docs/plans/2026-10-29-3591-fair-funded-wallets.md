@@ -113,3 +113,10 @@ The fresh3d7 live race found a distinct earlier producer: _assessFundedCandidate
 Drive the real selector in tests across zero, equal-floor, above-floor and unknown native balances with inadequate TRAC. Exercise its cause-less marker through same-ID publisher recovery/cooldown while preserving the TRAC rejection and post-WAL tests. Preserve both historical unsigned failed race jobs natively as terminal reproductions; fresh fixed fixtures must prove automatic failover. The custody audit allows only those exact terminal IDs after checking no transaction evidence, no automatic retry, an unminted identity and complete signer nonce reconciliation.
 
 Same response batch includes remote feedback4418930708/4418930712: chain owns the throw-safe native-funding normalization, while publisher owns routing/recovery policy. Canonical retry disposition now exposes one status-independent unaccounted-hash predicate, reused by failure disposition; failed included-origin evidence remains an additional unconditional condition in hasBroadcastEvidence. Preserve live-hash precedence over older accounted recovery metadata.
+
+
+## Review response round 7: recovery policy stays with failure disposition
+
+Remove the recovery-only funding wrapper from the wallet eligibility implementation. Its sole consumer now expresses the unchanged native-or-broader-funding retention predicate locally in executionFailureDisposition, using the two imported canonical classifiers. This removes recovery's dependency on concrete routing state and preserves inherited-hash/TRAC handling without adding an abstraction.
+
+Liveb19 validation passed the repeated all-ineligible/replenishment3-job case and the exact pre-sign selector race that had failed on040ff/3d7. The raced job retained its ID, reset from validated with no transaction history, and finalized through the expected other funded wallet; independent receipt/root/exact32-triple proof passed. Both superseded unsigned terminal reproductions remain preserved.

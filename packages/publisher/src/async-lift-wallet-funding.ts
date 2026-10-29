@@ -1,10 +1,5 @@
-import { isPublisherNativeGasFailure, type PublisherGasFundingObservation } from '@origintrail-official/dkg-chain';
+import type { PublisherGasFundingObservation } from '@origintrail-official/dkg-chain';
 import { claimTrace } from './async-lift-claim-trace.js';
-import { isDefinitivePreAcceptanceSendFailure } from './async-lift-publish-result.js';
-
-export function isPublisherFundingFailure(error: unknown): boolean {
-  return isPublisherNativeGasFailure(error) || isDefinitivePreAcceptanceSendFailure(error);
-}
 
 export interface AsyncLiftWalletEligibility {
   prepare(walletId: string): Promise<boolean>;
