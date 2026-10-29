@@ -74,6 +74,37 @@ async function openStore(dataDir: string) {
 }
 
 describe('RFC-64 finalized-private placement repair store', () => {
+  it('normalizes legacy synchronous operations and rejects cancellation before reading', async () => {
+    const list = vi.fn(() => [repair]);
+    const store = createRfc64FinalizedPrivatePlacementRepairStoreV1({
+      listFinalizedPrivatePlacementRepairs: list,
+      readFinalizedPrivatePlacementFailure: () => null,
+      writeFinalizedPrivatePlacementFailures: () => {},
+      putFinalizedPrivatePlacementRepair: () => {},
+      deleteFinalizedPrivatePlacementRepair: () => {},
+    });
+    await expect(store.listAsync(new AbortController().signal)).resolves.toEqual([repair]);
+    const controller = new AbortController();
+    controller.abort(new Error('stop'));
+    await expect(store.listAsync(controller.signal)).rejects.toThrow('stop');
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it('binds native asynchronous operations to their owner without taking the legacy path', async () => {
+    const operations = {
+      rows: [repair],
+      listFinalizedPrivatePlacementRepairs: vi.fn(() => []),
+      async listFinalizedPrivatePlacementRepairsAsync(_signal: AbortSignal) { return this.rows; },
+      readFinalizedPrivatePlacementFailure: () => null,
+      writeFinalizedPrivatePlacementFailures: () => {},
+      putFinalizedPrivatePlacementRepair: () => {},
+      deleteFinalizedPrivatePlacementRepair: () => {},
+    };
+    const store = createRfc64FinalizedPrivatePlacementRepairStoreV1(operations);
+    await expect(store.listAsync(new AbortController().signal)).resolves.toEqual([repair]);
+    expect(operations.listFinalizedPrivatePlacementRepairs).not.toHaveBeenCalled();
+  });
+
   it('yields while decoding a snapshot and does not hold the database transaction open', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-sliced-'));
     roots.push(dataDir);

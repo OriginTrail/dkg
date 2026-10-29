@@ -331,7 +331,7 @@ export class InventoryV1CandidateError extends Error {
 
 export interface Rfc64InventoryV1CandidateApi
   extends Rfc64SwmAuthorInventoryOperationsV1,
-    Required<Rfc64FinalizedPrivatePlacementRepairOperationsV1>,
+    Rfc64FinalizedPrivatePlacementRepairOperationsV1,
     Rfc64UnregisteredAuthoritySeedOperationsV1 {
   purgeNextStartupStaleCandidateBatch(): CandidateSessionGcBatchResultV1;
   createCandidateSession(): CandidateSessionV1;

@@ -66,7 +66,7 @@ export interface Rfc64PrivatePlacementFailureWriteV1 {
 
 /** The repair queue is implemented by the single owned inventory connection. */
 export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
-  listFinalizedPrivatePlacementRepairsAsync?(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]>;
+  listFinalizedPrivatePlacementRepairsAsync(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]>;
   listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
   readFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null;
   writeFinalizedPrivatePlacementFailures(entries: readonly Rfc64PrivatePlacementFailureWriteV1[]): void;
@@ -78,8 +78,13 @@ export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
   ): void;
 }
 
+/** Legacy injected operations are normalized once when constructing the store. */
+export type Rfc64FinalizedPrivatePlacementRepairInputV1 =
+  Omit<Rfc64FinalizedPrivatePlacementRepairOperationsV1, 'listFinalizedPrivatePlacementRepairsAsync'>
+  & Partial<Pick<Rfc64FinalizedPrivatePlacementRepairOperationsV1, 'listFinalizedPrivatePlacementRepairsAsync'>>;
+
 export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
-  listAsync?(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]>;
+  listAsync(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]>;
   list(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
   readFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null;
   writeFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1, state: PrivatePlacementFailureStateV1): void;
@@ -88,47 +93,15 @@ export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
   delete(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void>;
 }
 
-/** Prefer bounded decoding while retaining compatibility with injected synchronous stores. */
-export async function listFinalizedPrivateRepairsAsyncV1(
-  store: Rfc64FinalizedPrivatePlacementRepairStoreV1 | undefined, signal: AbortSignal,
-): Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]> {
-  signal.throwIfAborted();
-  return store?.listAsync ? store.listAsync(signal) : store?.list() ?? [];
-}
-
-/** Guard the inventory facade without duplicating its repair forwarding methods. */
-export function guardedFinalizedPrivateRepairOperationsV1(
-  readOperations: () => Required<Rfc64FinalizedPrivatePlacementRepairOperationsV1>,
-) {
-  return {
-    listFinalizedPrivatePlacementRepairs: () => readOperations().listFinalizedPrivatePlacementRepairs(),
-    listFinalizedPrivatePlacementRepairsAsync: async (signal: AbortSignal) => {
-      signal.throwIfAborted();
-      const operations = readOperations();
-      const repairs = await operations.listFinalizedPrivatePlacementRepairsAsync(signal);
-      readOperations(); // Recheck facade lifetime after yielding.
-      return repairs;
-    },
-    putFinalizedPrivatePlacementRepair: (repair: Rfc64FinalizedPrivatePlacementRepairV1) =>
-      readOperations().putFinalizedPrivatePlacementRepair(repair),
-    deleteFinalizedPrivatePlacementRepair: (repair: Rfc64FinalizedPrivatePlacementRepairV1) =>
-      readOperations().deleteFinalizedPrivatePlacementRepair(repair),
-    readFinalizedPrivatePlacementFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) =>
-      readOperations().readFinalizedPrivatePlacementFailure(repair),
-    writeFinalizedPrivatePlacementFailures: (entries: readonly Rfc64PrivatePlacementFailureWriteV1[]) =>
-      readOperations().writeFinalizedPrivatePlacementFailures(entries),
-  };
-}
-
 export function createRfc64FinalizedPrivatePlacementRepairStoreV1(
-  operations: Rfc64FinalizedPrivatePlacementRepairOperationsV1,
-): Rfc64FinalizedPrivatePlacementRepairStoreV1 & Required<Pick<Rfc64FinalizedPrivatePlacementRepairStoreV1, 'listAsync'>> {
+  operations: Rfc64FinalizedPrivatePlacementRepairInputV1,
+): Rfc64FinalizedPrivatePlacementRepairStoreV1 {
+  const listAsync = operations.listFinalizedPrivatePlacementRepairsAsync?.bind(operations)
+    ?? (async (_signal: AbortSignal) => operations.listFinalizedPrivatePlacementRepairs());
   return Object.freeze({
     listAsync: async (signal: AbortSignal) => {
       signal.throwIfAborted();
-      return operations.listFinalizedPrivatePlacementRepairsAsync
-        ? operations.listFinalizedPrivatePlacementRepairsAsync(signal)
-        : operations.listFinalizedPrivatePlacementRepairs();
+      return listAsync(signal);
     },
     list: () => operations.listFinalizedPrivatePlacementRepairs(),
     readFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => operations.readFinalizedPrivatePlacementFailure(repair),

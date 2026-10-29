@@ -1,4 +1,5 @@
-import { guardedFinalizedPrivateRepairOperationsV1 } from '../finalized-private-placement-repair-store-v1.js';
+import { readValidSqliteHeaderIdentity } from './sqlite-header.js';
+export { readValidSqliteHeaderIdentity, type SqliteHeaderIdentityV1 } from './sqlite-header.js';
 import { INVENTORY_SCHEMA_MIGRATIONS_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
 import { finishInventoryV1PreMigrationCopy, keepInventoryV1PreMigrationCopy } from './pre-migration-copy.js';
 import { InventoryV1OpenError } from './open-error.js';
@@ -542,22 +543,40 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapMergeSwmAuthorInventoryV1(input);
   }
 
-  private readonly finalizedRepairOperations = guardedFinalizedPrivateRepairOperationsV1(() => {
+  listFinalizedPrivatePlacementRepairs() {
     this.requireOpen();
-    return this.#candidate;
-  });
-  readonly listFinalizedPrivatePlacementRepairsAsync =
-    this.finalizedRepairOperations.listFinalizedPrivatePlacementRepairsAsync;
-  readonly listFinalizedPrivatePlacementRepairs =
-    this.finalizedRepairOperations.listFinalizedPrivatePlacementRepairs;
-  readonly putFinalizedPrivatePlacementRepair =
-    this.finalizedRepairOperations.putFinalizedPrivatePlacementRepair;
-  readonly deleteFinalizedPrivatePlacementRepair =
-    this.finalizedRepairOperations.deleteFinalizedPrivatePlacementRepair;
-  readonly readFinalizedPrivatePlacementFailure =
-    this.finalizedRepairOperations.readFinalizedPrivatePlacementFailure;
-  readonly writeFinalizedPrivatePlacementFailures =
-    this.finalizedRepairOperations.writeFinalizedPrivatePlacementFailures;
+    return this.#candidate.listFinalizedPrivatePlacementRepairs();
+  }
+
+  putFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['putFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.putFinalizedPrivatePlacementRepair(repair);
+  }
+
+  deleteFinalizedPrivatePlacementRepair(repair: Parameters<
+    Rfc64InventoryV1CandidateApi['deleteFinalizedPrivatePlacementRepair']
+  >[0]): void {
+    this.requireOpen();
+    this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
+  }
+
+  readFinalizedPrivatePlacementFailure(...input: Parameters<Rfc64InventoryV1CandidateApi['readFinalizedPrivatePlacementFailure']>) {
+    this.requireOpen();
+    return this.#candidate.readFinalizedPrivatePlacementFailure(...input);
+  }
+  writeFinalizedPrivatePlacementFailures(...input: Parameters<Rfc64InventoryV1CandidateApi['writeFinalizedPrivatePlacementFailures']>): void {
+    this.requireOpen();
+    this.#candidate.writeFinalizedPrivatePlacementFailures(...input);
+  }
+
+  async listFinalizedPrivatePlacementRepairsAsync(signal: AbortSignal) {
+    this.requireOpen();
+    const repairs = await this.#candidate.listFinalizedPrivatePlacementRepairsAsync(signal);
+    this.requireOpen();
+    return repairs;
+  }
 
   readUnregisteredAuthoritySeedV1(
     ...input: Parameters<Rfc64InventoryV1CandidateApi['readUnregisteredAuthoritySeedV1']>
@@ -2340,13 +2359,6 @@ export function isBusySqliteError(error: unknown): boolean {
 
 type CorruptDatabaseOwnershipV1 = 'owned' | 'ambiguous' | 'foreign' | 'newer';
 
-export interface SqliteHeaderIdentityV1 {
-  applicationId: number;
-  userVersion: number;
-  writeVersion: number;
-  readVersion: number;
-}
-
 function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabaseOwnershipV1 {
   const identity = readValidSqliteHeaderIdentity(databasePath);
   if (identity === null || identity.applicationId === 0) return 'ambiguous';
@@ -2355,32 +2367,6 @@ function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabase
   if (versionClass === 'newer') return 'newer';
   return versionClass === 'current' || versionClass === 'migratable'
     ? 'owned' : 'ambiguous';
-}
-
-export function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdentityV1 | null {
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(databasePath, 'r');
-    const header = Buffer.alloc(100);
-    const bytesRead = readSync(descriptor, header, 0, header.byteLength, 0);
-    if (bytesRead < header.byteLength || header.subarray(0, 16).toString('binary') !== 'SQLite format 3\u0000') {
-      return null;
-    }
-    return {
-      applicationId: header.readUInt32BE(68),
-      userVersion: header.readUInt32BE(60),
-      writeVersion: header[18],
-      readVersion: header[19],
-    };
-  } catch (cause) {
-    throw new InventoryV1OpenError(
-      'database-io',
-      'failed to read the inventory database header; it will not be quarantined',
-      { cause },
-    );
-  } finally {
-    if (descriptor !== undefined) closeSync(descriptor);
-  }
 }
 
 export function fsyncDirectory(path: string): void {

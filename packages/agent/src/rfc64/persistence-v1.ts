@@ -70,7 +70,7 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   readonly #ownedOwedShareInventories: Rfc64OwedShareInventoryStoreV1;
   readonly inventory: Rfc64InventoryV1OperationsV1;
   readonly swmAuthorInventory: Rfc64SwmAuthorInventoryOperationsV1;
-  readonly finalizedPrivatePlacementRepairs: ReturnType<typeof createRfc64FinalizedPrivatePlacementRepairStoreV1>;
+  readonly finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1;
   readonly owedShareInventories: Omit<Rfc64OwedShareInventoryStoreV1, 'close'>;
   readonly unregisteredAuthoritySeeds: Rfc64UnregisteredAuthoritySeedStoreV1;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
@@ -81,7 +81,7 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
     ownedInventory: Rfc64InventoryV1Foundation,
     ownedControlObjectStore: Rfc64ControlObjectStoreV1,
     ownedKaBundleStore: Rfc64KaBundleStoreV1,
-    finalizedPrivatePlacementRepairs: ReturnType<typeof createRfc64FinalizedPrivatePlacementRepairStoreV1>,
+    finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1,
     unregisteredAuthoritySeeds: Rfc64UnregisteredAuthoritySeedStoreV1,
     owedShareInventories: Rfc64OwedShareInventoryStoreV1,
   ) {

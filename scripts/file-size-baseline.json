@@ -44,7 +44,7 @@
     "packages/agent/src/rfc64/catalog-row-authorship.ts": 1260,
     "packages/agent/src/rfc64/control-object-store-v1-internal.ts": 903,
     "packages/agent/src/rfc64/inventory-v1/candidate.ts": 3303,
-    "packages/agent/src/rfc64/inventory-v1/open.ts": 2395,
+    "packages/agent/src/rfc64/inventory-v1/open.ts": 2381,
     "packages/agent/src/rfc64/legacy-swm-boundary-v1.ts": 1072,
     "packages/agent/src/rfc64/public-catalog-activation-config-v1.ts": 1487,
     "packages/agent/src/rfc64/public-catalog-native-receiver-v1.ts": 2592,
