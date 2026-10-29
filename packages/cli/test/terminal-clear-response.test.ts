@@ -49,6 +49,16 @@ describe('respondTerminalClearOutcome mapping', () => {
     expect(run({ outcome: 'rejected', reason: 'nonterminal' }, 'job-3')).toEqual({ status: 409, body: { outcome: 'rejected', reason: 'nonterminal', jobId: 'job-3' } });
   });
 
+  it('rejected pending_transaction → 409, saying what to check and which flag clears it (#3573)', () => {
+    const { status, body } = run({ outcome: 'rejected', reason: 'pending_transaction' }, 'job-4');
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ outcome: 'rejected', reason: 'pending_transaction', jobId: 'job-4' });
+    expect(String(body.error)).toContain('"allowPendingTransaction": true');
+    expect(String(body.error)).toContain('may have sent a transaction');
+    // The other reasons carry no such text: only this one has an exit that needs the flag.
+    expect(run({ outcome: 'rejected', reason: 'nonterminal' }, 'job-4').body).not.toHaveProperty('error');
+  });
+
   it('rejected unknown → 409 with echoed jobId', () => {
     expect(run({ outcome: 'rejected', reason: 'unknown' }, 'bogus-1')).toEqual({ status: 409, body: { outcome: 'rejected', reason: 'unknown', jobId: 'bogus-1' } });
   });

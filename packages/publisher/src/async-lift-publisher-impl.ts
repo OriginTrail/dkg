@@ -5,7 +5,7 @@ import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection 
 import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobListingSelectors } from './lift-job-listing-selectors.js';
-import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE } from './async-lift-guarded-clear.js';
+import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE, readStoredLifecycleKeys } from './async-lift-guarded-clear.js';
 import { createLiftRetentionAccess, type LiftRetentionAccess } from './async-lift-retention-access.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
@@ -101,6 +101,7 @@ import {
   isAutomaticallyRetryableLiftJob,
   isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
+  needsPendingTransactionOverride,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
   resolveHeldJobSettlementCapability,
@@ -2837,11 +2838,13 @@ export class TripleStoreAsyncLiftPublisher
       // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose pending tx recovery may still finalize),
       // narrowed for the bulk lane by GH#2270's evidence guard; since OT-RFC-73 P11 also the sibling guard (async-lift-guarded-clear.ts).
       return await clearTerminalJobsGuarded({
+        status,
         jobs: await this.list({ status }),
         transact: (jobId, work) => this.claimCoordinator.runClaimJobTransaction(owner, jobId, async (transaction) => {
           if (transaction.kind !== 'missing') await work(transaction.current, transaction.scope);
         }),
-        siblings: (key) => this.jobSelectors.vmPublishCandidates(key, controlStoreOptions('publisher', LIFT_CLEAR_SIBLINGS_SOURCE)),
+        siblings: (key) => this.jobSelectors.vmPublishCandidates(key, controlStoreOptions('publisher', LIFT_CLEAR_SIBLINGS_SOURCE), true),
+        storedKeys: (jobId) => readStoredLifecycleKeys(this.store, this.graphUri, jobId),
       });
     });
   }
@@ -2895,7 +2898,8 @@ export class TripleStoreAsyncLiftPublisher
         // settles authority and state eligibility together, so a call site cannot read the
         // canonical predicate while forgetting the ownership half.
         if (!isTargetedClearableLiftJob(job, options)) {
-          return { outcome: 'rejected', reason: 'nonterminal' };
+          // #3573 — a finished job that may have sent a transaction is refused with the reason the override is for.
+          return { outcome: 'rejected', reason: needsPendingTransactionOverride(job) ? 'pending_transaction' : 'nonterminal' };
         }
         await scope.commitRemoval();
         return { outcome: 'cleared' };

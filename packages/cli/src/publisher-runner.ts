@@ -458,11 +458,9 @@ export async function createPublisherRuntime(args: {
   });
 }
 
-export async function createPublisherInspector(args: {
-  dataDir: string;
-  config: DkgConfig;
-}): Promise<PublisherInspector> {
-  const store = await createPublisherStore(args.dataDir, args.config);
+/** `readOnly`: an embedded Oxigraph store is opened read-only and its file is never written (#3551). */
+export async function createPublisherInspector(args: { dataDir: string; config: DkgConfig; readOnly?: boolean }): Promise<PublisherInspector> {
+  const store = await createPublisherStore(args.dataDir, args.config, args.readOnly === true);
   return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config, { store }));
 }
 
@@ -1280,11 +1278,13 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
 }
 
 
-async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
+async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
   if (config.store) {
     const storeConfig = config.store as any;
     return await createTripleStore({
       ...storeConfig,
+      // Only the embedded Oxigraph adapters write a store file back; an external store is a server the inspector only queries.
+      ...(readOnly && isLocalOxigraphStoreConfig(storeConfig) ? { options: { ...storeConfig.options, readOnly } } : {}),
       // OT-RFC-59 §5.3: the daemon-down CLI publisher is a SECOND writer against
       // the same store. It MUST NOT maintain the change log — a second in-memory
       // seq allocator would fork the log (commit order ≠ seq order across
@@ -1301,7 +1301,7 @@ async function createPublisherStore(dataDir: string, config: DkgConfig): Promise
 
   return await createTripleStore({
     backend: 'oxigraph-worker',
-    options: { path: join(dataDir, 'store.nq') },
+    options: { path: join(dataDir, 'store.nq'), readOnly },
     largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
   });
 }

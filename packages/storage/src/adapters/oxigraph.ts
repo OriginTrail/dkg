@@ -10,6 +10,7 @@ import { existsSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { loadOxigraphSnapshot, OxigraphSnapshotReadError, serializeOxigraphSnapshot } from './oxigraph-snapshot.js';
+import { OxigraphStoreReadOnlyError, type OxigraphStoreOptions } from './oxigraph-read-only.js';
 import type {
   TripleStore,
   Quad as DKGQuad,
@@ -76,6 +77,7 @@ export class OxigraphStore implements TripleStore {
   readonly rfc64SemanticReadCertifiedV1 = true as const;
   private store: OxStore;
   private persistPath: string | undefined;
+  private readonly readOnly: boolean;
   // #1609: per-graph write generations, bumped on every local mutation (the
   // same choke points the sparql-http adapter pairs with its listGraphs-cache
   // invalidation). Feeds the chain-reconcile negative memo via
@@ -87,10 +89,13 @@ export class OxigraphStore implements TripleStore {
    *   to this file path for persistence across restarts. The underlying
    *   store is still in-memory, but data is hydrated on construction
    *   and flushed on insert/delete/close.
+   * @param options  `readOnly` hydrates from `persistPath` and never writes
+   *   it; see {@link OxigraphStoreOptions}.
    */
-  constructor(persistPath?: string) {
+  constructor(persistPath?: string, options: OxigraphStoreOptions = {}) {
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
+    this.readOnly = options.readOnly === true;
     if (persistPath) {
       this.hydrateSync(persistPath);
     }
@@ -117,6 +122,7 @@ export class OxigraphStore implements TripleStore {
    * aside for forensics (so the next daemon start picks up a clean empty
    * state) and the error is rethrown so the operator sees the failure
    * immediately rather than discovering empty data later through queries.
+   * A read-only open throws without moving the file: it belongs to its owner.
    *
    * Previously this swallowed all errors and started empty silently — that
    * was the proximate cause of the WM persistence regression. See the current
@@ -128,6 +134,9 @@ export class OxigraphStore implements TripleStore {
       loadOxigraphSnapshot(this.store, filePath);
     } catch (err) {
       if (err instanceof OxigraphSnapshotReadError) throw err;
+      if (this.readOnly) {
+        throw new Error(`OxigraphStore: failed to parse ${filePath}, left in place (read-only open): ${(err as Error).message}`);
+      }
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
       const corruptPath = `${filePath}.corrupt-${ts}`;
       try {
@@ -155,8 +164,14 @@ export class OxigraphStore implements TripleStore {
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
 
+  /** The native store for a write. A read-only store refuses before anything changes. */
+  private get writable(): OxStore {
+    if (this.readOnly) throw new OxigraphStoreReadOnlyError(this.persistPath);
+    return this.store;
+  }
+
   private scheduleFlush(): void {
-    if (!this.persistPath || this.flushTimer) return;
+    if (!this.persistPath || this.flushTimer || this.readOnly) return;
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       // Background flush has no caller to receive errors; log them.
@@ -196,9 +211,11 @@ export class OxigraphStore implements TripleStore {
    * directly, so their callers (e.g. `DKGAgent.stop()`) receive the
    * error and can fail the shutdown loudly instead of reporting
    * success while data was lost on disk.
+   *
+   * A read-only store never writes: what it loaded may be older than the file.
    */
   private async flushNow(): Promise<void> {
-    if (!this.persistPath || this.flushing) return;
+    if (!this.persistPath || this.flushing || this.readOnly) return;
     this.flushing = true;
     const dir = dirname(this.persistPath);
     const tmpPath = `${this.persistPath}.tmp`;
@@ -281,7 +298,7 @@ export class OxigraphStore implements TripleStore {
     // RFC 3987-invalid IRI, failing the whole batch.
     statements.checkIris.insert(quads);
     const nquads = `${quadsToNQuads(quads)}\n`;
-    this.store.load(nquads, { format: 'application/n-quads' });
+    this.writable.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
     this.writeGen.recordWrite({
       kind: 'graphs',
@@ -292,7 +309,7 @@ export class OxigraphStore implements TripleStore {
   async delete(quads: DKGQuad[]): Promise<void> {
     for (const q of quads) {
       const oxQuad = toOxQuad(q);
-      if (oxQuad) this.store.delete(oxQuad);
+      if (oxQuad) this.writable.delete(oxQuad);
     }
     this.scheduleFlush();
     this.writeGen.recordWrite({
@@ -309,7 +326,7 @@ export class OxigraphStore implements TripleStore {
       pattern.graph ? oxigraph.namedNode(pattern.graph) : null,
     );
     for (const q of matches) {
-      this.store.delete(q);
+      this.writable.delete(q);
     }
     if (matches.length > 0) this.scheduleFlush();
     this.writeGen.recordWrite(pattern.graph
@@ -412,7 +429,7 @@ export class OxigraphStore implements TripleStore {
 
   async dropGraph(graphUri: string): Promise<void> {
     const plan = statements.dropGraph(graphUri);
-    this.store.update(plan.update);
+    this.writable.update(plan.update);
     this.scheduleFlush();
     this.writeGen.recordWrite(plan.scope);
   }
@@ -430,11 +447,11 @@ export class OxigraphStore implements TripleStore {
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
     statements.checkIris.replaceGraph(graphUri, quads);
     try {
-      this.store.update(plan.update);
+      this.writable.update(plan.update);
     } catch (error) {
       if (plan.cleanup) {
         try {
-          this.store.update(plan.cleanup);
+          this.writable.update(plan.cleanup);
         } catch {
           // Keep the replacement error. Internal staging graphs are hidden
           // from enumeration and can be reaped independently.
@@ -451,7 +468,7 @@ export class OxigraphStore implements TripleStore {
     const plan = buildAtomicAssetGroupUpdate(assets);
     statements.checkIris.replaceAssetGroup(assets);
     options?.signal?.throwIfAborted();
-    this.store.update(plan.update);
+    this.writable.update(plan.update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: plan.graphs });
   }
@@ -482,10 +499,10 @@ export class OxigraphStore implements TripleStore {
       metadataQuads,
     );
     try {
-      this.store.update(plan.update);
+      this.writable.update(plan.update);
     } catch (error) {
       try {
-        this.store.update(plan.cleanup);
+        this.writable.update(plan.cleanup);
       } catch {
         // Preserve the compound replacement failure.
       }
@@ -512,7 +529,7 @@ export class OxigraphStore implements TripleStore {
     // rolls the whole thing back.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
     statements.checkIris.replaceSubject(graphUri, subject, quads);
-    this.store.update(update);
+    this.writable.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
@@ -532,7 +549,7 @@ export class OxigraphStore implements TripleStore {
     }
     const update = buildAtomicSubjectAndInsertUpdate(graphUri, subject, replacementQuads, insertQuads);
     statements.checkIris.replaceSubjectAndInsert(graphUri, subject, quads);
-    this.store.update(update);
+    this.writable.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
@@ -570,11 +587,11 @@ export class OxigraphStore implements TripleStore {
     }
     statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
-      executeUpdate: () => this.store.update(plan.update),
+      executeUpdate: () => this.writable.update(plan.update),
       readReceipt: () => this.store.query(plan.receiptAsk),
       cleanup: () => {
         try {
-          this.store.update(plan.cleanup);
+          this.writable.update(plan.cleanup);
         } finally {
           this.scheduleFlush();
         }
@@ -612,7 +629,7 @@ export class OxigraphStore implements TripleStore {
   ): Promise<number> {
     const plan = statements.deleteBySubjectPrefix(graphUri, prefix);
     const before = this.store.size;
-    this.store.update(plan.update);
+    this.writable.update(plan.update);
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
     this.writeGen.recordWrite(plan.scope);
@@ -629,7 +646,7 @@ export class OxigraphStore implements TripleStore {
     // In-process oxigraph is never wrapped by a graph-set index, so the
     // `touchedGraphs` hint is inapplicable here — accepted for a uniform
     // update contract, ignored.
-    this.store.update(sparql);
+    this.writable.update(sparql);
     this.scheduleFlush();
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped bump.
@@ -759,9 +776,9 @@ function termToString(t: OxTerm): string {
   return formatCanonicalRdfTerm(t);
 }
 
-registerTripleStoreAdapter('oxigraph', async () => new OxigraphStore());
+registerTripleStoreAdapter('oxigraph', async (opts) => new OxigraphStore(undefined, { readOnly: opts?.readOnly === true }));
 registerTripleStoreAdapter('oxigraph-persistent', async (opts) => {
   const filePath = opts?.path as string | undefined;
   if (!filePath) throw new Error('oxigraph-persistent requires options.path');
-  return new OxigraphStore(filePath);
+  return new OxigraphStore(filePath, { readOnly: opts?.readOnly === true });
 });

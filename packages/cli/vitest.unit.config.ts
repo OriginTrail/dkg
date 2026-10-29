@@ -23,11 +23,16 @@ export default defineConfig({
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/public-checkpoint-job.test.ts',
+          'test/public-checkpoint-config.test.ts',
+          'test/snapshot-job-isolation.test.ts',
+          'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
+          'test/rdf-parser.test.ts',
           'test/api-client.test.ts',
           'test/context-graph-read-model.test.ts',
           'test/finalized-publish-options.test.ts',
@@ -321,8 +326,10 @@ export default defineConfig({
           // routes (real publisher control, no hardhat), and the CLI rendering.
           'test/publisher-retry-surfacing-2270.test.ts',
           'test/publisher-retry-command-output-2270.test.ts',
-          // OT-RFC-73 P11 (AC7): the offline inspector refuses destructive commands while a daemon is running.
+          // OT-RFC-73 P11 (AC7) and #3551: the offline inspector refuses every command while a daemon is running.
           'test/publisher-offline-write-guard.test.ts',
+          // #3551: the offline reads open the store read-only and leave its file unchanged (real store files, no hardhat).
+          'test/publisher-offline-read-only.test.ts',
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
@@ -380,6 +387,7 @@ export default defineConfig({
           // at both async admission routes.
           'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/writable-quad-terms.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',

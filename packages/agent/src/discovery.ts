@@ -6,6 +6,7 @@ import {
   normalizeAgentDid,
   sparqlIri,
 } from '@origintrail-official/dkg-core';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 import {
   MAX_AGENT_PEER_PAGE_SIZE,
@@ -454,8 +455,5 @@ export class DiscoveryClient implements AgentPeerDiscovery {
 }
 
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
-  return s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }
