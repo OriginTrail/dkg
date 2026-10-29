@@ -31,7 +31,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
-import { assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
+import { assertNoDaemonForOfflineRead, assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
 import { parseJobListPagingOptions, readJobList, type JobListPage } from '../job-list-paging.js';
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
@@ -264,9 +264,10 @@ publisherCmd
         );
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('jobs');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           const filter = {
             ...(status ? { status: status as any } : {}),
@@ -312,9 +313,10 @@ publisherCmd
         }
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('job');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           const job = await inspector.publisher.getStatus(jobId);
           if (!job) {
@@ -353,9 +355,10 @@ publisherCmd
         stats = await client.publisherStats();
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineRead('stats');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
-        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
+        const inspector = await createPublisherInspector({ dataDir: dkgDir(), config, readOnly: true });
         try {
           stats = await inspector.publisher.getStats();
         } finally {

@@ -9,7 +9,7 @@ function respond(response: WorkerResponseV1): void {
   parentPort!.postMessage(response);
 }
 
-const store = new OxigraphStore(workerData?.persistPath);
+const store = new OxigraphStore(workerData?.persistPath, { readOnly: workerData?.readOnly === true });
 
 parentPort!.on('message', async (msg: { id: number; method: string; args: unknown[] }) => {
   try {

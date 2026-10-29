@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { normalizePublicSnapshotSyncOptions } from '../src/public-snapshot-options.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
@@ -18,7 +19,7 @@ describe('snapshot domain options', () => {
     { trustedCorePeerIds: ['a', 'b', 'c', 'd', 'e'] }])('rejects malformed options before any job access: %j', async patch => {
     const input = patch === null || Array.isArray(patch) ? patch : { ...request, ...patch };
     expect(() => normalizePublicSnapshotSyncOptions(input)).toThrow();
-    await expect(PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call({} as never, input as never))
+    await expect(PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call({ withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession } as never, input as never))
       .rejects.toThrow(/Invalid snapshot job|one to four/);
   });
 });
