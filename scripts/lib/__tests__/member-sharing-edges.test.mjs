@@ -464,7 +464,7 @@ for (const state of ['following', 'unknown', 'not-following']) {
     const feederOutOf = (graph, when) => auditFeederIsolation({ edges,
       graphs: { following: async () => { devnet.calls.push('audit'); return { state }; } },
       fail: (id, message) => { failures.push([id, message]); devnet.calls.push('verdict'); },
-    }, graph, when);
+    }, graph, when, { boundMs: 0 });
     const audit = () => feederOutOf('public', 'before removal');
     await edges.prepareLargeGraphAuthor(2, audit);
     await edges.prepareLargeGraphAuthor(3, audit);
@@ -476,6 +476,59 @@ for (const state of ['following', 'unknown', 'not-following']) {
     assert.equal(edges.feederRunning, false);
   });
 }
+
+/** The audit of a feeder whose listing answers `answers` in turn (the last repeats). */
+async function auditOf(answers, options = { boundMs: 2_000, everyMs: 5 }) {
+  const failures = [];
+  const notes = [];
+  let reads = 0;
+  await auditFeederIsolation({
+    edges: { feeder: { label: 'node10 (feeder)' } },
+    graphs: { following: async () => answers[Math.min(reads++, answers.length - 1)] },
+    fail: (id, message) => failures.push([id, message]),
+    note: text => notes.push(text),
+  }, 'public', 'after case 6', options);
+  return { failures, notes, reads };
+}
+const busy = { state: 'unknown', reason: 'HTTP 500 {"error":"ontology/agents definition scan exceeded listContextGraphs budget"}' };
+
+test('a feeder whose store is busy is asked again, and the first answer that says either way decides', async () => {
+  // It cannot read its store for a while, then says it stayed out: nothing failed, and the note keeps what it said.
+  const out = await auditOf([busy, busy, { state: 'not-following' }]);
+  assert.deepEqual(out.failures, []);
+  assert.equal(out.reads, 3);
+  assert.deepEqual(out.notes, [`after case 6 the feeder node10 (feeder) could not say whether it follows the public graph 2 time(s) (first: ${busy.reason}), then it did`]);
+  // Then it says it follows the graph: as without the wait, that fails case 2.
+  const followed = await auditOf([busy, { state: 'following' }]);
+  assert.deepEqual(followed.failures, [[2, 'after case 6 the feeder node10 (feeder) follows the public graph: its gossip may have carried writes']]);
+  assert.equal(followed.reads, 2);
+});
+
+test('a feeder that answers is not asked again, and one that never says fails case 2 when the bound runs out', async () => {
+  const quiet = await auditOf([{ state: 'not-following' }]);
+  assert.deepEqual([quiet.failures, quiet.notes, quiet.reads], [[], [], 1]);
+  const following = await auditOf([{ state: 'following' }]);
+  assert.equal(following.failures.length, 1);
+  assert.equal(following.reads, 1);
+  const never = await auditOf([busy], { boundMs: 40, everyMs: 5 });
+  assert.deepEqual(never.failures, [[2, `after case 6 it is not known whether the feeder node10 (feeder) follows the public graph (${busy.reason})`]]);
+  assert.ok(never.reads >= 2, `read ${never.reads} time(s)`);
+  assert.deepEqual(never.notes, []);
+});
+
+test('what a node\'s listing said is kept when it cannot say whether it follows a graph', async () => {
+  const answers = {
+    8: { status: 500, text: '{"error":"ontology/agents definition scan exceeded listContextGraphs budget"}' },
+    9: { status: 0, text: 'fetch failed' },
+    10: { status: 200, text: 'not json' },
+    11: { status: 200, text: '{"contextGraphs":[{"id":"public","subscribed":false}]}' },
+  };
+  const graphs = createGraphs({ api: async node => answers[node.number] }, {}, { stamp: 'S', sub: 's', say() {} });
+  assert.deepEqual(await graphs.following({ number: 8 }, { id: 'public' }), { state: 'unknown', reason: `HTTP 500 ${answers[8].text}` });
+  assert.deepEqual(await graphs.following({ number: 9 }, { id: 'public' }), { state: 'unknown', reason: 'no answer' });
+  assert.deepEqual(await graphs.following({ number: 10 }, { id: 'public' }), { state: 'unknown', reason: 'the body is not JSON' });
+  assert.deepEqual(await graphs.following({ number: 11 }, { id: 'public' }), { state: 'not-following' });
+});
 
 for (const recovers of [false, true]) test(`zero stop status with busy ports retains shutdown ownership (recovers=${recovers})`, async t => {
   const devnet = fakeDevnet(t);

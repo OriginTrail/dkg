@@ -217,6 +217,24 @@ export function topologyProblems({ observations, links, members, known }) {
   return problems;
 }
 
+/**
+ * What a node's answer to an asynchronous share says about its job, by the
+ * client rule of docs/build/async-jobs.md. `job`: poll `jobId`, which is stored
+ * or, with a 409 that names it, the same share still running. `indeterminate`:
+ * a job may exist under `jobId`, so read it and do not resend. `not-admitted`:
+ * no job was written, so send the same request again after Retry-After.
+ * `refused`: anything else, which no client rule says to wait out.
+ */
+export function shareAdmission(status, json) {
+  if (status === 200 && json?.jobId) return { kind: 'job', jobId: json.jobId };
+  if (status === 409 && json?.existingJobId) return { kind: 'job', jobId: json.existingJobId };
+  if (status === 503 && json?.code === 'PROMOTE_ADMISSION_UNAVAILABLE') {
+    if (json.admissionOutcome === 'indeterminate' && json.jobId) return { kind: 'indeterminate', jobId: json.jobId, phase: json.phase };
+    if (json.admissionOutcome === 'not_admitted') return { kind: 'not-admitted', phase: json.phase };
+  }
+  return { kind: 'refused' };
+}
+
 /** Where a write went, and the write as the report names it. */
 export const where = record => `${record.graph.key}${record.sub ? `/${record.sub}` : ' root'}`;
 export const describe = record => `"${record.value}" by ${record.author.label} in ${where(record)}`;

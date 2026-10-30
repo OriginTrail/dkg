@@ -3,12 +3,33 @@ import test from 'node:test';
 import { classify } from '../qa/known-gaps.mjs';
 import {
   caseVerdicts, connectionsObservation, describe, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
-  linkProblem, literalText, pairHeld, pairResult, sharedMemoryScope, subscriptionResults, topologyProblems,
+  linkProblem, literalText, pairHeld, pairResult, shareAdmission, sharedMemoryScope, subscriptionResults, topologyProblems,
 } from '../qa/member-sharing.mjs';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const LABEL = 'urn:issue3251:label';
 const written = { predicate: LABEL, value: 'owner live root (7)' };
+
+test('a share\'s answer says what a client does next, by the rule of docs/build/async-jobs.md', () => {
+  const unavailable = fields => ({ code: 'PROMOTE_ADMISSION_UNAVAILABLE', retryable: true, admissionScope: 'async_promote_job', ...fields });
+  assert.deepEqual(shareAdmission(200, { jobId: 'j-1' }), { kind: 'job', jobId: 'j-1' });
+  // The same share is still running: poll it.
+  assert.deepEqual(shareAdmission(409, { existingJobId: 'j-2' }), { kind: 'job', jobId: 'j-2' });
+  // A job may exist: read it. No job was written: send it again.
+  assert.deepEqual(shareAdmission(503, unavailable({ phase: 'persist', admissionOutcome: 'indeterminate', jobId: 'j-3' })), { kind: 'indeterminate', jobId: 'j-3', phase: 'persist' });
+  assert.deepEqual(shareAdmission(503, unavailable({ phase: 'lock', admissionOutcome: 'not_admitted' })), { kind: 'not-admitted', phase: 'lock' });
+  // Nothing else is taken for either: not an indeterminate answer without its job, not the same fields on another
+  // status, not another 503, not an answer that could not be read.
+  for (const [status, json] of [
+    [503, unavailable({ phase: 'persist', admissionOutcome: 'indeterminate' })],
+    [500, unavailable({ phase: 'lock', admissionOutcome: 'not_admitted' })],
+    [503, { code: 'STORE_SCHEDULER_BUSY', retryable: true }],
+    [503, unavailable({})],
+    [409, { error: 'conflict' }],
+    [200, {}],
+    [0, null],
+  ]) assert.deepEqual(shareAdmission(status, json), { kind: 'refused' }, JSON.stringify([status, json]));
+});
 
 test('a literal cell is read in each form the query API answers, and nothing else passes for a text', () => {
   assert.equal(literalText('"owner live root (7)"'), 'owner live root (7)');

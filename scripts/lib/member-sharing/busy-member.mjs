@@ -32,7 +32,7 @@ export async function fillBigGraph(io, author, graph, { assets, triples, stamp }
       object: `"row ${t} of asset ${i} ${'x'.repeat(80)}"`, graph: '',
     }));
     const outcome = await io.createAndShare(author, { contextGraphId: graph.id, name: `i3251-${graph.key}-${stamp.toLowerCase()}-${i}`, quads },
-      { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 500 });
+      { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 500, label: `case 6: asset ${i} of the ${graph.key} graph` });
     if (outcome.error) throw new Error(`asset ${i} of the ${graph.key} graph: ${outcome.error}`);
   }
 }

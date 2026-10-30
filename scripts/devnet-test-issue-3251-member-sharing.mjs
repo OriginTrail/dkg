@@ -37,8 +37,9 @@
 // cases, must not follow the public graph, and stops after case 6.
 //
 // A write is one asset with a subject of its own, written and shared the way a
-// client does it (create, then the asynchronous share job). A node HOLDS it
-// when both reads a client makes find it with the written value and no other
+// client does it (create, then the asynchronous share job, following a busy
+// node's answer as docs/build/async-jobs.md says, and noting it). A node HOLDS
+// it when both reads a client makes find it with the written value and no other
 // value: the `shared-working-memory` view (with `subGraphName` for a sub-graph)
 // and the cross-partition read (`includeContextGraphPartitions`, GRAPH ?g, in
 // the shared memory of the root or of that sub-graph).
@@ -227,7 +228,7 @@ const devnet = openDevnet({
 });
 const edges = new TemporaryEdges(devnet, { stamp: STAMP, log: report });
 const graphs = createGraphs(devnet, edges, { stamp: STAMP, sub: SUB, say });
-const io = createObservation(devnet, { boundMs: BOUND_MS, ...DEADLINES, stamp: STAMP, predicate: 'urn:issue3251:label' });
+const io = createObservation(devnet, { boundMs: BOUND_MS, ...DEADLINES, stamp: STAMP, predicate: 'urn:issue3251:label', note });
 const scenarioIo = { ...io, subscribe: graphs.subscribe };
 let EXIT = 0;
 
@@ -239,7 +240,7 @@ async function precondition(caseId, when) {
   return false;
 }
 
-const feederOutOf = (publicGraph, when) => auditFeederIsolation({ edges, graphs, fail }, publicGraph, when);
+const feederOutOf = (publicGraph, when) => auditFeederIsolation({ edges, graphs, fail, note }, publicGraph, when, { boundMs: BOUND_MS });
 
 /** The large graph of case 6's attempt `attempt` (writeLargeGraph), its feeder kept out of `publicGraph`. */
 const largeGraph = (attempt, size, publicGraph) => writeLargeGraph({
