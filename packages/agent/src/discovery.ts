@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
+import { AGENT_PEER_LAST_SEEN_PREDICATE, parseAgentPeerLastSeen } from './agent-profile-updates.js';
 import { AGENT_PROFILE_STALE_THRESHOLD_MS } from './dkg-agent-constants.js';
 import {
   MAX_AGENT_PEER_PAGE_SIZE,
@@ -310,12 +311,13 @@ export class DiscoveryClient implements AgentPeerDiscovery {
   }
 
   /**
-   * The peers to try for a wallet now, newest `dkg:lastSeen` first. A peer whose
-   * newest `dkg:lastSeen` is older than `staleAfterMs` is left out, so a wallet
-   * with no current peer has none, unless `isLive` says it is alive whatever its
-   * profile says. A profile with no usable `dkg:lastSeen` says nothing about its
-   * age: its peers stay, after the dated ones.
-   * {@link findAgentPeerPageByAddress} pages every listed peer in a fixed order.
+   * The peers to try for a wallet now, newest first, by the date its profile
+   * holds for each peer, or else the profile's own `dkg:lastSeen`. A peer whose
+   * newest date is older than `staleAfterMs` is left out, so a wallet with no
+   * current peer has none, unless `isLive` says it is alive whatever its profile
+   * says. A profile with no usable date says nothing about its age: its peers
+   * stay, after the dated ones. {@link findAgentPeerPageByAddress} pages every
+   * listed peer in a fixed order.
    */
   async findCurrentAgentPeerIds(
     agentAddress: string,
@@ -323,26 +325,38 @@ export class DiscoveryClient implements AgentPeerDiscovery {
   ): Promise<string[]> {
     const nowMs = options.nowMs ?? Date.now();
     const staleAfterMs = options.staleAfterMs ?? AGENT_PROFILE_STALE_THRESHOLD_MS;
-    const result = await this.engine.query(`
+    const addressMatch = agentAddressMatch(agentAddress);
+    const queryOptions = { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH, signal: options.signal };
+    const profileRows = await this.engine.query(`
       SELECT DISTINCT (STR(?storedPeerId) AS ?peerId) (STR(?storedLastSeen) AS ?lastSeen) WHERE {
         ?agent a <${DKG}Agent> ;
                <${DKG}peerId> ?storedPeerId .
-        ${agentAddressMatch(agentAddress)}
+        ${addressMatch}
         FILTER(STRLEN(STR(?storedPeerId)) > 0)
         OPTIONAL { ?agent <${DKG}lastSeen> ?storedLastSeen }
       }
       ORDER BY DESC(?lastSeen)
       LIMIT ${MAX_AGENT_PEER_PAGE_SIZE}
-    `, {
-      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
-      signal: options.signal,
-    });
+    `, queryOptions);
     options.signal?.throwIfAborted();
+    const dateRows = await this.engine.query(`
+      SELECT DISTINCT (STR(?storedDate) AS ?peerLastSeen) WHERE {
+        ?agent <${AGENT_PEER_LAST_SEEN_PREDICATE}> ?storedDate .
+        ${addressMatch}
+      }
+      LIMIT ${MAX_AGENT_PEER_PAGE_SIZE}
+    `, queryOptions);
+    options.signal?.throwIfAborted();
+    const dated = new Map<string, number>();
+    for (const row of dateRows.bindings) {
+      const parsed = parseAgentPeerLastSeen(row['peerLastSeen'] ?? '', nowMs);
+      if (parsed !== undefined) dated.set(parsed.peerId, Math.max(parsed.seen.ms, dated.get(parsed.peerId) ?? UNDATED));
+    }
     const newestByPeer = new Map<string, number>();
-    for (const row of result.bindings) {
+    for (const row of profileRows.bindings) {
       const peerId = stripQuotes(row['peerId'] ?? '');
       if (peerId.length === 0) continue;
-      const lastSeenMs = usableLastSeenMs(stripQuotes(row['lastSeen'] ?? ''), nowMs) ?? UNDATED;
+      const lastSeenMs = dated.get(peerId) ?? usableLastSeenMs(stripQuotes(row['lastSeen'] ?? ''), nowMs) ?? UNDATED;
       if (lastSeenMs >= (newestByPeer.get(peerId) ?? UNDATED)) newestByPeer.set(peerId, lastSeenMs);
     }
     return [...newestByPeer]

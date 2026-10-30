@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { AGENT_LAST_SEEN_CLOCK_SKEW_MS } from '../src/agent-peer-discovery.js';
-import { storeAgentProfileQuads } from '../src/agent-profile-updates.js';
+import { AGENT_PEER_LAST_SEEN_PREDICATE, storeAgentProfileQuads } from '../src/agent-profile-updates.js';
 import { AGENT_PROFILE_STALE_THRESHOLD_MS } from '../src/dkg-agent-constants.js';
 import { DiscoveryClient } from '../src/discovery.js';
 import { AGENT_REGISTRY_GRAPH, buildAgentProfile } from '../src/profile.js';
@@ -144,7 +144,11 @@ describe('the peers to try for a wallet', () => {
 
   it('skip a row without a peer id', async () => {
     const { discovery } = await fixture([]);
-    const engine = { query: async () => ({ bindings: [{ lastSeen: `"${ago(HOUR)}"` }, { peerId: '"peer-a"' }] }) };
+    const engine = {
+      query: async (sparql: string) => (sparql.includes('peerLastSeen')
+        ? { bindings: [{}] }
+        : { bindings: [{ lastSeen: `"${ago(HOUR)}"` }, { peerId: '"peer-a"' }] }),
+    };
     const stubbed = new DiscoveryClient(engine as unknown as DKGQueryEngine);
     await expect(stubbed.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW })).resolves.toEqual(['peer-a']);
     await expect(discovery.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW })).resolves.toEqual([]);
@@ -158,7 +162,7 @@ describe('the peers to try for a wallet', () => {
       .rejects.toThrow();
   });
 
-  it('are the one current peer once an update replaced the union an earlier sync stored', async () => {
+  it('put the peer of a new run first after an update of a stored union, and leave the dead ones out by age', async () => {
     const union = [
       ...buildAgentProfile({ peerId: 'peer-a-dead', name: 'a', skills: [], agentAddress: WALLET, lastSeen: ago(6 * HOUR) }).quads,
       ...buildAgentProfile({ peerId: 'peer-b-dead', name: 'a', skills: [], agentAddress: WALLET, lastSeen: ago(5 * HOUR) }).quads,
@@ -172,8 +176,35 @@ describe('the peers to try for a wallet', () => {
       async (quads) => { await store.insert(quads); return quads; },
       { nowMs: NOW },
     );
-    await expect(discovery.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW })).resolves.toEqual(['peer-z-live']);
-    await expect(discovery.findAgentPeerPageByAddress(WALLET, { limit: 8 }))
-      .resolves.toEqual({ peerIds: ['peer-z-live'], nextAfterPeerId: null });
+    await expect(discovery.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW }))
+      .resolves.toEqual(['peer-z-live', 'peer-a-dead', 'peer-b-dead']);
+    const dayLater = NOW + AGENT_PROFILE_STALE_THRESHOLD_MS - 2 * HOUR;
+    await expect(discovery.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: dayLater }))
+      .resolves.toEqual(['peer-z-live']);
+  });
+
+  it('go by the newest date a peer has, in whatever order the store returns them', async () => {
+    const engine = {
+      query: async (sparql: string) => (sparql.includes('peerLastSeen')
+        ? { bindings: [{ peerLastSeen: `"peer-a ${ago(60_000)}"` }, { peerLastSeen: `"peer-a ${ago(3 * HOUR)}"` }] }
+        : { bindings: [{ peerId: '"peer-a"', lastSeen: `"${ago(5 * HOUR)}"` }] }),
+    };
+    const stubbed = new DiscoveryClient(engine as unknown as DKGQueryEngine);
+    await expect(stubbed.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW, staleAfterMs: 2 * HOUR })).resolves.toEqual(['peer-a']);
+  });
+
+  it('take a peer\'s own date over its profile\'s lastSeen, whichever the store holds', async () => {
+    const quads = buildAgentProfile({ peerId: 'peer-old', name: 'a', skills: [], agentAddress: WALLET, lastSeen: ago(HOUR) }).quads;
+    const subject = quads[0]!.subject;
+    const { discovery } = await fixture([
+      ...quads,
+      ...buildAgentProfile({ peerId: 'peer-live', name: 'a', skills: [], agentAddress: WALLET, lastSeen: ago(HOUR) }).quads,
+      { subject, predicate: AGENT_PEER_LAST_SEEN_PREDICATE, object: `"peer-old ${ago(3 * HOUR)}"`, graph: AGENT_REGISTRY_GRAPH },
+      { subject, predicate: AGENT_PEER_LAST_SEEN_PREDICATE, object: `"peer-live ${ago(60_000)}"`, graph: AGENT_REGISTRY_GRAPH },
+      { subject, predicate: AGENT_PEER_LAST_SEEN_PREDICATE, object: `"peer-live ${ago(2 * HOUR)}"`, graph: AGENT_REGISTRY_GRAPH },
+      { subject, predicate: AGENT_PEER_LAST_SEEN_PREDICATE, object: '"peer-live not-a-date"', graph: AGENT_REGISTRY_GRAPH },
+    ]);
+    await expect(discovery.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW })).resolves.toEqual(['peer-live', 'peer-old']);
+    await expect(discovery.findCurrentAgentPeerIds(WALLET, { limit: 8, nowMs: NOW, staleAfterMs: 2 * HOUR })).resolves.toEqual(['peer-live']);
   });
 });

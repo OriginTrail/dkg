@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * A wallet that moves to a new node, over real libp2p gossip and real sync:
- * a second run of the same agent wallet must replace the first in another
- * node's phonebook, without leaving the dead peer listed.
+ * A wallet that moves to a new node, over real libp2p gossip: the second run of
+ * the same agent wallet comes first in another node's phonebook, ahead of the
+ * first run's peer, which no profile removes and which age leaves out.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -38,7 +38,7 @@ describe('an agent wallet that moves to a new node', () => {
     await Promise.all(agents.splice(0).map((agent) => agent.stop().catch(() => undefined)));
   });
 
-  it('is listed at the new peer only, once the new run\'s gossiped profile arrives', async () => {
+  it('is listed at the new peer first, once the new run\'s gossiped profile arrives', async () => {
     const wallet = ethers.Wallet.createRandom();
     const observer = await startAgent('Observer');
     agents.push(observer);
@@ -46,14 +46,13 @@ describe('an agent wallet that moves to a new node', () => {
     const firstRun = await startAgent('FirstRun', wallet.privateKey);
     agents.push(firstRun);
     await firstRun.connectTo(observer.multiaddrs[0]!);
-    const peersOfWallet = async () => (
-      await observer.discovery.findAgentPeerPageByAddress(wallet.address, { limit: 8 })
-    ).peerIds;
+    const peersOfWallet = () => observer.discovery.findCurrentAgentPeerIds(wallet.address, { limit: 8 });
     await vi.waitFor(async () => {
       await firstRun.publishProfile();
       expect(await peersOfWallet()).toEqual([firstRun.peerId]);
     }, { timeout: 20_000, interval: 500 });
 
+    const firstPeerId = firstRun.peerId;
     await firstRun.stop();
 
     const secondRun = await startAgent('SecondRun', wallet.privateKey);
@@ -61,8 +60,7 @@ describe('an agent wallet that moves to a new node', () => {
     await secondRun.connectTo(observer.multiaddrs[0]!);
     await vi.waitFor(async () => {
       await secondRun.publishProfile();
-      expect(await peersOfWallet()).toEqual([secondRun.peerId]);
+      expect(await peersOfWallet()).toEqual([secondRun.peerId, firstPeerId]);
     }, { timeout: 20_000, interval: 500 });
-    await expect(observer.discovery.findCurrentAgentPeerIds(wallet.address, { limit: 8 })).resolves.toEqual([secondRun.peerId]);
   }, 60_000);
 });

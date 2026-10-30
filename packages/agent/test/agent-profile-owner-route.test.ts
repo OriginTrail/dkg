@@ -234,17 +234,34 @@ describe('a synced agent profile', () => {
     await Promise.all(agents.splice(0).map((agent) => agent.stop().catch(() => undefined)));
   });
 
-  it('replaces the stored peers when newer, and adds nothing when a Core serves an older copy', async () => {
+  it('puts the newest peer first, whatever order the profiles arrive in, and removes no peer', async () => {
     const { agent, internals } = await createEdge('SyncedProfile');
     agents.push(agent);
-    const peers = async () => (await agent.discovery.findAgentPeerPageByAddress(OWNER, { limit: 8 })).peerIds;
+    const current = () => agent.discovery.findCurrentAgentPeerIds(OWNER, { limit: 8 });
 
     await internals.insertSyncedQuadsAndInvalidateListCache(ownerProfile(DEAD_1, ago(3_600_000)));
     await internals.insertSyncedQuadsAndInvalidateListCache(ownerProfile(LIVE, ago(60_000)));
-    expect(await peers()).toEqual([LIVE]);
+    expect(await current()).toEqual([LIVE, DEAD_1]);
 
     await internals.insertSyncedQuadsAndInvalidateListCache(ownerProfile(DEAD_2, ago(1_800_000)));
-    expect(await peers()).toEqual([LIVE]);
+    expect(await current()).toEqual([LIVE, DEAD_2, DEAD_1]);
+  });
+
+  it('adds a newer peer of a known wallet that a fetch delivered across two batches, as if in one', async () => {
+    const { agent, internals } = await createEdge('SyncedProfilePages');
+    agents.push(agent);
+    await internals.insertSyncedQuadsAndInvalidateListCache(ownerProfile(DEAD_1, ago(3_600_000)));
+    const profile = buildAgentProfile({
+      peerId: LIVE, name: 'Owner', skills: [], agentAddress: OWNER, lastSeen: ago(60_000),
+      multiaddrs: [`/dns4/relay/tcp/9090/p2p-circuit/p2p/${LIVE}`],
+    }).quads;
+    const sorted = [...profile].sort((left, right) => (left.predicate < right.predicate ? -1 : 1));
+    const cut = sorted.findIndex((quad) => quad.predicate === `${DKG}peerId`);
+    await internals.insertSyncedQuadsAndInvalidateListCache(sorted.slice(0, cut));
+    await internals.insertSyncedQuadsAndInvalidateListCache(sorted.slice(cut));
+    await expect(agent.discovery.findCurrentAgentPeerIds(OWNER, { limit: 8 })).resolves.toEqual([LIVE, DEAD_1]);
+    const stored = await agent.discovery.findAgentByPeerId(LIVE);
+    expect(stored?.multiaddrs).toEqual([`/dns4/relay/tcp/9090/p2p-circuit/p2p/${LIVE}`]);
   });
 
   it('still drops an oversized literal and passes the other graphs of the batch', async () => {
@@ -255,6 +272,16 @@ describe('a synced agent profile', () => {
     await internals.insertSyncedQuadsAndInvalidateListCache([...ownerProfile(LIVE, ago(60_000)), other, oversized]);
     expect(await agent.store.countQuads('did:dkg:context-graph:other')).toBe(1);
     expect((await agent.discovery.findAgentPeerPageByAddress(OWNER, { limit: 8 })).peerIds).toEqual([LIVE]);
+  });
+
+  it('counts an oversized peer id as no update: it is dropped, and the stored peer and date stay', async () => {
+    const { agent, internals } = await createEdge('SyncedOversizePeer');
+    agents.push(agent);
+    const lastSeen = ago(3_600_000);
+    await internals.insertSyncedQuadsAndInvalidateListCache(ownerProfile(DEAD_1, lastSeen));
+    await internals.insertSyncedQuadsAndInvalidateListCache(ownerProfile(`peer-${'x'.repeat(DKG_RDF_LITERAL_SAFE_MUTF8_BYTES)}`, ago(60_000)));
+    expect((await agent.discovery.findAgentPeerPageByAddress(OWNER, { limit: 8 })).peerIds).toEqual([DEAD_1]);
+    expect((await agent.discovery.findAgentByPeerId(DEAD_1))?.lastSeen).toBe(lastSeen);
   });
 });
 
