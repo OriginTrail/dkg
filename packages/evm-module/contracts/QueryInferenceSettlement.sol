@@ -68,6 +68,15 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * gives no priority, and the result counts as R and QueryInferenceScore in
  * e + 1.
  *
+ * The close (`closeEpochs`, `ensureClosed`). Epochs close in order, from the
+ * activation epoch, once they have ended. An epoch's money B is what is due in
+ * it (the wallet-funded value of the periods of the epoch before) plus the
+ * carry. If no node finalized value in it, the carry becomes B and its pool is
+ * 0 (rollover); otherwise its pool is B and the carry 0. The close freezes the
+ * pool and λ beside the epoch's totals ΣR and ΣQueryInferenceScore, which
+ * nothing writes once it has ended, so `queryInferenceGross`, a node's gross
+ * reward from the pool, reads only frozen values.
+ *
  * Architecture: stateless logic, as `ServiceSubscriptions`. Every byte of
  * settlement state lives in `QueryInferenceStorage`, and the periods in
  * `ConvictionServiceStorage`. The storages it reads or writes, and `Chronos`,
@@ -81,8 +90,8 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
 contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "QueryInferenceSettlement";
     // Version history:
-    //   1.0.0 — receipt batches, and their finalization against the funded cap,
-    //           of the query/inference pool (OT-RFC-27).
+    //   1.0.0 — receipt batches, their finalization against the funded cap,
+    //           and the epoch close of the query/inference pool (OT-RFC-27).
     string private constant _VERSION = "1.0.0";
 
     uint256 internal constant _SCALE18 = 1e18;
@@ -260,6 +269,19 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     /// @notice A claim named in `finalizeClaims` was not finalized, for
     ///         `reason`.
     event ClaimSkipped(bytes32 indexed subscriptionId, uint8 indexed bucketIndex, uint72 indexed seller, Skip reason);
+    /// @notice Epoch `epoch` closed: `walletDue` was due in it and `carryIn`
+    ///         carried into it; `pool` is what its nodes share, by ΣR `sumR`,
+    ///         ΣQueryInferenceScore `sumScore` and λ `lambdaBps`. The carry
+    ///         out is `walletDue + carryIn − pool`.
+    event EpochClosed(
+        uint256 indexed epoch,
+        uint96 walletDue,
+        uint96 carryIn,
+        uint96 pool,
+        uint128 sumR,
+        uint128 sumScore,
+        uint16 lambdaBps
+    );
 
     // ============================================================
     //                          Errors
@@ -280,6 +302,10 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     /// @notice The current epoch is before the activation epoch, or that is
     ///         still unset (0).
     error QueryInferenceNotActive(uint40 activationEpoch, uint256 currentEpoch);
+    /// @notice `epoch` is still open after a bounded close, which reached
+    ///         `closedThrough`. Anyone clears it with `closeEpochs`, and an
+    ///         epoch that has not ended yet cannot be closed.
+    error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
 
     // ============================================================
     //                    Working records
@@ -461,8 +487,79 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     }
 
     // ============================================================
+    //                           Close
+    // ============================================================
+
+    /**
+     * @notice Close ended epochs in order, from the one after `closedThrough`,
+     *         at most `maxSteps` of them. Permissionless.
+     * @dev    Nothing closes while the activation epoch is unset, and no epoch
+     *         closes before it has ended. The close itself never divides, so
+     *         it reverts only if an epoch's money exceeded a uint96, beyond
+     *         every TRAC there is.
+     * @return closed The last closed epoch after the call.
+     */
+    function closeEpochs(uint256 maxSteps) external returns (uint256 closed) {
+        (closed, ) = _closeThrough(type(uint256).max, maxSteps, false);
+    }
+
+    /**
+     * @notice Make sure `epoch` is closed, closing the epochs up to it in
+     *         order, at most `maxCloseStepsPerClaim` of them. A reward claim
+     *         calls it before it reads an epoch.
+     * @dev    An epoch before the activation epoch, or any while that is
+     *         unset, never closes, and returns at once. If `epoch` is still
+     *         open after the bounded close, because the closes are further
+     *         behind or because it has not ended, it reverts
+     *         `QueryInferenceCloseBehind`; `closeEpochs` clears the first.
+     * @return closed The last closed epoch after the call.
+     */
+    function ensureClosed(uint256 epoch) external returns (uint256 closed) {
+        uint256 activation;
+        (closed, activation) = _closeThrough(epoch, 0, true);
+        if (activation == 0 || epoch < activation) return closed;
+        if (closed < epoch) revert QueryInferenceCloseBehind(closed, epoch);
+    }
+
+    // ============================================================
     //                           Views
     // ============================================================
+
+    /// @notice The query/inference pool epoch `epoch`'s nodes share, frozen at
+    ///         its close; 0 while it is open.
+    function epochPool(uint256 epoch) external view returns (uint96) {
+        QueryInferenceStorage.EpochClose memory c = queryInferenceStorage.getEpochClose(epoch);
+        return c.closed ? c.pool : 0;
+    }
+
+    /**
+     * @notice Node `identityId`'s gross reward from the query/inference pool
+     *         of `epoch`: pool × QIF, as OT-RFC-27 defines it,
+     *         floor(pool × (1 − λ) × R / ΣR) + floor(pool × λ × QIS / ΣQIS),
+     *         over the values frozen at the close. If ΣQIS is 0 while ΣR is
+     *         not, which needs every seller's stake factor to be 0, the second
+     *         term takes the R share. 0 for an epoch still open, an empty pool
+     *         or a node with no finalized value. Over all nodes it sums to at
+     *         most the pool.
+     */
+    function queryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256 gross) {
+        QueryInferenceStorage qis = queryInferenceStorage;
+        QueryInferenceStorage.EpochClose memory c = qis.getEpochClose(epoch);
+        if (!c.closed || c.pool == 0) return 0;
+        QueryInferenceStorage.NodeEpoch memory n = qis.getNodeEpoch(identityId, epoch);
+        // A node's score never exceeds its value, so no value means no score.
+        if (n.r == 0) return 0;
+        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
+
+        uint256 pool = c.pool;
+        uint256 lambda = c.lambdaBps;
+        gross = Math.mulDiv(pool * (_BPS - lambda), n.r, _BPS * uint256(t.sumR));
+        if (lambda != 0) {
+            gross += t.sumScore == 0
+                ? Math.mulDiv(pool * lambda, n.r, _BPS * uint256(t.sumR))
+                : Math.mulDiv(pool * lambda, n.score, _BPS * uint256(t.sumScore));
+        }
+    }
 
     /// @notice The EIP-712 domain separator of requests and receipts: name
     ///         `DKGQueryInference`, version `1`, this chain and
@@ -608,6 +705,58 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         qis.finalizeClaim(ref.subscriptionId, ref.bucketIndex, ref.seller, current, value, score);
         emit ClaimsFinalized(ref.subscriptionId, ref.bucketIndex, ref.seller, current, c.claimed, value, score);
         return Skip.None;
+    }
+
+    /**
+     * @dev Close epochs in order up to `through`, or the last ended epoch if
+     *      sooner, at most `maxSteps` of them, or `maxCloseStepsPerClaim` when
+     *      `bounded`. Returns the last closed epoch, and the activation epoch.
+     */
+    function _closeThrough(
+        uint256 through,
+        uint256 maxSteps,
+        bool bounded
+    ) internal returns (uint256 closed, uint256 activation) {
+        QueryInferenceStorage qis = queryInferenceStorage;
+        uint96 carried;
+        uint8 claimSteps;
+        (activation, closed, carried, claimSteps) = qis.closeState();
+        if (activation == 0 || through <= closed) return (closed, activation);
+        if (bounded) maxSteps = claimSteps;
+
+        // An epoch has ended once the current epoch is after it.
+        uint256 last = chronos.getCurrentEpoch() - 1;
+        if (through < last) last = through;
+        uint96 carryIn = carried;
+        for (uint256 steps; steps < maxSteps && closed < last; steps++) {
+            closed++;
+            carryIn = _closeEpoch(qis, closed, carryIn);
+        }
+    }
+
+    /// @dev Close `epoch`: its money is its incoming money and `carryIn`,
+    ///      which become its pool if a node finalized value in it, and the
+    ///      carry out otherwise.
+    function _closeEpoch(QueryInferenceStorage qis, uint256 epoch, uint96 carryIn) internal returns (uint96 carryOut) {
+        uint96 incoming = _incoming(qis, epoch);
+        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
+        uint16 lambda = qis.lambdaBpsAt(epoch);
+        uint96 money = SafeCast.toUint96(uint256(incoming) + carryIn);
+        uint96 pool;
+        if (t.sumR == 0) {
+            carryOut = money;
+        } else {
+            pool = money;
+        }
+        qis.closeEpoch(epoch, pool, lambda, carryOut);
+        emit EpochClosed(epoch, incoming, carryIn, pool, t.sumR, t.sumScore, lambda);
+    }
+
+    /// @dev The money that joins `epoch`'s pool at its close, beside the
+    ///      carry: the wallet-funded value due in it. Every source of an
+    ///      epoch's money is read here, and only here.
+    function _incoming(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint96) {
+        return qis.walletDue(epoch);
     }
 
     /// @dev The funded cap of a bucket of value `value` in period `s`.

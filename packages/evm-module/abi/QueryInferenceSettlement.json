@@ -67,6 +67,22 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "closedThrough",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "QueryInferenceCloseBehind",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint40",
         "name": "activationEpoch",
         "type": "uint40"
@@ -223,6 +239,55 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "walletDue",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "carryIn",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "pool",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint128",
+        "name": "sumR",
+        "type": "uint128"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint128",
+        "name": "sumScore",
+        "type": "uint128"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint16",
+        "name": "lambdaBps",
+        "type": "uint16"
+      }
+    ],
+    "name": "EpochClosed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "uint72",
         "name": "seller",
         "type": "uint72"
@@ -363,6 +428,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "maxSteps",
+        "type": "uint256"
+      }
+    ],
+    "name": "closeEpochs",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "closed",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "convictionServiceStorage",
     "outputs": [
@@ -396,6 +480,44 @@
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "ensureClosed",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "closed",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "epochPool",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
       }
     ],
     "stateMutability": "view",
@@ -640,6 +762,30 @@
         "internalType": "contract ProfileStorage",
         "name": "",
         "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      }
+    ],
+    "name": "queryInferenceGross",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "gross",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",
