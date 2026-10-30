@@ -23,7 +23,7 @@ curl -s -H "Authorization: Bearer $DKG_AUTH_TOKEN" \
   "$DKG_NODE_URL/api/knowledge-assets/swm/share-jobs/<job-id>"
 ```
 
-Poll until `state` is `succeeded`; the node retries a `failed_retrying` job by itself. A `failed` job needs attention: read its `lastError` before you recover it. The CLI equivalents are `dkg ka share-async <name> -c <context-graph-id>` and `dkg ka share-job <job-id>`. After a CLI error, find the job (`dkg ka share-jobs`, `dkg publisher jobs`) and follow [Retry safely](#retry-safely) instead of running the command again.
+Poll until `state` is `succeeded`; the node retries a `failed_retrying` job by itself. A `failed` job needs attention: read its `lastError` before you recover it. The CLI equivalents are `dkg ka share-async <name> -c <context-graph-id>` and `dkg ka share-job <job-id>`. When `share-async` or `publish-async` fails, it prints what the answer says about a job (`code`, `admissionOutcome`, `jobId`, `statusPath`, `jobCreated`, `existingJobId`) and the command that reads a job it names. Follow [Retry safely](#retry-safely) before you run it again.
 
 Publishing works the same way, once the node has [Async Publisher Wallets](../use-dkg/async-publisher-wallets.md). `POST /api/knowledge-assets/{name}/vm/publish-async` answers `202` with a `jobId`. Poll `GET /api/publisher/job?id=<job-id>` until `job.status` is `finalized`.
 

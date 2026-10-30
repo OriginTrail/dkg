@@ -396,6 +396,7 @@ export default defineConfig({
           'test/assertion-cli-smoke.test.ts',
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/knowledge-asset-share-catalog-handoff.test.ts',
+          'test/async-job-failure-cli.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',
