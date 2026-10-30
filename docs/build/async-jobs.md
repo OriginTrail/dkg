@@ -23,9 +23,13 @@ curl -s -H "Authorization: Bearer $DKG_AUTH_TOKEN" \
   "$DKG_NODE_URL/api/knowledge-assets/swm/share-jobs/<job-id>"
 ```
 
-Poll until `state` is `succeeded`; the node retries a `failed_retrying` job by itself. A `failed` job needs attention: read its `lastError` before you recover it. The CLI equivalents are `dkg ka share-async <name> -c <context-graph-id>` and `dkg ka share-job <job-id>`. After a CLI error, find the job (`dkg ka share-jobs`, `dkg publisher jobs`) and follow [Retry safely](#retry-safely) instead of running the command again.
+Poll until `state` is `succeeded`; the node retries a `failed_retrying` job by itself. A `failed` job needs attention: read its `lastError` before you recover it. The CLI equivalents are `dkg ka share-async <name> -c <context-graph-id>` and `dkg ka share-job <job-id>`. When `share-async` or `publish-async` fails, it prints what the answer says about a job (`code`, `admissionOutcome`, `jobId`, `statusPath`, `jobCreated`, `existingJobId`) and the command that reads a job it names. Follow [Retry safely](#retry-safely) before you run it again.
 
 Publishing works the same way, once the node has [Async Publisher Wallets](../use-dkg/async-publisher-wallets.md). `POST /api/knowledge-assets/{name}/vm/publish-async` answers `202` with a `jobId`. Poll `GET /api/publisher/job?id=<job-id>` until `job.status` is `finalized`.
+
+### Read a failure
+
+A failed job carries a machine code and a short reason. For a share job they are `lastError.code` (with `lastError.diagnosticCode` when there is one) and `lastError.message`; for a publish job, `failure.code` and `failure.message`. Act on the code. The message is for people: at most 512 characters, without transaction payloads, long hex values or request details, and with any URL reduced to its host. When the node had to shorten it, the whole text, with the same parts left out, is in the node's log under the job ID.
 
 ## When the answer is not a success
 
@@ -54,6 +58,8 @@ Share jobs live at `/api/knowledge-assets/swm/share-jobs/{jobId}`:
 - `DELETE` cancels a `queued` job. The job stays, as `failed` with reason `cancelled`.
 - `POST .../recover` restarts a `failed` job.
 - `POST .../clear` removes one finished job. Clearing a single job is API-only for now.
+
+A share job's `attempts` never exceeds `maxAttempts`. When automatic recovery runs a job past its budget, the extra attempts are in `recoveryAttempts`; see [Share retries](../use-dkg/async-queue-operations.md#share-retries).
 
 For publish jobs, a node admin cancels an `accepted` job with `POST /api/publisher/cancel` and retries failed jobs with `POST /api/publisher/retry`. `POST /api/publisher/clear-job` removes one finished job. A [held](../use-dkg/async-publisher-wallets.md#held-jobs) one needs `"allowPendingTransaction": true`: check its transaction first, or a re-submit can publish again.
 

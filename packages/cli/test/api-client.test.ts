@@ -1797,6 +1797,29 @@ describe('ApiClient per-route timeout classes', () => {
     expect((err as Error).message).toContain('dkg ka history asset --context-graph-id cg --sub-graph-name sg');
   });
 
+  // #3574: an async admission that gets no answer may still have stored a job, so it is outcome unknown too, and the
+  // hint names the job list rather than a re-run.
+  it.each([
+    ['share', (client: ApiClient) => client.knowledgeAssetShareAsync('cg', 'asset'),
+      '/api/knowledge-assets/asset/swm/share-async', 'dkg ka share-jobs --context-graph-id cg'],
+    ['publish', (client: ApiClient) => client.knowledgeAssetPublishAsync('cg', 'asset'),
+      '/api/knowledge-assets/asset/vm/publish-async', 'dkg publisher jobs --context-graph cg'],
+  ] as const)('an async %s admission past its deadline reports outcome unknown, pointing at the job list', async (kind, send, path, jobList) => {
+    slowDaemon(400);
+    const err = await send(timed(100)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', method: 'POST', path });
+    expect((err as Error).message).toContain(`A ${kind} job for "asset" may exist: look for it with \`${jobList}\` before retrying.`);
+  });
+
+  it('names the stored context graph ID in the job-list hint when the request used its URI', async () => {
+    // The share-job list compares its filter as given, and jobs are stored under the bare ID.
+    slowDaemon(400);
+    const err = await timed(100).knowledgeAssetShareAsync('did:dkg:context-graph:research', 'asset').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect((err as Error).message).toContain('`dkg ka share-jobs --context-graph-id research`');
+  });
+
   it('other writes past the long deadline keep the plain timeout error', async () => {
     slowDaemon(400);
     // A create that neither shares nor publishes has nothing long in flight.

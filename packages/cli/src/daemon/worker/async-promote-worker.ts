@@ -13,7 +13,7 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
-  PromoteJobLeaseError, PromoteAdmissionUncertainError,
+  PromoteJobLeaseError, PromoteAdmissionUncertainError, jobFailureText,
   type AsyncPromoteQueue,
   type PromoteAttemptError,
   type PromoteJob,
@@ -21,7 +21,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
-import { logPromoteAttemptFailure, promoteAttemptAuthorityReason } from './async-promote-attempt-diagnostics.js';
+import { logPromoteAttemptFailure, promoteAttemptAuthorityReason, promoteFailureReason } from './async-promote-attempt-diagnostics.js';
 import {
   classifyPromoteError,
   safePromoteErrorIdentity,
@@ -347,7 +347,7 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
     // Persist the producer-owned diagnostic code (closed set) so the
     // post-commit recovery sweep can key on it without parsing prose.
     const attemptError: PromoteAttemptError = {
-      message,
+      message: promoteFailureReason(job, message, log),
       retryable: classified.retryable,
       classification: classified.classification,
       recordedAt: now(),
@@ -670,7 +670,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
           );
           return;
         }
-        log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${message}`);
+        log(`Worker ${slot.workerId} crashed processing ${claimed.jobId}: ${jobFailureText(message).detail}`);
         if (claimed.lease) {
           try {
             await config.agent.promoteQueue.fail(claimed.jobId, claimed.lease.claimToken, {
