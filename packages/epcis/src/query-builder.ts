@@ -2,7 +2,6 @@ import { buildEpcisEventDiscoveryPattern, buildEpcisEventTypeBinding } from './e
 import {
   EPCIS_DECLARED_EVENT_TYPE,
   EPCIS_CURRENT_PREFIX,
-  standardEpcisEventIris,
   epcisPropertyIris,
   EPCIS_TYPE_PREFIX,
   resolveEpcisQueryEventType,
@@ -80,6 +79,19 @@ function epcisPropertyPattern(property: string, object: string, bindingSuffix = 
 }
 
 /**
+ * Bind one response field from either namespace. The two can carry one value as
+ * different RDF terms (a plain string and a typed literal, a literal and an IRI).
+ * GROUP BY keys on the term, so the field is grouped on its lexical form.
+ */
+function epcisResponseFieldPattern(property: string): string {
+  const predicate = `?_epcis_${property}_value`;
+  const term = `?_${property}_term`;
+  return `{ VALUES ${predicate} { ${propertyAlternatives(property)} }
+      ?event ${predicate} ${term} .
+      BIND(STR(${term}) AS ?${property}) }`;
+}
+
+/**
  * Build a composite SPARQL query for EPCIS events.
  *
  * Adapted for v9's flat data graph model:
@@ -134,7 +146,7 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     { field: 'eventTimeZoneOffset', required: externalEventType },
   ] as const;
   for (const { field, required } of timingFields) {
-    const binding = epcisPropertyPattern(field, `?${field}`);
+    const binding = epcisResponseFieldPattern(field);
     if (required) sharedRequiredPatterns.push(binding);
     else optionalClauses.push(`OPTIONAL ${binding}`);
   }
@@ -145,11 +157,9 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   }
 
   // eventType filter — narrow to a specific EPCIS event type
+  // ?eventType is already canonical, so one comparison covers both namespaces.
   if (eventTypeIri) {
-    const eventTypeIris = eventType?.kind === 'standard'
-      ? standardEpcisEventIris(eventType.name)
-      : [eventTypeIri];
-    filterClauses.push(`FILTER(?eventType IN (${eventTypeIris.map(sparqlIri).join(', ')}))`);
+    filterClauses.push(`FILTER(?eventType = ${sparqlIri(eventTypeIri)})`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.
@@ -175,10 +185,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Parent ID filter (AggregationEvent)
   if (params.parentID) {
-    sharedRequiredPatterns.push(epcisPropertyPattern('parentID', '?parentID'));
+    sharedRequiredPatterns.push(epcisResponseFieldPattern('parentID'));
     filterClauses.push(`FILTER(STR(?parentID) = "${escapeSparql(params.parentID)}")`);
   } else {
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('parentID', '?parentID')}`);
+    optionalClauses.push(`OPTIONAL ${epcisResponseFieldPattern('parentID')}`);
   }
 
   // List filters select whole events (EPCIS 2.0 section 8.2.7.1); keep all
@@ -204,20 +214,18 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // BizStep filter
   if (params.bizStep) {
     const bizStepUri = normalizeBizStep(params.bizStep);
-    sharedRequiredPatterns.push(epcisPropertyPattern('bizStep', '?bizStep'));
+    sharedRequiredPatterns.push(epcisResponseFieldPattern('bizStep'));
     filterClauses.push(`FILTER(STR(?bizStep) = "${escapeSparql(bizStepUri)}")`);
   } else {
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('bizStep', '?bizStep')}`);
+    optionalClauses.push(`OPTIONAL ${epcisResponseFieldPattern('bizStep')}`);
   }
 
   // BizLocation filter — JSON-LD stores bizLocation as a URI node, match with angle brackets.
   // Also bind ?bizLocation so it appears in SELECT results for toEpcisEvent.
   if (params.bizLocation) {
     sharedRequiredPatterns.push(epcisPropertyPattern('bizLocation', `<${escapeSparql(params.bizLocation)}>`));
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('bizLocation', '?bizLocation')}`);
-  } else {
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('bizLocation', '?bizLocation')}`);
   }
+  optionalClauses.push(`OPTIONAL ${epcisResponseFieldPattern('bizLocation')}`);
 
   // Time range filters use the eventTime binding established above.
   if (params.from && params.to) {
@@ -232,29 +240,27 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Action filter — required when filtered, OPTIONAL otherwise
   if (params.action) {
-    sharedRequiredPatterns.push(epcisPropertyPattern('action', '?action'));
+    sharedRequiredPatterns.push(epcisResponseFieldPattern('action'));
     filterClauses.push(`FILTER(STR(?action) = "${escapeSparql(params.action)}")`);
   } else {
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('action', '?action')}`);
+    optionalClauses.push(`OPTIONAL ${epcisResponseFieldPattern('action')}`);
   }
 
   // Disposition filter — required when filtered, OPTIONAL otherwise
   if (params.disposition) {
     const dispUri = normalizeGs1Vocabulary('Disp', params.disposition);
-    sharedRequiredPatterns.push(epcisPropertyPattern('disposition', '?disposition'));
+    sharedRequiredPatterns.push(epcisResponseFieldPattern('disposition'));
     filterClauses.push(`FILTER(STR(?disposition) = "${escapeSparql(dispUri)}")`);
   } else {
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('disposition', '?disposition')}`);
+    optionalClauses.push(`OPTIONAL ${epcisResponseFieldPattern('disposition')}`);
   }
 
   // ReadPoint filter — JSON-LD stores readPoint as a URI node, match with angle brackets.
   // Also bind ?readPoint so it appears in SELECT results for toEpcisEvent.
   if (params.readPoint) {
     sharedRequiredPatterns.push(epcisPropertyPattern('readPoint', `<${escapeSparql(params.readPoint)}>`));
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('readPoint', '?readPoint')}`);
-  } else {
-    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('readPoint', '?readPoint')}`);
   }
+  optionalClauses.push(`OPTIONAL ${epcisResponseFieldPattern('readPoint')}`);
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('childEPCs', '?childEPCs')}`);
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('inputEPCList', '?inputEPCList')}`);
   optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('outputEPCList', '?outputEPCList')}`);

@@ -290,6 +290,73 @@ it.each([EPCIS, EPCIS_CURRENT].flatMap(publicNamespace =>
   }
 }, 30_000);
 
+it.each(['one graph', 'public and anchored private graphs'] as const)(
+  'returns one event when the namespaces carry a value as different RDF terms in %s', async (placement) => {
+  const store = create();
+  const contextGraphId = `${CG}-field-aliases`;
+  const publicGraph = contextGraphDataUri(contextGraphId);
+  const privateGraph = contextGraphPrivateUri(contextGraphId);
+  const metaGraph = contextGraphMetaUri(contextGraphId);
+  const currentGraph = placement === 'one graph' ? publicGraph : privateGraph;
+  const event = 'urn:field-aliases:a';
+  const next = 'urn:field-aliases:b';
+  const TIME = '2024-03-01T08:00:00Z';
+  const BIZ_STEP = 'https://ref.gs1.org/cbv/BizStep-receiving';
+  const fields: ReadonlyArray<readonly [string, string, string]> = [
+    ['eventTime', `"${TIME}"`, `"${TIME}"^^<http://www.w3.org/2001/XMLSchema#dateTimeStamp>`],
+    ['eventTimeZoneOffset', '"+00:00"', '"+00:00"^^<http://www.w3.org/2001/XMLSchema#token>'],
+    ['action', '"ADD"', '"ADD"^^<http://www.w3.org/2001/XMLSchema#token>'],
+    ['parentID', '"urn:epc:parent"', 'urn:epc:parent'],
+    ['bizStep', `"${BIZ_STEP}"`, BIZ_STEP],
+    ['disposition', '"https://ref.gs1.org/cbv/Disp-in_progress"', 'https://ref.gs1.org/cbv/Disp-in_progress'],
+    ['readPoint', '"urn:read:point"', 'urn:read:point'],
+    ['bizLocation', '"urn:business:location"', 'urn:business:location'],
+  ];
+  try {
+    await store.insert([
+      { subject: event, predicate: RDF_TYPE, object: `${EPCIS}ObjectEvent`, graph: publicGraph },
+      { subject: event, predicate: RDF_TYPE, object: `${EPCIS_CURRENT}ObjectEvent`, graph: currentGraph },
+      ...fields.flatMap(([field, legacy, current]) => [
+        { subject: event, predicate: `${EPCIS}${field}`, object: legacy, graph: publicGraph },
+        { subject: event, predicate: `${EPCIS_CURRENT}${field}`, object: current, graph: currentGraph },
+      ]),
+      { subject: event, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: publicGraph },
+      ...eventRows('b', `${EPCIS}ObjectEvent`, '2024-02-01T08:00:00Z', '+00:00')
+        .map(row => ({ ...row, subject: next, graph: publicGraph })),
+      ...[event, next].map(subject => ({ subject: `urn:publication:${subject}`, predicate: `${DKG}rootEntity`, object: subject, graph: metaGraph })),
+    ]);
+    const filters = [{}, { from: '2024-01-01T00:00:00Z' }, { eventType: 'ObjectEvent' }, { eventType: `${EPCIS_CURRENT}ObjectEvent` }];
+    for (const filter of filters) {
+      const rows = [];
+      for (let offset = 0; offset < 3; offset++) {
+        const result = await store.query(buildEpcisQuery({ ...filter, limit: 1, offset }, contextGraphId));
+        if (result.type !== 'bindings') throw new Error('Expected event bindings');
+        rows.push(...result.bindings);
+      }
+      expect(rows.map(row => row.event)).toEqual([event, next]);
+      expect(toEpcisEvent(rows[0])).toMatchObject({
+        type: 'ObjectEvent', eventTime: TIME, eventTimeZoneOffset: '+00:00', action: 'ADD', parentID: 'urn:epc:parent',
+        bizStep: BIZ_STEP, disposition: 'https://ref.gs1.org/cbv/Disp-in_progress',
+        readPoint: { id: 'urn:read:point' }, bizLocation: { id: 'urn:business:location' },
+      });
+    }
+    // A filter on a field still selects the event through either term.
+    const byField = async (params: Parameters<typeof buildEpcisQuery>[0]) => {
+      const result = await store.query(buildEpcisQuery(params, contextGraphId));
+      if (result.type !== 'bindings') throw new Error('Expected event bindings');
+      return result.bindings.map(row => row.event);
+    };
+    expect(await byField({ action: 'ADD' })).toEqual([event]);
+    expect(await byField({ bizStep: 'receiving' })).toEqual([event]);
+    expect(await byField({ parentID: 'urn:epc:parent' })).toEqual([event]);
+    expect(await byField({ readPoint: 'urn:read:point' })).toEqual([event]);
+    expect(await byField({ action: 'DELETE' })).toEqual([]);
+  } finally {
+    await store.dropGraph(publicGraph); await store.dropGraph(privateGraph); await store.dropGraph(metaGraph);
+    await store.close();
+  }
+}, 60_000);
+
 it('paginates admitted events with missing and malformed times deterministically', async () => {
   const store = create();
   const graph = contextGraphDataUri(CG);
@@ -413,12 +480,12 @@ describe.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])('ext
       const responseType = toEpcisEvent({ eventType }).type as string;
       expect(responseType).toBe(eventType);
       const sparql = buildEpcisQuery({ ...filters, eventType: responseType }, CG);
-      expect(sparql).toContain(`FILTER(?eventType IN (<${eventType}>))`);
+      expect(sparql).toContain(`FILTER(?eventType = <${eventType}>)`);
       expect(sparql.split('OPTIONAL { ?event <http://dkg.io/ontology/epcisEventType> ?_declaredEventType . }')).toHaveLength(3);
       for (const field of ['eventTime', 'eventTimeZoneOffset']) {
         expect(sparql).not.toContain(`OPTIONAL { VALUES ?_epcis_${field}_value`);
         // One binding in each public/private graph branch, even with date filters.
-        expect(sparql.split(`?event ?_epcis_${field}_value ?${field} .`)).toHaveLength(3);
+        expect(sparql.split(`?event ?_epcis_${field}_value ?_${field}_term .`)).toHaveLength(3);
       }
       const result = await store.query(sparql);
       if (result.type !== 'bindings') throw new Error('Expected event bindings');

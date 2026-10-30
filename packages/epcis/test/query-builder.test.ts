@@ -47,7 +47,7 @@ describe('buildEpcisQuery', () => {
       CONTEXT_GRAPH_ID,
     );
 
-    expect(sparql).toContain('?event ?_epcis_eventTime_value ?eventTime');
+    expect(sparql).toContain('BIND(STR(?_eventTime_term) AS ?eventTime)');
     expect(sparql).toContain('xsd:dateTime("2024-01-01T00:00:00Z")');
     expect(sparql).toContain('xsd:dateTime("2024-12-31T23:59:59Z")');
     expect(sparql).toContain('>=');
@@ -211,7 +211,7 @@ describe('buildEpcisQuery', () => {
   it('filters by disposition with shorthand normalization', () => {
     const sparql = buildEpcisQuery({ disposition: 'in_transit' }, CONTEXT_GRAPH_ID);
 
-    expect(sparql).toContain('?event ?_epcis_disposition_value ?disposition');
+    expect(sparql).toContain('BIND(STR(?_disposition_term) AS ?disposition)');
     expect(sparql).toContain('https://ref.gs1.org/cbv/Disp-in_transit');
     // Should NOT be OPTIONAL when filtered
     expect(sparql).not.toMatch(/OPTIONAL\s*\{\s*VALUES \?_epcis_disposition_value/);
@@ -232,7 +232,7 @@ describe('buildEpcisQuery', () => {
   it('filters by action — moves from OPTIONAL to required WHERE with FILTER', () => {
     const sparql = buildEpcisQuery({ action: 'OBSERVE' }, CONTEXT_GRAPH_ID);
 
-    expect(sparql).toContain('?event ?_epcis_action_value ?action');
+    expect(sparql).toContain('BIND(STR(?_action_term) AS ?action)');
     expect(sparql).toContain('FILTER(STR(?action) = "OBSERVE")');
     // Should NOT be OPTIONAL when filtered
     expect(sparql).not.toMatch(/OPTIONAL\s*\{\s*VALUES \?_epcis_action_value/);
@@ -241,7 +241,7 @@ describe('buildEpcisQuery', () => {
   it('filters by eventType with full EPCIS URI', () => {
     const sparql = buildEpcisQuery({ eventType: 'ObjectEvent' }, CONTEXT_GRAPH_ID);
 
-    expect(sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
+    expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
   });
 
   it('combines new filters with existing filters', () => {
@@ -250,7 +250,7 @@ describe('buildEpcisQuery', () => {
       CONTEXT_GRAPH_ID,
     );
 
-    expect(sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
+    expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
     expect(sparql).toContain('FILTER(STR(?action) = "OBSERVE")');
     expect(sparql).toContain('https://ref.gs1.org/cbv/BizStep-shipping');
     expect(sparql).toContain('https://ref.gs1.org/cbv/Disp-in_transit');
@@ -286,7 +286,7 @@ describe('buildEpcisQuery', () => {
     expect(sparql).toContain(`GRAPH <${SHARED_MEMORY_GRAPH}>`);
     expect(sparql).not.toContain(`GRAPH <${DATA_GRAPH}> {\n    ?event a ?_rawEventType`);
     expect(sparql).toContain(`GRAPH <${PRIVATE_GRAPH}>`);
-    expect(sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
+    expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
   });
 
   it('uses core URI helpers for sub-graph public, shared memory, meta, and private graphs', () => {
@@ -330,7 +330,7 @@ describe('buildEpcisQuery', () => {
     expect(sparql).toContain('https://ref.gs1.org/cbv/BizStep-shipping');
     expect(sparql).toContain('xsd:dateTime("2024-01-01T00:00:00Z")');
     expect(sparql).toContain('xsd:dateTime("2024-02-01T00:00:00Z")');
-    expect(sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
+    expect(sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
   });
 });
 
