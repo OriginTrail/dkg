@@ -21,6 +21,7 @@ import { join, relative, resolve } from 'node:path';
 import { planHardenMigration, executeHardenMigration, HARDEN_DISK_PREFLIGHT_FACTOR, HARDEN_EXPORT_FILENAME, type HardenStep } from '../src/daemon/blazegraph-harden.js';
 import { BLAZEGRAPH_DATA_DIR, BLAZEGRAPH_JOURNAL_FILE, type DockerRunner } from '../src/daemon/blazegraph-docker.js';
 import { storeHardenLockPath } from '../src/daemon/store-runtime-monitor.js';
+import { assertStoreMigrationInactive } from '../src/daemon/store-maintenance-gate.js';
 import { NAME, BACKUP, VOLUME, NAMESPACE, JOURNAL_BYTES, inspectJson, notFound, ok, scriptedDocker, verifierFetch, assertSafetyInvariants, uncertainInspectionResults } from './_helpers/blazegraph-harden-fixtures.js';
 
 describe('executeHardenMigration', () => {
@@ -274,6 +275,11 @@ describe('executeHardenMigration', () => {
       await expect(executeHardenMigration(baseOpts(runner, recovered.fn))).resolves.toMatchObject({
         outcome: 'already-hardened', journalBytes: JOURNAL_BYTES, backupContainerName: BACKUP,
       });
+      // A passing retry does not admit writers: the failed rollback's barrier needs explicit recovery.
+      await expect(assertStoreMigrationInactive(dkgHome)).rejects.toThrow(/Store hardening marker/);
+      await expect(executeHardenMigration({ ...baseOpts(runner, recovered.fn), recover: true }))
+        .resolves.toMatchObject({ outcome: 'recovered', journalBytes: JOURNAL_BYTES, backupContainerName: BACKUP });
+      await expect(assertStoreMigrationInactive(dkgHome)).resolves.toBeUndefined();
     },
   );
 
@@ -660,8 +666,9 @@ describe('executeHardenMigration', () => {
     assertSafetyInvariants(calls, migrationDir, true);
   });
 
-  it('resumes from backup-only by replacing the export without renaming the backup', async () => {
-    // Simulated crash after the rename: export exists, volume not yet run.
+  it('continues from a backup by replacing the export without renaming the backup', async () => {
+    // Only reachable once an interrupted run's marker and replacement volume are gone, which takes
+    // an operator: harden-crash-recovery.test.ts drives what a kill right after the rename leaves.
     writeFileSync(join(migrationDir, HARDEN_EXPORT_FILENAME), Buffer.alloc(JOURNAL_BYTES, 1));
     const { runner, calls } = scriptedDocker({ initial: 'backup-only', migrationDir });
     const { fn } = verifierFetch();

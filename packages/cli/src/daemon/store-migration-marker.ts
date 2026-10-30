@@ -37,7 +37,7 @@ export interface RecoveryStoreMigrationMarker {
   readonly namespace: string;
   readonly migrationDir: string;
   readonly hostPort: number;
-  /** Unknown export size retains the barrier but cannot certify recovery. */
+  /** Absent when the checkpoint failed: the barrier stays, and only the captured original can clear it. */
   readonly exportBytes?: number;
 }
 export interface StoreMigrationMarkerOwnership {
@@ -156,8 +156,9 @@ export function requireStoreMigrationRecoveryMarker(path: string,
   if (value === undefined || value.containerName !== expected.containerName
     || value.namespace !== expected.namespace || value.migrationDir !== resolve(expected.migrationDir)
     || value.hostPort !== expected.hostPort
-    // A live claim without a size stopped before its export checkpoint; a retained certificate must carry one.
-    || (marker.kind === 'recovery-required' && !positive(value.exportBytes))) {
+    // No size means the owner stopped or failed before its export checkpoint, and every swap
+    // comes after that. Recovery then verifies the captured original, so a certificate needs it.
+    || (marker.kind === 'recovery-required' && value.exportBytes === undefined && value.sourceContainerId === undefined)) {
     throw new Error('Marker does not certify an incomplete migration for these recovery options; startup remains blocked.');
   }
   if (marker.kind === 'active') {

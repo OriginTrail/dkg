@@ -141,7 +141,8 @@ export async function verifyExisting(ctx: HardenWorkflowInputs): Promise<void> {
     + `Check \`docker ps\` / \`docker logs ${ctx.specification.containerName}\`.`);
   ctx.log(`ASK probe OK at ${ctx.specification.sparqlUrl} — nothing to do.`);
 }
-export async function verifyReplacement(ctx: HardenWorkflowInputs, args: readonly string[], exported: VerifiedJournalExport): Promise<void> {
+/** Readiness, ASK and identity of the store in service; resolves its measured journal size. */
+export async function verifyStoreService(ctx: HardenWorkflowInputs, args: readonly string[]): Promise<number> {
   await waitForBlazegraphReady({ url: ctx.specification.baseUrl, fetch: ctx.fetchImpl, log: ctx.log,
     intervalMs: ctx.readyIntervalMs ?? 2_000, timeoutMs: ctx.readyTimeoutMs ?? 180_000,
     probeTimeoutMs: ctx.probeTimeoutMs });
@@ -150,8 +151,12 @@ export async function verifyReplacement(ctx: HardenWorkflowInputs, args: readonl
     `identity-tag probe returned no binding at ${ctx.specification.sparqlUrl} — the migrated data did not follow`);
   const out = await mustRun(ctx.docker, args, 'reading the migrated journal size');
   const size = Number.parseInt(out.trim(), 10);
-  if (!Number.isFinite(size) || size < exported.bytes) throw new Error(
-    `migrated journal is ${out.trim()} bytes, expected >= ${exported.bytes}`);
+  if (!Number.isFinite(size)) throw new Error(`migrated journal size is unreadable: ${out.trim()}`);
+  return size;
+}
+export async function verifyReplacement(ctx: HardenWorkflowInputs, args: readonly string[], exported: VerifiedJournalExport): Promise<void> {
+  const size = await verifyStoreService(ctx, args);
+  if (size < exported.bytes) throw new Error(`migrated journal is ${size} bytes, expected >= ${exported.bytes}`);
 }
 
 /** Retry of a hardened shape still proves retained migration copies, when present. */

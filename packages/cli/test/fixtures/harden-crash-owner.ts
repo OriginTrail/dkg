@@ -1,7 +1,7 @@
 import { defaultDockerRunner } from '../../src/daemon/blazegraph-docker.js';
 import { executeHardenMigration } from '../../src/daemon/blazegraph-harden.js';
 import { crashDocker, crashVerifier, CRASH_NAME, CRASH_NAMESPACE } from '../_helpers/harden-crash-docker.js';
-const home = process.argv[2]!, beforeExport = process.argv[3] === 'before-export';
+const home = process.argv[2]!, beforeExport = process.argv[3] === 'before-export', afterRename = process.argv[3] === 'after-rename';
 const real = process.argv[3] === 'real';
 const captured = real ? JSON.parse(process.argv[4]!) : {};
 const runner = real ? defaultDockerRunner() : crashDocker(home).runner;
@@ -9,11 +9,12 @@ await executeHardenMigration({ containerName: CRASH_NAME, namespace: CRASH_NAMES
   ...captured,
   docker: { async run(args, options) {
     const result = await runner.run(args, options);
-    if (beforeExport ? args[0] === 'volume' && args[1] === 'inspect' : args[0] === 'run' && args[1] === '-d') {
+    if (beforeExport ? args[0] === 'volume' && args[1] === 'inspect'
+      : afterRename ? args[0] === 'rename' : args[0] === 'run' && args[1] === '-d') {
       // Keep the issued migration alive before announcing the interruption point.
       const lifetime = setInterval(() => {}, 1000);
       try {
-        process.send?.({ replacementCreated: !beforeExport, ownerPid: process.pid });
+        process.send?.({ replacementCreated: !beforeExport && !afterRename, ownerPid: process.pid });
         await new Promise<void>(() => {});
       } finally { clearInterval(lifetime); }
     }

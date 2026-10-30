@@ -40,6 +40,11 @@ describe('shared migration marker protocol at real filesystem boundaries', () =>
     expect(() => requireStoreMigrationRecoveryMarker(path, recovery())).toThrow(/does not certify/);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow(/Store hardening marker/);
   });
+  it('hands an unknown export-size certificate to recovery only with its captured original', async () => {
+    const path = storeHardenLockPath(home), owner = await claimStoreMigrationMarker(path, 'dkg-store');
+    await retainStoreMigrationRecoveryMarker(owner, { ...recovery(), exportBytes: undefined, sourceContainerId: 'original-id' });
+    expect(requireStoreMigrationRecoveryMarker(path, recovery())).toMatchObject({ exportBytes: undefined, sourceContainerId: 'original-id' });
+  });
   it.each(['containerName', 'namespace', 'migrationDir', 'hostPort'] as const)('rejects recovery options not owned by the original marker (%s)', async key => {
     const path = storeHardenLockPath(home), owner = await claimStoreMigrationMarker(path, 'dkg-store');
     await retainStoreMigrationRecoveryMarker(owner, recovery());

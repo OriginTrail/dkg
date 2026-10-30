@@ -12,15 +12,15 @@ let home: string;
 const children: ChildProcess[] = [];
 beforeEach(() => { home = mkdtempSync(join(tmpdir(), 'harden-killed-')); });
 afterEach(() => { for (const child of children.splice(0)) child.kill('SIGKILL'); rmSync(home, { recursive: true, force: true }); });
-async function interruptedReplacement(beforeExport = false) {
+async function interruptedReplacement(point: 'before-export' | 'after-rename' | 'after-replacement' = 'after-replacement') {
   const child = spawn(process.execPath,
     ['--import', fileURLToPath(new URL('../../../node_modules/tsx/dist/loader.mjs', import.meta.url)),
-      fileURLToPath(new URL('./fixtures/harden-crash-owner.ts', import.meta.url)), home, beforeExport ? 'before-export' : 'after-replacement'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+      fileURLToPath(new URL('./fixtures/harden-crash-owner.ts', import.meta.url)), home, point], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   children.push(child);
   let diagnostic = ''; child.stderr?.on('data', bytes => { diagnostic += String(bytes); });
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { child.once('error', reject); child.once('exit', (code, signal) => resolve({ code, signal })); });
   await new Promise<void>((resolve, reject) => {
-    child.once('message', message => { expect(message).toEqual({ replacementCreated: !beforeExport, ownerPid: child.pid }); resolve(); });
+    child.once('message', message => { expect(message).toEqual({ replacementCreated: point === 'after-replacement', ownerPid: child.pid }); resolve(); });
     child.once('exit', () => reject(new Error(`owner exited before replacement: ${diagnostic}`)));
   });
   expect(child.kill('SIGKILL')).toBe(true);
@@ -60,6 +60,24 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     expect(f.calls.slice(index).every(args => ['inspect', 'exec'].includes(args[0]!))).toBe(true);
     await expect(assertStoreMigrationInactive(home)).resolves.toBeUndefined();
   }, 15000);
+  it('keeps both copies and the fence after a kill right after the rename, until the restored original is verified', async () => {
+    const f = await interruptedReplacement('after-rename');
+    expect(JSON.parse(f.marker).recovery.exportBytes).toBe(CRASH_BYTES);
+    const index = f.calls.length;
+    // A plain retry stops at the marker, and recovery needs a store under the original name.
+    await expect(executeHardenMigration(f.options)).rejects.toThrow(/--recover/);
+    await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/Restore the backup/);
+    expect(f.calls.slice(index).every(args => ['inspect', 'volume'].includes(args[0]!) && args[1] !== 'create')).toBe(true);
+    expect(readFileSync(join(home, 'bigdata.jnl'))).toHaveLength(CRASH_BYTES);
+    expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(f.marker);
+    await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+
+    await f.runner.run(['rename', `${CRASH_NAME}-backup`, CRASH_NAME]);
+    await f.runner.run(['start', CRASH_NAME]);
+    await expect(executeHardenMigration({ ...f.options, recover: true }))
+      .resolves.toMatchObject({ outcome: 'recovered', journalBytes: CRASH_BYTES, backupContainerName: null });
+    await expect(assertStoreMigrationInactive(home)).resolves.toBeUndefined();
+  }, 15000);
   describe('an owner interrupted before its export checkpoint', () => {
     /** Docker state and options as a recovery run sees them after `change`. */
     const recoveryAfter = (f: Awaited<ReturnType<typeof interruptedReplacement>>, change: (state: Record<string, unknown>) => void) => {
@@ -70,7 +88,7 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     };
 
     it('verifies the untouched original once it runs again, changing nothing in Docker', async () => {
-      const f = await interruptedReplacement(true);
+      const f = await interruptedReplacement('before-export');
       expect(JSON.parse(f.marker).recovery).toMatchObject({ namespace: CRASH_NAMESPACE, migrationDir: home, hostPort: 9999 });
       expect(JSON.parse(f.marker).recovery.exportBytes).toBeUndefined();
 
@@ -88,21 +106,21 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     }, 15000);
 
     it('keeps the fence while the original does not answer', async () => {
-      const f = await interruptedReplacement(true);
+      const f = await interruptedReplacement('before-export');
       const fetch: typeof globalThis.fetch = async () => new Response('unavailable', { status: 503 });
       await expect(executeHardenMigration({ ...f.options, fetch, recover: true })).rejects.toThrow();
       expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(f.marker);
     }, 15000);
 
     it('keeps the fence for a different container under the original name', async () => {
-      const f = await interruptedReplacement(true);
+      const f = await interruptedReplacement('before-export');
       const { options } = recoveryAfter(f, state => { state.sourceId = 'different-container-id'; });
       await expect(executeHardenMigration(options)).rejects.toThrow(/original source/);
       await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
     }, 15000);
 
     it('keeps the fence when the original was not captured', async () => {
-      const f = await interruptedReplacement(true);
+      const f = await interruptedReplacement('before-export');
       const marker = JSON.parse(f.marker); delete marker.recovery.sourceContainerId;
       writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
       await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/original source/);
@@ -110,7 +128,7 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     }, 15000);
 
     it('keeps the fence while its owner may be alive', async () => {
-      const f = await interruptedReplacement(true);
+      const f = await interruptedReplacement('before-export');
       const marker = JSON.parse(f.marker); marker.pid = process.pid;
       writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
       await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/live or unverifiable/);
@@ -118,7 +136,7 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     }, 15000);
   });
   it('refuses a historical orphan marker with no recovery evidence instead of guessing', async () => {
-    const f = await interruptedReplacement(true);
+    const f = await interruptedReplacement('before-export');
     const marker = JSON.parse(f.marker); delete marker.recovery; writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
     await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/does not certify/);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow();

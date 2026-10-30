@@ -64,6 +64,28 @@ describe('pre-swap owned migration export persistence', () => {
     const value = JSON.parse(readFileSync(marker, 'utf8'));
     if (value.recoveryRequired) expect(value.exportBytes).toBeUndefined();
   });
+  // A marker that cannot be rewritten stays the live claim, which recovery takes once its owner has
+  // exited: harden-crash-recovery.test.ts covers that.
+  it.each(['export-file', 'export-directory'] as const)('lets recovery verify the untouched original after %s could not sync', async boundary => {
+    const marker = storeHardenLockPath(home), exported = join(home, 'bigdata.jnl');
+    const code = boundary === 'export-directory' ? 'ENOTSUP' : 'EIO';
+    observeSync((path, index) => (boundary === 'export-file' && path === exported
+      || boundary === 'export-directory' && path === home && index === 2) ? code : undefined);
+    const f = scriptedDocker({ initial: 'legacy', migrationDir: home });
+    await expect(executeHardenMigration({ ...options(), docker: f.runner })).rejects.toThrow(code);
+    expect(JSON.parse(readFileSync(marker, 'utf8'))).toMatchObject({ recoveryRequired: true });
+    vi.mocked(fs.open).mockImplementation(originalOpen);
+
+    // The storage problem is over, but the source was stopped for its export.
+    await expect(executeHardenMigration({ ...options(), docker: f.runner, recover: true })).rejects.toThrow(/docker start/);
+    await expect(assertStoreMigrationInactive(home)).rejects.toThrow(/Store hardening marker/);
+    const running = scriptedDocker({ initial: 'legacy', migrationDir: home });
+    const mutations = () => running.calls.filter(args => !['inspect', 'exec'].includes(args[0]!));
+    await expect(executeHardenMigration({ ...options(), docker: running.runner, recover: true }))
+      .resolves.toMatchObject({ outcome: 'recovered', exportPath: null, journalBytes: null, backupContainerName: null });
+    expect(mutations()).toEqual([]);
+    await expect(assertStoreMigrationInactive(home)).resolves.toBeUndefined();
+  });
   it('retains the historical exported disk factor, plan description and actual preflight', async () => {
     expect(HARDEN_DISK_PREFLIGHT_FACTOR).toBe(2.2); expect(actionFactor).toBe(HARDEN_DISK_PREFLIGHT_FACTOR);
     const f = scriptedDocker({ initial: 'legacy', migrationDir: home });

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertDaemonStoppedForStoreMigration } from '../store-maintenance-gate.js';
-import { fileSize, verifyReplacement, type HardenWorkflowInputs } from './actions.js';
+import { fileSize, verifyReplacement, verifyStoreService, type HardenWorkflowInputs } from './actions.js';
 import type { HardenMigrationResult } from './executor.js';
 import { verifyInterruptedReplacementVolume } from './volume.js';
 import type { HardenStep } from './steps.js';
@@ -48,11 +48,11 @@ export async function recoverHardenMigration(ctx: HardenWorkflowInputs): Promise
     const { exportBytes } = evidence;
     const common = { outcome: 'recovered' as const, containerName: ctx.specification.containerName, hostPort: ctx.specification.hostPort, heapMb: ctx.specification.heapMb };
     if (exportBytes === undefined) {
-      // The owner stopped before its export checkpoint, and every swap comes after
-      // that. The captured original is still in place, with no export to compare.
+      // The owner stopped or failed before its export checkpoint, and every swap
+      // comes after that. The captured original is in place, with no export to compare.
       if (ctx.specification.state !== 'legacy' || evidence.sourceContainerId === undefined) throw new Error('Cannot verify the captured original source container; startup remains blocked.');
       if (!ctx.specification.running) throw new Error(`Start the original container with \`docker start ${ctx.specification.containerName}\`, then run recovery again; startup remains blocked.`);
-      await verifyReplacement(ctx, hardenRecoveryStep(ctx.specification.containerName).dockerArgs, { path: ctx.specification.exportPath, bytes: 0 });
+      await verifyStoreService(ctx, hardenRecoveryStep(ctx.specification.containerName).dockerArgs);
       await releaseStoreMigrationMarker(evidence);
       return { ...common, backupContainerName: null, exportPath: null, journalBytes: null };
     }
