@@ -35,6 +35,8 @@ const ADDR_BY_NAME: Record<string, string> = {
   PublishingConviction: '0x00000000000000000000000000000000000000A8',
   ShardingTable: '0x00000000000000000000000000000000000000A9',
   DKGStakingConvictionNFT: '0x00000000000000000000000000000000000000Aa',
+  ServiceSubscriptions: '0x00000000000000000000000000000000000000Ac',
+  ConvictionServiceStorage: '0x00000000000000000000000000000000000000Ad',
 };
 const RECOVERED = ethers.getAddress('0x00000000000000000000000000000000000000ab');
 
@@ -218,12 +220,14 @@ describe('resolveContract address memo (#1583)', () => {
     expect(hubReads(rc)).toBe(2);
   });
 
-  it('excluded names (RandomSampling*, PCA cold paths) ALWAYS resolve fresh', async () => {
+  it('excluded names (RandomSampling*, PCA and service-spending cold paths) ALWAYS resolve fresh', async () => {
     const a = makeAdapter();
     const rc = spyByName(a);
     for (const name of ['RandomSampling', 'RandomSamplingStorage',
       // PR #1615 review axis-1: hookless, no-self-heal cold paths — always fresh.
-      'PublishingConviction', 'ShardingTable', 'DKGStakingConvictionNFT']) {
+      'PublishingConviction', 'ShardingTable', 'DKGStakingConvictionNFT',
+      // Conviction Account service spending: cold paths, like PublishingConviction.
+      'ServiceSubscriptions', 'ConvictionServiceStorage']) {
       for (let i = 0; i < 4; i++) {
         await expect(a.resolveContractAddress(name)).resolves.toBe(ADDR_BY_NAME[name]);
       }

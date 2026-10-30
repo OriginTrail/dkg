@@ -79,6 +79,7 @@ export function constructConfiguredChainAdapter(
       indexTickMs: config.chainConfig.indexTickMs,
       boundedAuthorityReads: config.chainConfig.boundedAuthorityReads,
       maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
+      convictionServiceBuyerAddress: config.chainConfig.convictionServiceBuyerAddress,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
       minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,

@@ -59,6 +59,7 @@ describe('init wizard chain persistence', () => {
     walletRpcUrls: ['https://old-wallet.invalid'], tokenAddress: '0x0000000000000000000000000000000000000042',
     approvalPolicy: 'per-publish', minPublisherNativeWei: '123', minPublisherTracWei: '456',
     finalityConfirmations: 7, maxFeePerGasWei: '789', cgRegistryScanPageSize: 500, receiptTimeoutMs: 45_000,
+    caBuyerAddress: '0x0000000000000000000000000000000000000043',
   };
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -167,7 +168,11 @@ describe('init wizard chain persistence', () => {
       ...advancedOverrides, mockIdentityId: '7', unknownChainField: 'unowned',
     } });
     const saved = await runInit('testnet');
-    expect(saved.chain).toEqual({ type: 'evm', cgRegistryScanPageSize: 500, receiptTimeoutMs: 45_000 });
+    expect(saved.chain).toEqual({
+      type: 'evm', cgRegistryScanPageSize: 500, receiptTimeoutMs: 45_000,
+      // The buyer key is one of the node's own wallets, whatever the network.
+      caBuyerAddress: '0x0000000000000000000000000000000000000043',
+    });
     const network = await loadNetworkConfig('testnet');
     const defaults = resolveChainConfig(undefined, network)!;
     expect(resolveChainConfig(saved, network)).toMatchObject({

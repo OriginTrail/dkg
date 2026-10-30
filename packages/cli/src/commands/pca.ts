@@ -30,6 +30,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { caStatusPointer } from './ca.js';
 import type { RegisterAgentAdvisoryStatus } from '../pca-confirmation-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -270,6 +271,8 @@ pcaCmd
       console.log(`  lastSettledWin.:  ${info.lastSettledWindow}`);
       console.log(`  fullySwept:       ${info.fullySwept}`);
       console.log(`  discountBps:      ${info.discountBps} (${(info.discountBps / 100).toFixed(2)}% off base cost)`);
+      const servicePointer = await caStatusPointer(client, info.accountId);
+      if (servicePointer) console.log(servicePointer);
       if (info.probedKey) {
         console.log(`  probedKey:`);
         console.log(`    key:        ${info.probedKey.key}`);

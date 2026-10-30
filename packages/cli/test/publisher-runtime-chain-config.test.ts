@@ -20,6 +20,7 @@ describe('publisher runtime chain config projection', () => {
       indexTickMs: 12_000,
       boundedAuthorityReads: true,
       maxFeePerGasWei: 100_000_000n,
+      caBuyerAddress: '0x3333333333333333333333333333333333333333',
       approvalPolicy: {
         mode: 'replenishing',
         targetAllowance: '123456789',
@@ -42,6 +43,7 @@ describe('publisher runtime chain config projection', () => {
       indexTickMs: 12_000,
       boundedAuthorityReads: true,
       maxFeePerGasWei: 100_000_000n,
+      convictionServiceBuyerAddress: '0x3333333333333333333333333333333333333333',
       approvalPolicy: {
         mode: 'replenishing',
         targetAllowance: 123456789n,

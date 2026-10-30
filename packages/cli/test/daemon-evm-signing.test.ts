@@ -105,6 +105,36 @@ describe('daemon EVM signing', () => {
     expect(await connectionsLeftOpen(fake)).toBe(0);
   });
 
+  it('names the Conviction Account buyer key at startup, or warns that the node cannot sign for it', async () => {
+    const dir = await tempDir();
+    const fake = await fakeSigner();
+    const tokens = await tokenFiles(dir);
+    const start = async (caBuyerAddress: string | undefined, dataDir: string) => {
+      const lines: string[] = [];
+      const signing = await resolveDaemonEvmSigning({
+        config: {
+          nodeRole: 'edge',
+          chain: { signer: { type: 'remote', url: fake.url, authTokenFile: tokens.payer }, ...(caBuyerAddress ? { caBuyerAddress } : {}) },
+        } as any,
+        chainType: 'evm',
+        dataDir,
+        log: (line) => lines.push(line),
+      });
+      signing.release();
+      return lines.join('\n');
+    };
+    expect(await start(payers[1].address.toLowerCase(), dir)).toContain(`Conviction Account buyer key: ${payers[1].address}`);
+    const stranger = ethers.Wallet.createRandom().address;
+    expect(await start(stranger, dir)).toContain(`[warn] chain.caBuyerAddress ${stranger} is not one of this node's operational wallets`);
+    expect(await start(undefined, dir)).not.toContain('buyer key');
+    const local: string[] = [];
+    await resolveDaemonEvmSigning({
+      config: { nodeRole: 'edge', chain: { caBuyerAddress: stranger } } as any,
+      chainType: 'evm', dataDir: await tempDir(), log: (line) => local.push(line),
+    });
+    expect(local.join('\n')).toContain(`[warn] chain.caBuyerAddress ${stranger}`);
+  });
+
   it('refuses to start while the agent keystore keeps a payer\'s key, and leaves other entries alone', async () => {
     const dir = await tempDir();
     const fake = await fakeSigner();

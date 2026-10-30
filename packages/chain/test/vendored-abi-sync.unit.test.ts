@@ -101,8 +101,11 @@ describe('every contract the adapter loads by name is vendored', () => {
           if (entry.name !== 'archive') visit(join(dir, entry.name));
         } else if (entry.name.endsWith('.ts')) {
           const source = readFileSync(join(dir, entry.name), 'utf8');
-          for (const match of source.matchAll(/\b(?:loadAbi|resolveContract|resolveAssetStorage)\(\s*'(\w+)'/g)) {
-            names.add(match[1]!);
+          // `resolveContract(hubName, abiName)` loads `abiName`: a Hub name
+          // need not be the contract's (`EpochStorageV8` is `EpochStorage`).
+          const calls = /\b(?:loadAbi|resolveContract|resolveAssetStorage)\(\s*'(\w+)'(?:\s*,\s*'(\w+)')?/g;
+          for (const match of source.matchAll(calls)) {
+            names.add(match[2] ?? match[1]!);
           }
         }
       }

@@ -12,8 +12,9 @@ export const DAEMON_READ_TIMEOUT_MS = 30_000;
 /**
  * Deadline for the GET lists in {@link DAEMON_LIST_READ_ROUTES}, which walk
  * every context graph, sub-graph, PCA or publisher job (the PCA list reads
- * each account from the chain). It matches the node UI's graph-list deadline
- * and never falls below the read deadline.
+ * each account from the chain), or the Conviction Accounts a node owns and
+ * those its buyer key is assigned on (a chain log scan). It matches the node
+ * UI's graph-list deadline and never falls below the read deadline.
  */
 export const DAEMON_LIST_READ_TIMEOUT_MS = 60_000;
 
@@ -23,6 +24,7 @@ export const DAEMON_LIST_READ_ROUTES: ReadonlySet<string> = new Set([
   '/api/sub-graph/list',
   '/api/pca',
   '/api/publisher/jobs',
+  '/api/ca/mine',
 ]);
 
 /**

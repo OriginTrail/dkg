@@ -380,6 +380,48 @@ export {
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export {
+  CA_EIP712_DOMAIN_NAME,
+  CA_EIP712_DOMAIN_VERSION,
+  CA_LABELS_MAX_EPOCHS,
+  CA_PERIODS_MAX_LIMIT,
+  CA_SERVICE_CLASS_INFERENCE,
+  CA_SERVICE_CLASS_QUERY,
+  SERVICE_ASSIGNMENT_TYPES,
+  assignmentCapsRefusal,
+  convictionServiceDomain,
+  serviceAssignmentDigest,
+  serviceSubscriptionIdOf,
+  type CaAssignment,
+  type CaAssignmentCaps,
+  type CaAssignmentTerms,
+  type CaAssignmentUsage,
+  type CaBucket,
+  type CaContracts,
+  type CaEip712Domain,
+  type CaEpochLabel,
+  type CaFundingRequest,
+  type CaPeriod,
+  type CaPeriodFunding,
+  type CaServiceClass,
+  type CaServiceStatus,
+  type CaWindowAllowance,
+  type ConvictionServiceAdapter,
+} from './conviction-service.js';
+export {
+  CONVICTION_SERVICE_REVERT_KINDS,
+  ConvictionServiceError,
+  ConvictionServiceInputError,
+  ConvictionServiceRevertError,
+  ConvictionServiceUnavailableError,
+  convictionServiceErrorOf,
+  convictionServiceRevertKind,
+  isConvictionServiceError,
+  isConvictionServiceRevertError,
+  isConvictionServiceUnavailableError,
+  type ConvictionServiceErrorCode,
+  type ConvictionServiceErrorKind,
+} from './conviction-service-errors.js';
 export { numericChainIdOf } from './evm-adapter-storage-reads.js';
 export {
   DEFAULT_FINALITY_CONFIRMATIONS,
