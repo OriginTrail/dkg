@@ -17,6 +17,7 @@ import {
   isInsufficientFundsError,
 } from './evm-adapter-errors.js';
 import { createRpcTimeoutError, type RpcEndpointsExhaustedErrorLike } from './chain-rpc-transport-error.js';
+import { noteRefusalAfterPossibleAcceptance } from './rpc-failover-log.js';
 import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from './evm-adapter-constants.js';
 import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
   './context-graph-authority-index-snapshot.js';
@@ -66,7 +67,10 @@ export async function retryBroadcastEndpointSet(broadcast: () => Promise<void>):
       await broadcast();
       return;
     } catch (err) {
-      if (unknownOutcome !== undefined && isInsufficientFundsError(err)) throw unknownOutcome;
+      if (unknownOutcome !== undefined && isInsufficientFundsError(err)) {
+        noteRefusalAfterPossibleAcceptance('broadcast retry', (unknownOutcome as RpcEndpointsExhaustedErrorLike).txHash);
+        throw unknownOutcome;
+      }
       if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
         if ((err as RpcEndpointsExhaustedErrorLike).mayHaveBeenAccepted) unknownOutcome = err;
         await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);

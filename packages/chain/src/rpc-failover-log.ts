@@ -266,6 +266,24 @@ export function noteRpcFailover(
 }
 
 /**
+ * #3591 — a refusal for funds that does not count, because an earlier attempt at the same signed
+ * transaction may have been accepted. The sender then waits for chain proof, and if the wallet really
+ * was short no proof can arrive by itself, so this is worth one line that names the transaction.
+ */
+export function noteRefusalAfterPossibleAcceptance(label: string, txHash: string | undefined): void {
+  try {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[chain] ${label}: an endpoint refused tx ${txHash ?? '(unknown)'} for funds, but an earlier attempt may have been `
+      + 'accepted, so its outcome stays unknown. A publication waiting on it stays held until chain proof settles it; '
+      + 'if the wallet really was short, an operator may have to clear that job by id.',
+    );
+  } catch {
+    // Observability must never break the failover path.
+  }
+}
+
+/**
  * Record + log the terminal "all configured RPC endpoints exhausted"
  * condition. Host-only — does NOT print the full `rpcUrls.join()` aggregate
  * the thrown error carries. Synchronous and never-throwing.

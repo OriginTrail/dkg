@@ -46,6 +46,19 @@ describe('RpcFailoverClient.broadcast — a refusal for funds after an attempt t
     expect(backup.broadcastTransaction.calls).toHaveLength(1);
   });
 
+  it('says so once, naming the transaction, because a held publication can otherwise go unnoticed', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await makeClient([losesTheAnswer(), refuses()], URLS).broadcast('0xsigned', '0xhash', 'unit write').catch(() => undefined);
+      const lines = warn.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('refused tx'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('0xhash');
+      expect(lines[0]).toContain('unit write broadcast');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('still takes a later endpoint\'s word that it knows the transaction', async () => {
     const third = { broadcastTransaction: recorder(async () => { throw knownTxError(); }) };
     const client = makeClient([losesTheAnswer(), refuses(), third], [...URLS, 'https://third.example']);
@@ -121,8 +134,14 @@ describe('retryBroadcastEndpointSet — a refusal for funds on a later pass', ()
   }
 
   it('leaves the earlier unknown outcome standing when that pass may have left the transaction with an endpoint', async () => {
-    const unknown = new RpcEndpointsExhaustedError('exhausted', { txHash: '0xhash', mayHaveBeenAccepted: true });
-    expect(await settled(unknown, refusal())).toBe(unknown);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const unknown = new RpcEndpointsExhaustedError('exhausted', { txHash: '0xhash', mayHaveBeenAccepted: true });
+      expect(await settled(unknown, refusal())).toBe(unknown);
+      expect(warn.mock.calls.map(([line]) => String(line)).filter((line) => line.includes('refused tx 0xhash'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('stays a refusal after a pass that cannot have left the transaction anywhere', async () => {

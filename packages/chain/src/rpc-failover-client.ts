@@ -63,6 +63,7 @@ import {
 import { errorCode, errorMessage, errorRetryAfterMs, isInsufficientFundsError } from './evm-adapter-errors.js';
 import {
   hostOnlyRpcText,
+  noteRefusalAfterPossibleAcceptance,
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
@@ -658,7 +659,9 @@ export class RpcFailoverClient {
                 this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(err), { retryable: false });
                 throw err;
               }
-              if (!refusedAfterPossibleAcceptance) {
+              if (refusedAfterPossibleAcceptance) {
+                noteRefusalAfterPossibleAcceptance(`${label} broadcast`, txHash);
+              } else {
                 mayHaveBeenAccepted ||= sendStarted && broadcastAttemptMayHaveBeenAccepted(err);
                 lastRetryable = err;
                 attempt.recordFailure(); // de-prefer a failed backend
