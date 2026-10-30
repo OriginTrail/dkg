@@ -706,6 +706,52 @@
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      }
+    ],
+    "name": "getBucket",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Bucket",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
       }
     ],
     "name": "getBuckets",

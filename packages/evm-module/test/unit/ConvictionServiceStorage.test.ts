@@ -538,6 +538,16 @@ describe('@unit ConvictionServiceStorage', () => {
       expect((await CSS.getSubscription(id)).periodStart).to.equal(0n);
       expect(await CSS.getBuckets(id)).to.have.length(0);
     });
+
+    it('getBucket reads one bucket by its index, and reverts past the bucket count', async () => {
+      const id = ethers.id('subscription-1');
+      const buckets = [bucketOf('model-b', 1n, 6n * TRAC, 2_000n), bucketOf('graph-q', 2n, 1n * TRAC, 50n)];
+      await CSS.connect(logic).createSubscription(id, subscriptionRecord(7n), buckets);
+      expect(plain(await CSS.getBucket(id, 0n))).to.deep.equal(buckets[0]);
+      expect(plain(await CSS.getBucket(id, 1n))).to.deep.equal(buckets[1]);
+      await expect(CSS.getBucket(id, 2n)).to.be.revertedWithPanic(0x32);
+      await expect(CSS.getBucket(ethers.id('never-funded'), 0n)).to.be.revertedWithPanic(0x32);
+    });
   });
 
   describe('top-ups', () => {

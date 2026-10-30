@@ -15,6 +15,8 @@
 //   - Conviction Account top-ups and upgrades: the draw and labels at the
 //     account's tier, the period limit counting the period's earlier cost, and
 //     the usage without another period;
+//   - a Conviction Account period funded ahead, or topped up before it
+//     starts, is refused if its assignment expires before the period starts;
 //   - refusals: a zero key, before activation or while it is unset, paused, an
 //     unknown or ended period, a wrong source or buyer, a changed cap, and the
 //     bucket rules; each without partial effect.
@@ -473,24 +475,26 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect(await QIS.walletDue(now + 2n)).to.equal(0n);
     });
 
-    it('the receipt grace stays below one epoch, so the claim deadline always falls in the due epoch; a change to it moves no booking', async () => {
+    it('the receipt grace stays below one epoch, so the batch deadline always falls in the due epoch; a change to it moves no booking', async () => {
       for (const bad of [0n, epLen]) {
         await expect(forward(QIS, 'setReceiptGraceSeconds', [bad]))
           .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
           .withArgs('receiptGraceSeconds');
       }
+      // A change applies to the next epoch's periods: fund one, under the longest grace.
       await forward(QIS, 'setReceiptGraceSeconds', [epLen - 1n]);
-      const now = await epochNow();
-      const { subscriptionId } = await walletFund(walletRequestOf(now));
+      const next = (await epochNow()) + 1n;
+      const { subscriptionId } = await walletFund(walletRequestOf(next));
       const s = await CSS.getSubscription(subscriptionId);
-      const deadline = s.periodEnd + (await QIS.receiptGraceSeconds());
-      expect(await ChronosContract.epochAtTimestamp(deadline)).to.equal(now + 1n);
-      expect(await QIS.walletDue(now + 1n)).to.equal(10n * TRAC);
+      expect(await QIS.receiptGraceSecondsAt(next)).to.equal(epLen - 1n);
+      const deadline = s.periodEnd + (await QIS.receiptGraceSecondsAt(next));
+      expect(await ChronosContract.epochAtTimestamp(deadline)).to.equal(next + 1n);
+      expect(await QIS.walletDue(next + 1n)).to.equal(10n * TRAC);
 
       // A later change to the grace leaves the booking, and later bookings, in the same epoch.
       await forward(QIS, 'setReceiptGraceSeconds', [60n]);
       await walletTopUp(subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)]);
-      expect(await QIS.walletDue(now + 1n)).to.equal(11n * TRAC);
+      expect(await QIS.walletDue(next + 1n)).to.equal(11n * TRAC);
     });
   });
 
@@ -725,6 +729,64 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await expect(SS.connect(buyer).topUpFromConviction(unknown, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
         .to.be.revertedWithCustomError(SS, 'PeriodNotFound')
         .withArgs(unknown);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // A Conviction Account period funded ahead
+  // -------------------------------------------------------------------------
+
+  describe('a Conviction Account period funded ahead', () => {
+    let accountId: bigint;
+    let now: bigint;
+    let nextStart: bigint;
+
+    beforeEach(async () => {
+      await setExactScheduleFrom(HubContract, CSS);
+      accountId = await openAccount({ limit: 100n * TRAC });
+      now = await epochNow();
+      nextStart = await epochStart(now + 1n);
+    });
+
+    const expireAt = async (expiresAt: bigint) =>
+      SS.connect(owner).updateAssignmentCaps(accountId, buyer.address, { maxCostPerPeriod: 100n * TRAC, expiresAt });
+
+    it('is refused if the assignment expires at or before the next epoch starts, and accepted a second later', async () => {
+      for (const expiresAt of [nextStart - 1n, nextStart]) {
+        await expireAt(expiresAt);
+        await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, now + 1n)))
+          .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
+          .withArgs(accountId, buyer.address, expiresAt, nextStart);
+        expect(await CSS.subscriptionExists(subscriptionIdOf(buyer.address, now + 1n))).to.equal(false);
+        expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(0n);
+      }
+      await expireAt(nextStart + 1n);
+      await caFund(accountId, now + 1n, 10n * TRAC);
+    });
+
+    it("the same assignment still funds the current epoch's period, which it serves until it expires", async () => {
+      await expireAt(nextStart - 1n);
+      const { subscriptionId } = await caFund(accountId, now, 10n * TRAC);
+      expect((await CSS.getSubscription(subscriptionId)).periodEnd).to.equal(nextStart);
+    });
+
+    it('a period funded ahead is not topped up once its assignment is set to expire before it starts', async () => {
+      const ahead = await caFund(accountId, now + 1n, 10n * TRAC);
+      await expireAt(nextStart);
+      await expect(SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
+        .withArgs(accountId, buyer.address, nextStart, nextStart);
+      // A running period of the current epoch, under an assignment that
+      // expires before the next epoch, is topped up as before.
+      await assign(accountId, buyer2, 100n * TRAC);
+      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, {
+        maxCostPerPeriod: 100n * TRAC,
+        expiresAt: nextStart - 1n,
+      });
+      const running = await caFund(accountId, now, 10n * TRAC, buyer2);
+      await SS.connect(buyer2).topUpFromConviction(running.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
+      await expireAt(nextStart + 1n);
+      await SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
     });
   });
 
