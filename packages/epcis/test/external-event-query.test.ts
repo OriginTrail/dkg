@@ -509,6 +509,9 @@ it('filters the exact event identity without leaking an adjacent event or anothe
       ...eventRows('target', `${EPCIS}ObjectEvent`, '2024-03-01T00:00:00Z', '+00:00'),
       ...eventRows('target-suffix', `${EPCIS}ObjectEvent`, '2024-03-01T00:00:00Z', '+00:00'),
       ...eventRows('target', `${EPCIS}ObjectEvent`, '2025-03-01T00:00:00Z', '+00:00').map(row => ({ ...row, graph: outside })),
+      ...['target', 'target-suffix'].map(id => ({
+        subject: 'urn:document', predicate: `${EPCIS}eventList`, object: `urn:event:${id}`, graph: contextGraphDataUri(CG),
+      })),
     ]);
     for (const [eventID, expected] of [['urn:event:target', ['urn:event:target']], ['urn:event:missing', []]] as const) {
       const result = await store.query(buildEpcisQuery({ eventID }, CG));
