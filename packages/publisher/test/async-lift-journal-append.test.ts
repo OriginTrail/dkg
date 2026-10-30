@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
+import { readPublisherJournalWithScope, TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
 import type { LiftJob } from '../src/lift-job.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
   DEFAULT_JOURNAL_GRAPH_URI,
+  journalEntriesContextGraphId,
   JOURNAL_SEQ,
   JOURNAL_KIND,
   JOURNAL_LIFECYCLE_KEY,
@@ -156,6 +157,14 @@ describe('#1829 admission journal append (writeJob hook)', () => {
     await publisher.clear('finalized');
     expect(await publisher.getStatus(jobId)).toBeNull(); // record cleared from control plane
     expect(await journalRows()).toEqual(before); // journal untouched
+    const reloaded = createPublisher({ journalWrites: false });
+    expect(journalEntriesContextGraphId((await reloaded.readJournalByJob(jobId)).entries)).toBe('music-social');
+    expect(await reloaded.readJournalByJob(jobId)).toEqual(await publisher.readJournalByJob(jobId));
+    const getStatus = vi.spyOn(reloaded, 'getStatus').mockRejectedValue(new Error('cleared projection must not supply journal scope'));
+    const scoped = await readPublisherJournalWithScope(reloaded, jobId);
+    expect(scoped.scope).toEqual({ kind: 'context-graph', contextGraphId: 'music-social' });
+    expect(scoped.journal).toEqual(await publisher.readJournalByJob(jobId));
+    expect(getStatus).not.toHaveBeenCalled();
   });
 
   it('persists authoritative broadcast, included, and published-finalized projections', async () => {
@@ -226,6 +235,8 @@ describe('#1829 admission journal append (writeJob hook)', () => {
   it('readJournalByJob returns entries for that jobId', async () => {
     const publisher = createPublisher();
     const jobId = await driveToValidated(publisher);
+    expect(journalEntriesContextGraphId((await publisher.readJournalByJob('unknown-job')).entries)).toBeNull();
+    expect(journalEntriesContextGraphId((await publisher.readJournalByJob(jobId)).entries)).toBe('music-social');
     const res = await publisher.readJournalByJob(jobId);
     expect(res.entries.every((e) => e.jobId === jobId)).toBe(true);
     expect(res.entries.map((e) => e.kind)).toEqual(['admission', 'claimed', 'validated']);

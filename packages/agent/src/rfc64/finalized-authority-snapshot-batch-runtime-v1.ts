@@ -12,8 +12,15 @@ export interface Rfc64FinalizedAuthoritySnapshotEvidenceV1 {
 }
 
 export interface Rfc64FinalizedAuthoritySnapshotBatchRuntimeOptionsV1 {
+  /**
+   * Physical read of one batch. `signal` is supplied only for a batch with a
+   * single owner (see {@link Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1.read}),
+   * whose cancellation must also cancel the read and release its turn on the
+   * shared authority coordinator. A shared batch is never given one.
+   */
   readonly readSnapshots: (
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+    signal?: AbortSignal,
   ) => Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>>;
 }
 
@@ -65,9 +72,19 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
   createBatch(
     contextGraphAuthorityIndexIds: readonly ContextGraphAuthorityIndexId[],
   ): Rfc64FinalizedAuthoritySnapshotBatchSessionV1 {
+    return this.#createBatch(contextGraphAuthorityIndexIds);
+  }
+
+  #createBatch(
+    contextGraphAuthorityIndexIds: readonly ContextGraphAuthorityIndexId[],
+    ownerSignal?: AbortSignal,
+  ): Rfc64FinalizedAuthoritySnapshotBatchSessionV1 {
     const targetIds = Object.freeze([...new Set(contextGraphAuthorityIndexIds)]);
     const targetSet = new Set(targetIds);
-    const result = this.options.readSnapshots(targetIds).then((snapshots) => {
+    const physicalRead = ownerSignal === undefined
+      ? this.options.readSnapshots(targetIds)
+      : this.options.readSnapshots(targetIds, ownerSignal);
+    const result = physicalRead.then((snapshots) => {
       const owned = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>();
       for (const targetId of targetIds) {
         const snapshot = snapshots.get(targetId);
@@ -100,11 +117,17 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
     });
   }
 
+  /**
+   * Read one graph through a batch this caller alone owns. With no other
+   * waiter to serve, the caller's signal also cancels the physical read, so a
+   * caller that gives up (for example on a deadline) neither keeps its turn
+   * on the shared authority coordinator nor leaves a read queued behind it.
+   */
   read(
     contextGraphAuthorityIndexId: ContextGraphAuthorityIndexId,
     signal?: AbortSignal,
   ): Promise<Rfc64FinalizedAuthoritySnapshotEvidenceV1> {
-    return this.createBatch([contextGraphAuthorityIndexId])
+    return this.#createBatch([contextGraphAuthorityIndexId], signal)
       .read(contextGraphAuthorityIndexId, signal);
   }
 

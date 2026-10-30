@@ -37,6 +37,7 @@ import {
   startLiveDaemon,
   stopLiveDaemon,
   postJson,
+  caseVariantAddress,
   type LiveDaemon,
 } from './helpers/live-daemon.js';
 
@@ -172,12 +173,10 @@ describe('POST /api/update — kaId + attestation contract (KC→KA), real daemo
     expect(String(res.body.error)).toContain('precomputedUpdateAttestation.authorAddress');
   });
 
-  it('allows an agent token with a mixed-case self update attestation through the guard', async () => {
+  it('allows an agent token with a differently-cased self update attestation through the guard', async () => {
     const agent = await registerAgentClient(daemon, 'update-author-case');
-    const mixedCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
-    expect(mixedCaseAgent).not.toBe(agent.agentAddress);
     const seal = {
-      authorAddress: mixedCaseAgent,
+      authorAddress: caseVariantAddress(agent.agentAddress),
       expectedNewMerkleRoot: HEX32,
       signature: { r: HEX32, vs: HEX32 },
     };

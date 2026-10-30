@@ -4,11 +4,11 @@ import { appendFile } from 'node:fs/promises';
 import {
   readApiPort, loadConfig, apiPortPath, removeApiPort, logPath, ensureDkgDir,
 } from './config.js';
-import { DAEMON_EXIT_CODE_RESTART, decodeForcedExitCode } from './daemon.js';
+import { DAEMON_EXIT_CODE_RESTART } from './daemon/manifest.js';
+import { decodeForcedExitCode } from './daemon/shutdown.js';
 import {
   isLivenessProbeEnabled,
   startLivenessWatcher,
-  LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
   resolveLivenessShutdownGraceMs,
 } from './daemon/supervisor-liveness.js';
 import {
@@ -90,6 +90,7 @@ async function maybeStartSupervisorLivenessWatcher(
   // boots do heavy initialization before binding HTTP; a fixed cutoff would
   // permanently disable the watchdog for those processes.
   let cancelled = false;
+  let killRequested = false;
   let watcher: { stop(): void } | null = null;
   void (async () => {
     while (!cancelled) {
@@ -108,18 +109,20 @@ async function maybeStartSupervisorLivenessWatcher(
           // would race a slow teardown and SIGKILL mid-cleanup.
           isShuttingDown: () => !dependencies.apiPortExists(),
           shutdownGraceMs: config.shutdownGraceMs,
-          onUnresponsive: () => {
-            dependencies.warn(
-              `[supervisor] worker unresponsive after ${LIVENESS_CONSECUTIVE_FAILURES_TO_KILL} consecutive liveness probes; SIGKILL + respawn.`,
-            );
+          onUnresponsive: (summary) => {
+            if (cancelled || killRequested) return;
+            killRequested = true;
+            try {
+              dependencies.warn(`[supervisor] liveness restart ${JSON.stringify(summary)}`);
+            } catch { /* logging must not prevent termination */ }
             try {
               child.kill('SIGKILL');
             } catch {
               /* child may already be exiting; ignore */
             }
           },
-          onFailure: (consecutive: number) => {
-            dependencies.warn(`[supervisor] liveness probe failed (${consecutive} in a row).`);
+          onObservation: (observation) => {
+            if (!cancelled) dependencies.warn(`[supervisor] liveness probe ${JSON.stringify(observation)}`);
           },
         });
         return;

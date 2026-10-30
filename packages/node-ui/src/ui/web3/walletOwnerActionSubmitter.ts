@@ -30,10 +30,12 @@ import {
   type BrowserWalletPublicClient,
   type BrowserWalletRuntimeContext,
   type BrowserWalletRuntimeDeps,
+  type BrowserWalletRuntimeState,
 } from './browserWalletTransaction.js';
 import { extractAccountId, publishingConvictionNftAbi } from './pcaContract.js';
 import { WalletReceiptWaitError } from './walletTxError.js';
 import type { OwnerActionSubmitter } from '../pca/ownerActions.js';
+import { useWalletStore } from '../stores/wallet.js';
 
 const MAX_UINT72 = (1n << 72n) - 1n;
 const MAX_UINT96 = (1n << 96n) - 1n;
@@ -50,11 +52,12 @@ export interface WalletTxProgressEvent {
   error?: unknown;
 }
 
-export interface WalletOwnerActionSubmitterDeps extends BrowserWalletRuntimeDeps<PcaContracts> {
+export interface WalletOwnerActionSubmitterDeps extends Partial<BrowserWalletRuntimeDeps<PcaContracts>> {
   onProgress?: (event: WalletTxProgressEvent) => void;
 }
 
 interface WalletTxContext extends BrowserWalletRuntimeContext<PcaContracts> {
+  runtimeDeps: BrowserWalletRuntimeDeps<PcaContracts>;
   owner: Address;
   nft: Address;
   token: Address;
@@ -149,7 +152,6 @@ const connectionPolicy: BrowserWalletConnectionPolicy = {
   abortedError: (message) => new WalletOwnerActionAbortError(message),
   messages: {
     disconnected: 'Connect the PCA owner wallet before signing.',
-    bootstrapUnavailable: 'PCA contract addresses are not bootstrapped yet.',
     wrongNetwork: "Switch the connected wallet to this node's PCA network.",
     providerChanged: 'Wallet provider changed before the signature prompt. Reconnect and retry.',
     addressChanged: 'Connected wallet changed before the signature prompt. Reconnect the owner wallet.',
@@ -159,9 +161,26 @@ const connectionPolicy: BrowserWalletConnectionPolicy = {
 };
 
 function loadContext(deps: WalletOwnerActionSubmitterDeps): WalletTxContext {
-  const runtime = loadBrowserWalletRuntime(deps, connectionPolicy);
+  const getWalletState = deps.getWalletState ?? (() => {
+    const { provider, address, chainId } = useWalletStore.getState();
+    return { provider, address, chainId } satisfies BrowserWalletRuntimeState;
+  });
+  const bootstrap = deps.bootstrap ?? useWalletStore.getState().bootstrap;
+  if (!bootstrap) {
+    throw connectionPolicy.unavailableError('PCA contract addresses are not bootstrapped yet.');
+  }
+  const runtimeDeps: BrowserWalletRuntimeDeps<PcaContracts> = {
+    bootstrap,
+    getWalletState,
+    ...(deps.publicClientFor ? { publicClientFor: deps.publicClientFor } : {}),
+    ...(deps.walletClientFromProvider
+      ? { walletClientFromProvider: deps.walletClientFromProvider }
+      : {}),
+  };
+  const runtime = loadBrowserWalletRuntime(runtimeDeps, connectionPolicy);
   return {
     ...runtime,
+    runtimeDeps,
     owner: runtime.account,
     nft: normalizeAddress(runtime.bootstrap.nft, 'PCA NFT contract'),
     token: normalizeAddress(runtime.bootstrap.token, 'TRAC token contract'),
@@ -188,14 +207,16 @@ async function approveExactIfNeeded(
   }
   await submitBrowserWalletTransaction(
     ctx,
-    deps,
+    ctx.runtimeDeps,
     connectionPolicy,
-    {
+    walletClient => walletClient.writeContract({
+      account: ctx.account,
+      chain: ctx.chain,
       address: ctx.token,
       abi: erc20Abi,
       functionName: 'approve',
       args: [ctx.nft, amount],
-    },
+    }),
     'approve',
     {
       signing: () => deps.onProgress?.({ step: 'approve', state: 'active' }),
@@ -220,13 +241,15 @@ async function writePcaContract(
 ): Promise<{ hash: Hex; receipt: TransactionReceipt }> {
   return submitBrowserWalletTransaction(
     ctx,
-    deps,
+    ctx.runtimeDeps,
     connectionPolicy,
-    {
+    walletClient => walletClient.writeContract({
+      account: ctx.account,
+      chain: ctx.chain,
       address: ctx.nft,
       abi: publishingConvictionNftAbi,
       ...request,
-    },
+    }),
     'action',
     {
       signing: () => deps.onProgress?.({ step: 'action', state: 'active' }),

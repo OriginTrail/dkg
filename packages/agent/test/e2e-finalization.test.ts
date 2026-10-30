@@ -23,6 +23,21 @@ const ENTITY_3 = 'urn:finalization-chain:entity:3';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
+/**
+ * Stage a graph-scoped assertion in shared memory (write, then promote).
+ * 10.0.19 cores refuse legacy (not graph-scoped) public StorageACK requests,
+ * so the workspace-first flow publishes a promoted assertion.
+ */
+async function shareAssertion(
+  node: DKGAgent,
+  name: string,
+  quads: Array<{ subject: string; predicate: string; object: string }>,
+): Promise<void> {
+  await node.assertion.create(CONTEXT_GRAPH, name);
+  await node.assertion.write(CONTEXT_GRAPH, name, quads);
+  await node.assertion.promote(CONTEXT_GRAPH, name);
+}
+
 function makeChainConfig(privateKey: string) {
   if (!hardhat) throw new Error('Test chain was not started');
   return {
@@ -106,13 +121,10 @@ describe('E2E: workspace-first publish with real blockchain', () => {
   it('A writes to workspace; B receives via GossipSub', async () => {
     const [nodeA, nodeB] = agents;
 
-    const quads = [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Finalization Chain Draft"', graph: '' as const },
-      { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"', graph: '' as const },
-    ];
-
-    const wsResult = await nodeA.share(CONTEXT_GRAPH, quads);
-    expect(wsResult.shareOperationId).toBeDefined();
+    await shareAssertion(nodeA, 'finalization-entity-1', [
+      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Finalization Chain Draft"' },
+      { subject: ENTITY_1, predicate: 'http://schema.org/version', object: '"1"' },
+    ]);
 
     // Poll until B has the workspace data
     const deadline = Date.now() + 15000;
@@ -132,9 +144,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
   it('A enshrines on-chain; B receives finalization and promotes to canonical', async () => {
     const [nodeA, nodeB] = agents;
 
-    const enshrineResult = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, {
-      rootEntities: [ENTITY_1],
-    });
+    const enshrineResult = await nodeA.publishFromFinalizedAssertion(CONTEXT_GRAPH, 'finalization-entity-1');
 
     expect(enshrineResult.status).toBe('confirmed');
     expect(enshrineResult.ual).toBeDefined();
@@ -181,8 +191,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     const nodeA = agents[0];
 
     // Write entity 2 to workspace
-    await nodeA.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Entity Two"', graph: '' },
+    await shareAssertion(nodeA, 'finalization-entity-2', [
+      { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Entity Two"' },
     ]);
 
     const ws2 = await nodeA.query(
@@ -192,7 +202,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     expect(ws2.bindings.length).toBe(1);
 
     // Enshrine entity 2
-    const result2 = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [ENTITY_2] });
+    const result2 = await nodeA.publishFromFinalizedAssertion(CONTEXT_GRAPH, 'finalization-entity-2');
     expect(result2.status).toBe('confirmed');
     expect(result2.onChainResult).toBeDefined();
 
@@ -211,8 +221,8 @@ describe('E2E: workspace-first publish with real blockchain', () => {
   it('enshrineFromWorkspace with clearWorkspaceAfter removes workspace data', async () => {
     const nodeA = agents[0];
 
-    await nodeA.share(CONTEXT_GRAPH, [
-      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Cleanup Entity"', graph: '' },
+    await shareAssertion(nodeA, 'finalization-entity-3', [
+      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Cleanup Entity"' },
     ]);
 
     const wsBefore = await nodeA.query(
@@ -221,7 +231,7 @@ describe('E2E: workspace-first publish with real blockchain', () => {
     );
     expect(wsBefore.bindings.length).toBe(1);
 
-    const result = await nodeA.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: [ENTITY_3] }, {
+    const result = await nodeA.publishFromFinalizedAssertion(CONTEXT_GRAPH, 'finalization-entity-3', {
       clearSharedMemoryAfter: true,
     });
     expect(result.status).toBe('confirmed');

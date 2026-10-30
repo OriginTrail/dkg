@@ -6,6 +6,7 @@ import {
   normalizeAgentDid,
   sparqlIri,
 } from '@origintrail-official/dkg-core';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 import {
   MAX_AGENT_PEER_PAGE_SIZE,
@@ -165,6 +166,20 @@ export class DiscoveryClient implements AgentPeerDiscovery {
     this.engine = engine;
   }
 
+  /** Bounded routing hints only. Snapshot callers authenticate the live peer
+   * and its chain registration before trusting anything from this directory. */
+  async findSnapshotCorePeerIds(signal: AbortSignal): Promise<string[]> {
+    const result = await this.engine.query(`
+      SELECT DISTINCT ?peerId WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}nodeRole> "core" ;
+               <${DKG}peerId> ?peerId .
+      } ORDER BY ?peerId LIMIT 128
+    `, { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH, signal });
+    signal.throwIfAborted();
+    return result.bindings.slice(0, 128).map(row => stripQuotes(row['peerId']));
+  }
+
   async findAgents(options: {
     framework?: string;
     agentAddress?: string;
@@ -194,6 +209,7 @@ export class DiscoveryClient implements AgentPeerDiscovery {
     const result = await this.engine.query(sparql, {
       contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
       signal: options.signal,
+      source: 'discovery.findAgents',
     });
 
     const discovered = result.bindings.map((row) => ({
@@ -439,8 +455,5 @@ export class DiscoveryClient implements AgentPeerDiscovery {
 }
 
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
-  return s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }

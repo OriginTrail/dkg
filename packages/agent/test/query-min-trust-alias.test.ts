@@ -15,6 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { TrustLevel } from '@origintrail-official/dkg-core';
 import type { QueryResult, QueryOptions } from '@origintrail-official/dkg-query';
+import { StoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): InstanceType<typeof DKGAgent> {
@@ -37,8 +38,20 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
     log: { info() {}, warn() {}, debug() {}, error() {} },
     config: {},
     queryEngine: stubEngine,
-    subscribedContextGraphs: new Set<string>(),
+    store: { query: async () => ({ type: 'bindings', bindings: [] }) },
+    // Production type is `Map<string, ContextGraphSub>`; a Set made
+    // `resolveContextGraphReadAuthority` throw once the scoped gate started
+    // consulting it directly instead of going through `canReadContextGraph`.
+    subscribedContextGraphs: new Map(),
     // These scoped queries must reach the engine to verify option forwarding.
+    // The scoped gate resolves a tri-state decision, so the grant has to be
+    // stubbed on that seam — `canReadContextGraph` alone no longer gates it.
+    resolveContextGraphReadAuthority: async () => ({
+      outcome: 'allowed' as const,
+      source: 'system' as const,
+      reason: 'test stub grants scoped read',
+      metadataBootstrap: 'eligible' as const,
+    }),
     canReadContextGraph: async () => true,
     isPrivateContextGraph: async () => false,
     listPrivateContextGraphIdsNotReadableBy: async () => [],
@@ -51,7 +64,35 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
 }
 
 describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
-  it('forwards store cancellation, priority, and source attribution', async () => {
+  it.each([
+    Object.assign(new StoreResponseTooLargeError(10, 11), { queryPhase: 'result' }),
+    Object.assign(new Error('materialization limit'), {
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: 12,
+    }),
+  ])('normalizes lower-layer result limits before returning to callers', async (cause) => {
+    const agent = makeStubAgent(() => { throw cause; });
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: 'cg-1',
+      maxResponseBytes: 10,
+    })).rejects.toMatchObject({
+      code: 'QUERY_RESULT_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: expect.any(Number),
+      cause,
+    });
+  });
+
+  it('keeps internal authority overflow distinct from caller results', async () => {
+    const cause = new StoreResponseTooLargeError(8 * 1024 * 1024, 9 * 1024 * 1024);
+    const agent = makeStubAgent(() => { throw cause; });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'cg-1', maxResponseBytes: 10 }))
+      .rejects.toBe(cause);
+  });
+
+  it('forwards store cancellation, priority, source, and response bounds', async () => {
     let seen: QueryOptions | undefined;
     const agent = makeStubAgent((o) => { seen = o; });
     const controller = new AbortController();
@@ -61,12 +102,15 @@ describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
     });
 
     expect(seen).toMatchObject({
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
+      maxMaterializedBytes: 10 * 1024 * 1024,
     });
   });
 

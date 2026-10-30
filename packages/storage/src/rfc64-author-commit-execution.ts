@@ -1,3 +1,4 @@
+import { executeReceiptConfirmedPublication } from './receipt-confirmed-execution.js';
 export type Rfc64AuthorCommitCasResultV1 = 'committed' | 'conflict';
 
 export interface Rfc64AuthorCommitCasExecutionV1 {
@@ -21,19 +22,11 @@ export interface Rfc64AuthorCommitCasExecutionV1 {
 export async function executeRfc64AuthorCommitCasV1(
   execution: Rfc64AuthorCommitCasExecutionV1,
 ): Promise<Rfc64AuthorCommitCasResultV1> {
-  try {
-    await execution.executeUpdate();
-  } catch (error) {
-    await bestEffortRfc64Cleanup(execution.cleanup);
-    throw error;
-  }
-
-  let committed: boolean;
-  try {
-    committed = normalizeRfc64AuthorCommitReceipt(await execution.readReceipt());
-  } finally {
-    await bestEffortRfc64Cleanup(execution.cleanup);
-  }
+  const committed = await executeReceiptConfirmedPublication<boolean>({
+    publish: async () => { await execution.executeUpdate(); },
+    readReceipt: async () => normalizeRfc64AuthorCommitReceipt(await execution.readReceipt()),
+    cleanup: execution.cleanup,
+  });
 
   if (committed) await execution.onCommitted?.();
   return committed ? 'committed' : 'conflict';
@@ -50,13 +43,4 @@ function normalizeRfc64AuthorCommitReceipt(receipt: unknown): boolean {
     return (receipt as { value: boolean }).value;
   }
   throw new Error('RFC-64 author commit receipt query returned a non-boolean result');
-}
-
-async function bestEffortRfc64Cleanup(cleanup: () => void | Promise<void>): Promise<void> {
-  try {
-    await cleanup();
-  } catch {
-    // Receipt/staging cleanup is auxiliary. Preserve the semantic outcome or
-    // the original indeterminate transport failure.
-  }
 }

@@ -8,7 +8,16 @@
  * applies only to untyped ones — so there is a single place to add a rule and
  * no way to place it wrongly.
  */
+import type { ServerResponse } from "node:http";
+import {
+  UNSCOPED_QUERY_INVALIDATED_CODE,
+  UNSCOPED_QUERY_INVALIDATED_MESSAGE,
+} from "@origintrail-official/dkg-core";
 import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
+import {
+  isQueryResultTooLargeError,
+} from '@origintrail-official/dkg-agent';
+import { jsonResponse } from "../http-utils.js";
 
 /**
  * Recognised structurally rather than by importing `@origintrail-official/dkg-query`.
@@ -83,6 +92,7 @@ function isLegacyClientQueryMessage(msg: string): boolean {
  * private so the provenance-first rule cannot be bypassed.
  */
 export function isClientQueryFailure(err: unknown): boolean {
+  if (isQueryResultTooLargeError(err)) return false;
   // 1. Provenance wins: the engine marked this as the caller's own SPARQL.
   if (isCallerSparqlRejected(err)) return true;
 
@@ -97,4 +107,51 @@ export function isClientQueryFailure(err: unknown): boolean {
   // 3. Legacy families, for errors with no typed carrier at all.
   const msg = (err as { message?: unknown })?.message;
   return typeof msg === "string" && isLegacyClientQueryMessage(msg);
+}
+
+/**
+ * The agent's marker for an unscoped query whose result it withheld because
+ * the dataset or its read-authority facts changed while the query ran.
+ * Recognised by the dkg-core code, not by the agent's internal error class.
+ */
+function isUnscopedQueryInvalidated(err: unknown): boolean {
+  const shaped = err as { code?: unknown; retryable?: unknown } | null | undefined;
+  return shaped?.code === UNSCOPED_QUERY_INVALIDATED_CODE && shaped.retryable === true;
+}
+
+/**
+ * Answer a failed `/api/query` whose failure has an answer of its own, and say
+ * whether it did. `false` leaves the error to the daemon's top-level mapping.
+ *
+ * - The caller's own SPARQL was rejected: 400, see {@link isClientQueryFailure}.
+ * - An unscoped result was withheld: a retryable 503. Losing that check says
+ *   nothing about the request and the same query succeeds once the write has
+ *   settled, so it gets the shape of the route's other transient answers, not
+ *   a 500. The sentence is the one the agent throws.
+ */
+export function respondToQueryFailure(res: ServerResponse, err: unknown): boolean {
+  if (isQueryResultTooLargeError(err)) {
+    jsonResponse(res, 413, { error: err.message, code: err.code,
+      limitBytes: err.maxBytes, actualBytes: err.actualBytes });
+    return true;
+  }
+  if ((err as { code?: unknown } | null)?.code === 'CORE_CACHE_QUERY_TRUST_REQUIRED') {
+    jsonResponse(res, 409, { code: 'CORE_CACHE_QUERY_TRUST_REQUIRED', error: 'Explicit acceptance of core-cache evidence is required for this context graph' });
+    return true;
+  }
+  if (isClientQueryFailure(err)) {
+    jsonResponse(res, 400, { error: (err as { message?: unknown } | null)?.message ?? "" });
+    return true;
+  }
+  if (isUnscopedQueryInvalidated(err)) {
+    jsonResponse(
+      res,
+      503,
+      { error: UNSCOPED_QUERY_INVALIDATED_MESSAGE, code: UNSCOPED_QUERY_INVALIDATED_CODE, retryable: true },
+      undefined,
+      { "Retry-After": "1" },
+    );
+    return true;
+  }
+  return false;
 }

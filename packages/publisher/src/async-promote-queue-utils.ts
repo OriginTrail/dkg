@@ -1,3 +1,4 @@
+import { isBoundPromoteRequest } from './bound-promote-request.js';
 /**
  * Async Promote Queue — utils.
  *
@@ -17,12 +18,17 @@
 import type { Quad, QueryResult } from '@origintrail-official/dkg-storage';
 import {
   PROMOTE_JOB_STATES,
+  type PromoteAttemptError,
   type PromoteCommitMarker,
   type PromoteJob,
   type PromoteJobState,
   type PromoteLease,
   type PromoteRequest,
 } from './async-promote-queue-types.js';
+import {
+  PROMOTE_POST_COMMIT_FAILURE_CODE,
+  PROMOTE_POST_COMMIT_FAILURE_MESSAGE,
+} from './promote-replay-safety.js';
 
 export const DEFAULT_PROMOTE_CONTROL_GRAPH_URI = 'urn:dkg:promote-queue:control-plane';
 
@@ -264,6 +270,9 @@ function isPromoteRequest(value: unknown): value is PromoteRequest {
   if (value['subGraphName'] !== undefined && typeof value['subGraphName'] !== 'string') return false;
   if (value['agentAddress'] !== undefined && typeof value['agentAddress'] !== 'string') return false;
   if (value['authorAgentAddress'] !== undefined && typeof value['authorAgentAddress'] !== 'string') return false;
+  if (value['recoveryBinding'] !== undefined) {
+    return isBoundPromoteRequest(value);
+  }
   const entities = value['entities'];
   if (entities === 'all') return true;
   return Array.isArray(entities) && entities.every((e) => typeof e === 'string' && e.length > 0);
@@ -323,6 +332,7 @@ export function classifyJobPayload(binding: string | undefined): PromoteJobParse
     // state), so — like every other malformed field — it is `malformed`, never `unknown`.
     if (typeof parsed['state'] !== 'string' || parsed['state'].length === 0) return { kind: 'malformed' };
     if (!isPromoteRequest(parsed['request'])) return { kind: 'malformed' };
+    if (parsed['request'].recoveryBinding !== undefined && parsed['formatVersion'] !== 4) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return { kind: 'malformed' };
     if (!isRecord(parsed['attempt'])) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['attempt']['count']) || !isFiniteNumber(parsed['attempt']['maxRetries'])) {
@@ -358,20 +368,34 @@ export function parseJobPayload(binding: string | undefined): PromoteJob | null 
 }
 
 /**
- * Default exponential backoff: 1m, 2m, 4m, 8m, 15m (cap). Caller passes
- * 1-indexed attempt count.
+ * True when a recorded attempt failure is the publisher's post-commit
+ * disposition. Rows written by a worker that persists the diagnostic code are
+ * matched structurally; older rows carry no code and are recognized only by
+ * the producer's fixed message. A row whose code names a different
+ * diagnostic never matches, whatever its message says.
  */
-export function defaultBackoffMs(attemptCount: number): number {
-  const base = 60_000 * 2 ** Math.max(0, attemptCount - 1);
-  return Math.min(base, 15 * 60_000);
+export function isPromotePostCommitAttemptError(error: PromoteAttemptError | undefined): boolean {
+  if (!error) return false;
+  if (error.diagnosticCode !== undefined) return error.diagnosticCode === PROMOTE_POST_COMMIT_FAILURE_CODE;
+  return error.message === PROMOTE_POST_COMMIT_FAILURE_MESSAGE;
 }
+
+/** Stable `reason` the sweep writes once a post-commit replay budget is spent. */
+export function postCommitRecoveryExhaustedReason(attempts: number): string {
+  return `automatic post-commit recovery exhausted after ${attempts} attempts; needs operator inspection`;
+}
+
+export { defaultBackoffMs, createDefaultPromoteBackoff } from './promote-retry-policy.js';
+
+/** The fields `comparePromoteJobs` ranks by, so a caller can keep these in place of whole jobs. */
+export type PromoteReadyOrder = Pick<PromoteJob, 'jobId' | 'enqueuedAt'> & { readonly attempt: Pick<PromoteJob['attempt'], 'nextRetryAt'> };
 
 /**
  * Stable sort key for queued/failed_retrying jobs: oldest `nextRetryAt`
  * (or `enqueuedAt` when no retry has been scheduled), then `jobId` as a
  * deterministic tie-breaker for same-millisecond enqueues.
  */
-export function comparePromoteJobs(a: PromoteJob, b: PromoteJob): number {
+export function comparePromoteJobs(a: PromoteReadyOrder, b: PromoteReadyOrder): number {
   const aReady = a.attempt.nextRetryAt ?? a.enqueuedAt;
   const bReady = b.attempt.nextRetryAt ?? b.enqueuedAt;
   if (aReady !== bReady) return aReady - bReady;

@@ -12,6 +12,19 @@ import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
 
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); });
 describe('start store preflight (#1761)', () => {
+  it('rejects an unsupported Node runtime before reading node state', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'getBuiltinModule').mockImplementation(() => undefined);
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('runtime-exit'); });
+    const program = new Command();
+    registerLifecycleCommands(program);
+
+    await expect(program.parseAsync(['node', 'dkg', 'start'])).rejects.toThrow('runtime-exit');
+
+    expect(errors.mock.calls.flat().join(' ')).toContain('node:sqlite is unavailable');
+    expect(mocks.readPid).not.toHaveBeenCalled();
+  });
+
   it.each([{ flags: [] }, { flags: ['--foreground'] }])('rejects static memory errors before startup work ($flags)', async ({ flags }) => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('preflight-exit'); });

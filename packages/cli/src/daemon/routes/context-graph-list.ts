@@ -26,8 +26,8 @@ import {
 import {
   jsonResponse,
   jsonResponseHeaders,
-  jsonSerializedResponse,
-  serializeJsonResponseBody,
+  sendSerializedJsonResponse,
+  serializeJsonResponse,
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
@@ -247,6 +247,8 @@ function summaryRow(row: ContextGraphListFullRow): ContextGraphListSummaryRow {
     ...(row.callerInvolved === undefined
       ? {}
       : { callerInvolved: row.callerInvolved === true }),
+    ...(row.joinState === undefined ? {} : { joinState: row.joinState }),
+    ...(row.nameKnown === undefined ? {} : { nameKnown: row.nameKnown }),
   };
 }
 
@@ -357,7 +359,7 @@ function payloadWithExactSize(
   let serializedBytes = 0;
   for (let iteration = 0; iteration < 10; iteration += 1) {
     payload.page.serializedBytes = serializedBytes;
-    const body = serializeJsonResponseBody(payload);
+    const body = serializeJsonResponse(200, payload);
     const nextSize = Buffer.byteLength(body);
     if (nextSize === serializedBytes) return { payload, body, serializedBytes };
     serializedBytes = nextSize;
@@ -375,7 +377,7 @@ function digestPreparedRows(rows: readonly ContextGraphListRow[]): string {
   const hash = createHash('sha256').update('[', 'utf8');
   rows.forEach((row, index) => {
     if (index > 0) hash.update(',', 'utf8');
-    hash.update(serializeJsonResponseBody(row), 'utf8');
+    hash.update(serializeJsonResponse(200, row), 'utf8');
   });
   return hash.update(']', 'utf8').digest('hex');
 }
@@ -491,10 +493,10 @@ export async function handleContextGraphListRoute(
 
   if (parsed.mode === 'legacy') {
     const payload = { contextGraphs };
-    const body = serializeJsonResponseBody(payload);
+    const body = serializeJsonResponse(200, payload);
     const serializedBytes = Buffer.byteLength(body);
     const elapsedMs = Math.round((now() - startedAt) * 100) / 100;
-    jsonSerializedResponse(ctx.res, 200, body, undefined, responseHeaders({
+    sendSerializedJsonResponse(ctx.res, 200, body, undefined, responseHeaders({
       returned: contextGraphs.length,
       total: contextGraphs.length,
       bytes: serializedBytes,
@@ -535,7 +537,7 @@ export async function handleContextGraphListRoute(
     ctx.res.end();
     return;
   }
-  jsonSerializedResponse(
+  sendSerializedJsonResponse(
     ctx.res,
     200,
     page.body,

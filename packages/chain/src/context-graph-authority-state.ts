@@ -14,6 +14,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   applyContextGraphAuthorityGenerationEvent,
+  normalizeContextGraphAuthorityHash,
+  normalizeContextGraphAuthorityNonNegativeSafeInteger,
   type ContextGraphAuthorityGenerationState,
 } from './context-graph-authority-generation.js';
 import {
@@ -25,6 +27,7 @@ export const MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS = 256;
 
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
+const MAX_U256 = (1n << 256n) - 1n;
 
 export type ContextGraphAuthorityPublishReference = Readonly<{
   publishAuthority: EvmAddressV1 | null;
@@ -44,11 +47,14 @@ export type ContextGraphAuthorityIndexState = ContextGraphAuthorityState & Reado
   contextGraphId: ContextGraphAuthorityIndexId;
 }>;
 
+declare const canonicalContextGraphAuthorityIndexEvent: unique symbol;
+
 interface ContextGraphAuthorityIndexEventBase {
   readonly contextGraphId: bigint;
   readonly blockNumber: number;
   readonly blockHash: string;
   readonly index: number;
+  readonly [canonicalContextGraphAuthorityIndexEvent]: true;
 }
 
 export type ContextGraphAuthorityIndexCreationEvent =
@@ -102,12 +108,81 @@ export type ContextGraphAuthorityIndexEvent =
   | ContextGraphAuthorityIndexRosterEvent
   | ContextGraphAuthorityIndexDeactivationEvent;
 
+interface RawContextGraphAuthorityIndexEventBase {
+  readonly contextGraphId: unknown;
+  readonly blockNumber: unknown;
+  readonly blockHash: unknown;
+  readonly index: unknown;
+}
+
+export type RawContextGraphAuthorityIndexEvent =
+  | (RawContextGraphAuthorityIndexEventBase & Readonly<{
+      name: 'ContextGraphCreated';
+      owner: unknown;
+      nameHash: unknown;
+      participantAgents: unknown;
+      accessPolicy: unknown;
+      publishPolicy: unknown;
+      publishAuthority: unknown;
+      publishAuthorityAccountId: unknown;
+    }>)
+  | (RawContextGraphAuthorityIndexEventBase & Readonly<{
+      name: 'Transfer';
+      from: unknown;
+      to: unknown;
+    }>)
+  | (RawContextGraphAuthorityIndexEventBase & Readonly<{
+      name: 'PublishPolicyUpdated';
+      publishPolicy: unknown;
+      publishAuthority: unknown;
+      publishAuthorityAccountId: unknown;
+    }>)
+  | (RawContextGraphAuthorityIndexEventBase & Readonly<{
+      name: 'PublishAuthorityUpdated';
+      publishAuthority: unknown;
+      publishAuthorityAccountId: unknown;
+    }>)
+  | (RawContextGraphAuthorityIndexEventBase & Readonly<{
+      name: 'AgentParticipantAdded' | 'AgentParticipantRemoved';
+      agent: unknown;
+    }>)
+  | (RawContextGraphAuthorityIndexEventBase & Readonly<{
+      name: 'ContextGraphDeactivated';
+    }>);
+
+export interface ContextGraphAuthorityIndexEventPage {
+  readonly fromBlockNumber: number;
+  readonly throughBlockNumber: number;
+  readonly throughBlockHash: string;
+}
+
+export function normalizeAuthorityIndexAddress(value: unknown): string | undefined {
+  return typeof value === 'string' && ADDRESS_PATTERN.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+export function normalizeAuthorityIndexParticipantAgents(
+  value: unknown,
+): readonly string[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
+    return undefined;
+  }
+  const agents = value.map(normalizeAuthorityIndexAddress);
+  if (agents.some((agent) => agent === undefined || agent === ZERO_ADDRESS)) return undefined;
+  const unique = new Set(agents as string[]);
+  return unique.size === agents.length
+    ? Object.freeze([...unique].sort())
+    : undefined;
+}
+
 export function normalizeContextGraphAuthorityAccessPolicy(
   value: unknown,
 ): ContextGraphAccessPolicyV1 | undefined {
   try {
-    assertContextGraphAccessPolicyV1(value);
-    return value;
+    const normalized = typeof value === 'bigint' ? Number(value) : value;
+    assertContextGraphAccessPolicyV1(normalized);
+    return normalized;
   } catch {
     return undefined;
   }
@@ -117,8 +192,9 @@ export function normalizeContextGraphAuthorityPublishPolicy(
   value: unknown,
 ): ContextGraphPublishPolicyV1 | undefined {
   try {
-    assertContextGraphPublishPolicyV1(value);
-    return value;
+    const normalized = typeof value === 'bigint' ? Number(value) : value;
+    assertContextGraphPublishPolicyV1(normalized);
+    return normalized;
   } catch {
     return undefined;
   }
@@ -171,6 +247,127 @@ export function normalizeContextGraphAuthorityPublishDomain(
   }
 }
 
+/** Validate one untrusted decoder/test DTO into the sole transition event model. */
+export function normalizeContextGraphAuthorityIndexEvent(
+  event: RawContextGraphAuthorityIndexEvent,
+  page: ContextGraphAuthorityIndexEventPage,
+): ContextGraphAuthorityIndexEvent {
+  if (
+    typeof event.contextGraphId !== 'bigint'
+    || event.contextGraphId <= 0n
+    || event.contextGraphId > MAX_U256
+  ) {
+    throw new Error('Context Graph authority index event has an invalid context graph id');
+  }
+  const blockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(event.blockNumber);
+  const blockHash = normalizeContextGraphAuthorityHash(event.blockHash);
+  const index = normalizeContextGraphAuthorityNonNegativeSafeInteger(event.index);
+  if (
+    blockNumber === undefined
+    || blockNumber < page.fromBlockNumber
+    || blockNumber > page.throughBlockNumber
+    || blockHash === undefined
+    || index === undefined
+  ) {
+    throw new Error('Context Graph authority index event falls outside its page or is malformed');
+  }
+  if (blockNumber === page.throughBlockNumber && blockHash !== page.throughBlockHash) {
+    throw new Error('Context Graph authority index event disagrees with the page anchor');
+  }
+  const base = {
+    contextGraphId: event.contextGraphId,
+    blockNumber,
+    blockHash,
+    index,
+  };
+  switch (event.name) {
+    case 'ContextGraphCreated': {
+      const owner = normalizeAuthorityIndexAddress(event.owner);
+      const nameHash = normalizeContextGraphAuthorityHash(event.nameHash);
+      const participantAgents = normalizeAuthorityIndexParticipantAgents(
+        event.participantAgents,
+      );
+      const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(event.accessPolicy);
+      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+        event.publishPolicy,
+        event.publishAuthority,
+        event.publishAuthorityAccountId,
+      );
+      if (
+        owner === undefined
+        || owner === ZERO_ADDRESS
+        || nameHash === undefined
+        || participantAgents === undefined
+        || accessPolicy === undefined
+        || publishDomain === undefined
+      ) {
+        throw new Error('Context Graph authority index creation event has invalid authority state');
+      }
+      return Object.freeze({
+        ...base,
+        name: event.name,
+        owner,
+        nameHash,
+        participantAgents,
+        accessPolicy,
+        ...publishDomain,
+      }) as ContextGraphAuthorityIndexCreationEvent;
+    }
+    case 'Transfer': {
+      const from = normalizeAuthorityIndexAddress(event.from);
+      const to = normalizeAuthorityIndexAddress(event.to);
+      if (from === undefined || to === undefined) {
+        throw new Error('Context Graph authority index transfer event has an invalid address');
+      }
+      return Object.freeze({ ...base, name: event.name, from, to }) as
+        ContextGraphAuthorityIndexTransferEvent;
+    }
+    case 'PublishPolicyUpdated': {
+      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+        event.publishPolicy,
+        event.publishAuthority,
+        event.publishAuthorityAccountId,
+      );
+      if (publishDomain === undefined) {
+        throw new Error('Context Graph authority index policy event has invalid authority state');
+      }
+      return Object.freeze({
+        ...base,
+        name: event.name,
+        ...publishDomain,
+      }) as ContextGraphAuthorityIndexPublishPolicyEvent;
+    }
+    case 'PublishAuthorityUpdated': {
+      const publishReference = normalizeContextGraphAuthorityPublishReference(
+        event.publishAuthority,
+        event.publishAuthorityAccountId,
+      );
+      if (publishReference === undefined) {
+        throw new Error('Context Graph authority index publisher event has invalid authority state');
+      }
+      return Object.freeze({
+        ...base,
+        name: event.name,
+        ...publishReference,
+      }) as ContextGraphAuthorityIndexPublishAuthorityEvent;
+    }
+    case 'AgentParticipantAdded':
+    case 'AgentParticipantRemoved': {
+      const agent = normalizeAuthorityIndexAddress(event.agent);
+      if (agent === undefined || agent === ZERO_ADDRESS) {
+        throw new Error('Context Graph authority index roster event has an invalid agent');
+      }
+      return Object.freeze({ ...base, name: event.name, agent }) as
+        ContextGraphAuthorityIndexRosterEvent;
+    }
+    case 'ContextGraphDeactivated':
+      return Object.freeze({ ...base, name: event.name }) as
+        ContextGraphAuthorityIndexDeactivationEvent;
+    default:
+      throw new Error('Context Graph authority index event has an unsupported name');
+  }
+}
+
 export function freezeContextGraphAuthorityIndexState(
   state: ContextGraphAuthorityIndexState,
 ): ContextGraphAuthorityIndexState {
@@ -178,6 +375,22 @@ export function freezeContextGraphAuthorityIndexState(
     ...state,
     participantAgents: Object.freeze([...state.participantAgents]),
   });
+}
+
+function projectContextGraphAuthorityPublishDomain(
+  domain: ContextGraphPublishDomainV1,
+): ContextGraphPublishDomainV1 {
+  return domain.publishPolicy === 0
+    ? {
+        publishPolicy: 0,
+        publishAuthority: domain.publishAuthority,
+        publishAuthorityAccountId: domain.publishAuthorityAccountId,
+      }
+    : {
+        publishPolicy: 1,
+        publishAuthority: null,
+        publishAuthorityAccountId: domain.publishAuthorityAccountId,
+      };
 }
 
 /** Apply materialized-field patches around the one canonical generation reducer. */
@@ -201,21 +414,13 @@ export function applyContextGraphAuthorityStateEvent(
   const generation = applyContextGraphAuthorityGenerationEvent(previous, event, subject);
   switch (event.name) {
     case 'ContextGraphCreated': {
-      const domain = normalizeContextGraphAuthorityPublishDomain(
-        event.publishPolicy,
-        event.publishAuthority,
-        event.publishAuthorityAccountId,
-      );
-      if (domain === undefined) {
-        throw new Error(`${subject} creation event violates its publish policy`);
-      }
       return freezeContextGraphAuthorityIndexState({
         contextGraphId,
         owner: event.owner,
         active: true,
         accessPolicy: event.accessPolicy,
         participantAgents: event.participantAgents,
-        ...domain,
+        ...projectContextGraphAuthorityPublishDomain(event),
         ...generation,
       });
     }
@@ -226,29 +431,18 @@ export function applyContextGraphAuthorityStateEvent(
         owner: event.to,
       });
     case 'PublishPolicyUpdated': {
-      const domain = normalizeContextGraphAuthorityPublishDomain(
-        event.publishPolicy,
-        event.publishAuthority,
-        event.publishAuthorityAccountId,
-      );
-      if (domain === undefined) {
-        throw new Error(`${subject} policy event violates its publish policy`);
-      }
       return freezeContextGraphAuthorityIndexState({
         ...previous!,
         ...generation,
-        ...domain,
+        ...projectContextGraphAuthorityPublishDomain(event),
       });
     }
     case 'PublishAuthorityUpdated': {
-      const domain = normalizeContextGraphAuthorityPublishDomain(
+      const domain = snapshotContextGraphPublishDomainV1(
         previous!.publishPolicy,
         event.publishAuthority,
         event.publishAuthorityAccountId,
       );
-      if (domain === undefined) {
-        throw new Error(`${subject} publisher event violates its publish policy`);
-      }
       return freezeContextGraphAuthorityIndexState({
         ...previous!,
         ...generation,

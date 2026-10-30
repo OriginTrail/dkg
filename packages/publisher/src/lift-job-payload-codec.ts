@@ -1,3 +1,4 @@
+import { LIFT_VALIDATION_STAGES, LIFT_VALIDATION_CAUSES } from './lift-validation-error.js';
 import {
   LIFT_JOB_FAILURE_CODES,
   LIFT_JOB_FAILURE_MODES,
@@ -27,6 +28,7 @@ import {
   type PersistedLiftJob,
 } from './lift-job.js';
 import { parseLiteral } from './async-lift-control-plane.js';
+import { LiftJobPayloadUnreadableError } from './lift-job-payload-unreadable.js';
 import { normalizePersistedLiftJobRequest } from './async-lift-publisher-utils.js';
 import { LIFT_JOB_PAYLOAD_SCHEMA_VERSION } from './lift-job-payload-version.js';
 import {
@@ -141,9 +143,9 @@ export function decodedLiftJobOrThrow(decoded: LiftJobPayloadDecodeResult): Pers
     case 'absent':
       return null;
     case 'malformed':
-      throw new Error(`Malformed persisted LiftJob payload: ${decoded.reason}`);
+      throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: ${decoded.reason}`);
     case 'unknown':
-      throw new Error(`Malformed persisted LiftJob payload: Unsupported LiftJob status: ${decoded.job.status}`);
+      throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: Unsupported LiftJob status: ${decoded.job.status}`);
     case 'canonical':
     case 'compatibility':
       return decoded.job;
@@ -443,6 +445,8 @@ const timestampsParser = objectParser<LiftJobTimestamps>({
   validatedAt: optional(numberParser),
   broadcastAt: optional(numberParser),
   rpcAcceptedAt: optional(numberParser),
+  receiptObservedAt: optional(numberParser),
+  finalityObservedAt: optional(numberParser),
   includedAt: optional(numberParser),
   finalizedAt: optional(numberParser),
   failedAt: optional(numberParser),
@@ -593,6 +597,10 @@ const failureParser = objectParser<LiftJobFailureMetadata>({
   rpcResponseRef: optional(stringParser),
   revertReasonRef: optional(stringParser),
   timeout: optional(timeoutParser),
+  validationDiagnostic: optional(objectParser({
+    stage: optional(enumParser(LIFT_VALIDATION_STAGES)),
+    cause: enumParser(LIFT_VALIDATION_CAUSES),
+  })),
 });
 
 /** One exhaustive field schema shared by the explicit v0 and v1 durable envelopes. */

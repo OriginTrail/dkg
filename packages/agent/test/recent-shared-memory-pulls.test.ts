@@ -1,0 +1,1033 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { peerIdFromString } from '@libp2p/peer-id';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { createOperationContext, DKGEvent } from '@origintrail-official/dkg-core';
+import { DKGAgent } from '../src/index.js';
+import {
+  RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS,
+  RECENT_SHARED_MEMORY_PULL_INTERVAL_MS,
+  RECENT_SHARED_MEMORY_PULL_TICK_MS,
+  RecentSharedMemoryPulls,
+  type RecentSharedMemoryPullOptions,
+  type RecentSharedMemoryPullPorts,
+} from '../src/sync/recent-shared-memory-pulls.js';
+import {
+  recentSharedMemoryPullsEnabled,
+  startRecentSharedMemoryPulls,
+} from '../src/recent-shared-memory-pull-runtime.js';
+import { emptySharedMemorySyncResult } from '../src/sync/shared-memory-diagnostics.js';
+import {
+  asSyncOnConnectTestAgent,
+  peerSyncSessionDriver,
+} from './_helpers/sync-on-connect-test-fixture.js';
+
+// Issue #3251, member C: an always-on member that had already synced a public
+// graph and stayed connected to its owner logged no pull of the graph for six
+// minutes after the owner stored a member's write. The peer reconciler pulls a
+// connected peer again only 10 to 15 minutes after its last sync.
+
+const TICK = RECENT_SHARED_MEMORY_PULL_TICK_MS;
+const INTERVAL = RECENT_SHARED_MEMORY_PULL_INTERVAL_MS;
+
+function scheduler(options: RecentSharedMemoryPullOptions = {}, extraPorts: Partial<RecentSharedMemoryPullPorts> = {}) {
+  let clock = 1_000_000;
+  const pulls: Array<[string, string]> = [];
+  const errors: Array<[string, string]> = [];
+  const calls = { eligible: 0, sources: 0 };
+  const state = {
+    eligibleGate: undefined as undefined | Promise<void>,
+    sourcesGate: undefined as undefined | Promise<void>,
+    eligible: new Set<string>(),
+    owners: new Map<string, string[]>(),
+    others: [] as string[],
+    stored: 0,
+    pull: undefined as undefined | ((contextGraphId: string, peerId: string) => Promise<number>),
+  };
+  const ports: RecentSharedMemoryPullPorts = {
+    eligible: async (contextGraphId) => {
+      calls.eligible += 1;
+      await state.eligibleGate;
+      return state.eligible.has(contextGraphId);
+    },
+    sources: async (contextGraphId) => {
+      calls.sources += 1;
+      await state.sourcesGate;
+      return { owners: state.owners.get(contextGraphId) ?? [], others: state.others };
+    },
+    pull: async (contextGraphId, peerId) => {
+      pulls.push([contextGraphId, peerId]);
+      return state.pull ? state.pull(contextGraphId, peerId) : state.stored;
+    },
+    onError: (contextGraphId, error) => {
+      errors.push([contextGraphId, error instanceof Error ? error.message : String(error)]);
+    },
+    ...extraPorts,
+  };
+  const pulls$ = new RecentSharedMemoryPulls(ports, { now: () => clock, ...options });
+  return {
+    pulls$,
+    pulls,
+    errors,
+    calls,
+    state,
+    advance: (ms: number) => { clock += ms; },
+  };
+}
+
+describe('recent shared-memory pulls (#3251)', () => {
+  it('pulls a graph in use from its owner every interval and stops when the activity window ends', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:g');
+    h.state.owners.set('urn:cg:g', ['owner']);
+    h.state.others = ['other'];
+    h.pulls$.noteActivity('urn:cg:g');
+
+    expect(await h.pulls$.tick()).toBe(0);
+    h.advance(TICK);
+    expect(await h.pulls$.tick()).toBe(0);
+    h.advance(INTERVAL - TICK);
+    expect(await h.pulls$.tick()).toBe(1);
+    h.advance(TICK);
+    expect(await h.pulls$.tick()).toBe(0);
+    h.advance(TICK);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls).toEqual([['urn:cg:g', 'owner'], ['urn:cg:g', 'owner']]);
+
+    h.advance(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS);
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls$.trackedGraphCount).toBe(0);
+  });
+
+  it('keeps a graph in use while its pulls store data', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:g');
+    h.state.others = ['peer'];
+    h.state.stored = 3;
+    h.pulls$.noteActivity('urn:cg:g');
+
+    for (let elapsed = 0; elapsed <= RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS * 2; elapsed += INTERVAL) {
+      h.advance(INTERVAL);
+      await h.pulls$.tick();
+    }
+    expect(h.pulls$.trackedGraphCount).toBe(1);
+    expect(h.pulls.length).toBeGreaterThan(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS / INTERVAL);
+  });
+
+  it('starts no pull once closed, and its drain waits for the running tick to return', async () => {
+    const h = scheduler();
+    h.state.others = ['peer'];
+    for (const id of ['urn:cg:a', 'urn:cg:b']) {
+      h.state.eligible.add(id);
+      h.pulls$.noteActivity(id);
+    }
+    let open!: () => void;
+    h.state.eligibleGate = new Promise<void>((resolve) => { open = resolve; });
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    let drained = false;
+    const drain = h.pulls$.close().then(() => { drained = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(drained).toBe(false);
+    open();
+    await drain;
+    expect(await tick).toBe(0);
+    // No lookup for the next graph, no source lookup, no pull.
+    expect(h.calls).toEqual({ eligible: 1, sources: 0 });
+    expect(h.pulls).toEqual([]);
+    expect(await h.pulls$.tick()).toBe(0);
+    h.pulls$.noteActivity('urn:cg:c');
+    expect(h.pulls$.trackedGraphCount).toBe(2);
+  });
+
+  it('starts no pull when closed during the source lookup', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:a');
+    h.state.others = ['peer'];
+    h.pulls$.noteActivity('urn:cg:a');
+    let open!: () => void;
+    h.state.sourcesGate = new Promise<void>((resolve) => { open = resolve; });
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    await vi.waitFor(() => expect(h.calls.sources).toBe(1));
+    const drain = h.pulls$.close();
+    open();
+    await drain;
+    expect(await tick).toBe(0);
+    expect(h.pulls).toEqual([]);
+  });
+
+  it('ends a tick that waits for a slow pull at once when closed', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:slow');
+    h.state.others = ['peer'];
+    h.state.pull = () => new Promise<number>(() => {});
+    h.pulls$.noteActivity('urn:cg:slow');
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    await vi.waitFor(() => expect(h.pulls).toHaveLength(1));
+    await h.pulls$.close();
+    expect(await tick).toBe(1);
+  });
+
+  it('never forgets a graph whose pull runs, so it is never pulled twice at once', async () => {
+    const h = scheduler({ maxGraphs: 1, pullWaitMs: 1 });
+    h.state.others = ['peer'];
+    let finish!: (stored: number) => void;
+    h.state.pull = () => new Promise<number>((resolve) => { finish = resolve; });
+    h.state.eligible.add('urn:cg:a');
+    h.state.eligible.add('urn:cg:b');
+    h.pulls$.noteActivity('urn:cg:a');
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+
+    // Over the limit while a's pull runs: a stays, and noting it again keeps its state.
+    h.pulls$.noteActivity('urn:cg:b');
+    h.pulls$.noteActivity('urn:cg:a');
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls.map(([id]) => id)).toEqual(['urn:cg:a']);
+
+    finish(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls.map(([id]) => id)).toEqual(['urn:cg:a', 'urn:cg:a']);
+  });
+
+  it('takes the other connected peers in turn while no owner is connected', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:g');
+    h.state.others = ['p1', 'p2'];
+    h.pulls$.noteActivity('urn:cg:g');
+    for (let round = 0; round < 3; round += 1) {
+      h.advance(INTERVAL);
+      await h.pulls$.tick();
+    }
+    expect(h.pulls.map(([, peerId]) => peerId)).toEqual(['p1', 'p2', 'p1']);
+
+    h.state.others = [];
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls$.trackedGraphCount).toBe(1);
+  });
+
+  it('stops tracking a graph it may no longer pull', async () => {
+    const h = scheduler();
+    h.state.others = ['peer'];
+    h.pulls$.noteActivity('urn:cg:g');
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls$.trackedGraphCount).toBe(0);
+    expect(h.pulls).toEqual([]);
+  });
+
+  it('pulls at most pullsPerTick graphs a tick, the longest unpulled first', async () => {
+    const h = scheduler({ pullsPerTick: 2 });
+    h.state.others = ['peer'];
+    for (const id of ['urn:cg:a', 'urn:cg:b', 'urn:cg:c']) {
+      h.state.eligible.add(id);
+      h.pulls$.noteActivity(id);
+      h.advance(1);
+    }
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(2);
+    h.advance(1);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls.map(([id]) => id)).toEqual(['urn:cg:a', 'urn:cg:b', 'urn:cg:c']);
+  });
+
+  it('never pulls one graph twice at once, and a slow pull does not hold up the next graph', async () => {
+    const h = scheduler({ pullWaitMs: 1 });
+    h.state.others = ['peer'];
+    let finishSlow!: (stored: number) => void;
+    h.state.pull = (contextGraphId) => (contextGraphId === 'urn:cg:slow'
+      ? new Promise<number>((resolve) => { finishSlow = resolve; })
+      : Promise.resolve(0));
+    for (const id of ['urn:cg:slow', 'urn:cg:next']) {
+      h.state.eligible.add(id);
+      h.pulls$.noteActivity(id);
+    }
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(2);
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls.map(([id]) => id)).toEqual(['urn:cg:slow', 'urn:cg:next', 'urn:cg:next']);
+
+    finishSlow(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(2);
+  });
+
+  it('runs one tick at a time', async () => {
+    const h = scheduler();
+    h.state.eligible.add('urn:cg:g');
+    h.state.others = ['peer'];
+    let finish!: () => void;
+    h.state.pull = () => new Promise<number>((resolve) => { finish = () => resolve(0); });
+    h.pulls$.noteActivity('urn:cg:g');
+    h.advance(INTERVAL);
+    const first = h.pulls$.tick();
+    await vi.waitFor(() => expect(h.pulls).toHaveLength(1));
+    expect(await h.pulls$.tick()).toBe(0);
+    finish();
+    expect(await first).toBe(1);
+  });
+
+  it('forgets the least recently active graph beyond maxGraphs', async () => {
+    const h = scheduler({ maxGraphs: 2 });
+    h.state.others = ['peer'];
+    for (const id of ['urn:cg:a', 'urn:cg:b', 'urn:cg:c']) h.state.eligible.add(id);
+    h.pulls$.noteActivity('urn:cg:a');
+    h.pulls$.noteActivity('urn:cg:b');
+    h.pulls$.noteActivity('urn:cg:a');
+    h.pulls$.noteActivity('urn:cg:c');
+    expect(h.pulls$.trackedGraphCount).toBe(2);
+    h.advance(INTERVAL);
+    await h.pulls$.tick();
+    expect(h.pulls.map(([id]) => id).sort()).toEqual(['urn:cg:a', 'urn:cg:c']);
+  });
+
+  it('reports a failed source lookup or pull and goes on with the next graph', async () => {
+    const h = scheduler();
+    h.state.others = ['peer'];
+    h.state.pull = async (contextGraphId) => {
+      if (contextGraphId === 'urn:cg:failing-pull') throw new Error('stream reset');
+      return 0;
+    };
+    for (const id of ['urn:cg:failing-pull', 'urn:cg:ok']) {
+      h.state.eligible.add(id);
+      h.pulls$.noteActivity(id);
+    }
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(2);
+    expect(h.errors).toEqual([['urn:cg:failing-pull', 'stream reset']]);
+
+    const failingSources = new RecentSharedMemoryPulls({
+      eligible: async () => true,
+      sources: async () => { throw new Error('meta read failed'); },
+      pull: async () => 0,
+      onError: (contextGraphId, error) => {
+        h.errors.push([contextGraphId, (error as Error).message]);
+      },
+    }, { now: () => 0, intervalMs: 0 });
+    failingSources.noteActivity('urn:cg:sources');
+    expect(await failingSources.tick()).toBe(0);
+    expect(h.errors).toContainEqual(['urn:cg:sources', 'meta read failed']);
+  });
+});
+
+// Issue #3421: a member that missed the owner's change notice of another
+// member's write had nothing that pulled the graph again for 45 minutes. Its
+// graph was no longer in use, and its catch-up kept asking a connected peer
+// that held the graph's metadata and not the write; the owner, reached only
+// through a relay, was asked once.
+describe('recent shared-memory pulls of member graphs, and the owner (#3421)', () => {
+  const GRAPH = 'urn:cg:member';
+
+  it('keeps a graph this node is a member of in use past the activity window, and lets it go when it no longer is', async () => {
+    let members: readonly string[] = [GRAPH];
+    const h = scheduler({}, { memberGraphs: async () => members });
+    h.state.eligible.add(GRAPH);
+    h.state.owners.set(GRAPH, ['owner']);
+
+    // Nothing was noted: membership alone puts it in use, pulled one interval later.
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls$.trackedGraphCount).toBe(1);
+    for (let elapsed = 0; elapsed < RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS * 2; elapsed += INTERVAL) {
+      h.advance(INTERVAL);
+      expect(await h.pulls$.tick()).toBe(1);
+    }
+    expect(h.pulls).toHaveLength((RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS * 2) / INTERVAL);
+    expect(new Set(h.pulls.map(([, peerId]) => peerId))).toEqual(new Set(['owner']));
+
+    members = [];
+    h.advance(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS);
+    await h.pulls$.tick();
+    expect(h.pulls$.trackedGraphCount).toBe(0);
+  });
+
+  it('keeps its member graphs on their interval when other activity fills the tracking limit (#3421 review)', async () => {
+    const members = ['urn:cg:m1', 'urn:cg:m2', 'urn:cg:m3'];
+    const h = scheduler({ maxGraphs: 3 }, { memberGraphs: async () => members });
+    for (const id of [...members, 'urn:cg:other']) h.state.eligible.add(id);
+    h.state.others = ['peer'];
+    expect(await h.pulls$.tick()).toBe(0);
+
+    // Another graph comes into use before every tick, with the tracking limit full of members.
+    for (let round = 0; round < 6; round += 1) {
+      h.pulls$.noteActivity('urn:cg:other');
+      h.advance(TICK);
+      await h.pulls$.tick();
+    }
+
+    // Six ticks are three intervals: each member was pulled three times.
+    expect(h.pulls.map(([id]) => id).sort()).toEqual([...members, ...members, ...members].sort());
+    expect(h.pulls$.trackedGraphCount).toBe(3);
+  });
+
+  it('lets a graph that is no longer a member go like any other, and tracks at most the limit of members', async () => {
+    let members = ['urn:cg:m1', 'urn:cg:m2', 'urn:cg:m3', 'urn:cg:m4'];
+    const h = scheduler({ maxGraphs: 3 }, { memberGraphs: async () => members });
+    for (const id of [...members, 'urn:cg:other']) h.state.eligible.add(id);
+    h.state.others = ['peer'];
+
+    await h.pulls$.tick();
+    expect(h.pulls$.trackedGraphCount).toBe(3);
+    members = ['urn:cg:m1'];
+    await h.pulls$.tick();
+    h.pulls$.noteActivity('urn:cg:other');
+    // m2, the least recently active graph that is no member any more, made room; m1 stays.
+    h.advance(INTERVAL);
+    await h.pulls$.tick();
+    expect(h.pulls.map(([id]) => id).sort()).toEqual(['urn:cg:m1', 'urn:cg:m3', 'urn:cg:other']);
+  });
+
+  it('notes nothing when the member lookup fails', async () => {
+    const h = scheduler({}, { memberGraphs: async () => { throw new Error('store closed'); } });
+    h.state.eligible.add(GRAPH);
+
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls$.trackedGraphCount).toBe(0);
+  });
+
+  /** A scheduler whose owner route connects to `owner` (none when null), recording each graph it was asked for. */
+  function withOwnerRoute(owner: string | null = 'owner') {
+    const connects: string[] = [];
+    const h = scheduler({}, {
+      connectOwner: async (contextGraphId) => {
+        connects.push(contextGraphId);
+        return owner === null ? [] : [owner];
+      },
+    });
+    h.state.eligible.add(GRAPH);
+    h.pulls$.noteActivity(GRAPH);
+    return { ...h, connects };
+  }
+
+  it('asks the owner after a pull from another peer that stored nothing new, in the same pull, once an interval', async () => {
+    const h = withOwnerRoute();
+    h.state.others = ['metadata-only', 'other'];
+
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls).toEqual([[GRAPH, 'metadata-only'], [GRAPH, 'owner']]);
+    expect(h.connects).toEqual([GRAPH]);
+
+    // Not due before the interval ends: no pull, no owner.
+    h.advance(TICK);
+    expect(await h.pulls$.tick()).toBe(0);
+    h.advance(INTERVAL - TICK);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls).toEqual([[GRAPH, 'metadata-only'], [GRAPH, 'owner'], [GRAPH, 'other'], [GRAPH, 'owner']]);
+    expect(h.connects).toEqual([GRAPH, GRAPH]);
+  });
+
+  it('asks no owner after a pull that stored new data, or when the owner was the peer pulled', async () => {
+    const stored = withOwnerRoute();
+    stored.state.others = ['holder'];
+    stored.state.stored = 4;
+    stored.advance(INTERVAL);
+    await stored.pulls$.tick();
+    expect(stored.pulls).toEqual([[GRAPH, 'holder']]);
+
+    const connected = withOwnerRoute();
+    connected.state.owners.set(GRAPH, ['owner']);
+    connected.state.others = ['other'];
+    connected.advance(INTERVAL);
+    await connected.pulls$.tick();
+    expect(connected.pulls).toEqual([[GRAPH, 'owner']]);
+
+    expect([...stored.connects, ...connected.connects]).toEqual([]);
+  });
+
+  it('asks the owner after a pull from another peer that failed', async () => {
+    const h = withOwnerRoute();
+    h.state.others = ['resetting'];
+    h.state.pull = async (_contextGraphId, peerId) => {
+      if (peerId === 'resetting') throw new Error('The stream has been reset');
+      return 2;
+    };
+
+    h.advance(INTERVAL);
+    await h.pulls$.tick();
+
+    expect(h.pulls).toEqual([[GRAPH, 'resetting'], [GRAPH, 'owner']]);
+    expect(h.errors).toEqual([[GRAPH, 'The stream has been reset']]);
+  });
+
+  it('connects to the owner when no peer is connected, once an interval', async () => {
+    const h = withOwnerRoute();
+
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(1);
+    expect(h.pulls).toEqual([[GRAPH, 'owner']]);
+
+    // Out of reach next time: the pull ends there.
+    const unreachable = withOwnerRoute(null);
+    unreachable.advance(INTERVAL);
+    expect(await unreachable.pulls$.tick()).toBe(1);
+    expect(unreachable.connects).toEqual([GRAPH]);
+    expect(unreachable.pulls).toEqual([]);
+  });
+
+  it('pulls nobody when no peer is connected and it has no route to the owner', async () => {
+    const h = scheduler();
+    h.state.eligible.add(GRAPH);
+    h.pulls$.noteActivity(GRAPH);
+
+    h.advance(INTERVAL);
+    expect(await h.pulls$.tick()).toBe(0);
+    expect(h.pulls).toEqual([]);
+  });
+
+  it('reports an owner route that fails, and keeps the graph', async () => {
+    const h = scheduler({}, { connectOwner: async () => { throw new Error('phonebook unavailable'); } });
+    h.state.eligible.add(GRAPH);
+    h.pulls$.noteActivity(GRAPH);
+
+    h.advance(INTERVAL);
+    await h.pulls$.tick();
+
+    expect(h.errors).toEqual([[GRAPH, 'phonebook unavailable']]);
+    expect(h.pulls).toEqual([]);
+    expect(h.pulls$.trackedGraphCount).toBe(1);
+  });
+
+  it('starts no owner pull once closed while it connects', async () => {
+    let connected!: (peerIds: readonly string[]) => void;
+    const h = scheduler({}, {
+      connectOwner: () => new Promise<readonly string[]>((resolve) => { connected = resolve; }),
+    });
+    h.state.eligible.add(GRAPH);
+    h.pulls$.noteActivity(GRAPH);
+
+    h.advance(INTERVAL);
+    const tick = h.pulls$.tick();
+    await vi.waitFor(() => expect(connected).toBeTypeOf('function'));
+    await h.pulls$.close();
+    connected(['owner']);
+    await tick;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(h.pulls).toEqual([]);
+  });
+});
+
+describe('recent shared-memory pull runtime (#3251)', () => {
+  const OWNER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+  const OTHER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
+  const GRAPH = '0x1111111111111111111111111111111111111111/public-unregistered';
+  const agents: DKGAgent[] = [];
+
+  afterEach(async () => {
+    delete process.env.DKG_RECENT_SHARED_MEMORY_PULL_ENABLED;
+    delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+    vi.restoreAllMocks();
+    await Promise.all(agents.splice(0).map((agent) => agent.stop().catch(() => {})));
+  });
+
+  async function startedMember(name: string, config: { syncReconcilerEnabled?: boolean } = {}) {
+    const agent = await DKGAgent.create({
+      name,
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      ...config,
+    });
+    agents.push(agent);
+    await agent.start();
+    const internals = agent as any;
+    const coordinator = internals.networkAdmissionCoordinator;
+    coordinator.isAcceptedPeer = () => true;
+    coordinator.isRejectedPeer = () => false;
+    coordinator.ensureAdmitted = async () => true;
+    const original = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
+    (agent.node.libp2p as any).getPeers = () => [
+      ...original(),
+      peerIdFromString(OTHER),
+      peerIdFromString(OWNER),
+    ];
+    // The member learned its owner from the join; nothing resolves it otherwise.
+    internals.preferredSyncPeers.set(GRAPH, OWNER);
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    const sharedPulls: Array<{
+      peerId: string;
+      contextGraphIds: string[];
+      source?: string;
+      reservedSlotOnly?: boolean;
+    }> = [];
+    internals.syncSharedMemoryFromPeerDetailed = async (
+      peerId: string,
+      contextGraphIds: string[],
+      options?: { source?: string; reservedSlotOnly?: boolean },
+    ) => {
+      sharedPulls.push({
+        peerId,
+        contextGraphIds,
+        source: options?.source,
+        reservedSlotOnly: options?.reservedSlotOnly,
+      });
+      return { ...emptySharedMemorySyncResult(), insertedTriples: 3, insertedDataTriples: 3 };
+    };
+    const rootReplays: string[] = [];
+    internals.requestRfc64CatalogHeadReplaysFromConnectedPeersV1 = async (contextGraphId: string) => {
+      rootReplays.push(contextGraphId);
+      return { requested: 2, failed: 0 };
+    };
+    return { agent, internals, sharedPulls, rootReplays };
+  }
+
+  it('reproduces member C: the reconciler leaves a freshly synced owner alone, the safety net pulls from it', async () => {
+    const { agent, internals, sharedPulls, rootReplays } = await startedMember('Rfc3251MemberC');
+    // The agent starts one on an Edge; this test drives its own on a test clock.
+    expect(internals.recentSharedMemoryPulls).not.toBeNull();
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      // Root scope owned by the catalog, as on a persistent 10.0.24 member.
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(false);
+      // Subscribed the way the daemon's subscribe route does it.
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on' });
+
+      // Already synced from the owner 30 s ago: the reconciler skips it.
+      peerSyncSessionDriver(asSyncOnConnectTestAgent(agent))
+        .recordFreshness(OWNER, { successfulAt: Date.now() - 30_000 });
+      const reconciled: string[] = [];
+      internals.trySyncFromPeer = async (peerId: string) => { reconciled.push(peerId); };
+      await internals.reconcileSyncFromConnectedPeers();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(reconciled).not.toContain(OWNER);
+
+      // A write that reaches the owner right after the subscribe is pulled
+      // within one interval and one tick.
+      clock += TICK;
+      expect(await runtime.tick()).toBe(0);
+      expect(sharedPulls).toEqual([]);
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls).toEqual([
+        { peerId: OWNER, contextGraphIds: [GRAPH], source: 'reconcile', reservedSlotOnly: true },
+      ]);
+      expect(rootReplays).toEqual([GRAPH]);
+
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OWNER, OWNER]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('runs on a member whose periodic reconciler is off, and asks for the reserved slot', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251NoReconciler', {
+      syncReconcilerEnabled: false,
+    });
+    // No reconciler timer runs; the agent started the safety net all the same.
+    expect(internals.syncReconcilerTimer).toBeNull();
+    expect(internals.recentSharedMemoryPulls).not.toBeNull();
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(true);
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on' });
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls).toEqual([
+        { peerId: OWNER, contextGraphIds: [GRAPH], source: 'reconcile', reservedSlotOnly: true },
+      ]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('does not run on a member with its own switch off and the periodic reconciler off', async () => {
+    process.env.DKG_RECENT_SHARED_MEMORY_PULL_ENABLED = '0';
+    const { internals } = await startedMember('Rfc3251SwitchedOff', { syncReconcilerEnabled: false });
+    expect(internals.syncReconcilerTimer).toBeNull();
+    expect(internals.recentSharedMemoryPulls).toBeNull();
+  });
+
+  it('keeps pulling when a routing hint names this node, and replays no root on the legacy lane', async () => {
+    const { agent, internals, sharedPulls, rootReplays } = await startedMember('Rfc3251SelfHint');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      internals.subscribedContextGraphs.set(GRAPH, { subscribed: true, synced: true, syncMode: 'always-on' });
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(true);
+      // A hint is no proof of ownership: the graph id names another wallet.
+      internals.preferredSyncPeers.set(GRAPH, agent.peerId);
+      runtime.noteActivity(GRAPH);
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OTHER]);
+      expect(rootReplays).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('pulls a graph this node owns as well: a member that reaches it only through Cores shares through them', async () => {
+    const { agent, internals, sharedPulls, rootReplays } = await startedMember('CoreHostedOwnerPull');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      // A graph whose id names a wallet of this node's own.
+      const ownWallet = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+      internals.localAgents.set(ownWallet, { agentAddress: ownWallet });
+      const owned = `${ownWallet}/owned-here`;
+      internals.subscribedContextGraphs.set(owned, { subscribed: true, synced: true, syncMode: 'always-on' });
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(false);
+      runtime.noteActivity(owned);
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      // No owner peer to prefer: it is this node. A connected peer (a Core) is asked.
+      expect(sharedPulls).toEqual([
+        { peerId: OTHER, contextGraphIds: [owned], source: 'reconcile', reservedSlotOnly: true },
+      ]);
+      expect(rootReplays).toEqual([owned]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('keeps a public graph in use while one of its agents is on the allowlist, but not its own graph or one it was revoked from (#3421)', async () => {
+    const { agent, internals } = await startedMember('Rfc3421Member');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      const wallet = '0xabcdefabcdefabcdefabcdefabcdefabcdefabcd';
+      internals.localAgents.set(wallet, { agentAddress: wallet });
+      const graphs = {
+        member: GRAPH,
+        revoked: '0x1111111111111111111111111111111111111111/revoked-here',
+        curated: '0x1111111111111111111111111111111111111111/curated-here',
+        unlisted: '0x1111111111111111111111111111111111111111/not-a-member',
+        onDemand: '0x1111111111111111111111111111111111111111/on-demand',
+      };
+      // Subscribed long ago, as a restart restores them: nothing marks them in use.
+      for (const id of Object.values(graphs)) {
+        internals.subscribedContextGraphs.set(id, {
+          subscribed: true, synced: true, syncMode: id === graphs.onDemand ? 'on-demand' : 'always-on',
+        });
+      }
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(true);
+      vi.spyOn(internals, 'isPrivateContextGraph').mockResolvedValue(false);
+      vi.spyOn(internals, 'isCuratorOf').mockImplementation(async (id: unknown) => id === graphs.curated);
+      const storedMeta = internals.getCgMeta.bind(internals);
+      vi.spyOn(internals, 'getCgMeta').mockImplementation(async (id: unknown, options: unknown) => ({
+        ...(await storedMeta(id, options)),
+        allowedAgents: id === graphs.unlisted
+          ? ['0x2222222222222222222222222222222222222222']
+          : [`did:dkg:agent:${wallet.toUpperCase().replace('0X', '0x')}`],
+        participantAgents: [],
+        revokedAgents: id === graphs.revoked ? [wallet] : [],
+      }));
+      // The owner has nothing new: every pull stores metadata again and no data.
+      const pulled: string[] = [];
+      internals.syncSharedMemoryFromPeerDetailed = async (peerId: string, [contextGraphId]: string[]) => {
+        pulled.push(`${contextGraphId}@${peerId}`);
+        return { ...emptySharedMemorySyncResult(), insertedTriples: 304, insertedMetaTriples: 304 };
+      };
+
+      expect(await runtime.tick()).toBe(0);
+      const rounds = RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS / INTERVAL + 2;
+      for (let round = 0; round < rounds; round += 1) {
+        clock += INTERVAL;
+        await runtime.tick();
+      }
+      expect(pulled).toEqual(Array.from({ length: rounds }, () => `${GRAPH}@${OWNER}`));
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('connects to an owner that is known and not connected through the owner route, and pulls it after an empty pull (#3421)', async () => {
+    const { agent, internals } = await startedMember('Rfc3421OwnerRoute');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(true);
+      internals.subscribedContextGraphs.set(GRAPH, { subscribed: true, synced: true, syncMode: 'always-on' });
+      // The owner's relayed connection has closed; another peer holds the graph's metadata only.
+      (agent.node.libp2p as any).getPeers = () => [peerIdFromString(OTHER)];
+      const dialed: string[] = [];
+      const followers: string[] = [];
+      vi.spyOn(internals, 'graphOwnerRoutePortsV1').mockReturnValue({
+        ownerPeerIds: async () => [OWNER],
+        isConnected: (peerId: string) => dialed.includes(peerId),
+        connect: async (peerId: string) => { dialed.push(peerId); return true; },
+        mayConnect: () => true,
+        connectFailed: () => {},
+        noteFollower: (_contextGraphId: string, peerId: string) => { followers.push(peerId); },
+      });
+      const pulled: string[] = [];
+      internals.syncSharedMemoryFromPeerDetailed = async (peerId: string) => {
+        pulled.push(peerId);
+        return {
+          ...emptySharedMemorySyncResult(),
+          insertedTriples: 304,
+          insertedMetaTriples: 304,
+          insertedDataTriples: peerId === OWNER ? 125 : 0,
+        };
+      };
+      runtime.noteActivity(GRAPH);
+
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      await vi.waitFor(() => expect(pulled).toEqual([OTHER, OWNER]));
+      expect(dialed).toEqual([OWNER]);
+      expect(followers).toEqual([OWNER]);
+
+      // Not confirmed for the graph any more: nobody is asked, the owner neither.
+      internals.canUseSharedMemoryForContextGraph = async () => false;
+      dialed.length = 0;
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(0);
+      expect(pulled).toEqual([OTHER, OWNER]);
+      expect(dialed).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('takes a received shared-memory write as activity, and a Verified Memory change as none', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251Received');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      internals.subscribedContextGraphs.set(GRAPH, { subscribed: true, synced: true, syncMode: 'always-on' });
+      agent.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, { contextGraphId: GRAPH, layers: ['vm'] });
+      agent.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, { layers: ['swm'] });
+      agent.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, null);
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(0);
+
+      agent.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, { contextGraphId: GRAPH, layers: ['swm'] });
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls).toHaveLength(1);
+
+      await runtime.close();
+      agent.eventBus.emit(DKGEvent.MEMORY_GRAPH_CHANGED, { contextGraphId: 'urn:cg:later', layers: ['swm'] });
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(0);
+      expect(sharedPulls).toHaveLength(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('takes an explicit subscribe as activity, also of a graph already subscribed, but not a restore', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251Subscribe');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    try {
+      // What a restart does for a persisted subscription.
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on', persist: false });
+      await runtime.tick();
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(0);
+
+      // An application that subscribes again, as the issue's client does.
+      agent.subscribeToContextGraph(GRAPH, { syncMode: 'always-on' });
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      expect(sharedPulls.map(({ peerId }) => peerId)).toEqual([OWNER]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('makes agent shutdown wait for a running tick, and starts no pull after it', async () => {
+    const { agent, internals, sharedPulls } = await startedMember('Rfc3251Shutdown');
+    await internals.recentSharedMemoryPulls.close();
+    let clock = Date.now();
+    const runtime = startRecentSharedMemoryPulls(agent, { now: () => clock, tickMs: 3_600_000 });
+    internals.recentSharedMemoryPulls = runtime;
+    internals.subscribedContextGraphs.set(GRAPH, { subscribed: true, synced: true, syncMode: 'always-on' });
+    let release!: () => void;
+    const lookup = new Promise<void>((resolve) => { release = resolve; });
+    internals.isPrivateContextGraph = async () => {
+      await lookup;
+      return false;
+    };
+    runtime.noteActivity(GRAPH);
+    clock += INTERVAL;
+    const tick = runtime.tick();
+    let stopped = false;
+    const stop = agent.stop().then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(stopped).toBe(false);
+    release();
+    await stop;
+    expect(await tick).toBe(0);
+    expect(sharedPulls).toEqual([]);
+  });
+
+  it('takes a local share as activity', async () => {
+    const { internals } = await startedMember('Rfc3251LocalWrite');
+    const noted: string[] = [];
+    await internals.recentSharedMemoryPulls.close();
+    internals.recentSharedMemoryPulls = { noteActivity: (id: string) => { noted.push(id); }, close: async () => {} };
+    await internals.publishWorkspaceGossip(GRAPH, new Uint8Array(), createOperationContext('sync'))
+      .catch(() => undefined);
+    expect(noted).toEqual([GRAPH]);
+  });
+
+  it('runs on an Edge whose shared-memory sync is on, with the periodic reconciler on or off', () => {
+    expect(recentSharedMemoryPullsEnabled({})).toBe(true);
+    expect(recentSharedMemoryPullsEnabled({ nodeRole: 'edge' })).toBe(true);
+    expect(recentSharedMemoryPullsEnabled({ nodeRole: 'core' })).toBe(false);
+    expect(recentSharedMemoryPullsEnabled({ syncOnConnectEnabled: false })).toBe(false);
+    expect(recentSharedMemoryPullsEnabled({ durableSyncEnabled: false })).toBe(false);
+    expect(recentSharedMemoryPullsEnabled({ syncSharedMemoryOnConnect: false })).toBe(false);
+    // An Edge that keeps the reconciler away from its one sync slot: nothing
+    // else pulls a public graph it already synced.
+    const withoutReconciler = {
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: true,
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 0,
+    };
+    expect(recentSharedMemoryPullsEnabled(withoutReconciler)).toBe(true);
+    expect(recentSharedMemoryPullsEnabled({ ...withoutReconciler, nodeRole: 'core' })).toBe(false);
+    expect(recentSharedMemoryPullsEnabled({ ...withoutReconciler, syncOnConnectEnabled: false })).toBe(false);
+    process.env.DKG_SYNC_RECONCILER_ENABLED = '0';
+    expect(recentSharedMemoryPullsEnabled({})).toBe(true);
+
+    process.env.DKG_RECENT_SHARED_MEMORY_PULL_ENABLED = '0';
+    expect(recentSharedMemoryPullsEnabled({})).toBe(false);
+    expect(recentSharedMemoryPullsEnabled(withoutReconciler)).toBe(false);
+  });
+
+  it('skips graphs it may not pull and logs a pull that fails', async () => {
+    const debug = vi.fn();
+    const subscriptions = new Map<string, Record<string, unknown>>([
+      ['agents', { subscribed: true, synced: true, syncMode: 'always-on' }],
+      ['urn:cg:on-demand', { subscribed: true, synced: true, syncMode: 'on-demand' }],
+      ['urn:cg:private', { subscribed: true, synced: true, syncMode: 'always-on' }],
+      ['urn:cg:unconfirmed', { subscribed: true, synced: true, syncMode: 'always-on' }],
+      ['urn:cg:failing', { subscribed: true, synced: true, syncMode: 'always-on' }],
+    ]);
+    const attempted: string[] = [];
+    const agentLike = {
+      peerId: 'local-peer',
+      node: { libp2p: { getPeers: () => [{ toString: () => OTHER }] } },
+      subscribedContextGraphs: subscriptions,
+      preferredSyncPeers: new Map<string, string>(),
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      eventBus: { on: () => {}, off: () => {} },
+      log: { debug },
+      getCgMeta: async () => ({ curators: [], creators: [] }),
+      isPrivateContextGraph: async (contextGraphId: string) => contextGraphId === 'urn:cg:private',
+      canUseSharedMemoryForContextGraph: async (contextGraphId: string) => contextGraphId !== 'urn:cg:unconfirmed',
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
+      syncSharedMemoryFromPeerDetailed: async (peerId: string, [contextGraphId]: string[]) => {
+        attempted.push(`${contextGraphId}@${peerId}`);
+        throw new Error('stream reset');
+      },
+    };
+    let clock = 0;
+    const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      for (const id of [
+        'agents', 'urn:cg:unsubscribed', 'urn:cg:on-demand', 'urn:cg:private', 'urn:cg:unconfirmed', 'urn:cg:failing',
+      ]) {
+        runtime.noteActivity(id);
+      }
+      clock += INTERVAL;
+      expect(await runtime.tick()).toBe(1);
+      // Not authorized yet: skipped this round and asked again the next one.
+      clock += INTERVAL;
+      await runtime.tick();
+      // No owner is known, so the one connected peer is asked.
+      expect(attempted).toEqual([`urn:cg:failing@${OTHER}`, `urn:cg:failing@${OTHER}`]);
+      await vi.waitFor(() => expect(debug).toHaveBeenCalledWith(
+        expect.anything(),
+        'Safety-net shared-memory pull of "urn:cg:failing" did not run: stream reset',
+      ));
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('lets a graph go when its pulls only store metadata again', async () => {
+    const subscriptions = new Map<string, Record<string, unknown>>([
+      ['urn:cg:quiet', { subscribed: true, synced: true, syncMode: 'always-on' }],
+    ]);
+    let pulls = 0;
+    const agentLike = {
+      peerId: 'local-peer',
+      node: { libp2p: { getPeers: () => [{ toString: () => OTHER }] } },
+      subscribedContextGraphs: subscriptions,
+      localAgents: new Map(),
+      isCuratorOf: async () => false,
+      preferredSyncPeers: new Map<string, string>(),
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      eventBus: { on: () => {}, off: () => {} },
+      log: { debug: () => {} },
+      getCgMeta: async () => ({ curators: [], creators: [] }),
+      isPrivateContextGraph: async () => false,
+      canUseSharedMemoryForContextGraph: async () => true,
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
+      syncSharedMemoryFromPeerDetailed: async () => {
+        pulls += 1;
+        return { ...emptySharedMemorySyncResult(), insertedTriples: 19, insertedMetaTriples: 19 };
+      },
+    };
+    let clock = 0;
+    const runtime = startRecentSharedMemoryPulls(agentLike, { now: () => clock, tickMs: 3_600_000 });
+    try {
+      runtime.noteActivity('urn:cg:quiet');
+      for (let elapsed = 0; elapsed < RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS * 2; elapsed += INTERVAL) {
+        clock += INTERVAL;
+        await runtime.tick();
+      }
+      expect(pulls).toBe(RECENT_SHARED_MEMORY_ACTIVITY_WINDOW_MS / INTERVAL - 1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('logs a failed tick, keeps its timer, and lets go of the event bus when closed', async () => {
+    const debug = vi.fn();
+    const listeners = new Map<string, unknown>();
+    const agentLike = {
+      eventBus: {
+        on: (event: string, handler: unknown) => { listeners.set(event, handler); },
+        off: (event: string) => { listeners.delete(event); },
+      },
+      log: { debug },
+    };
+    const runtime = startRecentSharedMemoryPulls(agentLike, {
+      tickMs: 5,
+      now: () => { throw new Error('clock unavailable'); },
+    });
+    try {
+      expect(listeners.has(DKGEvent.MEMORY_GRAPH_CHANGED)).toBe(true);
+      await vi.waitFor(() => expect(debug.mock.calls.length).toBeGreaterThanOrEqual(2));
+      expect(debug).toHaveBeenCalledWith(
+        expect.anything(),
+        'Safety-net shared-memory pull tick failed: clock unavailable',
+      );
+    } finally {
+      await runtime.close();
+    }
+    expect(listeners.size).toBe(0);
+  });
+});

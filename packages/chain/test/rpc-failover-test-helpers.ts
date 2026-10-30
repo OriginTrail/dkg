@@ -10,7 +10,7 @@
  */
 import {
   RpcFailoverClient,
-  type SignPopulatedFn,
+  type PrepareForSigningFn,
   type StickinessOptions,
 } from '../src/rpc-failover-client.js';
 
@@ -24,27 +24,27 @@ export function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 /** A RETRYABLE transport error (HTTP 429) — the canonical failover trigger. */
 export const retryable429 = () => { const e = new Error('429 too many requests'); (e as any).status = 429; return e; };
 
-// A `signPopulated` stub the read/broadcast/receipt families never reach — wired
-// to fail loudly if a non-signing path ever tried to sign.
-export const NEVER_SIGN: SignPopulatedFn = async () => {
-  throw new Error('signPopulated must not be reached by this path');
+// A signer-side preparation stub the read/broadcast/receipt families never reach —
+// wired to fail loudly if a non-write path ever tried to prepare a transaction.
+export const NEVER_PREPARE: PrepareForSigningFn = async () => {
+  throw new Error('transaction preparation must not be reached by this path');
 };
 
-/** Construct the module under test over bare provider/signer doubles (the two
- *  injected capabilities: a `getEndpoints` thunk + a `signPopulated` callback).
- *  `stickiness` (Mechanism B) is optional — omitted, the client uses production
- *  defaults (stickiness on unless `DKG_DISABLE_RPC_STICKINESS=1`, `Date.now`
- *  clock, 30s TTL); the stickiness suite injects `{ enabled, now, ttlMs }`. */
+/** Construct the module under test over bare provider/signer doubles (the
+ *  injected capabilities: a `getEndpoints` thunk + the signer-side preparation
+ *  hook a write test controls). `stickiness` (Mechanism B) is optional — omitted,
+ *  the client uses production defaults (stickiness on unless
+ *  `DKG_DISABLE_RPC_STICKINESS=1`, `Date.now` clock, 30s TTL); the stickiness
+ *  suite injects `{ enabled, now, ttlMs }`. */
 export function makeClient(
   providers: unknown[],
   rpcUrls: string[],
-  signPopulated: SignPopulatedFn = NEVER_SIGN,
+  prepareForSigning: PrepareForSigningFn = NEVER_PREPARE,
   stickiness?: StickinessOptions,
 ): RpcFailoverClient {
   return new RpcFailoverClient(
     () => providers.map((p, i) => ({ provider: p as any, rpcUrl: rpcUrls[i] })),
-    signPopulated,
     () => 'evm:31337',
-    { stickiness },
+    { stickiness, prepareForSigning },
   );
 }

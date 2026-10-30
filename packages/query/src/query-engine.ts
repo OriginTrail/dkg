@@ -1,21 +1,30 @@
-import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
+import type {
+  Quad,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
+import type { DraftAccessPolicy } from './content-partition-policy.js';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
+import type { QueryMaterializationBudget } from './query-store-read-context.js';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
   quads?: Quad[];
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends StoreQueryOptions {
+  /**
+   * Query-wide ceiling for the cumulative decoded store results retained while
+   * evaluating one logical query. Unlike the transport-level
+   * `maxResponseBytes`, this limit is charged across every internal read.
+   */
+  maxMaterializedBytes?: number;
+  /** Request-local budget shared with pre-execution admission reads. */
+  materializationBudget?: QueryMaterializationBudget;
   contextGraphId?: string;
   timeout?: number;
-  /** Cancel queued and in-flight store work when the caller goes away. */
-  signal?: AbortSignal;
-  /** Store admission lane. External/API reads should use `background`. */
-  priority?: StoreWorkPriority;
-  /** Bounded operation label propagated to store diagnostics and slow-query telemetry. */
-  source?: string;
+  /** Reject compatibility routing that would omit selected graphs. */
+  requireCompleteGraphScope?: boolean;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */
@@ -30,6 +39,10 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
+  /** Internal draft policy derived from caller identity; never accept from HTTP input. */
+  draftAccess?: DraftAccessPolicy;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph
@@ -74,6 +87,13 @@ export interface QueryOptions {
    * queries that don't specify a contextGraphId.
    */
   excludeGraphPrefixes?: string[];
+  /**
+   * Graph IRIs a query without `contextGraphId` must not read, each with every
+   * graph below it (`<iri>/...`). The store answers over its default graph and
+   * every other named graph, whatever the query's patterns; FROM / FROM NAMED
+   * are refused with `WithheldGraphQueryError`. Rejected on scoped queries.
+   */
+  withheldGraphRoots?: readonly string[];
   /**
    * Per-subject trust floor for `verifiable-memory`. Values above
    * `SelfAttested` require every matched subject to carry an explicit

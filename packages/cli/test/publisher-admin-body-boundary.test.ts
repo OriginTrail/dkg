@@ -72,7 +72,7 @@ describe('#1890 publisher admin POST body boundary', () => {
       validTokens: new Set<string>(),
       apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       url, path: url.pathname,
-      authentication: requestAuthentication({ kind: 'anonymous' }), requestAgentAddress: '0x0',
+      authentication: requestAuthentication({ kind: 'nodeOperator' }), requestAgentAddress: '0x0',
     } as unknown as RequestContext;
     await handlePublisherRoutes(ctx);
     return { status: res.statusCode, body: res.body ? JSON.parse(res.body) as Record<string, unknown> : {} };

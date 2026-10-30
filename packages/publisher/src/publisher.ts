@@ -298,6 +298,14 @@ export interface BasePublicationOptions {
    * Invoked with the SIGNED transaction's identity strictly before it goes on the wire, and
    * fail-closed: a throw aborts the broadcast with the transaction still local. A caller that
    * cannot persist the signal therefore never has one on chain it does not know about.
+   *
+   * GH#2940 — the async publisher reads this hook as its PROOF about the publish transaction: a
+   * hook that never durably recorded (never reached, or rejected and rolled back) means no
+   * publish transaction was signed-and-sent, and a typed storage rejection on such an attempt is
+   * retried as the same job instead of being held for chain proof. An executor that may send a
+   * publish transaction MUST therefore await this hook before the send; one that does not is
+   * outside that proof. (Earlier transactions — a TRAC approval, a context-graph registration —
+   * are not publish transactions and are not covered by it.)
    */
   onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
   /**

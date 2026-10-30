@@ -64,6 +64,31 @@ the effective lane once at boot. A background query that is shed before
 execution returns HTTP 503 with `Retry-After: 1` and
 `code: "STORE_SCHEDULER_BUSY"`.
 
+## RDF file input
+
+Commands with `--file` accept N-Quads (`.nq`), N-Triples (`.nt`), Turtle (`.ttl`),
+TriG (`.trig`), JSON quad arrays (`.json`), and JSON-LD (`.jsonld`). JSON-LD
+supports inline `@context`, lists, named graphs and typed/language literals.
+Relative identifiers resolve against the input file's `file:` URL unless an
+inline `@base` overrides it. Expansion that would discard statements fails.
+
+JSON-LD named graphs can be stored in Working Memory with `dkg ka create --no-finalize`.
+A default-finalizing create rejects them before contacting the daemon: sealing, SWM
+sharing and VM publication do not yet preserve named-graph identity. Rewrite the
+document into the default graph to use those transitions.
+
+JSON-LD ingestion does not fetch remote contexts or `@import` URLs. Embed the
+required context inline before importing a file. Existing simple quad arrays
+remain supported in both `.json` and `.jsonld` files.
+
+## Async queue settings
+
+The async share and publish queues need no changes on most nodes. The four
+settings an operator might change are the store control path, write preflight
+sharing, share retries and finished-job cleanup. Each is read once at daemon
+start. Their defaults, how to change them and the log line that confirms each
+are in [Async Queue Operations](../../docs/use-dkg/async-queue-operations.md).
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2
@@ -273,9 +298,9 @@ modes auto-renewal can't recover from:
 | `dkg ka import-file <name> -c <cg> --input-file <file>` | Import a document into WM through extraction |
 | `dkg ka extraction-status <name> -c <cg>` | Check document extraction status |
 | `dkg ka finalize <name> -c <cg>` | Seal a WM draft; existing root-scoped SWM assets remain read-only |
-| `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
+| `dkg ka share <name> -c <cg>` | Share finalized WM to Shared Working Memory (the whole Knowledge Asset) |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
-| `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |
+| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n>] [--json]` | List async SWM share jobs (the complete list, or up to `--limit`). `--page-size <n>` and/or `--cursor <cursor>` print one page instead, and `--all [--page-size <n>]` pages through every job; `--limit` cannot be combined with a paging flag, nor `--all` with `--cursor` ([Listing async jobs](../../docs/references/cli.md#listing-async-jobs)) |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish an already finalized and fully shared KA from SWM to VM |
 | `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish for an already finalized and fully shared KA |
 | `dkg ka pull-from <name> -c <cg> --layer swm\|vm` | Seed WM from SWM or VM |
@@ -290,7 +315,7 @@ modes auto-renewal can't recover from:
 | `dkg subscribe <cg>` | Subscribe to a context graph and sync its data |
 | `dkg sync` | Catch up on data from peers |
 | `dkg index [directory]` | Index a code repository into the dev-coordination CG |
-| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async` |
+| `dkg publisher ...` | Inspect/control async publisher jobs and wallets; `publisher publish-async` remains an operational alias for `ka publish-async`; `publisher jobs` pages with the same `--page-size`/`--cursor`/`--all` |
 | `dkg auth show` | Display the current API auth token |
 | `dkg auth rotate` | Generate a new API auth token |
 | `dkg wallet` | Show operational wallet addresses and balances |
@@ -446,7 +471,7 @@ not truncate the previous state file.
 When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Key endpoint groups:
 
 - `GET /api/status`, `GET /api/info` — node status and health
-- `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
+- `POST /api/agent/register` (node-admin token), `GET /api/agent/identity` — agent identity
 - `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management. Prefer `GET /api/context-graph/list?limit=100&projection=summary`; follow `nextCursor`, restart at page one after `409 CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED`, and reuse the first-page `ETag` for polling. Bounded pages contain at most 100 rows and 64 KiB of JSON. The parameterless legacy response remains available.
 - `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/vm/publish`, `/{name}/vm/publish-async`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — named knowledge asset lifecycle
 - `POST /api/query`, `POST /api/query-remote` — SPARQL querying
@@ -454,6 +479,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
+- `POST /api/knowledge-assets/{name}/swm/share-async`, `GET /api/knowledge-assets/swm/share-jobs`, `GET /api/publisher/jobs`, `GET /api/publisher/stats` — async share and publish queues (client contract: [Async Share and Publish Jobs](../../docs/build/async-jobs.md); paging: [Listing async jobs](../../docs/references/api.md#listing-async-jobs))
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 
 `GET /api/info` retains its legacy `chain.rpcUrl`, `chain.rpcUrls`, and
@@ -470,8 +496,8 @@ credentials. The public Hub contract address remains available, while
 All endpoints (except public paths like `/api/status`, `/api/chain/rpc-health`, and `/.well-known/skill.md`) require an API token via `Authorization: Bearer <token>` header.
 
 `GET /api/diagnostics/backpressure` specifically requires the node-level admin
-token; agent-scoped tokens cannot inspect node-wide scheduler work. See the
-[backpressure observability operator guide](../../docs/use-dkg/backpressure-observability.md)
+token; agent-scoped tokens cannot inspect node-wide scheduler work. See
+[Monitor Store and Queue Pressure](../../docs/use-dkg/backpressure-observability.md)
 for state definitions, log behavior, metrics, and response safety boundaries.
 
 The full API surface — including request bodies, response shapes, and error codes — is documented in [`skills/dkg-node/SKILL.md`](./skills/dkg-node/SKILL.md).
@@ -525,8 +551,10 @@ records include operation, iteration, error message, root entity, marker, contex
 graph, and a reproduction command. Warmups are excluded from summaries.
 
 The repository-level ESBench workflow for this same benchmark feature is
-documented in `BENCHMARKING.md`. It uses a deterministic layered DKG client, not
-a live daemon, so the generated reports avoid auth tokens and local node paths.
+documented in the repository's
+[`bench/README.md`](../../bench/README.md).
+It uses a deterministic layered DKG client, not a live daemon, so the generated
+reports avoid auth tokens and local node paths.
 `pnpm bench:html` writes the combined ESBench report plus one focused HTML page
 for each benchmark flow and payload size. The full default matrix includes the
 `200mb` scene; set `DKG_ESBENCH_PAYLOAD_SIZES=10kb` or another comma-separated
@@ -732,4 +760,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-publisher` — publish pipeline (SWM → VM)
 - `@origintrail-official/dkg-storage` — triple-store adapters
 - `@origintrail-official/dkg-chain` — blockchain abstraction
+- `@origintrail-official/dkg-node-store` — durable protocol state (outbox, sync checkpoints, cursors, KA numbers, chain log) the daemon composes
 - `@origintrail-official/dkg-node-ui` — web dashboard serving

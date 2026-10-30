@@ -1,4 +1,28 @@
+export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@origintrail-official/dkg-query';
+export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
+export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
+export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSourceOptions, PublicCheckpointSourceOptions, PublicCheckpointPreparationOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
+export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  QUERY_RESULT_TOO_LARGE,
+  QueryResultTooLargeError,
+  asQueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-too-large-error.js';
+export {
+  authorityIndexTrustDomain,
+  planAuthorityIndexBootstrap,
+  resolveAuthorityIndexConfig,
+  type AuthorityIndexBootstrapInput,
+  type AuthorityIndexBootstrapPlan,
+  type AuthorityIndexConfig,
+  type AuthorityIndexSnapshotPlan,
+  type ResolvedAuthorityIndexConfig,
+} from './authority-index-config.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
@@ -9,6 +33,7 @@ export {
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   appendCustodialWorkspaceEncryptionKey,
   revokeCustodialWorkspaceEncryptionKey,
@@ -67,6 +92,7 @@ export * from './rfc64/swm-author-inventory-producer-v1.js';
 export * from './rfc64/swm-inventory-catalog-reconciler-v1.js';
 export * from './rfc64/public-catalog-transport-v1.js';
 export * from './rfc64/public-catalog-current-head-discovery-v1.js';
+export * from './rfc64/unregistered-authority-transport-v1.js';
 export * from './rfc64/open-catalog-policy-v1.js';
 export * from './rfc64/public-catalog-receiver-v1.js';
 export * from './rfc64/public-catalog-service-v1.js';
@@ -84,6 +110,7 @@ export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export type {
+  Rfc64AgentAuthorityResolverReadOptionsV1,
   Rfc64AuthorityReadCoordinatorSnapshotV1,
 } from './rfc64/authority-rpc-circuit-breaker-v1.js';
 export * from './rfc64/policy-cell-v1.js';
@@ -104,7 +131,22 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
-export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
+export {
+  FinalizedAuthorityColdResolutionV1,
+  finalizedAuthorityColdResolutionOf,
+  peekFinalizedAuthorityColdResolution,
+} from './finalized-authority-cold-resolution.js';
+export {
+  CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_ENV,
+  CHAIN_AUTHORITY_READ_TIMEOUT_ENV,
+  DEFAULT_CHAIN_AUTHORITY_READ_BUDGETS,
+  chainAuthorityReadBudgetsOf,
+  resolveChainAuthorityReadBudgets,
+  resolveChainAuthorityTimeoutMs,
+  type ChainAuthorityReadBudgets,
+  type ChainAuthorityReadBudgetsConfig,
+} from './chain-authority-read-budgets.js';
 export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,
@@ -144,6 +186,12 @@ export {
   ContextGraphMembershipPersistShutdownTimeoutError,
   CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from './context-graph-membership-persist-scheduler.js';
+export {
+  ContextGraphSubscriptionPersistQueueClosedError,
+  ContextGraphSubscriptionPersistQueueFullError,
+  ContextGraphSubscriptionPersistShutdownTimeoutError,
+  CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_ERROR_CODE,
+} from './context-graph-subscription-persist-scheduler.js';
 export { buildEndorsementQuads, DKG_ENDORSES, DKG_ENDORSED_AT } from './endorse.js';
 export {
   CclEvaluator,
@@ -180,6 +228,33 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { PrivateAccessRequest, PrivateAccessResponse } from './private-access-request.js';
+export { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
+export {
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE,
+  CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
+  createInMemoryContextGraphStorageDiscoveryStore,
+  type ContextGraphStorageDiscoveryStore,
+} from './context-graph-storage-discovery.js';
+export type {
+  ContextGraphListOnChainFacts,
+  ListContextGraphsRow,
+} from './context-graph-list-authority-enrichment.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,
@@ -191,6 +266,8 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
+  Rfc64CatalogSelectionV1,
+  Rfc64CatalogConnectionReplayStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,
@@ -206,11 +283,22 @@ export type {
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 export type {
+  CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
+export type {
+  FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
+export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
+export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
 export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+export type {
+  PersistVerifiedRfc64UnregisteredAuthoritySeedInputV1,
+  ReadRfc64UnregisteredAuthoritySeedInputV1,
+} from './dkg-agent-rfc64-seed-store.js';
 export type {
   AcceptedRfc64CatalogAccessSnapshotV1,
 } from './rfc64/catalog-access-policy-v1.js';
@@ -281,6 +369,7 @@ export {
   SWM_CATCHUP_FALLBACK_PROBE_LIMIT,
   SWM_CATCHUP_PEER_GOOD_TTL_MS,
   SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
+  swmCatchupOwnerPeerIds,
   type SelectSwmCatchupPeersInput,
   type SelectSwmCatchupPeersResult,
   type SwmCatchupPeerOutcome,
@@ -305,10 +394,16 @@ export {
 } from './rootless-update-error.js';
 export type {
   ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityDependency,
   ContextGraphReadAuthorityOutcome,
   ContextGraphReadAuthoritySource,
+  SettledContextGraphReadAuthorityDecision,
+  UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
+  ContextGraphAuthorityFailureSite,
+  ContextGraphAuthorityReadMode,
+  ContextGraphFinalizedAbsenceDetailCode,
   LiveOnChainAccessPolicyUnavailable,
   LiveOnChainAccessPolicyUnavailableReason,
   RegisteredContextGraphAuthority,
@@ -316,6 +411,16 @@ export type {
   RegisteredContextGraphAuthorityUnavailableReason,
 } from './registered-context-graph-authority.js';
 export type { ContextGraphRegistrationBinding } from './dkg-agent-cg-registry.js';
+export type { FinalizedContextGraphAuthoritySnapshotReadV1 } from './dkg-agent-cg-resolve.js';
+export type {
+  ContextGraphReadinessMetadataV1,
+  InspectedContextGraphReadinessV1,
+  InspectedPrivateEmptyVmReadinessV1,
+  PreparedPrivateEmptyVmReadinessV1,
+  ProvenRegisteredPrivateEmptyVmInspectionV1,
+  SynchronousReadinessCommitResult,
+} from './dkg-agent-registered-private-empty-vm.js';
+export { isRegisteredPrivateEmptyVmReadinessCandidateV1 } from './dkg-agent-registered-private-empty-vm.js';
 export {
   ContextGraphNotFoundError,
   InvalidContentError,
@@ -458,6 +563,8 @@ export {
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
 export { mapWithConcurrency } from './map-with-concurrency.js';
+// Deprecated compatibility codecs for third-party subscription-store adapters.
+// The recovery runtime does not import this historical persistence surface.
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,
@@ -554,6 +661,7 @@ export {
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
   selectSwmSnapshotCoverage,
+  sharedMemoryRoundFoundNothingMissing,
 } from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
@@ -562,3 +670,15 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+
+export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
+
+export { createFreshPublicCheckpointEdge, openFreshPublicCheckpointEdge } from './snapshot-fresh-edge.js';
+export { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+export { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+
+export { resumePublicCheckpointEdge, openResumablePublicCheckpointEdge } from './snapshot-resume-edge.js';
+export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
+export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
+
+export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';

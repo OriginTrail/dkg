@@ -14,12 +14,14 @@
  * grows past ~10 projects.
  */
 import React, { useEffect, useMemo, useState } from 'react';
-import { useProjectsStore, type ContextGraph } from '../stores/projects.js';
+import type { ContextGraph } from '../stores/projects.js';
+import { refreshContextGraphInventory, useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
 import { useTabsStore } from '../stores/tabs.js';
 import { useMemoryEntities, type MemoryEntity, type TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
+import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -44,7 +46,7 @@ const TS_PREDS = [
 ];
 
 export function MemoryStackView() {
-  const { contextGraphs } = useProjectsStore();
+  const { contextGraphs, error: listError, identity, inventoryLoading, inventoryError } = useContextGraphInventory();
   // Shared hidden-CG preference (same set as PanelLeft + Dashboard).
   const { hidden } = useHiddenContextGraphIds();
   const visible = useMemo(
@@ -57,16 +59,22 @@ export function MemoryStackView() {
       <div className="v10-memstack-head">
         <h1 className="v10-memstack-title">Memory Stack</h1>
         <p className="v10-memstack-sub">
-          Every layer across every context graph, at a glance. {visible.length} visible context graph{visible.length === 1 ? '' : 's'} ·
-          hidden context graphs are skipped.
+          Every layer across every context graph, at a glance.
+          {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible context graph{visible.length === 1 ? '' : 's'} · hidden context graphs are skipped.</>}
         </p>
       </div>
 
-      {visible.length === 0 ? (
+      {inventoryError && <div className="v10-stale-banner" role="alert">
+        <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
+          {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
+        <button type="button" className="v10-retry-btn" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
+      </div>}
+      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
+      {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
         <div className="v10-memstack-empty">
           No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
-      ) : (
+      )) : (
         <div className="v10-memstack-table">
           <div className="v10-memstack-colheads">
             <div className="v10-memstack-colhead project" />
@@ -153,6 +161,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
         {memory.error && (
           <div className="v10-memstack-project-status error">{memory.error}</div>
         )}
+        <MemoryReadStatus memory={memory} />
       </div>
       {LAYERS.map(L => {
         const bucket = byLayer[L.key];
@@ -166,6 +175,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
             entityCount={bucket.entities.length}
             tripleCount={bucket.tripleCount}
             recent={bucket.entities.slice(0, 4)}
+            partial={memory.partial || memory.loading}
             onOpenLayer={() =>
               openTab({
                 id: `${L.tabPrefix}:${cg.id}`,
@@ -188,6 +198,7 @@ function LayerCell({
   entityCount,
   tripleCount,
   recent,
+  partial,
   onOpenLayer,
 }: {
   cgId: string;
@@ -197,6 +208,7 @@ function LayerCell({
   entityCount: number;
   tripleCount: number;
   recent: MemoryEntity[];
+  partial: boolean;
   onOpenLayer: () => void;
 }) {
   const isEmpty = entityCount === 0;
@@ -208,11 +220,11 @@ function LayerCell({
       <div className="v10-memstack-cell-stats">
         <span className="v10-memstack-cell-n">{entityCount}</span>
         <span className="v10-memstack-cell-n-lbl">
-          entit{entityCount === 1 ? 'y' : 'ies'}
+          {partial ? 'loaded ' : ''}entit{entityCount === 1 ? 'y' : 'ies'}
         </span>
         <span className="v10-memstack-cell-sep">·</span>
         <span className="v10-memstack-cell-t">{tripleCount.toLocaleString()}</span>
-        <span className="v10-memstack-cell-t-lbl">triples</span>
+        <span className="v10-memstack-cell-t-lbl">{partial ? 'loaded triples' : 'triples'}</span>
       </div>
       {recent.length > 0 ? (
         <ul className="v10-memstack-cell-recent">
@@ -225,7 +237,7 @@ function LayerCell({
           ))}
         </ul>
       ) : (
-        <div className="v10-memstack-cell-empty-hint">Nothing in {tabPrefix.toUpperCase()} yet</div>
+        <div className="v10-memstack-cell-empty-hint">{partial ? 'No entries in the loaded preview' : `Nothing in ${tabPrefix.toUpperCase()} yet`}</div>
       )}
       {!isEmpty && (
         <button

@@ -1,12 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { DKGAgentBase } from './dkg-agent-base.js';
-import type { ContextGraphListFullRow } from '@origintrail-official/dkg-core';
+import type { ContextGraphListFullRow, ContextGraphListOnChainFacts } from '@origintrail-official/dkg-core';
 import type {
   FinalizedContextGraphAuthorityTargetV1,
   FinalizedContextGraphAuthorityTargetsResolutionV1,
 } from './dkg-agent-cg-registry.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import type { OnChainContextGraphFacts } from './context-graph-storage-discovery.js';
+
+export type { ContextGraphListOnChainFacts };
+
+/** Project the node's merged on-chain facts onto the list row's `onChain` field. */
+export function toContextGraphListOnChainFacts(
+  facts: OnChainContextGraphFacts,
+): ContextGraphListOnChainFacts {
+  return Object.freeze({
+    id: facts.onChainId,
+    access: facts.accessPolicy === 0 ? 'public' : facts.accessPolicy === 1 ? 'private' : 'unknown',
+    publishPolicy: facts.publishPolicy === null
+      ? null
+      : facts.publishPolicy === 0 ? 'curated' : facts.publishPolicy === 1 ? 'open' : 'unknown',
+    publishAuthority: facts.publishAuthority,
+    owner: facts.owner,
+    createdAt: facts.createdAt === null ? null : new Date(facts.createdAt * 1_000).toISOString(),
+    active: facts.active,
+    nameHash: facts.nameHash,
+    observedAtBlock: facts.observedAtBlock,
+  });
+}
 
 export type ListContextGraphsRow = ContextGraphListFullRow;
 

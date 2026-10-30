@@ -1157,6 +1157,12 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     expect((confirmPlan as any).calls).toHaveLength(1);
     expect(confirmPlan.calls[0][1]).toEqual({ yes: true });
     expect(existsSync(join(tmpHome, '.cursor', 'mcp.json'))).toBe(true);
+    for (const item of confirmPlan.calls[0][0]) {
+      if (item.action === 'skip') continue;
+      expect(item.s.kind).toBe('classified');
+      const persisted = JSON.parse(readFileSync(item.s.target.file.destination, 'utf8'));
+      expect(persisted.mcpServers.dkg).toEqual(item.s.entry);
+    }
   });
 
   it('F31: confirmPlan-stub-says-no on a single-client plan → zero writes', async () => {
@@ -2387,6 +2393,9 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
 
   // ── Codex Round-8 Fix 15: per-client failure isolation ───────────
 
+  // Windows launcher registration/idempotence runs in the mandatory real WSL fixture.
+  // Faking WSL_DISTRO_NAME here would also select Windows ACL persistence on plain Linux.
+
   it.each([false, true])('plans one Windows-backed registration when native and WSL targets alias (Windows first: %s)', async (windowsFirst) => {
     const configPath = join(tmpHome, 'aliased-cursor.json');
     writeFileSync(configPath, JSON.stringify({ mcpServers: { dkg: { command: 'old' } } }));
@@ -2455,7 +2464,14 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     writeFileSync(join(cursorDir, 'mcp.json'), '{"truncated":');
 
     const stderrSpy = captureWrites(process.stderr, 'write');
-    const deps = makeDeps();
+    const deps = makeDeps({ confirmPlan: async planned => {
+      const failed = planned.find(item => item.s.target.aliases.some(alias => alias.id === 'cursor'))!;
+      expect(failed.action).toBe('skip');
+      expect(failed.s.kind).toBe('failed');
+      expect(failed.s).not.toHaveProperty('entry');
+      expect(planned.filter(item => item.action !== 'skip').every(item => item.s.kind === 'classified')).toBe(true);
+      return [...planned];
+    } });
 
     await expect(
       mcpSetupAction({ start: false, fund: false, verify: false }, deps),

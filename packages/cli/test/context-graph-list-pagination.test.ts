@@ -601,6 +601,19 @@ describe('bounded context-graph listing', () => {
     const unrelated = { __corsOrigin: 'https://ui.example' } as unknown as Parameters<
       typeof jsonResponseHeaders
     >[0];
-    expect(jsonResponseHeaders(unrelated)).not.toHaveProperty('Access-Control-Expose-Headers');
+    expect(jsonResponseHeaders(unrelated)['Access-Control-Expose-Headers']).toBe('Retry-After, x-dkg-operation-id');
+    expect(jsonResponseHeaders(unrelated, undefined, { 'Access-Control-Expose-Headers': 'ETag, retry-after' })['Access-Control-Expose-Headers'])
+      .toBe('retry-after, x-dkg-operation-id, ETag');
+  });
+
+  it('keeps what changes the meaning of a row in the summary projection', () => {
+    const [row] = rows(1);
+    const page = buildContextGraphListPage(
+      [{ ...row!, nameKnown: false, joinState: 'approved-metadata-pending' as const }],
+      pagedQuery({ projection: 'summary' }),
+    );
+    expect(page).toMatchObject({ ok: true, payload: { contextGraphs: [
+      expect.objectContaining({ nameKnown: false, joinState: 'approved-metadata-pending' }),
+    ] } });
   });
 });

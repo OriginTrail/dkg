@@ -1,9 +1,86 @@
 import { describe, expect, it, vi } from 'vitest';
-import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
-  '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  '../src/rfc64/background-work-dispatcher-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
+  '../src/rfc64/catalog-limits-v1.js';
+import {
+  Rfc64CatalogReplayRecoveryRuntimeV1,
+} from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 
 interface Target {
   readonly id: string;
+  readonly scope?: string;
+  readonly version?: number;
+}
+
+/** Stands in for the agent's newest-version-per-scope promise pruning. */
+function pruneSupersededTargets(targets: readonly Target[]): readonly Target[] {
+  const newestByScope = new Map<string, number>();
+  for (const target of targets) {
+    const scope = target.scope ?? target.id;
+    const version = target.version ?? 0;
+    if ((newestByScope.get(scope) ?? -1) < version) newestByScope.set(scope, version);
+  }
+  return targets.filter(
+    (target) => (target.version ?? 0) === newestByScope.get(target.scope ?? target.id),
+  );
+}
+
+/**
+ * Three providers, each promising one head, and a durable parity read that can
+ * be parked once so another request can join the pass waiting inside it.
+ */
+function createParkableParityRuntime() {
+  const targetsByPeer = new Map<string, readonly Target[]>([
+    ['peer-a', [{ id: 'head-a' }]],
+    ['peer-b', [{ id: 'head-b' }]],
+    ['peer-c', [{ id: 'head-c' }]],
+  ]);
+  let failingPeer: string | null = null;
+  let parked: { readonly entered: () => void; readonly release: Promise<void> } | null = null;
+  const requestPeer = vi.fn(async (_contextGraphId: string, peerId: string) => {
+    if (peerId === failingPeer) throw new Error('dial failed');
+    return Object.freeze({
+      status: 'completed' as const,
+      targets: targetsByPeer.get(peerId) ?? [],
+    });
+  });
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+    requestPeer,
+    whenReceiverIdleForContextGraph: async () => undefined,
+    targetIdentity: (target) => target.id,
+    parityFailed: async () => {
+      const park = parked;
+      parked = null;
+      if (park !== null) {
+        park.entered();
+        await park.release;
+      }
+      return false;
+    },
+  });
+  return {
+    runtime,
+    requestPeer,
+    failPeer(peerId: string | null) {
+      failingPeer = peerId;
+    },
+    fullPass(connectedPeerIds: readonly string[]) {
+      return runtime.request({
+        contextGraphId: 'public-cg',
+        policyDigest: 'policy',
+        kind: 'full-connected-peers',
+        connectedPeerIds: Object.freeze([...connectedPeerIds]),
+      });
+    },
+    parkNextParityRead() {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      parked = { entered: () => entered.resolve(), release: release.promise };
+      return { entered: entered.promise, release: () => release.resolve() };
+    },
+  };
 }
 
 function run(
@@ -26,6 +103,400 @@ function run(
 }
 
 describe('RFC-64 catalog replay recovery runtime', () => {
+
+  it('cancels a held peer replay request when its background owner closes', async () => {
+    const onError = vi.fn();
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+    const entered = Promise.withResolvers<AbortSignal>();
+    const requestPeer = vi.fn(async (
+      _contextGraphId: string,
+      _peerId: string,
+      signal?: AbortSignal,
+    ) => {
+      if (signal === undefined) throw new Error('replay request signal missing');
+      entered.resolve(signal);
+      return new Promise<never>((_resolve, reject) => {
+        const onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+    });
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer,
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    runtime.markPeerPending('public-cg', 'policy', 'peer-held');
+    dispatcher.scheduleKeyed('catalog-replay', async (signal) => {
+      await runtime.request({
+        contextGraphId: 'public-cg',
+        policyDigest: 'policy',
+        kind: 'pending-recovery',
+        executionOwner: { signal },
+      });
+    });
+
+    const signal = await entered.promise;
+    await expect(dispatcher.closeAndDrain()).resolves.toBeUndefined();
+    expect(signal.aborted).toBe(true);
+    expect(requestPeer).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+    expect(runtime.status('public-cg', 'policy')).toMatchObject({
+      active: false,
+      failed: false,
+    });
+  });
+
+  it('cancels a held receiver-idle barrier when its background owner closes', async () => {
+    const onError = vi.fn();
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+    const entered = Promise.withResolvers<AbortSignal>();
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([]),
+      }),
+      whenReceiverIdleForContextGraph: async (_contextGraphId, signal) => {
+        if (signal === undefined) throw new Error('receiver idle signal missing');
+        entered.resolve(signal);
+        await new Promise<void>((_resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+      },
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    runtime.markPeerPending('public-cg', 'policy', 'peer-ready');
+    dispatcher.scheduleKeyed('catalog-replay', async (signal) => {
+      await runtime.request({
+        contextGraphId: 'public-cg',
+        policyDigest: 'policy',
+        kind: 'pending-recovery',
+        executionOwner: { signal },
+      });
+    });
+
+    const signal = await entered.promise;
+    await expect(dispatcher.closeAndDrain()).resolves.toBeUndefined();
+    expect(signal.aborted).toBe(true);
+    expect(onError).not.toHaveBeenCalled();
+    expect(runtime.status('public-cg', 'policy')).toMatchObject({
+      active: false,
+      failed: false,
+    });
+  });
+
+  it('keeps mixed provider failure in runtime health instead of dispatcher errors', async () => {
+    const onError = vi.fn();
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+    const promote = vi.fn(async () => undefined);
+    const replay = vi.fn(async () => Object.freeze({ requested: 1, failed: 1 }));
+    const scheduleAcceptedRecovery = (
+      Rfc64CatalogMethods.prototype as unknown as {
+        scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+          contextGraphId: string,
+          policyDigest: string,
+        ): void;
+      }
+    ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+    scheduleAcceptedRecovery.call({
+      rfc64BackgroundWorkDispatcherV1: dispatcher,
+      promoteRfc64OwnerSignedSwmInventoriesV1: promote,
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      rfc64CatalogReplayRecoveryRuntimeV1: () => ({
+        status: () => ({ failed: false, unverified: false }),
+      }),
+    }, 'public-cg', `0x${'11'.repeat(32)}`);
+
+    await dispatcher.whenIdle();
+    expect(promote).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+    await dispatcher.closeAndDrain();
+  });
+
+  it('retries only an observed incomplete private replay after authority acceptance', async () => {
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    const replay = vi.fn()
+      .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 0 }))
+      .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
+    const status = vi.fn()
+      .mockReturnValueOnce({ failed: false, unverified: true })
+      .mockReturnValueOnce({ failed: false, unverified: false });
+    const scheduleAcceptedRecovery = (
+      Rfc64CatalogMethods.prototype as unknown as {
+        scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+          contextGraphId: string,
+          policyDigest: string,
+          options?: { retryIncompletePrivate?: boolean },
+        ): void;
+      }
+    ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+    const host = {
+      rfc64BackgroundWorkDispatcherV1: dispatcher,
+      promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
+      requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
+    };
+
+    scheduleAcceptedRecovery.call(
+      host,
+      'private-cg',
+      `0x${'55'.repeat(32)}`,
+      { retryIncompletePrivate: true },
+    );
+    await dispatcher.whenIdle();
+    expect(replay).toHaveBeenCalledTimes(2);
+
+    replay.mockClear();
+    status.mockReturnValue({ failed: false, unverified: true });
+    scheduleAcceptedRecovery.call(host, 'public-cg', `0x${'66'.repeat(32)}`);
+    await dispatcher.whenIdle();
+    expect(replay).toHaveBeenCalledOnce();
+    await dispatcher.closeAndDrain();
+  });
+
+  it('retries an answered replay whose promised catalog rows are still missing', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const replay = vi.fn()
+        .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 1 }))
+        .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 0 }));
+      const status = vi.fn()
+        .mockReturnValueOnce({ failed: true, unverified: false })
+        .mockReturnValueOnce({ failed: false, unverified: false });
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+            options?: { awaitsProviderAuthorization?: boolean },
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
+      }, 'private-cg', `0x${'33'.repeat(32)}`, { awaitsProviderAuthorization: true });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(replay).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(250);
+      await dispatcher.whenIdle();
+
+      expect(replay).toHaveBeenCalledTimes(2);
+      expect(status).toHaveBeenCalledTimes(2);
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a zero-provider replay after private membership settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const promote = vi.fn(async () => undefined);
+      const replay = vi.fn()
+        .mockResolvedValueOnce(Object.freeze({ requested: 0, failed: 0 }))
+        .mockResolvedValueOnce(Object.freeze({ requested: 1, failed: 0 }));
+      const status = vi.fn()
+        .mockReturnValueOnce(null)
+        .mockReturnValueOnce({ failed: false, unverified: false });
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+            options?: { awaitsProviderAuthorization?: boolean },
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: promote,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status }),
+      }, 'private-cg', `0x${'44'.repeat(32)}`, { awaitsProviderAuthorization: true });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(replay).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(249);
+      expect(replay).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await dispatcher.whenIdle();
+
+      expect(replay).toHaveBeenCalledTimes(2);
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds zero-provider recovery when no authorized provider joins', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const replay = vi.fn(async () => Object.freeze({ requested: 0, failed: 0 }));
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+            options?: { awaitsProviderAuthorization?: boolean },
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: async () => undefined,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({ status: () => null }),
+      }, 'private-cg', `0x${'55'.repeat(32)}`, { awaitsProviderAuthorization: true });
+
+      await vi.advanceTimersByTimeAsync(480_000);
+      await dispatcher.whenIdle();
+
+      expect(replay).toHaveBeenCalledTimes(9);
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('takes a zero-provider replay as final unless the replica awaits provider authorization', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const promote = vi.fn(async () => undefined);
+      const replay = vi.fn(async () => Object.freeze({ requested: 0, failed: 0 }));
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      // Scheduled after every authority refresh of every accepted graph: a
+      // graph nobody has anything to serve for must not keep it running.
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: promote,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      }, 'public-cg', `0x${'66'.repeat(32)}`);
+
+      await vi.advanceTimersByTimeAsync(0);
+      await dispatcher.whenIdle();
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(promote).toHaveBeenCalledOnce();
+      expect(replay).toHaveBeenCalledOnce();
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries a transient authority promotion failure without another authority event', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const promote = vi.fn()
+        .mockRejectedValueOnce(new Error('temporary inventory store failure'))
+        .mockResolvedValue(undefined);
+      const replay = vi.fn(async () => Object.freeze({ requested: 1, failed: 0 }));
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: promote,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+        rfc64CatalogReplayRecoveryRuntimeV1: () => ({
+          status: () => ({ failed: false, unverified: false }),
+        }),
+      }, 'public-cg', `0x${'22'.repeat(32)}`);
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(promote).toHaveBeenCalledOnce();
+      expect(replay).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(249);
+      expect(promote).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      await dispatcher.whenIdle();
+
+      expect(promote).toHaveBeenCalledTimes(2);
+      expect(replay).toHaveBeenCalledOnce();
+      expect(onError).not.toHaveBeenCalled();
+      await dispatcher.closeAndDrain();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending authority recovery retry when its background owner closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+      const attempted = Promise.withResolvers<void>();
+      const promote = vi.fn(async () => {
+        attempted.resolve();
+        throw new Error('temporary inventory store failure');
+      });
+      const replay = vi.fn(async () => Object.freeze({ requested: 1, failed: 0 }));
+      const scheduleAcceptedRecovery = (
+        Rfc64CatalogMethods.prototype as unknown as {
+          scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
+            contextGraphId: string,
+            policyDigest: string,
+          ): void;
+        }
+      ).scheduleRfc64AuthorityAcceptedCatalogRecoveryV1;
+
+      scheduleAcceptedRecovery.call({
+        rfc64BackgroundWorkDispatcherV1: dispatcher,
+        promoteRfc64OwnerSignedSwmInventoriesV1: promote,
+        requestRfc64CatalogHeadReplaysFromConnectedPeersV1: replay,
+      }, 'public-cg', `0x${'33'.repeat(32)}`);
+
+      await attempted.promise;
+      await expect(dispatcher.closeAndDrain()).resolves.toBeUndefined();
+
+      expect(promote).toHaveBeenCalledOnce();
+      expect(replay).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('owns policy replacement leases, coalesced completion, and status projection', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -38,7 +509,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     });
     const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
       requestPeer,
-      whenReceiverIdle: async () => undefined,
+      whenReceiverIdleForContextGraph: async () => undefined,
       targetIdentity: (target) => target.id,
       parityFailed: async () => false,
     });
@@ -52,6 +523,8 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     expect(runtime.status('public-cg', 'new-policy')).toEqual({
       active: true,
       failed: false,
+      unresolvedPeerCount: 0,
+      unverified: false,
     });
 
     release();
@@ -61,6 +534,8 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     expect(runtime.status('public-cg', 'new-policy')).toEqual({
       active: false,
       failed: false,
+      unresolvedPeerCount: 0,
+      unverified: false,
     });
     newLease?.release();
   });
@@ -78,7 +553,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     });
     const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
       requestPeer,
-      whenReceiverIdle: async () => undefined,
+      whenReceiverIdleForContextGraph: async () => undefined,
       targetIdentity: (target) => target.id,
       parityFailed: async () => parityFails,
     });
@@ -101,4 +576,274 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     await expect(scoped).resolves.toEqual({ requested: 1, failed: 0 });
     expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
   });
+
+  it('parks each pass on ITS OWN context graph and reads parity only after that wait', async () => {
+    const order: string[] = [];
+    const releases = new Map<string, () => void>();
+    const whenReceiverIdleForContextGraph = vi.fn((contextGraphId: string) => (
+      new Promise<void>((resolve) => {
+        order.push(`idle-wait:${contextGraphId}`);
+        releases.set(contextGraphId, resolve);
+      })
+    ));
+    const parityFailed = vi.fn(async (contextGraphId: string) => {
+      order.push(`parity:${contextGraphId}`);
+      return false;
+    });
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{ id: 'target' }]),
+      }),
+      whenReceiverIdleForContextGraph,
+      targetIdentity: (target) => target.id,
+      parityFailed,
+    });
+    const request = (contextGraphId: string) => {
+      runtime.markPeerPending(contextGraphId, 'policy', 'peer-a');
+      return runtime.request({ contextGraphId, policyDigest: 'policy', kind: 'pending-recovery' });
+    };
+
+    const busy = request('busy-cg');
+    const converged = request('converged-cg');
+    await vi.waitFor(() => { expect(releases.size).toBe(2); });
+    // The id is the whole contract: a wait keyed by anything else reads idle
+    // for a graph with admissions still pending, or parks on a stranger's work.
+    expect(whenReceiverIdleForContextGraph.mock.calls).toEqual([['busy-cg'], ['converged-cg']]);
+    expect(parityFailed).not.toHaveBeenCalled();
+
+    // The converged graph's pass completes while the busy graph's stays parked.
+    releases.get('converged-cg')!();
+    await expect(converged).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('converged-cg', 'policy')?.active).toBe(false);
+    expect(runtime.status('busy-cg', 'policy')?.active).toBe(true);
+    expect(order).toEqual(['idle-wait:busy-cg', 'idle-wait:converged-cg', 'parity:converged-cg']);
+
+    releases.get('busy-cg')!();
+    await expect(busy).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('busy-cg', 'policy')?.active).toBe(false);
+  });
+
+  it('keeps the promise of a peer a full pass never heard from', async () => {
+    const targetsByPeer = new Map<string, readonly Target[]>([
+      ['peer-a', [{ id: 'head-a' }]],
+      ['peer-b', [{ id: 'head-b' }]],
+    ]);
+    let failingPeer: string | null = null;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_contextGraphId, peerId) => {
+        if (peerId === failingPeer) throw new Error('dial failed');
+        return Object.freeze({
+          status: 'completed' as const,
+          targets: targetsByPeer.get(peerId) ?? [],
+        });
+      },
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    const fullPass = () => runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'policy',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-a', 'peer-b']),
+    });
+
+    await expect(fullPass()).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+    ]);
+
+    // The pass queued every connected peer, so it may clear a witness -- but
+    // peer-b never answered, so its promised head was not re-heard and is not
+    // evidence that peer-b retired it.
+    failingPeer = 'peer-b';
+    await expect(fullPass()).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+    ]);
+  });
+
+  it('keeps a promise when a full pass that joins a scoped run mid-parity loses an answer', async () => {
+    const replay = createParkableParityRuntime();
+    await expect(replay.fullPass(['peer-a', 'peer-b']))
+      .resolves.toEqual({ requested: 2, failed: 0 });
+    expect(replay.runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+    ]);
+
+    // A reconnect demand starts a scoped run, parked inside its durable parity
+    // read with only peer-c's promise heard.
+    const parity = replay.parkNextParityRead();
+    replay.runtime.markPeerPending('public-cg', 'policy', 'peer-c');
+    const scoped = run(replay.runtime, 'policy');
+    await parity.entered;
+
+    // A full pass joins the running pass: coalescing hands it the full-replay
+    // entitlement and queues its peers, and peer-a no longer answers.
+    replay.failPeer('peer-a');
+    replay.requestPeer.mockClear();
+    const joined = replay.fullPass(['peer-a', 'peer-b']);
+    expect(joined).toBe(scoped);
+    parity.release();
+
+    await expect(scoped).resolves.toEqual({ requested: 2, failed: 1 });
+    // The running pass absorbed the join and dialed its peers itself.
+    expect(replay.requestPeer.mock.calls.map(([, peerId]) => peerId).sort())
+      .toEqual(['peer-a', 'peer-a', 'peer-b']);
+    // A full pass may clear a witness past one unreachable provider, so the
+    // promise snapshot is the only record left of head-a.
+    expect(replay.runtime.status('public-cg', 'policy')).toEqual({
+      active: false,
+      failed: false,
+      unresolvedPeerCount: 1,
+      unverified: false,
+    });
+    expect(replay.runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+      { id: 'head-c' },
+    ]);
+  });
+
+  it('still replaces the promise snapshot when a joined full pass re-hears every peer', async () => {
+    const replay = createParkableParityRuntime();
+    await expect(replay.fullPass(['peer-a', 'peer-b']))
+      .resolves.toEqual({ requested: 2, failed: 0 });
+
+    const parity = replay.parkNextParityRead();
+    replay.runtime.markPeerPending('public-cg', 'policy', 'peer-c');
+    const scoped = run(replay.runtime, 'policy');
+    await parity.entered;
+
+    // peer-b has disconnected; the joined pass covers peer-a, which answers.
+    const joined = replay.fullPass(['peer-a']);
+    expect(joined).toBe(scoped);
+    parity.release();
+
+    await expect(scoped).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(replay.runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-c' },
+      { id: 'head-a' },
+    ]);
+  });
+
+
+  it('keeps a merged promise overflow latched on a full pass that may clear the witness', async () => {
+    const half = RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 / 2;
+    const heads = (prefix: string) => Array.from(
+      { length: half },
+      (_, index) => Object.freeze({ id: `${prefix}-${index}` }),
+    );
+    const targetsByPeer = new Map<string, readonly Target[]>([
+      ['peer-a', heads('a')],
+      ['peer-b', heads('b')],
+    ]);
+    let failingPeer: string | null = null;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_contextGraphId, peerId) => {
+        if (peerId === failingPeer) throw new Error('dial failed');
+        return Object.freeze({
+          status: 'completed' as const,
+          targets: targetsByPeer.get(peerId) ?? [],
+        });
+      },
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    const fullPass = () => runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'policy',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-a', 'peer-b']),
+    });
+
+    await expect(fullPass()).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(runtime.promisedTargets('public-cg', 'policy'))
+      .toHaveLength(RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1);
+
+    // peer-a moves to new heads and peer-b stops answering. The pass passes
+    // parity and may clear a witness, but it may only ADD to the snapshot, and
+    // the union no longer fits the bound.
+    targetsByPeer.set('peer-a', heads('a-next'));
+    failingPeer = 'peer-b';
+    await expect(fullPass()).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toBeNull();
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
+  });
+
+  it('prunes superseded promises instead of blocking a graph that advanced often', async () => {
+    let promisedVersion = 1;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => Object.freeze({
+        status: 'completed' as const,
+        targets: Object.freeze([{
+          id: `scope-a@${promisedVersion}`,
+          scope: 'scope-a',
+          version: promisedVersion,
+        }]),
+      }),
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+      pruneSupersededTargets,
+    });
+
+    // One live scope, advanced past the per-Context-Graph target bound. Each
+    // scoped pass merges into the snapshot, so without pruning the superseded
+    // versions accumulate and overflow it into `failed`.
+    for (; promisedVersion <= 70; promisedVersion += 1) {
+      runtime.markPeerPending('public-cg', 'policy', `peer-${promisedVersion}`);
+      await expect(run(runtime, 'policy')).resolves.toEqual({ requested: 1, failed: 0 });
+    }
+
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'scope-a@70', scope: 'scope-a', version: 70 },
+    ]);
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
+  });
+});
+
+it.each([false, true])('retires orphaned cancelled coverage while preserving staged custody (%s)', async staged => {
+  let failingParity = true;
+  let blockB = false;
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+    requestPeer: async (_cg, peer) => {
+      if (peer === 'peer-b' && blockB) { entered.resolve(); await release.promise; }
+      return { status: 'completed', targets: [{ id: `head-${peer}` }] };
+    },
+    whenReceiverIdleForContextGraph: async () => undefined,
+    targetIdentity: target => target.id,
+    parityFailed: async () => failingParity,
+  });
+  const full = (peers: string[], signal?: AbortSignal) => runtime.request({
+    contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'full-connected-peers', connectedPeerIds: peers, executionOwner: { signal },
+  });
+  await full(['peer-a', 'peer-b']);
+  expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
+  blockB = true;
+  const reserved = staged ? runtime.reservePeer('public-cg', 'policy', 'peer-c') : null;
+  const controller = new AbortController();
+  const cancelled = full(staged ? ['peer-a', 'peer-b', 'peer-c'] : ['peer-a', 'peer-b'], controller.signal);
+  const rejection = expect(cancelled).rejects.toThrow('cancelled replay');
+  await entered.promise;
+  controller.abort(new Error('cancelled replay'));
+  release.resolve();
+  await rejection;
+  expect(runtime.promisedTargets('public-cg', 'policy')).toContainEqual({ id: 'head-peer-b' });
+  failingParity = false;
+  await expect(full(['peer-a'])).resolves.toEqual({ requested: 1, failed: 0 });
+  if (reserved) {
+    expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: true, active: true });
+    reserved.admit();
+    await runtime.request({ contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'connection-demand', demand: reserved });
+    reserved.release();
+  }
+  expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: false, active: false, unverified: false });
 });

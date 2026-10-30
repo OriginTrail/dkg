@@ -1,3 +1,4 @@
+import { buildOpenOwnerContextGraphPolicyV1, unsignedOpenContextGraphPolicyEnvelopeV1 } from '../src/rfc64/open-catalog-policy-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import { join } from 'node:path';
@@ -7,9 +8,13 @@ import type { AddressInfo } from 'node:net';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   assertCanonicalGraphScopedAuthorSealV1,
+  buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
+  computeSwmAuthorInventoryScopeDigestV1,
+  contextGraphAssertionUri,
   contextGraphDataGraphUri,
+  contextGraphMetaUri,
   createOperationContext,
   DKG_ONTOLOGY,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
@@ -24,16 +29,31 @@ import {
   type EvmAddressV1,
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  GraphManager,
+  OxigraphStore,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
+  isRfc64TransientAuthorityRefreshFailureV1,
+  RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1,
+} from '../src/dkg-agent-rfc64-catalog.js';
+import {
+  computeFlatKCRootV10,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '@origintrail-official/dkg-publisher';
 import {
   NoChainAdapter,
   activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
   withRpcRequestContext,
   type ChainAdapter,
+  type ContextGraphAuthorityReadOptions,
   type ContextGraphAuthorityIndexId,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -41,33 +61,57 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/index.js';
+import { peekFinalizedAuthorityColdResolution } from '../src/finalized-authority-cold-resolution.js';
+import {
+  createLoopbackJsonRpcTestHarness,
+  sendJsonRpcError,
+  sendJsonRpcResult,
+} from '../../chain/test/loopback-rpc-harness.js';
 import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
+import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
+  '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
-import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
+import {
+  isRfc64AuthorityRpcCircuitOpenErrorV1,
+  Rfc64AuthorityRpcCircuitOpenErrorV1,
+} from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { VmReconcileQueueClosedError } from '../src/vm-reconcile-service.js';
 import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from
   '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import { maintainRfc64SwmAuthorInventoryV1 } from
+  '../src/rfc64/swm-author-inventory-producer-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1,
   Rfc64PublicCatalogTransportErrorV1,
+  encodeRfc64PublicCatalogHeadReplayCompletionV2,
   parseRfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadAnnouncementV1,
   type Rfc64PublicCatalogHeadReplayRequestV1,
 } from '../src/rfc64/public-catalog-transport-v1.js';
-import { composeRfc64UnregisteredCatalogAuthorityV1 } from
-  '../src/rfc64/release-native-catalog-authority-v1.js';
+import {
+  composeRfc64FinalizedCatalogAuthorityV1,
+  composeRfc64UnregisteredCatalogAuthorityV1,
+  parseRfc64AuthoritySnapshotV1,
+} from '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   commitPreparedRfc64AppliedCatalogAuthorityDeactivationsV1,
   prepareRfc64AppliedCatalogAuthorityDeactivationV1,
 } from '../src/rfc64/applied-catalog-authority-transition-v1.js';
+import {
+  RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+  mintRfc64UnregisteredReplicaAuthorityEvidenceV1,
+} from '../src/rfc64/unregistered-replica-authority-v1.js';
 import {
   createRfc64RolloutAgentHarness,
   RFC64_ROLLOUT_AUTHOR as AUTHOR,
@@ -79,9 +123,20 @@ import {
   rfc64RolloutActivation as activation,
   rfc64RolloutPolicyEnvelope as policyEnvelope,
 } from './_helpers/rfc64-rollout-agent-harness.js';
+import { createFinalizedVmLoopbackRpcV1 } from
+  './support/rfc64-finalized-vm-loopback-fixture.js';
 
 const MEMBER = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
 const NONMEMBER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
+const AUTHOR_CHAIN_CONFIG = Object.freeze({
+  rpcUrl: 'http://127.0.0.1:1',
+  hubAddress: '0x3333333333333333333333333333333333333333',
+  operationalKeys: Object.freeze([AUTHOR_WALLET.privateKey]),
+});
+
+function custodialAuthorConfig(chainAdapter: ChainAdapter = new NoChainAdapter()) {
+  return { chainAdapter, chainConfig: AUTHOR_CHAIN_CONFIG };
+}
 
 const PROJECTION_QUADS: readonly Quad[] = Object.freeze([
   Object.freeze({
@@ -103,6 +158,7 @@ const {
   restartAgent,
   cleanup,
 } = createRfc64RolloutAgentHarness();
+const finalizedRpcHarness = createLoopbackJsonRpcTestHarness();
 
 function finalizedAuthoritySnapshot(
   contextGraphId: string,
@@ -163,10 +219,10 @@ function replaySuccess(
   });
 }
 
-async function startAppliedOpenReplayProvider(name: string) {
+async function startAppliedOpenReplayProvider(name: string, activationInput?: ReturnType<typeof activation>) {
   const provider = await startAgent({
-    name,
-    config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+    name, activation: activationInput,
+    config: activationInput ? {} : { rfc64CatalogDeploymentProfile: DEPLOYMENT },
   });
   const signer = Object.freeze({
     address: AUTHOR,
@@ -212,6 +268,7 @@ async function startAppliedOpenReplayProvider(name: string) {
 
 afterEach(async () => {
   await cleanup();
+  await finalizedRpcHarness.stopAll();
   vi.restoreAllMocks();
 });
 
@@ -296,12 +353,18 @@ describe('RFC-64 rollout authority integration', () => {
       startupJitterMs: 0,
     });
     let observedSignal: AbortSignal | undefined;
+    let observedProjectionEvidence = false;
     const readRevisions = vi.fn(async (
       _contextGraphIds: readonly string[],
-      options?: { signal?: AbortSignal },
+      options: ContextGraphAuthorityReadOptions = {},
     ) => {
-      observedSignal = options?.signal;
+      observedSignal = options.signal;
       await governor.acquireActiveRequest();
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'scan',
+        ageMs: 0,
+      });
+      observedProjectionEvidence = true;
       return new Map([['9', `0x${'ab'.repeat(32)}`]]);
     });
     const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
@@ -315,12 +378,64 @@ describe('RFC-64 rollout authority integration', () => {
       // so startup needs only the owner's initial revision read.
       expect(readRevisions).toHaveBeenCalledOnce();
       expect(readRevisions).toHaveBeenCalledWith(['9'], {
+        onContextGraphAuthorityProjectionServed: expect.any(Function),
         signal: expect.any(AbortSignal),
       });
       expect(observedSignal?.aborted).toBe(false);
+      expect(observedProjectionEvidence).toBe(true);
       expect(governor.snapshot()).toMatchObject({
         backgroundAdmitted: 1,
         foregroundAdmitted: 0,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('keeps the shared circuit half-open when the scheduled revision read uses stale cache', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'stale-cache',
+        ageMs: 18_000,
+      });
+      return new Map([['9', `0x${'ab'.repeat(32)}`]]);
+    });
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+
+    try {
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
+      expect(readRevisions).not.toHaveBeenCalled();
+      // Isolate the scheduled revision probe: a subsequent point-authority
+      // refresh has its own production evidence-path coverage below and may
+      // legitimately prove pool recovery after this stale projection.
+      vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+        .mockResolvedValue(finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'));
+      await openSharedAuthorityCircuit(edge);
+      clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+        + 60_000;
+      // The responsibility owner used during construction is intentionally
+      // closed by the lifecycle helper. Seed the same durable binding and
+      // explicitly nudge the production refresh owner for this second pass.
+      (edge as any).contextGraphBindingState.bindAuthoritative(
+        CONTEXT_GRAPH_ID,
+        subscription,
+        '9',
+      );
+      (edge as any).rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
+      await runtime.whenIdle();
+      expect(readRevisions).toHaveBeenCalledOnce();
+      expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+        state: 'half-open',
+        consecutiveExhaustions: 1,
       });
     } finally {
       await runtime.close();
@@ -760,6 +875,12 @@ describe('RFC-64 rollout authority integration', () => {
       provider.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID),
       requester.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID),
     ]);
+    await vi.waitFor(() => {
+      for (const agent of [provider, requester]) {
+        expect(agent.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0);
+        expect(agent.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.activePeers).toBe(0);
+      }
+    });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -780,28 +901,34 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId: CONTEXT_GRAPH_ID,
     }));
 
-    await started;
-    let completed = false;
-    void Promise.all(requests).then(() => { completed = true; });
-    await vi.waitFor(() => {
-      expect(tryQueue).toHaveBeenCalledTimes(requests.length);
-    });
-    expect(tryQueue.mock.results.filter(
-      ({ value }) => value?.status === 'admitted' && value.newlyQueued,
-    )).toHaveLength(1);
-    expect(tryQueue.mock.results.filter(
-      ({ value }) => value?.status === 'admitted' && !value.newlyQueued,
-    )).toHaveLength(requests.length - 1);
-    expect(completed).toBe(false);
-    release();
-    await expect(Promise.all(requests)).resolves.toHaveLength(requests.length);
-    expect(replay).toHaveBeenCalled();
-    await vi.waitFor(() => {
-      expect(info.mock.calls.filter(([, message]: unknown[]) => (
-        typeof message === 'string'
-        && message.includes('Replayed 1 RFC-64 catalog head(s)')
-      ))).toHaveLength(1);
-    });
+    try {
+      await started;
+      let completed = false;
+      const completion = Promise.all(requests).then((values) => { completed = true; return values; });
+      void completion.catch(() => undefined);
+      await vi.waitFor(() => {
+        expect(tryQueue).toHaveBeenCalledTimes(requests.length);
+      });
+      expect(tryQueue.mock.results.filter(
+        ({ value }) => value?.status === 'admitted' && value.newlyQueued,
+      )).toHaveLength(1);
+      expect(tryQueue.mock.results.filter(
+        ({ value }) => value?.status === 'admitted' && !value.newlyQueued,
+      )).toHaveLength(requests.length - 1);
+      expect(completed).toBe(false);
+      release();
+      await expect(completion).resolves.toHaveLength(requests.length);
+      expect(replay).toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(info.mock.calls.filter(([, message]: unknown[]) => (
+          typeof message === 'string'
+          && message.includes('Replayed 1 RFC-64 catalog head(s)')
+        ))).toHaveLength(1);
+      });
+    } finally {
+      release();
+      await Promise.allSettled(requests);
+    }
   }, 30_000);
 
   it('reruns a coalesced receiver replay for demand added while an earlier peer is in flight', async () => {
@@ -914,11 +1041,14 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
       CONTEXT_GRAPH_ID,
     )).resolves.toEqual({ requested: 0, failed: 2 });
+    // Unreachable providers say nothing about this node's applied rows: they
+    // stay visible as retried provider failures, never as CG incompleteness.
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-replay-incomplete',
+        phase: 'bootstrapping',
+        stableReason: null,
+        providerHealth: expect.objectContaining({ unresolvedReplayPeers: 2 }),
       }),
     );
   });
@@ -946,8 +1076,9 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
-        phase: 'blocked',
-        stableReason: 'catalog-replay-incomplete',
+        phase: 'bootstrapping',
+        stableReason: null,
+        providerHealth: expect.objectContaining({ unresolvedReplayPeers: 1 }),
       }),
     );
 
@@ -969,6 +1100,7 @@ describe('RFC-64 rollout authority integration', () => {
     ))).toEqual(new Set([failedPeer, newPeer]));
     const [recoveredStatus] = await edge.readRfc64CatalogOperationalStatusV1();
     expect(recoveredStatus?.stableReason).not.toBe('catalog-replay-incomplete');
+    expect(recoveredStatus?.providerHealth.unresolvedReplayPeers).toBe(0);
   });
 
   it('bounds unresolved provider attribution and retains an aggregate churn witness', async () => {
@@ -999,7 +1131,7 @@ describe('RFC-64 rollout authority integration', () => {
     queueGeneration(1);
     await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 0, failed: 65 });
+    )).resolves.toEqual({ requested: 0, failed: 64 });
 
     requestReplay.mockClear();
     requestReplay.mockResolvedValue(Object.freeze({
@@ -1012,7 +1144,7 @@ describe('RFC-64 rollout authority integration', () => {
     )).not.toBeNull();
     await expect(edge.continueRfc64CatalogHeadReplayRecoveryV1(
       CONTEXT_GRAPH_ID,
-    )).resolves.toEqual({ requested: 64, failed: 1 });
+    )).resolves.toEqual({ requested: 64, failed: 0 });
     expect(requestReplay).toHaveBeenCalledTimes(64);
     await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({
@@ -1033,7 +1165,7 @@ describe('RFC-64 rollout authority integration', () => {
       (edge as any).networkAdmissionCoordinator,
       'ensureAdmitted',
     ).mockImplementation(async (peerId: string) => peerId !== peer.peerId);
-    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    const markPending = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
     const service = (edge as any).rfc64PublicCatalogServiceV1;
     const requestReplay = vi.spyOn(service, 'requestCatalogHeadReplay');
     edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
@@ -1044,7 +1176,7 @@ describe('RFC-64 rollout authority integration', () => {
         timeline: { open: Date.now() },
       },
     } as any));
-    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
+    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(String), peer.peerId);
     expect(markPending.mock.invocationCallOrder[0]).toBeLessThan(
       admission.mock.invocationCallOrder[0]!,
     );
@@ -1066,7 +1198,7 @@ describe('RFC-64 rollout authority integration', () => {
       (edge as any).networkAdmissionCoordinator,
       'ensureAdmitted',
     ).mockRejectedValue(new Error('admission transport unavailable'));
-    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    const markPending = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
     edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
       detail: {
         remotePeer: peer.node.libp2p.peerId,
@@ -1075,7 +1207,7 @@ describe('RFC-64 rollout authority integration', () => {
         timeline: { open: Date.now() },
       },
     } as any));
-    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peer.peerId);
+    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(String), peer.peerId);
     await vi.waitFor(async () => {
       await expect(edge.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
         expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID, phase: 'bootstrapping' }),
@@ -1100,8 +1232,8 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
       .mockResolvedValue(0);
     const warn = vi.spyOn((edge as any).log, 'warn');
-    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+    const markPending = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
+    const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
@@ -1141,8 +1273,8 @@ describe('RFC-64 rollout authority integration', () => {
       .mockResolvedValue(undefined);
     vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
       .mockResolvedValue(0);
-    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+    const markPending = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
+    const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     const reannounce = vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1')
       .mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
@@ -1160,19 +1292,41 @@ describe('RFC-64 rollout authority integration', () => {
 
     await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
     expect(markPending).toHaveBeenCalledTimes(1);
-    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, peerId);
-    expect(replay).toHaveBeenCalledWith(
-      CONTEXT_GRAPH_ID,
-      expect.objectContaining({
+    expect(markPending).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(String), peerId);
+    expect(replay).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kind: 'connection-demand',
+      demand: expect.objectContaining({
         peerId,
         generation: expect.any(Number),
-        release: expect.any(Function),
       }),
-    );
+    }));
     expect(reannounce).toHaveBeenCalledTimes(1);
+    const command = replay.mock.lastCall![0];
+    if (command.kind !== 'connection-demand') throw new Error('expected connection demand');
+    expect(command.demand.handle).toBe(markPending.mock.results[0].value!.handle);
+    expect(command.demand).toMatchObject({ peerId: markPending.mock.results[0].value!.peerId, generation: markPending.mock.results[0].value!.generation });
+    expect(command.executionOwner?.signal).toBe(reannounce.mock.lastCall![2]);
   }, 15_000);
 
-  it('debounces one live session but replays a genuine reconnect before time expiry', async () => {
+  it('constructs recovery commands at the accepted agent boundary without eagerly enumerating peers', async () => {
+    const edge = await startAgent({ name: 'replay-command-boundary', activation: activation('catalog') });
+    // Startup metadata bootstrap owns an independent peer scan; keep this
+    // command-boundary assertion focused on the replay owner's enumeration.
+    vi.spyOn(edge, 'resolveRfc64UnregisteredAuthoritySeedPeersV1').mockReturnValue([]);
+    const peers = vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([{ toString: () => 'connected-peer' }] as never);
+    const owner = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
+      .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
+    const signal = new AbortController().signal;
+    await edge.continueRfc64CatalogHeadReplayRecoveryV1(CONTEXT_GRAPH_ID, signal);
+    expect(owner.mock.lastCall![0]).toMatchObject({ kind: 'pending-recovery', contextGraphId: CONTEXT_GRAPH_ID });
+    expect(owner.mock.lastCall![0].executionOwner?.signal).toBe(signal); expect(peers).not.toHaveBeenCalled();
+    await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID, signal);
+    expect(owner.mock.lastCall![0]).toMatchObject({ kind: 'full-connected-peers', connectedPeerIds: ['connected-peer'] });
+    expect(owner.mock.lastCall![0].executionOwner?.signal).toBe(signal); expect(peers).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains a short reconnect and catches the newer head at the cooldown deadline', async () => {
     const edge = await startAgent({
       name: 'replay-connection-debounce-expiry',
       activation: activation('catalog'),
@@ -1187,10 +1341,10 @@ describe('RFC-64 rollout authority integration', () => {
       .mockResolvedValue(undefined);
     vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer')
       .mockResolvedValue(0);
-    const markPending = vi.spyOn(edge, 'markRfc64CatalogReplayPeerPendingV1');
+    const markPending = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
     let providerHead = 'head-v1';
     const replayedHeads: string[] = [];
-    const replay = vi.spyOn(edge, 'requestRfc64CatalogHeadReplayForConnectionDemandV1')
+    const replay = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockImplementation(async () => {
         replayedHeads.push(providerHead);
         return Object.freeze({ requested: 1, failed: 0 });
@@ -1210,13 +1364,15 @@ describe('RFC-64 rollout authority integration', () => {
     edge.node.libp2p.dispatchEvent(event());
     await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(1));
 
-    now.mockReturnValue(109_999);
+    now.mockRestore();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(109_999);
     edge.node.libp2p.dispatchEvent(event());
     await vi.waitFor(() => expect(admission).toHaveBeenCalledTimes(2));
     expect(replay).toHaveBeenCalledTimes(1);
 
     vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([] as never);
-    now.mockReturnValue(110_000);
+    vi.setSystemTime(110_000);
     edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', {
       detail: {
         remotePeer,
@@ -1225,12 +1381,56 @@ describe('RFC-64 rollout authority integration', () => {
       },
     } as any));
     providerHead = 'head-v2';
-    now.mockReturnValue(110_001);
+    vi.setSystemTime(110_001);
     edge.node.libp2p.dispatchEvent(event());
-    await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(2));
-    expect(markPending).toHaveBeenCalledTimes(2);
-    expect(replayedHeads).toEqual(['head-v1', 'head-v2']);
+    await vi.waitFor(() => expect(admission).toHaveBeenCalledTimes(3));
+    expect(replay).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(159_000);
+    try {
+      await vi.advanceTimersByTimeAsync(999);
+      expect(replay).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(replay).toHaveBeenCalledTimes(2);
+      expect(markPending).toHaveBeenCalledTimes(2);
+      expect(replayedHeads).toEqual(['head-v1', 'head-v2']);
+    } finally { vi.useRealTimers(); }
   }, 15_000);
+
+  it('the actual connection listener keeps a cooling peer fenced while another peer recovers', async () => {
+    const edge = await startAgent({ name: 'connection-staged-cooling-custody', activation: activation('catalog') });
+    vi.spyOn((edge as any).networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+    vi.spyOn(edge as any, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue(undefined);
+    vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
+    vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const pull = vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [],
+    });
+    let now = 10_000;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const a = '12D3KooWCoolingCatalogReplayPeerA';
+    const b = '12D3KooWIndependentCatalogReplayPeerB';
+    const open = (peer: string) => edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
+      detail: { remotePeer: { toString: () => peer }, remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+        direction: 'outbound', timeline: { open: now } },
+    } as any));
+    const peers = () => pull.mock.calls.map(([request]: any) => request.remotePeerId);
+    const recovery = () => (edge as any).rfc64CatalogReplayRecoveryRuntimeV1().status(CONTEXT_GRAPH_ID,
+      edge.readAcceptedRfc64CatalogAccessSnapshotV1(CONTEXT_GRAPH_ID)!.policyDigest);
+    try {
+      open(a); await vi.waitFor(() => expect(peers()).toEqual([a]));
+      await vi.waitFor(() => expect(recovery().active).toBe(false));
+      now = 11_000; open(a);
+      now = 12_000; open(b);
+      await vi.waitFor(() => expect(peers()).toContain(b));
+      expect(peers()).toEqual([a, b]);
+      expect(recovery().active).toBe(true);
+      expect((await edge.readRfc64CatalogOperationalStatusV1()).find(row => row.contextGraphId === CONTEXT_GRAPH_ID)?.phase).not.toBe('complete');
+      now = 70_000;
+      await vi.waitFor(() => expect(peers()).toEqual([a, b, a]), { timeout: 3_000 });
+      await vi.waitFor(() => expect(recovery().active).toBe(false));
+    } finally { clock.mockRestore(); }
+  });
 
   it('connection replay sends public and authorized private heads without disclosing private metadata to a nonmember', async () => {
     const privateContextGraphId = `${AUTHOR}/private-connection-replay` as ContextGraphIdV1;
@@ -1358,6 +1558,644 @@ describe('RFC-64 rollout authority integration', () => {
       .toEqual([CONTEXT_GRAPH_ID, privateContextGraphId].sort());
   });
 
+  it('replays only the accepted generation when one CG holds both generations\' heads', async () => {
+    // The devnet failure this guards: a CG authored before its registration
+    // keeps its owner-signed durable head alongside the finalized-chain head
+    // published afterwards. Both are current for their own catalog scope and
+    // both collapse to one wire scope, so replaying both makes the V2
+    // completion unencodable and every receiver sits at
+    // catalog-replay-incomplete.
+    const { provider, persistence, publication, scope } =
+      await startAppliedOpenReplayProvider('replay-two-generations');
+    const signer = Object.freeze({
+      address: AUTHOR,
+      signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+    });
+    const finalized = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: parseRfc64AuthoritySnapshotV1(
+        { ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'), accessPolicy: 0 },
+        9n,
+      ),
+    });
+    // Registration is the one-way promotion the authority reconciler performs
+    // once the CG is on chain: the owner-signed seed stays durable, the
+    // finalized generation becomes the accepted one.
+    (provider as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: finalized.policy,
+      policyDigest: finalized.policyDigest,
+      roster: finalized.roster,
+    });
+    const governedScope = Object.freeze({
+      ...scope,
+      governanceChainId: finalized.policy.governanceChainId,
+      governanceContractAddress: finalized.policy.governanceContractAddress,
+      ownershipTransitionDigest: finalized.policy.ownershipTransitionDigest,
+      era: finalized.policy.era,
+    }) as AuthorCatalogScopeV1;
+    const governedGenesis = await provider.publishAuthorCatalogGenesisV1({
+      scope: governedScope,
+      author: signer,
+      peers: [],
+      issuedAt: '1773900000002' as TimestampMsV1,
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    const governedScopeDigest = computeAuthorCatalogScopeDigestV1(governedScope);
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: governedScopeDigest,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: governedGenesis.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest: governedScopeDigest,
+        rows: [],
+      }),
+      catalogVersion: governedGenesis.announcement.catalogVersion,
+      inventoryRowCount: '0',
+    });
+    // Both generations are durable and applied for this one CG.
+    expect(persistence.inventory.listAppliedCatalogHeadsV1().filter(
+      (row: { authorAddress: string }) => row.authorAddress === AUTHOR,
+    )).toHaveLength(2);
+    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+
+    const replay = await provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayTwoGenerationsPeer',
+    );
+
+    expect(replay).toMatchObject({ announced: 1, failed: 0 });
+    expect(replay.manifest).toHaveLength(1);
+    expect(replay.manifest[0]).toMatchObject({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      catalogHeadObjectDigest: governedGenesis.headObjectDigest,
+      policyDigest: finalized.policyDigest,
+    });
+    expect(replay.manifest[0]?.catalogHeadObjectDigest)
+      .not.toBe(publication.headObjectDigest);
+    // The superseded head must not merely be dropped from delivery: the
+    // completion this manifest becomes has to encode.
+    expect(() => encodeRfc64PublicCatalogHeadReplayCompletionV2({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: replay.manifest,
+    })).not.toThrow();
+  }, 30_000);
+
+  it('promotes an owner-signed SWM inventory after late finalized authority and converges without reconnect', async () => {
+    // Live-testnet ordering: the author has already produced a valid
+    // owner-signed inventory/catalog generation while the finalized authority
+    // index still reports absence. Registration becomes visible only to the
+    // scheduled finality retry. No new SWM write, reconnect, resubscribe, or
+    // operator-triggered replay occurs after that transition, so accepting the
+    // finalized policy must itself promote the durable author inventory and
+    // make a current-generation head replayable to the connected receiver.
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
+    const finalizedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
+      accessPolicy: 0 as const,
+      nameHash,
+    });
+    const finalizedRpc = createFinalizedVmLoopbackRpcV1({
+      accessPolicy: 0,
+      active: true,
+      assertedAtChainId: finalizedSnapshot.chainId,
+      assertedAtKav10Address: KAV10,
+      knowledgeAssetStorageAddress: `0x${'55'.repeat(20)}`,
+      assets: [],
+      blockHash: finalizedSnapshot.sourceBlockHash,
+      blockNumberQuantity: ethers.toQuantity(BigInt(finalizedSnapshot.sourceBlockNumber)),
+      contextGraphStorageAddress: finalizedSnapshot.governanceContract,
+      nameHash,
+      networkId: NETWORK_ID,
+      onChainContextGraphId: finalizedSnapshot.contextGraphId,
+      ownerAddress: AUTHOR,
+      publishPolicy: finalizedSnapshot.publishPolicy,
+    });
+    const finalizedRpcServer = await finalizedRpcHarness.start((call, response) => {
+      try {
+        sendJsonRpcResult(
+          response,
+          call,
+          finalizedRpc.respond(call.method, call.params),
+        );
+      } catch (cause) {
+        sendJsonRpcError(
+          response,
+          call,
+          -32602,
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    });
+    let finalized = false;
+    const makeChainAdapter = () => {
+      const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+        finalized && onChainIds.includes(finalizedSnapshot.contextGraphId)
+          ? [[finalizedSnapshot.contextGraphId, finalizedSnapshot]]
+          : [],
+      ));
+      const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => new Map(
+        finalized && nameHashes.includes(nameHash)
+          ? [[nameHash, finalizedSnapshot]]
+          : [],
+      ));
+      return Object.freeze({
+        adapter: Object.assign(new NoChainAdapter(), {
+          getEvmChainId: vi.fn(async () => BigInt(finalizedSnapshot.chainId)),
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexSnapshots: readSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+        readSnapshots,
+      });
+    };
+    const publisherChain = makeChainAdapter();
+    const receiverChain = makeChainAdapter();
+    const publisher = await startAgent({
+      name: 'late-finalized-authority-publisher',
+      config: {
+        ...custodialAuthorConfig(publisherChain.adapter),
+        chainConfig: {
+          ...AUTHOR_CHAIN_CONFIG,
+          rpcUrl: finalizedRpcServer.url,
+        },
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+      },
+    });
+    const receiver = await startAgent({
+      name: 'late-finalized-authority-receiver',
+      config: {
+        chainAdapter: receiverChain.adapter,
+        chainConfig: {
+          rpcUrl: finalizedRpcServer.url,
+          hubAddress: AUTHOR_CHAIN_CONFIG.hubAddress,
+          operationalKeys: [],
+        },
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+      },
+    });
+    for (const agent of [publisher, receiver]) {
+      await installRfc64UnregisteredAuthorityEvidenceV1(agent);
+      await expect(agent.reconcileRfc64CatalogAccessAuthorityV1(
+        CONTEXT_GRAPH_ID,
+        undefined,
+        { kind: 'finalized-absence' },
+      )).resolves.toMatchObject({ source: 'owner-signed-unregistered' });
+      agent.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+      await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+    }
+    await connectBothWays(publisher, receiver);
+
+    const assertionCoordinate = 'late-finalized-authority-asset';
+    const shareOperationId = 'late-finalized-authority-operation';
+    await seedRfc64SwmWorkspaceV1(publisher, {
+      assertionCoordinate,
+      shareOperationId,
+      kaNumber: 91n,
+    });
+    await publisher.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await publisher.awaitInFlightRfc64SwmInventoryObserversV1();
+    await publisher.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await publisher.whenRfc64CatalogHeadDeliveryIdleV1();
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+
+    const ownerInventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+    });
+    const ownerApplied = publisher.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    });
+    expect(publisher.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: ownerInventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '1' } },
+      rows: [{ assertionCoordinate, shareOperationId }],
+    });
+    expect(ownerApplied).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: ownerApplied?.currentCatalogHeadDigest,
+      inventoryRowCount: '1',
+    });
+
+    vi.useFakeTimers();
+    try {
+      // Bind both existing subscriptions while the finalized projection still
+      // reports absence. This arms the production retry instead of manually
+      // reconciling authority or requesting replay in the test.
+      for (const agent of [publisher, receiver]) {
+        agent.recordDiscoveredContextGraph(CONTEXT_GRAPH_ID, {
+          name: CONTEXT_GRAPH_ID,
+          onChainId: finalizedSnapshot.contextGraphId,
+          onChainHash: nameHash,
+        });
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      expect(publisherChain.readSnapshots).toHaveBeenCalled();
+      expect(receiverChain.readSnapshots).toHaveBeenCalled();
+
+      finalized = true;
+      await vi.advanceTimersByTimeAsync(30_100);
+      await Promise.all([
+        publisher.whenRfc64CatalogResponsibilitiesIdleV1(),
+        receiver.whenRfc64CatalogResponsibilitiesIdleV1(),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await publisher.awaitInFlightRfc64SwmInventoryObserversV1();
+    await publisher.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    await publisher.whenRfc64CatalogHeadDeliveryIdleV1();
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect((publisher as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toMatchObject({ policy: { source: { kind: 'finalized-chain' } } });
+    expect((receiver as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      CONTEXT_GRAPH_ID,
+    )).toMatchObject({ policy: { source: { kind: 'finalized-chain' } } });
+
+    const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      snapshot: parseRfc64AuthoritySnapshotV1(finalizedSnapshot, 9n),
+    });
+    const finalizedInventoryScopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: finalizedAuthority.policy.governanceChainId,
+      governanceContractAddress: finalizedAuthority.policy.governanceContractAddress,
+      ownershipTransitionDigest: finalizedAuthority.policy.ownershipTransitionDigest,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: finalizedAuthority.policy.era,
+    });
+    const finalizedCatalogScopeDigest = computeAuthorCatalogScopeDigestV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: finalizedAuthority.policy.governanceChainId,
+      governanceContractAddress: finalizedAuthority.policy.governanceContractAddress,
+      ownershipTransitionDigest: finalizedAuthority.policy.ownershipTransitionDigest,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: finalizedAuthority.policy.era,
+      bucketCount: '1',
+    });
+    expect(publisher.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: finalizedInventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      head: { payload: { totalRows: '1' } },
+      rows: [{ assertionCoordinate, shareOperationId }],
+    });
+    const finalizedApplied = publisher.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: finalizedCatalogScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    expect(finalizedApplied).toMatchObject({
+      catalogVersion: '1',
+      inventoryRowCount: '1',
+    });
+    expect(receiver.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: finalizedCatalogScopeDigest,
+      authorAddress: AUTHOR,
+    })).toMatchObject({
+      currentCatalogHeadDigest: finalizedApplied?.currentCatalogHeadDigest,
+      inventoryRowCount: '1',
+    });
+    expect(publisher.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: ownerInventoryScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  }, 60_000);
+
+  it('fails a stale owner-generation inventory closed without mutating either generation', async () => {
+    const fixture = await prepareLateAuthorityPromotionFixtureV1({
+      name: 'late-authority-stale-source-fail-closed',
+      assertionCoordinate: 'late-authority-stale-source',
+      shareOperationId: 'late-authority-stale-source-operation',
+      kaNumber: 93n,
+    });
+    const sourceBefore = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    expect(sourceBefore).toMatchObject({ head: { payload: { totalRows: '1' } } });
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+
+    await (fixture.agent as any).publisher.clearPublishedKnowledgeAssetSwm(
+      CONTEXT_GRAPH_ID,
+      {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: AUTHOR, kaNumber: fixture.kaNumber },
+      },
+      undefined,
+      createOperationContext('publish'),
+      fixture.kaUal,
+    );
+
+    // The thrown failure is consumed by the authority recovery dispatcher's
+    // owned retry policy in production; it must never look like a successful,
+    // selectively-truncated migration.
+    await expect(fixture.agent.promoteRfc64OwnerSignedSwmInventoriesV1(
+      CONTEXT_GRAPH_ID,
+    )).rejects.toThrow(/stale source row.*workspace-mismatch/u);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })?.head.objectDigest).toBe(sourceBefore?.head.objectDigest);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  });
+
+  it('fails closed while the owner applied catalog lags an additions-only source inventory', async () => {
+    const fixture = await prepareLateAuthorityPromotionFixtureV1({
+      name: 'late-authority-owner-catalog-lag',
+      assertionCoordinate: 'late-authority-owner-catalog-lag',
+      shareOperationId: 'late-authority-owner-catalog-lag-operation',
+      kaNumber: 96n,
+      projectOwnerCatalog: true,
+      deferFinalizedAuthority: true,
+    });
+    await seedRfc64SwmWorkspaceV1(fixture.agent, {
+      assertionCoordinate: 'late-authority-owner-catalog-lag-second',
+      shareOperationId: 'late-authority-owner-catalog-lag-second-operation',
+      kaNumber: 98n,
+    });
+    await expect(fixture.agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'late-authority-owner-catalog-lag-second',
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: 'late-authority-owner-catalog-lag-second-operation',
+    })).resolves.toMatchObject({ status: 'applied' });
+    const sourceAhead = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    expect(sourceAhead).toMatchObject({
+      head: { payload: { version: '1', totalRows: '2' } },
+    });
+    expect(fixture.agent.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '1', inventoryRowCount: '1' });
+
+    fixture.acceptFinalizedAuthority();
+    await expect(fixture.agent.promoteRfc64OwnerSignedSwmInventoriesV1(
+      CONTEXT_GRAPH_ID,
+    )).rejects.toThrow(/inventory differs from its exact applied catalog row set/u);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })?.head.objectDigest).toBe(sourceAhead?.head.objectDigest);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  });
+
+  it('fails closed for a removal-bearing owner lineage even at exact current parity', async () => {
+    const fixture = await prepareLateAuthorityPromotionFixtureV1({
+      name: 'late-authority-owner-removal-lineage',
+      assertionCoordinate: 'late-authority-owner-removal-lineage',
+      shareOperationId: 'late-authority-owner-removal-lineage-operation',
+      kaNumber: 97n,
+      projectOwnerCatalog: true,
+      deferFinalizedAuthority: true,
+    });
+    const sourceRow = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })!.rows[0]!;
+    await fixture.agent.removeRfc64SwmAuthorInventoryConfirmedRowV1({
+      scope: fixture.ownerScope,
+      expectedRow: {
+        kaUal: sourceRow.kaUal,
+        assertionVersion: sourceRow.assertionVersion,
+        sealDigest: sourceRow.sealDigest,
+      },
+    });
+    await fixture.agent.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID as ContextGraphIdV1,
+      authorAddress: AUTHOR,
+    });
+    const sourceAfterRemoval = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    expect(sourceAfterRemoval?.rows).toEqual([]);
+    expect(fixture.agent.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '0' });
+
+    fixture.acceptFinalizedAuthority();
+    await expect(fixture.agent.promoteRfc64OwnerSignedSwmInventoriesV1(
+      CONTEXT_GRAPH_ID,
+    )).rejects.toThrow(/requires an additions-only source lineage/u);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })?.head.objectDigest).toBe(sourceAfterRemoval?.head.objectDigest);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  });
+
+  it('rejects a reset source when the owner catalog has a prior removal lineage', async () => {
+    const fixture = await prepareLateAuthorityPromotionFixtureV1({
+      name: 'late-authority-owner-reset-lineage',
+      assertionCoordinate: 'late-authority-owner-reset-lineage',
+      shareOperationId: 'late-authority-owner-reset-lineage-operation',
+      kaNumber: 99n,
+      projectOwnerCatalog: true,
+      deferFinalizedAuthority: true,
+    });
+    const sourceRow = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })!.rows[0]!;
+    await fixture.agent.removeRfc64SwmAuthorInventoryConfirmedRowV1({
+      scope: fixture.ownerScope,
+      expectedRow: {
+        kaUal: sourceRow.kaUal,
+        assertionVersion: sourceRow.assertionVersion,
+        sealDigest: sourceRow.sealDigest,
+      },
+    });
+    await fixture.agent.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID as ContextGraphIdV1,
+      authorAddress: AUTHOR,
+    });
+    const removedSource = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })!;
+    (fixture.agent as any).rfc64PersistenceV1.swmAuthorInventory
+      .deleteSwmAuthorInventoryV1({
+        inventoryScopeDigest: fixture.ownerScopeDigest,
+        authorAddress: AUTHOR,
+        expectedCurrentHeadDigest: removedSource.head.objectDigest,
+      });
+    await expect(fixture.agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: fixture.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: fixture.shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied' });
+    await fixture.agent.reconcileRfc64PublicCatalogFromSwmInventoryV1({
+      contextGraphId: CONTEXT_GRAPH_ID as ContextGraphIdV1,
+      authorAddress: AUTHOR,
+    });
+    const resetSource = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    expect(resetSource).toMatchObject({
+      head: { payload: { version: '0', totalRows: '1' } },
+    });
+    expect(fixture.agent.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
+
+    fixture.acceptFinalizedAuthority();
+    await expect(fixture.agent.promoteRfc64OwnerSignedSwmInventoriesV1(
+      CONTEXT_GRAPH_ID,
+    )).rejects.toThrow(/requires an additions-only applied catalog lineage/u);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })?.head.objectDigest).toBe(resetSource?.head.objectDigest);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  });
+
+  it('keeps a newer finalized-generation row for a duplicate source UAL', async () => {
+    const fixture = await prepareLateAuthorityPromotionFixtureV1({
+      name: 'late-authority-target-row-wins',
+      assertionCoordinate: 'late-authority-target-row-wins',
+      shareOperationId: 'late-authority-target-row-wins-operation',
+      kaNumber: 94n,
+    });
+    await expect(fixture.agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: fixture.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: fixture.shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied' });
+    const target = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    expect(target?.rows).toHaveLength(1);
+    const targetRow = target!.rows[0]!;
+    const newerSharedAt = (BigInt(targetRow.sharedAt) + 1n).toString() as TimestampMsV1;
+    const persistence = (fixture.agent as any).rfc64PersistenceV1;
+    await maintainRfc64SwmAuthorInventoryV1(persistence.swmAuthorInventory, {
+      scope: fixture.targetScope,
+      row: Object.freeze({ ...targetRow, sharedAt: newerSharedAt }),
+      issuedAt: newerSharedAt,
+      signer: Object.freeze({
+        issuer: AUTHOR,
+        signDigest: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+      }),
+    });
+
+    await expect(fixture.agent.promoteRfc64OwnerSignedSwmInventoriesV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toMatchObject({ authors: 1, rows: 0 });
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual([expect.objectContaining({ sharedAt: newerSharedAt })]);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  });
+
+  it('does not resurrect a finalized-generation row removed during confirmation', async () => {
+    const fixture = await prepareLateAuthorityPromotionFixtureV1({
+      name: 'late-authority-target-removal-wins',
+      assertionCoordinate: 'late-authority-target-removal-wins',
+      shareOperationId: 'late-authority-target-removal-wins-operation',
+      kaNumber: 95n,
+    });
+    await expect(fixture.agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: fixture.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: fixture.shareOperationId,
+    })).resolves.toMatchObject({ status: 'applied' });
+    const sourceBefore = fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    });
+    const canonicalSeal = await authorSeal(fixture.kaNumber);
+    await fixture.agent.observeRfc64ConfirmedVmV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: fixture.assertionCoordinate,
+      shareOperationId: fixture.shareOperationId,
+      seal: assertionSealFromCanonical(canonicalSeal),
+      assertionUri: contextGraphAssertionUri(
+        CONTEXT_GRAPH_ID,
+        AUTHOR,
+        fixture.assertionCoordinate as never,
+      ),
+      ctx: createOperationContext('publish'),
+      publicationLabel: 'publish',
+    });
+    await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual([]);
+
+    await expect(fixture.agent.promoteRfc64OwnerSignedSwmInventoriesV1(
+      CONTEXT_GRAPH_ID,
+    )).rejects.toThrow(/stale source row.*vm-confirmed/u);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.targetScopeDigest,
+      authorAddress: AUTHOR,
+    })?.rows).toEqual([]);
+    expect(fixture.agent.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: fixture.ownerScopeDigest,
+      authorAddress: AUTHOR,
+    })?.head.objectDigest).toBe(sourceBefore?.head.objectDigest);
+  });
+
   it('fails replay when an applied inventory row points at a missing durable head', async () => {
     const { provider, persistence, applied } = await startAppliedOpenReplayProvider(
       'replay-missing-durable-head',
@@ -1372,6 +2210,47 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
       '12D3KooWReplayMissingHeadPeer',
     )).rejects.toThrow(/durable catalog head is missing or unverifiable/u);
+  });
+
+  it('discards the replay snapshot cache at the mutation-persistence close boundary', async () => {
+    const { provider, persistence } = await startAppliedOpenReplayProvider(
+      'replay-snapshot-lifecycle-reset',
+    );
+    let readHeadCalls = 0;
+    const getVerifiedObjectByDigest = persistence.controlObjects
+      .getVerifiedObjectByDigest.bind(persistence.controlObjects);
+    const lifecyclePersistence = Object.freeze({
+      ...persistence,
+      controlObjects: Object.freeze({
+        ...persistence.controlObjects,
+        getVerifiedObjectByDigest: async (
+          ...args: Parameters<typeof getVerifiedObjectByDigest>
+        ) => {
+            readHeadCalls += 1;
+            return getVerifiedObjectByDigest(...args);
+        },
+      }),
+    });
+    (provider as any).rfc64PersistenceV1 = lifecyclePersistence;
+    vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+
+    await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplaySnapshotFirstLifecycle',
+    )).resolves.toMatchObject({ announced: 1, failed: 0 });
+    expect(readHeadCalls).toBe(1);
+
+    await provider.closeRfc64PublicCatalogMutationPersistenceV1();
+    (provider as any).rfc64CatalogMutationCoordinatorV1.reopen();
+    provider.acceptOpenContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+
+    await expect(provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplaySnapshotReopenedLifecycle',
+    )).resolves.toMatchObject({ announced: 1, failed: 0 });
+    expect(readHeadCalls).toBe(2);
   });
 
   it('refreshes scoped provider replay after its head advances while the scope lock waits', async () => {
@@ -1453,6 +2332,86 @@ describe('RFC-64 rollout authority integration', () => {
     ]);
   });
 
+  it('aborts the real first announcement and drains without sending the second durable head', async () => {
+    const { provider, persistence, scope } = await startAppliedOpenReplayProvider('replay-announcement-abort');
+    const secondScope = Object.freeze({ ...scope, subGraphName: 'second' }) as AuthorCatalogScopeV1;
+    const second = await provider.publishAuthorCatalogGenesisV1({
+      scope: secondScope,
+      author: { address: AUTHOR, signMessage: digest => AUTHOR_WALLET.signMessage(digest) },
+      peers: [], issuedAt: '1773900000000' as TimestampMsV1,
+      catalogIssuerDelegationEffectiveAt: '1773899999000' as TimestampMsV1,
+      catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+    });
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(secondScope);
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest, authorAddress: AUTHOR, expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: second.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({ catalogScopeDigest, rows: [] }),
+      catalogVersion: second.announcement.catalogVersion, inventoryRowCount: '0',
+    });
+    expect(persistence.inventory.listAppliedCatalogHeadsV1()).toHaveLength(2);
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
+    let entered!: () => void;
+    const firstSend = new Promise<void>(resolve => { entered = resolve; });
+    let release!: () => void;
+    let transportSignal: AbortSignal | undefined;
+    let transportAborted = false;
+    const send = vi.spyOn(provider.router, 'send').mockImplementation(async (_peer, protocol, _data, options) => {
+      expect(protocol).toBe(RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1);
+      transportSignal = options?.signal;
+      return new Promise<Uint8Array>((resolve, reject) => {
+        release = () => resolve(Uint8Array.of(1));
+        transportSignal?.addEventListener('abort', () => {
+          transportAborted = true; reject(transportSignal?.reason);
+        }, { once: true });
+        entered();
+      });
+    });
+    expect(owner.scheduleKeyed('replay', async signal => {
+      await provider.reannounceRfc64CatalogHeadsToPeerV1('12D3KooWCancelledReplayPeer', undefined, signal);
+    })).toBe(true);
+    try {
+      await firstSend;
+      expect(transportSignal).toBeInstanceOf(AbortSignal);
+      expect(transportSignal?.aborted).toBe(false);
+      const drained = owner.closeAndDrain();
+      await vi.waitFor(() => expect(transportAborted).toBe(true));
+      await drained;
+      expect(transportSignal?.aborted).toBe(true);
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      release(); await owner.closeAndDrain();
+    }
+  });
+
+  it('does not hold a catalog change while a replay waits for its peer', async () => {
+    // GH#3081 — the replay used to send inside the mutation locks of every catalog it replayed.
+    const { provider, scope } = await startAppliedOpenReplayProvider('replay-outside-locks');
+    let releaseDelivery!: () => void;
+    let markDeliveryEntered!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+    const deliveryEntered = new Promise<void>((resolve) => { markDeliveryEntered = resolve; });
+    vi.spyOn((provider as any).router, 'send').mockImplementation(async () => {
+      markDeliveryEntered();
+      await deliveryGate;
+      return Uint8Array.of(1);
+    });
+
+    const replay = provider.reannounceRfc64CatalogHeadsToPeerV1(
+      '12D3KooWReplayOutsideLocksPeer',
+    );
+    await deliveryEntered;
+    // The peer has not answered. A change of the replayed catalog takes its lock all the same.
+    await expect((provider as any).rfc64CatalogMutationCoordinatorV1.run(
+      scope,
+      async () => 'changed',
+    )).resolves.toBe('changed');
+    releaseDelivery();
+
+    // That change wrote nothing, so the replay completes.
+    await expect(replay).resolves.toMatchObject({ announced: 1, failed: 0 });
+  });
+
   it('rejects provider replay when durable inventory changes during delivery', async () => {
     const { provider, persistence, applied } =
       await startAppliedOpenReplayProvider('replay-delivery-race');
@@ -1510,6 +2469,7 @@ describe('RFC-64 rollout authority integration', () => {
     const edge = await startAgent({
       name: 'profile-only-accepted-swm-authority',
       config: {
+        ...custodialAuthorConfig(),
         rfc64CatalogDeploymentProfile: DEPLOYMENT,
         rfc64CatalogAccessPolicyAuthority: {
           localAgentAddress: AUTHOR,
@@ -1553,7 +2513,10 @@ describe('RFC-64 rollout authority integration', () => {
     const remotePeerId = '12D3KooWAuthorityCatchupPeer';
     const edge = await startAgent({
       name: 'authority-accepted-peer-catchup',
-      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+      config: {
+        ...custodialAuthorConfig(),
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+      },
     });
     (edge as any).defaultAgentAddress = AUTHOR;
     vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
@@ -1582,7 +2545,10 @@ describe('RFC-64 rollout authority integration', () => {
       remotePeerId,
       expect.any(Function),
       0,
-      { authorityScopeChanged: true },
+      {
+        authorityScopeChanged: true,
+        authorityScopeContextGraphIds: new Set(contextGraphIds),
+      },
     );
     // Unchanged direct reconciliations must not create another timer.
     for (const contextGraphId of contextGraphIds) {
@@ -1590,6 +2556,58 @@ describe('RFC-64 rollout authority integration', () => {
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
     expect(queueSync).toHaveBeenCalledOnce();
+  });
+
+  it('catches up only the graph whose authority changed from each connected peer', async () => {
+    const unchangedContextGraphId = `${AUTHOR}/authority-catchup-unchanged` as ContextGraphIdV1;
+    const changedContextGraphId = `${AUTHOR}/authority-catchup-changed` as ContextGraphIdV1;
+    const remotePeerIds = [
+      '12D3KooWAuthorityCatchupPeerA',
+      '12D3KooWAuthorityCatchupPeerB',
+    ];
+    const edge = await startAgent({
+      name: 'authority-accepted-graph-catchup',
+      config: {
+        ...custodialAuthorConfig(),
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        syncOnConnectEnabled: true,
+      },
+    });
+    (edge as any).defaultAgentAddress = AUTHOR;
+    await edge.createContextGraph({
+      id: unchangedContextGraphId,
+      name: 'Authority catch-up unchanged',
+      accessPolicy: 0,
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    // No peer is connected yet, so the first graph's catch-up has nobody to ask.
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue(
+      remotePeerIds.map((peerId) => ({ toString: () => peerId })) as never,
+    );
+    vi.spyOn(edge.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+    vi.spyOn(edge, 'getSyncReconcilerProbe').mockResolvedValue({
+      protocolsKey: null,
+      connectionKey: null,
+    });
+    const trySync = vi.spyOn(edge, 'trySyncFromPeer').mockResolvedValue('synced');
+    await edge.createContextGraph({
+      id: changedContextGraphId,
+      name: 'Authority catch-up changed',
+      accessPolicy: 0,
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+
+    await vi.waitFor(() => expect(trySync).toHaveBeenCalledTimes(remotePeerIds.length));
+    expect(trySync.mock.calls.map(([peerId]) => peerId).sort()).toEqual([...remotePeerIds].sort());
+    for (const [, , source, graphScope] of trySync.mock.calls) {
+      expect(source).toBe('on-connect');
+      expect(graphScope).toEqual(new Set([changedContextGraphId]));
+    }
   });
 
   it('fails closed when an unregistered graph has no authenticated owner', async () => {
@@ -1601,7 +2619,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
 
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
-      .rejects.toThrow(/no canonical owner address/u);
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
     expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
       contextGraphId,
@@ -1686,7 +2704,10 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId: '10',
       accessPolicy: 0,
     });
+    const readLanes: Array<Readonly<{ requestClass: string; admissionPriority?: string }>> = [];
     const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      const { requestClass, admissionPriority } = activeRpcRequestContext();
+      readLanes.push({ requestClass, admissionPriority });
       if (nameHashes.includes(firstSnapshot.nameHash)) {
         throw new Error('durably bound duplicate name hash is ambiguous');
       }
@@ -1729,15 +2750,21 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId === localFirstContextGraphId
       ));
 
-    const requests = await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
-      [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
-      new AbortController().signal,
-    );
+    const requests = await withRpcRequestContext({ requestClass: 'background' }, () => (
+      edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+        [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
+        new AbortController().signal,
+      )
+    ));
 
     expect(resolveSnapshots).toHaveBeenCalledOnce();
+    expect(readLanes).toEqual([{ requestClass: 'foreground', admissionPriority: 'authority' }]);
     expect(resolveSnapshots).toHaveBeenCalledWith([
       secondSnapshot.nameHash,
-    ], { signal: expect.any(AbortSignal) });
+    ], {
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(requests.get(firstContextGraphId)).toMatchObject({
       kind: 'finalized-evidence',
       evidence: {
@@ -1761,6 +2788,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readSnapshots).toHaveBeenCalledOnce();
     expect(readSnapshots).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
@@ -1836,6 +2864,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledWith(['79'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
@@ -1866,6 +2895,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readAuthority).toHaveBeenCalledOnce();
     expect(readAuthority).toHaveBeenCalledWith(9n, {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
   });
 
@@ -1936,14 +2966,21 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('propagates caller cancellation into the registered authority snapshot read', async () => {
     let readSignal: AbortSignal | undefined;
+    const readStarted = Promise.withResolvers<void>();
     const readAuthority = vi.fn(async (
       _contextGraphId: bigint,
       options?: { signal?: AbortSignal },
     ) => {
       readSignal = options?.signal;
-      return Object.freeze({
-        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
-        accessPolicy: 0,
+      readStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        if (readSignal?.aborted) {
+          reject(readSignal.reason);
+          return;
+        }
+        readSignal?.addEventListener('abort', () => reject(readSignal!.reason), {
+          once: true,
+        });
       });
     });
     const edge = await startAgent({
@@ -1957,13 +2994,15 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     const controller = new AbortController();
 
-    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+    const operation = edge.reconcileRfc64CatalogAccessAuthorityV1(
       CONTEXT_GRAPH_ID,
       controller.signal,
-    )).resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
+    );
+    await readStarted.promise;
     expect(readSignal).toBeInstanceOf(AbortSignal);
     const reason = new Error('caller stopped');
     controller.abort(reason);
+    await expect(operation).rejects.toBe(reason);
     expect(readSignal).toMatchObject({ aborted: true, reason });
   });
 
@@ -2037,6 +3076,554 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readAuthority).not.toHaveBeenCalled();
   });
 
+  /**
+   * These two cover the production evidence call sites, which the coordinator's
+   * own unit tests cannot reach: delete `markRpcAttempt`/`onRpcRead` from the
+   * agent and the circuit never closes again, yet every isolated coordinator
+   * test still passes. One test per lane, because the indexed daemon path and
+   * the point-read path record their evidence in different places.
+   */
+  async function openSharedAuthorityCircuit(edge: DKGAgent): Promise<void> {
+    await expect((edge as unknown as {
+      rfc64AuthorityReadCoordinatorV1: {
+        run: (
+          signal: AbortSignal | undefined,
+          operation: () => Promise<never>,
+        ) => Promise<never>;
+      };
+    }).rfc64AuthorityReadCoordinatorV1.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError(
+        'an unrelated registered authority read exhausted every provider',
+        { exhaustionKind: 'mixed', retryAfterMs: 30_000 },
+      );
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'open',
+      consecutiveExhaustions: 1,
+    });
+  }
+
+  it('degrades Context Graph listing instead of failing it while the circuit is open', async () => {
+    const readTargets = vi.fn(async () => {
+      throw new Error('listing enrichment must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'listing-enrichment-open-circuit',
+      config: { chainAdapter: new NoChainAdapter() },
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Listing enrichment open circuit',
+      callerAgentAddress: AUTHOR,
+    });
+    vi.spyOn(edge, 'resolveFinalizedContextGraphAuthorityTargetsV1')
+      .mockImplementation(readTargets);
+    await openSharedAuthorityCircuit(edge);
+
+    // The enrichment fan-out is exactly what the circuit holds back, so it is
+    // deferred — but a deferral must degrade the listing, never reject it.
+    const rows = await edge.listContextGraphs();
+
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: CONTEXT_GRAPH_ID }),
+    ]));
+    expect(readTargets).not.toHaveBeenCalled();
+  });
+
+  it('defers VM reconcile binding resolution while the circuit is open', async () => {
+    const resolveSnapshots = vi.fn(async () => {
+      throw new Error('VM reconcile must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'vm-reconcile-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    await expect(edge.resolveFinalizedVmReconcileBinding(CONTEXT_GRAPH_ID, () => true))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    // A deferral is not a closed queue: the reconcile lane must keep the target
+    // and retry on its own cadence rather than treat it as permanently gone.
+    await expect(edge.resolveFinalizedVmReconcileBinding(CONTEXT_GRAPH_ID, () => true))
+      .rejects.not.toBeInstanceOf(VmReconcileQueueClosedError);
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
+  it('defers registration binding discovery while the circuit is open', async () => {
+    const resolveSnapshots = vi.fn(async () => {
+      throw new Error('registration discovery must not reach the pool while the circuit is open');
+    });
+    const edge = await startAgent({
+      name: 'registration-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    // Registration discovery reads the same finalized index as the refresh
+    // pass, so it defers with every other governed reader instead of walking
+    // an exhausted pool on its own. The boundary is already fail-closed, and
+    // the caller retries.
+    await expect(edge.resolveContextGraphRegistrationBinding(
+      `${AUTHOR}/registration-binding-open-circuit`,
+    )).resolves.toMatchObject({
+      kind: 'unavailable',
+      // A cooldown is a deferral, not a failed chain read: the pool was never
+      // asked, and the caller may retry on the circuit's own cadence.
+      reason: 'authority-circuit-open',
+    });
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('keeps approved replica cooldown lookup retained-only (capability present: %s)', async (supportsRetained) => {
+    const contextGraphId = `${AUTHOR}/approved-registration-binding-open-circuit`;
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const retainedSnapshots = vi.fn(async (_hashes: readonly string[], _options?: ContextGraphAuthorityReadOptions) => new Map());
+    const edge = await startAgent({
+      name: 'approved-registration-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: supportsRetained ? retainedSnapshots : undefined,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    (edge as any).localApprovedAgentByCG.set(contextGraphId, AUTHOR);
+    await openSharedAuthorityCircuit(edge);
+
+    const binding = await edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      allowApprovedPrivateReplicaFinalizedAbsence: true,
+      freshness: 'bounded',
+    });
+
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+    expect(retainedSnapshots).toHaveBeenCalledTimes(supportsRetained ? 1 : 0);
+    if (supportsRetained) expect(retainedSnapshots.mock.calls[0]?.[1]).toMatchObject({ freshness: 'bounded' });
+    expect(binding).toMatchObject({
+      kind: 'unavailable',
+      reason: supportsRetained ? 'finalized-name-absence-unaccepted' : 'authority-circuit-open',
+    });
+  });
+
+  it('keeps live registration callers separate from a bounded in-flight read', async () => {
+    const contextGraphId = `${AUTHOR}/registration-binding-freshness`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0');
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const resolveSnapshots = vi.fn(async (_hashes: readonly string[], options?: ContextGraphAuthorityReadOptions) => {
+      if (options?.freshness === 'bounded') {
+        entered.resolve();
+        await release.promise;
+      }
+      return new Map([[nameHash, snapshot]]);
+    });
+    const edge = await startAgent({
+      name: 'registration-binding-freshness',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    const bounded = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'bounded', registrationTimeoutMs: 10_000,
+    });
+    await entered.promise;
+    const live = edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      freshness: 'live', registrationTimeoutMs: 10_000,
+    });
+    try {
+      await vi.waitFor(() => expect(peekFinalizedAuthorityColdResolution(edge)?.inFlightKeys).toHaveLength(2));
+    } finally {
+      release.resolve();
+      await Promise.allSettled([bounded, live]);
+    }
+    expect(resolveSnapshots.mock.calls.map((call) => call[1]?.freshness)).toEqual(['bounded', 'live']);
+  });
+
+  it('resolves a registration binding while a slow authority read holds the serializer', async () => {
+    // Registration discovery backs query, crypto and Context Graph operations
+    // under a policy-read budget, so it takes the circuit without the queue:
+    // behind a cold whole-contract scan it would spend that budget waiting and
+    // deny a policy decision on a node whose pool is healthy.
+    const contextGraphId = `${AUTHOR}/registration-binding-unqueued`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async () => new Map([[expectedNameHash, snapshot]]));
+    const edge = await startAgent({
+      name: 'registration-binding-unqueued',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+
+    const release = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<void>();
+    let serializerReleased = false;
+    const held = (edge as unknown as {
+      rfc64AuthorityReadCoordinatorV1: {
+        run: (
+          signal: AbortSignal | undefined,
+          operation: () => Promise<string>,
+        ) => Promise<string>;
+      };
+    }).rfc64AuthorityReadCoordinatorV1.run(undefined, async () => {
+      entered.resolve();
+      await release.promise;
+      serializerReleased = true;
+      return 'held';
+    });
+    await entered.promise;
+
+    await expect(edge.resolveContextGraphRegistrationBinding(contextGraphId, {
+      registrationTimeoutMs: 1_000,
+    })).resolves.toMatchObject({ kind: 'registered', onChainId: 9n });
+    expect(serializerReleased).toBe(false);
+
+    release.resolve();
+    await expect(held).resolves.toBe('held');
+  });
+
+  it('closes the shared circuit when registration discovery reaches the pool', async () => {
+    // Only move forward, so unrelated agent timers keep a monotonic clock.
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const contextGraphId = `${AUTHOR}/registration-binding-evidence`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async () => new Map([[expectedNameHash, snapshot]]));
+    const edge = await startAgent({
+      name: 'registration-binding-evidence',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+
+    await expect(edge.resolveContextGraphRegistrationBinding(contextGraphId))
+      .resolves.toMatchObject({ kind: 'registered', onChainId: 9n });
+
+    // This lane proves provider recovery for every other governed reader too.
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
+  it('still resolves a curator binding while the shared circuit is open', async () => {
+    const curatorSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const readAuthority = vi.fn(async () => curatorSnapshot);
+    const edge = await startAgent({
+      name: 'curator-binding-open-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    await openSharedAuthorityCircuit(edge);
+
+    // An ordinary governed read is still deferred: the circuit really is open.
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      `${AUTHOR}/deferred-while-open` as ContextGraphIdV1,
+    )).rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+
+    // A repeatable caller — the per-message catalog admission hook — stays
+    // governed, so it cannot turn every inbound message into a probe.
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
+      .rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+    expect(readAuthority).not.toHaveBeenCalled();
+
+    // The join-decision caller is admitted: its binding is stamped into a
+    // payload the outbox replays verbatim, so it must not be downgraded to
+    // "absent" for a whole backoff window. It is one more serialized probe.
+    await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(
+      CONTEXT_GRAPH_ID,
+      { admitWhileOpen: true },
+    )).resolves.toEqual({ agentAddress: AUTHOR, authorityEra: '0' });
+    expect(readAuthority).toHaveBeenCalledOnce();
+
+    // Reaching the pool is also what clears the outstanding exhaustion.
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
+  });
+
+  it('closes the shared circuit when a point-read authority lookup reaches the pool', async () => {
+    // Only move forward, so unrelated agent timers keep a monotonic clock.
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const readAuthority = vi.fn(async () => Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    }));
+    const edge = await startAgent({
+      name: 'authority-recovery-evidence-point-read',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    await openSharedAuthorityCircuit(edge);
+
+    // Past the retry deadline the circuit is merely eligible to probe: the
+    // exhaustion is still outstanding until some read proves recovery.
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+      retryAtMs: null,
+    });
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(readAuthority).toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+      retryAtMs: null,
+    });
+  });
+
+  it('uses positive, but not negative, cold name-hash resolution as recovery evidence', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const makeEdge = async (name: string, resolved: bigint | null) => {
+      let resolutionArmed = false;
+      const resolveByNameHash = vi.fn(async () => (resolutionArmed ? resolved : null));
+      const readAuthority = vi.fn(async () => Object.freeze({
+        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+        accessPolicy: 0,
+      }));
+      const edge = await startAgent({
+        name,
+        config: {
+          chainAdapter: Object.assign(new NoChainAdapter(), {
+            resolveContextGraphIdByNameHash: resolveByNameHash,
+            getContextGraphAuthoritySnapshot: readAuthority,
+          }),
+        },
+      });
+      // Seed the locally-admitted subscription a cold-start reverse lookup
+      // operates on without marking the graph as locally created/unregistered;
+      // that local-first authority lane intentionally bypasses chain lookup.
+      (edge as unknown as {
+        subscribedContextGraphs: Map<string, { subscribed: boolean }>;
+      }).subscribedContextGraphs.set(CONTEXT_GRAPH_ID, { subscribed: true });
+      resolveByNameHash.mockClear();
+      readAuthority.mockClear();
+      await openSharedAuthorityCircuit(edge);
+      resolutionArmed = true;
+      return { edge, resolveByNameHash, readAuthority };
+    };
+
+    const positive = await makeEdge('authority-recovery-evidence-cold-name-hash', 9n);
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(positive.edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+    expect(positive.resolveByNameHash).toHaveBeenCalledOnce();
+    expect(positive.readAuthority).toHaveBeenCalled();
+    expect(positive.edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
+
+    clockOffsetMs = 0;
+    const negative = await makeEdge('authority-no-recovery-evidence-cold-name-hash', null);
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(negative.edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
+    expect(negative.resolveByNameHash).toHaveBeenCalledOnce();
+    expect(negative.readAuthority).not.toHaveBeenCalled();
+    expect(negative.edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+  });
+
+  it('closes the shared circuit when an indexed authority projection reaches the pool', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase();
+    const indexedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async (
+      _nameHashes: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'scan',
+        ageMs: 0,
+      });
+      return new Map([[expectedNameHash, indexedSnapshot]]);
+    });
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('an indexed projection must not reopen a point read');
+    });
+    const edge = await startAgent({
+      name: 'authority-recovery-evidence-indexed',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: pointAuthorityRead,
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'closed',
+      consecutiveExhaustions: 0,
+    });
+  });
+
+  it('keeps the shared circuit half-open when an indexed read uses stale cache', async () => {
+    const realNow = Date.now.bind(Date);
+    let clockOffsetMs = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + clockOffsetMs);
+
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase();
+    const indexedSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async (
+      _nameHashes: readonly string[],
+      options: ContextGraphAuthorityReadOptions = {},
+    ) => {
+      options.onContextGraphAuthorityProjectionServed?.({
+        source: 'stale-cache',
+        ageMs: 18_000,
+      });
+      return new Map([[expectedNameHash, indexedSnapshot]]);
+    });
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('a stale indexed projection must not reopen a point read');
+    });
+    const edge = await startAgent({
+      name: 'authority-stale-cache-evidence-indexed',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: pointAuthorityRead,
+          contextGraphAuthorityIndexRevisionReader: {
+            resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+            readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+            whenIdle: vi.fn(async () => undefined),
+          },
+        }),
+      },
+    });
+    await openSharedAuthorityCircuit(edge);
+
+    clockOffsetMs = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.rpcCircuitMaxBackoffMs
+      + 60_000;
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .resolves.toBeDefined();
+
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({
+      state: 'half-open',
+      consecutiveExhaustions: 1,
+    });
+  });
+
   it('rejects a curator binding returned for a different registered Context Graph ID', async () => {
     const mismatchedSnapshot = Object.freeze({
       ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0'),
@@ -2087,7 +3674,10 @@ describe('RFC-64 rollout authority integration', () => {
     expect(await edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
       .toMatchObject({ source: 'owner-signed-unregistered' });
     expect(requestReplays).toHaveBeenCalledOnce();
-    expect(requestReplays).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    expect(requestReplays).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      expect.any(AbortSignal),
+    );
 
     edge.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
@@ -2133,7 +3723,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
 
-    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         contextGraphId: CONTEXT_GRAPH_ID,
         active: true,
@@ -2146,7 +3736,8 @@ describe('RFC-64 rollout authority integration', () => {
         mode: 'legacy',
         selectionSource: 'operator-override',
       }),
-    ]);
+    ]));
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toHaveLength(2);
     expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
       mode: 'shadow',
       legacySyncAllowed: true,
@@ -2193,7 +3784,7 @@ describe('RFC-64 rollout authority integration', () => {
   async function prepareAuthorityRefreshLifecycle(
     readRevisions?: (
       contextGraphIds: readonly string[],
-      options?: { signal?: AbortSignal },
+      options?: ContextGraphAuthorityReadOptions,
     ) => Promise<ReadonlyMap<string, string>>,
     whenRevisionReadsIdle: () => Promise<void> = async () => undefined,
   ) {
@@ -2212,7 +3803,7 @@ describe('RFC-64 rollout authority integration', () => {
     const edge = await startAgent({
       name: 'authority-refresh-lifecycle',
       config: {
-        chainAdapter,
+        ...custodialAuthorConfig(chainAdapter),
         rfc64CatalogActivation: {
           deploymentProfile: DEPLOYMENT,
           rollout: { contextGraphModes: { [legacyContextGraphId]: 'legacy' } },
@@ -2930,6 +4521,604 @@ describe('RFC-64 rollout authority integration', () => {
     }
   });
 
+  it('retries a fresh registered Edge subscription until its authority reaches the finalized index', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-lag`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '98',
+      accessPolicy: 0,
+      nameHash,
+    });
+    let finalized = false;
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      finalized && onChainIds.includes('98') ? [['98', snapshot]] : [],
+    ));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-lag',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '98',
+      onChainHash: nameHash,
+    });
+
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId }),
+      );
+
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(60_100);
+      expect(readSnapshots).toHaveBeenCalledTimes(3);
+
+      finalized = true;
+      await vi.advanceTimersByTimeAsync(120_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(4);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({
+          contextGraphId,
+          responsibilityReason: 'edge-subscription',
+        }),
+      );
+
+      await vi.advanceTimersByTimeAsync(240_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(4);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({
+          contextGraphId,
+          responsibilityReason: 'edge-subscription',
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it.each([false, true])('bounds finalized-absence retries and resumes after exhaustion (owed retries: %s)', async owedRetries => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-absence`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '99',
+      accessPolicy: 0,
+      nameHash,
+    });
+    let finalized = false;
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      finalized && onChainIds.includes('99') ? [['99', snapshot]] : [],
+    ));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-absence',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '99',
+      onChainHash: nameHash,
+    });
+
+    let owedOwner: ReturnType<DKGAgent['createRfc64OwedShareInventoryOwnerV1']> | undefined;
+    const markers = (edge as any).rfc64PersistenceV1.owedShareInventories;
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+      if (owedRetries) {
+        vi.spyOn(edge, 'rfc64CatalogAuthorityRefreshFailureReasonV1').mockReturnValue(undefined);
+        vi.spyOn(edge, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(true);
+        vi.spyOn(edge, 'tryCommitRfc64SwmAuthorInventoryV1').mockImplementation(async () =>
+          edge.readRfc64CatalogResponsibilityV1(contextGraphId).active
+            ? { status: 'existing', attempts: 1, headObjectDigest: 'h', kaUal: 'u' } as any
+            : { status: 'dormant', dormantReason: 'inactive-lane' } as any);
+        await markers.put({ version: 1, contextGraphId, subGraphName: null, authorAddress: AUTHOR,
+          assertionCoordinate: 'owed-finality', sealDigest: `0x${'ab'.repeat(32)}`, shareOperationId: 'owed-finality' });
+        owedOwner = edge.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 5_000 }));
+        owedOwner.start(createOperationContext('system'));
+        await owedOwner.whenIdle();
+      }
+
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(60_100);
+      expect(readSnapshots).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(120_100);
+      expect(readSnapshots).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(240_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(5);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId }),
+      );
+
+      if (owedOwner) {
+        expect(markers.list()).toHaveLength(1);
+        finalized = true; // Finality arrives after all four timers have exhausted.
+        await vi.advanceTimersByTimeAsync(5_100);
+        await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+        await owedOwner.whenIdle();
+        expect(readSnapshots).toHaveBeenCalledTimes(6);
+        expect(edge.readRfc64CatalogResponsibilityV1(contextGraphId).active).toBe(true);
+        expect(markers.list()).toEqual([]);
+        return; // No lifecycle notification or manual marker request was needed.
+      }
+
+      await vi.advanceTimersByTimeAsync(480_000);
+      expect(readSnapshots).toHaveBeenCalledTimes(5);
+
+      expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId))
+        .toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledTimes(6);
+      finalized = true;
+      await vi.advanceTimersByTimeAsync(30_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(7);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({
+          contextGraphId,
+          responsibilityReason: 'edge-subscription',
+        }),
+      );
+    } finally {
+      await owedOwner?.close();
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it('retries an unbound private join after its metadata arrives, but stops when join intent is removed', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-private-join`;
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-private-join',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    vi.spyOn(edge, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(false);
+
+    vi.useFakeTimers();
+    try {
+      // A subscribed node without a local join intent cannot promote an
+      // unregistered private graph, and it must not poll indefinitely.
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolveSnapshots).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(resolveSnapshots).toHaveBeenCalledOnce();
+
+      // The signed join path records this local agent intent before _meta
+      // arrives. The next selection stays inactive until the authority facts
+      // are verified, but it must retry rather than remain permanently idle.
+      (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
+      // Real unregistered subscriptions retain their name hash even though
+      // the numeric chain ID remains absent.
+      const subscription = edge.getSubscribedContextGraphs().get(contextGraphId)!;
+      Reflect.get(edge, 'subscribedContextGraphs').set(contextGraphId, {
+        ...subscription,
+        onChainHash: edge.contextGraphNameCommitment(contextGraphId),
+      });
+      expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId))
+        .toBe(true);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId, active: true }),
+      );
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(3);
+
+      // Removing the join intent before the next timer fires fences the
+      // queued retry even if the subscription row has not yet been removed.
+      (edge as any).localApprovedAgentByCG.delete(contextGraphId);
+      await vi.advanceTimersByTimeAsync(60_100);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it('does not arm finalized-absence retries while the RFC-64 kill switch is active', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-kill-switch`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const readSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-kill-switch',
+      activation: activation('catalog', true),
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '104',
+      onChainHash: nameHash,
+    });
+    const scheduleKeyed = vi.spyOn(
+      (edge as any).rfc64BackgroundWorkDispatcherV1,
+      'scheduleKeyed',
+    );
+
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      const initialReads = readSnapshots.mock.calls.length;
+      expect(initialReads).toBeGreaterThan(0);
+      expect(scheduleKeyed.mock.calls.filter(
+        ([key]) => String(key).startsWith('responsibility-finalized-absence-retry'),
+      )).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(450_300);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(initialReads);
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it('does not retry finalized absence for a partially bound subscription', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-partial-binding`;
+    const readSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-partial-binding',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '105',
+    });
+    const scheduleKeyed = vi.spyOn(
+      (edge as any).rfc64BackgroundWorkDispatcherV1,
+      'scheduleKeyed',
+    );
+
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+      expect(edge.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        onChainId: '105',
+      });
+      expect(edge.getSubscribedContextGraphs().get(contextGraphId)?.onChainHash)
+        .toBeUndefined();
+      expect(scheduleKeyed.mock.calls.filter(
+        ([key]) => String(key).startsWith('responsibility-finalized-absence-retry'),
+      )).toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(450_300);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it('tracks a sleeping finalized-absence retry until shutdown aborts and drains it', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-shutdown`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const readSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-shutdown',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '106',
+      onChainHash: nameHash,
+    });
+
+    let stopping: Promise<void> | undefined;
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+
+      let idleSettled = false;
+      const idle = edge.whenRfc64CatalogResponsibilitiesIdleV1()
+        .then(() => { idleSettled = true; });
+      await Promise.resolve();
+      expect(idleSettled).toBe(false);
+
+      stopping = edge.stop();
+      await Promise.all([stopping, idle]);
+      expect(idleSettled).toBe(true);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+      await stopping?.catch(() => undefined);
+    }
+  });
+
+  it('keeps unrelated responsibility reconciliation live during a finality retry delay', async () => {
+    const delayedContextGraphId = `${AUTHOR}/scheduled-finality-delayed`;
+    const readyContextGraphId = `${AUTHOR}/scheduled-finality-ready`;
+    const delayedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(delayedContextGraphId),
+    ).toLowerCase();
+    const readyNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(readyContextGraphId),
+    ).toLowerCase();
+    const readySnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(readyContextGraphId, [], '0'),
+      contextGraphId: '101',
+      accessPolicy: 0,
+      nameHash: readyNameHash,
+    });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.includes('101') ? [['101', readySnapshot]] : [],
+    ));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-independent',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(delayedContextGraphId, {
+      name: delayedContextGraphId,
+      onChainId: '100',
+      onChainHash: delayedNameHash,
+    });
+    edge.recordDiscoveredContextGraph(readyContextGraphId, {
+      name: readyContextGraphId,
+      onChainId: '101',
+      onChainHash: readyNameHash,
+    });
+
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(delayedContextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId: delayedContextGraphId }),
+      );
+
+      edge.subscribeToContextGraph(readyContextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({
+          contextGraphId: readyContextGraphId,
+          responsibilityReason: 'edge-subscription',
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it('drops a stale finalized-absence timer when a newer revision replaces it', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-stale-revision`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '102',
+      accessPolicy: 0,
+      nameHash,
+    });
+    let finalized = false;
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      finalized && onChainIds.includes('102') ? [['102', snapshot]] : [],
+    ));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-stale-revision',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '102',
+      onChainHash: nameHash,
+    });
+
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+
+      const scheduleKeyed = vi.spyOn(
+        (edge as any).rfc64BackgroundWorkDispatcherV1,
+        'scheduleKeyed',
+      );
+      const release = edge.beginRfc64ScheduledCatalogResponsibilityBatchV1();
+      expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId))
+        .toBe(true);
+      expect(scheduleKeyed.mock.calls.filter(
+        ([key]) => key === 'responsibility-batch',
+      )).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+      expect(scheduleKeyed.mock.calls.filter(
+        ([key]) => key === 'responsibility-batch',
+      )).toHaveLength(0);
+
+      release();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(scheduleKeyed.mock.calls.filter(
+        ([key]) => key === 'responsibility-batch',
+      )).toHaveLength(1);
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+
+      finalized = true;
+      await vi.advanceTimersByTimeAsync(30_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(3);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({
+          contextGraphId,
+          responsibilityReason: 'edge-subscription',
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
+  it('cancels finalized-absence retries when the Edge subscription is removed', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-finality-unsubscribe`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const readSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-finality-unsubscribe',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    readSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '103',
+      onChainHash: nameHash,
+    });
+
+    vi.useFakeTimers();
+    try {
+      edge.subscribeToContextGraph(contextGraphId);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(readSnapshots).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(30_100);
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+
+      edge.unsubscribeFromContextGraph(contextGraphId);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId }),
+      );
+
+      await vi.advanceTimersByTimeAsync(420_300);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId }),
+      );
+    } finally {
+      vi.useRealTimers();
+      await edge.stop();
+    }
+  });
+
   it('pauses a scheduled responsibility batch after one shared store timeout', async () => {
     const contextGraphIds = Array.from(
       { length: 16 },
@@ -3073,6 +5262,7 @@ describe('RFC-64 rollout authority integration', () => {
 
     expect(readSnapshots).toHaveBeenCalledWith(['96'], {
       signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
     });
     expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
       expect.objectContaining({ contextGraphId: withdrawnContextGraphId }),
@@ -3451,9 +5641,262 @@ describe('RFC-64 rollout authority integration', () => {
       request,
     )).rejects.toThrow('no finalized indexed authority');
     expect(resolveIds).not.toHaveBeenCalled();
-    expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(readSnapshots).toHaveBeenCalledWith(['9'], {
+      signal: expect.any(AbortSignal),
+      onContextGraphAuthorityProjectionServed: expect.any(Function),
+    });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
     expect(legacyPolicy).not.toHaveBeenCalled();
+  });
+
+  /**
+   * A freshly registered graph is invisible to the FINALIZED authority index
+   * until chain finality catches up (~600 blocks / ~20 min on Base Sepolia).
+   * That lag used to be reported as `registered-authority-binding-mismatch`
+   * and parked the graph as `blocked`, which silenced the AUTHOR of a public
+   * graph (no heads authored, served or announced) for the whole finality
+   * window after every registration. It is retryable, and the author of
+   * record keeps its already-accepted authority through it.
+   */
+  it('treats a registered graph the finalized index has not indexed yet as retryable, retaining the author\'s accepted authority', async () => {
+    const contextGraphId = `${AUTHOR}/unfinalized-author`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a private graph; this scenario is a PUBLIC one.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      accessPolicy: 0 as const,
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const author = await startAgent({
+      name: 'unfinalized-author',
+      config: { chainAdapter },
+    });
+    (author as any).localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    author.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    // A responsibility (not just a discovered binding) is what the fence,
+    // the refresh workload and the operational status all key on.
+    author.subscribeToContextGraph(contextGraphId);
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+
+    // Accepted while the index carries the entry.
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+    const accepted = (author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    expect(accepted).not.toBeNull();
+    expect(author.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId)).toBeNull();
+
+    // The finalized index no longer carries the bound id (finality lag).
+    readSnapshots.mockResolvedValue(new Map());
+    const request = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({
+      code: 'registered-authority-unfinalized',
+      message: expect.stringContaining('no finalized indexed authority'),
+    });
+    // The recorded reason is what ends a share observer's settlement retries early.
+    expect(author.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))
+      .toBe('registered-authority-unfinalized');
+
+    // Retryable, not a denial: authority retained, fence open, not parked.
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+    expect(author.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true });
+    const status = (await author.readRfc64CatalogOperationalStatusV1())
+      .find((entry) => entry.contextGraphId === contextGraphId);
+    expect(status?.authorityState).toBe('resolving');
+    expect(status?.authorityState).not.toBe('blocked');
+  });
+
+  it('classifies an unresolved private roster as transient, not as a denial', () => {
+    // This decision is what keeps the curator authoring: a denial parks the
+    // graph `blocked`, closing the only root-scope SWM lane a catalog-selected
+    // graph has.
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-private-roster-unresolved')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('unregistered-private-roster-unresolved')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-authority-unfinalized')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('authority-rpc-circuit-open')).toBe(true);
+    // Genuine denials must still fail closed.
+    for (const denial of [
+      'registered-authority-binding-mismatch',
+      'registered-authority-adapter-unsupported',
+      'unregistered-owner-unresolved',
+      'access-policy-unresolved',
+      'catalog-service-unavailable',
+      'authority-resolution-failed',
+    ]) {
+      expect(isRfc64TransientAuthorityRefreshFailureV1(denial)).toBe(false);
+    }
+  });
+
+  /**
+   * On a PRIVATE graph the refresh additionally requires a locally verified
+   * lifecycle roster. When that roster is not resolvable YET the refresh used
+   * to throw a bare `Error`, which is classified as a denial and parks the
+   * graph as `blocked`. That closes the curator's own authoring fence — and on
+   * a catalog-selected graph the catalog lane is the ONLY delivery path for
+   * root-scope SWM (legacy apply is deliberately closed), so the curator
+   * authored zero catalog rows and an RFC-64 matrix cell converged 0/50 SWM
+   * rather than slowly. `null` means "not resolvable yet"; a genuine
+   * revocation arrives as a resolved, smaller roster and still fails closed.
+   */
+  it('treats an unresolved private roster as retryable, keeping the author\'s catalog lane open', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-author`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a PRIVATE graph, which is what this needs.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const author = await startAgent({
+      name: 'private-roster-author',
+      config: { chainAdapter },
+    });
+    (author as any).localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    author.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    author.subscribeToContextGraph(contextGraphId);
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+
+    // A resolvable authenticated roster is a precondition of acceptance on a
+    // private graph; this fixture has no durable member state of its own.
+    const roster = vi
+      .spyOn(author as any, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValue([AUTHOR.toLowerCase()]);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+    const accepted = (author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    expect(accepted).not.toBeNull();
+
+    // The authenticated roster stops resolving locally.
+    roster.mockResolvedValue(null);
+    const request = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({ code: 'registered-private-roster-unresolved' });
+    expect(roster).toHaveBeenCalled();
+
+    // The accepted lineage survives the failed refresh rather than being
+    // cleared, which is what keeps the author's catalog lane usable. (This
+    // fixture does not select the graph, so the fence projection itself is
+    // asserted by the public sibling above; what is new here is the typed,
+    // retryable classification.)
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+
+    // A temporarily open authority RPC circuit is likewise an unavailable
+    // read, not evidence of a revoked private graph. Keep the accepted
+    // author lineage and allow the next bounded refresh to restore parity.
+    roster.mockResolvedValue([AUTHOR.toLowerCase()]);
+    vi.spyOn(author as any, 'readRfc64FinalizedAuthoritySnapshotEvidenceV1')
+      .mockRejectedValueOnce(new Rfc64AuthorityRpcCircuitOpenErrorV1(
+        Date.now() + 1_000,
+        1_000,
+      ));
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .rejects.toMatchObject({ code: 'RFC64_AUTHORITY_RPC_CIRCUIT_OPEN' });
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
+  });
+
+  it('keeps a replica fail-closed but retryable through the same finality lag (no retained seed, not parked)', async () => {
+    const contextGraphId = `${AUTHOR}/unfinalized-replica`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a private graph; this scenario is a PUBLIC one.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      accessPolicy: 0 as const,
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const replica = await startAgent({
+      name: 'unfinalized-replica',
+      config: { chainAdapter },
+    });
+    // NOT the author of record: no recordLocalCreate.
+    replica.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    replica.subscribeToContextGraph(contextGraphId);
+    await replica.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+    await expect(replica.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+
+    readSnapshots.mockResolvedValue(new Map());
+    const request = (await replica.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(replica.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({ code: 'registered-authority-unfinalized' });
+
+    // A replica does not get to keep serving on a stale acceptance ...
+    expect(replica.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false });
+    // ... but it is left retryable rather than parked as blocked.
+    const status = (await replica.readRfc64CatalogOperationalStatusV1())
+      .find((entry) => entry.contextGraphId === contextGraphId);
+    expect(status?.authorityState).toBe('resolving');
   });
 
   it('gates indexed private responsibility and authority on verified membership', async () => {
@@ -3721,13 +6164,16 @@ describe('RFC-64 rollout authority integration', () => {
     })).resolves.toBe(false);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
     const confirmedMeta = vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(false);
-    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryRosterSource')
       .mockResolvedValue([AUTHOR, MEMBER]);
     await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
       .resolves.toBeNull();
     expect(recoveryGate).not.toHaveBeenCalled();
 
     confirmedMeta.mockResolvedValue(true);
+    recoveryGate.mockRejectedValueOnce(new Error('member recovery gate unavailable'));
+    await expect(edge.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
+      .resolves.toBeNull();
     recoveryGate.mockResolvedValue([AUTHOR]);
     await expect(edge.hasRfc64VerifiedPrivateMembershipV1(contextGraphId))
       .resolves.toBe(false);
@@ -3758,7 +6204,7 @@ describe('RFC-64 rollout authority integration', () => {
       { agentAddress: MEMBER },
     ] as ReturnType<DKGAgent['listLocalAgents']>);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryGate')
+    const recoveryGate = vi.spyOn(edge, 'getMemberRecoveryRosterSource')
       .mockResolvedValue([MEMBER]);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('private');
 
@@ -3798,7 +6244,7 @@ describe('RFC-64 rollout authority integration', () => {
     const curatorPeerId = '12D3KooWVerifiedPrivateCurator';
     const memberPeerId = '12D3KooWVerifiedPrivateMember';
     const edge = await startAgent({ name: 'private-peer-binding' });
-    vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
+    const profile = vi.spyOn(edge, 'findAgentByPeerId').mockResolvedValue(null);
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
     const delegateePeers = vi.spyOn(edge, 'getContextGraphAllowedDelegateePeers')
       .mockResolvedValue(new Map([[MEMBER, [memberPeerId]]]));
@@ -3807,6 +6253,15 @@ describe('RFC-64 rollout authority integration', () => {
       memberPeerId,
       contextGraphId,
     )).resolves.toBe(MEMBER);
+
+    // A generic profile can arrive after the private delegatee binding and
+    // name another local agent. It must not replace the graph-scoped identity.
+    profile.mockResolvedValue({ agentAddress: AUTHOR } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      memberPeerId,
+      contextGraphId,
+    )).resolves.toBe(MEMBER);
+    profile.mockResolvedValue(null);
 
     delegateePeers.mockResolvedValue(new Map());
     (edge as any).localApprovedAgentByCG.set(contextGraphId, MEMBER);
@@ -3826,6 +6281,12 @@ describe('RFC-64 rollout authority integration', () => {
       curatorPeerId,
       contextGraphId,
     )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBe(AUTHOR);
+    profile.mockResolvedValue(null);
 
     currentCuratorBinding.mockResolvedValue({ agentAddress: MEMBER, authorityEra: '1' });
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
@@ -3857,8 +6318,38 @@ describe('RFC-64 rollout authority integration', () => {
       [MEMBER, [memberPeerId]],
       [AUTHOR, [memberPeerId]],
     ]));
+    profile.mockResolvedValue({ agentAddress: MEMBER } as never);
     await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
       memberPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    // Transient failures in graph-scoped binding reads must not manufacture
+    // an identity when no verified profile can supply one.
+    profile.mockResolvedValue(null);
+    delegateePeers.mockRejectedValueOnce(new Error('delegatee roster unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    delegateePeers.mockResolvedValue(new Map());
+    requesterState.mockRejectedValueOnce(new Error('join state unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
+      contextGraphId,
+    )).resolves.toBeNull();
+
+    requesterState.mockResolvedValue({
+      status: 'approved',
+      requestGeneration: `0x${'11'.repeat(32)}`,
+      curatorPeerId,
+      curatorAgentAddress: AUTHOR,
+      curatorAuthorityEra: '0',
+    });
+    currentCuratorBinding.mockRejectedValueOnce(new Error('curator binding unavailable'));
+    await expect(edge.resolveRfc64CatalogRemoteAgentAddressV1(
+      curatorPeerId,
       contextGraphId,
     )).resolves.toBeNull();
   });
@@ -3883,7 +6374,7 @@ describe('RFC-64 rollout authority integration', () => {
     (edge as any).defaultAgentAddress = MEMBER;
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR, MEMBER]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([AUTHOR, MEMBER]);
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1788482000000');
     vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
       .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
@@ -4003,7 +6494,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([localMember]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([localMember]);
     vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1');
 
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
@@ -4029,7 +6520,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     vi.spyOn(edge, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(edge, 'getMemberRecoveryGate').mockResolvedValue([AUTHOR]);
+    vi.spyOn(edge, 'getMemberRecoveryRosterSource').mockResolvedValue([AUTHOR]);
     vi.spyOn(edge, 'getCgMeta').mockResolvedValue({
       ...(await edge.getCgMeta(contextGraphId)),
       revokedAgents: [MEMBER],
@@ -4077,6 +6568,59 @@ describe('RFC-64 rollout authority integration', () => {
     expect(BigInt(await curator.readRfc64PrivateRosterVersionV1(contextGraphId)))
       .toBeGreaterThan(admittedVersion);
     expect(curator.resolveRfc64PrivateReadRosterV1(contextGraphId)).toEqual([AUTHOR]);
+  });
+
+  it('uses only confirmed own metadata for a local-first private roster during catalog rotation', async () => {
+    const contextGraphId = `${AUTHOR}/local-first-roster-rotation` as ContextGraphIdV1;
+    const curator = await startAgent({ name: 'local-first-roster-rotation' });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Local-first private roster',
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.inviteAgentToContextGraph(contextGraphId, MEMBER, AUTHOR);
+    expect(await curator.hasConfirmedMetaState(contextGraphId)).toBe(true);
+    expect(await curator.isLocalFirstUnregisteredContextGraph(contextGraphId)).toBe(true);
+
+    const generalRecovery = vi.spyOn(curator, 'getMemberRecoveryRosterSource')
+      .mockRejectedValue(new Error('catalog policy is rotating'));
+    vi.spyOn(curator, 'getLocalMetadataMemberRecoveryGate')
+      .mockResolvedValue([AUTHOR, MEMBER, NONMEMBER]);
+    await expect(curator.resolveRfc64VerifiedPrivateRosterV1(contextGraphId))
+      .resolves.toEqual([AUTHOR, MEMBER].sort());
+    expect(generalRecovery).not.toHaveBeenCalled();
+  });
+
+  it('replays an approved private catalog only to a member of its accepted roster', async () => {
+    const contextGraphId = `${AUTHOR}/approved-catalog-replay` as ContextGraphIdV1;
+    const curator = await startAgent({ name: 'approved-catalog-replay' });
+    const policyDigest = `0x${'ab'.repeat(32)}` as Digest32V1;
+    vi.spyOn(curator, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue({
+      policy: { networkId: NETWORK_ID, contextGraphId, accessPolicy: 1 },
+      policyDigest,
+      roster: { members: [{ agentAddress: MEMBER }] },
+    } as any);
+    const replay = vi.spyOn(curator, 'reannounceRfc64CatalogHeadsToPeerV1')
+      .mockResolvedValue(Object.freeze({ announced: 1, failed: 0, manifest: Object.freeze([]) }));
+
+    await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
+      contextGraphId, NONMEMBER, 'nonmember-peer',
+    )).resolves.toBe(false);
+    expect(replay).not.toHaveBeenCalled();
+    await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
+      contextGraphId, MEMBER, 'member-peer',
+    )).resolves.toBe(true);
+    expect(replay).toHaveBeenCalledWith('member-peer', expect.objectContaining({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      policyDigest,
+    }));
+    replay.mockResolvedValue(Object.freeze({ announced: 0, failed: 0, manifest: Object.freeze([]) }));
+    await expect(curator.reannounceRfc64CatalogAfterJoinApprovalV1(
+      contextGraphId, MEMBER, 'member-peer',
+    )).resolves.toBe(false);
   });
 
   it('rejects an out-of-order unregistered roster refresh after removal', async () => {
@@ -4153,6 +6697,219 @@ describe('RFC-64 rollout authority integration', () => {
         stableReason: null,
       }),
     );
+  });
+
+  /**
+   * A private unregistered graph whose authority this node has already
+   * accepted, plus the reads that let a test move local authority facts while
+   * one composition is in flight.
+   */
+  async function acceptedPrivateAuthorityFixture(name: string) {
+    const contextGraphId = `${AUTHOR}/${name}` as ContextGraphIdV1;
+    const curator = await startAgent({
+      name,
+      config: {
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name,
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+    const accepted = () => (curator as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    const rosterMembers = (snapshot: { roster: { members: readonly { agentAddress: string }[] } | null }) => (
+      snapshot.roster?.members.map(({ agentAddress }) => agentAddress.toLowerCase()) ?? []
+    );
+    return {
+      contextGraphId,
+      curator,
+      accepted,
+      rosterMembers,
+      projection: Reflect.get(curator, 'contextGraphMetaProjection') as {
+        markDirty(contextGraphId: string): void;
+        markDirtyForGraph(graphUri: string): void;
+      },
+    };
+  }
+
+  it('recomposes an unregistered roster when its own metadata changes during the read', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-roster-revision-fence');
+    const acceptedBefore = f.accepted();
+    expect(f.rosterMembers(acceptedBefore)).toEqual([AUTHOR.toLowerCase()]);
+    let releaseVersion!: () => void;
+    let versionEntered!: () => void;
+    const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+    const versionRead = new Promise<void>((resolve) => { versionEntered = resolve; });
+    // Only the first composition sees this roster and version: they stand for
+    // facts read before the change. The composition after it reads the real ones.
+    vi.spyOn(f.curator, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValueOnce([AUTHOR, MEMBER]);
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementationOnce(async () => {
+        versionEntered();
+        await versionGate;
+        return '9';
+      });
+
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await versionRead;
+    f.projection.markDirty(f.contextGraphId);
+    releaseVersion();
+
+    const authority = await refresh;
+    expect(authority).not.toBeNull();
+    expect(f.rosterMembers(authority!)).toEqual([AUTHOR.toLowerCase()]);
+    expect(authority!.roster?.version).not.toBe('9');
+    expect(f.rosterMembers(f.accepted())).toEqual([AUTHOR.toLowerCase()]);
+    expect(f.accepted().policyDigest).toBe(acceptedBefore.policyDigest);
+    // The graph is not left `resolving` until the next periodic refresh pass.
+    expect((await f.curator.readRfc64CatalogOperationalStatusV1())
+      .find((status) => status.contextGraphId === f.contextGraphId))
+      .toMatchObject({ authorityState: 'accepted', policyDigest: acceptedBefore.policyDigest });
+  });
+
+  it('keeps an unregistered authority composition when only another graph changes', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-roster-unrelated-write');
+    let releaseVersion!: () => void;
+    let versionEntered!: () => void;
+    const versionGate = new Promise<void>((resolve) => { releaseVersion = resolve; });
+    const versionRead = new Promise<void>((resolve) => { versionEntered = resolve; });
+    const roster = vi.spyOn(f.curator, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValueOnce([AUTHOR, MEMBER]);
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementationOnce(async () => {
+        versionEntered();
+        await versionGate;
+        return '9';
+      });
+
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await versionRead;
+    f.projection.markDirtyForGraph('urn:dkg:test:unrelated-graph');
+    releaseVersion();
+
+    await expect(refresh).resolves.toMatchObject({
+      roster: { version: '9' },
+    });
+    expect(f.rosterMembers(f.accepted())).toEqual([
+      AUTHOR.toLowerCase(), MEMBER.toLowerCase(),
+    ]);
+    expect(roster).toHaveBeenCalledOnce();
+  });
+
+  it('composes an unregistered authority generation again when metadata changes during the policy read', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-policy-revision-fence');
+    const acceptedBefore = f.accepted();
+    let releasePolicy!: () => void;
+    let policyEntered!: () => void;
+    const policyGate = new Promise<void>((resolve) => { releasePolicy = resolve; });
+    const policyRead = new Promise<void>((resolve) => { policyEntered = resolve; });
+    const explicitPolicy = vi.spyOn(f.curator, 'getExplicitAccessPolicy')
+      .mockImplementationOnce(async () => {
+        policyEntered();
+        await policyGate;
+        return 'private';
+      });
+
+    const refresh = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await policyRead;
+    // Simulate an owner/policy authority-fact generation landing after the
+    // old owner was read but before this blocked policy read completes.
+    f.projection.markDirty(f.contextGraphId);
+    const policyReadsWhenMoved = explicitPolicy.mock.calls.length;
+    releasePolicy();
+
+    await expect(refresh).resolves.toMatchObject({ policyDigest: acceptedBefore.policyDigest });
+    // The policy was read again after the change instead of being reused.
+    expect(explicitPolicy.mock.calls.length).toBeGreaterThan(policyReadsWhenMoved);
+    expect(f.accepted().policyDigest).toBe(acceptedBefore.policyDigest);
+  });
+
+  it('gives up after its bounded retries while local authority facts never stop moving', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-authority-facts-never-settle');
+    const acceptedBefore = f.accepted();
+    const warnings: string[] = [];
+    vi.spyOn(Reflect.get(f.curator, 'log') as { warn(ctx: unknown, message: string): void }, 'warn')
+      .mockImplementation((_ctx, message) => { warnings.push(message); });
+    let compositions = 0;
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        compositions += 1;
+        f.projection.markDirty(f.contextGraphId);
+        return '9';
+      });
+
+    await expect(f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId))
+      .resolves.toBeNull();
+
+    expect(compositions).toBe(RFC64_AUTHORITY_FACTS_MOVED_RETRY_DELAYS_MS_V1.length + 1);
+    expect(f.accepted()).toEqual(acceptedBefore);
+    expect(warnings.filter((message) => message.includes('local authority facts kept changing')))
+      .toHaveLength(1);
+  }, 20_000);
+
+  it('leaves the outcome to a refresh that starts while it waits to compose again', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-authority-newer-refresh');
+    let compositions = 0;
+    let newerRefreshStarted = false;
+    let compositionsAfterNewerRefresh = 0;
+    let thirdDiscard!: () => void;
+    const thirdDiscarded = new Promise<void>((resolve) => { thirdDiscard = resolve; });
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        compositions += 1;
+        if (newerRefreshStarted) {
+          compositionsAfterNewerRefresh += 1;
+          return '9';
+        }
+        // Every composition of the first refresh is discarded.
+        f.projection.markDirty(f.contextGraphId);
+        if (compositions === 3) thirdDiscard();
+        return '9';
+      });
+
+    const first = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+    await thirdDiscarded;
+    // The first refresh now waits before a fourth composition. Let its third
+    // one return, then start a newer refresh inside that wait.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    newerRefreshStarted = true;
+    const newer = f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId);
+
+    await expect(newer).resolves.toMatchObject({ roster: { version: '9' } });
+    await expect(first).resolves.toBeNull();
+    // Only the newer refresh composed after it started.
+    expect(compositionsAfterNewerRefresh).toBe(1);
+    expect(f.accepted().roster.version).toBe('9');
+  });
+
+  it('propagates cancellation while it waits to compose again', async () => {
+    const f = await acceptedPrivateAuthorityFixture('private-authority-cancelled-wait');
+    const acceptedBefore = f.accepted();
+    const owner = new AbortController();
+    const cancelled = new Error('authority refresh owner stopped');
+    let compositions = 0;
+    vi.spyOn(f.curator, 'readRfc64PrivateRosterVersionV1')
+      .mockImplementation(async () => {
+        compositions += 1;
+        f.projection.markDirty(f.contextGraphId);
+        // The second discard is followed by a real wait; cancel inside it.
+        if (compositions === 2) setTimeout(() => owner.abort(cancelled), 5);
+        return '9';
+      });
+
+    await expect(f.curator.reconcileRfc64CatalogAccessAuthorityV1(f.contextGraphId, owner.signal))
+      .rejects.toBe(cancelled);
+    expect(compositions).toBe(2);
+    expect(f.accepted()).toEqual(acceptedBefore);
   });
 
   it('keeps a blocked authority disabled throughout a stalled retry', async () => {
@@ -4608,6 +7365,10 @@ describe('RFC-64 rollout authority integration', () => {
         },
       },
     });
+    expect(stopped.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)
+      .legacySyncAllowed).toBe(false);
+    await expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
+    await expect(stopped.canUseLegacyDurableSyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
     expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();
@@ -4654,7 +7415,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     // Finalized RFC-64 authority is sufficient at the transport boundary, so
     // catalog-owned SWM no longer waits for a legacy metadata bootstrap read.
-    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
+    await vi.waitFor(() => expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true));
 
     // Catalog mode owns the root lane, but named subgraphs still require the
     // authorized member transport. queueSharedMemoryGossipSubscription remains
@@ -4678,7 +7439,10 @@ describe('RFC-64 rollout authority integration', () => {
       subscribed: true,
       metaSynced: true,
     });
-    expect(memberAuthority).toHaveBeenCalledWith(CONTEXT_GRAPH_ID);
+    expect(memberAuthority).toHaveBeenCalledWith(
+      CONTEXT_GRAPH_ID,
+      { onAuthorityWait: expect.any(Function) },
+    );
     expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
 
     // A core's ordinary host reconciliation is another legacy entry point.
@@ -5197,10 +7961,17 @@ describe('RFC-64 rollout authority integration', () => {
             policyEnvelope: policyEnvelope(),
             targets: [{ authorAddress: AUTHOR, providers: [author.peerId] }],
           }],
+          retryIntervalMs: 1_000,
         },
       },
+      config: { syncContextGraphs: [] },
     });
+    // Subscribe only after the provider connection exists. Otherwise the first
+    // pass probes a provider it can only find through mDNS; where multicast is
+    // unavailable (e.g. macOS without Local Network access) that probe times
+    // out and admission backs the provider off for 15s.
     await connectBothWays(author, shadow);
+    shadow.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await vi.waitFor(() => {
       expect(shadow.readRfc64PublicCatalogBootstrapStatusV1()?.targets[0]).toMatchObject({
         mode: 'shadow',
@@ -5229,6 +8000,7 @@ describe('RFC-64 rollout authority integration', () => {
     const shadow = await startAgent({
       name: 'lifecycle-shadow-receiver',
       config: {
+        ...custodialAuthorConfig(),
         rfc64CatalogActivation: {
           deploymentProfile: DEPLOYMENT,
           rollout: {
@@ -5343,6 +8115,204 @@ async function seedCatalogSemanticClosure(
   ]);
 }
 
+async function prepareLateAuthorityPromotionFixtureV1(params: Readonly<{
+  name: string;
+  assertionCoordinate: string;
+  shareOperationId: string;
+  kaNumber: bigint;
+  projectOwnerCatalog?: boolean;
+  deferFinalizedAuthority?: boolean;
+}>) {
+  const chainAdapter = Object.assign(new NoChainAdapter(), {
+    getEvmChainId: vi.fn(async () => 20430n),
+    contextGraphAuthorityIndexRevisionReader: {
+      resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes:
+        vi.fn(async () => new Map()),
+      readContextGraphAuthorityIndexSnapshots: vi.fn(async () => new Map()),
+      readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+      whenIdle: vi.fn(async () => undefined),
+    },
+  });
+  const agent = await startAgent({
+    name: params.name,
+    config: {
+      ...custodialAuthorConfig(chainAdapter),
+      rfc64CatalogDeploymentProfile: DEPLOYMENT,
+    },
+  });
+  await installRfc64UnregisteredAuthorityEvidenceV1(agent);
+  await agent.reconcileRfc64CatalogAccessAuthorityV1(
+    CONTEXT_GRAPH_ID,
+    undefined,
+    { kind: 'finalized-absence' },
+  );
+  agent.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+  await agent.whenRfc64CatalogResponsibilitiesIdleV1();
+  await seedRfc64SwmWorkspaceV1(agent, params);
+  if (params.projectOwnerCatalog === true) {
+    await agent.afterDurableSwmPromotionV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: params.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: params.shareOperationId,
+      ctx: createOperationContext('share'),
+    });
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+  } else {
+    const recorded = await agent.recordRfc64SwmAuthorInventoryShadowV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: params.assertionCoordinate,
+      lifecycleAgentAddress: AUTHOR,
+      shareOperationId: params.shareOperationId,
+    });
+    if (recorded.status !== 'applied') {
+      throw new Error(`fixture owner inventory row was not applied: ${JSON.stringify(recorded)}`);
+    }
+  }
+
+  const ownerScope = Object.freeze({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: null,
+    governanceContractAddress: null,
+    ownershipTransitionDigest: null,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    era: '0',
+  });
+  const ownerScopeDigest = computeSwmAuthorInventoryScopeDigestV1(ownerScope);
+  const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    snapshot: parseRfc64AuthoritySnapshotV1(
+      {
+        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
+        accessPolicy: 0,
+      },
+      9n,
+    ),
+  });
+  const acceptFinalizedAuthority = () => {
+    (agent as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: finalizedAuthority.policy,
+      policyDigest: finalizedAuthority.policyDigest,
+      roster: finalizedAuthority.roster,
+    });
+  };
+  if (params.deferFinalizedAuthority !== true) acceptFinalizedAuthority();
+  const targetScope = Object.freeze({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: finalizedAuthority.policy.governanceChainId,
+    governanceContractAddress: finalizedAuthority.policy.governanceContractAddress,
+    ownershipTransitionDigest: finalizedAuthority.policy.ownershipTransitionDigest,
+    subGraphName: null,
+    authorAddress: AUTHOR,
+    era: finalizedAuthority.policy.era,
+  });
+  return Object.freeze({
+    agent,
+    assertionCoordinate: params.assertionCoordinate,
+    shareOperationId: params.shareOperationId,
+    kaNumber: params.kaNumber,
+    kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${params.kaNumber}`,
+    ownerScope,
+    ownerScopeDigest,
+    targetScope,
+    targetScopeDigest: computeSwmAuthorInventoryScopeDigestV1(targetScope),
+    acceptFinalizedAuthority,
+  });
+}
+
+async function installRfc64UnregisteredAuthorityEvidenceV1(
+  agent: DKGAgent,
+): Promise<void> {
+  const evidence = await mintRfc64UnregisteredReplicaAuthorityEvidenceV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    ownerAddress: AUTHOR,
+    accessPolicy: 0,
+    publishPolicy: 0,
+    publishAuthorityAccountId: '0',
+    memberAddresses: [],
+    rosterVersion: '0',
+    signer: {
+      issuer: AUTHOR,
+      signDigest: (digest) => AUTHOR_WALLET.signMessage(digest),
+    },
+  });
+  const subject = contextGraphDataGraphUri(CONTEXT_GRAPH_ID);
+  const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+  await (agent as unknown as { store: TripleStore }).store.insert([
+    {
+      subject,
+      predicate: RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
+      object: `"${evidence}"`,
+      graph: ontologyGraph,
+    },
+  ]);
+}
+
+async function seedRfc64SwmWorkspaceV1(
+  agent: DKGAgent,
+  params: Readonly<{
+    assertionCoordinate: string;
+    shareOperationId: string;
+    kaNumber: bigint;
+  }>,
+): Promise<void> {
+  const canonicalSeal = await authorSeal(params.kaNumber);
+  const seal = assertionSealFromCanonical(canonicalSeal);
+  const assertionUri = contextGraphAssertionUri(
+    CONTEXT_GRAPH_ID,
+    AUTHOR,
+    params.assertionCoordinate as never,
+  );
+  const metaGraph = contextGraphMetaUri(CONTEXT_GRAPH_ID);
+  await agent.store.insert(buildAssertionSealQuads({
+    assertionUri,
+    metaGraph,
+    merkleRoot: seal.merkleRoot,
+    authorAddress: seal.authorAddress,
+    authorAttestationR: seal.authorAttestationR,
+    authorAttestationVS: seal.authorAttestationVS,
+    authorSchemeVersion: seal.authorSchemeVersion,
+    chainId: seal.chainId,
+    kav10Address: seal.kav10Address,
+    reservedKaId: seal.reservedKaId!,
+    finalizedAtIso: seal.finalizedAtIso,
+    contentScopeVersion: seal.contentScopeVersion!,
+    kaUal: seal.kaUal!,
+    assertionVersion: seal.assertionVersion!,
+    publicTripleCount: seal.publicTripleCount!,
+    privateTripleCount: seal.privateTripleCount!,
+  }));
+  const graphManager = new GraphManager(agent.store);
+  await storeKnowledgeAssetOperationPublicQuads({
+    store: agent.store,
+    graphManager,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    shareOperationId: params.shareOperationId,
+    kaUal: canonicalSeal.kaUal,
+    assertionVersion: canonicalSeal.assertionVersion,
+    quads: PROJECTION_QUADS,
+    privateTripleCount: 0,
+    publisherPeerId: agent.peerId,
+    accessPolicy: 'public',
+    agentAddress: AUTHOR,
+    timestamp: new Date(canonicalSeal.assertionFinalizedAt),
+  });
+  await storeKnowledgeAssetWorkspaceHead({
+    store: agent.store,
+    graphManager,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    kaUal: canonicalSeal.kaUal,
+    assertionVersion: canonicalSeal.assertionVersion,
+    shareOperationId: params.shareOperationId,
+  });
+}
+
 function catalogScopeDigest() {
   return computeAuthorCatalogScopeDigestV1({
     networkId: NETWORK_ID,
@@ -5414,3 +8384,152 @@ function assertionSealFromCanonical(seal: CanonicalGraphScopedAuthorSealV1): Ass
     rootEntities: [],
   };
 }
+
+
+it('retains a genuine last-close reconnect raised during the receiver drain', async () => {
+  const edge = await startAgent({ name: 'replay-last-close-successor', activation: activation('catalog') });
+  const peer = '12D3KooWReconnectDuringReceiverDrain';
+  const remotePeer = { toString: () => peer };
+  let connected = true;
+  vi.spyOn(edge.node.libp2p, 'getPeers').mockImplementation(() => connected ? [remotePeer] as never : []);
+  vi.spyOn((edge as any).networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+  vi.spyOn(edge as any, 'enrichPeerStoreFromInboundCircuit').mockResolvedValue(undefined);
+  vi.spyOn(edge as any, 'drainPendingSenderKeyForPeer').mockResolvedValue(0);
+  vi.spyOn(edge, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+  vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
+  const service = (edge as any).rfc64PublicCatalogServiceV1;
+  const reserve = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
+  const deferred = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reserveDeferred');
+  const request = vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({
+    kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [],
+  });
+  let release!: () => void;
+  let entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  vi.spyOn(service, 'whenReceiverIdleForContextGraph').mockImplementationOnce(async () => { entered(); await held; });
+  let now = Date.now();
+  const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+  const open = () => edge.node.libp2p.dispatchEvent(new CustomEvent('connection:open', { detail: {
+    remotePeer, remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+    direction: 'inbound', timeline: { open: now },
+  } } as any));
+  try {
+    open(); await started;
+    for (let i = 0; i < 20; i++) open();
+    expect(request).toHaveBeenCalledOnce();
+    // Closing one of several live connections is not a new peer generation.
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', { detail: { remotePeer, timeline: { open: now, close: now } } } as any));
+    open();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(1);
+    expect(reserve.mock.calls.filter(call => call[2] === peer)).toHaveLength(1);
+    const currentFence = reserve.mock.results.find((_, i) => reserve.mock.calls[i][2] === peer)?.value;
+    expect(currentFence).not.toBeNull();
+    connected = false;
+    edge.node.libp2p.dispatchEvent(new CustomEvent('connection:close', { detail: { remotePeer, timeline: { open: now, close: now } } } as any));
+    connected = true; open();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(2);
+    const peerFences = reserve.mock.results.filter((_, i) => reserve.mock.calls[i][2] === peer).map(result => result.value);
+    expect(peerFences).toEqual([currentFence]);
+    expect(deferred.mock.calls.some(call => call[0] === CONTEXT_GRAPH_ID)).toBe(true);
+    release();
+    await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.activePeers).toBe(0));
+    expect(request).toHaveBeenCalledOnce();
+    expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(1);
+    now += 60_001;
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    const completedFences = reserve.mock.results.filter((_, i) => reserve.mock.calls[i][2] === peer).map(result => result.value);
+    expect(completedFences).toHaveLength(2);
+    expect(completedFences[1]).not.toBe(currentFence);
+    await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0));
+  } finally { release(); clock.mockRestore(); }
+}, 15_000);
+
+it('reads SWM authority selection without traversing connection replay diagnostics', async () => {
+  const edge = await startAgent({ name: 'replay-lightweight-selection', activation: activation('catalog') });
+  const reservation = edge.prepareRfc64CatalogConnectionReplayV1('12D3KooWSelectionProbe');
+  reservation?.reject();
+  const status = vi.spyOn(Rfc64CatalogReplayConnectionRuntimeV1.prototype, 'status');
+  const authority = edge.resolveRfc64SwmRecoveryRuntimeAuthorityV1(CONTEXT_GRAPH_ID);
+  expect(authority.active).toBe(true);
+  expect(status).not.toHaveBeenCalled();
+  expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay).toBeDefined();
+  expect(status).toHaveBeenCalledOnce();
+});
+
+
+function twoReplayGraphsActivation(): ReturnType<typeof activation> {
+  const graphA = `${AUTHOR}/receiving-a` as ContextGraphIdV1;
+  const input = activation('catalog');
+  return { ...input,
+    rollout: { ...input.rollout, contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog', [graphA]: 'catalog' } },
+    bootstrap: { acceptedPublicPolicies: [{ policyEnvelope: policyEnvelope(), targets: [] }, { policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(
+      buildOpenOwnerContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: graphA, ownerAddress: AUTHOR })), targets: [] }] },
+  };
+}
+
+it.each(['configured', 'compatibility'] as const)('announces durable serving B via %s while the edge receives A', async mode => {
+  const graphA = `${AUTHOR}/receiving-a`;
+  const both = twoReplayGraphsActivation();
+  const input = mode === 'configured' ? both : { ...both,
+    rollout: { ...both.rollout, contextGraphModes: { [graphA]: 'catalog' as const } },
+    bootstrap: { ...both.bootstrap, acceptedPublicPolicies: both.bootstrap!.acceptedPublicPolicies!.slice(1) },
+  };
+  const { provider } = await startAppliedOpenReplayProvider('serving-only-connection-' + mode, input);
+  if (mode === 'compatibility') provider.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
+  provider.subscribeToContextGraph(graphA);
+  if (mode === 'configured') { provider.subscribeToContextGraph(CONTEXT_GRAPH_ID); provider.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID); }
+  await provider.whenRfc64PublicCatalogBootstrapIdleV1();
+  expect(provider.listActiveRfc64CatalogReplayContextGraphIdsV1()).toContain(graphA);
+  expect(provider.listActiveRfc64CatalogReplayContextGraphIdsV1()).not.toContain(CONTEXT_GRAPH_ID);
+  expect(provider.listServingRfc64CatalogReplayContextGraphIdsV1()).toContain(CONTEXT_GRAPH_ID);
+  const sent = vi.spyOn((provider as any).router, 'send').mockResolvedValue(Uint8Array.of(1));
+  const service = (provider as any).rfc64PublicCatalogServiceV1;
+  const request = vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({ kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [] });
+  const peer = '12D3KooWServingOnlyConnection';
+  provider.prepareRfc64CatalogConnectionReplayV1(peer)!.admit();
+  await vi.waitFor(() => expect(provider.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0));
+  expect(sent.mock.calls.map(([, , data]) => parseRfc64PublicCatalogHeadAnnouncementV1(data).contextGraphId)).toContain(CONTEXT_GRAPH_ID);
+  expect(request.mock.calls.some(([input]) => (input as { contextGraphId: string }).contextGraphId === CONTEXT_GRAPH_ID)).toBe(false);
+});
+
+it('shares the agent transport limit between full recovery and connection announcements across graphs', async () => {
+  const { provider } = await startAppliedOpenReplayProvider('agent-shared-transport', twoReplayGraphsActivation());
+  const graphA = `${AUTHOR}/receiving-a`;
+  provider.subscribeToContextGraph(graphA);
+  provider.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+  await provider.whenRfc64PublicCatalogBootstrapIdleV1();
+  const peers = ['12D3KooWBoundA', '12D3KooWBoundB', '12D3KooWBoundC'];
+  vi.spyOn(provider.node.libp2p, 'getPeers').mockReturnValue(peers.map(peer => ({ toString: () => peer })) as never);
+  const active = new Set<string>(); let maximum = 0; let overlap = false; let entered = 0; let draining = false;
+  const releases: (() => void)[] = [];
+  const hold = async (peer: string) => {
+    overlap ||= active.has(peer); active.add(peer); maximum = Math.max(maximum, active.size); entered++;
+    if (!draining) await new Promise<void>(resolve => releases.push(resolve)); active.delete(peer);
+  };
+  const service = (provider as any).rfc64PublicCatalogServiceV1;
+  vi.spyOn(service, 'requestCatalogHeadReplay').mockImplementation(async (input: any) => {
+    await hold(input.remotePeerId); return { kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [] };
+  });
+  const sent = vi.spyOn((provider as any).router, 'send').mockImplementation(async (peer: any) => {
+    await hold(peer.toString()); return Uint8Array.of(1);
+  });
+  const recovery = provider.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(graphA);
+  try {
+    await vi.waitFor(() => expect(entered).toBe(2));
+    provider.prepareRfc64CatalogConnectionReplayV1(peers[0])!.admit();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(entered).toBe(2); expect(sent).not.toHaveBeenCalled();
+    // Drain deterministically, retaining assertions outside mocked best-effort ports.
+    for (let pass = 0; pass < 40; pass++) {
+      releases.splice(0).forEach(release => release());
+      await new Promise(resolve => setTimeout(resolve, 5));
+      if (active.size === 0 && provider.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes === 0) break;
+    }
+    await recovery;
+    expect(sent).toHaveBeenCalled(); expect(maximum).toBe(2); expect(overlap).toBe(false);
+    expect(provider.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0);
+  } finally { draining = true; releases.splice(0).forEach(release => release()); await recovery; }
+}, 15_000);

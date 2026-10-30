@@ -1,5 +1,44 @@
 [
   {
+    "pattern": "scripts/repro/publisher-live-control-restart.test.mts",
+    "lane": "native-crash-campaign",
+    "reason": "Five serial runtime starts prove persisted publisher pause, resume, startup override and graceful shutdown fencing in the first required CLI shard",
+    "cadence": "required",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts",
+    "prerequisites": [
+      "Node 22 with experimental SQLite",
+      "built publisher and CLI dependency closure",
+      "disposable loopback HTTP listeners and temporary persistent Oxigraph store"
+    ],
+    "layer": "Native publisher HTTP/Oxigraph process-crash regression"
+  },
+  {
+    "pattern": "packages/agent/campaigns/catalog-durable-head.test.ts",
+    "lane": "native-crash-campaign",
+    "reason": "Parent-owned process-death and restart matrix runs once in the required agent sidecar shard; ordinary Gate1 regression remains in the package inventory",
+    "cadence": "required",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts",
+    "prerequisites": [
+      "Node 22 with experimental SQLite",
+      "built agent dependency closure",
+      "disposable loopback libp2p peers"
+    ],
+    "layer": "Native SQLite/Oxigraph/libp2p process-crash regression"
+  },
+  {
+    "pattern": "packages/node-ui/browser-regressions/pr3236/*.spec.ts",
+    "lane": "browser",
+    "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
+    "cadence": "required",
+    "command": "pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts",
+    "layer": "browser regression fixtures",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies",
+      "Playwright Chromium"
+    ]
+  },
+  {
     "pattern": "packages/node-ui/e2e/specs/devnet-local/**",
     "lane": "browser-local",
     "reason": "Heavy destructive scenarios use isolated devnet in scheduled main CI or explicit local runs",
@@ -47,6 +86,33 @@
     ]
   },
   {
+    "pattern": "scripts/docs/*.test.mjs",
+    "lane": "docs",
+    "reason": "Documentation contracts workflow runs these dependency-free tests for documentation, example, and docs-tooling changes",
+    "cadence": "pull_request/manual",
+    "command": "node --test scripts/docs/*.test.mjs",
+    "layer": "documentation tooling",
+    "prerequisites": [
+      "Node.js 22"
+    ]
+  },
+  {
+    "pattern": "devnet/rfc64-persistence-lifecycle/*.test.ts",
+    "lane": "inventory-windows",
+    "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run on the Windows inventory evidence leg before generation and on the Linux tornado-agent sidecar shard, which also runs the POSIX-only cases",
+    "cadence": "required",
+    "command": "pnpm test:gate0:rfc64-persistence-lifecycle:unit"
+  },
+  {
+    "pattern": "devnet/_bootstrap/{suite-manifest,harness-json,harness-query,select-response,query-node}.test.ts",
+    "lane": "scripts",
+    "reason": "Pure devnet evidence parsing and manifest checks run in the required build gate, without starting a devnet",
+    "cadence": "required",
+    "command": "pnpm test:devnet:manifest",
+    "layer": "repository tooling",
+    "prerequisites": ["pnpm frozen install"]
+  },
+  {
     "pattern": "devnet/**",
     "lane": "devnet",
     "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",
@@ -80,6 +146,27 @@
     "reason": "Native Oxigraph recovery plus real backend conformance; Blazegraph mandatory in CI",
     "cadence": "required",
     "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
+  },
+  {
+    "pattern": "packages/storage/test-live/blazegraph-prefix.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Native graph-prefix evaluation conformance is mandatory in the existing Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane: on its service container and again on the blazegraph-image.json image with the U+001F reproduction required",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts"
+  },
+  {
+    "pattern": "packages/cli/test-live/public-checkpoint-daemon.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Daemon-owned fresh native bootstrap and restart run with the pinned private JVM in the required Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.native-bootstrap.config.ts"
   },
   {
     "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",
@@ -128,15 +215,15 @@
     "command": "bash tools/observability/smoke-test.sh"
   },
   {
-    "pattern": "ccl_v0_1/tests/**",
+    "pattern": "packages/agent/ccl_v0_1/tests/**",
     "lane": "ccl-python-yaml",
-    "reason": "Python CCL driver loads the YAML case corpus; requires ccl_v0_1/requirements.txt",
+    "reason": "Python CCL driver loads the YAML case corpus; requires PyYAML",
     "cadence": "manual",
-    "command": "cd ccl_v0_1 && python3 tests/run_all_tests.py",
+    "command": "cd packages/agent/ccl_v0_1 && python3 tests/run_all_tests.py",
     "layer": "Python/YAML conformance",
     "prerequisites": [
       "Python 3",
-      "ccl_v0_1/requirements.txt"
+      "PyYAML"
     ]
   },
   {
@@ -145,5 +232,29 @@
     "reason": "Long-running operator soak drivers for isolated devnets; prerequisites are documented by each script",
     "cadence": "manual",
     "command": "bash {file}"
+  },
+  {
+    "pattern": "scripts/testnet-share-recovery/test_*.py",
+    "lane": "python",
+    "reason": "Exact full-graph evidence verifier regressions for the testnet share-recovery campaign",
+    "cadence": "required",
+    "command": "python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py",
+    "layer": "evidence validation",
+    "prerequisites": [
+      "Python 3.9 or newer"
+    ]
+  },
+  {
+    "pattern": "scripts/testnet-share-recovery/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Exact identity evidence verifier regressions for the testnet share-recovery campaign",
+    "cadence": "required",
+    "command": "node --test scripts/testnet-share-recovery/*.test.mjs",
+    "layer": "evidence validation",
+    "prerequisites": [
+      "Node.js 22",
+      "Built core and RDF utility packages",
+      "Python 3.9 or newer"
+    ]
   }
 ]

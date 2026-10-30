@@ -376,16 +376,9 @@ describe('CLI-2 — CORS policy for /api/*', () => {
         'Access-Control-Request-Headers': 'Content-Type, Authorization',
       },
     });
-    // Either 403 (strict) or 204/200 without ACAO echoing evil origin.
-    const acao = res.headers.get('access-control-allow-origin');
-    // PROD-BUG guard: assert we do NOT blanket wildcard when apiHost is
-    // loopback (the default — daemon should return a narrow whitelist).
-    expect(acao).not.toBe('https://evil.example.com');
-    // Accept either a loopback origin or absence of the header; wildcard on
-    // an auth-enabled endpoint would be a security regression.
-    if (acao && acao !== '*') {
-      expect(acao).toMatch(/^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):\d+$/);
-    }
+    // This fixture binds to loopback with the default narrow allowlist.
+    expect(res.status).toBe(403);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
   });
 
   it('echoes a loopback origin on CORS preflight (expected: allowed)', async () => {
@@ -398,9 +391,8 @@ describe('CLI-2 — CORS policy for /api/*', () => {
         'Access-Control-Request-Headers': 'Content-Type, Authorization',
       },
     });
-    expect([200, 204]).toContain(res.status);
-    const acao = res.headers.get('access-control-allow-origin');
-    expect(acao === `http://127.0.0.1:${d.apiPort}` || acao === '*').toBe(true);
+    expect(res.status).toBe(204);
+    expect(res.headers.get('access-control-allow-origin')).toBe(`http://127.0.0.1:${d.apiPort}`);
   });
 
   it('allows and exposes conditional context-graph polling headers cross-origin', async () => {
@@ -1139,6 +1131,15 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
           },
           reconcileRfc64CatalogResponsibilityV1: async () => undefined,
+          prepareContextGraphReadinessWithPrivateEmptyVmV1: async () => ({
+            inspectAndCommit: async (
+              _input: unknown,
+              commit: (completion: { proven: false; inspection: Record<string, unknown> }) => unknown,
+            ) => commit({ proven: false, inspection: {
+              kind: 'current', metadata: { kind: 'absent' },
+              authority: { outcome: 'allowed', source: 'legacy-local' },
+            } }),
+          }),
           resolveAgentByToken: () => undefined,
           getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
         };
@@ -2490,14 +2491,18 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
 
   async function subscribeWith(opts: {
     authority: 'allowed' | 'denied' | 'unavailable' | 'throw';
+    contextGraphId?: string;
+    onChainId?: bigint;
   }): Promise<{
     status: number;
     body: Record<string, unknown>;
     retryAfter: string | null;
     subscribeCalled: boolean;
+    subscribeOptions: Record<string, unknown> | undefined;
     catchupJobs: number;
   }> {
-    const contextGraphId = 'cg-1596-' + Math.random().toString(36).slice(2, 8);
+    const contextGraphId = opts.contextGraphId
+      ?? 'cg-1596-' + Math.random().toString(36).slice(2, 8);
     const catchupTracker = {
       jobs: new Map<string, any>(),
       latestByContextGraph: new Map<string, string>(),
@@ -2522,6 +2527,7 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     } as any;
 
     let subscribeCalled = false;
+    let subscribeOptions: Record<string, unknown> | undefined;
     let observedReadOpts: {
       callerAgentAddress?: string;
       allowSubscriptionFallback?: boolean;
@@ -2551,12 +2557,14 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
               metadataBootstrap: opts.authority === 'denied'
                 ? 'forbidden' as const
                 : 'eligible' as const,
+              ...(opts.onChainId === undefined ? {} : { onChainId: opts.onChainId }),
             };
           },
           getDefaultAgentAddress: () => CALLER,
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {
+          subscribeToContextGraph: (_id: string, options: Record<string, unknown>) => {
             subscribeCalled = true;
+            subscribeOptions = options;
             return {
               subscribed: true,
               synced: false,
@@ -2626,6 +2634,7 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
         body: await response.json() as Record<string, unknown>,
         retryAfter: response.headers.get('retry-after'),
         subscribeCalled,
+        subscribeOptions,
         catchupJobs: catchupTracker.jobs.size,
       };
     } finally {
@@ -2644,6 +2653,19 @@ describe('#1596 — subscribe gate uses fail-closed read authority', () => {
     });
     expect(status).toBe(200);
     expect(subscribeCalled).toBe(true);
+  });
+
+  it('carries an admission-authorized numeric slot into the durable subscription boundary', async () => {
+    const result = await subscribeWith({
+      authority: 'allowed',
+      contextGraphId: '298',
+      onChainId: 298n,
+    });
+    expect(result.status).toBe(200);
+    expect(result.subscribeOptions).toEqual({
+      syncMode: 'always-on',
+      onChainId: '298',
+    });
   });
 
   it('403s a private non-member even when no local allowlist is available', async () => {

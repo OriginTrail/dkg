@@ -6,6 +6,7 @@ import type { CatchupJobResult } from '../catchup-runner.js';
 import type { Rfc64SelectedSwmGraphSyncStatus } from '@origintrail-official/dkg-agent';
 import {
   toLegacyCatchupJobState,
+  type CatchupContextGraphIdentity,
   type CatchupJobState,
   type CatchupStatusResponse,
 } from '../catchup-status.js';
@@ -22,6 +23,16 @@ export interface CatchupJob {
   finishedAt?: number;
   result?: CatchupJobResult;
   error?: string;
+  /** Current registration applicability, not sticky VM verification. */
+  durablePlane?: 'required' | 'not-applicable';
+  /** The verified cleartext id the job continued under (name-hash requests). */
+  resolvedContextGraphId?: string;
+  /**
+   * The job's walk found the graph's selected SWM lane not active, so it asked
+   * a peer nothing through it: this node had not put the graph's RFC-64
+   * authority in place yet.
+   */
+  selectedLaneFoundInactive?: true;
 }
 
 export interface CatchupTracker {
@@ -34,6 +45,7 @@ export type CatchupGraphSyncStatus = Rfc64SelectedSwmGraphSyncStatus;
 export function toCatchupStatusResponse(
   job: CatchupJob,
   graphSync?: CatchupGraphSyncStatus,
+  identity?: CatchupContextGraphIdentity | null,
 ): CatchupStatusResponse {
   return {
     jobId: job.jobId,
@@ -49,6 +61,11 @@ export function toCatchupStatusResponse(
     ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
     ...(job.result === undefined ? {} : { result: job.result }),
     ...(job.error === undefined ? {} : { error: job.error }),
+    ...(job.durablePlane === undefined ? {} : { durablePlane: job.durablePlane }),
     ...(graphSync === undefined ? {} : { graphSync }),
+    ...(job.resolvedContextGraphId === undefined
+      ? {}
+      : { resolvedContextGraphId: job.resolvedContextGraphId }),
+    ...(identity == null ? {} : { identity }),
   };
 }

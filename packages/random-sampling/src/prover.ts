@@ -1,3 +1,4 @@
+import { withChallengePeriod, type ChallengeOutcome } from './prover-challenge-error.js';
 /**
  * Random Sampling prover orchestrator.
  *
@@ -48,34 +49,11 @@ import {
   type ProverWal,
 } from './wal.js';
 import { InMemoryProverWal } from './wal.js';
+import { SolvedPeriodSkip } from './solved-period-skip.js';
 
-/**
- * Outcome reported by `tick()`. The orchestrator's caller (the
- * agent's epoch loop) uses these to drive observability + retry
- * cadence — never to decide "should I tick again", because the next
- * tick is governed by chain state, not the previous outcome.
- */
-export type TickOutcome =
-  /** Reserved. Currently unreachable — see `tickImpl` for why we no
-   *  longer trust view-side `isValid: false`. Kept in the union so
-   *  downstream consumers (`prover-loop`, `random-sampling-bind`)
-   *  can pattern-match on it without breakage if a stricter
-   *  period-closed gate is reintroduced (e.g. duration == 0). */
-  | { kind: 'period-closed' }
-  | { kind: 'no-challenge'; reason: 'no-eligible-cg' | 'no-eligible-kc' }
-  | { kind: 'already-solved' }
-  | { kind: 'cg-not-found'; kaId: bigint }
-  | { kind: 'kc-not-synced'; kaId: bigint; cgId: bigint }
-  | {
-      kind: 'data-corrupted';
-      kaId: bigint;
-      cgId: bigint;
-      reason: 'root-mismatch' | 'leaf-count-mismatch' | 'meta-graph-bug';
-    }
-  | { kind: 'submit-stale' }
-  | { kind: 'submitted'; txHash: string; kaId: bigint; cgId: bigint; chunkId: bigint }
-  | { kind: 'error'; error: Error };
-
+import type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
+export type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
+export type { TickFailureKind } from './prover-health.js';
 export interface RandomSamplingProverDeps {
   chain: ChainAdapter;
   store: TripleStore;
@@ -128,6 +106,13 @@ const noopLog: ProverLogger = {
   warn: () => undefined,
   error: () => undefined,
 };
+
+// A leaf-count/root mismatch is a deterministic local sync inconsistency, not
+// a transient RPC failure. Give the sync/reconciliation path a few ticks to
+// repair the KA before attempting another full extraction. The loop normally
+// runs every five seconds, so this caps repeated mismatch work to one extract
+// per roughly twenty seconds while keeping recovery bounded.
+const DATA_CORRUPTION_COOLDOWN_TICKS = 3;
 
 function lifecycleAbortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException(
@@ -210,6 +195,8 @@ export class RandomSamplingProver {
   private readonly lifecycleController = new AbortController();
   private inflight: Promise<TickOutcome> | null = null;
   private readonly repairOperations = new Set<RandomSamplingRepairOperation>();
+  private readonly dataCorruptionCooldown = new Map<bigint, number>();
+  private readonly solvedPeriodSkip: SolvedPeriodSkip;
 
   /**
    * Proof material pinned for the active proof period. The prover already pins
@@ -240,6 +227,7 @@ export class RandomSamplingProver {
     this.wal = deps.wal ?? new InMemoryProverWal();
     this.log = deps.log ?? noopLog;
     this.repairMissingKnowledgeAsset = deps.repairMissingKnowledgeAsset;
+    this.solvedPeriodSkip = new SolvedPeriodSkip(deps.chain);
   }
 
   /** Single-flight tick. Concurrent callers await the same result. */
@@ -284,54 +272,6 @@ export class RandomSamplingProver {
     await this.wal.close();
   }
 
-  /**
-   * Detect "the cached challenge's proof period has already elapsed in
-   * wall-clock terms, even though no on-chain tx has advanced the
-   * `activeProofPeriodStartBlock` storage cursor yet". Returns true
-   * when we should force a `createChallenge` to make the chain rotate.
-   *
-   * Applies to BOTH solved-and-stale (poll-after-success while period
-   * actually rotated) AND unsolved-and-stale (testnet 2026-05-01: an
-   * RS-contract Hub rotation left every node holding an unsolvable
-   * challenge from a long-expired period; with no tx ever calling
-   * submitProof / createChallenge the cursor froze, so
-   * `existingIsCurrent` stayed truthy forever and the prover never
-   * tried to rotate. Wall-clock comparison breaks the deadlock.)
-   *
-   * Codex round 2 on PR #369 — the on-chain
-   * `updateAndGetActiveProofPeriodStartBlock()` rolls forward using
-   * the CURRENT epoch's
-   * `RandomSampling.getActiveProofingPeriodDurationInBlocks()`, NOT
-   * whatever duration was baked into a cached `NodeChallenge` at
-   * creation time. If governance shortens the proofing duration
-   * mid-flight, the cached duration overstates expiry and the same
-   * `kc-not-synced` deadlock reappears at the rollover. So when the
-   * adapter exposes the live duration on `ProofPeriodStatus`
-   * (modern EVM/mock adapters), prefer it; fall back to
-   * `existing.proofingPeriodDurationInBlocks` only for legacy adapters
-   * that don't yet populate the field.
-   *
-   * Robust to chain adapters that don't expose `getBlockNumber` (mock
-   * / test): falls back to "not stale" so the existing short-circuit
-   * behaviour is preserved.
-   */
-  private async isCachedChallengeStale(
-    existing: NodeChallenge,
-    liveDurationInBlocks?: bigint,
-  ): Promise<boolean> {
-    if (!this.chain.getBlockNumber) return false;
-    const duration = liveDurationInBlocks ?? existing.proofingPeriodDurationInBlocks;
-    if (duration <= 0n) return false;
-    let currentBlock: number;
-    try {
-      currentBlock = await this.chain.getBlockNumber();
-    } catch {
-      return false;
-    }
-    const periodEndBlock = existing.activeProofPeriodStartBlock + duration;
-    return BigInt(currentBlock) >= periodEndBlock;
-  }
-
   /** Reuse the proof material already verified for this exact challenge, if any. */
   private pinnedMaterialFor(
     periodKey: PeriodKey,
@@ -370,6 +310,19 @@ export class RandomSamplingProver {
     };
   }
 
+  private markDataCorrupted(kaId: bigint): void {
+    this.dataCorruptionCooldown.set(kaId, DATA_CORRUPTION_COOLDOWN_TICKS);
+  }
+
+  /** Consume one retry suppression tick for a KA, returning its prior count. */
+  private consumeDataCorruptionCooldown(kaId: bigint): number {
+    const remaining = this.dataCorruptionCooldown.get(kaId);
+    if (remaining === undefined) return 0;
+    if (remaining <= 1) this.dataCorruptionCooldown.delete(kaId);
+    else this.dataCorruptionCooldown.set(kaId, remaining - 1);
+    return remaining;
+  }
+
   private async extractPublicKnowledgeAssetWithRepair(input: {
     kaId: bigint;
     cgId: bigint;
@@ -378,7 +331,13 @@ export class RandomSamplingProver {
     periodStartBlock: bigint;
   }): Promise<RandomSamplingRepairMaterial> {
     const extractLocal = async (): Promise<RandomSamplingRepairMaterial> => {
-      const extracted = await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      const extracted = await extractV10KCFromStore(
+        this.store,
+        input.cgId,
+        input.kaId,
+        undefined,
+        () => this.chain.getContextGraphNameHash?.(input.cgId) ?? Promise.resolve(null),
+      );
       return {
         contents: extracted.triples.map((triple) => tripleContentV10(
           triple.subject,
@@ -476,29 +435,54 @@ export class RandomSamplingProver {
       );
     }
 
-    // Read the period status + existing challenge in parallel. We
-    // *don't* short-circuit on `!status.isValid`: that view-side
-    // check stalls single-tenant deployments indefinitely because no
-    // external tx ever triggers `updateAndGetActiveProofPeriodStartBlock`.
-    // The on-chain `createChallenge` auto-rotates the period inside
-    // `_generateChallenge`, so we always proceed and let the chain
-    // (a) decide what the current period actually is and (b) reject
-    // submissions for stale periods via `ChallengeNoLongerActive`.
-    const [status, existing] = await Promise.all([
-      this.chain.getActiveProofPeriodStatus(),
-      this.chain.getNodeChallenge(this.identityId),
-    ]);
+    // The collaborator owns the complete guarded sequence: reuse check, pair
+    // and epoch capture, these live reads, head staleness, and observation.
+    const solvedPeriodRead = await this.solvedPeriodSkip.read(async () => {
+      // Read the period status + existing challenge in parallel. We
+      // *don't* short-circuit on `!status.isValid`: that view-side
+      // check stalls single-tenant deployments indefinitely because no
+      // external tx ever triggers `updateAndGetActiveProofPeriodStartBlock`.
+      // The on-chain `createChallenge` auto-rotates the period inside
+      // `_generateChallenge`, so we always proceed and let the chain
+      // (a) decide what the current period actually is and (b) reject
+      // submissions for stale periods via `ChallengeNoLongerActive`.
+      const [status, existing] = await Promise.all([
+        this.chain.getActiveProofPeriodStatus!(),
+        this.chain.getNodeChallenge!(this.identityId),
+      ]);
 
-    // Existing is "current" iff its period-start block matches the
-    // status read. If status was stale, existing's period block
-    // matches the same stale snapshot and we still try to use it —
-    // the chain rejects on submit if the boundary actually crossed.
-    // If status is fresh but existing is from a previous period
-    // (rotation happened), we discard existing and force a rotation
-    // by calling `createChallenge` below.
-    const existingIsCurrent =
-      existing !== null
-      && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
+      // Existing is "current" iff its period-start block matches the status
+      // read. A stale status and matching challenge are still checked against
+      // the live head by the collaborator before either is reused.
+      const existingIsCurrent = existing !== null
+        && existing.activeProofPeriodStartBlock === status.activeProofPeriodStartBlock;
+      return {
+        value: { status },
+        ...(existingIsCurrent
+          ? {
+              currentChallenge: {
+                challenge: existing,
+                durationInBlocks: status.proofingPeriodDurationInBlocks,
+              },
+            }
+          : {}),
+      };
+    });
+    if (solvedPeriodRead.kind === 'reused') {
+      this.log.info('rs.tick.already-solved', {
+        epoch: solvedPeriodRead.record.challengePeriodEpoch.toString(),
+        periodStart: solvedPeriodRead.record.periodStartBlock.toString(),
+      });
+      return {
+        kind: 'already-solved',
+        period: {
+          epoch: solvedPeriodRead.record.challengePeriodEpoch,
+          periodStartBlock: solvedPeriodRead.record.periodStartBlock,
+        },
+      };
+    }
+    const { status } = solvedPeriodRead.value;
+    const currentExisting = solvedPeriodRead.currentChallenge?.challenge ?? null;
 
     // Codex review on PR #357 flagged: short-circuiting on `existingIsCurrent && solved`
     // strands the node when the read-only `getActiveProofPeriodStatus` view is
@@ -514,64 +498,62 @@ export class RandomSamplingProver {
     // hasn't rotated yet (RandomSampling.sol L191-200). So a naive
     // always-call would burn a tick + emit confusing reverts on every
     // post-solve poll inside the same period.
-    if (existingIsCurrent && existing.solved) {
-      const isStale = await this.isCachedChallengeStale(
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      );
-      if (!isStale) {
+    if (currentExisting?.solved === true) {
+      if (solvedPeriodRead.currentChallenge?.stale !== true) {
         this.log.info('rs.tick.already-solved', {
-          epoch: existing.epoch.toString(),
-          periodStart: existing.activeProofPeriodStartBlock.toString(),
+          epoch: currentExisting.epoch.toString(),
+          periodStart: currentExisting.activeProofPeriodStartBlock.toString(),
         });
-        return { kind: 'already-solved' };
+        return {
+          kind: 'already-solved',
+          period: {
+            epoch: currentExisting.epoch,
+            periodStartBlock: currentExisting.activeProofPeriodStartBlock,
+          },
+        };
       }
       // Fall through to createChallenge — period actually rotated on-chain
       // even though the status view hasn't caught up. The chain's
       // updateAndGetActiveProofPeriodStartBlock advances the storage slot
       // inside createChallenge and we get a fresh challenge.
       this.log.info('rs.tick.forcing-rotation', {
-        cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
+        cachedPeriodStart: currentExisting.activeProofPeriodStartBlock.toString(),
         statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
         reason: 'solved-stale',
       });
     }
 
-    const periodKey: PeriodKey = {
-      epoch: 0n, // filled in once we have a challenge (epoch is on the challenge)
-      periodStartBlock: status.activeProofPeriodStartBlock,
-      identityId: this.identityId,
-    };
-
     let challenge: NodeChallenge;
-    let cgId: bigint;
+    let suppliedContextGraphId: bigint | undefined;
+    let observedDurationInBlocks: bigint | undefined;
     // Same wall-clock stale check as the solved branch above. Without
     // it, an unsolved challenge whose period has expired (but whose
     // on-chain cursor never advanced because no submit/create tx
     // landed) would be reused forever and starve every subsequent
     // rotation. This is exactly what bricked Base Sepolia testnet
     // after the 2026-05-01 RS-contract Hub rotation.
-    const unsolvedStale = existingIsCurrent
-      && !existing.solved
-      && (await this.isCachedChallengeStale(
-        existing,
-        status.proofingPeriodDurationInBlocks,
-      ));
+    const unsolvedStale = currentExisting !== null
+      && !currentExisting.solved
+      && solvedPeriodRead.currentChallenge?.stale === true;
     if (unsolvedStale) {
       this.log.info('rs.tick.forcing-rotation', {
-        cachedPeriodStart: existing.activeProofPeriodStartBlock.toString(),
+        cachedPeriodStart: currentExisting!.activeProofPeriodStartBlock.toString(),
         statusPeriodStart: status.activeProofPeriodStartBlock.toString(),
         reason: 'unsolved-stale',
       });
     }
-    if (existingIsCurrent && !existing.solved && !unsolvedStale) {
-      challenge = existing;
-      cgId = await this.chain.getKAContextGraphId(challenge.knowledgeAssetId);
+    if (currentExisting !== null && !currentExisting.solved && !unsolvedStale) {
+      challenge = currentExisting;
+      observedDurationInBlocks = status.proofingPeriodDurationInBlocks;
     } else {
       try {
         const created = await this.chain.createChallenge();
         challenge = created.challenge;
-        cgId = created.contextGraphId;
+        // A challenge created by this transaction pins the then-effective
+        // duration. Unlike an older challenge, it cannot carry a duration from
+        // a previous epoch's schedule.
+        observedDurationInBlocks = challenge.proofingPeriodDurationInBlocks;
+        suppliedContextGraphId = created.contextGraphId;
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
           this.log.info('rs.tick.no-eligible-cg', {});
@@ -585,8 +567,22 @@ export class RandomSamplingProver {
       }
     }
 
-    periodKey.epoch = challenge.epoch;
-    periodKey.periodStartBlock = challenge.activeProofPeriodStartBlock;
+    return withChallengePeriod(challenge, period => this.processChallenge({
+      challenge, suppliedContextGraphId, observedDurationInBlocks,
+      observationBindingId: solvedPeriodRead.observationBindingId, period,
+    }));
+  }
+
+  /** Process one acquired challenge, including existing-challenge CG resolution, inside its period boundary. */
+  private async processChallenge({ challenge, suppliedContextGraphId, observedDurationInBlocks, observationBindingId, period }: {
+    challenge: NodeChallenge;
+    suppliedContextGraphId?: bigint;
+    observedDurationInBlocks?: bigint;
+    observationBindingId?: string;
+    period: ChallengePeriod;
+  }): Promise<ChallengeOutcome> {
+    const cgId = suppliedContextGraphId ?? await this.chain.getKAContextGraphId!(challenge.knowledgeAssetId);
+    const periodKey: PeriodKey = { ...period, identityId: this.identityId };
     const kaId = challenge.knowledgeAssetId;
     const chunkId = challenge.chunkId;
 
@@ -607,6 +603,29 @@ export class RandomSamplingProver {
         }),
       );
       return { kind: 'cg-not-found', kaId };
+    }
+
+    const cooldownTicksRemaining = this.consumeDataCorruptionCooldown(kaId);
+    if (cooldownTicksRemaining > 0) {
+      this.log.warn('rs.tick.kc-not-synced', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        periodStart: periodKey.periodStartBlock.toString(),
+        err: 'DataCorruptionCooldown',
+        cooldownTicksRemaining,
+      });
+      await this.wal.append(
+        makeWalEntry(periodKey, 'failed', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          chunkId: chunkId.toString(),
+          error: {
+            code: 'DataCorruptionCooldown',
+            message: `retry suppressed for ${cooldownTicksRemaining} tick(s) after data-corrupted outcome`,
+          },
+        }),
+      );
+      return { kind: 'kc-not-synced', kaId, cgId };
     }
 
     // OT-RFC-49 / WS-B Trap 1 — curation branch + commitment are PINNED on
@@ -710,6 +729,7 @@ export class RandomSamplingProver {
               error: { code: 'KCRootEntitiesNotFoundError', message: err.message.slice(0, 200) },
             }),
           );
+          this.markDataCorrupted(kaId);
           return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
         }
         throw err;
@@ -775,6 +795,7 @@ export class RandomSamplingProver {
             error: { code: (err as Error).name, message: (err as Error).message.slice(0, 200) },
           }),
         );
+        this.markDataCorrupted(kaId);
         return { kind: 'data-corrupted', kaId, cgId, reason };
       }
     }
@@ -792,7 +813,7 @@ export class RandomSamplingProver {
 
     let txResult;
     try {
-      txResult = await this.chain.submitProof(material.content, material.proof);
+      txResult = await this.chain.submitProof!(material.content, material.proof);
     } catch (err) {
       if (err instanceof ChallengeNoLongerActiveError) {
         this.pinnedProofMaterial = undefined;
@@ -834,6 +855,7 @@ export class RandomSamplingProver {
             error: { code: 'MerkleRootMismatch', message: err.message.slice(0, 200) },
           }),
         );
+        this.markDataCorrupted(kaId);
         return { kind: 'data-corrupted', kaId, cgId, reason: 'root-mismatch' };
       }
       throw err;
@@ -847,6 +869,11 @@ export class RandomSamplingProver {
         txHash: txResult.hash,
       }),
     );
+    await this.solvedPeriodSkip.observeSubmittedProof({
+      observationBindingId: observationBindingId,
+      challenge,
+      durationInBlocks: observedDurationInBlocks,
+    });
     this.log.info('rs.tick.submitted', {
       kaId: kaId.toString(),
       cgId: cgId.toString(),

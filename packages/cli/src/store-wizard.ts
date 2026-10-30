@@ -34,7 +34,7 @@ export interface PromptStoreBackendOptions {
   existingStore?: {
     backend: string;
     options?: Record<string, unknown>;
-  };
+  } & NodeStoreSettings;
   /** Pre-fill from `--store` flag. Always overrides existing config. */
   flagBackend?: string;
   /** Pre-fill from `--store-url` flag. Always overrides existing config. */
@@ -76,8 +76,33 @@ export interface PromptStoreBackendResult {
    * step in PR 1 uses this flag to decide between `DROP ALL` (safe on
    * DKG-owned namespaces) and scoped DELETE (mandatory on
    * shared / V6 / V8 instances).
+   *
+   * A returned block also carries the existing block's node settings
+   * (`keepNodeStoreSettings`), whichever backend it picks.
    */
-  storeBlock: ExternalStoreBlock | LocalStoreBlock | null;
+  storeBlock: ((ExternalStoreBlock | LocalStoreBlock) & NodeStoreSettings) | null;
+}
+
+/**
+ * The node settings a `store` block holds beside its backend and options:
+ * `controlReservedSlots`, the switch for the async queues' store control path
+ * (OT-RFC-73 P14). They belong to the node, not to the backend, so a helper
+ * that rewrites the block keeps them from the existing block, whatever backend
+ * it writes: a re-run of `dkg init` or of a setup command with `--store` must
+ * never turn the path back on after the operator switched it off. Any value is
+ * kept as it is, a malformed one included (the daemon refuses that and keeps
+ * the path off; a dropped key would mean the default). Clearing the block for
+ * the embedded store drops them with it: that store never uses the path.
+ */
+export type NodeStoreSettings = Pick<NonNullable<DkgConfig['store']>, 'controlReservedSlots'>;
+
+function keepNodeStoreSettings<T extends object>(
+  block: T,
+  existing: NodeStoreSettings | undefined,
+): T & NodeStoreSettings {
+  return existing?.controlReservedSlots === undefined
+    ? block
+    : { ...block, controlReservedSlots: existing.controlReservedSlots };
 }
 
 // An explicit embedded/local store block carried through verbatim on an
@@ -103,6 +128,14 @@ export type ExternalStoreBlock =
         queryEndpoint: string;
         updateEndpoint: string;
         managedByDkg: boolean;
+        /**
+         * Operator-declared endpoint guarantee. The adapter defaults an
+         * explicitly configured endpoint to `best-effort`, so a node that
+         * needs RFC-64 graph-scoped materialization must declare it here.
+         * Only carried through from an existing config; the wizard never
+         * invents a guarantee for an endpoint it cannot verify.
+         */
+        consistencyProfile?: string;
       };
     }
   // Daemon-managed local Oxigraph server (Release 2 opt-in). No URL: the
@@ -119,6 +152,7 @@ function externalStoreBlock(
   url: string,
   managedByDkg: boolean,
   updateUrl?: string,
+  consistencyProfile?: string,
 ): ExternalStoreBlock {
   if (backend === 'blazegraph') {
     return { backend, options: { url, managedByDkg } };
@@ -132,11 +166,23 @@ function externalStoreBlock(
       // can point query/update at different URLs).
       updateEndpoint: updateUrl ?? url,
       managedByDkg,
+      // A re-run must not silently downgrade an endpoint the operator already
+      // certified: dropping this key returns the node to `best-effort`, which
+      // makes RFC-64 durable sync refuse every graph-scoped materialization.
+      ...(consistencyProfile === undefined ? {} : { consistencyProfile }),
     },
   };
 }
 
 export async function promptStoreBackend(
+  opts: PromptStoreBackendOptions,
+): Promise<PromptStoreBackendResult> {
+  const { storeBlock } = await chooseStoreBlock(opts);
+  return { storeBlock: storeBlock && keepNodeStoreSettings(storeBlock, opts.existingStore) };
+}
+
+/** The wizard itself: the backend and its options, before the node settings are carried over. */
+async function chooseStoreBlock(
   opts: PromptStoreBackendOptions,
 ): Promise<PromptStoreBackendResult> {
   const log = opts.log ?? console.log;
@@ -153,6 +199,14 @@ export async function promptStoreBackend(
   const existingUpdateUrl =
     typeof opts.existingStore?.options?.updateEndpoint === 'string'
       ? (opts.existingStore?.options?.updateEndpoint as string)
+      : undefined;
+  // An operator-declared endpoint guarantee is a fact about their deployment,
+  // not something the wizard can re-derive from a URL. Keep it across a re-run
+  // of the same endpoint so `dkg init` cannot silently downgrade a node to the
+  // `best-effort` default that fails RFC-64 graph-scoped materialization.
+  const existingConsistencyProfile =
+    typeof opts.existingStore?.options?.consistencyProfile === 'string'
+      ? (opts.existingStore?.options?.consistencyProfile as string)
       : undefined;
 
   // `oxigraph-server` (daemon-managed local RocksDB server) is the default
@@ -339,8 +393,20 @@ export async function promptStoreBackend(
       // query URL for both.
       const preservedUpdateUrl =
         backend === 'sparql-http' && url === existingUrl ? existingUpdateUrl : undefined;
+      // The guarantee belongs to the endpoint, so it travels with an unchanged
+      // URL only. A newly typed endpoint is unverified and stays `best-effort`.
+      const preservedConsistencyProfile =
+        backend === 'sparql-http' && url === existingUrl
+          ? existingConsistencyProfile
+          : undefined;
       return {
-        storeBlock: externalStoreBlock(backend, url, false, preservedUpdateUrl),
+        storeBlock: externalStoreBlock(
+          backend,
+          url,
+          false,
+          preservedUpdateUrl,
+          preservedConsistencyProfile,
+        ),
       };
     }
 
@@ -426,7 +492,10 @@ export async function applyStoreFlagsToConfig(
       existing.store?.backend === 'oxigraph-server' && existing.store.options
         ? existing.store.options
         : {};
-    await save({ ...existing, store: { backend: 'oxigraph-server', options: prevOptions } });
+    await save({
+      ...existing,
+      store: keepNodeStoreSettings({ backend: 'oxigraph-server', options: prevOptions }, existing.store),
+    });
     log('  Store configured: oxigraph-server (daemon-managed local server).');
     return;
   }
@@ -455,7 +524,7 @@ export async function applyStoreFlagsToConfig(
   const existing = await load();
   const next: DkgConfig = {
     ...existing,
-    store: externalStoreBlock(backend, url, false),
+    store: keepNodeStoreSettings(externalStoreBlock(backend, url, false), existing.store),
   };
   await save(next);
   log(`  Store configured: ${backend} (${url}) — verified reachable.`);

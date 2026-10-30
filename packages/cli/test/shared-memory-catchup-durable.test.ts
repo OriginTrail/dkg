@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import {
@@ -29,9 +29,9 @@ function fakeReq(body: unknown) {
   } as any;
 }
 
-function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
+function buildCatchupCtx(body: unknown, agent: Record<string, any>, path = '/api/shared-memory/catchup') {
   const res = fakeRes();
-  const url = new URL('http://127.0.0.1/api/shared-memory/catchup');
+  const url = new URL(`http://127.0.0.1${path}`);
   const ctx = {
     req: fakeReq(body),
     res,
@@ -209,6 +209,52 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       errorCode: 'DURABLE_CATCHUP_NO_ELIGIBLE_PEERS',
       durableComplete: false,
       peersAttempted: 0,
+    });
+  });
+
+  it('keeps an implicitly enumerated durable peer that advertises only the pooled sync id (#2822)', async () => {
+    const cgId = 'implicit-pooled-durable-cg';
+    const peerId = 'peer-pooled-only';
+    const syncFromPeerDetailed = vi.fn(async () => detailedDurableResult({
+      insertedTriples: 4,
+      insertedDataTriples: 4,
+      complete: true,
+    }));
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{
+            remotePeer: { toString: () => peerId },
+          }],
+        },
+      },
+      // Stale identify: the peer's later pooled pulls merged only the pooled id.
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(agent.getPeerProtocols).toHaveBeenCalledWith(peerId);
+    expect(syncFromPeerDetailed).toHaveBeenCalledOnce();
+    expect(syncFromPeerDetailed.mock.calls[0]?.[0]).toBe(peerId);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: true,
+      peersAttempted: 1,
+      totalDurableInsertedTriples: 4,
     });
   });
 
@@ -1088,6 +1134,152 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     ]);
   });
 
+  it('asks the graph owner on every catch-up, whatever it answered before (#3421)', async () => {
+    const cgId = '0x2222222222222222222222222222222222222222/owner-always-asked';
+    const holderPeer = 'peer-holder';
+    const ownerPeer = 'peer-owner';
+    let connected = [holderPeer];
+    // The holder serves data; the owner and the other peers answer with metadata only this time.
+    const syncSharedMemoryFromPeerDetailed = vi.fn(async (peerId: string) => (peerId === holderPeer
+      ? { insertedTriples: 3, insertedDataTriples: 3, fetchedDataTriples: 3, fetchedMetaTriples: 4 }
+      : { insertedTriples: 304, insertedDataTriples: 0, fetchedDataTriples: 0, fetchedMetaTriples: 304 }));
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => connected.map((peerId) => ({ remotePeer: { toString: () => peerId } })),
+        },
+      },
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      resolveCuratorPeerIdsForCg: vi.fn(async () => ({ curatorIsLocal: false, peerIds: [ownerPeer] })),
+      syncSharedMemoryFromPeerDetailed,
+      syncFromPeer: vi.fn(),
+    };
+    const catchup = async () => {
+      const { ctx, res } = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
+      await handleMemoryRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+    };
+
+    // The holder serves data while the owner is out of reach: a good source from now on.
+    await catchup();
+    expect(syncSharedMemoryFromPeerDetailed.mock.calls.map(([peerId]) => peerId)).toEqual([holderPeer]);
+
+    // Once the owner is connected it is asked on every catch-up, beside the
+    // holder and one peer not known yet, also after it answered with metadata only.
+    connected = [holderPeer, 'peer-a', 'peer-b', ownerPeer];
+    for (let round = 0; round < 2; round += 1) {
+      syncSharedMemoryFromPeerDetailed.mockClear();
+      await catchup();
+      const asked = syncSharedMemoryFromPeerDetailed.mock.calls.map(([peerId]) => peerId);
+      expect(asked, `round ${round + 1}`).toContain(ownerPeer);
+      expect(asked, `round ${round + 1}`).toContain(holderPeer);
+      expect(asked, `round ${round + 1}`).toHaveLength(3);
+    }
+    expect(agent.resolveCuratorPeerIdsForCg).toHaveBeenCalledWith(cgId, { maxPeerIds: 16 });
+  });
+
+  it('uses selected recovery for an accepted public catalog graph and unwraps its result', async () => {
+    const cgId = '0x1111111111111111111111111111111111111111/release-native-public';
+    const peerId = 'peer-release-native-publisher';
+    const syncSharedMemoryFromPeerDetailed = vi.fn();
+    const syncSelectedSharedMemoryFromPeerDetailed = vi.fn(async () => ({
+      kind: 'selected-shared-memory' as const,
+      shared: { insertedTriples: 7 },
+      scopeComplete: true,
+      selectedScopeComplete: true,
+      requestedScope: {
+        kind: 'selected-public' as const,
+        targets: [{ contextGraphId: cgId, lane: 'selected-public' as const }],
+      },
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    }));
+    const agent = {
+      peerId: 'self-peer',
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({
+        active: true,
+        mode: 'catalog',
+        reconciliationLane: 'catalog-apply',
+        killSwitchActive: false,
+      })),
+      syncSharedMemoryFromPeerDetailed,
+      syncSelectedSharedMemoryFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        peerId,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(syncSharedMemoryFromPeerDetailed).not.toHaveBeenCalled();
+    expect(syncSelectedSharedMemoryFromPeerDetailed).toHaveBeenCalledWith(
+      peerId,
+      [cgId],
+      {
+        selectedSwmPriority: true,
+        requestedScope: {
+          kind: 'selected-public',
+          targets: [{ contextGraphId: cgId, lane: 'selected-public' }],
+        },
+        source: 'catchup-foreground',
+      },
+    );
+    expect(JSON.parse(res.body)).toMatchObject({
+      totalInsertedTriples: 7,
+      results: [{ peerId, insertedTriples: 7 }],
+      perContextGraph: [{ contextGraphId: cgId, insertedTriples: 7 }],
+    });
+  });
+
+  it('does not fall back to retired host ciphertext for a selected public catalog no-op', async () => {
+    const cgId = '0x1111111111111111111111111111111111111111/catalog-no-op';
+    const peerId = 'peer-catalog-no-op';
+    const catchupSwmFromConnectedHosts = vi.fn();
+    const agent = {
+      peerId: 'self-peer',
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({
+        active: true,
+        mode: 'catalog',
+        reconciliationLane: 'catalog-apply',
+        killSwitchActive: false,
+      })),
+      syncSelectedSharedMemoryFromPeerDetailed: vi.fn(async () => ({
+        shared: { insertedTriples: 0 },
+      })),
+      catchupSwmFromConnectedHosts,
+    };
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: cgId, peerId }, agent);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).not.toHaveBeenCalled();
+    expect(JSON.parse(res.body)).toMatchObject({
+      totalInsertedTriples: 0,
+      hostCatchup: {
+        ranFallback: false,
+        triggeredForContextGraphIds: [],
+      },
+    });
+  });
+
   it('keeps includeDurable independent from the SWM negative outcome cache', async () => {
     const cgId = 'public-negative-cache-route-cg';
     const negativePeer = 'peer-negative-cache';
@@ -1235,3 +1427,95 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       .filter(([selectedPeerId]) => selectedPeerId === peerId)).toHaveLength(failedPhases === 1 ? 2 : 1);
   });
 });
+
+describe('POST /api/shared-memory/host-catchup', () => {
+  const HOST_CATCHUP = '/api/shared-memory/host-catchup';
+  const peerResult = { peerId: 'host-peer', rounds: 1, fetched: 2, applied: 0, appliedTriples: 0, skipped: 2, nextSeqno: 7 };
+
+  it('asks the host with its default page and reports no entries unless the caller asks', async () => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', { peers: undefined, sinceSeqno: 0, maxRounds: 8 });
+    expect(JSON.parse(res.body)).toEqual({
+      contextGraphId: 'host-cg',
+      peers: [peerResult],
+      appliedTotal: 0,
+      appliedEnvelopes: 0,
+      fetchedTotal: 2,
+    });
+  });
+
+  it('passes a page size and the request for served entries through to the agent', async () => {
+    const entries = [
+      { seqno: 6, envelopeSha256: 'a'.repeat(64) },
+      { seqno: 7, envelopeSha256: 'b'.repeat(64) },
+    ];
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [{ ...peerResult, entries }]);
+    const { ctx, res } = buildCatchupCtx(
+      { contextGraphId: 'host-cg', peerId: 'host-peer', sinceSeqno: 5, maxRounds: 1, maxEntriesPerRound: 2.9, includeEntries: true },
+      { catchupSwmFromConnectedHosts },
+      HOST_CATCHUP,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', {
+      peers: ['host-peer'],
+      sinceSeqno: 5,
+      maxRounds: 1,
+      maxEntriesPerRound: 2,
+      reportEntries: true,
+    });
+    expect(JSON.parse(res.body).peers).toEqual([{ ...peerResult, entries }]);
+  });
+
+  it.each([0, -3, '4', null, true])('ignores a page size of %j and a non-boolean includeEntries', async (maxEntriesPerRound) => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx(
+      { contextGraphId: 'host-cg', maxEntriesPerRound, includeEntries: 'yes' },
+      { catchupSwmFromConnectedHosts },
+      HOST_CATCHUP,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(200);
+    expect(catchupSwmFromConnectedHosts).toHaveBeenCalledWith('host-cg', { peers: undefined, sinceSeqno: 0, maxRounds: 8 });
+  });
+
+  it.each([[''], ['   '], [7], [undefined]])('rejects a contextGraphId of %j with a 400 and does not call the agent', async (contextGraphId) => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => [peerResult]);
+    const { ctx, res } = buildCatchupCtx({ contextGraphId }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Missing or invalid "contextGraphId"' });
+    expect(catchupSwmFromConnectedHosts).not.toHaveBeenCalled();
+  });
+
+  it('answers 501 on an agent build without host catch-up', async () => {
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, {}, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(501);
+    expect(JSON.parse(res.body)).toEqual({ error: 'Host-catchup is not supported on this agent build' });
+  });
+
+  it('answers 500 with the agent\'s message when the catch-up throws', async () => {
+    const catchupSwmFromConnectedHosts = vi.fn(async () => { throw new Error('no connected hosting core'); });
+    const { ctx, res } = buildCatchupCtx({ contextGraphId: 'host-cg' }, { catchupSwmFromConnectedHosts }, HOST_CATCHUP);
+
+    await handleMemoryRoutes(ctx);
+
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.body)).toEqual({ error: 'no connected hosting core' });
+  });
+});
+

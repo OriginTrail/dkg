@@ -130,6 +130,24 @@ describe('classifyDurableProgress', () => {
     expect(progress.madeReadinessProgress).toBe(true);
   });
 
+  it.each([0, 3])('recognizes held completion and reconnect progress with %s META inserts', insertedMetaTriples => {
+    const held = { insertedTriples: insertedMetaTriples, insertedDataTriples: 0, insertedMetaTriples,
+      resumedPhases: 1, completedPhases: 2, verifiedHeldAssets: 6 };
+    expect(classifyDurableProgress(held, { complete: true })).toMatchObject({
+      hasVerifiedHeldAssets: true, hasInsertedData: false, metadataOnly: false,
+      completedReadinessCleanly: true, madeReconnectProgress: true, cleanNonMetadataResponse: true,
+    });
+    expect(classifyDurableProgress({ ...held, insertedDataTriples: undefined }, { complete: true }).hasInsertedData).toBe(false);
+    expect(classifyDurableProgress({ ...held, verifiedHeldAssets: 0 }, { complete: true }).completedReadinessCleanly).toBe(false);
+    for (const failure of [{}, { timedOutPhases: 1 }, { failedPeers: 1 }, { failedPhases: 1 },
+      { deniedPhases: 1 }, { rejectedKcs: 1 }, { deferredBackpressure: 1 }]) {
+      const complete = Object.keys(failure).length > 0;
+      expect(classifyDurableProgress({ ...held, ...failure }, { complete })).toMatchObject({
+        completedReadinessCleanly: false, madeReconnectProgress: false, cleanNonMetadataResponse: false,
+      });
+    }
+  });
+
   it('does not classify an explicitly incomplete durable result as readiness complete', () => {
     const progress = classifyDurableProgress({
       insertedTriples: 40_000,
