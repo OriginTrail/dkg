@@ -604,7 +604,8 @@ describe('bounded context-graph listing', () => {
     expect(response.state.headers).toMatchObject({
       'X-DKG-Route-Ms': '25.25',
       'Server-Timing': 'dkg-context-graph-list;dur=25.25',
-      'Access-Control-Expose-Headers': CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
+      // The route's headers join what every cross-origin response exposes.
+      'Access-Control-Expose-Headers': `Retry-After, x-dkg-operation-id, ${CONTEXT_GRAPH_LIST_EXPOSE_HEADERS}`,
     });
 
     const unrelated = { __corsOrigin: 'https://ui.example' } as unknown as Parameters<
