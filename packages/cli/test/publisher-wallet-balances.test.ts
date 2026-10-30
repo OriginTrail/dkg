@@ -70,6 +70,21 @@ describe('publisher wallet balance reader (#3591)', () => {
     expect(await read('no-allowance-read')).toEqual({ native: 9n, trac: 0n, pca: null });
   });
 
+  it('asks for the account strictly, so a failed read is unknown and never zero coverage', async () => {
+    const asked: unknown[] = [];
+    const reverting = {
+      getConvictionAgentAccountId: async () => 7n,
+      getPublishingConvictionAccountInfo: async (_accountId: bigint, opts: unknown) => {
+        asked.push(opts);
+        throw Object.assign(new Error('call revert'), { code: 'CALL_EXCEPTION' });
+      },
+    } as unknown as ChainAdapter;
+    const read = createPublisherWalletBalanceReader(new Map([['reverting', reverting]]), nowMs);
+
+    expect(await read('reverting')).toEqual({ native: null, trac: null, pca: null });
+    expect(asked).toEqual([{ extended: true, strict: true }]);
+  });
+
   it('fails each part on its own', async () => {
     const read = createPublisherWalletBalanceReader(new Map([
       ['pca-down', adapter({ balances: async () => ({ native: 9n, trac: 1n }), accountId: async () => { throw new Error('rpc down'); }, info: async () => account() })],

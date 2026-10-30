@@ -38,10 +38,10 @@ export function createPublisherWalletBalanceReader(
 async function readConvictionCoverage(chain: ChainAdapter, walletId: string, nowMs: () => number): Promise<bigint | null> {
   if (!chain.getConvictionAgentAccountId || !chain.getPublishingConvictionAccountInfo) return null;
   try {
-    // Strict, so a chain without the PCA contract or a failed read is unknown rather than "no agent".
+    // Strict, so a chain without the PCA contract or a failed read is unknown rather than no coverage.
     const accountId = await chain.getConvictionAgentAccountId(walletId, { strict: true });
     if (accountId <= 0n) return 0n;
-    const info = await chain.getPublishingConvictionAccountInfo(accountId, { extended: true });
+    const info = await chain.getPublishingConvictionAccountInfo(accountId, { extended: true, strict: true });
     if (!info) return 0n;
     if (info.expiresAtTimestamp > 0 && nowMs() / 1000 >= info.expiresAtTimestamp) return 0n;
     return info.remainingAllowance ?? null;

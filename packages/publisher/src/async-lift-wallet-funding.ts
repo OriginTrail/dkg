@@ -156,22 +156,29 @@ function covers(nativeWei: bigint | null, requiredWei: bigint): boolean {
 }
 
 /**
- * With no stated cost, a top-up is any metric read at the refusal that is larger now: native gas,
+ * With no stated cost, a top-up is any metric that is larger now than at the refusal: native gas,
  * TRAC, or Publishing Conviction coverage, which grows when an account is registered for the
- * wallet, funded, or starts a new epoch while both balances stay the same. A metric that was read
- * then but is unreadable now may be the top-up too: an unreadable balance never keeps a wallet out.
- * With nothing read at the refusal, the cooldown alone paces the next attempt.
+ * wallet, funded, or starts a new epoch while both balances stay the same. With nothing read at the
+ * refusal, the cooldown alone paces the next attempt.
  */
 function replenished(excluded: WalletExclusion, balances: AsyncLiftWalletBalances): boolean {
   if (excluded.requiredNativeWei !== undefined) return covers(balances.native, excluded.requiredNativeWei);
   const before = excluded.balancesAtRefusal;
   if (!before) return true;
-  const compared = ([
+  const metrics = [
     [before.native, balances.native],
     [before.trac, balances.trac],
     [before.pca ?? null, balances.pca ?? null],
-  ] as const).filter(([then]) => then !== null);
-  return compared.length === 0 || compared.some(([then, now]) => now === null || now > then!);
+  ] as const;
+  return metrics.every(([then]) => then === null) || metrics.some(([then, now]) => mayHaveGrown(then, now));
+}
+
+/**
+ * A metric read at only one of the two moments cannot be compared, and may be the top-up: the
+ * cooldown-paced attempt goes ahead, because an unreadable balance never keeps a wallet out.
+ */
+function mayHaveGrown(then: bigint | null, now: bigint | null): boolean {
+  return then === null || now === null ? then !== now : now > then;
 }
 
 async function boundedRead(reader: AsyncLiftWalletBalanceReader, walletId: string): Promise<AsyncLiftWalletBalances> {

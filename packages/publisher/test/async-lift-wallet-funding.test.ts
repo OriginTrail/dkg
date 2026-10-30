@@ -165,6 +165,28 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     expect(g.funding.mayClaim('w1')).toBe(true);
   });
 
+  it.each([
+    ['TRAC', { trac: null, pca: 0n }, { trac: 500n, pca: 0n }],
+    ['coverage', { trac: 0n, pca: null }, { trac: 0n, pca: 500n }],
+  ] as const)('lets a wallet refused with no stated cost back when %s, unreadable at the refusal, reads now', async (_name, atRefusal, later) => {
+    const g = gate();
+    g.fund('w1', 100n, atRefusal.trac, atRefusal.pca);
+    g.funding.recordRefusal('w1', UNSTATED);
+    await g.settle();
+    // Still unreadable and nothing else moved: it stays out.
+    g.advance(BASE);
+    g.funding.mayClaim('w1');
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(false);
+
+    // There is nothing to compare it with, and it may be the top-up: the cooldown-paced attempt goes ahead.
+    g.fund('w1', 100n, later.trac, later.pca);
+    g.advance(2 * BASE);
+    g.funding.mayClaim('w1');
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(true);
+  });
+
   it('keeps only the refused wallet out: a stated cost never applies to another wallet', async () => {
     const g = gate();
     // An expensive publication is refused on w1, stating 2047.

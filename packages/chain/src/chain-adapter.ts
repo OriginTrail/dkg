@@ -1875,7 +1875,7 @@ export interface ChainAdapter {
   registerPublishingConvictionAgents?(accountId: bigint, agents: string[]): Promise<TxResult>;
   isPublishingConvictionAgent?(accountId: bigint, agent: string): Promise<boolean>;
   settlePublishingConvictionAccount?(accountId: bigint): Promise<TxResult>;
-  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
+  getPublishingConvictionAccountInfo?(accountId: bigint, opts?: { extended?: boolean; strict?: boolean }): Promise<V10PublishingConvictionAccountInfo | null>;
 
   /**
    * OT-RFC-51 designated primary node for a PCA — `accounts(accountId).primaryNode`.

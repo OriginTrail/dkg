@@ -122,6 +122,7 @@ import {
 } from './async-lift-publish-result.js';
 import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from './async-lift-execution-failure.js';
 import { AsyncLiftWalletFunding } from './async-lift-wallet-funding.js';
+import { isInheritedTxHashAccounted } from './lift-job-tx-hash-accounting.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
@@ -3296,6 +3297,9 @@ export class TripleStoreAsyncLiftPublisher
       now: this.now(),
       recoveredFrom: recoveredFromStatus,
       txHashChecked,
+      // #3591 — an interrupted re-run must not reopen what is settled: a later failure before
+      // signing would hold the job on a transaction no proof can settle again.
+      ...(isInheritedTxHashAccounted(job, txHashChecked) ? { txHashAccounted: true } : {}),
       stampRetriedAt: false,
       ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
       // r21 (🔴 3812632539) — the signer travels with the hash. Prefer the broadcast this reset

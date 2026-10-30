@@ -265,6 +265,20 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
       return { session: publisher.openClaimSession(claimed as ActiveLiftJobClaim), jobId };
     }
 
+    it.each([[false], [true]])('an interrupted reset leaves the inherited hash as it found it (accounted: %s, #3591)', async (accounted) => {
+      const publisher = h.createPublisher(RETRY_LANE);
+      const { jobId } = await validatedWithInheritedHash(publisher, { accounted });
+
+      // The worker is gone: its lease runs out and recovery puts the job back.
+      h.advance(6 * 60_000);
+      expect(await publisher.recover()).toBe(1);
+
+      const reset = await publisher.getStatus(jobId);
+      expect(reset?.status).toBe('accepted');
+      expect(reset?.recovery?.txHashChecked).toBe(TX_HASH);
+      expect(reset?.recovery?.txHashAccounted).toBe(accounted ? true : undefined);
+    });
+
     it('keeps an UNACCOUNTED inherited hash: recorded pre-send, but HELD and never scheduled', async () => {
       const publisher = h.createPublisher(RETRY_LANE);
       const { session } = await validatedWithInheritedHash(publisher, { accounted: false });

@@ -19,6 +19,8 @@ import { completeResult } from './_helpers/journal-completion.js';
 /** What a publication costs unless a test prices it otherwise; the node states it when it refuses. */
 const COST = 2_047n;
 const RETRY_MS = 10;
+/** Past the claim lease of five minutes. */
+const LOCK_LEASE_PAST_MS = 6 * 60_000;
 
 function fixture(store = new OxigraphStore()) {
   const clock = { now: 1_000 };
@@ -246,5 +248,32 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
       status: 'accepted',
       recovery: { txHashChecked: failed.recovery!.txHashChecked, txHashAccounted: true },
     });
+  });
+
+  it('keeps the refused transaction accounted when a re-run is interrupted and reset', async () => {
+    const f = fixture();
+    f.fund('short', 1_907n);
+    f.fund('funded', 10_000n);
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+    const { jobId, refused } = await refuseOn(f, publisher, 'short', 'interrupted');
+    const refusedTx = refused.broadcast!.txHash;
+
+    f.clock.now += RETRY_MS;
+    expect(await publisher.processNext('short')).toBeNull();
+    // A worker claims the re-run and dies: its lease runs out and recovery puts the job back.
+    expect((await publisher.claimNext('funded'))?.jobId).toBe(jobId);
+    f.clock.now += LOCK_LEASE_PAST_MS;
+    expect(await publisher.recover()).toBe(1);
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'accepted',
+      recovery: { txHashChecked: refusedTx, txHashAccounted: true },
+    });
+
+    // The next attempt fails before signing: nothing holds it on a transaction no proof can settle.
+    f.beforeSigning.push(new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }));
+    const failed = await publisher.processNext('funded') as PersistedFailedJob;
+    expect(failed).toMatchObject({ jobId, status: 'failed', failure: { code: 'quorum_unmet' } });
+    expect(isHeldForChainProof(failed)).toBe(false);
   });
 });

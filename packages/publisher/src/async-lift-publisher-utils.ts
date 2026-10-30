@@ -2,8 +2,8 @@ import type { QueryResult } from '@origintrail-official/dkg-storage';
 import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
-  getLiftJobFailurePolicy,
 } from './lift-job.js';
+import { isFailedJobTxHashAccounted } from './lift-job-tx-hash-accounting.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
@@ -270,7 +270,7 @@ export function resetFailedLiftJobToAccepted(
   const txHashChecked = getLiftJobTransactionEvidence(job);
   return buildLiftJobAcceptedReset(job, {
     now,
-    ...(options.txHashAccounted || txHashAccountedByRecord(job, txHashChecked) ? { txHashAccounted: true } : {}),
+    ...(options.txHashAccounted || isFailedJobTxHashAccounted(job, txHashChecked) ? { txHashAccounted: true } : {}),
     // The marker rides along with the hash: a released job must not degrade to the pre-marker
     // default on its next attempt (see LiftJobRecoveryMetadata.operationKind).
     ...(liftJobOperationKindMarker(job) ? { operationKind: liftJobOperationKindMarker(job) } : {}),
@@ -288,21 +288,6 @@ export function resetFailedLiftJobToAccepted(
     // This is a RETRY of the job (sweep, `retry()`, re-submit), so the attempt is stamped.
     stampRetriedAt: true,
   });
-}
-
-/**
- * #3591 — does the record itself already account for the hash a reaccept carries forward? Yes when
- * the failure proves the attempt's own transaction had no effect (refused before the mempool), or
- * when the hash is an inherited one that chain proof already accounted for. Carried forward as an
- * open question instead, it would hold the re-run the first time that fails before signing, on a
- * transaction no proof can settle again — and an `insufficient_funds` job now re-runs by itself.
- */
-function txHashAccountedByRecord(job: PersistedFailedJob, txHash: LiftJobHex | undefined): boolean {
-  if (txHash === undefined) return false;
-  if ((job as { broadcast?: { txHash?: string } }).broadcast?.txHash === txHash) {
-    return getLiftJobFailurePolicy(job.failure.code).provenIneffective === true;
-  }
-  return job.recovery?.action === 'reset_to_accepted' && job.recovery.txHashAccounted === true;
 }
 
 /**
