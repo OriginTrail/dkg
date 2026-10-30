@@ -304,7 +304,16 @@ const PINNED_DIGESTS: Record<string, string> = {
   // `WindowSettled` is no longer emitted (declaration retained — decoding
   // stays valid) and `settle()` reduces to schedule-if-needed + the
   // post-expiry topUp tail. Additive surface change → new digest.
-  PublishingConviction:         '6836d907ef63ba140d60051830a89714a143d7e9154ce64e5ee94958d3dff9d7',
+  // Repinned (Conviction Account service spending, OT-RFC-27, 10.1.0): added
+  // `coverServiceCost(uint256,address,bytes32,uint96)`, callable only by the
+  // Hub-registered `ServiceSubscriptions` and returning the draw split (cost,
+  // window/top-up parts, window, epoch, discount, top-up emission ranges), the
+  // event `ServiceCostCovered(uint256,address,bytes32,uint96,uint96,uint40,uint40,uint96,uint96)`
+  // and the errors `OnlyServiceSubscriptions(address)`,
+  // `ServiceFundingPausedTreasuryWired(address)` and `ZeroServiceValue()`.
+  // `coverPublishingCost` and every other entry are unchanged. Additive
+  // surface change → new digest.
+  PublishingConviction:         '1e34631abf48b35fc1080e08717469dfb54ac0ced2c0a6273d8fd33ac0147b6c',
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',

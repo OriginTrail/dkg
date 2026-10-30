@@ -1,0 +1,162 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "publishingConviction",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "name": "cover",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint40",
+                "name": "startEpoch",
+                "type": "uint40"
+              },
+              {
+                "internalType": "uint40",
+                "name": "endEpoch",
+                "type": "uint40"
+              },
+              {
+                "internalType": "uint96",
+                "name": "tokenAmount",
+                "type": "uint96"
+              }
+            ],
+            "internalType": "struct PublishingMathLib.ActiveSinkRange[3]",
+            "name": "topUpRanges",
+            "type": "tuple[3]"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceDraw",
+        "name": "d",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "lastDraw",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "components": [
+              {
+                "internalType": "uint40",
+                "name": "startEpoch",
+                "type": "uint40"
+              },
+              {
+                "internalType": "uint40",
+                "name": "endEpoch",
+                "type": "uint40"
+              },
+              {
+                "internalType": "uint96",
+                "name": "tokenAmount",
+                "type": "uint96"
+              }
+            ],
+            "internalType": "struct PublishingMathLib.ActiveSinkRange[3]",
+            "name": "topUpRanges",
+            "type": "tuple[3]"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceDraw",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

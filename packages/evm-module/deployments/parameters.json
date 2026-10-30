@@ -30,6 +30,10 @@
                 "W1": "0",
                 "W2": "2"
             }
+        },
+        "ConvictionServiceStorage": {
+            "maxPeriodSeconds": "2678400",
+            "maxBucketsPerPeriod": "16"
         }
     },
     "devnet": {
@@ -67,7 +71,13 @@
         }
     },
     "testnet": {
-        "overrides": {},
+        "overrides": {
+            "base_sepolia_v10": {
+                "ConvictionServiceStorage": {
+                    "exactScheduleFrom": "1783530141"
+                }
+            }
+        },
         "ParametersStorage": {
             "maximumStake": "10000000000000000000000000",
             "minimumStake": "50000000000000000000000",
@@ -107,6 +117,10 @@
                 "W1": "0",
                 "W2": "2"
             }
+        },
+        "ConvictionServiceStorage": {
+            "maxPeriodSeconds": "2678400",
+            "maxBucketsPerPeriod": "16"
         }
     },
     "mainnet": {
