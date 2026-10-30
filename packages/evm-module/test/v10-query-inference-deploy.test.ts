@@ -1,5 +1,5 @@
 // The development deploy of the plan-period contracts (OT-RFC-27), run through
-// the real deploy steps 052c, 052d and 052e on the in-process network:
+// the real deploy steps 052c, 052d, 052e and 052f on the in-process network:
 //   - every contract is registered in the Hub and wired, in an order that lets
 //     each initialize as it is deployed;
 //   - the parameters of deployments/parameters.json are set, λ at once;
@@ -14,6 +14,7 @@ import {
   Chronos,
   ConvictionServiceStorage,
   Hub,
+  QueryInferenceSettlement,
   QueryInferenceStorage,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
@@ -22,7 +23,7 @@ import {
 import { ACCOUNT_STACK_TAGS, TRAC, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 
 async function deployFixture() {
-  await hre.deployments.fixture([...ACCOUNT_STACK_TAGS, 'ServiceSubscriptions']);
+  await hre.deployments.fixture([...ACCOUNT_STACK_TAGS, 'ServiceSubscriptions', 'QueryInferenceSettlement']);
   const Hub = await hre.ethers.getContract<Hub>('Hub');
   const at = async <T>(name: string) => (await hre.ethers.getContractAt(name, await Hub.getContractAddress(name))) as T;
   return {
@@ -33,6 +34,7 @@ async function deployFixture() {
     CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
     SS: await at<ServiceSubscriptions>('ServiceSubscriptions'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
+    QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
     accounts: await hre.ethers.getSigners(),
   };
 }
@@ -43,11 +45,29 @@ describe('@integration The development deploy of the plan-period contracts', () 
   });
 
   it('registers and wires every contract, at the versions of this release', async () => {
-    const { Hub, Token, QIS, CSS, SS, SSW } = await loadFixture(deployFixture);
+    const { Hub, Token, QIS, CSS, SS, SSW, QS } = await loadFixture(deployFixture);
     expect(await QIS.version()).to.equal('1.0.0');
     expect(await CSS.version()).to.equal('1.1.0');
     expect(await SS.version()).to.equal('1.1.0');
     expect(await SSW.version()).to.equal('1.0.0');
+    expect(await QS.version()).to.equal('1.0.0');
+    expect(await QS.name()).to.equal('QueryInferenceSettlement');
+    expect(await Hub['isContract(address)'](await QS.getAddress())).to.equal(true);
+    for (const [getter, name] of [
+      ['queryInferenceStorage', 'QueryInferenceStorage'],
+      ['convictionServiceStorage', 'ConvictionServiceStorage'],
+      ['chronos', 'Chronos'],
+      ['identityStorage', 'IdentityStorage'],
+      ['profileStorage', 'ProfileStorage'],
+      ['shardingTableStorage', 'ShardingTableStorage'],
+      ['randomSamplingStorage', 'RandomSamplingStorage'],
+      ['convictionStakingStorage', 'ConvictionStakingStorage'],
+      ['parametersStorage', 'ParametersStorage'],
+    ] as const) {
+      expect(await (QS as unknown as Record<string, () => Promise<string>>)[getter](), getter).to.equal(
+        await Hub.getContractAddress(name),
+      );
+    }
 
     expect(await SS.queryInferenceStorage()).to.equal(await QIS.getAddress());
     expect(await SS.convictionServiceStorage()).to.equal(await CSS.getAddress());

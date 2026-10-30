@@ -1,8 +1,9 @@
 // Shared set-up for the service plan period tests (OT-RFC-27): Hub
 // registration of QueryInferenceStorage, ConvictionServiceStorage,
-// ServiceSubscriptions and ServiceSubscriptionsWallet, the EIP-712
-// ServiceAssignment consent, funding requests for one-epoch periods, a model of
-// the label basis, and synthetic accounts from before the schedule cut-over.
+// ServiceSubscriptions, ServiceSubscriptionsWallet and
+// QueryInferenceSettlement, the EIP-712 ServiceAssignment consent, funding
+// requests for one-epoch periods, a model of the label basis, and synthetic
+// accounts from before the schedule cut-over.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { ethers } from 'ethers';
@@ -14,6 +15,7 @@ import {
   DKGPublishingConvictionNFT,
   Hub,
   PublishingConvictionStorage,
+  QueryInferenceSettlement,
   QueryInferenceStorage,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
@@ -57,10 +59,12 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
 /**
  * Deploy QueryInferenceStorage, ConvictionServiceStorage and
  * ServiceSubscriptions (and, with `wallet`, ServiceSubscriptionsWallet, which
- * needs the Token and the vault in the Hub) and register each in the Hub's
- * contract set, as the development deploy does: the Hub registration, then
- * `initialize()` through `Hub.forwardCall`. The storages come first, because
- * the logic contracts wire them at initialization.
+ * needs the Token and the vault in the Hub; with `settlement`,
+ * QueryInferenceSettlement, which needs the identity, profile, sharding-table,
+ * random-sampling, staking and parameters storages there) and register each in
+ * the Hub's contract set, as the development deploy does: the Hub
+ * registration, then `initialize()` through `Hub.forwardCall`. The storages
+ * come first, because the logic contracts wire them at initialization.
  *
  * As the development deploy does, it also sets the activation epoch to the
  * current epoch, so periods can be funded at once; `activate: false` leaves it
@@ -68,19 +72,23 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
  */
 export async function registerServiceContracts(
   hub: Hub,
-  opts: { activate?: boolean; wallet?: boolean } = {},
+  opts: { activate?: boolean; wallet?: boolean; settlement?: boolean } = {},
 ): Promise<{
   QIS: QueryInferenceStorage;
   CSS: ConvictionServiceStorage;
   SS: ServiceSubscriptions;
   SSW?: ServiceSubscriptionsWallet;
+  QS?: QueryInferenceSettlement;
 }> {
   const QIS = await registerOne<QueryInferenceStorage>(hub, 'QueryInferenceStorage');
   if (opts.activate !== false) await activateQueryInference(hub, QIS);
   const CSS = await registerOne<ConvictionServiceStorage>(hub, 'ConvictionServiceStorage');
   const SS = await registerOne<ServiceSubscriptions>(hub, 'ServiceSubscriptions');
   const SSW = opts.wallet ? await registerOne<ServiceSubscriptionsWallet>(hub, 'ServiceSubscriptionsWallet') : undefined;
-  return { QIS, CSS, SS, SSW };
+  const QS = opts.settlement
+    ? await registerOne<QueryInferenceSettlement>(hub, 'QueryInferenceSettlement')
+    : undefined;
+  return { QIS, CSS, SS, SSW, QS };
 }
 
 /** Set QueryInferenceStorage's activation epoch through Hub.forwardCall; defaults to the current epoch. */

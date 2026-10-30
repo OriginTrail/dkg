@@ -7,6 +7,8 @@
 //     against a PublishingConviction without coverServiceCost;
 //   - deploy/active/052e_deploy_query_inference_storage.ts, which sets the
 //     activation epoch to the deployment epoch on development only;
+//   - deploy/active/052f_deploy_query_inference_settlement.ts, which deploys
+//     QueryInferenceSettlement everywhere but on mainnet;
 //   - deploy/active/998_initialize_contracts.ts, which sends
 //     Hub.setAndReinitializeContracts only when the deployer may, and
 //     otherwise prints the transaction for the Hub owner.
@@ -23,6 +25,7 @@ import { ethers, Interface } from 'ethers';
 import deployStorage from '../deploy/active/052c_deploy_conviction_service_storage';
 import deployServiceSubscriptions from '../deploy/active/052d_deploy_service_subscriptions';
 import deployQueryInferenceStorage from '../deploy/active/052e_deploy_query_inference_storage';
+import deployQueryInferenceSettlement from '../deploy/active/052f_deploy_query_inference_settlement';
 import initializeContracts from '../deploy/active/998_initialize_contracts';
 
 const abiOf = (name: string) =>
@@ -369,6 +372,57 @@ describe('@unit deploy/052e — QueryInferenceStorage and its activation', () =>
       expect(forwarded).to.have.length(0);
       expect(lines.join('\n')).to.match(new RegExp(`${network}: the query/inference pool is not deployed on mainnet yet`));
     }
+  });
+});
+
+describe('@unit deploy/052f — QueryInferenceSettlement', () => {
+  const qsHre = (opts: { network: string; environment: string }) => {
+    const deployed: string[] = [];
+    const hre = {
+      network: { name: opts.network, config: { environment: opts.environment } },
+      helpers: {
+        deploy: async ({ newContractName }: { newContractName: string }) => {
+          deployed.push(newContractName);
+        },
+      },
+    };
+    return { hre, deployed };
+  };
+
+  it('deploys it on development and on a testnet, with no parameters of its own', async () => {
+    for (const where of [
+      { network: 'hardhat', environment: 'development' },
+      { network: 'localhost', environment: 'development' },
+      { network: 'base_sepolia_v10', environment: 'testnet' },
+    ]) {
+      const { hre, deployed } = qsHre(where);
+      const lines = await captured(() => deployQueryInferenceSettlement(hre as never));
+      expect(deployed).to.deep.equal(['QueryInferenceSettlement']);
+      expect(lines).to.have.length(0);
+    }
+  });
+
+  it('on a mainnet network, deploys nothing', async () => {
+    for (const network of ['base_mainnet', 'gnosis_mainnet']) {
+      const { hre, deployed } = qsHre({ network, environment: 'mainnet' });
+      const lines = await captured(() => deployQueryInferenceSettlement(hre as never));
+      expect(deployed).to.have.length(0);
+      expect(lines.join('\n')).to.match(new RegExp(`${network}: the query/inference pool is not deployed on mainnet yet`));
+    }
+  });
+
+  it('runs after every storage it wires', () => {
+    expect(deployQueryInferenceSettlement.dependencies).to.include.members([
+      'QueryInferenceStorage',
+      'ConvictionServiceStorage',
+      'Chronos',
+      'IdentityStorage',
+      'ProfileStorage',
+      'ShardingTableStorage',
+      'RandomSamplingStorage',
+      'ConvictionStakingStorage',
+      'ParametersStorage',
+    ]);
   });
 });
 
