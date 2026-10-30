@@ -3481,8 +3481,10 @@ export class TripleStoreAsyncLiftPublisher
     // record for a transaction/account pair that never existed on chain. `origin.lookup` is
     // already built from the evidence carrier (see `chainProofLookupFor`), so it is the same
     // envelope the hash came from.
-    const broadcast = job.broadcast
-      ?? { txHash: origin.txHash, walletId: origin.lookup.walletId };
+    // #3591 — and it must be THAT transaction: a refused attempt's own record is not the one proven.
+    const broadcast = job.broadcast?.txHash?.toLowerCase() === origin.txHash.toLowerCase()
+      ? job.broadcast
+      : { txHash: origin.txHash, walletId: origin.lookup.walletId };
     return {
       ...withoutFailure,
       status: 'finalized',

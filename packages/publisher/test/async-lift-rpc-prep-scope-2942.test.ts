@@ -28,6 +28,7 @@ import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/k
 import { RETRY_LANE, createStoreRejectionFixtures } from './_helpers/store-rejection-2940.js';
 import { exhaustedWithoutKeywords, keyedExhaustedWithoutKeywords, preparationExhausted } from './_helpers/rpc-prep-failure-2942.js';
 import { decideChainProofDisposition } from '../src/async-lift-retry-disposition.js';
+import { getLiftJobTransactionEvidence, liftJobCheckedSigner } from '../src/async-lift-publisher-utils.js';
 
 describe('GH#2942 typed transient RPC failure: scope edges', () => {
   const h = createAsyncLift2270Harness();
@@ -366,6 +367,9 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
         expect(failed.failure.code).toBe('insufficient_funds');
         expect(failed.broadcast?.txHash).toBe(OWN_TX_HASH);
         expect(failed.recovery?.txHashChecked).toBe(TX_HASH);
+        // The refused transaction is settled, so the older hash is what chain proof must answer.
+        expect(getLiftJobTransactionEvidence(failed)).toBe(TX_HASH);
+        expect(liftJobCheckedSigner(failed)).toBe('wallet-1');
         expect(failed.recovery?.txHashAccounted).toBeUndefined();
         expect(isHeldForChainProof(failed)).toBe(true);
         expect(failed.timestamps.nextRetryAt).toBeUndefined();
@@ -385,6 +389,20 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
         expect(failed.failure.code).toBe('tx_reverted');
         expect(failed.recovery?.txHashChecked).toBe(TX_HASH);
         expect(isHeldForChainProof(failed)).toBe(true);
+      });
+
+      it('keeps the refused transaction as the evidence when the inherited hash is ACCOUNTED: nothing older is open', async () => {
+        const publisher = h.createPublisher(RETRY_LANE);
+        const { session, jobId } = await validatedWithInheritedHash(publisher, { accounted: true });
+        await publisher.update(jobId, 'broadcast', {
+          broadcast: { txHash: OWN_TX_HASH, walletId: 'wallet-1', nonce: 7, operationKind: 'create' },
+        });
+
+        const failed = expectFailed(await session.recordExecutionFailure('broadcast', new Error('insufficient funds for gas * price + value')));
+
+        expect(isHeldForChainProof(failed)).toBe(false);
+        expect(getLiftJobTransactionEvidence(failed)).toBe(OWN_TX_HASH);
+        expect(failed.timestamps.nextRetryAt).toBeDefined();
       });
 
       it('lets a re-run retry when the inherited hash is ACCOUNTED, since the refusal then leaves nothing open', async () => {

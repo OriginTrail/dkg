@@ -3,12 +3,13 @@ import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
 } from './lift-job.js';
-import { isFailedJobTxHashAccounted } from './lift-job-tx-hash-accounting.js';
+import { isFailedJobTxHashAccounted, ownTransactionSettledBesideOpenHash } from './lift-job-tx-hash-accounting.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
   PersistedLiftJob,
   LiftJobAccepted,
+  LiftJobBroadcastMetadata,
   LiftJobHex,
   LiftJobResettableState,
   LiftJobRequest,
@@ -135,10 +136,19 @@ export function compareAcceptedJobs(a: AcceptanceOrderKey, b: AcceptanceOrderKey
  * it mean" — that is `hasBroadcastEvidence` in the disposition module.
  */
 export function getLiftJobTransactionEvidence(job: PersistedLiftJob): LiftJobHex | undefined {
-  if ('broadcast' in job && job.broadcast) {
-    return job.broadcast.txHash;
-  }
+  const broadcast = evidenceBroadcast(job);
+  if (broadcast) return broadcast.txHash;
   return job.recovery?.txHashChecked;
+}
+
+/**
+ * The broadcast record that carries the job's evidence, so the hash, its signer and its nonce always
+ * come from one carrier. #3591 — not a record whose transaction the failure has settled while an
+ * older hash stays open: the recovery record then carries the evidence.
+ */
+function evidenceBroadcast(job: PersistedLiftJob): LiftJobBroadcastMetadata | undefined {
+  if (ownTransactionSettledBesideOpenHash(job)) return undefined;
+  return (job as { broadcast?: LiftJobBroadcastMetadata }).broadcast;
 }
 
 export function isFailedJob(job: PersistedLiftJob): job is PersistedFailedJob {
@@ -196,7 +206,7 @@ export function pinnedPublishIdentityKaId(job: PersistedLiftJob): string | undef
  * record. Either carrier is the transaction's own testimony; nothing else is.
  */
 export function liftJobOperationKindMarker(job: PersistedLiftJob): 'create' | 'update' | undefined {
-  const broadcast = (job as { broadcast?: { operationKind?: 'create' | 'update' } }).broadcast;
+  const broadcast = evidenceBroadcast(job);
   const recovery = (job as { recovery?: { operationKind?: 'create' | 'update' } }).recovery;
   return broadcast?.operationKind ?? recovery?.operationKind;
 }
@@ -209,14 +219,14 @@ export function liftJobOperationKindMarker(job: PersistedLiftJob): 'create' | 'u
  * transaction/account combination that never existed on chain.
  */
 export function liftJobCheckedSigner(job: PersistedLiftJob): string | undefined {
-  const broadcast = (job as { broadcast?: { txHash?: string; walletId?: string } }).broadcast;
+  const broadcast = evidenceBroadcast(job);
   if (broadcast?.txHash && broadcast.walletId) return broadcast.walletId;
   return (job as { recovery?: { walletIdChecked?: string } }).recovery?.walletIdChecked;
 }
 
 /** The nonce that accompanies {@link liftJobCheckedSigner}'s hash, from the same carrier. */
 export function liftJobCheckedNonce(job: PersistedLiftJob): number | undefined {
-  const broadcast = (job as { broadcast?: { txHash?: string; nonce?: number } }).broadcast;
+  const broadcast = evidenceBroadcast(job);
   if (broadcast?.txHash && broadcast.nonce !== undefined) return broadcast.nonce;
   return (job as { recovery?: { nonceChecked?: number } }).recovery?.nonceChecked;
 }

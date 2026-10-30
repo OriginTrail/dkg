@@ -31,6 +31,18 @@ export function carriesOpenInheritedHash(job: PersistedLiftJob): boolean {
 }
 
 /**
+ * Has the failure settled the attempt's own transaction while an older hash stays open? Then the
+ * older hash is the one question left, so it is the evidence chain proof has to answer, under the
+ * signer and nonce kept with it. Asking about the settled transaction could never release the job.
+ */
+export function ownTransactionSettledBesideOpenHash(job: PersistedLiftJob): boolean {
+  return job.status === 'failed'
+    && 'failure' in job
+    && getLiftJobFailurePolicy(job.failure.code).provenIneffective === true
+    && carriesOpenInheritedHash(job);
+}
+
+/**
  * Is this the inherited hash an earlier reset already marked accounted? Every reset that carries it
  * forward keeps the mark. It only ever keeps one: a reset that has asked the chain nothing never
  * turns an open question into an accounted one.
