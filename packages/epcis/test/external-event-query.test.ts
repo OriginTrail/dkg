@@ -34,7 +34,8 @@ const backends: Array<{ name: string; create: () => OxigraphStore | BlazegraphSt
 ];
 if (blazegraphUrl) backends.push({ name: 'Blazegraph', create: () => new BlazegraphStore(blazegraphUrl) });
 
-describe.each(backends)('$name capture/query', ({ create }) => {
+// A cold live store takes seconds to answer this query, so every case gets the limit of the other live suites.
+describe.each(backends)('$name capture/query', { timeout: 30_000 }, ({ create }) => {
 it('excludes the EPCISDocument container from an unfiltered event query', async () => {
   const store = create();
   const graph = contextGraphDataUri(CG);
