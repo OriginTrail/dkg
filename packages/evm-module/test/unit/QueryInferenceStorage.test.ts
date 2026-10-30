@@ -10,8 +10,14 @@
 //   - the λ schedule: a change applies from the next epoch, at once while no
 //     epoch from activation on has started, and a scheduled value is folded in
 //     only once every epoch before it is closed;
+//   - the receipt grace schedule: a change applies to the next epoch's periods,
+//     at once while no epoch from activation on has started, and is refused in
+//     the epoch where a scheduled value took effect;
 //   - the due ledger: bookings accumulate per epoch and never land in a closed
 //     epoch;
+//   - the settlement mutators: nonce bits are only ever set, a claim takes no
+//     value once finalized and is finalized once, never into a closed epoch,
+//     and epochs close one at a time, in order, from activation on;
 //   - the views over the settlement state, and the compiler's storage layout
 //     against the documented one.
 
@@ -151,10 +157,11 @@ describe('@unit QueryInferenceStorage', () => {
           .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
           .withArgs('receiptGraceSeconds');
       }
-      await expect(QIS.setReceiptGraceSeconds(1n)).to.emit(QIS, 'ReceiptGraceSecondsSet').withArgs(3_600n, 1n);
+      const now = await currentEpoch();
+      await expect(QIS.setReceiptGraceSeconds(1n)).to.emit(QIS, 'ReceiptGraceSecondsSet').withArgs(1n, now);
       await expect(QIS.setReceiptGraceSeconds(epLen - 1n))
         .to.emit(QIS, 'ReceiptGraceSecondsSet')
-        .withArgs(1n, epLen - 1n);
+        .withArgs(epLen - 1n, now);
       expect(await QIS.receiptGraceSeconds()).to.equal(epLen - 1n);
     });
 
@@ -293,6 +300,70 @@ describe('@unit QueryInferenceStorage', () => {
     });
   });
 
+  describe('the receipt grace schedule', () => {
+    it('applies at once while activation is unset, or still ahead', async () => {
+      const now = await currentEpoch();
+      await expect(QIS.setReceiptGraceSeconds(600n)).to.emit(QIS, 'ReceiptGraceSecondsSet').withArgs(600n, now);
+      expect(await QIS.receiptGraceSecondsAt(now)).to.equal(600n);
+      await activateAt(now + 2n);
+      await QIS.setReceiptGraceSeconds(900n);
+      expect([await QIS.receiptGraceSeconds(), await QIS.nextReceiptGraceFromEpoch()]).to.deep.equal([900n, 0n]);
+      expect(await QIS.receiptGraceSecondsAt(now + 2n)).to.equal(900n);
+    });
+
+    it("from activation on, a change applies to the next epoch's periods, and a second change in the same epoch replaces it", async () => {
+      const now = await currentEpoch();
+      await activateAt(now);
+      await expect(QIS.setReceiptGraceSeconds(600n))
+        .to.emit(QIS, 'ReceiptGraceSecondsSet')
+        .withArgs(600n, now + 1n);
+      expect(await QIS.receiptGraceSeconds()).to.equal(3_600n);
+      expect([await QIS.nextReceiptGraceSeconds(), await QIS.nextReceiptGraceFromEpoch()]).to.deep.equal([
+        600n,
+        now + 1n,
+      ]);
+      expect(await QIS.receiptGraceSecondsAt(now)).to.equal(3_600n);
+      expect(await QIS.receiptGraceSecondsAt(now + 1n)).to.equal(600n);
+      expect(await QIS.receiptGraceSecondsAt(now + 9n)).to.equal(600n);
+
+      await QIS.setReceiptGraceSeconds(1_200n);
+      expect(await QIS.receiptGraceSecondsAt(now)).to.equal(3_600n);
+      expect(await QIS.receiptGraceSecondsAt(now + 1n)).to.equal(1_200n);
+    });
+
+    it('in the epoch where a scheduled value took effect a change is refused, and from the next epoch on it folds it in', async () => {
+      const e = await currentEpoch();
+      await activateAt(e);
+      await QIS.setReceiptGraceSeconds(600n); // for the periods of e + 1 on
+      await time.increase(epLen);
+      expect(await currentEpoch()).to.equal(e + 1n);
+
+      // The periods of e are finalized now, under 3,600; those of e + 1 run under 600.
+      await expect(QIS.setReceiptGraceSeconds(1_200n))
+        .to.be.revertedWithCustomError(QIS, 'ReceiptGraceScheduleInUse')
+        .withArgs(e + 1n);
+      expect(await QIS.receiptGraceSecondsAt(e)).to.equal(3_600n);
+
+      await time.increase(epLen);
+      await expect(QIS.setReceiptGraceSeconds(1_200n))
+        .to.emit(QIS, 'ReceiptGraceSecondsSet')
+        .withArgs(1_200n, e + 3n);
+      expect(await QIS.receiptGraceSeconds()).to.equal(600n);
+      expect(await QIS.receiptGraceSecondsAt(e + 1n)).to.equal(600n);
+      expect(await QIS.receiptGraceSecondsAt(e + 2n)).to.equal(600n);
+      expect(await QIS.receiptGraceSecondsAt(e + 3n)).to.equal(1_200n);
+    });
+
+    it('keeps every value below one epoch, scheduled or not', async () => {
+      await activateAt(await currentEpoch());
+      await expect(QIS.setReceiptGraceSeconds(epLen))
+        .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
+        .withArgs('receiptGraceSeconds');
+      await QIS.setReceiptGraceSeconds(epLen - 1n);
+      expect(await QIS.nextReceiptGraceSeconds()).to.equal(epLen - 1n);
+    });
+  });
+
   describe('the due ledger (onlyContracts)', () => {
     it('the list below covers every state-changing function except initialize and the setters', () => {
       const stateChanging: string[] = [];
@@ -301,7 +372,9 @@ describe('@unit QueryInferenceStorage', () => {
           stateChanging.push(f.name);
         }
       });
-      expect(stateChanging).to.deep.equal(['addWalletDue']);
+      expect(stateChanging.sort()).to.deep.equal(
+        ['addClaim', 'addWalletDue', 'closeEpoch', 'finalizeClaim', 'useNonces'].sort(),
+      );
     });
 
     it('addWalletDue refuses a caller outside the Hub, and admits a Hub contract and the Hub owner', async () => {
@@ -334,6 +407,112 @@ describe('@unit QueryInferenceStorage', () => {
         .withArgs(now - 1n, now - 1n);
       await QIS.connect(logic).addWalletDue(now, 1n);
       await QIS.connect(logic).addWalletDue(now + 1n, 1n);
+    });
+  });
+
+  describe('the settlement mutators (onlyContracts)', () => {
+    const id = ethers.id('period');
+    const calls = (): Array<[string, unknown[]]> => [
+      ['useNonces', [id, 5n, 0n, 1n]],
+      ['addClaim', [id, 0n, 5n, 10n, 7n]],
+      ['finalizeClaim', [id, 1n, 5n, 1_000n, 10n, 7n]],
+      ['closeEpoch', [1_000n, 1n, 0n, 0n]],
+    ];
+
+    it('each refuses a caller outside the Hub', async () => {
+      for (const [fn, args] of calls()) {
+        await expect(
+          (QIS.connect(stranger) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[fn](...args),
+          fn,
+        )
+          .to.be.revertedWithCustomError(QIS, 'UnauthorizedAccess')
+          .withArgs('Only Contracts in Hub');
+      }
+    });
+
+    it('useNonces only ever sets bits, per period, seller and word', async () => {
+      await QIS.connect(logic).useNonces(id, 5n, 2n, 0b0101n);
+      await QIS.connect(owner).useNonces(id, 5n, 2n, 0b0011n);
+      await QIS.connect(logic).useNonces(id, 5n, 2n, 0n);
+      expect(await QIS.nonceWord(id, 5n, 2n)).to.equal(0b0111n);
+      expect(await QIS.nonceWord(id, 5n, 3n)).to.equal(0n);
+      expect(await QIS.nonceWord(id, 6n, 2n)).to.equal(0n);
+      expect(await QIS.nonceWord(ethers.id('other'), 5n, 2n)).to.equal(0n);
+    });
+
+    it('addClaim adds to the seller and the bucket, checked, and finalizeClaim credits the node and the epoch once', async () => {
+      const now = await currentEpoch();
+      await activateAt(now);
+      await QIS.connect(logic).addClaim(id, 3n, 5n, 100n, 40n);
+      await QIS.connect(logic).addClaim(id, 3n, 5n, 50n, 10n);
+      await QIS.connect(logic).addClaim(id, 3n, 6n, 30n, 30n);
+      expect(await QIS.getSellerClaim(id, 3n, 5n)).to.deep.equal([150n, 50n, false]);
+      expect(await QIS.getSellerClaim(id, 3n, 6n)).to.deep.equal([30n, 30n, false]);
+      expect(await QIS.bucketClaimed(id, 3n)).to.equal(180n);
+      await expect(QIS.connect(logic).addClaim(id, 3n, 5n, MAX_UINT96, 0n)).to.be.revertedWithPanic(0x11);
+
+      await QIS.connect(logic).finalizeClaim(id, 3n, 5n, now, 120n, 45n);
+      await QIS.connect(logic).finalizeClaim(id, 3n, 6n, now, 30n, 30n);
+      expect(await QIS.getSellerClaim(id, 3n, 5n)).to.deep.equal([150n, 50n, true]);
+      expect(await QIS.getNodeEpoch(5n, now)).to.deep.equal([120n, 45n]);
+      expect(await QIS.getNodeEpoch(6n, now)).to.deep.equal([30n, 30n]);
+      expect(await QIS.getEpochTotals(now)).to.deep.equal([150n, 75n]);
+
+      for (const call of [
+        QIS.connect(logic).finalizeClaim(id, 3n, 5n, now, 1n, 1n),
+        QIS.connect(logic).addClaim(id, 3n, 5n, 1n, 1n),
+      ]) {
+        await expect(call).to.be.revertedWithCustomError(QIS, 'ClaimFinalized').withArgs(id, 3n, 5n);
+      }
+      // Another bucket of the period, and another seller, are claims of their own.
+      await QIS.connect(logic).addClaim(id, 4n, 5n, 1n, 1n);
+      await QIS.connect(logic).addClaim(id, 3n, 7n, 1n, 1n);
+    });
+
+    it('finalizeClaim never credits a closed epoch', async () => {
+      await time.increase(2n * epLen);
+      const now = await currentEpoch();
+      await activateAt(now);
+      await expect(QIS.connect(logic).finalizeClaim(id, 0n, 5n, now - 1n, 1n, 1n))
+        .to.be.revertedWithCustomError(QIS, 'EpochClosed')
+        .withArgs(now - 1n, now - 1n);
+    });
+
+    it('closeEpoch closes one epoch at a time, in order from activation, and sets the record, the cursor and the carry', async () => {
+      await expect(QIS.connect(logic).closeEpoch(1n, 0n, 0n, 0n))
+        .to.be.revertedWithCustomError(QIS, 'CloseOutOfOrder')
+        .withArgs(1n, 0n);
+      const now = await currentEpoch();
+      await activateAt(now);
+      for (const e of [now - 1n, now + 1n]) {
+        await expect(QIS.connect(logic).closeEpoch(e, 0n, 0n, 0n))
+          .to.be.revertedWithCustomError(QIS, 'CloseOutOfOrder')
+          .withArgs(e, now - 1n);
+      }
+      await QIS.connect(logic).closeEpoch(now, 0n, 5_000n, 77n);
+      expect(await QIS.getEpochClose(now)).to.deep.equal([0n, 0n, 5_000n, true]);
+      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([now, 77n]);
+      await QIS.connect(owner).closeEpoch(now + 1n, 77n, 2_500n, 0n);
+      expect(await QIS.getEpochClose(now + 1n)).to.deep.equal([77n, 0n, 2_500n, true]);
+      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([now + 1n, 0n]);
+      await expect(QIS.connect(logic).closeEpoch(now + 1n, 0n, 0n, 0n))
+        .to.be.revertedWithCustomError(QIS, 'CloseOutOfOrder')
+        .withArgs(now + 1n, now + 1n);
+      // A closed epoch takes no booking and no credit.
+      await expect(QIS.connect(logic).addWalletDue(now + 1n, 1n)).to.be.revertedWithCustomError(QIS, 'EpochClosed');
+    });
+
+    it('batchState and closeState read the parameters and the cursor in one call', async () => {
+      await QIS.setMaxGroupsPerBatch(9n);
+      await QIS.setMaxItemsPerBatch(99n);
+      await QIS.setMaxCloseStepsPerClaim(7n);
+      await QIS.setPaused(true);
+      expect(await QIS.batchState()).to.deep.equal([0n, true, 9n, 99n]);
+      expect(await QIS.closeState()).to.deep.equal([0n, 0n, 0n, 7n]);
+      const now = await currentEpoch();
+      await activateAt(now);
+      expect(await QIS.batchState()).to.deep.equal([now, true, 9n, 99n]);
+      expect(await QIS.closeState()).to.deep.equal([now, now - 1n, 0n, 7n]);
     });
   });
 
@@ -383,6 +562,8 @@ describe('@unit QueryInferenceStorage', () => {
     type StorageLayout = { storage: LayoutEntry[]; types: Record<string, LayoutType> };
 
     it('matches the documented layout: two packed parameter slots, closedThrough, carry, then the mappings', async () => {
+      // Slot 1 holds 20 of 32 bytes: the item bound, the λ schedule and the
+      // scheduled receipt grace.
       const sourceName = 'contracts/storage/QueryInferenceStorage.sol';
       const buildInfo = await hre.artifacts.getBuildInfo(`${sourceName}:QueryInferenceStorage`);
       const layout = (
@@ -402,6 +583,8 @@ describe('@unit QueryInferenceStorage', () => {
         ['1', 2, 'lambdaBps', 'uint16'],
         ['1', 4, 'nextLambdaBps', 'uint16'],
         ['1', 6, 'nextLambdaFromEpoch', 'uint40'],
+        ['1', 11, 'nextReceiptGraceSeconds', 'uint32'],
+        ['1', 15, 'nextReceiptGraceFromEpoch', 'uint40'],
         ['2', 0, 'closedThrough', 'uint256'],
         ['3', 0, 'carry', 'uint96'],
         ['4', 0, 'walletDue', 'mapping(uint256 => uint96)'],

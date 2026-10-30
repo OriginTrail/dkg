@@ -24,6 +24,43 @@
   {
     "inputs": [
       {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      }
+    ],
+    "name": "ClaimFinalized",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "closedThrough",
+        "type": "uint256"
+      }
+    ],
+    "name": "CloseOutOfOrder",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
@@ -62,6 +99,17 @@
       }
     ],
     "name": "LambdaScheduleAheadOfCloses",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "ReceiptGraceScheduleInUse",
     "type": "error"
   },
   {
@@ -204,14 +252,14 @@
       {
         "indexed": false,
         "internalType": "uint32",
-        "name": "oldValue",
+        "name": "value",
         "type": "uint32"
       },
       {
         "indexed": false,
-        "internalType": "uint32",
-        "name": "newValue",
-        "type": "uint32"
+        "internalType": "uint256",
+        "name": "fromEpoch",
+        "type": "uint256"
       }
     ],
     "name": "ReceiptGraceSecondsSet",
@@ -246,6 +294,39 @@
   {
     "inputs": [
       {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "weighted",
+        "type": "uint96"
+      }
+    ],
+    "name": "addClaim",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
@@ -259,6 +340,34 @@
     "name": "addWalletDue",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "batchState",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "activation",
+        "type": "uint40"
+      },
+      {
+        "internalType": "bool",
+        "name": "isPaused",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint8",
+        "name": "maxGroups",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint16",
+        "name": "maxItems",
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -299,6 +408,62 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "pool",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint16",
+        "name": "lambda",
+        "type": "uint16"
+      },
+      {
+        "internalType": "uint96",
+        "name": "carryOut",
+        "type": "uint96"
+      }
+    ],
+    "name": "closeEpoch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "closeState",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "activation",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "closed",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "carried",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint8",
+        "name": "maxSteps",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "closedThrough",
     "outputs": [
@@ -309,6 +474,44 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "score",
+        "type": "uint96"
+      }
+    ],
+    "name": "finalizeClaim",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -614,6 +817,32 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "nextReceiptGraceFromEpoch",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nextReceiptGraceSeconds",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -658,6 +887,25 @@
   {
     "inputs": [],
     "name": "receiptGraceSeconds",
+    "outputs": [
+      {
+        "internalType": "uint32",
+        "name": "",
+        "type": "uint32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "receiptGraceSecondsAt",
     "outputs": [
       {
         "internalType": "uint32",
@@ -755,6 +1003,34 @@
       }
     ],
     "name": "setReceiptGraceSeconds",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint64",
+        "name": "word",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint256",
+        "name": "bits",
+        "type": "uint256"
+      }
+    ],
+    "name": "useNonces",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

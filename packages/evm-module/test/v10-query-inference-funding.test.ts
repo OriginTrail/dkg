@@ -473,24 +473,26 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect(await QIS.walletDue(now + 2n)).to.equal(0n);
     });
 
-    it('the receipt grace stays below one epoch, so the claim deadline always falls in the due epoch; a change to it moves no booking', async () => {
+    it('the receipt grace stays below one epoch, so the batch deadline always falls in the due epoch; a change to it moves no booking', async () => {
       for (const bad of [0n, epLen]) {
         await expect(forward(QIS, 'setReceiptGraceSeconds', [bad]))
           .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
           .withArgs('receiptGraceSeconds');
       }
+      // A change applies to the next epoch's periods: fund one, under the longest grace.
       await forward(QIS, 'setReceiptGraceSeconds', [epLen - 1n]);
-      const now = await epochNow();
-      const { subscriptionId } = await walletFund(walletRequestOf(now));
+      const next = (await epochNow()) + 1n;
+      const { subscriptionId } = await walletFund(walletRequestOf(next));
       const s = await CSS.getSubscription(subscriptionId);
-      const deadline = s.periodEnd + (await QIS.receiptGraceSeconds());
-      expect(await ChronosContract.epochAtTimestamp(deadline)).to.equal(now + 1n);
-      expect(await QIS.walletDue(now + 1n)).to.equal(10n * TRAC);
+      expect(await QIS.receiptGraceSecondsAt(next)).to.equal(epLen - 1n);
+      const deadline = s.periodEnd + (await QIS.receiptGraceSecondsAt(next));
+      expect(await ChronosContract.epochAtTimestamp(deadline)).to.equal(next + 1n);
+      expect(await QIS.walletDue(next + 1n)).to.equal(10n * TRAC);
 
       // A later change to the grace leaves the booking, and later bookings, in the same epoch.
       await forward(QIS, 'setReceiptGraceSeconds', [60n]);
       await walletTopUp(subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)]);
-      expect(await QIS.walletDue(now + 1n)).to.equal(11n * TRAC);
+      expect(await QIS.walletDue(next + 1n)).to.equal(11n * TRAC);
     });
   });
 

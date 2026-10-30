@@ -51,7 +51,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //   1.1.0 — a plan period is one epoch; an assignment holds one cost
     //           limit per period and an expiry, and its usage counts periods
     //           only; `maxPeriodSeconds` is gone; top-ups of a recorded period
-    //           (`applyTopUp`). The mapping slots are unchanged.
+    //           (`applyTopUp`); one bucket read by index (`getBucket`). The
+    //           mapping slots are unchanged.
     string private constant _VERSION = "1.1.0";
 
     uint8 internal constant _DEFAULT_MAX_BUCKETS_PER_PERIOD = 16;
@@ -433,6 +434,12 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     function getBuckets(bytes32 subscriptionId) external view returns (Bucket[] memory) {
         return _buckets[subscriptionId];
+    }
+
+    /// @notice The period's bucket at `index`, its funding order. Reverts for
+    ///         an index at or past the period's bucket count.
+    function getBucket(bytes32 subscriptionId, uint256 index) external view returns (Bucket memory) {
+        return _buckets[subscriptionId][index];
     }
 
     function accountSubscriptionCount(uint256 accountId) external view returns (uint256) {
