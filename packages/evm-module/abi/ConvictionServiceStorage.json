@@ -13,6 +13,27 @@
   {
     "inputs": [
       {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "count",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "bucketCount",
+        "type": "uint256"
+      }
+    ],
+    "name": "BucketTopUpOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint40",
         "name": "current",
         "type": "uint40"
@@ -35,12 +56,39 @@
   {
     "inputs": [
       {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
       }
     ],
     "name": "SubscriptionExists",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionNotFound",
     "type": "error"
   },
   {
@@ -100,25 +148,6 @@
       }
     ],
     "name": "MaxBucketsPerPeriodSet",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint32",
-        "name": "oldValue",
-        "type": "uint32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint32",
-        "name": "newValue",
-        "type": "uint32"
-      }
-    ],
-    "name": "MaxPeriodSecondsSet",
     "type": "event"
   },
   {
@@ -280,6 +309,83 @@
       }
     ],
     "name": "addTopUpLabel",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromTopUp",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.TopUpAmounts",
+        "name": "t",
+        "type": "tuple"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96[]",
+        "name": "added",
+        "type": "uint96[]"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Bucket[]",
+        "name": "appended",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "applyTopUp",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -566,31 +672,6 @@
             "type": "uint96"
           },
           {
-            "internalType": "uint96",
-            "name": "maxInferenceCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxQueryCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerWindow",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxTotalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "maxPeriodSeconds",
-            "type": "uint32"
-          },
-          {
             "internalType": "uint40",
             "name": "assignedAt",
             "type": "uint40"
@@ -774,21 +855,6 @@
       {
         "components": [
           {
-            "internalType": "uint96",
-            "name": "totalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "windowCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint40",
-            "name": "window",
-            "type": "uint40"
-          },
-          {
             "internalType": "uint32",
             "name": "periods",
             "type": "uint32"
@@ -903,19 +969,6 @@
   },
   {
     "inputs": [],
-    "name": "maxPeriodSeconds",
-    "outputs": [
-      {
-        "internalType": "uint32",
-        "name": "",
-        "type": "uint32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
     "name": "name",
     "outputs": [
       {
@@ -938,16 +991,6 @@
         "internalType": "address",
         "name": "assignee",
         "type": "address"
-      },
-      {
-        "internalType": "uint40",
-        "name": "window",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint96",
-        "name": "cost",
-        "type": "uint96"
       }
     ],
     "name": "recordUsage",
@@ -1037,31 +1080,6 @@
             "type": "uint96"
           },
           {
-            "internalType": "uint96",
-            "name": "maxInferenceCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxQueryCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerWindow",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxTotalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "maxPeriodSeconds",
-            "type": "uint32"
-          },
-          {
             "internalType": "uint40",
             "name": "assignedAt",
             "type": "uint40"
@@ -1110,31 +1128,6 @@
             "internalType": "uint96",
             "name": "maxCostPerPeriod",
             "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxInferenceCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxQueryCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerWindow",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxTotalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "maxPeriodSeconds",
-            "type": "uint32"
           },
           {
             "internalType": "uint40",
@@ -1215,19 +1208,6 @@
       }
     ],
     "name": "setMaxBucketsPerPeriod",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint32",
-        "name": "value",
-        "type": "uint32"
-      }
-    ],
-    "name": "setMaxPeriodSeconds",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

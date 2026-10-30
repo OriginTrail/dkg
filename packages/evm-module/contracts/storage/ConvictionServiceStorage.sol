@@ -6,47 +6,55 @@ import {INamed} from "../interfaces/INamed.sol";
 import {IVersioned} from "../interfaces/IVersioned.sol";
 import {IInitializable} from "../interfaces/IInitializable.sol";
 import {HubDependent} from "../abstract/HubDependent.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /**
  * @title ConvictionServiceStorage
- * @notice State store for Conviction Account service spending (OT-RFC-27,
- *         "NeuroSymbolic Marketplace"): the owner of a Conviction Account
- *         opts it in, assigns bounded plan-funding authority to buyer keys,
- *         and each buyer key funds weekly or monthly service plan periods
- *         from the account's existing allowance. A funded period moves no
- *         TRAC: its cost is recorded as service-labelled emission against the
- *         account's own scheduled staker emission.
+ * @notice State store for service plan periods (OT-RFC-27, "NeuroSymbolic
+ *         Marketplace"). The owner of a Conviction Account opts it in and
+ *         assigns bounded plan-funding authority to buyer keys, and each buyer
+ *         key funds plan periods from the account's existing allowance. A
+ *         period funded from an account moves no TRAC: its cost is recorded
+ *         as service-labelled emission against the account's own scheduled
+ *         staker emission. A buyer key may also fund periods from its wallet;
+ *         those are recorded here too, under account 0, which no account has.
+ *         A plan period is one chain epoch.
  *
  * Architecture (the pattern of `PublishingConvictionStorage`):
  *   - This contract holds every byte of service-spending state: the opt-in
- *     switch per account, the assignments and the usage counted against
- *     their caps, the labels per account and epoch, and the period records
- *     with their buckets. It never holds or moves TRAC.
+ *     switch per account, the assignments and the periods counted under
+ *     them, the labels per account and epoch, and the period records with
+ *     their buckets, which top-ups grow. It never holds or moves TRAC.
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
  *     contract, and the Hub owner), and the logic contracts enforce every
- *     business rule (ownership, consent, caps, label capacity) before they
+ *     business rule (ownership, consent, the cost limit, label capacity) before they
  *     write. The one rule it keeps itself is the integrity of its period
- *     records: each id is written once, and a written record always reads as
- *     existing (`createSubscription`). Business events come from the logic
- *     contracts; this contract emits events only for its own parameters.
+ *     records: each id is written once, a written record always reads as
+ *     existing (`createSubscription`), and only a written record is topped
+ *     up, at the indexes of its buckets (`applyTopUp`). Business events come
+ *     from the logic contracts; this contract emits events only for its own
+ *     parameters.
  *   - The parameter setters are `onlyHub`, so governance reaches them through
  *     `Hub.forwardCall` (the Hub owner may also call them directly).
  *
  * Fresh state: the contract ships empty and is never upgraded in place. A
  * replacement starts empty, so the storage layout matters to audits and
  * indexers rather than to migrations. The declaration order of the state
- * below IS the layout: slot 0 packs the inherited `hub` with the three scalar
- * parameters (30 of 32 bytes), and slots 1 to 15 hold the mappings in order.
+ * below IS the layout: slot 0 packs the inherited `hub` with the two scalar
+ * parameters (26 of 32 bytes), and slots 1 to 15 hold the mappings in order.
  */
 contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "ConvictionServiceStorage";
-    string private constant _VERSION = "1.0.0";
+    // Version history:
+    //   1.0.0 — Conviction Account service spending: opt-ins, assignments,
+    //           usage, labels, and period records with their buckets.
+    //   1.1.0 — a plan period is one epoch; an assignment holds one cost
+    //           limit per period and an expiry, and its usage counts periods
+    //           only; `maxPeriodSeconds` is gone; top-ups of a recorded period
+    //           (`applyTopUp`). The mapping slots are unchanged.
+    string private constant _VERSION = "1.1.0";
 
-    uint32 internal constant _DEFAULT_MAX_PERIOD_SECONDS = 31 days;
     uint8 internal constant _DEFAULT_MAX_BUCKETS_PER_PERIOD = 16;
-
-    uint32 internal constant _PERIOD_SECONDS_LOWER_BOUND = 1 days;
-    uint32 internal constant _PERIOD_SECONDS_UPPER_BOUND = 366 days;
     uint8 internal constant _BUCKETS_PER_PERIOD_UPPER_BOUND = 32;
 
     /// @notice Service class of an inference bucket; its units are tokens.
@@ -58,57 +66,44 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //                          Records
     // ============================================================
 
-    /// @notice A buyer key's authority over one account. Every cap is in COST:
-    ///         TRAC wei drawn from the account's allowance after its discount.
+    /// @notice A buyer key's authority over one account: the most it may draw
+    ///         for one period, in COST (TRAC wei drawn from the account's
+    ///         allowance after its discount), until it expires.
     struct Assignment {
-        uint96 maxCostPerPeriod;
-        uint96 maxInferenceCostPerPeriod; // 0 = the inference class is not allowed
-        uint96 maxQueryCostPerPeriod; // 0 = the query class is not allowed
-        uint96 maxCostPerWindow; // 0 = no per-window cap
-        uint96 maxTotalCost; // counted since assignedAt
-        uint32 maxPeriodSeconds;
+        uint96 maxCostPerPeriod; // the period's cost, its top-ups included
         uint40 assignedAt; // 0 = no assignment
         uint40 expiresAt;
         uint40 revokedAt; // 0 = not revoked
         uint64 nonce; // the account nonce this assignment consumed
     }
 
-    /// @notice The seven limits of an assignment, in `Assignment`'s order.
-    ///         `setAssignmentCaps` writes them and nothing else, so an owner's
-    ///         cap update keeps the usage counted so far.
+    /// @notice The two limits of an assignment. `setAssignmentCaps` writes
+    ///         them and nothing else.
     struct AssignmentCaps {
         uint96 maxCostPerPeriod;
-        uint96 maxInferenceCostPerPeriod;
-        uint96 maxQueryCostPerPeriod;
-        uint96 maxCostPerWindow;
-        uint96 maxTotalCost;
-        uint32 maxPeriodSeconds;
         uint40 expiresAt;
     }
 
-    /// @notice What an assignee has drawn, counted against its caps.
+    /// @notice What an assignee has funded under its assignment.
     struct Usage {
-        uint96 totalCost; // since assignedAt
-        uint96 windowCost; // drawn in `window`
-        uint40 window; // the billing window `windowCost` belongs to
-        uint32 periods; // periods funded since assignedAt
+        uint32 periods; // periods funded since assignedAt; top-ups fund none
     }
 
-    /// @notice One funded plan period.
+    /// @notice One funded plan period: one chain epoch.
     struct Subscription {
-        uint256 accountId;
+        uint256 accountId; // 0 = funded from the buyer key's wallet
         address assignee; // the buyer key that funded it
-        address sessionKey; // the buyer's request-signing key; may be zero
-        bytes32 periodId; // chosen by the buyer
-        bytes32 planDigest; // the buyer's commitment to its plan, opaque here
-        uint40 periodStart; // block time of the funding; 0 = no record
-        uint40 periodEnd; // periodStart + the period length
-        uint40 fundedEpoch;
-        uint40 fundedWindow;
-        uint16 discountBps;
+        address sessionKey; // the buyer's request-signing key; the funding contracts refuse zero
+        bytes32 periodId; // the period's epoch; the id is keccak256(abi.encode(assignee, periodId))
+        bytes32 planDigest; // the buyer's commitment to its plan, opaque here; a top-up replaces it
+        uint40 periodStart; // the later of the funding's block time and the epoch's start; 0 = no record
+        uint40 periodEnd; // the start of the next epoch
+        uint40 fundedEpoch; // the epoch the funding ran in
+        uint40 fundedWindow; // the account's billing window drawn; 0 for a wallet period
+        uint16 discountBps; // 0 for a wallet period
         uint8 bucketCount;
         uint96 value; // sum of the bucket values, before the discount
-        uint96 cost; // drawn from the allowance
+        uint96 cost; // drawn from the allowance; the value for a wallet period
         uint96 drawnFromWindow;
         uint96 drawnFromTopUp;
     }
@@ -121,12 +116,21 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         uint96 maxAskWeiPerUnit; // the buyer's price cap per unit
     }
 
+    /// @notice What a top-up adds to a period record: its value, its cost and
+    ///         the cost's split between the window allowance and the top-up
+    ///         buffer (both 0 for a wallet period).
+    struct TopUpAmounts {
+        uint96 value;
+        uint96 cost;
+        uint96 drawnFromWindow;
+        uint96 drawnFromTopUp;
+    }
+
     // ============================================================
     //                    Events (parameters only)
     // ============================================================
 
     event ExactScheduleFromSet(uint40 timestamp);
-    event MaxPeriodSecondsSet(uint32 oldValue, uint32 newValue);
     event MaxBucketsPerPeriodSet(uint8 oldValue, uint8 newValue);
 
     // ============================================================
@@ -140,6 +144,10 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @notice The period record has a `periodStart` of 0, so it would read as
     ///         absent.
     error ZeroPeriodStart(bytes32 subscriptionId);
+    /// @notice The id holds no period record.
+    error SubscriptionNotFound(bytes32 subscriptionId);
+    /// @notice A top-up names more stored buckets than the period has.
+    error BucketTopUpOutOfRange(bytes32 subscriptionId, uint256 count, uint256 bucketCount);
 
     // ============================================================
     //          State (the declaration order is the layout)
@@ -153,9 +161,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ///         a future time. 0 means unset, and the logic contracts refuse to
     ///         switch service spending on until it is set.
     uint40 public exactScheduleFrom;
-    /// @notice The longest plan period any assignment may allow.
-    uint32 public maxPeriodSeconds;
-    /// @notice The most buckets one funded period may carry.
+    /// @notice The most buckets one funded period may carry, its top-ups
+    ///         included.
     uint8 public maxBucketsPerPeriod;
 
     /// @notice accountId => when the owner switched service spending on; 0 = off.
@@ -164,7 +171,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     mapping(uint256 => uint64) public assignmentNonce;
     /// @dev accountId => assignee => assignment.
     mapping(uint256 => mapping(address => Assignment)) internal _assignments;
-    /// @dev accountId => assignee => usage against the assignment's caps.
+    /// @dev accountId => assignee => what it has funded under its assignment.
     mapping(uint256 => mapping(address => Usage)) internal _usage;
     /// @dev accountId => every assignee ever listed, append-only, each once.
     mapping(uint256 => address[]) internal _assignees;
@@ -200,9 +207,6 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ///      while it is unset, so a value governance has tuned survives a
     ///      re-initialization.
     function initialize() external onlyHub {
-        if (maxPeriodSeconds == 0) {
-            maxPeriodSeconds = _DEFAULT_MAX_PERIOD_SECONDS;
-        }
         if (maxBucketsPerPeriod == 0) {
             maxBucketsPerPeriod = _DEFAULT_MAX_BUCKETS_PER_PERIOD;
         }
@@ -232,16 +236,6 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         emit ExactScheduleFromSet(timestamp);
     }
 
-    /// @notice Set the longest plan period, from 1 day to 366 days.
-    function setMaxPeriodSeconds(uint32 value) external onlyHub {
-        if (value < _PERIOD_SECONDS_LOWER_BOUND || value > _PERIOD_SECONDS_UPPER_BOUND) {
-            revert InvalidParameter("maxPeriodSeconds");
-        }
-        uint32 old = maxPeriodSeconds;
-        maxPeriodSeconds = value;
-        emit MaxPeriodSecondsSet(old, value);
-    }
-
     /// @notice Set the most buckets per period, from 1 to 32.
     function setMaxBucketsPerPeriod(uint8 value) external onlyHub {
         if (value == 0 || value > _BUCKETS_PER_PERIOD_UPPER_BOUND) revert InvalidParameter("maxBucketsPerPeriod");
@@ -267,7 +261,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     /// @notice Store an assignment, list its assignee once, and reset the
     ///         assignee's usage: a new assignment is new terms both parties
-    ///         signed, so its caps count from nothing.
+    ///         signed, so its usage counts from nothing.
     function setAssignment(uint256 accountId, address assignee, Assignment calldata a) external onlyContracts {
         _assignments[accountId][assignee] = a;
         if (!_listed[accountId][assignee]) {
@@ -282,7 +276,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         _assignments[accountId][assignee].revokedAt = at;
     }
 
-    /// @notice Overwrite the seven limits of a stored assignment and nothing
+    /// @notice Overwrite the two limits of a stored assignment and nothing
     ///         else: `assignedAt`, `revokedAt`, `nonce`, the assignee list and
     ///         the usage stay as they are.
     function setAssignmentCaps(
@@ -292,23 +286,12 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ) external onlyContracts {
         Assignment storage a = _assignments[accountId][assignee];
         a.maxCostPerPeriod = c.maxCostPerPeriod;
-        a.maxInferenceCostPerPeriod = c.maxInferenceCostPerPeriod;
-        a.maxQueryCostPerPeriod = c.maxQueryCostPerPeriod;
-        a.maxCostPerWindow = c.maxCostPerWindow;
-        a.maxTotalCost = c.maxTotalCost;
-        a.maxPeriodSeconds = c.maxPeriodSeconds;
         a.expiresAt = c.expiresAt;
     }
 
-    /// @notice Count a funded period's cost against its assignee: the window
-    ///         cost restarts from 0 when `window` is not the window it last
-    ///         counted, and the total and the period count accumulate.
-    function recordUsage(uint256 accountId, address assignee, uint40 window, uint96 cost) external onlyContracts {
-        Usage storage u = _usage[accountId][assignee];
-        u.windowCost = (u.window == window ? u.windowCost : 0) + cost;
-        u.window = window;
-        u.totalCost += cost;
-        u.periods += 1;
+    /// @notice Count a funded period against its assignee.
+    function recordUsage(uint256 accountId, address assignee) external onlyContracts {
+        _usage[accountId][assignee].periods += 1;
     }
 
     /// @notice Add the window-allowance part of a service draw to its window.
@@ -360,6 +343,47 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
             stored.push(buckets[i]);
         }
         _accountSubscriptions[s.accountId].push(subscriptionId);
+    }
+
+    /// @notice Top up a recorded period: add `added[i]` to the value of its
+    ///         stored bucket `i`, append `appended` after its stored buckets,
+    ///         add `t` to its value, cost and draw split, and replace its plan
+    ///         commitment.
+    /// @dev    It refuses an id with no record (`SubscriptionNotFound`), whose
+    ///         buckets would then belong to no period, and more entries in
+    ///         `added` than the period has buckets (`BucketTopUpOutOfRange`).
+    ///         Appending keeps every stored bucket at its index, which claims
+    ///         are keyed by. The sums are checked, so an overflow reverts.
+    function applyTopUp(
+        bytes32 subscriptionId,
+        TopUpAmounts calldata t,
+        bytes32 planDigest,
+        uint96[] calldata added,
+        Bucket[] calldata appended
+    ) external onlyContracts {
+        Subscription storage s = _subscriptions[subscriptionId];
+        if (s.periodStart == 0) revert SubscriptionNotFound(subscriptionId);
+        Bucket[] storage stored = _buckets[subscriptionId];
+        uint256 n = stored.length;
+        if (added.length > n) revert BucketTopUpOutOfRange(subscriptionId, added.length, n);
+
+        for (uint256 i; i < added.length; i++) {
+            if (added[i] != 0) stored[i].value += added[i];
+        }
+        if (appended.length != 0) {
+            for (uint256 i; i < appended.length; i++) {
+                stored.push(appended[i]);
+            }
+            s.bucketCount = SafeCast.toUint8(stored.length);
+        }
+
+        s.value += t.value;
+        s.cost += t.cost;
+        if (t.drawnFromWindow != 0 || t.drawnFromTopUp != 0) {
+            s.drawnFromWindow += t.drawnFromWindow;
+            s.drawnFromTopUp += t.drawnFromTopUp;
+        }
+        s.planDigest = planDigest;
     }
 
     // ============================================================

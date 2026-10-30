@@ -32,7 +32,6 @@
             }
         },
         "ConvictionServiceStorage": {
-            "maxPeriodSeconds": "2678400",
             "maxBucketsPerPeriod": "16"
         },
         "QueryInferenceStorage": {
@@ -126,7 +125,6 @@
             }
         },
         "ConvictionServiceStorage": {
-            "maxPeriodSeconds": "2678400",
             "maxBucketsPerPeriod": "16"
         },
         "QueryInferenceStorage": {

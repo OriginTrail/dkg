@@ -117,7 +117,7 @@ function storageHre(opts: {
       },
       parametersConfig: {
         testnet: {
-          ConvictionServiceStorage: { maxPeriodSeconds: '2678400', maxBucketsPerPeriod: '16' },
+          ConvictionServiceStorage: { maxBucketsPerPeriod: '16' },
           overrides:
             opts.configured === undefined
               ? {}

@@ -57,29 +57,29 @@ type Case = { target: bigint; measured: bigint; above?: true };
 // The targets, and what this file measured against them.
 const GAS: Record<string, Case> = {
   'setServiceSpending(…, true) on a scheduled account': { target: 120_000n, measured: 103_170n },
-  // Above its target: the assignment's four slots, the nonce, and the
-  // assignee's list entry, list length and membership flag are seven new slots.
-  'assign, one EOA signature': { target: 250_000n, measured: 251_941n, above: true },
-  updateAssignmentCaps: { target: 100_000n, measured: 89_411n },
+  // An assignment is one limit and an expiry: two slots, the nonce, and the
+  // assignee's list entry, list length and membership flag.
+  'assign, one EOA signature': { target: 250_000n, measured: 198_503n },
+  updateAssignmentCaps: { target: 100_000n, measured: 71_486n },
   // Above its target: an account's first funding also creates its service
   // spend, usage, label total, cursor and period list.
   'fundFromConviction, one bucket, base only, labels within 3 epochs': {
     target: 700_000n,
-    measured: 758_691n,
+    measured: 737_672n,
     above: true,
   },
-  'the same on an account from before the cut-over, lock 12': { target: 900_000n, measured: 823_251n },
+  'the same on an account from before the cut-over, lock 12': { target: 900_000n, measured: 801_789n },
   // Above its target, as the first base-only funding is.
   'fundFromConviction, one bucket, with top-up overflow, lock 12': {
     target: 1_300_000n,
-    measured: 1_328_911n,
+    measured: 1_307_646n,
     above: true,
   },
-  'fundFromConviction, one bucket, with top-up overflow, lock 60': { target: 4_500_000n, measured: 3_656_045n },
+  'fundFromConviction, one bucket, with top-up overflow, lock 60': { target: 4_500_000n, measured: 3_633_964n },
   // The same fundings for a later period of an account that has funded one
   // before: the account's usage, label total, cursor and period list exist.
-  'base only, labels within 3 epochs, a later period': { target: 700_000n, measured: 638_994n },
-  'with top-up overflow, lock 12, a later period': { target: 1_300_000n, measured: 1_217_679n },
+  'base only, labels within 3 epochs, a later period': { target: 700_000n, measured: 635_084n },
+  'with top-up overflow, lock 12, a later period': { target: 1_300_000n, measured: 1_213_552n },
 };
 
 const ROUNDING = 5_000n;
@@ -215,11 +215,6 @@ describe('@gas Conviction Account service spending', () => {
     accountId,
     assignee: buyer.address,
     maxCostPerPeriod: 50_000n * TRAC,
-    maxInferenceCostPerPeriod: 50_000n * TRAC,
-    maxQueryCostPerPeriod: 50_000n * TRAC,
-    maxCostPerWindow: 0n,
-    maxTotalCost: 1_000_000n * TRAC,
-    maxPeriodSeconds: 31n * DAY,
     expiresAt: (await latest()) + 400n * DAY,
     nonce: await CSS.assignmentNonce(accountId),
     ...overrides,
@@ -241,8 +236,11 @@ describe('@gas Conviction Account service spending', () => {
     return S(first) + S(first + 1n) + S(first + 2n) / 2n;
   };
 
+  /** Fund the current epoch's period: one per buyer key and epoch. */
   const fundBase = async (accountId: bigint, cost: bigint) => {
-    const r = requestOf(accountId, { buckets: [bucket(0, CLASS_INFERENCE, valueFor(cost, BPS))] });
+    const r = requestOf(accountId, await ChronosContract.getCurrentEpoch(), {
+      buckets: [bucket(0, CLASS_INFERENCE, valueFor(cost, BPS))],
+    });
     return (await (await SS.connect(buyer).fundFromConviction(r)).wait())!;
   };
 
@@ -314,17 +312,8 @@ describe('@gas Conviction Account service spending', () => {
     await setExactScheduleFrom(HubContract, CSS);
     const { accountId } = await createAccount();
     const terms = await optInAndAssign(accountId);
-    // Every limit changes.
-    const caps = {
-      ...capsOf(terms),
-      maxCostPerPeriod: 25n * TRAC,
-      maxInferenceCostPerPeriod: 20n * TRAC,
-      maxQueryCostPerPeriod: 5n * TRAC,
-      maxCostPerWindow: 100n * TRAC,
-      maxTotalCost: 1_000n * TRAC,
-      maxPeriodSeconds: 7n * DAY,
-      expiresAt: terms.expiresAt - DAY,
-    };
+    // Both limits change.
+    const caps = { ...capsOf(terms), maxCostPerPeriod: 25n * TRAC, expiresAt: terms.expiresAt - DAY };
     const receipt = (await (await SS.connect(owner).updateAssignmentCaps(accountId, buyer.address, caps)).wait())!;
     record('updateAssignmentCaps', receipt);
   });
@@ -393,7 +382,7 @@ describe('@gas Conviction Account service spending', () => {
     const { accountId, createdAt } = await createAccount();
     await optInAndAssign(accountId);
     await fundBase(accountId, 100n * TRAC);
-    // The next period, in the next window.
+    // The next period, in the next window and the next epoch.
     await time.increaseTo(createdAt + epLen + 60n);
     const receipt = await fundBase(accountId, await threeEpochCostNow(accountId));
     await expectThreeLabelledEpochs(receipt);

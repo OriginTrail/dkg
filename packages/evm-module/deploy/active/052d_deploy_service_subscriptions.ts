@@ -11,16 +11,18 @@ import {
  * V10 — deploys `ServiceSubscriptions`, the stateless logic of Conviction
  * Account service spending (OT-RFC-27): the owner's opt-in, buyer-key
  * assignments with the consent of both parties over one EIP-712 digest, the
- * owner's cap updates and revocations, and `fundFromConviction`, which funds
- * one plan period from the account's allowance through
- * `PublishingConviction.coverServiceCost` and labels its cost on the account's
- * own scheduled emission. No TRAC moves.
+ * owner's limit updates and revocations, and `fundFromConviction` and
+ * `topUpFromConviction`, which fund and top up one plan period of one epoch
+ * from the account's allowance through `PublishingConviction.coverServiceCost`
+ * and label the cost on the account's own scheduled emission. No TRAC moves.
  *
- * Its state is in `ConvictionServiceStorage` (052c). `initialize()` wires
- * `PublishingConvictionStorage`, `ConvictionServiceStorage`, `Chronos` and
- * `ParametersStorage`. `PublishingConviction` and `DKGPublishingConvictionNFT`
- * are resolved from the Hub on every call, so either can be re-registered
- * without re-initializing this contract.
+ * Its state is in `ConvictionServiceStorage` (052c) and `QueryInferenceStorage`
+ * (052e), which is deployed first, so on development, where each contract is
+ * initialized as it is deployed, it is registered by then. `initialize()`
+ * wires `PublishingConvictionStorage`, `ConvictionServiceStorage`, `Chronos`,
+ * `ParametersStorage` and `QueryInferenceStorage`. `PublishingConviction` and
+ * `DKGPublishingConvictionNFT` are resolved from the Hub on every call, so
+ * either can be re-registered without re-initializing this contract.
  *
  * Fundings need `PublishingConviction` 10.1.0 or later, the first build with
  * `coverServiceCost`. On a network whose deployments file records an older
@@ -70,6 +72,7 @@ func.tags = ['ServiceSubscriptions', 'v10'];
 func.dependencies = [
   'Hub',
   'ConvictionServiceStorage',
+  'QueryInferenceStorage',
   'PublishingConvictionStorage',
   'PublishingConviction',
   'Chronos',

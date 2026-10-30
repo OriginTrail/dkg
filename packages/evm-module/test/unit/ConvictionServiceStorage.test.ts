@@ -9,9 +9,9 @@
 //   - the parameters: defaults, bounds, and a cut-over set once and never in
 //     the future;
 //   - the mutators' semantics: assignment listing and usage reset, cap
-//     updates that keep everything but the seven limits, the usage window
-//     roll-over, label totals, and period records, each written once and
-//     never with a start of 0;
+//     updates that keep everything but the two limits, the period count,
+//     label totals, period records, each written once and never with a start
+//     of 0, and top-ups of a recorded period at its bucket indexes;
 //   - the compiler's storage layout against the documented one.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -54,11 +54,6 @@ async function deployFixture(): Promise<Fixture> {
 
 const assignmentTerms = (overrides: Record<string, bigint> = {}) => ({
   maxCostPerPeriod: 25n * TRAC,
-  maxInferenceCostPerPeriod: 20n * TRAC,
-  maxQueryCostPerPeriod: 5n * TRAC,
-  maxCostPerWindow: 100n * TRAC,
-  maxTotalCost: 1_000n * TRAC,
-  maxPeriodSeconds: 31n * DAY,
   assignedAt: 1_000n,
   expiresAt: 4_000_000_000n,
   revokedAt: 0n,
@@ -68,11 +63,6 @@ const assignmentTerms = (overrides: Record<string, bigint> = {}) => ({
 
 const capsOf = (overrides: Record<string, bigint> = {}) => ({
   maxCostPerPeriod: 40n * TRAC,
-  maxInferenceCostPerPeriod: 40n * TRAC,
-  maxQueryCostPerPeriod: 0n,
-  maxCostPerWindow: 0n,
-  maxTotalCost: 400n * TRAC,
-  maxPeriodSeconds: 7n * DAY,
   expiresAt: 4_100_000_000n,
   ...overrides,
 });
@@ -106,6 +96,14 @@ const bucketOf = (label: string, serviceClass: bigint, value: bigint, maxAsk: bi
   maxAskWeiPerUnit: maxAsk,
 });
 
+const topUpOf = (overrides: Record<string, bigint> = {}) => ({
+  value: TRAC,
+  cost: TRAC,
+  drawnFromWindow: 0n,
+  drawnFromTopUp: 0n,
+  ...overrides,
+});
+
 /** A struct read back from the contract, as a plain object. */
 const plain = (r: unknown) => (r as ethers.Result).toObject();
 
@@ -123,25 +121,23 @@ describe('@unit ConvictionServiceStorage', () => {
   });
 
   describe('metadata and initialization', () => {
-    it('is named ConvictionServiceStorage, version 1.0.0, with the two service classes', async () => {
+    it('is named ConvictionServiceStorage, version 1.1.0, with the two service classes', async () => {
       expect(await CSS.name()).to.equal('ConvictionServiceStorage');
-      expect(await CSS.version()).to.equal('1.0.0');
+      expect(await CSS.version()).to.equal('1.1.0');
       expect(await CSS.CLASS_INFERENCE()).to.equal(1n);
       expect(await CSS.CLASS_QUERY()).to.equal(2n);
       expect(await CSS.hub()).to.equal(await Hub.getAddress());
     });
 
-    it('initialize seeds the defaults and leaves the cut-over unset', async () => {
-      expect(await CSS.maxPeriodSeconds()).to.equal(31n * DAY);
+    it('initialize seeds the default and leaves the cut-over unset', async () => {
       expect(await CSS.maxBucketsPerPeriod()).to.equal(16n);
       expect(await CSS.exactScheduleFrom()).to.equal(0n);
     });
 
     it('initialize is idempotent: a tuned parameter survives a re-initialization', async () => {
-      await CSS.setMaxPeriodSeconds(7n * DAY);
+      await CSS.setMaxBucketsPerPeriod(7n);
       await Hub.forwardCall(await CSS.getAddress(), CSS.interface.encodeFunctionData('initialize'));
-      expect(await CSS.maxPeriodSeconds()).to.equal(7n * DAY);
-      expect(await CSS.maxBucketsPerPeriod()).to.equal(16n);
+      expect(await CSS.maxBucketsPerPeriod()).to.equal(7n);
     });
 
     it('initialize is onlyHub: a Hub contract and a stranger are refused', async () => {
@@ -155,7 +151,6 @@ describe('@unit ConvictionServiceStorage', () => {
 
   describe('parameter setters (onlyHub)', () => {
     const setters: Array<[string, unknown[]]> = [
-      ['setMaxPeriodSeconds', [7n * DAY]],
       ['setMaxBucketsPerPeriod', [8n]],
       ['setExactScheduleFrom', [1n]],
     ];
@@ -193,21 +188,6 @@ describe('@unit ConvictionServiceStorage', () => {
         .to.emit(CSS, 'MaxBucketsPerPeriodSet')
         .withArgs(16n, 4n);
       expect(await CSS.maxBucketsPerPeriod()).to.equal(4n);
-    });
-
-    it('setMaxPeriodSeconds accepts 1 day to 366 days and emits the old and new values', async () => {
-      await expect(CSS.setMaxPeriodSeconds(DAY - 1n))
-        .to.be.revertedWithCustomError(CSS, 'InvalidParameter')
-        .withArgs('maxPeriodSeconds');
-      await expect(CSS.setMaxPeriodSeconds(366n * DAY + 1n))
-        .to.be.revertedWithCustomError(CSS, 'InvalidParameter')
-        .withArgs('maxPeriodSeconds');
-
-      await expect(CSS.setMaxPeriodSeconds(DAY)).to.emit(CSS, 'MaxPeriodSecondsSet').withArgs(31n * DAY, DAY);
-      await expect(CSS.setMaxPeriodSeconds(366n * DAY))
-        .to.emit(CSS, 'MaxPeriodSecondsSet')
-        .withArgs(DAY, 366n * DAY);
-      expect(await CSS.maxPeriodSeconds()).to.equal(366n * DAY);
     });
 
     it('setMaxBucketsPerPeriod accepts 1 to 32 and emits the old and new values', async () => {
@@ -264,7 +244,7 @@ describe('@unit ConvictionServiceStorage', () => {
       ['setAssignment', (c, s) => c.setAssignment(s, assignee, assignmentTerms())],
       ['setAssignmentRevokedAt', (c, s) => c.setAssignmentRevokedAt(s, assignee, 2_000n)],
       ['setAssignmentCaps', (c, s) => c.setAssignmentCaps(s, assignee, capsOf())],
-      ['recordUsage', (c, s) => c.recordUsage(s, assignee, 0n, 5n)],
+      ['recordUsage', (c, s) => c.recordUsage(s, assignee)],
       ['increaseServiceSpent', (c, s) => c.increaseServiceSpent(s, 0n, 5n)],
       ['addBaseLabel', (c, s) => c.addBaseLabel(s, 10n, 5n)],
       ['addTopUpLabel', (c, s) => c.addTopUpLabel(s, 10n, 5n)],
@@ -276,10 +256,18 @@ describe('@unit ConvictionServiceStorage', () => {
             bucketOf('model-a', 1n, 10n * TRAC, 1_000n),
           ]),
       ],
+      [
+        'applyTopUp',
+        async (c, s) => {
+          const id = ethers.toBeHex(1_000n + s, 32);
+          await CSS.connect(logic).createSubscription(id, subscriptionRecord(s), [bucketOf('m', 1n, 1n, 1n)]);
+          return c.applyTopUp(id, topUpOf(), ethers.id('plan-2'), [1n], []);
+        },
+      ],
     ];
 
     it('the list below covers every state-changing function except initialize and the parameter setters', () => {
-      const parameterFunctions = ['initialize', 'setExactScheduleFrom', 'setMaxPeriodSeconds', 'setMaxBucketsPerPeriod'];
+      const parameterFunctions = ['initialize', 'setExactScheduleFrom', 'setMaxBucketsPerPeriod'];
       const stateChanging: string[] = [];
       CSS.interface.forEachFunction((f) => {
         if (f.stateMutability === 'nonpayable' && !parameterFunctions.includes(f.name)) stateChanging.push(f.name);
@@ -327,20 +315,15 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(await CSS.assigneeCount(accountId)).to.equal(1n);
       expect(await CSS.assigneeAt(accountId, 0n)).to.equal(a);
 
-      await CSS.connect(logic).recordUsage(accountId, a, 2n, 9n * TRAC);
-      expect((await CSS.getUsage(accountId, a)).totalCost).to.equal(9n * TRAC);
+      await CSS.connect(logic).recordUsage(accountId, a);
+      expect((await CSS.getUsage(accountId, a)).periods).to.equal(1n);
 
       // Re-assigning the same key: new terms, the list unchanged, usage from zero.
-      const renewed = assignmentTerms({ assignedAt: 5_000n, maxTotalCost: 2_000n * TRAC, nonce: 1n });
+      const renewed = assignmentTerms({ assignedAt: 5_000n, maxCostPerPeriod: 2_000n * TRAC, nonce: 1n });
       await CSS.connect(logic).setAssignment(accountId, a, renewed);
       expect(plain(await CSS.getAssignment(accountId, a))).to.deep.equal(renewed);
       expect(await CSS.assigneeCount(accountId)).to.equal(1n);
-      expect(plain(await CSS.getUsage(accountId, a))).to.deep.equal({
-        totalCost: 0n,
-        windowCost: 0n,
-        window: 0n,
-        periods: 0n,
-      });
+      expect(plain(await CSS.getUsage(accountId, a))).to.deep.equal({ periods: 0n });
 
       // A second key is appended after the first; another account's list is separate.
       await CSS.connect(logic).setAssignment(accountId, b, assignmentTerms({ nonce: 2n }));
@@ -358,13 +341,13 @@ describe('@unit ConvictionServiceStorage', () => {
       );
     });
 
-    it('setAssignmentCaps writes only the seven limits and keeps the usage, assignedAt, revokedAt, nonce and list', async () => {
+    it('setAssignmentCaps writes only the two limits and keeps the usage, assignedAt, revokedAt, nonce and list', async () => {
       const [a, b] = [accounts[10].address, accounts[11].address];
       await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ assignedAt: 1_111n, nonce: 4n }));
       await CSS.connect(logic).setAssignment(accountId, b, assignmentTerms({ nonce: 5n }));
       await CSS.connect(logic).setAssignmentRevokedAt(accountId, a, 2_222n);
-      await CSS.connect(logic).recordUsage(accountId, a, 6n, 3n * TRAC);
-      await CSS.connect(logic).recordUsage(accountId, a, 6n, 2n * TRAC);
+      await CSS.connect(logic).recordUsage(accountId, a);
+      await CSS.connect(logic).recordUsage(accountId, a);
       const usageBefore = plain(await CSS.getUsage(accountId, a));
 
       const caps = capsOf();
@@ -377,7 +360,7 @@ describe('@unit ConvictionServiceStorage', () => {
         nonce: 4n,
       });
       expect(plain(await CSS.getUsage(accountId, a))).to.deep.equal(usageBefore);
-      expect(usageBefore).to.deep.equal({ totalCost: 5n * TRAC, windowCost: 5n * TRAC, window: 6n, periods: 2n });
+      expect(usageBefore).to.deep.equal({ periods: 2n });
       expect(await CSS.assigneeCount(accountId)).to.equal(2n);
       expect(await CSS.assigneeAt(accountId, 0n)).to.equal(a);
       expect(await CSS.assigneeAt(accountId, 1n)).to.equal(b);
@@ -385,19 +368,14 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(plain(await CSS.getAssignment(accountId, b))).to.deep.equal(assignmentTerms({ nonce: 5n }));
     });
 
-    it('recordUsage accumulates within a window and restarts the window cost in any other window', async () => {
+    it('recordUsage counts the periods of an assignee, per account', async () => {
       const a = accounts[10].address;
-      const steps: Array<[bigint, bigint, Record<string, bigint>]> = [
-        [3n, 10n, { totalCost: 10n, windowCost: 10n, window: 3n, periods: 1n }],
-        [3n, 5n, { totalCost: 15n, windowCost: 15n, window: 3n, periods: 2n }],
-        [4n, 7n, { totalCost: 22n, windowCost: 7n, window: 4n, periods: 3n }],
-        // Any window other than the last one counted starts from zero again.
-        [3n, 1n, { totalCost: 23n, windowCost: 1n, window: 3n, periods: 4n }],
-      ];
-      for (const [window, cost, expected] of steps) {
-        await CSS.connect(logic).recordUsage(accountId, a, window, cost);
-        expect(plain(await CSS.getUsage(accountId, a))).to.deep.equal(expected);
+      for (let i = 1n; i <= 3n; i++) {
+        await CSS.connect(logic).recordUsage(accountId, a);
+        expect(plain(await CSS.getUsage(accountId, a))).to.deep.equal({ periods: i });
       }
+      expect((await CSS.getUsage(accountId + 1n, a)).periods).to.equal(0n);
+      expect((await CSS.getUsage(accountId, accounts[11].address)).periods).to.equal(0n);
     });
 
     it('isAssignmentActive needs an assignment, no revocation, and a block time before expiry', async () => {
@@ -562,12 +540,83 @@ describe('@unit ConvictionServiceStorage', () => {
     });
   });
 
+  describe('top-ups', () => {
+    const id = ethers.id('subscription-1');
+    const stored = () => [
+      bucketOf('model-a', 1n, 6n * TRAC, 2_000n),
+      bucketOf('model-b', 1n, 3n * TRAC, 1_000n),
+      bucketOf('graph-q', 2n, 1n * TRAC, 50n),
+    ];
+
+    beforeEach(async () => {
+      await CSS.connect(logic).createSubscription(id, subscriptionRecord(7n), stored());
+    });
+
+    it('applyTopUp adds to the stored buckets by index, appends new ones, and adds to the value, cost and draws', async () => {
+      const appended = [bucketOf('model-c', 2n, 4n * TRAC, 70n)];
+      await CSS.connect(logic).applyTopUp(
+        id,
+        topUpOf({ value: 7n * TRAC, cost: 5n * TRAC, drawnFromWindow: 4n * TRAC, drawnFromTopUp: TRAC }),
+        ethers.id('plan-2'),
+        [2n * TRAC, 0n, TRAC],
+        appended,
+      );
+
+      const before = stored();
+      expect((await CSS.getBuckets(id)).map(plain)).to.deep.equal([
+        { ...before[0], value: 8n * TRAC },
+        before[1],
+        { ...before[2], value: 2n * TRAC },
+        appended[0],
+      ]);
+      expect(plain(await CSS.getSubscription(id))).to.deep.equal(
+        subscriptionRecord(7n, {
+          planDigest: ethers.id('plan-2'),
+          bucketCount: 4n,
+          value: 17n * TRAC,
+          cost: 12n * TRAC,
+          drawnFromWindow: 11n * TRAC,
+          drawnFromTopUp: TRAC,
+        }),
+      );
+      // The account's list holds the period once, as before.
+      expect(await CSS.accountSubscriptionCount(7n)).to.equal(1n);
+    });
+
+    it('fewer entries than buckets leave the rest as they are, and no appended bucket keeps the count', async () => {
+      await CSS.connect(logic).applyTopUp(id, topUpOf({ value: TRAC, cost: TRAC }), ethers.id('plan-3'), [TRAC], []);
+      expect((await CSS.getBuckets(id))[0].value).to.equal(7n * TRAC);
+      expect((await CSS.getSubscription(id)).bucketCount).to.equal(3n);
+    });
+
+    it('refuses an id with no record, and more entries than the period has buckets', async () => {
+      const unknown = ethers.id('never-funded');
+      await expect(CSS.connect(logic).applyTopUp(unknown, topUpOf(), ethers.id('p'), [], [bucketOf('m', 1n, 1n, 1n)]))
+        .to.be.revertedWithCustomError(CSS, 'SubscriptionNotFound')
+        .withArgs(unknown);
+      expect(await CSS.getBuckets(unknown)).to.have.length(0);
+
+      await expect(CSS.connect(logic).applyTopUp(id, topUpOf(), ethers.id('p'), [1n, 1n, 1n, 1n], []))
+        .to.be.revertedWithCustomError(CSS, 'BucketTopUpOutOfRange')
+        .withArgs(id, 4n, 3n);
+    });
+
+    it('reverts on overflow instead of wrapping', async () => {
+      await expect(
+        CSS.connect(logic).applyTopUp(id, topUpOf(), ethers.id('p'), [MAX_UINT96], []),
+      ).to.be.revertedWithPanic(0x11);
+      await expect(
+        CSS.connect(logic).applyTopUp(id, topUpOf({ value: MAX_UINT96 }), ethers.id('p'), [], []),
+      ).to.be.revertedWithPanic(0x11);
+    });
+  });
+
   describe('storage layout', () => {
     type LayoutEntry = { label: string; slot: string; offset: number; type: string };
     type LayoutType = { label: string; numberOfBytes: string; members?: LayoutEntry[] };
     type StorageLayout = { storage: LayoutEntry[]; types: Record<string, LayoutType> };
 
-    it('matches the documented layout: slot 0 packs the hub with the three parameters, slots 1 to 15 the mappings', async () => {
+    it('matches the documented layout: slot 0 packs the hub with the two parameters, slots 1 to 15 the mappings', async () => {
       const sourceName = 'contracts/storage/ConvictionServiceStorage.sol';
       const buildInfo = await hre.artifacts.getBuildInfo(`${sourceName}:ConvictionServiceStorage`);
       const output = buildInfo?.output.contracts[sourceName]?.ConvictionServiceStorage as
@@ -583,8 +632,7 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(rows).to.deep.equal([
         ['0', 0, 'hub', 'contract Hub'],
         ['0', 20, 'exactScheduleFrom', 'uint40'],
-        ['0', 25, 'maxPeriodSeconds', 'uint32'],
-        ['0', 29, 'maxBucketsPerPeriod', 'uint8'],
+        ['0', 25, 'maxBucketsPerPeriod', 'uint8'],
         ['1', 0, 'serviceSpendingEnabledAt', 'mapping(uint256 => uint40)'],
         ['2', 0, 'assignmentNonce', 'mapping(uint256 => uint64)'],
         [
@@ -607,16 +655,16 @@ describe('@unit ConvictionServiceStorage', () => {
         ['15', 0, '_accountSubscriptions', 'mapping(uint256 => bytes32[])'],
       ]);
 
-      // Slot 0 uses 30 of its 32 bytes.
+      // Slot 0 uses 26 of its 32 bytes.
       const maxBuckets = layout!.storage.find((s) => s.label === 'maxBucketsPerPeriod')!;
-      expect(maxBuckets.offset + Number(layout!.types[maxBuckets.type].numberOfBytes)).to.equal(30);
+      expect(maxBuckets.offset + Number(layout!.types[maxBuckets.type].numberOfBytes)).to.equal(26);
 
-      // An Assignment takes 4 slots and a Usage 2.
+      // An Assignment takes 2 slots and a Usage 1.
       const structBytes = (label: string) =>
         Object.values(layout!.types).find((t) => t.label === `struct ConvictionServiceStorage.${label}`)!
           .numberOfBytes;
-      expect(structBytes('Assignment')).to.equal('128');
-      expect(structBytes('Usage')).to.equal('64');
+      expect(structBytes('Assignment')).to.equal('64');
+      expect(structBytes('Usage')).to.equal('32');
     });
   });
 });
