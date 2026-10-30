@@ -1,13 +1,37 @@
 import { test, expect, vi, afterEach } from 'vitest';
 import { createServer } from 'node:http';
-import { mkdtemp, writeFile, readFile, stat, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, stat, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { descriptorHash } from '@origintrail-official/kafka-plugin/registry';
 import { main, runEnrollment } from '../src/enroll-cli.mjs';
 
 const owner = '0x' + 'a'.repeat(40);
 afterEach(() => { vi.restoreAllMocks(); process.exitCode = undefined; delete process.env.DKG_TEST_REGISTRY_TOKEN; });
+
+test('direct and symlinked executable entrypoints run while module imports stay passive', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-enroll-entrypoint-'));
+  t.onTestFinished(() => rm(directory, { recursive: true, force: true }));
+  const entrypoint = fileURLToPath(new URL('../src/enroll-cli.mjs', import.meta.url));
+  const binary = join(directory, 'dkg-kafka-enroll');
+  await symlink(entrypoint, binary);
+  const execute = promisify(execFile);
+  for (const path of [entrypoint, binary]) {
+    const help = await execute(process.execPath, [path, '--help'], { timeout: 10_000 });
+    expect(help.stdout).toContain('dkg-kafka-enroll --registry-url URL');
+    expect(help.stderr).toBe('');
+    await expect(execute(process.execPath, [path], { timeout: 10_000 })).rejects.toMatchObject({
+      code: 1, stdout: '', stderr: 'KAFKA_REGISTRY_CLI_ARGUMENTS_REQUIRED\n',
+    });
+  }
+  const importer = join(directory, 'importer.mjs');
+  await writeFile(importer, `await import(${JSON.stringify(pathToFileURL(binary).href)});\nconsole.log('import-complete');\n`);
+  const imported = await execute(process.execPath, [importer], { timeout: 10_000 });
+  expect(imported).toMatchObject({ stdout: 'import-complete\n', stderr: '' });
+}, 20_000);
 
 test('CLI resolves an authenticated snapshot into a private file and refuses overwrite', async t => {
   const descriptor = { name: 'Application events', kafkaBootstrapUrl: 'kafka://broker.example:9094',

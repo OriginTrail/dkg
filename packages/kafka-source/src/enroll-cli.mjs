@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { readFile, open } from 'node:fs/promises';
+import { readFile, open, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
 import { enrollKafkaSource, resolveKafkaRegistryEntry } from './registry.mjs';
 
 export async function runEnrollment(args = process.argv.slice(2)) {
@@ -38,6 +37,8 @@ export async function main(args) {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Package-manager binaries are symlinks; compare their canonical file paths.
+if (process.argv[1] && await realpath(process.argv[1]).catch(() => undefined)
+    === await realpath(fileURLToPath(import.meta.url))) {
   void main();
 }
