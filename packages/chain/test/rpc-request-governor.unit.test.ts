@@ -228,6 +228,36 @@ describe('RpcRequestGovernor', () => {
     ]);
   });
 
+  it('lets an authority read go first again after an admission with nothing waiting', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 32,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+
+    // The last contended permit goes to an authority read, so the next turn
+    // would be an ordinary request's.
+    const contended = acquireForegroundAuthority(governor);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await contended;
+
+    // Then nothing waits for a while: this admission is not a turn.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await governor.acquire('foreground');
+
+    const order: string[] = [];
+    const ordinary = governor.acquire('foreground').then(() => { order.push('ordinary'); });
+    const authority = acquireForegroundAuthority(governor).then(() => { order.push('authority'); });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await Promise.all([ordinary, authority]);
+    expect(order).toEqual(['authority', 'ordinary']);
+  });
+
   it('admits a transaction request inside a stream of authority reads that never ends', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
