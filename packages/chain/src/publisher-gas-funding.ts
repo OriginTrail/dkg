@@ -1,6 +1,3 @@
-import type { ethers } from 'ethers';
-import { priceEip1559Fees, readSuggestedPriorityFee, type ChainFeeFloor } from './evm-fee-policy.js';
-import { applyTransactionFeeCap } from './evm-fee-cap.js';
 import type { PreparedTransaction } from './rpc-failover-client.js';
 
 export interface PublisherGasFundingObservation {
@@ -19,39 +16,8 @@ export class PublisherGasFundingError extends Error {
   }
 }
 
-/** Advisory claim budget; exact preparation remains the authority for each transaction. */
+/** Checks the prepared execution-gas budget. Base's separate L1/operator fees are not estimated here. */
 export class PublisherGasFunding {
-  // Start near a V10 publish; learn the actual buffered gas limit at preparation. This is
-  // deliberately an estimate: a differently sized next publication can cost more or less.
-  private gasLimit = 1_000_000n;
-
-  async read(
-    provider: ethers.Provider, address: string, floor?: ChainFeeFloor, cap?: bigint,
-  ): Promise<PublisherGasFundingObservation> {
-    const observedAt = Date.now(), gasLimit = this.gasLimit;
-    const [feePerGasWei, balanceWei] = await Promise.all([
-      this.readFeePerGas(provider, floor, cap), provider.getBalance(address, 'pending'),
-    ]);
-    return gasObservation(observedAt, balanceWei, gasLimit, feePerGasWei);
-  }
-
-  private async readFeePerGas(provider: ethers.Provider, floor?: ChainFeeFloor, cap?: bigint): Promise<bigint> {
-    const [block, suggestedPriorityFeePerGas] = await Promise.all([
-      provider.getBlock('latest'), readSuggestedPriorityFee(provider),
-    ]);
-    const baseFeePerGas = block?.baseFeePerGas ?? null;
-    let request: ethers.TransactionRequest;
-    if (baseFeePerGas) {
-      request = { type: 2, ...priceEip1559Fees({ baseFeePerGas, suggestedPriorityFeePerGas, floor }) };
-    } else {
-      const feeData = await provider.getFeeData();
-      if (feeData.gasPrice == null) throw new Error('Publisher gas price unavailable');
-      request = { gasPrice: feeData.gasPrice };
-    }
-    if (cap !== undefined) request = applyTransactionFeeCap(request, cap, baseFeePerGas);
-    return BigInt(request.maxFeePerGas ?? request.gasPrice!);
-  }
-
   async assertPrepared(prepared: PreparedTransaction, provider = prepared.signer.provider): Promise<PreparedTransaction> {
     const { signer, transaction } = prepared;
     const price = transaction.maxFeePerGas ?? transaction.gasPrice;
@@ -59,7 +25,6 @@ export class PublisherGasFunding {
       throw new Error('Prepared publisher transaction gas cost unavailable');
     }
     const gasLimit = BigInt(transaction.gasLimit);
-    this.gasLimit = gasLimit;
     const observedAt = Date.now();
     const balanceWei = await provider.getBalance(signer.address, 'pending');
     const observation = gasObservation(observedAt, balanceWei, gasLimit, BigInt(price), BigInt(transaction.value ?? 0));

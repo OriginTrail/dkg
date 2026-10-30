@@ -799,8 +799,8 @@ export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {
-  /** Optional runtime routing policy; observations never replace durable wallet ownership. */
-  walletEligibility?: import('./async-lift-wallet-funding.js').AsyncLiftWalletEligibility;
+  /** Optional runtime routing policy; eligibility never replaces durable wallet ownership. */
+  walletEligibility?: import('./async-lift-wallet-cooldown.js').AsyncLiftWalletEligibility;
   /** Explicit recovery contract; independent of advisory wallet routing. Default: legacy. */
   fundingRecoveryPolicy?: 'legacy' | 'proof-first';
   graphUri?: string;

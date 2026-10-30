@@ -2018,12 +2018,6 @@ export class EVMChainAdapterBase {
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
   }
 
-  async getPublisherGasFunding() {
-    return this.readProvider('async publisher gas funding', (p) =>
-      (this.publisherGasFunding ?? new PublisherGasFunding()).read(p, this.signer.address, this.feeFloor, this.maxFeePerGasWei),
-    { policy: 'failOpenFundingRead', skipPreferred: true });
-  }
-
   /** Shared pre-sign V10 preparation, including one-shot stale-allowance recovery. */
   protected async prepareV10WithAllowanceRecovery(
     signer: EvmSigner,

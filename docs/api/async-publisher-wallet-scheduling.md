@@ -7,35 +7,32 @@ selection and durable claims, then releases that scheduling turn immediately aft
 is recorded: up to all configured wallets can execute concurrently. A busy wallet is skipped;
 wallets with different service times are not expected to finish equal numbers of jobs.
 
-The native runtime probes all configured wallets once during publisher startup. A healthy
-wallet then relies on the existing transaction preparation and the exact maximum-cost
-balance check immediately before signing a publish or update. It does not repeat advisory
-fee/balance probes for every healthy job. A recognized native-gas failure revokes eligibility
-and defers the wallet for 30 seconds. After that delay, a fresh advisory observation must succeed
-before it becomes eligible again; unavailable reads wait five seconds instead of classifying
-an RPC outage as insufficient funds. A balance can change after any routing observation,
-so the exact pre-sign check remains authoritative throughout.
+Wallet scheduling does not estimate funding at startup or before a claim. Every configured,
+free wallet outside cooldown may attempt the next job. `AsyncLiftWalletCooldown` only paces
+wallets after a recognized native-gas failure: it excludes that wallet for 30 seconds, then
+permits another actual-job attempt without a funding probe, top-up notification or new enqueue.
+An elapsed cooldown never authorizes a signature or releases transaction ownership. A later
+deferral is rechecked under the canonical claim lock and cannot be bypassed by an older
+prepared scheduling attempt. Cooldowns are process-local; durable locks and chain recovery
+remain authoritative across restarts.
 
-`AsyncLiftWalletFunding` keeps `before-claim` as its library default: eligible observations
-expire after five seconds and refresh outside the canonical lock before a synchronous
-freshness check inside it. The native runtime explicitly selects `after-failure` and completes
-its first probes before exposing publisher availability. A positive observation in that mode
-means that no later native-gas failure has revoked it; its age is not current affordability proof.
-The runner preserves free-wallet rotation and concurrent execution in both modes.
-
-Advisory observations overlap independent block, priority-fee and pending-balance reads and
-reuse the canonical fee arithmetic, configured floors and caps. Their initial gas budget is
-1,000,000 gas; preparation replaces the estimate with its actual buffered gas limit. The
-estimate can conservatively defer a wallet that could afford a smaller transaction. Approval
-transactions retain their existing handling. TRAC/PCA funding and authorization remain with
-the existing publisher preparation.
+Transaction preparation retains the existing job-specific gas estimate, gas-limit buffer,
+fee floors/caps and TRAC/PCA handling. Immediately before signing, the async runtime reads
+the pending balance and checks the prepared execution-gas maximum (`gasLimit * maxFeePerGas`,
+or legacy `gasPrice`, plus native value). There is no assumed one-million-gas threshold,
+previous-job estimate, observation cache or advisory fee RPC. This local calculation does not
+separately estimate Base's L1 data or operator fee; it is not a guarantee of complete all-fee
+affordability. Native-fee rejections during preparation can use the same proven pre-dispatch
+recovery, while an error after the durable transaction boundary remains recovery-owned.
+No new fee buffer or oracle subsystem is introduced.
 
 Concurrent preparations share a lightweight queue existence read; payload selection and
-retry promotion remain under the canonical claim lock. After the one-time startup probes,
-empty queues do not cause funding RPCs. If every wallet is deferred, work stays accepted
-under its original ID. A newly depleted wallet can briefly claim a job before the exact
-execution checks detect the loss and safely return that same job to the queue. Adapters
-without the optional native-gas observation capability retain their existing behavior.
+retry promotion remain under the canonical claim lock. If all wallets fail actual funding
+checks, the original jobs return unsigned to accepted and the wallets cool down. Later attempts
+recheck the actual job; a replenished wallet can complete it without resubmission. This can
+repeat validation, RPC and storage-ACK work when wallets remain underfunded. A separate TRAC
+approval may already have occurred before a publication's cost check; its existing handling
+is unchanged. Healthy wallets and distinct jobs still execute concurrently.
 
 The chain's funding selector marks a native shortfall only when every refreshed candidate
 has a known native balance at or below its configured gas floor. The publisher recognizes
@@ -51,7 +48,7 @@ failures; the existing guarded clear/resubmit path remains available after fundi
 Native-gas eligibility cannot establish that a particular publication has enough TRAC or PCA coverage.
 
 The runtime explicitly selects `fundingRecoveryPolicy: 'proof-first'`. Library consumers keep
-the legacy failure policy by default; installing an eligibility observer does not change that
+the legacy failure policy by default; installing wallet cooldowns does not change that
 durable recovery contract. Both execution paths use the same failure-disposition decision.
 
 A signed transaction already recorded by the write-ahead boundary is different. Insufficient
@@ -71,7 +68,7 @@ Set `DKG_ASYNC_PUBLISH_TRACE=1` on the daemon to emit the bounded
 | Per-wallet claims | `claim_outcome`, `result: claimed`, job ID and claim epoch |
 | Completions/failures | `wallet_job_settled`, job ID, status and failure code; deduplicate repeated observations by job/status |
 | Wallet busy duration | Join `wallet_lock_written.acquiredAt` with `wallet_lock_deleted.wallTimeMs` for the same wallet/job; heartbeat writes keep the original acquisition time |
-| Eligibility and age | `wallet_funding.reason`, `observedAt`, `ageMs`, `retryAt`, estimated required wei and observed balance |
+| Wallet cooldown | `wallet_funding.reason`, `observedAt` and `retryAt` for actual-failure cooldowns |
 
 These events expose scheduling and ownership separately. Receipt proof can release nonce
 ownership while local finalization continues, so busy duration is not the same as end-to-end

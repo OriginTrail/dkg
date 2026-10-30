@@ -186,8 +186,6 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     const getBalance = vi.fn(async () => balance);
     const provider = { getBlock: async () => ({ baseFeePerGas: 100n }), send: async () => '0x1', getBalance };
     adapter.readProvider = async (_label: string, read: (p: unknown) => Promise<unknown>) => read(provider);
-    const initiallyEligible = await adapter.getPublisherGasFunding();
-    expect(initiallyEligible.balanceWei).toBeGreaterThan(initiallyEligible.requiredWei);
     const exactCost = BigInt(TX.gasLimit!) * BigInt(TX.maxFeePerGas!);
     balance = exactCost - 1n;
     const sign = vi.spyOn(adapter, 'signPreparedTransaction'), onBroadcast = vi.fn();
@@ -205,7 +203,7 @@ describe('contract recovery never re-signs after a signer refusal', () => {
     await expect(v10Write(adapter, write, payer, onBroadcast)).rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
     expect(sign).toHaveBeenCalledTimes(1);
     expect(fake.calls('eth_signTransaction')).toHaveLength(1);
-    expect(getBalance.mock.calls).toEqual([[payer, 'pending'], [payer, 'pending'], [payer, 'pending']]);
+    expect(getBalance.mock.calls).toEqual([[payer, 'pending'], [payer, 'pending']]);
     expect(onBroadcast).not.toHaveBeenCalled();
     expect(broadcast).not.toHaveBeenCalled();
   });

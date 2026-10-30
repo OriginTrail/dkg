@@ -1,7 +1,6 @@
 import type { PublisherPublishPlanRequest, PublisherPublishPlan } from './publisher-publish-plan.js';
 export { publisherPublishPlanByteSize, type PublisherPublishPlanRequest, type PublisherPublishPlan } from './publisher-publish-plan.js';
 import type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
-import type { PublisherGasFundingObservation } from './publisher-gas-funding.js';
 export type { PublisherGasFundingObservation } from './publisher-gas-funding.js';
 export type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
 import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
@@ -1484,8 +1483,6 @@ export function operationalSigningOf(
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
 export interface ChainAdapter {
-  /** Fresh native-gas estimate for this adapter's pinned publisher signer. */
-  getPublisherGasFunding?(): Promise<PublisherGasFundingObservation>;
   /** Complete coherent public chain evidence for explicit snapshot recovery. */
   readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
 

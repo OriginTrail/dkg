@@ -26,7 +26,7 @@ import {
 import {
   ACKCollector,
   AsyncLiftRunner,
-  AsyncLiftWalletFunding,
+  AsyncLiftWalletCooldown,
   type AsyncLiftRunnerConfig,
   DKGPublisher,
   FileWorkspacePublicSnapshotStore,
@@ -660,9 +660,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       publishers,
       args.knowledgeAssetVmPublishHandler,
     );
-    const walletEligibility = new AsyncLiftWalletFunding(new Map(wallets.map(({ address, chain }) =>
-      [address, chain.getPublisherGasFunding?.bind(chain)])), Date.now, 'after-failure');
-    await Promise.all(wallets.map(({ address }) => walletEligibility.prepare(address)));
+    const walletEligibility = new AsyncLiftWalletCooldown(wallets.map(({ address }) => address));
     startup.assertActive();
     // Recovered verdicts carry canonical evidence so the finalizer never repeats verification.
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {

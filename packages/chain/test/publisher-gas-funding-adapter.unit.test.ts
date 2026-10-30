@@ -56,15 +56,14 @@ describe('native EVM async publisher funding composition', () => {
     } finally { adapter.destroy(); }
   });
 
-  it('exposes current fees/balance and checks exact prepared cost before returning to signing', async () => {
+  it('checks the actual prepared cost without an advisory budget', async () => {
     const adapter = new FundingAdapter(true);
     try {
-      expect((await adapter.getPublisherGasFunding()).requiredWei).toBe(301_000_000n);
       adapter.balance = 999_999n;
       await expect(adapter.prepare()).rejects.toMatchObject({ code: 'PUBLISHER_GAS_FUNDING_UNAVAILABLE' });
       adapter.balance = 1_000_000n;
       expect((await adapter.prepare()).transaction.gasLimit).toBe(100_000n);
-      expect((await adapter.getPublisherGasFunding()).gasLimit).toBe(100_000n);
+      expect(adapter.reads).toBe(2);
     } finally { adapter.destroy(); }
   });
 
