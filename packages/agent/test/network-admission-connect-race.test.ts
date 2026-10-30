@@ -1,8 +1,9 @@
 import { multiaddr } from '@multiformats/multiaddr';
 import { peerIdFromString } from '@libp2p/peer-id';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_GENESIS_ID,
+  PROTOCOL_NETWORK_IDENTITY,
   computeNetworkId,
   createOperationContext,
   type DKGNodeConfig,
@@ -28,7 +29,7 @@ describe('network admission when the peer connects mid-probe', () => {
     for (const agent of agents.splice(0)) await agent.stop().catch(() => {});
   });
 
-  async function startAgent(name: string, networkId: string, genesisId = DEFAULT_GENESIS_ID): Promise<DKGAgent> {
+  async function createAgent(name: string, networkId: string, genesisId = DEFAULT_GENESIS_ID): Promise<DKGAgent> {
     const agent = await DKGAgent.create({
       name,
       listenHost: '127.0.0.1',
@@ -46,6 +47,11 @@ describe('network admission when the peer connects mid-probe', () => {
     // Linux CI without multicast, and macOS without Local Network permission,
     // run without it, so switch it off on the node before it starts.
     (agent.node as unknown as { config: DKGNodeConfig }).config.enableMdns = false;
+    return agent;
+  }
+
+  async function startAgent(name: string, networkId: string, genesisId = DEFAULT_GENESIS_ID): Promise<DKGAgent> {
+    const agent = await createAgent(name, networkId, genesisId);
     await agent.start();
     return agent;
   }
@@ -82,6 +88,39 @@ describe('network admission when the peer connects mid-probe', () => {
     expect(Date.now() - startedAt).toBeLessThan(PROBE_TIMEOUT_MS - 1_000);
     expect(b.networkAdmission.isAcceptedPeer(a.peerId)).toBe(true);
     expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
+  }, 20_000);
+
+  it('serves identity while both agents are still loading persistent application state', async () => {
+    const networkId = await computeNetworkId(DEFAULT_GENESIS_ID);
+    const a = await createAgent('BootingPeerA', networkId);
+    const b = await createAgent('BootingPeerB', networkId);
+    const release = Promise.withResolvers<void>();
+    const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+    for (const [index, agent] of [a, b].entries()) {
+      const load = agent.loadAgentsFromStore.bind(agent);
+      vi.spyOn(agent, 'loadAgentsFromStore').mockImplementation(async () => {
+        entered[index]!.resolve();
+        await release.promise;
+        await load();
+      });
+    }
+    const starts = [a.start(), b.start()];
+    try {
+      await Promise.all(entered.map(gate => gate.promise));
+      for (const agent of [a, b]) expect(agent.node.libp2p.getProtocols()).toContain(PROTOCOL_NETWORK_IDENTITY);
+      const address = a.multiaddrs.find(addr => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+      expect(address).toBeDefined();
+      await b.node.libp2p.dial(multiaddr(address!));
+      await expect(Promise.all([
+        b.networkAdmissionCoordinator.ensureAdmitted(a.peerId, createOperationContext('connect')),
+        a.networkAdmissionCoordinator.ensureAdmitted(b.peerId, createOperationContext('connect')),
+      ])).resolves.toEqual([true, true]);
+      expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
+      expect(a.networkAdmission.getRetryableProbeBackoff(b.peerId)).toBeUndefined();
+    } finally {
+      release.resolve();
+      await Promise.all(starts);
+    }
   }, 20_000);
 
   it('refuses redials after a real signed network-identity mismatch', async () => {

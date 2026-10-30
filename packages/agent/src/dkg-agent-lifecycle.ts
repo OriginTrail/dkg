@@ -1464,214 +1464,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
-  async start(this: DKGAgent): Promise<void> {
-    if (this.vmReconcileShutdownBlocked) {
-      throw new VmReconcileShutdownTimeoutError(DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
-    }
-    if (this.contextGraphMembershipPersistenceShutdownBlocked) {
-      throw new ContextGraphMembershipPersistShutdownTimeoutError(
-        DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS,
-      );
-    }
-    if (this.contextGraphSubscriptionPersistenceShutdownBlocked) {
-      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
-        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
-      );
-    }
-    if (this.started) return;
-    this.storageACKRegistrationRuntime.retireCurrentGeneration();
-    this.chain.contextGraphAuthorityIndexSnapshots?.open();
-    // Validate and capture the substrate before persistence/network startup.
-    // Caller changes during awaits cannot introduce a late configuration error.
-    const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
-    // The daemon supplies durable stores. SDK embedders default to process-local
-    // stores whose reliability state lasts only for this agent lifetime.
-    const idempotencyStore =
-      this.config.messengerStores?.idempotencyStore ??
-      new InMemoryMessageIdempotencyStore();
-    const outboxStore =
-      this.config.messengerStores?.outboxStore ??
-      new InMemoryProtocolOutboxStore();
-    assertBoundedProtocolOutboxStore(outboxStore);
-    await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
-    await this.retireContextGraphSubscriptionPromotionRuntime();
-    this.rfc64BackgroundWorkDispatcherV1.reopen();
-    peekOwedLegacySwmRetirementsV1(this)?.reopen();
-    this.contextGraphMembershipPersistence.reopen();
-    // stop() drained and closed subscription writes; a restarted agent admits
-    // them again. Writes issued before the first start() left it open.
-    this.contextGraphSubscriptionPersistence.reopenIfClosed();
-    // stop() aborts detached cold authority flights; a restarted agent admits
-    // new ones (the runtime is created lazily on first use otherwise).
-    peekFinalizedAuthorityColdResolution(this)?.reopen();
-    peekOnDemandAgentsPhonebook(this)?.reopen();
-    this.reopenOwedPublicSharesV1();
-    this.vmReconcileRuntimeReady = false;
-    this.graphScopedStoreClosed = false;
-    this.coreHostRecordingGeneration += 1;
-    this.coreHostRecordingsClosed = false;
-    const ctx = createOperationContext('connect');
-    this.log.info(ctx, `Starting DKG node`);
-
-    // OT-RFC-64: persistent inventory ownership and the complete bounded
-    // startup purge precede node.start(), protocol registration, and every
-    // network consumer. No dataDir intentionally leaves the feature dormant.
-    await this.prepareRfc64PersistenceV1();
-    try {
-      if (
-        this.config.dataDir !== undefined
-        && this.rfc64PersistenceV1 !== undefined
-      ) {
-        await initializeRfc64LegacySwmBoundaryV1(
-          this,
-          this.rfc64PersistenceV1.rootPath,
-          this.store,
-          { onFenceEvent: rfc64LegacySwmFenceEventLoggerV1(this.log, ctx) },
-        );
-        await reconcileRfc64CatalogAuthorityPlanV1(
-          this.rfc64PersistenceV1,
-          this.store,
-          this.config.rfc64CatalogExecutionPlan,
-        );
-      }
-      await this.prepareFinalizationRecoveryStore();
-      // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
-      // so the local store is clean before this node serves or syncs anything.
-      // Marker-gated (runs once per data dir), never throws, no-op on stores
-      // that never accepted oversized literals (Blazegraph).
-      await runOversizeSweep({
-        store: this.store,
-        dataDir: this.config.dataDir,
-        recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
-        logInfo: (message) => this.log.info(ctx, message),
-        logWarn: (message) => this.log.warn(ctx, message),
-      });
-
-      await this.node.start();
-    } catch (cause) {
-      const failures: unknown[] = [cause];
-      try {
-        await this.closeFinalizationRecoveryStore();
-      } catch (closeCause) {
-        failures.push(closeCause);
-      }
-      try {
-        await this.closeRfc64PersistenceV1();
-      } catch (closeCause) {
-        failures.push(closeCause);
-      }
-      if (failures.length === 1) throw cause;
-      throw new AggregateError(
-        failures,
-        'DKG node startup and persistence cleanup failed',
-      );
-    }
-    this.started = true;
-    // Open the lifetime before catalog bootstrap or any other startup producer
-    // can enqueue recovery. Connection listeners below retain this same session.
-    this.peerSyncSession.close();
-    const peerEvents = new PeerSyncSession({
-      createJob: (remotePeer, session) => this.createSyncOnConnectPeerJobRunner(remotePeer, {}, session),
-      onInternalError: (remotePeer, error, stage, session) => {
-        if (!session.checkpoint()) return;
-        const detail = error instanceof Error ? error.message : String(error);
-        this.log.error(
-          createOperationContext('sync'),
-          `Sync-on-connect scheduler ${stage} failure for ${remotePeer.slice(-8)}: ${detail}`,
-        );
-      },
-    });
-    this.peerSyncSession = peerEvents;
-    this.randomSamplingRuntime = new RandomSamplingRuntime({
-      role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-      resolveEligibility: createRandomSamplingEligibilityResolver({
-        role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-        chain: this.chain, log: { warn: (message) => this.log.warn(ctx, message) },
-      }),
-      shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
-      log: {
-        info: (message) => this.log.info(ctx, message),
-        warn: (message) => this.log.warn(ctx, message),
-      },
-      createHandle: (identityId) => this.resolveRandomSamplingBinding({
-        role: 'core', chain: this.chain, store: this.store, identityId,
-        walPath: this.config.randomSamplingWalPath,
-        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
-        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
-        log: this.randomSamplingLogger(ctx),
-        repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
-      }),
-    });
-    this.workLifetime.open();
-    this.openVmReconcileRotationState();
-    this.finalizationRuntime.markStarted({
-      localPeerId: this.peerId,
-      localNodeIdentityId: this.identityId.toString(),
-    });
-    this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
-
-    // Public definitions were historically written only to ONTOLOGY while
-    // late-subscriber admission requires the canonical proof in root `_meta`.
-    // Repair only graphs whose ontology creator is this exact peer. This runs
-    // after libp2p has exposed the stable peer ID but before protocol handlers
-    // and sync serving are registered. Foreign/discovered graphs remain
-    // ineligible; conflicting local policy remains fail-closed.
-    try {
-      const repaired = await repairCreatorPublicMetaProjections(
-        this.store,
-        this.node.peerId.toString(),
-      );
-      if (repaired.repairedGraphs > 0) {
-        this.log.info(
-          ctx,
-          `Repaired authoritative public metadata for ${repaired.repairedGraphs} creator-owned context graph(s) (${repaired.insertedTriples} triples)`,
-        );
-      }
-      if (repaired.conflictingGraphs.length > 0) {
-        this.log.warn(
-          ctx,
-          `Skipped authoritative public metadata repair for ${repaired.conflictingGraphs.length} context graph(s) with conflicting root policy: ${repaired.conflictingGraphs.join(', ')}`,
-        );
-      }
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Failed to repair creator-owned public metadata projections; continuing fail-closed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-
-    // Curated and local-only graph metadata belongs in each graph's `_meta`.
-    // Move what earlier builds left in ontology, using local metadata only,
-    // before sync serving starts. Bare bindings of graphs this node doesn't
-    // hold need a chain read; that pass runs once start completes and before
-    // every store discovery pass. This pass is on the startup path, so it has
-    // a time budget; candidates it doesn't reach are left to those passes.
-    // Until one of them reaches every candidate (this one included), ontology
-    // may still hold private rows, so peers are not served it.
-    try {
-      await this.relocatePrivateContextGraphMetadata({
-        classifyOnChain: false,
-        budgetMs: METADATA_RELOCATION_STARTUP_BUDGET_MS,
-      });
-    } catch (err) {
-      this.log.warn(
-        ctx,
-        `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
-      this.log.warn(
-        ctx,
-        'Not serving the ontology graph to peers until the context graph metadata relocation reaches every candidate',
-      );
-    }
-
-    // Load registered agents from triple store; loadAgentsFromStore restores
-    // defaultAgentAddress from the persisted isDefaultAgent marker, avoiding
-    // reliance on SPARQL result ordering. Then settle the default agent once.
-    await this.loadAgentsFromStore();
-    await this.reconcileDefaultAgent();
-
+  /** This is the network-ready boundary: identity is served before peers can dial us. */
+  async initializeNetworkAdmission(this: DKGAgent): Promise<void> {
     const network = new LibP2PNetwork(this.node);
     // Local helper: race a lookup against an optional AbortSignal so
     // an in-flight SPARQL query honours the resolver's outer deadline.
@@ -1797,6 +1591,217 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
       publicDirectAddressesOnly: this.config.publicAddressesOnly === true,
     });
+    await this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
+  }
+
+  async start(this: DKGAgent): Promise<void> {
+    if (this.vmReconcileShutdownBlocked) {
+      throw new VmReconcileShutdownTimeoutError(DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
+    }
+    if (this.contextGraphMembershipPersistenceShutdownBlocked) {
+      throw new ContextGraphMembershipPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
+    if (this.contextGraphSubscriptionPersistenceShutdownBlocked) {
+      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
+    if (this.started) return;
+    this.storageACKRegistrationRuntime.retireCurrentGeneration();
+    this.chain.contextGraphAuthorityIndexSnapshots?.open();
+    // Validate and capture the substrate before persistence/network startup.
+    // Caller changes during awaits cannot introduce a late configuration error.
+    const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
+    // The daemon supplies durable stores. SDK embedders default to process-local
+    // stores whose reliability state lasts only for this agent lifetime.
+    const idempotencyStore =
+      this.config.messengerStores?.idempotencyStore ??
+      new InMemoryMessageIdempotencyStore();
+    const outboxStore =
+      this.config.messengerStores?.outboxStore ??
+      new InMemoryProtocolOutboxStore();
+    assertBoundedProtocolOutboxStore(outboxStore);
+    await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
+    await this.retireContextGraphSubscriptionPromotionRuntime();
+    this.rfc64BackgroundWorkDispatcherV1.reopen();
+    peekOwedLegacySwmRetirementsV1(this)?.reopen();
+    this.contextGraphMembershipPersistence.reopen();
+    // stop() drained and closed subscription writes; a restarted agent admits
+    // them again. Writes issued before the first start() left it open.
+    this.contextGraphSubscriptionPersistence.reopenIfClosed();
+    // stop() aborts detached cold authority flights; a restarted agent admits
+    // new ones (the runtime is created lazily on first use otherwise).
+    peekFinalizedAuthorityColdResolution(this)?.reopen();
+    peekOnDemandAgentsPhonebook(this)?.reopen();
+    this.reopenOwedPublicSharesV1();
+    this.vmReconcileRuntimeReady = false;
+    this.graphScopedStoreClosed = false;
+    this.coreHostRecordingGeneration += 1;
+    this.coreHostRecordingsClosed = false;
+    const ctx = createOperationContext('connect');
+    this.log.info(ctx, `Starting DKG node`);
+
+    // OT-RFC-64: persistent inventory ownership and the complete bounded
+    // startup purge precede node.start(), protocol registration, and every
+    // network consumer. No dataDir intentionally leaves the feature dormant.
+    await this.prepareRfc64PersistenceV1();
+    try {
+      if (
+        this.config.dataDir !== undefined
+        && this.rfc64PersistenceV1 !== undefined
+      ) {
+        await initializeRfc64LegacySwmBoundaryV1(
+          this,
+          this.rfc64PersistenceV1.rootPath,
+          this.store,
+          { onFenceEvent: rfc64LegacySwmFenceEventLoggerV1(this.log, ctx) },
+        );
+        await reconcileRfc64CatalogAuthorityPlanV1(
+          this.rfc64PersistenceV1,
+          this.store,
+          this.config.rfc64CatalogExecutionPlan,
+        );
+      }
+      await this.prepareFinalizationRecoveryStore();
+      // One-shot resident-poison sweep (OT-RFC-56 §4.4) — BEFORE networking,
+      // so the local store is clean before this node serves or syncs anything.
+      // Marker-gated (runs once per data dir), never throws, no-op on stores
+      // that never accepted oversized literals (Blazegraph).
+      await runOversizeSweep({
+        store: this.store,
+        dataDir: this.config.dataDir,
+        recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
+        logInfo: (message) => this.log.info(ctx, message),
+        logWarn: (message) => this.log.warn(ctx, message),
+      });
+
+      await this.node.start({ beforeListen: () => this.initializeNetworkAdmission() });
+    } catch (cause) {
+      const failures: unknown[] = [cause];
+      try {
+        await this.closeFinalizationRecoveryStore();
+      } catch (closeCause) {
+        failures.push(closeCause);
+      }
+      try {
+        await this.closeRfc64PersistenceV1();
+      } catch (closeCause) {
+        failures.push(closeCause);
+      }
+      if (failures.length === 1) throw cause;
+      throw new AggregateError(
+        failures,
+        'DKG node startup and persistence cleanup failed',
+      );
+    }
+    this.started = true;
+    // Open the lifetime before catalog bootstrap or any other startup producer
+    // can enqueue recovery. Connection listeners below retain this same session.
+    this.peerSyncSession.close();
+    const peerEvents = new PeerSyncSession({
+      createJob: (remotePeer, session) => this.createSyncOnConnectPeerJobRunner(remotePeer, {}, session),
+      onInternalError: (remotePeer, error, stage, session) => {
+        if (!session.checkpoint()) return;
+        const detail = error instanceof Error ? error.message : String(error);
+        this.log.error(
+          createOperationContext('sync'),
+          `Sync-on-connect scheduler ${stage} failure for ${remotePeer.slice(-8)}: ${detail}`,
+        );
+      },
+    });
+    this.peerSyncSession = peerEvents;
+    this.randomSamplingRuntime = new RandomSamplingRuntime({
+      role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+      resolveEligibility: createRandomSamplingEligibilityResolver({
+        role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+        chain: this.chain, log: { warn: (message) => this.log.warn(ctx, message) },
+      }),
+      shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+      log: {
+        info: (message) => this.log.info(ctx, message),
+        warn: (message) => this.log.warn(ctx, message),
+      },
+      createHandle: (identityId) => this.resolveRandomSamplingBinding({
+        role: 'core', chain: this.chain, store: this.store, identityId,
+        walPath: this.config.randomSamplingWalPath,
+        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
+        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
+        log: this.randomSamplingLogger(ctx),
+        repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
+      }),
+    });
+    this.workLifetime.open();
+    this.openVmReconcileRotationState();
+    this.finalizationRuntime.markStarted({
+      localPeerId: this.peerId,
+      localNodeIdentityId: this.identityId.toString(),
+    });
+    this.log.info(ctx, `Node started, peer ID: ${this.node.peerId.toString()}`);
+
+    // Public definitions were historically written only to ONTOLOGY while
+    // late-subscriber admission requires the canonical proof in root `_meta`.
+    // Repair only graphs whose ontology creator is this exact peer. This runs
+    // after libp2p has exposed the stable peer ID but before protocol handlers
+    // and sync serving are registered. Foreign/discovered graphs remain
+    // ineligible; conflicting local policy remains fail-closed.
+    try {
+      const repaired = await repairCreatorPublicMetaProjections(
+        this.store,
+        this.node.peerId.toString(),
+      );
+      if (repaired.repairedGraphs > 0) {
+        this.log.info(
+          ctx,
+          `Repaired authoritative public metadata for ${repaired.repairedGraphs} creator-owned context graph(s) (${repaired.insertedTriples} triples)`,
+        );
+      }
+      if (repaired.conflictingGraphs.length > 0) {
+        this.log.warn(
+          ctx,
+          `Skipped authoritative public metadata repair for ${repaired.conflictingGraphs.length} context graph(s) with conflicting root policy: ${repaired.conflictingGraphs.join(', ')}`,
+        );
+      }
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to repair creator-owned public metadata projections; continuing fail-closed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    // Curated and local-only graph metadata belongs in each graph's `_meta`.
+    // Move what earlier builds left in ontology, using local metadata only,
+    // before sync serving starts. Bare bindings of graphs this node doesn't
+    // hold need a chain read; that pass runs once start completes and before
+    // every store discovery pass. This pass is on the startup path, so it has
+    // a time budget; candidates it doesn't reach are left to those passes.
+    // Until one of them reaches every candidate (this one included), ontology
+    // may still hold private rows, so peers are not served it.
+    try {
+      await this.relocatePrivateContextGraphMetadata({
+        classifyOnChain: false,
+        budgetMs: METADATA_RELOCATION_STARTUP_BUDGET_MS,
+      });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
+      this.log.warn(
+        ctx,
+        'Not serving the ontology graph to peers until the context graph metadata relocation reaches every candidate',
+      );
+    }
+
+    // Load registered agents from triple store; loadAgentsFromStore restores
+    // defaultAgentAddress from the persisted isDefaultAgent marker, avoiding
+    // reliance on SPARQL result ordering. Then settle the default agent once.
+    await this.loadAgentsFromStore();
+    await this.reconcileDefaultAgent();
+
     this.messenger = new Messenger({
       router: this.router,
       idempotencyStore,
@@ -1814,7 +1819,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // remains the step-2 DHT lookup inside resolve(), so we don't
       // lose any pre-existing recovery path.
       resolvePeer: async (peerId, { signal }) => {
-        await peerResolver.connect(peerId, { signal }).catch(() => undefined);
+        await this.peerResolver.connect(peerId, { signal }).catch(() => undefined);
       },
     });
     // A remote join handler that aborts before persisting its decision can be
@@ -1851,7 +1856,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.rehydrateContextGraphsFromDurableState();
     await this.restoreSwmHostModeSubscriptions();
 
-    this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 
     // Register protocol handlers. PROTOCOL_ACCESS migrated onto the
     // Universal Messenger substrate in rc.9 PR-8 — handler is

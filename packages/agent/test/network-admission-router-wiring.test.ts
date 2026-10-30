@@ -81,8 +81,7 @@ async function startAdmissionWiringFixture(name: string) {
   });
   const captured = new Map<string, AdmissionHandler>();
   const realNodeStart = agent.node.start.bind(agent.node);
-  (agent.node as unknown as { start: () => Promise<void> }).start = async () => {
-    await realNodeStart();
+  agent.node.start = async (options) => realNodeStart({ beforeListen: async () => {
     const libp2p = agent.node.libp2p as unknown as {
       handle: (protocol: string, handler: AdmissionHandler, options?: unknown) => unknown;
     };
@@ -91,7 +90,8 @@ async function startAdmissionWiringFixture(name: string) {
       captured.set(protocol, handler);
       return realHandle(protocol, handler, options);
     };
-  };
+    await options?.beforeListen?.();
+  } });
 
   try {
     await agent.start();

@@ -645,6 +645,8 @@ describe('NetworkAdmissionCoordinator', () => {
     const fixture = buildCoordinator({
       identity,
       sendIdentityProbe,
+      // This case isolates the post-budget backoff; compatibility retries have their own suite.
+      probeTimeoutMs: 20,
       now: () => now,
       probeBackoff: {
         transientBaseMs: 100,

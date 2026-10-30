@@ -466,7 +466,8 @@ export class DKGNode {
     this.config = config;
   }
 
-  async start(): Promise<void> {
+  /** Register mandatory protocols on the constructed node before transport/discovery starts. */
+  async start(options: { beforeListen?: () => Promise<void> } = {}): Promise<void> {
     if (this.node) return;
     // PR-6: fresh AbortController per completed start cycle. Create it
     // locally and publish it only after libp2p exists; otherwise a startup
@@ -982,19 +983,13 @@ export class DKGNode {
     const peerStoreOverrides = buildPeerStoreOverrides(this.config);
 
     this.node = await createLibp2p<DKGServices>({
+      start: false,
       privateKey,
       ...(peerStoreOverrides !== undefined
         ? { peerStore: peerStoreOverrides }
         : {}),
-      // `nodeInfo.userAgent` is libp2p's only knob for the identify
-      // protocol's `agentVersion` PB field — every remote peer reads
-      // it back as `Peer.metadata.AgentVersion`. Without it, libp2p
-      // defaults to `js-libp2p/<version>`, a libp2p-toolkit version
-      // that tells a remote operator nothing about which DKG release
-      // this peer is running. The daemon (see
-      // packages/cli/src/daemon/lifecycle.ts) sets `nodeVersion` to
-      // `dkg/<semver>` so /api/peer-info can answer "which DKG release
-      // is each peer running?" from the wire.
+      // Advertise the DKG release in Identify's AgentVersion instead of libp2p's
+      // toolkit version. The daemon supplies dkg/<semver> for /api/peer-info.
       ...(this.config.nodeVersion
         ? { nodeInfo: { userAgent: this.config.nodeVersion } }
         : {}),
@@ -1029,6 +1024,14 @@ export class DKGNode {
     } as any);
     this.stopAbortController = startStopAbortController;
     this.networkPeerDialPolicy = networkPeerDialPolicy;
+    try {
+      await options.beforeListen?.();
+      await this.node.start();
+    } catch (cause) {
+      try { await this.stop(); }
+      catch (cleanupError) { throw new AggregateError([cause, cleanupError], 'Node startup and cleanup failed'); }
+      throw cause;
+    }
     if (services.relay) repairRelayReservationTimers(this.node.services.relay);
 
     this.setupConnectionObservability();
@@ -1677,7 +1680,7 @@ export class DKGNode {
   }
 
   get isStarted(): boolean {
-    return this.node !== null;
+    return this.node?.status === 'started';
   }
 
   /**

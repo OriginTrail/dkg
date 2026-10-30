@@ -19,6 +19,8 @@ vi.mock('libp2p', () => ({
     getConnections: transport.connections,
     getMultiaddrs: () => [],
     addEventListener: vi.fn(),
+    start: vi.fn(),
+    status: 'started',
     stop: vi.fn(),
   })),
 }));

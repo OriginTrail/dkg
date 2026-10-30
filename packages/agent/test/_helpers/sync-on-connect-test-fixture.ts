@@ -24,6 +24,7 @@ interface SyncOnConnectPrivateSeam {
   config: DKGAgentConfig;
   node: {
     node: {
+      status: 'started';
       getPeers: () => Array<{ toString: () => string }>;
       getConnections: () => unknown[];
     };

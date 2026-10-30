@@ -161,6 +161,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.syncSharedMemoryOnConnect = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -251,6 +252,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     agent.config.syncContextGraphs = [];
     agent.config.syncSharedMemoryOnConnect = false;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -413,6 +415,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -544,6 +547,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -602,6 +606,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -643,6 +648,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -703,6 +709,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -743,6 +750,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -858,6 +866,7 @@ describe('RFC-64 peer-job accounting and order', () => {
     allowAllNetworkAdmission(agent);
     agent.started = true;
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };

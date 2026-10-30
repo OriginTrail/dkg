@@ -19,6 +19,7 @@ describe('sync-on-connect accounting', () => {
     agent.started = true;
     resetPeerSyncSessionForTest(agent);
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
@@ -150,6 +151,7 @@ describe('sync-on-connect accounting', () => {
     agent.started = true;
     resetPeerSyncSessionForTest(agent);
     agent.node.node = {
+      status: 'started',
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };

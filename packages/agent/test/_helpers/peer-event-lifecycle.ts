@@ -34,9 +34,9 @@ interface PeerEventState {
 function captureAgentConnectionOpenListeners(agent: DKGAgent) {
   const captured = { transport: undefined as unknown, listeners: [] as Array<(event: CustomEvent) => void> };
   const startNode = agent.node.start.bind(agent.node);
-  const start = vi.spyOn(agent.node, 'start').mockImplementation(async () => {
+  const start = vi.spyOn(agent.node, 'start').mockImplementation(async (...args) => {
     start.mockRestore();
-    await startNode();
+    await startNode(...args);
     const transport = agent.node.libp2p;
     const addEventListener = transport.addEventListener.bind(transport);
     vi.spyOn(transport, 'addEventListener').mockImplementation((type, listener, options) => {
