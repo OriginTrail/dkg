@@ -156,6 +156,7 @@ export default defineConfig({
       "test/query-private-authority-pending.test.ts",
       "test/unscoped-query-admission.test.ts",
       "test/prepare-unscoped-context-graph-read-checks.test.ts",
+      "test/local-context-graph-registration-cancellation.test.ts",
       "test/unscoped-query-consistency.test.ts",
       "test/query-source-coverage.test.ts",
       "test/context-graph-on-chain-id-source-labels.test.ts",

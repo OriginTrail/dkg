@@ -24,7 +24,11 @@ export interface UnscopedContextGraphReadCheckDependencies {
   ): Promise<ContextGraphReadAuthorityFactsSnapshot>;
 }
 
-const SCALAR_REGISTRATION_PREPARATION_CONCURRENCY = 32;
+// Scalar authority reads also enter the ordinary store queue. Two overlapping
+// 32-row preparations leave no room for the concurrent metadata snapshot or
+// peer-discovery work on a node with a 64-entry queue. Pace this producer;
+// preserving the scheduler's existing bounds also preserves its other lanes.
+const SCALAR_REGISTRATION_PREPARATION_CONCURRENCY = 4;
 
 async function prepareScalarRegistrationRead(
   deps: UnscopedContextGraphReadCheckDependencies,

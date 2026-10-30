@@ -153,7 +153,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   const owners = new Set(meta.curators.map((did) => did
     .replace(/^did:dkg:agent:/u, '').toLowerCase()));
   const creators = new Set(meta.creators);
-  const registrationStatus = await agent.readLocalContextGraphRegistrationStatus(contextGraphId);
+  const registrationStatus = await agent.readLocalContextGraphRegistrationStatus(contextGraphId, { signal });
   if (
     meta.accessPolicy?.trim().toLowerCase() !== 'private'
     || owners.size !== 1
@@ -185,7 +185,7 @@ export async function resolveApprovedPrivateReplicaAuthority(
   // rejection, replacement request, or local-agent removal cannot race into a
   // successful result based on a stale snapshot.
   const currentRegistrationStatus = await agent
-    .readLocalContextGraphRegistrationStatus(contextGraphId);
+    .readLocalContextGraphRegistrationStatus(contextGraphId, { signal });
   if (
     currentRegistrationStatus === 'pending'
     || (
