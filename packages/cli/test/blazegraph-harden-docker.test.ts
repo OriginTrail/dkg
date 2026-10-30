@@ -9,7 +9,7 @@ import { provisionBlazegraphDocker, defaultDockerRunner, blazegraphVolumeName, b
 import { assertStoreMigrationInactive } from '../src/daemon/store-maintenance-gate.js';
 import { executeHardenMigration, planHardenMigration } from '../src/daemon/blazegraph-harden.js';
 
-// test-disable-allow: D1 #2974 -- owner=cli lane=bura-cli expires=2026-10-25 Real Docker journal roundtrip runs explicitly in CLI shard 1.
+// test-disable-allow: D1 #2974 -- owner=cli lane=bura-cli expires=2026-11-28 Real Docker journal roundtrip runs explicitly in CLI shard 1.
 describe.skipIf(process.env.BLAZEGRAPH_HARDEN_INTEGRATION_TEST !== '1')('real pinned Docker hardening', () => {
 it('recovers an actual SIGKILL after replacement creation only after journal verification', async () => {
   const name = `dkg-harden-crash-${process.pid}-${Date.now()}`, namespace = 'crash-owner';
