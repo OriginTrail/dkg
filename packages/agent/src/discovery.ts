@@ -8,8 +8,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
+import { AGENT_PROFILE_STALE_THRESHOLD_MS } from './dkg-agent-constants.js';
 import {
   MAX_AGENT_PEER_PAGE_SIZE,
+  usableLastSeenMs,
   validateAgentPeerPage,
   validateAgentPeerPageRequest,
   type AgentPeerDiscovery,
@@ -276,11 +278,7 @@ export class DiscoveryClient implements AgentPeerDiscovery {
   ): Promise<AgentPeerPage> {
     options = Object.freeze({ ...options });
     validateAgentPeerPageRequest(options);
-    const isEvmAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress);
-    const addressMatch = isEvmAddress
-      ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
-        FILTER(LCASE(STR(?storedAgentAddress)) = "${escapeSparqlLiteral(agentAddress.toLowerCase())}")`
-      : `?agent <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" .`;
+    const addressMatch = agentAddressMatch(agentAddress);
     const afterFilter = options.afterPeerId
       ? `FILTER(STR(?storedPeerId) > "${escapeSparqlLiteral(options.afterPeerId)}")`
       : '';
@@ -309,6 +307,49 @@ export class DiscoveryClient implements AgentPeerDiscovery {
       peerIds,
       nextAfterPeerId: result.bindings.length > options.limit ? peerIds[peerIds.length - 1] : null,
     }, options);
+  }
+
+  /**
+   * The peers to try for a wallet now, newest `dkg:lastSeen` first. A peer whose
+   * newest `dkg:lastSeen` is older than `staleAfterMs` is left out, so a wallet
+   * with no current peer has none, unless `isLive` says it is alive whatever its
+   * profile says. A profile with no usable `dkg:lastSeen` says nothing about its
+   * age: its peers stay, after the dated ones.
+   * {@link findAgentPeerPageByAddress} pages every listed peer in a fixed order.
+   */
+  async findCurrentAgentPeerIds(
+    agentAddress: string,
+    options: { limit: number; staleAfterMs?: number; nowMs?: number; signal?: AbortSignal; isLive?: (peerId: string) => boolean },
+  ): Promise<string[]> {
+    const nowMs = options.nowMs ?? Date.now();
+    const staleAfterMs = options.staleAfterMs ?? AGENT_PROFILE_STALE_THRESHOLD_MS;
+    const result = await this.engine.query(`
+      SELECT DISTINCT (STR(?storedPeerId) AS ?peerId) (STR(?storedLastSeen) AS ?lastSeen) WHERE {
+        ?agent a <${DKG}Agent> ;
+               <${DKG}peerId> ?storedPeerId .
+        ${agentAddressMatch(agentAddress)}
+        FILTER(STRLEN(STR(?storedPeerId)) > 0)
+        OPTIONAL { ?agent <${DKG}lastSeen> ?storedLastSeen }
+      }
+      ORDER BY DESC(?lastSeen)
+      LIMIT ${MAX_AGENT_PEER_PAGE_SIZE}
+    `, {
+      contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
+      signal: options.signal,
+    });
+    options.signal?.throwIfAborted();
+    const newestByPeer = new Map<string, number>();
+    for (const row of result.bindings) {
+      const peerId = stripQuotes(row['peerId'] ?? '');
+      if (peerId.length === 0) continue;
+      const lastSeenMs = usableLastSeenMs(stripQuotes(row['lastSeen'] ?? ''), nowMs) ?? UNDATED;
+      if (lastSeenMs >= (newestByPeer.get(peerId) ?? UNDATED)) newestByPeer.set(peerId, lastSeenMs);
+    }
+    return [...newestByPeer]
+      .filter(([peerId, lastSeenMs]) => lastSeenMs === UNDATED || nowMs - lastSeenMs <= staleAfterMs || options.isLive?.(peerId) === true)
+      .sort(([leftPeer, left], [rightPeer, right]) => right - left || (leftPeer < rightPeer ? -1 : 1))
+      .slice(0, options.limit)
+      .map(([peerId]) => peerId);
   }
 
   async findSkillOfferings(options: SkillSearchOptions = {}): Promise<DiscoveredOffering[]> {
@@ -452,6 +493,16 @@ export class DiscoveryClient implements AgentPeerDiscovery {
       lastSeen: row['lastSeen'] ? stripQuotes(row['lastSeen']) : undefined,
     };
   }
+}
+
+/** Sorts after every dated peer: a profile without a usable `dkg:lastSeen`. */
+const UNDATED = Number.NEGATIVE_INFINITY;
+
+function agentAddressMatch(agentAddress: string): string {
+  return /^0x[0-9a-fA-F]{40}$/.test(agentAddress)
+    ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
+        FILTER(LCASE(STR(?storedAgentAddress)) = "${escapeSparqlLiteral(agentAddress.toLowerCase())}")`
+    : `?agent <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" .`;
 }
 
 function stripQuotes(s: string): string {

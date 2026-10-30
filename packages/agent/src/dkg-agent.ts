@@ -3662,7 +3662,7 @@ export class DKGAgent extends DKGAgentBase {
       /** Curated assertions stay on encrypted member channels. */
       curated?: boolean;
     },
-  ): Promise<void> {
+  ): Promise<readonly string[] | undefined> {
     // Use the public quads from the publish result to avoid leaking private
     // triples that are stored in the same data graph.
     const publicQuads = result.publicQuads ?? [];
@@ -3740,9 +3740,10 @@ export class DKGAgent extends DKGAgentBase {
     const topic = contextGraphPublishTopic(contextGraphId);
     this.log.info(ctx, `Broadcasting to topic ${topic}`);
     try {
-      await this.gossip.publish(topic, msg);
+      return await this.gossip.publish(topic, msg);
     } catch {
       this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+      return [];
     }
   }
 

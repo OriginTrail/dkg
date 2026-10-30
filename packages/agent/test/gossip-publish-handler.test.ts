@@ -17,6 +17,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
+import { buildAgentProfile } from '../src/profile.js';
 import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
@@ -640,6 +641,119 @@ describe('GossipPublishHandler', () => {
     // and a fresh one per peer heartbeat is what grows agents/_meta unbounded.
     const metaCount = await store.countQuads(`did:dkg:context-graph:${agentsCg}/_meta`);
     expect(metaCount, 'agents/_meta must not accumulate per-publish tentative records').toBe(0);
+  });
+
+  describe('an update of an agent profile', () => {
+    const agentsCg = SYSTEM_CONTEXT_GRAPHS.AGENTS;
+    const agentsGraph = `did:dkg:context-graph:${agentsCg}`;
+    const wallet = '0x1111111111111111111111111111111111111111';
+    const subject = `did:dkg:agent:${wallet}`;
+    const secondsAgo = (seconds: number) => new Date(Date.now() - seconds * 1_000).toISOString();
+
+    function profileMessage(peerId: string, lastSeen: string, extra: { name?: string } = {}): Uint8Array {
+      const { quads, rootEntity } = buildAgentProfile({
+        peerId,
+        name: extra.name ?? 'Agent',
+        skills: [],
+        agentAddress: wallet,
+        lastSeen,
+        relayAddress: `/dns4/relay-of-${peerId}/tcp/9090`,
+      });
+      return makePublishMessage({
+        ual: `did:dkg:mock:31337/0x1/${lastSeen}`,
+        contextGraphId: agentsCg,
+        nquads: quads
+          .map((quad) => `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} .`)
+          .join('\n'),
+        kas: [{ tokenId: 1, rootEntity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+      });
+    }
+
+    async function values(store: OxigraphStore, predicate: string): Promise<string[]> {
+      const result = await store.query(
+        `SELECT ?o WHERE { GRAPH <${agentsGraph}> { <${subject}> <https://dkg.network/ontology#${predicate}> ?o } } ORDER BY ?o`,
+      );
+      return result.type === 'bindings' ? result.bindings.map((row) => row['o']!) : [];
+    }
+
+    it('of a known agent reaches the store and replaces its peer, instead of being dropped as a replay', async () => {
+      const { store, handler } = createHandler();
+      const seen = secondsAgo(60);
+      const later = secondsAgo(1);
+      await handler.handlePublishMessage(profileMessage('peer-old', seen), agentsCg, undefined, 'peer-old');
+      expect(await values(store, 'peerId')).toEqual(['"peer-old"']);
+
+      await handler.handlePublishMessage(profileMessage('peer-new', later), agentsCg, undefined, 'peer-new');
+      expect(await values(store, 'peerId')).toEqual(['"peer-new"']);
+      expect(await values(store, 'lastSeen')).toEqual([`"${later}"`]);
+      expect(await values(store, 'relayAddress')).toEqual(['"/dns4/relay-of-peer-new/tcp/9090"']);
+      expect(await store.countQuads(`${agentsGraph}/_meta`)).toBe(0);
+    });
+
+    it('brings a heartbeat of the same peer in without growing the subject', async () => {
+      const { store, handler } = createHandler();
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(86_000)), agentsCg, undefined, 'peer-1');
+      const first = await store.countQuads(agentsGraph);
+      const latest = secondsAgo(1);
+      for (const seen of [secondsAgo(60_000), secondsAgo(30_000), latest]) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        await handler.handlePublishMessage(profileMessage('peer-1', seen), agentsCg, undefined, 'peer-1');
+      }
+      expect(await values(store, 'lastSeen')).toEqual([`"${latest}"`]);
+      expect(await store.countQuads(agentsGraph)).toBe(first);
+    });
+
+    it('that is older does not bring back a peer of an earlier run', async () => {
+      const { store, handler } = createHandler();
+      await handler.handlePublishMessage(profileMessage('peer-new', secondsAgo(1)), agentsCg, undefined, 'peer-new');
+      await handler.handlePublishMessage(profileMessage('peer-old', secondsAgo(600)), agentsCg, undefined, 'peer-old');
+      expect(await values(store, 'peerId')).toEqual(['"peer-new"']);
+    });
+
+    it('from another peer than the one it names is not stored', async () => {
+      const { store, handler } = createHandler();
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(60)), agentsCg, undefined, 'peer-1');
+      await handler.handlePublishMessage(profileMessage('peer-2', secondsAgo(1)), agentsCg, undefined, 'peer-other');
+      expect(await values(store, 'peerId')).toEqual(['"peer-1"']);
+
+      const fresh = createHandler();
+      await fresh.handler.handlePublishMessage(profileMessage('peer-2', secondsAgo(1)), agentsCg, undefined, 'peer-other');
+      expect(await fresh.store.countQuads(agentsGraph)).toBe(0);
+    });
+
+    it('stored nothing to mark when it is not newer', async () => {
+      const marked: unknown[] = [];
+      const store = new OxigraphStore();
+      const handler = new GossipPublishHandler(store, undefined, new Map(), {
+        contextGraphExists: async () => false,
+        getContextGraphOwner: async () => null,
+        setContextGraphSubscription: () => {},
+        recordDiscoveredContextGraph: () => {},
+        markCgMetaDirtyFromQuads: (quads) => { marked.push(quads); },
+      });
+      const message = profileMessage('peer-1', secondsAgo(1));
+      await handler.handlePublishMessage(message, agentsCg, undefined, 'peer-1');
+      expect(marked).toHaveLength(1);
+      await handler.handlePublishMessage(message, agentsCg, undefined, 'peer-1');
+      expect(marked).toHaveLength(1);
+    });
+  });
+
+  it('keeps the replay rule for a known entity of an ordinary graph', async () => {
+    const { store, handler } = createHandler();
+    const entity = 'did:dkg:test:known-entity';
+    const message = (name: string) => makePublishMessage({
+      ual: 'did:dkg:mock:31337/0x1/9',
+      contextGraphId: CONTEXT_GRAPH,
+      nquads: `<${entity}> <http://schema.org/name> "${name}" .`,
+      kas: [{ tokenId: 1, rootEntity: entity, privateMerkleRoot: new Uint8Array(0), privateTripleCount: 0 }],
+    });
+    await handler.handlePublishMessage(message('First'), CONTEXT_GRAPH);
+    await handler.handlePublishMessage(message('Second'), CONTEXT_GRAPH);
+    const result = await store.query(
+      `SELECT ?o WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}> { <${entity}> <http://schema.org/name> ?o } }`,
+    );
+    expect(result.type === 'bindings' ? result.bindings.map((row) => row['o']) : []).toEqual(['"First"']);
   });
 
   it('DOES persist tentative _meta for a non-registry data CG (control)', async () => {
