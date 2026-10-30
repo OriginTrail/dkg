@@ -286,7 +286,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     for (const peer of this.#byPeer.values()) {
       const runnable: ScopeV1[] = [];
       for (const scope of peer.scopes.values()) {
-        const retryAt = scope.retryDueAt(peer.connectionGeneration);
+        const retryAt = scope.retryDueAt();
         if (retryAt !== null && retryAt > now) nextRetry = Math.min(nextRetry, retryAt);
         else if (retryAt !== null) {
           admitted ??= new Set(this.#ports.admittedConnectedPeerIds());
@@ -388,7 +388,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           if (!signal.aborted) this.#ports.warn(`RFC-64 catalog replay failed after ${peer.peerId.slice(-8)} connected: ${error instanceof Error ? error.message : String(error)}`);
         } finally {
           if (failed) peer.failed++;
-          scope.finish(execution, failed, Date.now());
+          scope.finish(execution, failed, Date.now(), peer.connectionGeneration);
           // The canonical collection also carries round-robin order.
           if (peer.scopes.get(scope.contextGraphId) === scope) {
             peer.scopes.delete(scope.contextGraphId); peer.scopes.set(scope.contextGraphId, scope);

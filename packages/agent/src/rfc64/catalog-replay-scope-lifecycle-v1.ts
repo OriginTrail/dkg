@@ -45,20 +45,18 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   awaitingFence(): boolean {
     return this.#current?.phase.state === 'waiting-for-fence';
   }
-  /** When a retry owed on this connection falls due; null when none is. */
-  retryDueAt(connectionGeneration: number): number | null {
-    const unfinished = this.#unfinished;
-    return unfinished?.owed === true && unfinished.connectionGeneration === connectionGeneration ? this.#eligibleAt : null;
+  /** When the retry owed falls due; null when none is. */
+  retryDueAt(): number | null {
+    return this.#unfinished?.owed === true ? this.#eligibleAt : null;
   }
   /** The peer did not stay: its next connection raises its own demand. */
   dropRetry(): void {
     if (this.#unfinished !== null) this.#unfinished = { ...this.#unfinished, owed: false };
   }
   /**
-   * Turn the retry owed into a demand. Null when a demand of this connection is
-   * there already, which then serves for it. No demand of an earlier connection
-   * can be, as that connection's retries end when the next one opens, so this
-   * never needs the deferred custody of a successor.
+   * Turn the retry owed into a demand. Null when a demand is there already, which
+   * then serves for it. None is executing, as the next replay cannot begin before
+   * the retry falls due, so this never needs the deferred custody of a successor.
    */
   takeRetry(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
     this.dropRetry();
@@ -139,13 +137,16 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     return lease;
   }
 
-  finish(execution: Rfc64CatalogReplayScopeExecutionV1, failed: boolean, now: number): void {
+  /**
+   * Retries count on the connection the peer has now, `connectionGeneration`: a
+   * demand a reconnect found queued or waiting for a fence serves for that connection.
+   */
+  finish(execution: Rfc64CatalogReplayScopeExecutionV1, failed: boolean, now: number, connectionGeneration: number): void {
     const demand = this.#current;
     if (execution !== this.#execution || demand?.phase.state !== 'executing') return;
     this.#execution = null;
     this.#failures = failed ? this.#failures + 1 : 0;
     this.#eligibleAt = now + (failed ? this.#retryDelay() : this.debounceMs);
-    const { connectionGeneration } = demand;
     const earlier = this.#unfinished?.connectionGeneration === connectionGeneration ? this.#unfinished.retries : -1;
     this.#unfinished = failed ? { connectionGeneration, retries: earlier + 1,
       owed: earlier + 1 < RFC64_CATALOG_UNFINISHED_REPLAY_MAX_RETRIES_V1 } : null;
@@ -157,7 +158,6 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     if (this.#selection.state === 'selected') {
       this.#selection = { state: 'retired', generation: this.#selection.generation + 1 };
     }
-    this.#unfinished = null;
     if (this.#successor !== null) this.#release(this.#successor);
     if (this.#current !== null && !this.executing) this.#release(this.#current);
   }
