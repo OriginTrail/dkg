@@ -49,7 +49,7 @@ const LANE_GROUPS = {
   tornado_publisher: [{ id: 'publisher', packages: ['publisher'], shards: 4, runner: 'vitest' }],
   tornado_agent: [{ id: 'agent', packages: ['agent'], shards: AGENT_SHARD_POLICY.descriptors.length, runner: 'agent' }],
   // Keep the expanded CLI inventory within the existing 15-minute job budget.
-  bura_cli: [{ id: 'cli', packages: ['cli'], shards: 6, runner: 'weighted' }],
+  bura_cli: [{ id: 'cli', packages: ['cli'], shards: 8, runner: 'weighted' }],
   bura_query: [{ id: 'query', packages: ['query'], shards: 1 }],
   kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui', 'node-store'], shards: 1 }],
   kosava_supporting: [{

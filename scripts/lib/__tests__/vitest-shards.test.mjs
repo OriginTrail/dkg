@@ -143,6 +143,8 @@ test('equal weights use stable path and shard-index tie breakers', () => {
 });
 
 test('the executable prints only its selected shard to stdout', () => {
+  const cliShards = PACKAGE_SPECS.cli.shardCount;
+  const chainShards = PACKAGE_SPECS.chain.shardCount;
   const expected = planPackageShards('cli', REPO_ROOT)[0].files;
   const result = spawnSync(process.execPath, [SCRIPT_PATH, 'cli', '1'], {
     cwd: REPO_ROOT,
@@ -151,14 +153,14 @@ test('the executable prints only its selected shard to stdout', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.stdout.trimEnd().split('\n'), expected);
-  assert.match(result.stderr, /vitest-shard: cli 1\/4/);
+  assert.match(result.stderr, new RegExp(`^vitest-shard: cli 1/${cliShards} files=`));
 
-  const invalid = spawnSync(process.execPath, [SCRIPT_PATH, 'chain', '4'], {
+  const invalid = spawnSync(process.execPath, [SCRIPT_PATH, 'chain', String(chainShards + 1)], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
   assert.equal(invalid.status, 2);
-  assert.match(invalid.stderr, /CLI has 4 shards and chain has 3 shards/);
+  assert.match(invalid.stderr, new RegExp(`CLI has ${cliShards} shards and chain has ${chainShards} shards`));
 });
 
 test('invalid or duplicate planning inputs fail loudly', () => {
