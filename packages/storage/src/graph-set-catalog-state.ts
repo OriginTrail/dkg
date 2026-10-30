@@ -1,3 +1,5 @@
+import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { measureGraphCatalogBytes, assertMeasuredGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
 import {
   createSortedUniqueStringCatalog,
   insertSortedUniqueStringCatalog,
@@ -12,6 +14,8 @@ import type { SortedGraphCatalog } from './graph-set-index-store.js';
  */
 export class GraphSetCatalogState {
   private members: Set<string> | null = null;
+  private sourceMaterializedBytes: number | undefined;
+  private measuredBytes: number | null = null;
   private ordered: SortedGraphCatalog | null = null;
 
   get initialized(): boolean {
@@ -28,15 +32,18 @@ export class GraphSetCatalogState {
 
   clear(): void {
     this.members = null;
+    this.sourceMaterializedBytes = undefined;
     this.ordered = null;
+    this.measuredBytes = null;
   }
 
-  replace(next: Set<string>): { added: string[]; removed: string[] } {
+  replace(next: Set<string>, materializedBytes?: number): { added: string[]; removed: string[] } {
     const previous = this.members ?? new Set<string>();
     const added = [...next].filter((graph) => !previous.has(graph)).sort();
     const removed = [...previous].filter((graph) => !next.has(graph)).sort();
     this.members = next;
-    if (added.length > 0 || removed.length > 0) this.ordered = null;
+    this.sourceMaterializedBytes = materializedBytes;
+    if (added.length > 0 || removed.length > 0) { this.ordered = null; this.measuredBytes = null; }
     return { added, removed };
   }
 
@@ -60,6 +67,7 @@ export class GraphSetCatalogState {
         removed.push(graph);
       }
     }
+    if (added.length > 0 || removed.length > 0) { this.measuredBytes = null; this.sourceMaterializedBytes = undefined; }
     if (this.ordered) {
       const mutationCount = added.length + removed.length;
       if (mutationCount === 1) {
@@ -78,9 +86,21 @@ export class GraphSetCatalogState {
    * observed by the caller. An invalidation between an async cache read and
    * enumeration must be retried, not represented as an ordinary empty catalog.
    */
-  sortedFor(members: ReadonlySet<string>): SortedGraphCatalog | null {
+  sortedFor(members: ReadonlySet<string>, maxBytes?: number): SortedGraphCatalog | null {
     if (this.members !== members) return null;
     this.ordered ??= createSortedUniqueStringCatalog(this.members);
+    if (maxBytes !== undefined) {
+      assertMeasuredGraphCatalogWithinResponseLimit(this.projectionBytes(this.ordered), maxBytes);
+    }
     return this.ordered;
+  }
+
+  private projectionBytes(graphs: SortedGraphCatalog): number {
+    return this.measuredBytes ??= measureGraphCatalogBytes(graphs);
+  }
+
+  measuredFor(members: ReadonlySet<string>, maxBytes?: number): MeasuredGraphInventory<SortedGraphCatalog> | null {
+    const graphs = this.sortedFor(members, maxBytes);
+    return graphs && { graphs, materializedBytes: this.sourceMaterializedBytes ?? this.projectionBytes(graphs) };
   }
 }

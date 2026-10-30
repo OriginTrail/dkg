@@ -1,11 +1,14 @@
 import type { StoreWorkPriority } from './triple-store.js';
 import type { BackpressureSnapshot } from '@origintrail-official/dkg-core';
 
+/** The lane a store scheduler reports: a shared lane, or `control` for a queue's control-path instance. */
+export type StoreSchedulerPriority = StoreWorkPriority | 'control';
+
 export interface StoreSchedulerTimeoutDiagnostic {
-  waiting: { priority: StoreWorkPriority; operation: string };
+  waiting: { priority: StoreSchedulerPriority; operation: string };
   /** Possible slot holders, never proof of which operation delayed the waiter. */
   activeAtTimeout: readonly {
-    priority: StoreWorkPriority;
+    priority: StoreSchedulerPriority;
     operation: string;
     count: number;
     oldestAgeMs: number;
@@ -13,7 +16,7 @@ export interface StoreSchedulerTimeoutDiagnostic {
 }
 
 export interface StoreSchedulerTimeoutWaiter {
-  priority: StoreWorkPriority;
+  priority: StoreSchedulerPriority;
   operation: string;
 }
 
@@ -45,7 +48,7 @@ export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
       if (!newWindow && windowEmitted >= maxEmitsPerWindow) return;
       const activeAtTimeout = snapshot().lanes
         .flatMap((lane) => lane.activeOperations.map((active) => ({
-          priority: lane.lane as StoreWorkPriority,
+          priority: lane.lane as StoreSchedulerPriority,
           operation: active.operation,
           count: active.count,
           oldestAgeMs: active.oldestAgeMs,

@@ -1,3 +1,5 @@
+import { graphCatalogFlightKey } from '../graph-catalog-flight-key.js';
+import { registerStoreRecoveryGeneration } from '../store-recovery-generation.js';
 import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
 import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
@@ -18,16 +20,11 @@ import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './
  *
  * Works with Oxigraph server, Apache Jena Fuseki, GraphDB, Blazegraph,
  * Amazon Neptune, Stardog, and any SPARQL 1.1–compliant server.
- *
  * Example (Oxigraph server):
  *   queryEndpoint: 'http://127.0.0.1:7878/query'
  *   updateEndpoint: 'http://127.0.0.1:7878/update'
  *
- * Example (single URL for both, e.g. Blazegraph):
- *   queryEndpoint: 'http://127.0.0.1:9999/blazegraph/namespace/kb/sparql'
- *   updateEndpoint: same URL
  */
-
 import type {
   TripleStore,
   BoundedQueryResponseCapability,
@@ -39,12 +36,11 @@ import type {
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
-import {
-  externalStorePriorityScheduler,
-  type StorePriorityScheduler,
-} from '../store-priority-scheduler.js';
+import { decodeSparqlHttpQueryResponse, sparqlQueryResponseAccept } from './sparql-query-response.js';
+import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
+import { selectStoreScheduler } from '../store-control-path.js';
 import {
   GraphWriteGenTracker,
   type GraphWriteLifecycle,
@@ -261,7 +257,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
-  private listGraphsInFlight: Promise<string[]> | null = null;
+  private readonly listGraphsInFlight = new Map<string, Promise<string[]>>();
   // #1609: per-graph write generations, bumped at the same choke points that
   // invalidate the listGraphs cache (every local mutation). Feeds the chain-
   // reconcile negative memo via `asGraphWriteGenSource` / `getWriteRevision`.
@@ -292,6 +288,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       ?? managedRecovery?.recover;
     this.getRecoveryState = managedRuntimeHooks?.getRecoveryState
       ?? managedRecovery?.readState;
+    if (managedRuntimeHooks?.getRecoveryState) registerStoreRecoveryGeneration(this, () => {
+      const state = this.readRecoveryState();
+      return state ? { generation: state.generation, ready: !state.recovering && !state.admissionsPaused } : undefined;
+    });
     this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
     this.workLifecycle = new AbortableStoreWorkLifecycle({
       onGenerationClosed: () => {
@@ -451,7 +451,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return this.workLifecycle.run(
       options?.signal,
       (signal, context) => {
-        return this.scheduler.run(
+        return selectStoreScheduler(this.scheduler, options).run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
           () => work(signal, context),
@@ -1098,30 +1098,18 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           );
         }
 
+        const mode = isAsk ? 'ask-json' : this.managedOxigraph ? 'select-tsv' : 'select-json';
         return await this.postQuery(
           trimmed,
-          'application/sparql-results+json',
+          sparqlQueryResponseAccept(mode),
           'query',
           canonicalOperation,
           effectiveOptions,
-          async (res) => {
-            if (!res.ok) {
-              const text = await readSparqlResponseText(res, {
-                maxResponseBytes: effectiveOptions.maxResponseBytes,
-                managedOxigraph: this.managedOxigraph,
-                operation: canonicalOperation,
-                tolerateReadFailure: true,
-              });
-              throw new SparqlHttpResponseError('query', res.status, text.slice(0, 300));
-            }
-
-            const text = await readSparqlResponseText(res, {
-              maxResponseBytes: effectiveOptions.maxResponseBytes,
-              managedOxigraph: this.managedOxigraph,
-              operation: canonicalOperation,
-            });
-            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
-          },
+          (res) => decodeSparqlHttpQueryResponse(res, {
+            mode, operation: canonicalOperation,
+            maxResponseBytes: effectiveOptions.maxResponseBytes,
+            managedOxigraph: this.managedOxigraph,
+          }),
           readPolicy,
         );
       } finally {
@@ -1191,12 +1179,17 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       this.listGraphsCache &&
       this.now() - this.listGraphsCachedAt < MANAGED_LIST_GRAPHS_CACHE_MS
     ) {
+      assertGraphCatalogWithinResponseLimit(this.listGraphsCache, options?.maxResponseBytes);
       return [...this.listGraphsCache];
     }
 
-    const refreshOptions = options?.source ? { source: options.source } : undefined;
-    const inFlight = this.listGraphsInFlight ?? this.refreshListGraphsCache(refreshOptions);
+    // Cancellation is caller-local; transport ceilings and telemetry stay on the shared flight.
+    const refreshOptions = { source: options?.source, priority: options?.priority,
+      maxResponseBytes: options?.maxResponseBytes, maxLiteralHydrationBytes: options?.maxLiteralHydrationBytes };
+    const key = JSON.stringify([graphCatalogFlightKey(refreshOptions), refreshOptions.priority ?? 'normal', refreshOptions.source ?? null]);
+    const inFlight = this.listGraphsInFlight.get(key) ?? this.refreshListGraphsCache(key, refreshOptions);
     const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
     return [...graphs];
   }
 
@@ -1217,9 +1210,9 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       : [];
   }
 
-  private refreshListGraphsCache(options?: QueryOptions): Promise<string[]> {
+  private refreshListGraphsCache(key: string, options?: QueryOptions): Promise<string[]> {
     const generation = this.listGraphsGeneration;
-    const task = (async () => {
+    const task = Promise.resolve().then(async () => {
       try {
         const graphs = await this.listGraphsDirect(options);
         const cached = [...graphs];
@@ -1229,10 +1222,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
         }
         return cached;
       } finally {
-        if (this.listGraphsGeneration === generation) this.listGraphsInFlight = null;
+        if (this.listGraphsInFlight.get(key) === task) this.listGraphsInFlight.delete(key);
       }
-    })();
-    this.listGraphsInFlight = task;
+    });
+    this.listGraphsInFlight.set(key, task);
     return task;
   }
 
@@ -1240,7 +1233,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.listGraphsGeneration++;
     this.listGraphsCache = null;
     this.listGraphsCachedAt = 0;
-    this.listGraphsInFlight = null;
+    this.listGraphsInFlight.clear();
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {

@@ -1,4 +1,6 @@
 export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
+export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,
@@ -23,6 +25,7 @@ export {
   type QueryResult,
   type QueryOptions,
   type StoreWorkPriority,
+  type StoreControlQueue,
   type StorePressureSnapshot,
   type SelectResult,
   type ConstructResult,
@@ -104,6 +107,7 @@ export {
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
   withDefaultStoreWorkPriority,
+  withoutDefaultStoreWorkPriority,
   activeDefaultStoreWorkPriority,
   storeLaneInflightLimit,
   DEFAULT_STORE_QUEUE_LIMIT,
@@ -116,6 +120,50 @@ export {
   type StoreSchedulerBusyErrorOptions,
   type StoreSchedulerBusyErrorLike,
 } from './store-priority-scheduler.js';
+export type { StoreSchedulerPriority } from './store-scheduler-timeout-diagnostics.js';
+export {
+  STORE_CONTROL_DEFAULT_BACKENDS,
+  STORE_CONTROL_MAX_SLOTS,
+  STORE_CONTROL_QUEUES,
+  STORE_CONTROL_RESERVED_SLOTS_CONFIG_KEY,
+  STORE_CONTROL_RESERVED_SLOTS_ENV,
+  STORE_CONTROL_SCHEDULER_ID_PREFIX,
+  configureStoreControlPath,
+  controlStoreOptions,
+  defaultStoreControlSlots,
+  describeStoreControlPath,
+  getStoreControlPath,
+  logStoreControlPathGeometry,
+  resolveStoreControlConfig,
+  selectStoreScheduler,
+  type StoreControlConfig,
+  type StoreControlPath,
+  type StoreControlPathSettings,
+  type StoreControlResolveOptions,
+  type StoreControlSlots,
+} from './store-control-path.js';
+/**
+ * Test hooks of the control path: build instances, register them with the diagnostics, and replace the
+ * process-wide path.
+ * @internal Not part of the package's supported API; production code never calls them.
+ */
+export {
+  buildStoreControlPath,
+  registerStoreControlPath,
+  setStoreControlPathForTesting,
+} from './store-control-path.js';
+export {
+  STORE_QUEUE_WAIT_BUCKET_UPPER_MS,
+  StoreSchedulerStats,
+  estimateQueueWaitPercentileMs,
+  registerStoreSchedulerStats,
+  takeStoreSchedulerStatsReports,
+  storeOperationFamily,
+  type StoreSchedulerLaneWait,
+  type StoreSchedulerRejectionTotal,
+  type StoreSchedulerStatsReport,
+  type StoreSchedulerStatsSource,
+} from './store-scheduler-stats.js';
 export {
   STORE_OPERATION_TIMEOUT_CODE,
   StoreOperationTimeoutError,
@@ -197,7 +245,11 @@ export {
   type BoundedGraphPayloadRefusalReason,
   type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
-export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+  type StoreResponseTooLargeErrorLike,
+} from './http-response-limit.js';
 export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,
@@ -260,6 +312,11 @@ export {
 } from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
+export {
+  OXIGRAPH_STORE_READ_ONLY_CODE,
+  OxigraphStoreReadOnlyError,
+  type OxigraphStoreOptions,
+} from './adapters/oxigraph-read-only.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export {
   BlazegraphStore,
@@ -328,3 +385,8 @@ import './adapters/sparql-http.js';
 export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES, type AtomicAssetReplacement } from './atomic-asset-group.js';
 
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
+
+export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
+
+export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

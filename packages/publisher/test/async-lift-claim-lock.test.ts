@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it } from 'vitest';
 import {
-  OxigraphStore, activeDefaultStoreWorkPriority, withDefaultStoreWorkPriority,
+  OxigraphStore, activeDefaultStoreWorkPriority, controlStoreOptions, withDefaultStoreWorkPriority,
 } from '@origintrail-official/dkg-storage';
 import { withClaimDomainLock, type ClaimLockKind, type ClaimLockQueue } from '../src/async-lift-claim-lock.js';
 import type { ClaimLockObservation } from '../src/async-lift-claim-lock.js';
@@ -133,7 +133,11 @@ describe('claim-domain admission bypass', () => {
     expect(h.queues.size).toBe(0);
   });
 
-  it('keeps each callback in its original caller async context and store-priority lane', async () => {
+  // OT-RFC-73 S1: the lock hands ownership on from whoever releases it (here a caller in the 'ack' lane), yet each
+  // callback keeps its OWN caller's async context and ambient lane, and a caller with none sees none. The lock
+  // installs no lane of its own. That is why the publisher's control calls made inside it carry their queue tag
+  // as explicit options (see the bulk retry test below) instead of relying on an ambient lane.
+  it('keeps each callback in its original caller async context and ambient lane, and installs none of its own', async () => {
     const h = harness();
     const context = new AsyncLocalStorage<string>();
     const holder = await h.hold();
@@ -142,9 +146,12 @@ describe('claim-domain admission bypass', () => {
       h.run('admission', 'normal', async () => { seen.push([context.getStore(), activeDefaultStoreWorkPriority()]); })));
     const background = context.run('background-caller', () => withDefaultStoreWorkPriority('background', () =>
       h.run('claim', 'background', async () => { seen.push([context.getStore(), activeDefaultStoreWorkPriority()]); })));
+    const bare = h.run('admin', 'bare', async () => { seen.push([context.getStore(), activeDefaultStoreWorkPriority()]); });
     withDefaultStoreWorkPriority('ack', holder.release);
-    await Promise.all([holder.done, normal, background]);
-    expect(seen).toEqual([['background-caller', 'background'], ['normal-caller', 'normal']]);
+    await Promise.all([holder.done, normal, background, bare]);
+    expect(seen).toEqual([
+      ['background-caller', 'background'], ['normal-caller', 'normal'], [undefined, undefined],
+    ]);
   });
 });
 
@@ -251,6 +258,43 @@ describe('claim-domain observer boundaries', () => {
 });
 
 describe('publisher admission convoy', () => {
+  // OT-RFC-73 S1 (plan 5.1): bulk retry() lists the failed jobs INSIDE the claim lock, and the lock's successor runs
+  // in its own caller's context. The list is a control call all the same: it carries the control options
+  // explicitly, so it resolves to the publisher's control path whatever ambient lane that caller is in.
+  it('lists the failed jobs of a bulk retry on the control path from inside the claim lock', async () => {
+    const store = new OxigraphStore();
+    let id = 0;
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      now: () => 1_000, idGenerator: () => `retry-${++id}`, claimTokenGenerator: () => 'retry-token', autoRetryEnabled: false,
+    });
+    const entered = deferred();
+    const release = deferred();
+    const seen: Array<{ source?: string; options: unknown; ambient: unknown }> = [];
+    const originalQuery = store.query.bind(store);
+    store.query = async (...args) => {
+      const source = args[1]?.source;
+      if (source === 'publisher.asyncLift.retryList') {
+        seen.push({ source, options: args[1], ambient: activeDefaultStoreWorkPriority() });
+      }
+      const result = await originalQuery(...args);
+      if (source === 'publisher.asyncLift.findActiveVmPublish') { entered.resolve(); await release.promise; }
+      return result;
+    };
+    const admission = publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await entered.promise;
+    // The retry queues behind the admission, which holds the claim lock, from a caller in the background lane.
+    const retried = withDefaultStoreWorkPriority('background', () => publisher.retry());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(seen).toEqual([]);
+    release.resolve();
+    await Promise.all([admission, retried]);
+    expect(seen).toEqual([{
+      source: 'publisher.asyncLift.retryList',
+      options: controlStoreOptions('publisher', 'publisher.asyncLift.retryList'),
+      ambient: 'background',
+    }]);
+  });
+
   it('claims the first durably accepted job across publisher instances before eleven queued admissions', async () => {
     const store = new OxigraphStore();
     let id = 0;

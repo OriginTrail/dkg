@@ -43,7 +43,12 @@ dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF paylo
 dkg ka finalize <name> -c <cg>                                # seal the WM draft
 dkg ka share <name> -c <cg>                                   # WM -> SWM
 dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
-dkg ka share-jobs [--context-graph-id <cg>]                   # list async share jobs
+dkg ka share-jobs [--context-graph-id <cg>] [--state <s>] [--limit <n>]   # list async share jobs (all of them, or up to --limit)
+dkg ka share-jobs ... --all [--page-size <n>]                 # page through the whole list and print every job, in enqueue order
+dkg ka share-jobs ... --page-size <n> [--cursor <cursor>]     # print one page, then "Next cursor: ..." for the page after it
+dkg ka share-job <job-id>                                     # show one async share job
+dkg ka cancel-share-job <job-id>                              # cancel a share job that is still queued
+dkg ka recover-share-job <job-id>                             # queue a failed share job again
 dkg ka publish <name> -c <cg>                                 # sync SWM -> VM publish
 dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue SWM -> VM publish
 dkg ka pull-from <name> -c <cg> --layer swm|vm                # seed WM from SWM or VM
@@ -68,8 +73,15 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
 dkg publisher publish-async <cg> <name> [--publisher-node-identity-id 0]  # alias for dkg ka publish-async
-dkg publisher jobs                       # list publisher jobs
-dkg publisher stats                      # publisher throughput stats
+dkg publisher jobs [--status <s>] [--context-graph <cg>]  # list publisher jobs (all of them, as a JSON array)
+dkg publisher jobs ... --all [--page-size <n>]            # page through the whole list and print every job, in acceptance order
+dkg publisher jobs ... --page-size <n> [--cursor <cursor>]  # print one page as { jobs, nextCursor, complete }
+dkg publisher job <job-id> [--payload]   # one job as JSON, with retryState when the daemon answers
+dkg publisher stats                      # job counts by status, as JSON
+dkg publisher cancel <job-id>            # remove a job that is still accepted
+dkg publisher retry                      # accept failed jobs again that are safe to re-run
+dkg publisher clear finalized|failed     # bulk clear; keeps jobs whose removal would change which job holds the KA
+# one finished job by ID: POST /api/publisher/clear-job (API only; a held job needs allowPendingTransaction: check its transaction first)
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
@@ -165,6 +177,41 @@ including legitimate subscriptions. It preserves `agents`, `ontology`, hosted
 core state, and the graph's VM/SWM data. Re-add wanted user subscriptions
 explicitly after cleanup.
 
+## Listing async jobs
+
+`dkg ka share-jobs` and `dkg publisher jobs` print the complete list, as they always did, unless a paging flag is given. They take the same three flags (the route parameters are in [Listing async jobs](api.md#listing-async-jobs)):
+
+| Flag | Effect |
+|---|---|
+| `--page-size <n>` | Print one page of up to `n` jobs (1-1000, 100 when only `--cursor` is given). Alone, it prints the first page. With `--all`, it is the number of jobs per request (1000 by default). |
+| `--cursor <cursor>` | Print the page after this cursor, the `nextCursor` of an earlier page. |
+| `--all` | Request pages until one is complete and print every job. The output has the shape of the complete list, in the order of the pages (admission time, then job ID) and not in the order of the complete list. |
+
+`ka share-jobs` prints a single page's jobs and then `Next cursor: <cursor>`, or `No further jobs when this page was read.` for the last page. With `--json` it prints `{ jobs, nextCursor, complete }`. `publisher jobs` always prints JSON: that object for a single page, and the bare array for the complete list and for `--all`.
+
+- `--limit` exists on `ka share-jobs` only. It caps the complete list and cannot be combined with a paging flag.
+- `--all` cannot be combined with `--cursor`.
+- A finished `--all` listed every job that matched the filters for its whole walk. A job missing from it is not thereby proven absent.
+- `--all` stops at the first failed request, a retryable `503` included, and prints only the error. Run it again, or page on with `--page-size` and `--cursor` from the last cursor you have.
+
+When the daemon's API cannot be reached and no daemon is running, `publisher jobs` reads the node's store directly and pages it in the same way. A request that times out does not fall back. See [Async publisher commands without the daemon](#async-publisher-commands-without-the-daemon).
+
+What each job state means, and how a client recovers a job, is in [Async Share and Publish Jobs](../build/async-jobs.md).
+
+## Async publisher commands without the daemon
+
+When the daemon's API cannot be reached, the `dkg publisher` commands open the node's store directly.
+
+They refuse to do that while the node home's `daemon.pid` names a live process. A daemon that is still starting or restarting, or that answers the route with `404`, `405` or `501`, owns the store as much as one that answers. The commands exit with code 1 and print:
+
+```text
+Refusing to run "dkg publisher <command>" offline: a daemon appears to be running (PID <pid>) but did not answer the API. ...
+```
+
+Try again once the daemon answers, or stop it first with `dkg stop`. If that PID is not a DKG daemon, remove the stale `daemon.pid` file.
+
+`jobs`, `job` and `stats` open the store read-only. With the file-backed Oxigraph stores (`oxigraph-worker`, the default, and `oxigraph-persistent`) they load the store file and never write it: the file is the same after they run.
+
 ## Client request timeouts
 
 The CLI and the MCP server (`dkg mcp serve`) give each daemon request a
@@ -181,7 +228,9 @@ instead. A Knowledge Asset publish, share, file import, or a create that also
 shares or publishes, that gets no answer in time is reported as outcome
 unknown, not as failed: the daemon keeps working after the client stops
 waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
-retrying. Any other request that times out fails with a `TimeoutError`.
+retrying. The CLI's `ka share-async`, `ka publish-async` and `publisher publish-async`
+are reported as outcome unknown too, naming the job list to check (`dkg ka share-jobs`
+or `dkg publisher jobs`). Any other request that times out fails with a `TimeoutError`.
 
 On a slow node or store, override the read and long deadlines, in
 milliseconds, with environment variables (for the MCP server, in the MCP

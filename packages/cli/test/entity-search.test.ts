@@ -1,3 +1,4 @@
+import { executePublicQuery } from '../../agent/src/public-query-execution.js';
 import { markCoreTrustedGraph, queryWithPublicSnapshotTrust } from "../../agent/src/public-snapshot-evidence.js";
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -38,7 +39,9 @@ async function fixture(count = 3, capacity = 100_000, http = false, blobs = fals
   let allowedCaller: string | undefined;
   const agent = { query: vi.fn(async (sparql, options) => {
     if (!permitted || (allowedCaller !== undefined && options?.callerAgentAddress !== allowedCaller)) throw Object.assign(new Error('denied'), { code: 'QUERY_ACCESS_DENIED' });
-    return queryWithPublicSnapshotTrust(graph, engine, sparql, options, options.chainEvidenceMode);
+    // Match the real agent's public normalization around the engine. This
+    // fixture substitutes admission, not the public error contract.
+    return executePublicQuery(() => queryWithPublicSnapshotTrust(graph, engine, sparql, options, options.chainEvidenceMode));
   }) };
   for (let i = 0; i < count; i++) await graph.insert([
     { graph: partition, subject: `urn:entity:${i}`, predicate: 'urn:description', object: JSON.stringify(i === 0 ? 'ocean science' : 'mountain climbing') },

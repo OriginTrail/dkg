@@ -87,9 +87,27 @@ are in-memory stores and provide no restart durability.
   flush. The atomic snapshot protocol protects the previously persisted file
   from a torn overwrite; it cannot make unflushed memory durable.
 
+### Read-only open
+
+`readOnly: true` in the adapter options (`{ readOnly: true }` as the second
+`OxigraphStore` constructor argument) opens the persistence file for reading
+only. It is for a process that reads a store another process owns, such as the
+CLI's offline `dkg publisher jobs`, `job` and `stats`.
+
+- Construction loads the file as above.
+- A write that would change the data rejects with `OxigraphStoreReadOnlyError`
+  (code `DKG_STORE_READ_ONLY`, also across the worker boundary) before the
+  in-memory data changes.
+- `flush()` and `close()` write nothing. What the reader loaded can be older
+  than the file by then, and writing it back would replace the owner's newer
+  data.
+- A file that fails to parse stays where it is, unchanged, and construction
+  throws.
+
 The executable regression contract is in
-[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts) and
-[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts).
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts),
+[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts) and
+[`test/oxigraph-read-only.test.ts`](test/oxigraph-read-only.test.ts).
 After building the storage dependency closure, run
 `node scripts/repro/oxigraph-large-snapshot.mjs` from the repository root for
 the larger native-worker check. It writes about 558 MB, verifies every value,
@@ -136,8 +154,10 @@ and keeps the daemon responsive under load.
 
 ## External-store admission and deadlines
 
-All external adapters share a process-wide priority scheduler. Waiting work is
-bounded independently for `ack`, `normal`, and `background` traffic, and an
+All external adapters share a process-wide priority scheduler, except the async
+share and publisher queues' own calls while the queue control path is on (see
+[Queue control path](#queue-control-path)). Waiting work is
+bounded independently for `ack`, `health`, `normal`, and `background` traffic, and an
 operation rejected before dispatch receives `StoreSchedulerBusyError` with
 `code: STORE_SCHEDULER_BUSY`, `retryable: true`, and a reason of either
 `queue_full` or `queue_wait_timeout`. Because this error is only created before
@@ -150,17 +170,44 @@ Decorators validate that tagged operation-outcome contract rather than the
 error class alone: a rejected nested read does not imply that an enclosing
 replace failed before mutation.
 
+OTel is opt-in, so the scheduler also keeps its rejection and wait figures
+in-process. The `dkg.store.scheduler_rejections_total` counter carries
+`priority`, `reason` and `operation_family` (the first two dot-separated
+segments of the caller's `source`, such as `publisher.asyncLift`; at most 64
+families per scheduler, then `other`). `takeStoreSchedulerStatsReports()` returns,
+for each registered scheduler, the queue waits of each lane since the previous
+call (`queueWaits`) and the cumulative rejections by lane, family and reason. A
+lane's figures are its longest wait and the count of its waits in fixed buckets.
+Every started operation counts, including one that starts at once, as a wait of
+about 0 ms; so do those that time out in the queue or are cancelled there. A
+rejection on a full queue never queued, so it adds no wait. The buckets
+(`queueWaitBuckets`) have the inclusive upper bounds in
+`STORE_QUEUE_WAIT_BUCKET_UPPER_MS`: 83 bounds from 1 ms to 10000 ms (the default
+queue-wait timeout) that grow by about 10 % per step (`round(1.1 ** k)`, with
+duplicates dropped, then 10000), plus an overflow bucket for anything longer.
+The list is fixed, because figures from different builds are compared;
+`queueWaitCount` is the sum of the counts.
+`estimateQueueWaitPercentileMs(buckets, 0.95, maxQueueWaitMs)` turns counts into
+a P95: the upper bound of the bucket that holds the rank, so it overstates the
+true value by at most one step (15 % from 7 ms up), it is 0 for an empty
+interval, and in the overflow bucket it is the interval maximum. Counts of
+several intervals add up, so the same function gives the P95 of a longer window;
+P95s of single intervals do not. Each call ends the interval, so only the
+periodic admission log line should call it.
+
 | Environment variable | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum external-store operations in flight, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. |
+| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum operations in flight on the shared external-store scheduler, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. The queue control path, when on (the default for `blazegraph` and `oxigraph-server` on more than 2 CPUs), runs up to 3 more on its own schedulers (share 1, publisher 2) on top of this ceiling; `DKG_STORE_CONTROL_RESERVED_SLOTS=0` keeps the backend at this ceiling. |
 | `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
+| `DKG_STORE_HEALTH_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for health work, capped so at least one ordinary slot remains. |
 | `DKG_STORE_NORMAL_RESERVED_SLOTS` | `1` | Non-ACK capacity kept available for normal work while background operations are in flight. |
 | `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
 | `DKG_STORE_QUEUE_LIMIT` | `64` | Maximum waiting operations in each priority queue. |
 | `DKG_STORE_ACK_QUEUE_LIMIT` | common limit | Optional ACK queue override. |
-| `DKG_STORE_NORMAL_QUEUE_LIMIT` | common limit | Optional normal queue override. |
+| `DKG_STORE_HEALTH_QUEUE_LIMIT` | common limit | Optional health queue override. |
+| `DKG_STORE_NORMAL_QUEUE_LIMIT` | common limit | Optional normal queue override. Also the queue limit of each control scheduler. |
 | `DKG_STORE_BACKGROUND_QUEUE_LIMIT` | common limit | Optional background queue override. |
-| `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. |
+| `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. Also applies to the control schedulers. |
 | `DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS` | `30000` | Blazegraph end-to-end operation deadline, including scheduler wait, HTTP, response decoding, and mapping. |
 
 Normal and background reserves are normalized against the available non-ACK
@@ -176,6 +223,68 @@ ACK and health retain priority. This does not bound elapsed waiting time,
 because admitted operations are not preempted. Setting
 `DKG_STORE_BACKGROUND_RESERVED_SLOTS=0` retains strict normal-before-background
 ordering. Schedulers with multiple ordinary slots retain their capacity reserves.
+
+### Queue control path
+
+The async share and publisher queues can run their own store calls on two small
+schedulers of their own, beside the shared one, so queue
+bookkeeping never waits behind client reads or data-plane work. The shared
+scheduler's lanes, limits and `StorePressureSnapshot` are unchanged; the
+control schedulers add slots on top of them: one for the share queue and two for
+the publisher queue, which are also the caps. Each is built only for a queue
+whose configured slots are above 0, once per process, with every capacity
+option explicit (no ACK, health, normal or background reserve; the shared
+scheduler's normal-lane queue limit and its queue wait as values; the same
+timeout diagnostics).
+
+A call reaches its queue's scheduler by naming the queue and nothing else:
+
+```ts
+import { controlStoreOptions } from '@origintrail-official/dkg-storage';
+
+await store.query(sparql, { ...controlStoreOptions('share', 'publisher.asyncPromote.writeJob'), signal });
+```
+
+`controlStoreOptions(queue, source)` returns `{ source, controlQueue: queue }`
+and sets no priority. When the queue's path is on, the `blazegraph` and
+`sparql-http` adapters run the call on that queue's scheduler in one fixed lane
+that is reported as `control` (in the `503` body's `priority`, metric
+attributes, the backpressure registry under `store-control-share` /
+`store-control-publisher`, and the queue-wait stats), whatever `priority` or
+ambient `withDefaultStoreWorkPriority` lane the caller has. When it is off, the
+call resolves exactly like the same call without the tag. Embedded Oxigraph
+backends run no store scheduler and so never use the path, whatever its
+setting.
+
+| Setting | Default | Purpose |
+|---|---:|---|
+| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
+| node config `store.controlReservedSlots` | absent | The same values (also the number `0`), used when the variable is unset. A malformed value (`null`, `true`, any number but `0` included) is refused with a warning that names the key and leaves the path off. Read by the daemon only. |
+
+With neither setting, the default is share 1 + publisher 2 for
+a node whose configured backend is `blazegraph` or managed `oxigraph-server`
+(`STORE_CONTROL_DEFAULT_BACKENDS`) on a host with more than 2 CPUs
+(`availableParallelism()`), and off for every other node: 2 or fewer CPUs,
+`sparql-http` (any other SPARQL store) and any other backend. A malformed value
+never falls through to the other setting or to the default.
+
+The daemon calls `configureStoreControlPath({ backend, configured })` with the
+node's `store.backend` (the configured name, so managed Oxigraph is
+`oxigraph-server`, not its runtime `sparql-http` view) and
+`store.controlReservedSlots`, before any store call can build the path, and
+then logs the effective geometry and the setting that decided it once
+(`logStoreControlPathGeometry`), for example `Store control path: on (added
+slots share=1 publisher=2; default for blazegraph, 8 CPUs; effective until
+daemon restart)`. The path is built once; a configuration after that is
+refused with a warning (a repeat of the same settings is accepted). A process
+that never configures the path (a standalone tool, a benchmark, a test) has no
+backend and no config value, so only the variable can turn its path on.
+`resolveStoreControlConfig(process.env.DKG_STORE_CONTROL_RESERVED_SLOTS, { cpus, backend, configured })`
+(the first argument is the variable's raw value, `undefined` when unset) is the
+pure resolver behind it. Tests replace the process-wide path with
+`setStoreControlPathForTesting(buildStoreControlPath(...))`, and
+`setStoreControlPathForTesting(undefined)` returns the process to the
+unconfigured state.
 
 Blazegraph's deadline can also be set per store, which takes precedence over
 the environment default:

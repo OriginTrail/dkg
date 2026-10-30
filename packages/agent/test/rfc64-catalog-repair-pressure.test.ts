@@ -52,7 +52,7 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
     listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    acceptsFinalizedPrivateLane: () => true,
+      readFinalizedPlacementAuthority: () => ({ status: 'inactive' as const }),
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => [],
@@ -160,13 +160,20 @@ describe('GH#2893 catalog repair admission at the incident store capacity', () =
     h.request();
     await vi.advanceTimersByTimeAsync(0);
     expect(h.scheduler.snapshot).toMatchObject({ backgroundInflight: 1, backgroundQueued: 2, normalInflight: 0 });
-    expect(h.samples.filter((sample) => sample.source.startsWith('catalog.explicit')).every((sample) => sample.outcome === 'completed')).toBe(true);
+    expect(h.samples.filter((sample) => sample.source.startsWith('catalog.explicit'))
+      .map(({ source, outcome }) => ({ source, outcome }))).toEqual([
+      { source: 'catalog.explicit-ack', outcome: 'completed' },
+      { source: 'catalog.explicit-health', outcome: 'completed' },
+    ]);
     await expect(h.run('background', 'catalog.overflow', async () => {})).rejects.toMatchObject({ code: 'STORE_SCHEDULER_BUSY', reason: 'queue_full' });
     const closing = h.owner.close();
     await vi.advanceTimersByTimeAsync(0);
     expect(h.scheduler.snapshot.backgroundQueued).toBe(0);
     expect(h.samples.filter((sample) => sample.source === 'catalog.cancel.1' || sample.source === 'catalog.cancel.2')
-      .every((sample) => sample.startedAt === undefined && sample.outcome === 'rejected')).toBe(true);
+      .map(({ source, startedAt, outcome }) => ({ source, startedAt, outcome }))).toEqual([
+      { source: 'catalog.cancel.1', startedAt: undefined, outcome: 'rejected' },
+      { source: 'catalog.cancel.2', startedAt: undefined, outcome: 'rejected' },
+    ]);
     held[0]!.release();
     await closing;
     expect(queuedResults.map((result) => result.status)).toEqual(['fulfilled', 'rejected', 'rejected', 'fulfilled', 'fulfilled']);

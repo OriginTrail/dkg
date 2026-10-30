@@ -25,6 +25,7 @@ const publicCatalogActivation = await import(
 const chainAuthorityReadBudgets = await import(
   '@origintrail-official/dkg-agent/chain-authority-read-budgets'
 );
+const inventoryRollback = await import('@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback');
 const registeredAuthorityContract = await import(
   '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
 );
@@ -244,6 +245,13 @@ if (
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogControlsV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose catalog-control normalization');
 }
+if (
+  typeof inventoryRollback.planRfc64InventoryRollbackV1 !== 'function'
+  || typeof inventoryRollback.prepareRfc64InventoryForRollbackV1 !== 'function'
+  || !inventoryRollback.INVENTORY_SCHEMA_FIRST_RELEASES_V1?.length
+) {
+  throw new Error('RFC-64 inventory rollback subpath did not expose its rollback preparation');
+}
 
 const digestAuthor = '0x1111111111111111111111111111111111111111';
 const digestRows = [10, 2].map((number) => ({
@@ -278,6 +286,8 @@ const blockedRfc64Modules = [
   'private-placement-failure-state-v1.js',
   'inventory-v1/finalized-private-repair-persistence.js',
   'inventory-v1/schema-migrations.js',
+  'inventory-v1/pre-migration-copy.js',
+  'inventory-v1/rollback.js',
   'catalog-projection-discovery-v1.js',
   'catalog-repair-diagnostics-v1.js',
   'catalog-repair-retry-v1.js',
@@ -332,6 +342,7 @@ const blockedRfc64Modules = [
   'finalized-policy-agent-precommit-v1.js',
   'finalized-policy-verifier-v1.js',
   'finalized-private-placement-repair-store-v1.js',
+  'owed-share-inventory-store-v1.js',
   'catalog-synchronization-evidence-v1.js',
   'finalized-swm-retirement-lifecycle-receipt-v1.js',
   'finalized-vm-agent-precommit-v1.js',
@@ -377,8 +388,19 @@ const blockedRfc64Modules = [
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
   'catalog-replay-connection-runtime-v1.js',
+  'catalog-replay-connection-adapter-v1.js',
+  'catalog-replay-evidence-v1.js',
+  'catalog-replay-peer-work-v1.js',
+  'catalog-replay-selection-v1.js',
+  'catalog-replay-types-v1.js',
+  'catalog-selection-types-v1.js',
+  'catalog-replay-run-reporter-v1.js',
+  'catalog-replay-scope-lifecycle-v1.js',
   'catalog-replay-generation-v1.js',
   'catalog-replay-recovery-runtime-v1.js',
+  'catalog-replay-peer-worklist-v1.js',
+  'catalog-replay-peer-lane-v1.js',
+  'catalog-replay-transport-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
   'catalog-operational-applied-heads-v1.js',
   'catalog-operational-reads-v1.js',

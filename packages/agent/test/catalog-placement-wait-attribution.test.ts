@@ -58,11 +58,12 @@ async function startPlacementAgent(name: string, peers: readonly string[] = []) 
   });
   // Keep the ordinary projection from placing the row first: only the confirmed repair may.
   vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneV1.bind(agent);
-  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
+  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneDecisionV1.bind(agent);
+  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation(
     (contextGraphId: unknown, subGraphName: unknown) => {
-      const lane = realLane(contextGraphId, subGraphName);
-      return lane === null ? null : { ...lane, acceptsFinalizedVmRepair: true };
+      const decision = realLane(contextGraphId, subGraphName);
+      return decision.status === 'active'
+        ? { ...decision, lane: { ...decision.lane, acceptsFinalizedVmRepair: true } } : decision;
     },
   );
   const clock = { now: 0 };

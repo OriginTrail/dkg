@@ -501,6 +501,26 @@ describe.each(['urn:epcis:CustomEvent', 'https://example.org/CustomEvent'])('ext
   });
 });
 
+it('filters the exact event identity without leaking an adjacent event or another context graph', async () => {
+  const store = create();
+  const outside = contextGraphDataUri('outside-event-filter');
+  try {
+    await store.insert([
+      ...eventRows('target', `${EPCIS}ObjectEvent`, '2024-03-01T00:00:00Z', '+00:00'),
+      ...eventRows('target-suffix', `${EPCIS}ObjectEvent`, '2024-03-01T00:00:00Z', '+00:00'),
+      ...eventRows('target', `${EPCIS}ObjectEvent`, '2025-03-01T00:00:00Z', '+00:00').map(row => ({ ...row, graph: outside })),
+    ]);
+    for (const [eventID, expected] of [['urn:event:target', ['urn:event:target']], ['urn:event:missing', []]] as const) {
+      const result = await store.query(buildEpcisQuery({ eventID }, CG));
+      if (result.type !== 'bindings') throw new Error('Expected event bindings');
+      expect(result.bindings.map(row => row.event)).toEqual(expected);
+      if (expected.length) expect(toEpcisEvent(result.bindings[0]).eventTime).toBe('2024-03-01T00:00:00Z');
+    }
+  } finally {
+    await store.dropGraph(contextGraphDataUri(CG)); await store.dropGraph(outside); await store.close();
+  }
+});
+
 const jsonld = createRequire(import.meta.url)('jsonld') as {
   toRDF(document: unknown, options: { format: 'application/n-quads' }): Promise<string>;
 };

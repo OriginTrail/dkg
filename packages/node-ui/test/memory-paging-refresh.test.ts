@@ -60,6 +60,17 @@ beforeEach(() => {
 });
 afterEach(async () => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals(); invalidateQueryCache(); await store.close(); });
 describe('memory continuation and refresh with the scoped native store', () => {
+  it('starts other memory sources while the first source is still pending and commits together', async () => {
+    await seed(cg, 1); holdRefresh = true;
+    await act(async () => { root.render(React.createElement(Probe)); });
+    try {
+      await vi.waitFor(() => expect(resolveRefresh).toBeDefined());
+      await vi.waitFor(() => expect(requests.some(request => request.sparql.includes('STRENDS(STR(?g), "/_shared_memory")'))).toBe(true));
+      expect(memory.graphTriples).toHaveLength(0);
+    } finally { await act(async () => { holdRefresh = false; resolveRefresh?.(); }); }
+    expect(memory.graphTriples).toHaveLength(1);
+  });
+
   it('derives actions from failure reasons even when a transient failure shares a budget warning', async () => {
     await seed(cg, 1); failWorkingBudget = true;
     await act(async () => root.render(React.createElement(Probe)));

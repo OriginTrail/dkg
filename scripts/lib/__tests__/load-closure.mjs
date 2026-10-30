@@ -52,8 +52,8 @@ export const UNFOLLOWED_LOADS = new Map([
   // Files a child-process or worker call runs that no reading resolves.
   ['scripts/lib/regressions/subprocess.mjs: invocation.command',
     'the installed pnpm CLI or recorded Node executable, not a repository script; repository-owned profiles name the tests replayed in disposable checkouts'],
-  ['scripts/lib/regressions/registry.mjs: invocation.command',
-    'the installed pnpm CLI or recorded Node executable, resolved by subprocess.mjs like every proof launch, running the named-assertion discovery; not a repository script'],
+  ['scripts/lib/regressions/named-test-discovery.mjs: invocation.command',
+    'Required-lane Vitest discovery uses the portable pnpm command resolver.'],
   ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
   ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',
@@ -83,6 +83,8 @@ export const UNFOLLOWED_LOADS = new Map([
     'the benchmark itself, re-run as its own worker process'],
   ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
     "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
+  ['packages/agent/src/snapshot-native-process.ts: command',
+    'the explicitly configured external Java executable running a locally hash-pinned Blazegraph JAR; lifecycle tests use process.execPath with inline code, not a repository entry point; the launcher and its callers already select the agent lane'],
   // Programs a child-process call runs that no reading identifies: tools, or
   // node running the file named.
   ['devnet/rfc64-gate1-public-open/agent-child.ts: options.spawn.command',
@@ -115,7 +117,9 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/oxigraph-server.test.ts: standin', 'an Oxigraph standin binary fixture'],
   ['packages/core/src/daemon-lifecycle.ts: node',
     'process.execPath running the CLI entry resolveDkgCli() finds (packages/cli/dist/cli.js, or an installed CLI), CLI code the CLI rule routes'],
-  ['scripts/release-packages.mjs: cmd', "the npm, pnpm and git commands its run helpers take; verify-pack's is declared in SUBCOMMAND_CHILD_COMMANDS"],
+  ['scripts/lib/release-process.mjs: command', 'manual prepared-package runner for git/pnpm/npm; scripts/lib changes select full CI, and script tests inject no build execution'],
+  ['scripts/lib/package-certification/publish.mjs: command', 'manual npm tarball/tag mutation runner; script tests inject or shim npm, while scripts/lib changes select full CI'],
+  ['scripts/lib/package-certification/certify.mjs: command', 'Docker certification runner for main pushes and manual rehearsals, outside primary lane execution; scripts/lib changes select full CI'],
   ['packages/cli/scripts/bundle-markitdown-binaries.mjs: python.command', 'the Python interpreter it builds a virtual environment with'],
   ['packages/cli/scripts/bundle-markitdown-binaries.mjs: venvPython', "the build's virtual-environment Python, outside the repository"],
   ['packages/cli/test/devnet-publish-helpers-smoke.test.ts: toWslPath(scriptPath)',

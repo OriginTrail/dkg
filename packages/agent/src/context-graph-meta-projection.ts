@@ -11,7 +11,7 @@ import {
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { resolveWorkspaceAgentRecipientKeys, WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
-import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
+import { storeLaneInflightLimit, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
@@ -214,7 +214,12 @@ export class ContextGraphMetaProjection {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const batches = [...chunks(ids, 128)];
-    await mapWithConcurrency(batches, 4, async (batch) => {
+    // Ordinary reads should not fill the store queue with their own siblings.
+    // A dedicated control queue has its own admission policy, not this lane's.
+    const readWidth = options.controlQueue === undefined
+      ? Math.min(4, storeLaneInflightLimit(this.store, options.priority) ?? 4)
+      : 4;
+    await mapWithConcurrency(batches, readWidth, async (batch) => {
       options.signal?.throwIfAborted();
       const idsByUri = new Map(batch.map((id) => [contextGraphDataUri(id), id]));
       const values = batch.map((id) => (
@@ -319,6 +324,12 @@ export class ContextGraphMetaProjection {
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) {
+      // Lifecycle stamps cannot change this projection. Still fence any fact on the CG
+      // subject: read-authority absence proofs inspect all its predicates, not only this set.
+      if (subject !== undefined && isSafeIri(subject) && subject !== contextGraphDataUri(contextGraphId)
+        && predicate !== undefined && isSafeIri(predicate)
+        && !PROJECTION_RECORD_PREDICATES.has(predicate)
+        && !WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES.has(predicate)) return;
       this.markDirty(contextGraphId, false);
       // Catalog reads admit only the disclosure floor, never peers or roster.
       // Keep projection/node-wide and recipient-key invalidation independent.

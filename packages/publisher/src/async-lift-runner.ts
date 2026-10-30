@@ -1,5 +1,5 @@
 import type { AsyncLiftPublisher, AsyncLiftClaimControl } from './async-lift-publisher.js';
-import { assertNodeTimerDelayMs } from '@origintrail-official/dkg-core';
+import { assertNodeTimerDelayMs, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
@@ -126,6 +126,8 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
+    // The usage line's worker-free pick-up needs the wallets that run workers.
+    asyncAdmissionUsage.setLiftWallets(this.config.walletIds);
     // One atomic attachment for reconciliation demand, wallet release, and accepted work.
     // Each callback invites its loop to recheck authoritative state; none grants ownership.
     // All callbacks transfer together, so scheduling cannot split between runner incarnations.
@@ -149,6 +151,7 @@ export class AsyncLiftRunner {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    asyncAdmissionUsage.setLiftWallets([]);
     if (this.recoveryTimer) {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = undefined;
