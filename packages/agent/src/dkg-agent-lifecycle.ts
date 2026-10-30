@@ -6201,7 +6201,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return runSyncSingleFlight(this, singleFlightKey, async () => execution(
         await runOrderedWork(orderedTargets.map(privateWork)),
         completedTargetKeys,
-      ), { scope: 'shared-memory', source: options?.source });
+      ), { scope: 'shared-memory', source: options?.source, fresh: options?.freshSnapshot });
     }
 
     const selectedBootstrapOwner = transferMode === 'selected'
