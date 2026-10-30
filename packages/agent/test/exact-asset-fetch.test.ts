@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
@@ -73,9 +74,8 @@ function createFetchHost(options: {
     vmReconcileRuntimeReady: true,
     graphScopedStoreClosed: false,
     vmReconcileRotationClosed: false,
-    vmReconcileLifecycleGeneration: 1,
-    vmReconcileLifecycleController: new AbortController(),
-    vmReconcilePhysicalRuns: new Set<Promise<unknown>>(),
+    workLifetime: new AgentWorkLifetime(),
+
     subscribedContextGraphs: new Map([[CONTEXT_GRAPH, subscription]]),
     chain: {
       chainId: 'base:8453',
@@ -393,13 +393,13 @@ describe('exact Context Graph asset fetch', () => {
       { peerIds: [PEER] },
     );
     await vi.waitFor(() => expect(host.canReadContextGraph).toHaveBeenCalledOnce());
-    expect(host.vmReconcilePhysicalRuns.size).toBe(1);
+    expect(host.workLifetime.physicalRuns.size).toBe(1);
 
-    host.vmReconcileLifecycleController.abort();
+    host.workLifetime.close();
     await expect(running).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
-    expect(host.vmReconcilePhysicalRuns.size).toBe(1);
+    expect(host.workLifetime.physicalRuns.size).toBe(1);
     releaseIdle();
-    await vi.waitFor(() => expect(host.vmReconcilePhysicalRuns.size).toBe(0));
+    await vi.waitFor(() => expect(host.workLifetime.physicalRuns.size).toBe(0));
 
     expect(whenIdle).toHaveBeenCalledOnce();
     expect(exactFetch).not.toHaveBeenCalled();
@@ -432,13 +432,13 @@ describe('exact Context Graph asset fetch', () => {
       { peerIds: [PEER] },
     );
     await vi.waitFor(() => expect(physicalFetch).toHaveBeenCalledTimes(1));
-    expect(host.vmReconcilePhysicalRuns.size).toBe(1);
+    expect(host.workLifetime.physicalRuns.size).toBe(1);
     const inspectionsBeforeShutdown = inspect.mock.calls.length;
 
-    host.vmReconcileLifecycleController.abort();
+    host.workLifetime.close();
     await expect(running).rejects.toBeInstanceOf(VmReconcileQueueClosedError);
     release();
-    await vi.waitFor(() => expect(host.vmReconcilePhysicalRuns.size).toBe(0));
+    await vi.waitFor(() => expect(host.workLifetime.physicalRuns.size).toBe(0));
 
     expect(inspect).toHaveBeenCalledTimes(inspectionsBeforeShutdown);
     expect(flush).not.toHaveBeenCalled();

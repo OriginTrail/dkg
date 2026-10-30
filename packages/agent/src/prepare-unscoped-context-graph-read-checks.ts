@@ -124,6 +124,7 @@ export async function prepareUnscopedContextGraphReadChecks(
     let metadataAbsenceEligible = false;
     const preparedInput: ContextGraphReadAuthorityInput = {
       ...input,
+      signal: readSignal,
       getRegisteredAuthority: registration
         ? async () => {
             const prepared = await registration.resolve(id, liveRegistration, readSignal);

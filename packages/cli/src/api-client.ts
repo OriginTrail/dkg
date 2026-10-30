@@ -1,3 +1,10 @@
+import { createPublicCheckpointClient } from './public-checkpoint-client.js';
+import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
+export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
+import type { QueryOptions } from './query-options.js';
+import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
+import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
+import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -7,6 +14,7 @@ import type {
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
 import type {
+  ShareReconciliationInput, ShareReconciliationResult, AssertionPullFromOptions,
   AsyncLiftRetryOutcome,
   AsyncPreparedPublishPayload,
   JournalReadResult,
@@ -14,10 +22,7 @@ import type {
   PersistedLiftJob,
   PublicationPricingPolicy,
 } from '@origintrail-official/dkg-publisher';
-import {
-  isSafeJobId,
-  SAFE_JOB_ID_ERROR,
-} from '@origintrail-official/dkg-publisher';
+import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
@@ -31,14 +36,14 @@ import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
-import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
   type StoreQuadsStatusFields,
   type StoreReachabilityFields,
 } from './status-store-quads-wire.js';
+import type { DaemonRuntimeStatusFields } from './status-runtime-wire.js';
 import type {
   CatchupContextGraphIdentity,
   CatchupStatusResponse,
@@ -51,10 +56,8 @@ import {
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
-
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
-
 /**
  * `/api/verify` collects signatures for up to 30 minutes when the request names
  * no `timeoutMs` (the agent default in packages/agent/src/dkg-agent-endorse.ts).
@@ -204,7 +207,7 @@ export interface KnowledgeAssetCreateResponse {
   status?: string;
   written?: number;
   merkleRoot?: string;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: KnowledgeAssetShareResponse['catalogHandoff'];
   swmShared?: boolean;
   promotedCount?: number;
   publishReady?: boolean;
@@ -223,7 +226,7 @@ export interface KnowledgeAssetShareResponse {
   promotedCount: number;
   sealed?: boolean;
   publishReady?: boolean;
-  shareOperationId?: string;
+  shareOperationId?: string; catalogHandoff?: { state: 'pending'; reason: string; recoveryJobId: string; recoveryStatusUrl: string };
   errors?: KnowledgeAssetLifecycleError[];
 }
 
@@ -240,19 +243,6 @@ export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOpt
 }
 
 export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
-
-export interface KnowledgeAssetPublishResponse {
-  kaId?: string;
-  ual?: string;
-  txHash?: string;
-  status?: string;
-  /** Core peers whose StorageACKs backed a confirmed VM publish. */
-  storageAckPeerIds?: string[];
-  error?: string;
-  errors?: KnowledgeAssetLifecycleError[];
-  contextGraphError?: unknown;
-  [key: string]: unknown;
-}
 
 export interface KnowledgeAssetLifecycleError {
   phase?: string;
@@ -425,6 +415,18 @@ export interface RandomSamplingStatusResponse {
     submittedCount: number;
     lastSubmittedTxHash: string | null;
     lastSubmittedAt: string | null;
+    /**
+     * Distinct challenges (proof periods) first seen in the daemon's trailing
+     * 24-hour window; repeated ticks on one period count once. This and the
+     * three health fields below are optional because older daemons omit them;
+     * the CLI renders a missing counter as `n/a`, never as 0.
+     */
+    challengesReceived24h?: number;
+    /** Of those periods, how many this daemon submitted a proof for. */
+    proofsSubmitted24h?: number;
+    /** Kind of the most recent failed tick (for example `kc-not-synced`), or null. */
+    lastFailureClassification?: string | null;
+    lastFailureAt?: string | null;
   };
 }
 
@@ -440,7 +442,7 @@ export interface RelayStatusResponse {
   configuredAnnounceAddresses: string[];
 }
 
-export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields {
+export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReachabilityFields, DaemonRuntimeStatusFields {
   name: string;
   peerId: string;
   nodeRole?: string;
@@ -667,6 +669,7 @@ interface ConfigFallbackContext {
 }
 
 export class ApiClient {
+  readonly checkpoints = createPublicCheckpointClient({ get: (path, opts) => this.get(path, opts), post: (path, body) => this.post(path, body) });
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;
@@ -1018,7 +1021,7 @@ export class ApiClient {
     contextGraphId: string,
     name: string,
     layer: 'swm' | 'vm',
-    options?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
+    options?: AssertionPullFromOptions,
   ): Promise<Record<string, unknown>> {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/pull-from`, { contextGraphId, layer, ...(options ?? {}) });
   }
@@ -1049,19 +1052,13 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
   }
 
-  async knowledgeAssetShareJobs(options?: {
-    contextGraphId?: string;
-    state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
-    limit?: number;
-  }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
-    const params = new URLSearchParams();
-    if (options?.contextGraphId) params.set('contextGraphId', options.contextGraphId);
-    if (options?.state) {
-      params.set('state', Array.isArray(options.state) ? options.state.join(',') : options.state);
-    }
-    if (options?.limit !== undefined) params.set('limit', String(options.limit));
-    const qs = params.toString();
-    return this.get(`/api/knowledge-assets/swm/share-jobs${qs ? `?${qs}` : ''}`);
+  async knowledgeAssetShareJobs(options?: ShareJobsListOptions): Promise<ShareJobsListResult> {
+    return this.get(shareJobsPath(options));
+  }
+
+  /** Read retained execution evidence; never infer retry permission from an unproven result. */
+  async knowledgeAssetReconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult> {
+    return this.get(shareReconciliationPath(input));
   }
 
   async knowledgeAssetShareJob(jobId: string): Promise<KnowledgeAssetShareJobView> {
@@ -1240,30 +1237,9 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    assertionUri: string;
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-    storageAckPeerIds?: string[];
-    contextGraphError?: string;
-  }> {
-    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
-      kaId: string;
-      status: 'tentative' | 'confirmed';
-      assertionUri: string;
-      authorAddress: string;
-      merkleRoot: string;
-      kas: Array<{ tokenId: string; rootEntity: string }>;
-      txHash?: string;
-      blockNumber?: number;
-      storageAckPeerIds?: string[];
-      contextGraphError?: string;
-    }>;
+  ): Promise<FinalizedAssertionPublishResponse> {
+    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<FinalizedAssertionPublishResponse>;
+
   }
 
   /**
@@ -1287,16 +1263,7 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    assertionUri: string;
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
+  ): Promise<FinalizedAssertionPublishResponse> {
     const created = await this.createAssertion(contextGraphId, name, {
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
       quads,
@@ -1331,6 +1298,7 @@ export class ApiClient {
           : {}),
       },
     );
+    if (published.catalogObligationPending) return published;
     return {
       assertionUri: created.assertionUri,
       kaId: published.kaId,
@@ -1517,9 +1485,8 @@ export class ApiClient {
     return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
-  async publisherJobs(status?: string): Promise<{ jobs: any[] }> {
-    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
-    return this.get(`/api/publisher/jobs${qs}`);
+  async publisherJobs(status?: string, contextGraphId?: string, page?: PublisherJobsPageOptions): Promise<PublisherJobsResult> {
+    return this.get(publisherJobsPath(status, contextGraphId, page));
   }
 
   // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
@@ -1605,7 +1572,7 @@ export class ApiClient {
 
   // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
   // status-scoped publisherClear). cleared / already_absent resolve normally (200);
-  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // rejected (nonterminal/pending_transaction/unknown → 409, malformed → 400) throws via the post() helper
   // carrying { outcome:'rejected', reason } in the response body.
   //
   // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose
@@ -1718,25 +1685,7 @@ export class ApiClient {
   async query(
     sparql: string,
     contextGraphId?: string,
-    opts?: {
-      graphSuffix?: string;
-      includeSharedMemory?: boolean;
-      includeContextGraphPartitions?: boolean;
-      view?: 'working-memory' | 'shared-working-memory' | 'verifiable-memory';
-      agentAddress?: string;
-      assertionName?: string;
-      subGraphName?: string;
-      verifiedGraph?: string;
-      minTrust?:
-        | 'SelfAttested'
-        | 'Endorsed'
-        | 'PartiallyVerified'
-        | 'ConsensusVerified'
-        | 0
-        | 1
-        | 2
-        | 3;
-    },
+    opts?: QueryOptions,
   ): Promise<{ result: QueryResult }> {
     return this.post('/api/query', {
       sparql,
@@ -1744,6 +1693,7 @@ export class ApiClient {
       graphSuffix: opts?.graphSuffix,
       includeSharedMemory: opts?.includeSharedMemory,
       includeContextGraphPartitions: opts?.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts?.includeSharedMemoryMeta,
       view: opts?.view,
       agentAddress: opts?.agentAddress,
       assertionName: opts?.assertionName,
@@ -2130,20 +2080,20 @@ export class ApiClient {
   }
 
   /**
-   * Forward a previously-signed join delegation to the curator over
-   * P2P. The daemon dials `curatorPeerId` directly (DHT-resolved if
-   * not currently connected). Returns the delivery count so callers can detect
-   * "no curator reachable" without inspecting log output.
+   * Forward a previously-signed join delegation to the curator over P2P (the daemon dials
+   * `curatorPeerId` directly). Returns the delivery count so callers can detect "no curator
+   * reachable"; `reRequest` sends a request even while an approval's member list is pending.
    */
   async requestJoin(
     contextGraphId: string,
     delegation: unknown,
     curatorPeerId: string,
     agentName?: string,
+    options: { reRequest?: boolean } = {},
   ): Promise<ContextGraphJoinResult> {
     return this.post(
       `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
-      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}) },
+      { delegation, curatorPeerId, ...(agentName ? { agentName } : {}), ...(options.reRequest ? { reRequest: true } : {}) },
     );
   }
 
@@ -2463,6 +2413,8 @@ export class ApiClient {
   private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
     return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
   }
+
+  readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

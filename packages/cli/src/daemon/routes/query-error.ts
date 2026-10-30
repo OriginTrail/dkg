@@ -14,6 +14,9 @@ import {
   UNSCOPED_QUERY_INVALIDATED_MESSAGE,
 } from "@origintrail-official/dkg-core";
 import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
+import {
+  isQueryResultTooLargeError,
+} from '@origintrail-official/dkg-agent';
 import { jsonResponse } from "../http-utils.js";
 
 /**
@@ -89,6 +92,7 @@ function isLegacyClientQueryMessage(msg: string): boolean {
  * private so the provenance-first rule cannot be bypassed.
  */
 export function isClientQueryFailure(err: unknown): boolean {
+  if (isQueryResultTooLargeError(err)) return false;
   // 1. Provenance wins: the engine marked this as the caller's own SPARQL.
   if (isCallerSparqlRejected(err)) return true;
 
@@ -126,6 +130,15 @@ function isUnscopedQueryInvalidated(err: unknown): boolean {
  *   a 500. The sentence is the one the agent throws.
  */
 export function respondToQueryFailure(res: ServerResponse, err: unknown): boolean {
+  if (isQueryResultTooLargeError(err)) {
+    jsonResponse(res, 413, { error: err.message, code: err.code,
+      limitBytes: err.maxBytes, actualBytes: err.actualBytes });
+    return true;
+  }
+  if ((err as { code?: unknown } | null)?.code === 'CORE_CACHE_QUERY_TRUST_REQUIRED') {
+    jsonResponse(res, 409, { code: 'CORE_CACHE_QUERY_TRUST_REQUIRED', error: 'Explicit acceptance of core-cache evidence is required for this context graph' });
+    return true;
+  }
   if (isClientQueryFailure(err)) {
     jsonResponse(res, 400, { error: (err as { message?: unknown } | null)?.message ?? "" });
     return true;

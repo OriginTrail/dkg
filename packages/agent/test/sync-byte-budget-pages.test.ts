@@ -17,6 +17,7 @@ import {
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../src/dkg-agent-constants.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from '../src/sync/auth/request-signing.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import {
   fetchSyncPages,
@@ -335,7 +336,7 @@ describe('byte-budget sync pagination', () => {
       },
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -362,7 +363,7 @@ describe('byte-budget sync pagination', () => {
       computeSyncDigest: () => new Uint8Array(32),
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -412,7 +413,7 @@ describe('byte-budget sync pagination', () => {
       },
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -438,7 +439,7 @@ describe('byte-budget sync pagination', () => {
       computeSyncDigest: () => new Uint8Array(32),
       getIdentityId: async () => 0n,
       claimedAgentAddress: wallet.address,
-      claimedAgentPrivateKey: wallet.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(undefined, wallet.address, { privateKey: wallet.privateKey }),
     });
 
     const request = JSON.parse(new TextDecoder().decode(encoded));
@@ -494,11 +495,13 @@ describe('byte-budget sync pagination', () => {
   it('returns a soft page boundary as incomplete progress without a timeout', async () => {
     let sends = 0;
     const observedProgress: Array<{ resumedFromOffset: number; nextOffset: number }> = [];
+    const retained = { subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: 'urn:g' };
     const result = await fetchSyncPages(pageFetchParams({
       includeSharedMemory: false,
       phase: 'data',
       graphUri: `did:dkg:context-graph:${CG_ID}`,
-      parseAndFilter: async () => ({ quads: [], totalQuads: SYNC_PAGE_SIZE }),
+      // The responder sent a full page; one of its rows survived filtering.
+      parseAndFilter: async () => ({ quads: [retained], totalQuads: SYNC_PAGE_SIZE }),
       send: async () => {
         sends += 1;
         return new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .');
@@ -513,6 +516,9 @@ describe('byte-budget sync pagination', () => {
     expect(observedProgress).toEqual([{
       resumedFromOffset: 0,
       nextOffset: SYNC_PAGE_SIZE,
+      acceptedQuads: 1,
+      acceptedHeapBytesEstimate: expect.any(Number),
+      pageQuads: [retained],
     }]);
     expect(result).toMatchObject({
       nextOffset: SYNC_PAGE_SIZE,

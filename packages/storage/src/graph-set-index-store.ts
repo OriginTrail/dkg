@@ -1,3 +1,12 @@
+import { filterGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
+import { isStoreResponseTooLargeError } from './http-response-limit.js';
+import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
+import { namedGraphsFromQuads, endsWithHighSurrogate, normalizeGraphUris, queryOptionsFromUpdateOptions } from "./graph-set-index-utils.js";
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
+import type { GraphSetMutationSource, TouchedGraphMutationSource, GraphSetRefreshSource, PendingFullRefreshSource, GraphSetMutationEvent, GraphSetDiagnosticEvent } from './graph-set-index-types.js';
+export type { GraphSetMutationSource, GraphSetMutationEvent } from './graph-set-index-types.js';
+import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import { performance } from 'node:perf_hooks';
 import {
   codePointLowerBound,
@@ -15,8 +24,8 @@ import type {
   TripleStoreDecorator,
   UpdateOptions,
 } from './triple-store.js';
-import { deleteByPatternWithoutCount } from './triple-store.js';
-import { storeWorkPriorityRank } from './store-priority-scheduler.js';
+import { deleteByPatternWithoutCount, runLogicalStoreMutation } from './triple-store.js';
+import { RefreshCoordinator, type RefreshFlight } from './graph-set-refresh-coordinator.js';
 import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
@@ -32,6 +41,7 @@ import {
 } from './rfc64-author-commit-cas.js';
 import { isStoreOperationNotStarted } from './store-operation-outcome.js';
 import { raceStoreWorkAgainstAbort } from './abortable-store-work-lifecycle.js';
+import { assertGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -39,63 +49,6 @@ const MIN_GRAPH_SET_REVALIDATE_FAILURE_BACKOFF_MS = 1_000;
 // Max times a bounded hasGraph probe is repeated when a concurrent write bumps
 // the mutation generation, before falling back to one O(store) rebuild.
 const MAINTAIN_INDEX_MAX_PROBE_RETRIES = 4;
-
-export type GraphSetMutationSource =
-  | 'seed'
-  | 'revalidate'
-  | 'insert'
-  | 'delete'
-  | 'deleteByPattern'
-  | 'deleteBySubjectPrefix'
-  | 'dropGraph'
-  | 'replaceGraph'
-  | 'replaceGraphAndSubject'
-  | 'replaceSubject'
-  | 'rfc64AuthorCommitCasV1'
-  | 'query'
-  | 'update';
-
-type TouchedGraphMutationSource =
-  | 'delete'
-  | 'deleteByPattern'
-  | 'deleteBySubjectPrefix'
-  | 'replaceGraph'
-  | 'replaceGraphAndSubject'
-  | 'replaceSubject'
-  | 'rfc64AuthorCommitCasV1'
-  | 'update';
-type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
-type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
-
-export type GraphSetMutationEvent =
-  | {
-      type: 'graph-added';
-      graph: string;
-      source: GraphSetMutationSource;
-    }
-  | {
-      type: 'graph-removed';
-      graph: string;
-      source: GraphSetMutationSource;
-    }
-  | {
-      type: 'graph-set-revalidated';
-      added: string[];
-      removed: string[];
-      source: GraphSetRefreshSource;
-    };
-
-type GraphSetDiagnosticEvent =
-  | {
-      type: 'dirty-rebuild';
-      source: PendingFullRefreshSource;
-      graphCount: number;
-    }
-  | {
-      type: 'probe-retry-exhausted';
-      source: TouchedGraphMutationSource;
-      probeCount: number;
-    };
 
 export interface GraphSetIndexStoreOptions {
   enabled?: boolean;
@@ -136,93 +89,17 @@ export async function loadSortedGraphCatalog(
     === 'function'
     ? store as TripleStore & SortedGraphSetSource
     : null;
-  return sortedSource
+  const graphs = await (sortedSource
     ? sortedSource.listGraphsSorted(options)
-    : createSortedUniqueStringCatalog(await store.listGraphs(options));
+    : createSortedUniqueStringCatalog(await store.listGraphs(options)));
+  assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+  return graphs;
 }
 
 /** Internal/test-only observation seam; intentionally absent from the package API. */
 type GraphSetIndexStoreInternalOptions = GraphSetIndexStoreOptions & {
   onDiagnostic?: (event: GraphSetDiagnosticEvent) => void;
 };
-
-interface RefreshFlight<T> {
-  readonly priority: StoreWorkPriority;
-  readonly task: Promise<T>;
-  lastScanSequence: number;
-}
-
-interface RefreshScan {
-  readonly sequence: number;
-}
-
-/**
- * Coordinates priority-promoted refresh flights independently of graph-cache
- * mechanics. A caller may reuse a flight at its own or a higher priority; a
- * higher-priority caller starts a separate flight. Monotonic scan tokens then
- * fence both stale publication and stale failure handling.
- */
-class RefreshCoordinator<T> {
-  private readonly flights = new Map<StoreWorkPriority, RefreshFlight<T>>();
-  private nextScanSequence = 0;
-  private latestPublishedScanSequence = 0;
-
-  run(
-    priority: StoreWorkPriority,
-    start: (flight: RefreshFlight<T>) => Promise<T>,
-  ): Promise<T> {
-    const reusable = this.bestReusableFlight(priority);
-    if (reusable) return reusable.task;
-
-    // Register the flight before its work starts so even a re-entrant caller
-    // sees a complete single-flight view.
-    let resolveTask!: (value: T) => void;
-    let rejectTask!: (reason?: unknown) => void;
-    const task = new Promise<T>((resolve, reject) => {
-      resolveTask = resolve;
-      rejectTask = reject;
-    });
-    const flight: RefreshFlight<T> = { priority, task, lastScanSequence: 0 };
-    this.flights.set(priority, flight);
-    void (async () => {
-      try {
-        resolveTask(await start(flight));
-      } catch (error: unknown) {
-        rejectTask(error);
-      } finally {
-        if (this.flights.get(priority) === flight) this.flights.delete(priority);
-      }
-    })();
-    return task;
-  }
-
-  beginScan(flight: RefreshFlight<T>): RefreshScan {
-    const scan = { sequence: ++this.nextScanSequence };
-    flight.lastScanSequence = scan.sequence;
-    return scan;
-  }
-
-  tryPublish(scan: RefreshScan): boolean {
-    if (scan.sequence < this.latestPublishedScanSequence) return false;
-    this.latestPublishedScanSequence = scan.sequence;
-    return true;
-  }
-
-  shouldApplyFailureBackoff(flight: RefreshFlight<T>): boolean {
-    return flight.lastScanSequence >= this.latestPublishedScanSequence;
-  }
-
-  private bestReusableFlight(priority: StoreWorkPriority): RefreshFlight<T> | undefined {
-    const requestedRank = storeWorkPriorityRank(priority);
-    let best: RefreshFlight<T> | undefined;
-    for (const candidate of this.flights.values()) {
-      const candidateRank = storeWorkPriorityRank(candidate.priority);
-      if (candidateRank > requestedRank) continue;
-      if (!best || candidateRank < storeWorkPriorityRank(best.priority)) best = candidate;
-    }
-    return best;
-  }
-}
 
 /**
  * Write-through named-graph index for stores whose `listGraphs()` implementation
@@ -261,9 +138,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
    */
   private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !isAtomicGraphReplaceStagingGraph(graph));
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -283,66 +162,74 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
-    if (!this.enabled) {
+    return runLogicalStoreMutation(this.inner, 'insert', options, async options => {
+      if (!this.enabled) {
+        await this.inner.insert(quads, options);
+        return;
+      }
       await this.inner.insert(quads, options);
-      return;
-    }
-    await this.inner.insert(quads, options);
-    const touched = namedGraphsFromQuads(quads);
-    if (touched.length === 0) return;
-    this.bumpMutation();
-    this.addGraphs(touched, 'insert');
+      const touched = namedGraphsFromQuads(quads);
+      if (touched.length === 0) return;
+      this.bumpMutation();
+      this.addGraphs(touched, 'insert');
+    });
   }
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
-    if (!this.enabled) {
+    return runLogicalStoreMutation(this.inner, 'delete', options, async options => {
+      if (!this.enabled) {
+        await this.inner.delete(quads, options);
+        return;
+      }
       await this.inner.delete(quads, options);
-      return;
-    }
-    await this.inner.delete(quads, options);
-    const touched = namedGraphsFromQuads(quads);
-    if (touched.length === 0) return;
-    this.bumpMutation();
-    await this.maintainTouchedGraphs(touched, 'delete', options);
+      const touched = namedGraphsFromQuads(quads);
+      if (touched.length === 0) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs(touched, 'delete', options);
+    });
   }
 
   async deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
-    if (!this.enabled) {
-      return this.inner.deleteByPattern(pattern, options);
-    }
-    const removed = await this.inner.deleteByPattern(pattern, options);
-    if (removed <= 0) return removed;
-    const graph = pattern.graph;
-    if (graph) {
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
-    } else {
-      // No target graph → can't know which graphs emptied; defer to a single
-      // lazy rebuild on the next read instead of a full scan now.
-      this.scheduleFullRefresh('deleteByPattern');
-    }
-    return removed;
+    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+      if (!this.enabled) {
+        return this.inner.deleteByPattern(pattern, options);
+      }
+      const removed = await this.inner.deleteByPattern(pattern, options);
+      if (removed <= 0) return removed;
+      const graph = pattern.graph;
+      if (graph) {
+        this.bumpMutation();
+        await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+      } else {
+        // No target graph → can't know which graphs emptied; defer to a single
+        // lazy rebuild on the next read instead of a full scan now.
+        this.scheduleFullRefresh('deleteByPattern');
+      }
+      return removed;
+    });
   }
 
   async deleteByPatternWithoutCount(
     pattern: Partial<Quad>,
     options?: QueryOptions,
   ): Promise<void> {
-    if (!this.enabled) {
+    return runLogicalStoreMutation(this.inner, 'deleteByPattern', options, async options => {
+      if (!this.enabled) {
+        await deleteByPatternWithoutCount(this.inner, pattern, options);
+        return;
+      }
       await deleteByPatternWithoutCount(this.inner, pattern, options);
-      return;
-    }
-    await deleteByPatternWithoutCount(this.inner, pattern, options);
-    const graph = pattern.graph;
-    if (graph) {
-      this.bumpMutation();
-      await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
-    } else {
-      // Without an exact count, conservatively invalidate even when the
-      // pattern may have matched no rows. This preserves graph membership
-      // correctness without reintroducing count-before/count-after scans.
-      this.scheduleFullRefresh('deleteByPattern');
-    }
+      const graph = pattern.graph;
+      if (graph) {
+        this.bumpMutation();
+        await this.maintainTouchedGraphs([graph], 'deleteByPattern', options);
+      } else {
+        // Without an exact count, conservatively invalidate even when the
+        // pattern may have matched no rows. This preserves graph membership
+        // correctness without reintroducing count-before/count-after scans.
+        this.scheduleFullRefresh('deleteByPattern');
+      }
+    });
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -362,39 +249,42 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    if (typeof this.inner.update !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
-    }
-    if (!this.enabled) {
-      await this.inner.update(sparql, options);
-      return;
-    }
-    await this.inner.update(sparql, options);
-    // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
-    // drop named graphs the index must learn about. When the caller declares the
-    // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
-    // URIs), maintain the index INCREMENTALLY — a bounded per-graph `hasGraph`
-    // (which correctly handles an ASK-guarded INSERT that matched zero rows) —
-    // instead of marking the whole index dirty. That keeps the index warm so
-    // graph enumeration stays O(1) rather than forcing a full store scan on the
-    // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
-    // full rebuild.
-    if (options?.touchedGraphs) {
-      // Normalize the caller-supplied hint once at the boundary (filter falsy +
-      // de-dupe), matching the `namedGraphsFromQuads` pattern — keeps the incremental
-      // path predictable and avoids repeated `hasGraph` calls on duplicates.
-      const touched = normalizeGraphUris(options.touchedGraphs);
-      if (touched.length > 0) {
-        // Strip the update-only `touchedGraphs` hint before the maintenance READS
-        // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
-        // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
-        const readOptions = queryOptionsFromUpdateOptions(options);
-        this.bumpMutation();
-        await this.maintainTouchedGraphs(touched, 'update', readOptions);
+    return runLogicalStoreMutation(this.inner, 'update', options, async scoped => {
+      const scopedUpdateOptions: UpdateOptions = { ...options, ...scoped };
+      if (typeof this.inner.update !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('update', 'GraphSetIndexStore');
+      }
+      if (!this.enabled) {
+        await this.inner.update(sparql, scopedUpdateOptions);
         return;
       }
-    }
-    this.scheduleFullRefresh('update');
+      await this.inner.update(sparql, scopedUpdateOptions);
+      // A server-side SPARQL UPDATE (e.g. the RS heal's INSERT…WHERE) can create or
+      // drop named graphs the index must learn about. When the caller declares the
+      // touched graphs (#1549: RS-heal + agents-meta prune write statically-known
+      // URIs), maintain the index INCREMENTALLY — a bounded per-graph `hasGraph`
+      // (which correctly handles an ASK-guarded INSERT that matched zero rows) —
+      // instead of marking the whole index dirty. That keeps the index warm so
+      // graph enumeration stays O(1) rather than forcing a full store scan on the
+      // next read. Only opaque updates (no `touchedGraphs`) fall back to the lazy
+      // full rebuild.
+      if (scopedUpdateOptions?.touchedGraphs) {
+        // Normalize the caller-supplied hint once at the boundary (filter falsy +
+        // de-dupe), matching the `namedGraphsFromQuads` pattern — keeps the incremental
+        // path predictable and avoids repeated `hasGraph` calls on duplicates.
+        const touched = normalizeGraphUris(scopedUpdateOptions.touchedGraphs);
+        if (touched.length > 0) {
+          // Strip the update-only `touchedGraphs` hint before the maintenance READS
+          // (`hasGraph`) — it is meaningless on the read path and must not be smuggled
+          // through the `QueryOptions` boundary into read-path wrappers/diagnostics.
+          const readOptions = queryOptionsFromUpdateOptions(scopedUpdateOptions);
+          this.bumpMutation();
+          await this.maintainTouchedGraphs(touched, 'update', readOptions);
+          return;
+        }
+      }
+      this.scheduleFullRefresh('update');
+    });
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
@@ -420,13 +310,15 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    if (!this.enabled) {
+    return runLogicalStoreMutation(this.inner, 'dropGraph', options, async options => {
+      if (!this.enabled) {
+        await this.inner.dropGraph(graphUri, options);
+        return;
+      }
       await this.inner.dropGraph(graphUri, options);
-      return;
-    }
-    await this.inner.dropGraph(graphUri, options);
-    this.bumpMutation();
-    this.removeGraphs([graphUri], 'dropGraph');
+      this.bumpMutation();
+      this.removeGraphs([graphUri], 'dropGraph');
+    });
   }
 
   async replaceGraph(
@@ -434,31 +326,27 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (typeof this.inner.replaceGraph !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
-    }
-    if (!this.enabled) {
-      await this.inner.replaceGraph(graphUri, quads, options);
-      return;
-    }
-    try {
-      await this.inner.replaceGraph(graphUri, quads, options);
-    } catch (error) {
-      // The replaceGraph contract allows a rejected call to have committed the
-      // complete new graph (or dropped the old one). Serving the cached graph
-      // set would then hide a committed KA graph from enumeration, so mark the
-      // index dirty for a lazy rebuild — unless this was a clean preflight
-      // capability refusal or an admission rejection explicitly bound to this
-      // replace dispatch. A nested post-commit probe can also be rejected by
-      // the scheduler, but its storeOperation does not match replaceGraph and
-      // therefore still dirties this index.
-      if (!isStoreOperationNotStarted(error, 'replaceGraph')) {
-        this.scheduleFullRefresh('replaceGraph');
+    return runLogicalStoreMutation(this.inner, 'replaceGraph', options, async options => {
+      if (typeof this.inner.replaceGraph !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'GraphSetIndexStore');
       }
-      throw error;
-    }
-    this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'replaceGraph', options);
+      return this.runReplacementMutation('replaceGraph', [graphUri], options,
+        () => this.inner.replaceGraph!(graphUri, quads, options));
+    });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    return runLogicalStoreMutation(this.inner, 'replaceAssetGroup', options, async options => {
+      if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+      try { await this.inner.replaceAssetGroup(assets, options); }
+      catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceAssetGroup')) this.scheduleFullRefresh('replaceAssetGroup');
+        throw error;
+      }
+      if (!this.enabled) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))], 'replaceAssetGroup', options);
+    });
   }
 
   async replaceGraphAndSubject(
@@ -469,34 +357,36 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     metadataQuads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (typeof this.inner.replaceGraphAndSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
+    return runLogicalStoreMutation(this.inner, 'replaceGraphAndSubject', options, async options => {
+      if (typeof this.inner.replaceGraphAndSubject !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError(
+          'replaceGraphAndSubject',
+          'GraphSetIndexStore',
+        );
+      }
+      try {
+        await this.inner.replaceGraphAndSubject(
+          graphUri,
+          graphQuads,
+          metaGraphUri,
+          metadataSubject,
+          metadataQuads,
+          options,
+        );
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
+          this.scheduleFullRefresh('replaceGraphAndSubject');
+        }
+        throw error;
+      }
+      if (!this.enabled) return;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs(
+        [graphUri, metaGraphUri],
         'replaceGraphAndSubject',
-        'GraphSetIndexStore',
-      );
-    }
-    try {
-      await this.inner.replaceGraphAndSubject(
-        graphUri,
-        graphQuads,
-        metaGraphUri,
-        metadataSubject,
-        metadataQuads,
         options,
       );
-    } catch (error) {
-      if (!isStoreOperationNotStarted(error, 'replaceGraphAndSubject')) {
-        this.scheduleFullRefresh('replaceGraphAndSubject');
-      }
-      throw error;
-    }
-    if (!this.enabled) return;
-    this.bumpMutation();
-    await this.maintainTouchedGraphs(
-      [graphUri, metaGraphUri],
-      'replaceGraphAndSubject',
-      options,
-    );
+    });
   }
 
   async replaceSubject(
@@ -505,123 +395,135 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void> {
-    if (typeof this.inner.replaceSubject !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
-    }
+    return runLogicalStoreMutation(this.inner, 'replaceSubject', options, async options => {
+      if (typeof this.inner.replaceSubject !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubject', 'GraphSetIndexStore');
+      }
+      return this.runReplacementMutation('replaceSubject', [graphUri], options,
+        () => this.inner.replaceSubject!(graphUri, subject, quads, options));
+    });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    return runLogicalStoreMutation(this.inner, 'replaceSubjectAndInsert', options, async options => {
+      if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'GraphSetIndexStore');
+      }
+      return this.runReplacementMutation('replaceSubjectAndInsert', [graphUri], options,
+        () => this.inner.replaceSubjectAndInsert!(graphUri, subject, replacementQuads, insertQuads, options));
+    });
+  }
+
+  private async runReplacementMutation(
+    operation: 'replaceGraph' | 'replaceSubject' | 'replaceSubjectAndInsert',
+    touchedGraphs: string[],
+    options: QueryOptions | undefined,
+    execute: () => Promise<void>,
+  ): Promise<void> {
     if (!this.enabled) {
-      await this.inner.replaceSubject(graphUri, subject, quads, options);
+      await execute();
       return;
     }
     try {
-      await this.inner.replaceSubject(graphUri, subject, quads, options);
+      await execute();
     } catch (error) {
-      // A committed subject replace could add/remove the graph's first/last row;
-      // dirty the index so a lazy rebuild re-derives membership — unless this was
-      // a clean preflight capability refusal, where nothing was mutated.
-      if (!isStoreOperationNotStarted(error, 'replaceSubject')) {
-        this.scheduleFullRefresh('replaceSubject');
+      // A rejected replacement may have committed. Only a not-started outcome
+      // bound to this dispatch is clean; a nested post-commit probe is not.
+      if (!isStoreOperationNotStarted(error, operation)) {
+        this.scheduleFullRefresh(operation);
       }
       throw error;
     }
     this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+    await this.maintainTouchedGraphs(touchedGraphs, operation, options);
   }
 
   async rfc64AuthorCommitCasV1(
     input: Rfc64AuthorCommitCasInputV1,
     options?: QueryOptions,
   ): Promise<Rfc64AuthorCommitCasResultV1> {
-    if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
-      throw new UnsupportedTripleStoreCapabilityError(
-        'rfc64AuthorCommitCasV1',
-        'GraphSetIndexStore',
-      );
-    }
-    const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
-    if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
-    // Prepare every fallible index-maintenance input before dispatch. Once the
-    // inner capability reports `committed`, only best-effort observation and
-    // index maintenance may remain; malformed caller input must never create a
-    // committed backend mutation that this decorator cannot account for.
-    const touchedGraphs = [...manifest.touchedGraphs];
-    let result: Rfc64AuthorCommitCasResultV1;
-    try {
-      result = await this.inner.rfc64AuthorCommitCasV1(source, options);
-    } catch (error) {
-      if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
-        this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
+    return runLogicalStoreMutation(this.inner, 'rfc64AuthorCommitCasV1', options, async options => {
+      if (typeof this.inner.rfc64AuthorCommitCasV1 !== 'function') {
+        throw new UnsupportedTripleStoreCapabilityError(
+          'rfc64AuthorCommitCasV1',
+          'GraphSetIndexStore',
+        );
       }
-      throw error;
-    }
-    if (result === 'conflict') return result;
-    this.bumpMutation();
-    await this.maintainTouchedGraphs(
-      touchedGraphs,
-      'rfc64AuthorCommitCasV1',
-      options,
-    );
-    return result;
+      const manifest = normalizeRfc64AuthorCommitCasV1(input);
+      const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
+      if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
+      // Prepare every fallible index-maintenance input before dispatch. Once the
+      // inner capability reports `committed`, only best-effort observation and
+      // index maintenance may remain; malformed caller input must never create a
+      // committed backend mutation that this decorator cannot account for.
+      const touchedGraphs = [...manifest.touchedGraphs];
+      let result: Rfc64AuthorCommitCasResultV1;
+      try {
+        result = await this.inner.rfc64AuthorCommitCasV1(source, options);
+      } catch (error) {
+        if (!isStoreOperationNotStarted(error, 'rfc64AuthorCommitCasV1')) {
+          this.scheduleFullRefresh('rfc64AuthorCommitCasV1');
+        }
+        throw error;
+      }
+      if (result === 'conflict') return result;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs(
+        touchedGraphs,
+        'rfc64AuthorCommitCasV1',
+        options,
+      );
+      return result;
+    });
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
-    if (!this.enabled) {
-      return (await this.inner.listGraphs(options)).filter(
-        (graph) => !isAtomicGraphReplaceStagingGraph(graph),
-      );
-    }
-    return [...await this.loadCurrentSortedGraphs(options)];
+    return [...(await this.readGraphInventory(undefined, options)).graphs];
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
-    if (!this.enabled) {
-      return createSortedUniqueStringCatalog(
-        (await this.inner.listGraphs(options)).filter(
-          (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
-        ),
-      );
-    }
-    return this.loadCurrentSortedGraphs(options);
+    if (this.enabled) return (await this.loadCurrentSortedGraphs(options)).graphs;
+    return createSortedUniqueStringCatalog((await this.readGraphInventory(undefined, options)).graphs.filter(Boolean));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
+    return [...(await this.readGraphInventory(prefix, options)).graphs];
+  }
+
+  async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
     if (!this.enabled) {
-      if (this.inner.listGraphsByPrefix) {
-        return (await this.inner.listGraphsByPrefix(prefix, options)).filter(
-          (graph) => !isAtomicGraphReplaceStagingGraph(graph),
-        );
-      }
-      return (await this.inner.listGraphs(options)).filter(
-        (graph) => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph),
-      );
+      const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
+      assertGraphCatalogWithinResponseLimit(inventory.graphs, options?.maxResponseBytes);
+      return filterGraphInventory(inventory, graph => !isAtomicGraphReplaceStagingGraph(graph));
     }
-    const graphs = await this.loadCurrentSortedGraphs(options);
-    // startsWith() is defined over UTF-16 code units, while this catalog is
-    // ordered by Unicode code point. A prefix ending in a high surrogate can
-    // split an astral code point, so its matches are not guaranteed to be one
-    // contiguous code-point-sorted range. Preserve exact JS prefix semantics
-    // with the rare O(n) fallback; all scalar-aligned prefixes keep O(log n+k).
-    if (endsWithHighSurrogate(prefix)) {
-      return graphs.filter((graph) => graph.startsWith(prefix));
-    }
+    const inventory = await this.loadCurrentSortedGraphs(options);
+    if (prefix === undefined) return inventory;
+    // A split surrogate need not occupy a contiguous code-point-sorted range.
+    if (endsWithHighSurrogate(prefix)) return filterGraphInventory(inventory, graph => graph.startsWith(prefix));
     const matches: string[] = [];
-    for (let index = codePointLowerBound(graphs, prefix); index < graphs.length; index += 1) {
-      const graph = graphs[index]!;
+    for (let index = codePointLowerBound(inventory.graphs, prefix); index < inventory.graphs.length; index += 1) {
+      const graph = inventory.graphs[index]!;
       if (!graph.startsWith(prefix)) break;
       matches.push(graph);
     }
-    return matches;
+    return { graphs: matches, materializedBytes: inventory.materializedBytes };
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
-    if (!this.enabled) {
-      return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-    }
-    const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-    if (removed <= 0) return removed;
-    this.bumpMutation();
-    await this.maintainTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options);
-    return removed;
+    return runLogicalStoreMutation(this.inner, 'deleteBySubjectPrefix', options, async options => {
+      if (!this.enabled) {
+        return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
+      }
+      const removed = await this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
+      if (removed <= 0) return removed;
+      this.bumpMutation();
+      await this.maintainTouchedGraphs([graphUri], 'deleteBySubjectPrefix', options);
+      return removed;
+    });
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
@@ -667,7 +569,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       try {
         return await this.refreshIndexLoop(source, options, flight);
       } catch (error: unknown) {
-        if (source !== 'revalidate') throw error;
+        if (source !== 'revalidate' || isStoreResponseTooLargeError(error)) throw error;
         // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
         // correctness paths even if another refresh published in parallel.
         if (options?.signal?.aborted || !this.catalog.initialized || this.pendingFullRefresh) {
@@ -686,7 +588,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         this.noteRevalidationFailure();
         return this.catalog.current!;
       }
-    });
+    }, graphCatalogFlightKey(options));
   }
 
   private async refreshIndexLoop(
@@ -712,8 +614,10 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
+      const discovered = await readGraphInventory(this.inner, scanOptions);
+      assertGraphCatalogWithinResponseLimit(discovered.graphs, scanOptions?.maxResponseBytes);
       const next = new Set(
-        (await this.inner.listGraphs(scanOptions)).filter(
+        discovered.graphs.filter(
           (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
         ),
       );
@@ -737,7 +641,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
           graphCount: next.size,
         });
       }
-      this.replaceGraphSet(next, sourceForScan);
+      this.replaceGraphSet(next, sourceForScan, discovered.materializedBytes);
       return this.catalog.current!;
     }
   }
@@ -792,8 +696,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.resetRevalidationSchedule();
   }
 
-  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
-    const { added, removed } = this.catalog.replace(next);
+  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource, materializedBytes?: number): void {
+    const { added, removed } = this.catalog.replace(next, materializedBytes);
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {
@@ -849,14 +753,14 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     }
   }
 
-  private async loadCurrentSortedGraphs(options?: QueryOptions): Promise<SortedGraphCatalog> {
+  private async loadCurrentSortedGraphs(options?: QueryOptions): Promise<MeasuredGraphInventory<SortedGraphCatalog>> {
     for (;;) {
       const members = await this.ensureGraphSet(options);
       // No async boundary exists between the identity check and projection.
       // If another continuation invalidated/replaced the catalog after
       // ensureGraphSet() resolved, retry instead of manufacturing an empty or
       // stale enumeration from unrelated mutable state.
-      const sorted = this.catalog.sortedFor(members);
+      const sorted = this.catalog.measuredFor(members, options?.maxResponseBytes);
       if (sorted) return sorted;
       throwIfAborted(options?.signal);
     }
@@ -887,31 +791,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // Observability hooks must not make already-committed store writes fail.
     }
   }
-}
-
-function namedGraphsFromQuads(quads: Quad[]): string[] {
-  return [...new Set(quads.map((quad) => quad.graph).filter(Boolean))];
-}
-
-function endsWithHighSurrogate(value: string): boolean {
-  if (value.length === 0) return false;
-  const lastCodeUnit = value.charCodeAt(value.length - 1);
-  return lastCodeUnit >= 0xD800 && lastCodeUnit <= 0xDBFF;
-}
-
-/** Filter falsy entries and de-duplicate a caller-supplied graph-URI hint list. */
-function normalizeGraphUris(graphs: readonly string[]): string[] {
-  return [...new Set(graphs.filter(Boolean))];
-}
-
-/**
- * Drop the update-only `touchedGraphs` hint, yielding the read-path `QueryOptions`
- * (source/priority/signal) to forward to index-maintenance reads (`hasGraph`) — so
- * the update-only field never crosses into a read call via structural assignability.
- */
-function queryOptionsFromUpdateOptions(options: UpdateOptions): QueryOptions {
-  const { touchedGraphs: _touchedGraphs, ...readOptions } = options;
-  return readOptions;
 }
 
 function positiveFiniteMs(value: number | undefined, fallback: number): number {

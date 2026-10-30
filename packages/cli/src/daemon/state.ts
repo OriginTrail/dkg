@@ -34,7 +34,7 @@ export interface LastUpdateCheck {
 
 /**
  * Verbose sync-progress tracing. Opt-in via either env var. Referenced
- * from the catch-up job handler (routes/context-graph.ts) plus the
+ * from the catch-up job (context-graph-catchup-job.ts) plus the
  * daemon bootstrap path, so it lives here next to `daemonState` rather
  * than inside any one module.
  */

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { SYSTEM_CONTEXT_GRAPHS, MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 import {
@@ -38,9 +38,12 @@ function requesterFixture(index: number): {
   assertionGraph: string;
 } {
   const ual = `did:dkg:otp:2043/0x1111111111111111111111111111111111111111/${index}`;
-  const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/${index}`;
+  const assertionGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(ual, index));
   const metadata = [
     ['contentScopeVersion', '"2"'],
+    ['publicTripleCount', '"1"'],
+    ['privateTripleCount', '"0"'],
     ['kaUal', ual],
     ['assertionVersion', `"${index}"`],
     ['assertionGraph', assertionGraph],
@@ -561,7 +564,7 @@ describe('durable sync deadline budget', () => {
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
   });
 
-  it('awaits an in-flight graph-scoped commit but aborts before the next asset and checkpoint', async () => {
+  it('checkpoints only the settled commit after cancellation and never starts the next asset', async () => {
     const controller = new AbortController();
     let releaseFirstCommit!: () => void;
     let firstCommitStarted!: () => void;
@@ -591,11 +594,21 @@ describe('durable sync deadline budget', () => {
 
     expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({
-      insertedTriples: 9,
+      insertedTriples: requesterFixture(1).metadata.length + 2, // Data plus the receiver-owned batch ID.
       complete: false,
       failedPhases: 1,
     });
-    expect(setCheckpoint).not.toHaveBeenCalled();
+    // A write that physically settled remains resumable, even when cancellation
+    // arrived during it. Only that authenticated prefix may be checkpointed.
+    expect(setCheckpoint).toHaveBeenCalledExactlyOnceWith(`${contextGraphId}:data`, {
+      offset: 1,
+      responderSessionOffset: 1,
+      binding: {
+        manifestDigest: expect.stringMatching(/^sha256:/),
+        manifestPrefixDigest: expect.stringMatching(/^sha256:/),
+        terminal: false,
+      },
+    });
   });
 
   it('does not advance checkpoints when cancellation occurs during snapshot reconciliation', async () => {

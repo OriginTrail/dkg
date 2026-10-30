@@ -108,7 +108,7 @@ describe('legacy context-graph readiness provenance migration', () => {
     expect(f.getProvenance()).toBeNull();
   });
 
-  it('normalizes a legacy PROJECT_SYNCED payload without private-only evidence', () => {
+  it('normalizes a legacy PROJECT_SYNCED payload without private-only or held-content evidence', () => {
     expect(parseProjectSyncedReadinessPayload({
       contextGraphId: 'legacy-project-synced',
       dataSynced: 2,
@@ -117,8 +117,25 @@ describe('legacy context-graph readiness provenance migration', () => {
       contextGraphId: 'legacy-project-synced',
       dataSynced: 2,
       sharedMemorySynced: 0,
+      sharedMemoryHeldAssets: 0,
+      durableHeldAssets: 0,
       verifiedPrivateOnlyResponses: 0,
     });
+  });
+
+  it('rejects a PROJECT_SYNCED payload whose held-content count is not a number', () => {
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'malformed-held', dataSynced: 0, sharedMemorySynced: 0, sharedMemoryHeldAssets: '3',
+    })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'malformed-held', dataSynced: 0, sharedMemorySynced: 0, sharedMemoryHeldAssets: Number.NaN,
+    })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'malformed-held', dataSynced: 0, sharedMemorySynced: 0, durableHeldAssets: '6',
+    })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'held-generation', dataSynced: 0, sharedMemorySynced: 0, durableHeldAssets: 6,
+    })).toMatchObject({ durableHeldAssets: 6 });
   });
 
   it('resets an unproven private row once and preserves newly verified provenance on restart', async () => {
@@ -297,6 +314,63 @@ describe('PROJECT_SYNCED readiness provenance', () => {
       durableVerified: true,
       sharedMemoryVerified: true,
     });
+  });
+
+  it('persists shared-memory proof from a round that found nothing missing (#3296)', async () => {
+    // The inline catch-up of a node that already held every asset its peer
+    // served: nothing was inserted, and the plane is proven all the same.
+    const f = fixture({ confirmedMeta: true });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      sharedMemoryHeldAssets: 3,
+    })).resolves.toBe(true);
+
+    expect(f.getProvenance()).toMatchObject({
+      version: 1,
+      durableVerified: false,
+      sharedMemoryVerified: true,
+    });
+  });
+
+  it('persists durable proof from a round that found its whole generation stored and current', async () => {
+    // A restarted node whose durable recovery found every asset of the
+    // generation already stored here: nothing was inserted, and the plane is proven.
+    const f = fixture({ confirmedMeta: true });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      durableHeldAssets: 6,
+    })).resolves.toBe(true);
+
+    expect(f.getProvenance()).toMatchObject({
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: false,
+    });
+  });
+
+  it('does not take a held-content count that is zero or not finite as proof', async () => {
+    for (const sharedMemoryHeldAssets of [0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const f = fixture({ confirmedMeta: true });
+      await expect(persistProjectSyncedReadiness({
+        agent: f.agent,
+        store: f.store,
+        contextGraphId: f.contextGraphId,
+        dataSynced: 0,
+        sharedMemorySynced: 0,
+        sharedMemoryHeldAssets,
+      })).resolves.toBe(false);
+      expect(f.getProvenance()).toBeNull();
+    }
   });
 
   it('persists verified private-only durable proof across restart migration', async () => {

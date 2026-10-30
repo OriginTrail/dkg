@@ -1,3 +1,5 @@
+import { handlePrivatePlacementRetry } from './private-placement-retry.js';
+import { handleContextGraphMembers } from './context-graph-members.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -59,8 +61,8 @@ import {
   enrichEvmError,
   MockChainAdapter,
   resolveRpcUrls,
-  getRpcFailoverStats,
 } from '@origintrail-official/dkg-chain';
+import { chainRpcStatusFields } from './status-chain-rpc.js';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 import {
   DKGAgent,
@@ -73,7 +75,7 @@ import { projectStoreStatus } from '../store-status.js';
 import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
 import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { probeExternalStore } from '../store-reachability.js';
-import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -130,7 +132,6 @@ import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/regis
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
-import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
@@ -561,6 +562,7 @@ export function summarizeContextGraphIdentityStatus(
 }
 
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
+  if (await handlePrivatePlacementRetry(ctx)) return;
   const {
     req,
     res,
@@ -569,7 +571,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     publisherState,
     config,
     startedAt,
-    dashDb,
     opWallets,
     network,
     tracker,
@@ -593,10 +594,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     path,
     requestAgentAddress,
   } = ctx;
-  // Registering adapters, creating the node identity, backfilling the store and
-  // shutting down act on the whole node, so they require a node-level admin
-  // token. Resolved lazily, inside those routes only, so read-only routes never
-  // depend on the caller's authentication.
+  // Node-wide operations resolve operator authentication lazily, inside those routes only.
   const nodeAuth = () => actorFromRequestContext(ctx).authentication;
 
   if ((req.method === "GET" || req.method === "HEAD") && path === "/.well-known/skill.md") {
@@ -663,17 +661,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // GET /api/context-graph/{id}/members — local SQL membership cache.
   // Kept in this early route group so the cache has a lightweight read path.
-  const contextGraphMembersMatch = path.match(/^\/api\/context-graph\/([^/]+)\/members$/);
-  if (req.method === "GET" && contextGraphMembersMatch) {
-    const contextGraphId = decodeURIComponent(contextGraphMembersMatch[1]);
-    if (!validateContextGraphId(contextGraphId).valid) {
-      return jsonResponse(res, 400, { error: 'Invalid context graph id' });
-    }
-    return jsonResponse(res, 200, {
-      contextGraphId,
-      members: dashDb.listContextGraphMembers(contextGraphId),
-    });
-  }
+  if (await handleContextGraphMembers(ctx)) return;
 
   // GET/HEAD /api/status — HEAD claims early so liveness probes never reach plugins.
   if ((req.method === "GET" || req.method === "HEAD") && path === "/api/status") {
@@ -694,10 +682,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const networkId = network?.networkId ?? await computeNetworkId(network?.genesisId);
     const chainConf = resolveChainConfig(config, network);
     const publicChainSummary = buildPublicChainSummary(chainConf);
-    // Process-wide multi-RPC write-failover counters (host-only; no URLs).
-    // Reflects WRITE failover/exhaustion across all chain adapters in this
-    // daemon process; read-path failover is internal to the FallbackProvider.
-    const rpcFailoverStats = getRpcFailoverStats();
     const blockExplorerUrl =
       config.blockExplorerUrl ?? deriveBlockExplorerUrl(chainConf?.chainId);
     const identityId = agent.publisher.getIdentityId();
@@ -778,6 +762,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
+      runtime: canAdministerNode(actorFromRequestContext(ctx).authentication) ? { nodeVersion: process.version } : null,
       commit: buildInfo.commit !== "uncommitted"
         ? buildInfo.commit
         : (getCurrentCommitFull() ?? nodeCommit ?? null),
@@ -877,23 +862,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
       autoUpdate: resolveAutoUpdateEnabled(config),
-      chain: publicChainSummary
-        ? {
-            ...publicChainSummary,
-            // Multi-RPC failover observability (counts only — no RPC URLs).
-            rpcFailovers: rpcFailoverStats.failovers,
-            rpcExhaustions: rpcFailoverStats.exhaustions,
-            rpcFailoversByClass: rpcFailoverStats.byErrorClass,
-            // Per-provider distribution (host-only). `served` is the success side
-            // — which endpoint is actually carrying the traffic — and `failed` is
-            // the failover side. Together they show provider health at a glance.
-            rpcServedByEndpointHost: rpcFailoverStats.servedByEndpointHost,
-            rpcFailoversByEndpointHost: rpcFailoverStats.byEndpointHost,
-            // Endpoint-stickiness: times the client stuck to a backup after a
-            // failover (a rising count = a configured primary is degraded).
-            rpcPreferredEstablishments: rpcFailoverStats.preferredEstablishments,
-          }
-        : null,
+      // The static summary plus process-wide endpoint observability (see status-chain-rpc.ts).
+      chain: publicChainSummary ? { ...publicChainSummary, ...chainRpcStatusFields(routeRpcTransport) } : null,
       updateAvailable:
         daemonState.lastUpdateCheck.checkedAt > 0 ? !daemonState.lastUpdateCheck.upToDate : null,
       // True when this node pins an auto-update channel that has no acceptable

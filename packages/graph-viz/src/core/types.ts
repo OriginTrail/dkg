@@ -41,8 +41,15 @@ export interface PropertyAnnotation {
   datatype?: string;
 }
 
+export interface NodeDecorations {
+  imageUrl: string | null;
+  riskScore?: number;
+  isHighRisk?: boolean;
+  sizeMultiplier?: number;
+}
+
 /** A node in the visual graph (represents an RDF subject/object URI or blank node) */
-export interface GraphNode {
+export interface GraphNode extends NodeDecorations {
   /** URI or blank node ID — stable across updates */
   id: string;
   /** rdf:type values (full URIs) */
@@ -51,20 +58,12 @@ export interface GraphNode {
   label: string;
   /** Literal properties: predicate URI → values */
   properties: Map<string, RdfValue[]>;
-  /** Resolved image URL for avatar rendering (null if none found) */
-  imageUrl: string | null;
   /** Extracted metadata properties (provenance, timestamps, etc.) */
   metadata: Map<string, RdfValue[]>;
   /** Number of edges connected to this node (in + out) */
   degree: number;
   /** Whether this is a boundary node (has hidden neighbors in focus mode) */
   isBoundary: boolean;
-  /** Optional risk/threat score for visual emphasis (set by application code) */
-  riskScore?: number;
-  /** Whether this node is in the top-N risk tier (set by application code) */
-  isHighRisk?: boolean;
-  /** Optional size multiplier for featured/focal nodes (set by application code) */
-  sizeMultiplier?: number;
 
   /** Resolved provenance info (set by ProvenanceResolver) */
   provenance?: ProvenanceInfo;

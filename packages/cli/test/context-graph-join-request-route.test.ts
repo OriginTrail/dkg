@@ -240,6 +240,96 @@ describe('POST /api/context-graph/{id}/request-join', () => {
     });
   });
 
+  it('answers a held approval whose member list is pending instead of a transport failure (#3421)', async () => {
+    const contextGraphId = 'public-approved-pending-metadata';
+    const curatorPeerId = '12D3KooWPendingMetadataCurator';
+    const delegation = {
+      agentAddress: '0x6666666666666666666666666666666666666666',
+      scope: `join:test:${contextGraphId}`,
+      issuedAtMs: Date.now(),
+      delegateePeerId: '12D3KooWPendingMetadataJoiner',
+      signature: `0x${'55'.repeat(65)}`,
+    };
+    const forwardJoinRequest = vi.fn().mockResolvedValue({
+      delivered: 0,
+      errors: [],
+      alreadyMember: true,
+      approvedMetadataPending: true,
+    });
+    const agent = {
+      peerId: delegation.delegateePeerId,
+      isCuratorOf: vi.fn().mockResolvedValue(false),
+      ensureProfilePublished: vi.fn().mockResolvedValue(undefined),
+      forwardJoinRequest,
+      resolveAgentByToken: () => undefined,
+    };
+
+    server = await startRouteServer(agent);
+    const response = await fetch(routeUrl(server, contextGraphId), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegation, curatorPeerId }),
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      status: 'approved',
+      joinState: 'approved-metadata-pending',
+      delivered: 0,
+      alreadyMember: true,
+    });
+    expect(forwardJoinRequest).toHaveBeenCalledWith(
+      contextGraphId,
+      delegation,
+      undefined,
+      curatorPeerId,
+      { reRequest: undefined },
+    );
+  });
+
+  it('passes an explicit re-request on and refuses one that is not a boolean', async () => {
+    const contextGraphId = 'public-explicit-re-request';
+    const curatorPeerId = '12D3KooWReRequestCurator';
+    const delegation = {
+      agentAddress: '0x7777777777777777777777777777777777777777',
+      scope: `join:test:${contextGraphId}`,
+      issuedAtMs: Date.now(),
+      delegateePeerId: '12D3KooWReRequestJoiner',
+      signature: `0x${'66'.repeat(65)}`,
+    };
+    const forwardJoinRequest = vi.fn().mockResolvedValue({ delivered: 1, errors: [] });
+    const agent = {
+      peerId: delegation.delegateePeerId,
+      isCuratorOf: vi.fn().mockResolvedValue(false),
+      ensureProfilePublished: vi.fn().mockResolvedValue(undefined),
+      forwardJoinRequest,
+      resolveAgentByToken: () => undefined,
+    };
+    server = await startRouteServer(agent);
+    const post = (body: Record<string, unknown>) => fetch(routeUrl(server!, contextGraphId), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ delegation, curatorPeerId, ...body }),
+    });
+
+    const malformed = await post({ reRequest: 'yes' });
+    expect(malformed.status).toBe(400);
+    await expect(malformed.json()).resolves.toEqual({ error: '"reRequest" must be a boolean when supplied' });
+    expect(forwardJoinRequest).not.toHaveBeenCalled();
+
+    const explicit = await post({ reRequest: true });
+    expect(explicit.status).toBe(200);
+    await expect(explicit.json()).resolves.toMatchObject({ ok: true, status: 'pending', delivered: 1 });
+    expect(forwardJoinRequest).toHaveBeenCalledWith(
+      contextGraphId,
+      delegation,
+      undefined,
+      curatorPeerId,
+      { reRequest: true },
+    );
+  });
+
   it('fails closed and does not forward when the cold profile cannot publish', async () => {
     const contextGraphId = 'private-profile-unavailable';
     const ensureProfilePublished = vi.fn().mockRejectedValue(new Error('registry unavailable'));

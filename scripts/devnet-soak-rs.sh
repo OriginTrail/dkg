@@ -742,6 +742,9 @@ function isPlannedRestartPublishFailure(p) {
   const endMs = (Number(restartWindow.apiReadyTs ?? 0) + Number(restartWindow.graceSec ?? 0)) * 1000;
   if (!startMs || !endMs || tsMs < startMs || tsMs > endMs) return false;
   const output = String(p.out ?? "");
+  // A publish to the stopped node that started as the planned stop began is
+  // killed with it (SIGTERM, exit 143), whatever it had printed by then.
+  if (Number(p.rc) === 143 && Number(p.node) === Number(restartWindow.node)) return true;
   // The CLI can fail before its HTTP request when its own node is the one
   // deliberately stopped. Only excuse that diagnostic for the stopped node;
   // another node losing its API in this window remains a blocking failure.

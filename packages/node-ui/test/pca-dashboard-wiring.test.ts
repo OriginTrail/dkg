@@ -29,7 +29,7 @@ vi.mock('../src/ui/api.js', async (orig) => {
 });
 // Empty myCgs → no per-CG rows → no useMemoryEntities/useNodeEvents subtree.
 vi.mock('../src/ui/hooks/useMyContextGraphs.js', () => ({
-  useMyContextGraphs: () => ({ myCgs: [], identity: null, identityLoading: false, cgsLoading: false }),
+  useMyContextGraphs: () => ({ myCgs: [], identity: null, identityLoading: false, cgsLoading: false, inventoryLoading: false, inventoryError: null }),
 }));
 vi.mock('../src/ui/hooks/usePcaOverview.js', () => ({ usePcaOverview: () => pca.overview }));
 

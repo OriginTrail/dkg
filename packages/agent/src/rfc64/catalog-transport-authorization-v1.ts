@@ -44,6 +44,30 @@ export function normalizeRfc64CatalogTransportAuthorizerV1<
   };
 }
 
+const DENIED_BEFORE_WORK_V1 = new WeakSet<object>();
+const DENIED_AFTER_WORK_V1 = new WeakSet<object>();
+
+function deniedV1(phase: WeakSet<object>): (cause: unknown) => never {
+  return (cause) => {
+    if (typeof cause === 'object' && cause !== null) phase.add(cause);
+    throw cause;
+  };
+}
+
+/**
+ * Where {@link withCurrentRfc64CatalogPolicyV1} rejected with `error`: at its policy check before
+ * the work, so the work never ran; at its check after the work, so the work ran to its end; or
+ * `null`, when the rejection is not from one of its own two checks. A caller that reports on a
+ * denial needs this to say whether anything went out (GH#3081).
+ */
+export function rfc64CatalogPolicyDenialPhaseV1(
+  error: unknown,
+): 'before-work' | 'after-work' | null {
+  if (typeof error !== 'object' || error === null) return null;
+  if (DENIED_BEFORE_WORK_V1.has(error)) return 'before-work';
+  return DENIED_AFTER_WORK_V1.has(error) ? 'after-work' : null;
+}
+
 /**
  * Apply the same accepted-current policy before and after an awaited boundary.
  * This closes policy-generation and membership TOCTOU windows without making
@@ -54,9 +78,9 @@ export async function withCurrentRfc64CatalogPolicyV1<Value>(
   work: () => Value | Promise<Value>,
 ): Promise<Value> {
   return withRfc64CatalogAccessAuthorizationScopeV1(async () => {
-    await requireCurrentPolicy();
+    await requireCurrentPolicy().catch(deniedV1(DENIED_BEFORE_WORK_V1));
     const value = await work();
-    await requireCurrentPolicy();
+    await requireCurrentPolicy().catch(deniedV1(DENIED_AFTER_WORK_V1));
     return value;
   });
 }

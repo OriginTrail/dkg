@@ -1,3 +1,6 @@
+import { createPublisherLiveControl } from './publisher-live-control.js';
+import type { PublisherRuntime, PublisherRuntimeWallet } from './publisher-runtime-types.js';
+export type { PublisherRuntime, PublisherRuntimeWallet } from './publisher-runtime-types.js';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
@@ -12,7 +15,6 @@ import {
   type ChainAdapter,
   type ChainEventLogBindingSource,
   type OnChainPublishResult,
-  type RpcUsageWindow,
 } from '@origintrail-official/dkg-chain';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -48,6 +50,7 @@ import {
   type V10ACKProviderParams,
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
+  type StorageAckCopyCleanupWriter,
 } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -96,30 +99,6 @@ export function createPublisherWalletChain(
       chainEventLogBindingSource,
     }))
     : new NoChainAdapter();
-}
-
-export interface PublisherRuntime {
-  readonly runner: AsyncLiftRunner;
-  readonly publisher: AsyncLiftPublisher;
-  readonly walletIds: string[];
-  readonly wallets: readonly PublisherRuntimeWallet[];
-  readonly stop: () => Promise<void>;
-  /** RpcUsageDrainable: merged window across every per-wallet chain adapter. */
-  readonly drainRpcUsage: () => RpcUsageWindow;
-  /**
-   * GH#2270 follow-up (🔴 3822987482) — can THIS runtime settle a held job signed by this
-   * wallet, for this operation kind? The daemon's ADMISSION instance is a separate, deliberately
-   * resolver-less publisher (it runs no scheduler), so asking it whether an automatic exit exists
-   * always answered "no" — every pending-chain-proof rejection claimed there was no automatic
-   * recovery even on a node where recovery was configured and running. Admission now asks the
-   * live runtime through this probe instead of inferring from its own wiring.
-   */
-  readonly canSettleHeldJob: (walletId: string, operationKind: 'create' | 'update' | undefined) => boolean;
-}
-
-export interface PublisherRuntimeWallet {
-  readonly address: string;
-  readonly identityId: bigint;
 }
 
 export type AsyncPublisherUnavailableReason =
@@ -212,7 +191,7 @@ export interface PublisherInspector {
    * knobs, so its `autoRetryEligible` could contradict the lane that actually runs. The
    * detailed retry counts carry no such dependency (the manual path ignores the kill-switch).
    */
-  readonly publisher: AsyncLiftPublisher & AsyncLiftDetailedRetrier;
+  readonly publisher: AsyncLiftPublisher & AsyncLiftDetailedRetrier & Pick<VmPublisherControl, 'listPage'>;
   readonly stop: () => Promise<void>;
 }
 
@@ -257,6 +236,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   startupSignal?: AbortSignal;
 }): Promise<PublisherRuntime | null> {
   if (!isPublisherRuntimeEnabled(args.config.publisher)) {
@@ -300,6 +280,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
       publicSnapshotStore: args.publicSnapshotStore,
+      storageAckCopyCleanup: args.storageAckCopyCleanup,
       startPaused: resolvePublisherStartPaused(process.env.DKG_PUBLISHER_START_PAUSED),
       startupSignal: args.startupSignal,
     });
@@ -417,6 +398,7 @@ interface PublisherRuntimeBaseArgs {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   closeStoreOnStop: boolean;
   // #1829 — daemon-only append-only journal writes (OFF for standalone `dkg publisher run`).
   journalWrites?: boolean;
@@ -476,11 +458,9 @@ export async function createPublisherRuntime(args: {
   });
 }
 
-export async function createPublisherInspector(args: {
-  dataDir: string;
-  config: DkgConfig;
-}): Promise<PublisherInspector> {
-  const store = await createPublisherStore(args.dataDir, args.config);
+/** `readOnly`: an embedded Oxigraph store is opened read-only and its file is never written (#3551). */
+export async function createPublisherInspector(args: { dataDir: string; config: DkgConfig; readOnly?: boolean }): Promise<PublisherInspector> {
+  const store = await createPublisherStore(args.dataDir, args.config, args.readOnly === true);
   return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config, { store }));
 }
 
@@ -590,6 +570,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   startPaused?: boolean;
   startupSignal?: AbortSignal;
 }): Promise<PublisherRuntime> {
@@ -606,6 +587,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
+    storageAckCopyCleanup: args.storageAckCopyCleanup,
     publicSnapshotStore: args.publicSnapshotStore
       ?? createPublicSnapshotStore(args.dataDir, args.config, { store: args.store }),
     closeStoreOnStop: false,
@@ -677,6 +659,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
           publisherNodeIdentityId: identityId,
           publisherPrivateKey: wallet.privateKey,
           publicSnapshotStore: args.publicSnapshotStore,
+          storageAckCopyCleanupWriter: args.storageAckCopyCleanup,
         }),
       });
     }
@@ -684,28 +667,20 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     const publishers = new Map<string, DKGPublisher>(
       wallets.map((wallet) => [wallet.address, wallet.publisher]),
     );
-    // GH#2270 PR-3 r2 — the recovery factories take adapters, not publishers. Built here, from the
-    // wallets, where `chain` is a public field rather than something to assert through.
+    // Recovery factories use the adapters owned by these wallet runtimes.
     const chainAdapters = chainAdaptersForWallets(wallets);
     const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
-    // GH#2270 follow-up (🟡 3823952723) — ONE closure, used by both the runtime's own publisher and
-    // the runtime handle the daemon's admission instance asks. These two answers are required to be
-    // identical; computing them twice is precisely the drift this bridge exists to prevent, so they
-    // share function identity rather than a copied body.
+    // Runtime and daemon admission share one recovery-capability closure.
     const canSettleHeldJob = createRuntimeRecoveryCapability(chainAdapters);
 
     const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
       publishers,
       args.knowledgeAssetVmPublishHandler,
     );
-    // PR #2300 r2 (🟡 3809616683) — no shared verifier instance: the `recovered` verdict CARRIES
-    // its canonical update evidence to the finalizer, so a recognized update is verified once per
-    // recovery by construction, with no cache and no temporal coupling between the factories.
+    // Recovered verdicts carry canonical evidence so the finalizer never repeats verification.
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
       chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
-      // Receipt waiting is detached only when this runtime has the independent chain-proof lane
-      // that can move the resulting tx-bearing `broadcast` record. Direct library consumers retain
-      // the historical blocking `processNext()` contract by default.
+      // Detach only with independent chain proof; library processNext() remains blocking by default.
       detachReceiptReconciliation: hasChainRecovery,
       // r20 (🔴 3815617109) — `hasChainRecovery` is `.some(...)`, so on a node mixing a capable
       // adapter with a legacy one the resolvers are installed for the whole node. The honesty
@@ -769,15 +744,14 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       walletIds: validWalletIds,
       // The boundary-resolved scheduling options land here INTACT — no per-field relay to forget.
       ...args.runnerOptions,
-      // Operator-only maintenance seam. Recovery still reconciles signed transactions, but wallet
-      // loops cannot claim released jobs while a closed run is being removed from the queue.
-      startPaused: args.startPaused ?? false,
       hasIncludedRecoveryResolver: hasChainRecovery,
     });
 
+    const control = await createPublisherLiveControl(runner.claimControl, validWalletIds, args.dataDir, args.startPaused);
     startup.assertActive();
     return {
       runner,
+      control,
       publisher: asyncPublisher,
       walletIds: validWalletIds,
       wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
@@ -789,6 +763,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       canSettleHeldJob,
       stop: async () => {
         try {
+          await control.close();
           await runner.stop();
         } finally {
           // Wallet adapters borrow the agent's binding but own their own Hub
@@ -1303,11 +1278,13 @@ function mapCanonicalFinalizationReceiptToKnowledgeAssetVmRecovery(
 }
 
 
-async function createPublisherStore(dataDir: string, config: DkgConfig): Promise<TripleStore> {
+async function createPublisherStore(dataDir: string, config: DkgConfig, readOnly = false): Promise<TripleStore> {
   if (config.store) {
     const storeConfig = config.store as any;
     return await createTripleStore({
       ...storeConfig,
+      // Only the embedded Oxigraph adapters write a store file back; an external store is a server the inspector only queries.
+      ...(readOnly && isLocalOxigraphStoreConfig(storeConfig) ? { options: { ...storeConfig.options, readOnly } } : {}),
       // OT-RFC-59 §5.3: the daemon-down CLI publisher is a SECOND writer against
       // the same store. It MUST NOT maintain the change log — a second in-memory
       // seq allocator would fork the log (commit order ≠ seq order across
@@ -1324,7 +1301,7 @@ async function createPublisherStore(dataDir: string, config: DkgConfig): Promise
 
   return await createTripleStore({
     backend: 'oxigraph-worker',
-    options: { path: join(dataDir, 'store.nq') },
+    options: { path: join(dataDir, 'store.nq'), readOnly },
     largeLiteralStorage: defaultLargeLiteralStorage(dataDir, config),
   });
 }

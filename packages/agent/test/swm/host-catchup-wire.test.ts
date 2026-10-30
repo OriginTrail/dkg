@@ -5,11 +5,15 @@ import {
   encodeSwmHostCatchupResponse,
   decodeSwmHostCatchupRequest,
   decodeSwmHostCatchupResponse,
+  normalizeCatchupMaxEntries,
+  DEFAULT_MAX_ENTRIES,
+  MAX_MAX_ENTRIES,
   SWM_HOST_CATCHUP_WIRE_VERSION,
 } from '../../src/swm/host-catchup-wire.js';
 import {
   computeCatchupRequestDigest,
   mintSignedCatchupRequest,
+  verifySignedCatchupRequest,
 } from '../../src/swm/host-catchup-sign.js';
 
 const SIG_FILLER = '0x' + 'aa'.repeat(65); // shape-valid 65-byte hex (won't verify, but encode/decode only)
@@ -196,3 +200,53 @@ describe('SwmHostCatchup wire (PR #610 round-2 Codex follow-ups)', () => {
     });
   });
 });
+
+describe('SwmHostCatchup page size: the requester signs the value it sends', () => {
+  /** Sign a request for `maxEntries`, send it, and verify it as the host does after decoding. */
+  async function verifiedAfterTheWire(maxEntries: number) {
+    const wallet = ethers.Wallet.createRandom();
+    const signed = await mintSignedCatchupRequest({
+      contextGraphId: 'curator/cg-1',
+      sinceSeqno: 0,
+      maxEntries,
+      maxBytes: 64 * 1024,
+      sign: async (digest) => wallet.signMessage(digest),
+    });
+    const received = decodeSwmHostCatchupRequest(encodeSwmHostCatchupRequest({
+      version: SWM_HOST_CATCHUP_WIRE_VERSION,
+      contextGraphId: 'curator/cg-1',
+      sinceSeqno: 0,
+      maxEntries,
+      maxBytes: 64 * 1024,
+      requesterEoa: signed.requesterEoa,
+      issuedAtMs: signed.issuedAtMs,
+      nonce: signed.nonce,
+      sig: signed.sig,
+    }));
+    return { received, verdict: verifySignedCatchupRequest(received as Parameters<typeof verifySignedCatchupRequest>[0], signed.issuedAtMs) };
+  }
+
+  it('normalizes to the default, the wire range and whole entries', () => {
+    expect(normalizeCatchupMaxEntries(undefined)).toBe(DEFAULT_MAX_ENTRIES);
+    expect(normalizeCatchupMaxEntries(MAX_MAX_ENTRIES)).toBe(MAX_MAX_ENTRIES);
+    expect(normalizeCatchupMaxEntries(MAX_MAX_ENTRIES * 2)).toBe(MAX_MAX_ENTRIES);
+    expect(normalizeCatchupMaxEntries(2.9)).toBe(2);
+    expect(normalizeCatchupMaxEntries(0)).toBe(1);
+    expect(normalizeCatchupMaxEntries(Number.NaN)).toBe(1);
+  });
+
+  it('a request signed for more than the wire carries does not verify at the host', async () => {
+    const { received, verdict } = await verifiedAfterTheWire(MAX_MAX_ENTRIES * 2);
+    expect(received.maxEntries).toBe(MAX_MAX_ENTRIES);
+    expect(verdict.ok).toBe(false);
+  });
+
+  it('the same request signed for the normalized page verifies, at the limit and above it', async () => {
+    for (const asked of [MAX_MAX_ENTRIES, MAX_MAX_ENTRIES * 2]) {
+      const { received, verdict } = await verifiedAfterTheWire(normalizeCatchupMaxEntries(asked));
+      expect(received.maxEntries).toBe(MAX_MAX_ENTRIES);
+      expect(verdict.ok, `asked for ${asked}`).toBe(true);
+    }
+  });
+});
+

@@ -9,7 +9,8 @@
  * fetch, one graph at a time.
  *
  * A pass that could not start its work at all, because the source it had to
- * ask did not answer, waits here too (see {@link VmReconcileLocalAdmissionWait.defer}).
+ * ask did not answer, waits here too, and so does one that met a chain read
+ * the node's own RPC admission refused (see {@link VmReconcileLocalAdmissionWait.defer}).
  *
  * It owns no sync lease and no VM worker. A nudge re-enters the ordinary
  * bounded dispatcher, and the periodic sweep still visits a waiting graph.
@@ -33,7 +34,10 @@ export interface LocalAdmissionWaitOptions {
 }
 
 interface Waiter extends LocalAdmissionWaitOptions {
-  /** Parked by `defer`: its last pass ended as a failed one. */
+  /**
+   * Parked by `defer`. It waits for a read to be answered or sent, not for
+   * sync admission, and a failed pass of it left the dispatcher's live hold.
+   */
   deferred: boolean;
   onAbort: () => void;
 }
@@ -97,13 +101,16 @@ export class VmReconcileLocalAdmissionWait {
   /**
    * A graph that just used the node's sync admission and has more to fetch
    * goes behind the graphs already waiting for it. Returns false, and parks
-   * nothing, when no other graph is waiting.
+   * nothing, when no other graph is waiting for sync admission. A graph
+   * parked by `defer` waits for a read instead: it is nudged on its own delay
+   * whatever this graph does, and a fetching graph that stood behind every
+   * one of those would get one slice per round of their attempts.
    */
   yieldTurn(key: string, options: LocalAdmissionWaitOptions): boolean {
     if (this.closed || options.signal?.aborted || !options.isCurrent()) return false;
     let othersWaiting = false;
-    for (const waiting of this.waiters.keys()) {
-      if (waiting !== key) { othersWaiting = true; break; }
+    for (const [waiting, waiter] of this.waiters) {
+      if (waiting !== key && !waiter.deferred) { othersWaiting = true; break; }
     }
     if (!othersWaiting) return false;
     const parked = this.park(key, options, 'back');
@@ -113,9 +120,11 @@ export class VmReconcileLocalAdmissionWait {
 
   /**
    * A pass ended before its work started: the source it had to ask gave no
-   * answer. Nothing here can read when it will, so the graph goes behind the
-   * others and no waiter is nudged for one delay. A graph that keeps getting
-   * no answer then costs one short pass per delay, in turn with the rest.
+   * answer. Or a chain read of the pass was not sent, because the node's own
+   * RPC admission refused it. Nothing here can read when either will change,
+   * so the graph goes behind the others and no waiter is nudged for one delay.
+   * A graph that keeps getting no answer then costs one short pass per delay,
+   * in turn with the rest.
    * `canAdmit` is the same readiness contract as for a refused fetch: the
    * graph is not asked again while its fetch could not start anyway.
    *
