@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { computePublishACKDigest, computeUpdateACKDigest, encodeStorageACK } from '@origintrail-official/dkg-core';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { ACKRoundDiagnostics } from '../src/ack-diagnostics.js';
 
 const contract = '0x000000000000000000000000000000000000c10a';
 const root = new Uint8Array(32).fill(7);
@@ -12,11 +13,12 @@ const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve()
 async function fixture(operation: 'publish' | 'update', options: {
   ignoresAbort?: boolean; verify?: ACKCollectorDeps['verifyIdentity'];
   detailedVerify?: ACKCollectorDeps['verifyIdentityDetailed'];
+  declineLast?: boolean; sleep?: ACKCollectorDeps['sleep'];
 } = {}) {
   const releases = new Map<string, () => void>();
   const logs: string[] = [];
   const signals = new Map<string, AbortSignal | undefined>();
-  let active = 0;
+  let active = 0, sends = 0;
   const verify = options.verify ?? vi.fn(async () => true);
   const digest = operation === 'publish'
     ? computePublishACKDigest(31337n, contract, 42n, root, 1n, 100n, 1n, 0n, 2n)
@@ -28,21 +30,25 @@ async function fixture(operation: 'publish' | 'update', options: {
   }));
   const collector = new ACKCollector({
     gossipPublish: async () => {}, getConnectedCorePeers: () => peers, verifyIdentity: verify,
-    verifyIdentityDetailed: options.detailedVerify, log: message => logs.push(message),
+    verifyIdentityDetailed: options.detailedVerify, log: message => logs.push(message), sleep: options.sleep,
     sendP2P: async (peer, _protocol, _data, opts?: { signal?: AbortSignal }) => {
-      signals.set(peer, opts?.signal);
+      signals.set(peer, opts?.signal); sends++;
       active++;
       try {
         await new Promise<void>((resolve, reject) => {
           releases.set(peer, resolve);
           if (!options.ignoresAbort) opts?.signal?.addEventListener('abort', () => reject(opts.signal!.reason), { once: true });
         });
+        if (options.declineLast && peer === peers[3]) return encodeStorageACK({
+          merkleRoot: new Uint8Array(), coreNodeSignatureR: new Uint8Array(), coreNodeSignatureVS: new Uint8Array(),
+          contextGraphId: '42', nodeIdentityId: 0, declineCode: 'NO_DATA_IN_SWM',
+        });
         return responses[peers.indexOf(peer)];
       } finally { active--; }
     },
   });
   return {
-    releases, signals, verify, logs, active: () => active,
+    releases, signals, verify, logs, active: () => active, sendCount: () => sends,
     collect: (signal?: AbortSignal) => operation === 'publish'
       ? collector.collect({ merkleRoot: root, contextGraphId: 42n, contextGraphIdStr: '42',
           publisherPeerId: 'publisher', publicByteSize: 100n, isPrivate: false, kaCount: 1,
@@ -55,7 +61,7 @@ async function fixture(operation: 'publish' | 'update', options: {
   };
 }
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe.each(['publish', 'update'] as const)('%s ACK round retirement', operation => {
   it('aborts losing sends after three independently valid ACKs and clears its deadline', async () => {
     const f = await fixture(operation);
@@ -170,6 +176,29 @@ describe.each(['publish', 'update'] as const)('%s ACK round retirement', operati
     expect((await run).acks).toHaveLength(3); await flush();
     expect(signal?.aborted).toBe(true);
     expect(active).toBe(0);
+  });
+
+  it.each(['default', 'custom'] as const)('retires a pending %s retry sleep when other peers reach quorum', async kind => {
+    let release!: () => void;
+    const custom = new Promise<void>(resolve => { release = resolve; });
+    const measured = vi.spyOn(ACKRoundDiagnostics.prototype, 'measureBackoff');
+    const f = await fixture(operation, { declineLast: true, ...(kind === 'custom' ? { sleep: () => custom } : {}) });
+    const run = f.collect(); await flush();
+    try {
+      f.releases.get(peers[3])!(); await flush();
+      expect(measured).toHaveBeenCalledTimes(1);
+      let retired = false;
+      void (measured.mock.results[0].value as Promise<unknown>).then(() => { retired = true; }, () => { retired = true; });
+      expect(retired).toBe(false);
+      for (const peer of peers.slice(0, 3)) f.releases.get(peer)!();
+      expect((await run).acks).toHaveLength(3);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(retired).toBe(true);
+      expect(f.sendCount()).toBe(4);
+    } finally {
+      // The custom dependency itself may ignore cancellation; only the round-owned wait retires.
+      release(); for (const resolve of f.releases.values()) resolve(); await run;
+    }
   });
 
 });
