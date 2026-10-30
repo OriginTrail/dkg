@@ -49,10 +49,9 @@ const ordinaryWithRecoveryState: PublicSwmTargetV1 = {
 void selectedWithoutGuard;
 void ordinaryWithRecoveryState;
 
-// Public lifecycle targets always carry a transfer session, regardless of algorithm.
-// @ts-expect-error The ordinary lifecycle path cannot bypass retained metadata.
+// The released ordinary shape reads its metadata directly.
 const ordinaryWithoutMetadata: PublicSwmTargetV1 = { ...base, mode: { kind: 'ordinary' } };
-// @ts-expect-error Selected lifecycle execution also requires the independent transfer capability.
+// @ts-expect-error Selected execution requires the independent transfer capability.
 const selectedWithoutMetadata: PublicSwmTargetV1 = { ...base, mode: { kind: 'selected-recovery', recoveryGuard } };
 void ordinaryWithoutMetadata;
 void selectedWithoutMetadata;

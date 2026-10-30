@@ -653,6 +653,60 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     }
   });
 
+  it('a resumed transfer leaves a head alone that the store advanced after an earlier round resolved its ref', async () => {
+    const publicCg = 'ordinary-resume-after-local-update';
+    const fixtures = swmFixtures(publicCg);
+    const ual = (asset: number) => `did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/${asset}`;
+    const shares = [0, 1].map(asset => fixtures.share({
+      ual: ual(asset), version: 1, operationId: `op-${asset}`, marker: `marker-${asset}`,
+    }));
+    const meta = shares.flatMap(share => share.meta);
+    const payloadByRef = new Map<string, typeof meta>();
+    let firstRef: string | undefined;
+    let servesEveryRef = false;
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: { meta, payloadByRef },
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      metaPages: [{ quads: meta, resumedFromOffset: 0, nextOffset: meta.length, completed: true, timedOut: false }],
+      // The walk stops at a ref the peer cannot serve, so the first round resolves only the ref it asks for first.
+      snapshotAnswer: (ref) => {
+        firstRef ??= ref;
+        if (!servesEveryRef && ref !== firstRef) return [];
+        const payload = shares.find(share => share.digest === ref)?.payload ?? [];
+        payloadByRef.set(ref, payload);
+        return payload;
+      },
+    });
+    const plan = { targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }] };
+    try {
+      const first = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+      expect(first.swmCoverage).toMatchObject({ snapshotsResolved: 1, snapshotsTotal: 2 });
+
+      // A later share moves the resolved asset past the manifest the transfer kept.
+      const resolved = shares.findIndex(share => share.digest === firstRef);
+      const { headSubject, meta: resolvedMeta } = shares[resolved];
+      const newer = fixtures.share({ ual: ual(resolved), version: 2, operationId: 'op-newer', marker: 'marker-newer' });
+      const { store } = harness.agent;
+      await store.delete(resolvedMeta.filter(row => row.subject === headSubject));
+      await store.insert(newer.meta);
+
+      servesEveryRef = true;
+      const resumed = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(resumed.swmCoverage).toMatchObject({ snapshotsResolved: 2, snapshotsTotal: 2 });
+
+      const other = shares[1 - resolved];
+      expect(await store.countQuads(other.assertionGraph)).toBe(other.payload.length);
+      const head = await store.query(`SELECT ?version ?operation WHERE { GRAPH <${newer.meta[0].graph}> {
+        <${headSubject}> <http://dkg.io/ontology/assertionVersion> ?version ;
+          <http://dkg.io/ontology/shareOperationId> ?operation } }`);
+      expect(head).toMatchObject({ bindings: [{ version: expect.stringContaining('"2"'), operation: '"op-newer"' }] });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('shares one row of retention across ordinary and selected owners until the ordinary prefix is released', async () => {
     const publicCg = 'ordinary-selected-global-retention';
     const manifest = snapshotManifest(publicCg, 1);

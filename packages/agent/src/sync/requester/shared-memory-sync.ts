@@ -751,14 +751,14 @@ async function runSharedMemorySyncCore(
         reconcileFinalizedTwin,
         heldAsRetiredFinalizedTwin,
       );
-      // A selected continuation skips blob and assertion-graph work for its
-      // verified prefix, but the final bulk metadata append is owned by this
-      // round. Reapply the exact suppression decisions captured with each
-      // resolved ref so a later successful suffix cannot resurrect metadata
-      // that the prefix deliberately withheld.
+      // A continuation skips blob and assertion-graph work for its verified
+      // prefix. An earlier round committed or withheld each resolved ref's rows
+      // under its asset's lock, and the store may have moved on since, so this
+      // round's bulk append must not write them again.
       if (snapshotWalk) {
         for (const resolvedRef of snapshotWalk.resolvedRefsSnapshot()) {
           snapshotCommit.suppressRows(snapshotWalk.suppressedMetadataRows(resolvedRef));
+          for (const descriptor of snapshotDescriptorsByRef.get(resolvedRef) ?? []) snapshotCommit.recordSettledEarlier(descriptor.metadataQuads);
         }
       }
       let contextGraphEnsured = false;

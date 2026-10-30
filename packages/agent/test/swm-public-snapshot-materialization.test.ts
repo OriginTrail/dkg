@@ -821,8 +821,10 @@ it.each([false, true])('leases a reused public ref until metadata commits (colle
       resolvedRefsSnapshot: () => [fx.digest],
       suppressedMetadataRows: () => [], markResolved: () => {},
     };
+    // The reused asset's own rows stay out of this round's append; this row is what the round still commits.
+    const appended: Quad = { subject: 'urn:round:appended', predicate: 'http://schema.org/name', object: '"appended"', graph: fx.meta[0].graph };
     const h = harness({ snapshotStore: snapshots, preseedSnapshot: false,
-      metadataFetcher: { fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+      metadataFetcher: { fetch: async () => ({ result: page([...fx.meta, appended]), continuationYielded: false }),
         release: () => {}, snapshotWalk: () => walk },
       onStoreInsert: async () => { inserted.resolve(); await commit.promise; referenced = true; },
     });

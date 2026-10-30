@@ -129,6 +129,7 @@ export interface GraphScopedSwmRecoveryDescriptor {
 }
 
 const PROV_WAS_ATTRIBUTED_TO = P.wasAttributedTo;
+export { SWM_HEAD_SUFFIX };
 export const SWM_SHARE_OPERATION_ID = P.shareOperationId;
 export interface HeadOperationReference {
   readonly shareOperationId: string;

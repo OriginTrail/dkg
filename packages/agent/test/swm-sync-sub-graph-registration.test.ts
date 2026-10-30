@@ -14,8 +14,6 @@
  * The scenario runs the real public sync lane (`SwmTargetExecutorV1`) over a
  * real store; the responder is a stand-in that serves one sub-graph share.
  */
-import type { SharedMemoryMetadataFetcher } from '../src/sync/requester/shared-memory-sync.js';
-import { directSwmMetadataSession } from './_helpers/swm-metadata-session.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
@@ -111,7 +109,6 @@ function snapshotStoreFor(shared: Share): WorkspacePublicSnapshotStore {
 
 interface Member {
   readonly executor: () => SwmTargetExecutorV1;
-  readonly metadataFetcher: SharedMemoryMetadataFetcher;
   readonly logInfo: ReturnType<typeof vi.fn>;
   readonly logWarn: ReturnType<typeof vi.fn>;
   readonly invalidateListContextGraphsCache: ReturnType<typeof vi.fn>;
@@ -176,23 +173,18 @@ function member(
     logDebug: () => undefined,
   };
   const sessions = new SwmTargetExecutorSessionFactoryV1(ports);
-  return {
-    executor: () => sessions.createSession(),
-    metadataFetcher: directSwmMetadataSession(ports.fetchSyncPages),
-    logInfo, logWarn, invalidateListContextGraphsCache,
-  };
+  return { executor: () => sessions.createSession(), logInfo, logWarn, invalidateListContextGraphsCache };
 }
 
 /** One sync of the graph's shared memory from the owner, the root left to the catalog as on a catalog-owned graph. */
-function syncFromOwner(m: Member, includeRootScope = false) {
-  return m.executor().syncPublicTarget({
+function syncFromOwner(executor: SwmTargetExecutorV1, includeRootScope = false) {
+  return executor.syncPublicTarget({
     ctx: createOperationContext('sync'),
     remotePeerId: OWNER,
     contextGraphId: CG,
     remainingContextGraphs: 1,
     includeRootScope,
     mode: { kind: 'ordinary' },
-    metadataFetcher: m.metadataFetcher,
   });
 }
 
@@ -231,7 +223,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     const shared = share();
     const m = member(store, shared);
 
-    const summary = await syncFromOwner(m);
+    const summary = await syncFromOwner(m.executor());
 
     expect(summary.failedPhases).toBe(0);
     expect(await store.countQuads(shared.assertionGraph)).toBe(shared.payload.length);
@@ -258,7 +250,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     ]);
     expect(await partitionsHolding(store, 'urn:member-one:note')).toEqual([]);
 
-    await syncFromOwner(member(store, shared));
+    await syncFromOwner(member(store, shared).executor());
 
     expect((await registrationRows(store)).map(([p]) => p)).toContain(`${DKG}createdBy`);
     expect(await partitionsHolding(store, 'urn:member-one:note')).toEqual([shared.assertionGraph]);
@@ -269,8 +261,8 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     const shared = share();
     const m = member(store, shared);
 
-    await Promise.all([syncFromOwner(m), syncFromOwner(m)]);
-    await syncFromOwner(m);
+    await Promise.all([syncFromOwner(m.executor()), syncFromOwner(m.executor())]);
+    await syncFromOwner(m.executor());
 
     const createdAt = (await registrationRows(store)).filter(([p]) => p === `${DKG}createdAt`);
     expect(createdAt).toHaveLength(1);
@@ -289,7 +281,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     await store.insert(own);
     const m = member(store, shared, async () => [{ name: SUB, uri: SUB_GRAPH_URI }]);
 
-    await syncFromOwner(m);
+    await syncFromOwner(m.executor());
 
     expect(await store.countQuads(shared.assertionGraph)).toBe(shared.payload.length);
     expect((await registrationRows(store)).find(([p]) => p === `${DKG}createdBy`)?.[1])
@@ -310,7 +302,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     }]);
     const m = member(store, shared);
 
-    await syncFromOwner(m);
+    await syncFromOwner(m.executor());
 
     expect(await registrationRows(store)).toEqual([]);
     expect(m.logInfo).not.toHaveBeenCalledWith(expect.anything(), AUTO_REGISTERED);
@@ -320,7 +312,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     const store = newStore();
     const shared = share(null);
 
-    await syncFromOwner(member(store, shared), true);
+    await syncFromOwner(member(store, shared).executor(), true);
 
     expect(await store.countQuads(shared.assertionGraph)).toBe(shared.payload.length);
     const subGraphs = await store.query(`ASK { GRAPH <${META}> { ?s a <${DKG}SubGraph> } }`);
@@ -340,7 +332,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     });
     const m = member(store, shared);
 
-    const first = await syncFromOwner(m);
+    const first = await syncFromOwner(m.executor());
     refuseRegistration = false;
 
     expect(first.failedPhases).toBe(0);
@@ -351,7 +343,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
       `SWM sync stored shared memory of a sub-graph of "${CG}" it could not register: store refused the write`,
     );
 
-    await syncFromOwner(m);
+    await syncFromOwner(m.executor());
 
     expect((await registrationRows(store)).map(([p]) => p)).toContain(`${DKG}createdBy`);
     expect(m.logInfo).toHaveBeenCalledWith(expect.anything(), AUTO_REGISTERED);
@@ -392,7 +384,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     });
     const m = member(store, shared, undefined, retireFinalizedSwmTwin);
 
-    expect((await syncFromOwner(m)).failedPhases).toBe(0);
+    expect((await syncFromOwner(m.executor())).failedPhases).toBe(0);
     expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
     expect(await registrationRows(store)).toEqual([]);
     expect(await partitionsHolding(store, 'urn:member-one:note')).toEqual([]);
@@ -401,7 +393,7 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
     refuseRegistration = false;
 
     // A later round holds the twin and writes none of it, and its sub-graph is registered.
-    const later = await syncFromOwner(m);
+    const later = await syncFromOwner(m.executor());
     expect(later.alreadyHeldAssets).toBe(1);
     expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
     expect((await registrationRows(store)).map(([p]) => p)).toContain(`${DKG}createdBy`);

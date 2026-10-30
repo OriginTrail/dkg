@@ -18,7 +18,6 @@ import { createOperationContext, workspaceKnowledgeAssetOperationSnapshotGraph, 
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { canonicalGraphScopedSnapshotManifestQuads, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
-import { servedSwmMetadataSession } from './_helpers/swm-metadata-session.js';
 import { parseGraphScopedSwmRecoveryHeadResults } from '../src/sync/graph-scoped-swm-recovery.js';
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import { insertKeepingOnePublishedAt, planOperationPublishedAt } from '../src/sync/swm-operation-published-at.js';
@@ -144,7 +143,6 @@ async function catchUp(store: OxigraphStore, meta: readonly Quad[], shares: read
     contextGraphId: CG,
     remainingContextGraphs: 1,
     mode: { kind: 'ordinary' },
-    metadataFetcher: servedSwmMetadataSession(meta),
   });
 }
 

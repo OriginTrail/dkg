@@ -121,11 +121,19 @@ interface SelectedPublicSwmModeV1 {
   readonly metadataFetcher?: SharedMemoryMetadataFetcher;
 }
 
-/** Ordinary targets require a session; selected targets retain the released nested layout. */
+/**
+ * The agent's lifecycle always passes a retained session. An ordinary target
+ * without one reads its metadata directly, and selected targets keep the
+ * released nested layout.
+ */
 export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & (
   | {
     readonly metadataFetcher: SharedMemoryMetadataFetcher;
     readonly mode: Readonly<{ kind: 'ordinary' }> | Readonly<SelectedPublicSwmModeV1>;
+  }
+  | {
+    readonly metadataFetcher?: undefined;
+    readonly mode: Readonly<{ kind: 'ordinary' }>;
   }
   | {
     readonly metadataFetcher?: undefined;
@@ -269,10 +277,6 @@ export class SwmTargetExecutorV1 {
     input: PublicSwmTargetV1,
   ): Promise<SharedMemorySyncSummary> {
     const target = normalizeSharedMemoryFetcherContext(input);
-    const metadataFetcher = target.metadataFetcher;
-    if (!metadataFetcher) {
-      throw new TypeError('Public SWM targets require a metadata fetcher');
-    }
     const mode = target.mode.kind === 'selected-recovery'
       ? {
         kind: 'selected-recovery' as const,
@@ -304,7 +308,7 @@ export class SwmTargetExecutorV1 {
     };
     return runSharedMemorySync({
       mode,
-      metadataFetcher,
+      metadataFetcher: target.metadataFetcher,
       freshSnapshot: target.freshSnapshot,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
