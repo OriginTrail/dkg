@@ -42,6 +42,7 @@ import { createInterface } from 'node:readline';
 import { dirname } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { homedir } from 'node:os';
+import { AUTHORITY_CODE, askWithAuthorityRetry } from '../lib/qa/authority-retry.mjs';
 
 // -----------------------------------------------------------------------------
 // Config
@@ -99,6 +100,7 @@ async function apiCall(method, path, body, { timeoutMs = 120_000 } = {}) {
       const err = new Error(`HTTP ${res.status} ${method} ${path}: ${json.error ?? text.slice(0, 300)}`);
       err.status = res.status;
       err.body = json;
+      err.retryAfter = res.headers.get('retry-after');
       throw err;
     }
     return json;
@@ -295,10 +297,25 @@ async function publishOnePartition(partition, partitionIdx, attempt = 0) {
   // Sepolia + libp2p with 5 connected cores.
   await sleep(3000);
 
-  // 2. publish — SWM → VM. Returns kaId + txHash on success.
-  const publishRes = await apiCall('POST', `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
-    contextGraphId: CFG.cgId,
-  }, { timeoutMs: 180_000 });
+  // 2. publish — SWM → VM. Returns kaId + txHash on success. The route's
+  //    retryable authority 503 comes before anything is signed or sent, so the
+  //    same publish is sent again rather than under a fresh name below.
+  const publishAnswer = await askWithAuthorityRetry(async () => {
+    try {
+      return { status: 200, json: await apiCall('POST', `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`, {
+        contextGraphId: CFG.cgId,
+      }, { timeoutMs: 180_000 }) };
+    } catch (err) {
+      if (err.status === undefined) throw err;
+      return { status: err.status, json: err.body, retryAfter: err.retryAfter, err };
+    }
+  }, {
+    codes: [AUTHORITY_CODE],
+    sleep,
+    onRetry: ({ retry, delayMs }) => log(`[retry] partition=${partitionIdx} publish: authority unavailable, retry ${retry} in ${delayMs} ms`),
+  });
+  if (publishAnswer.err) throw publishAnswer.err;
+  const publishRes = publishAnswer.json;
 
   return {
     partitionIdx,
