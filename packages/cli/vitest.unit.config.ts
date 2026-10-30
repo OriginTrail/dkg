@@ -111,6 +111,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/knowledge-assets-publish-authority-route.test.ts',
           'test/promote-admission-route.test.ts',
           'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
