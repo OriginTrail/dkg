@@ -3373,9 +3373,9 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return false;
             }
@@ -3387,9 +3387,9 @@ export class DKGAgent extends DKGAgentBase {
       // distinctly from definitive key/stake rejections — pre-PR this
       // try/catch swallowed RPC errors as `false`, conflating them.
       verifyIdentityDetailed: typeof this.chain.verifyACKIdentityDetailed === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return { valid: false, reason: 'rpc-error' as const };
             }
@@ -3521,18 +3521,18 @@ export class DKGAgent extends DKGAgentBase {
         this.ackOperationContext(protocol),
       ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return false;
             }
           }
         : undefined,
       verifyIdentityDetailed: typeof this.chain.verifyACKIdentityDetailed === 'function'
-        ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
+        ? async (recoveredAddress: string, claimedIdentityId: bigint, options) => {
             try {
-              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId);
+              return await this.chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options);
             } catch {
               return { valid: false, reason: 'rpc-error' as const };
             }

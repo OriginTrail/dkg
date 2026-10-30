@@ -60,7 +60,7 @@ export interface ACKCollectorDeps {
    * generic "ACK rejected" line without a reason. New code should
    * prefer `verifyIdentityDetailed`.
    */
-  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+  verifyIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
   /**
    * Structured ACK signer pre-flight. When provided, the collector
    * uses this in preference to `verifyIdentity` and surfaces the
@@ -70,7 +70,7 @@ export interface ACKCollectorDeps {
    */
   verifyIdentityDetailed?: (
     recoveredAddress: string,
-    claimedIdentityId: bigint,
+    claimedIdentityId: bigint, options?: { signal?: AbortSignal },
   ) => Promise<ACKVerifyResult>;
   log?: (msg: string) => void;
   /**
@@ -949,7 +949,7 @@ export class ACKCollector {
               const verdict = await withSpan(
                 'publisher.ack_verify_identity',
                 async (span) => {
-                  const v = await this.deps.verifyIdentityDetailed!(recoveredAddress, identityId);
+                  const v = await this.deps.verifyIdentityDetailed!(recoveredAddress, identityId, { signal: lifetime.signal });
                   // A rejected identity is an expected negative, not a span
                   // error (status stays OK). withSpan only flips ERROR on throw.
                   span.setAttribute('dkg.verify_result', v.valid ? 'valid' : (v.reason ?? 'unknown'));
@@ -975,7 +975,7 @@ export class ACKCollector {
               const valid = await withSpan(
                 'publisher.ack_verify_identity',
                 async (span) => {
-                  const ok = await this.deps.verifyIdentity!(recoveredAddress, identityId);
+                  const ok = await this.deps.verifyIdentity!(recoveredAddress, identityId, { signal: lifetime.signal });
                   // Legacy boolean verifier surfaces no structured reason; an
                   // invalid result maps to the generic registration gate.
                   span.setAttribute('dkg.verify_result', ok ? 'valid' : 'key-not-registered');

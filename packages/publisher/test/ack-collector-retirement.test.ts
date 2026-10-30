@@ -11,8 +11,10 @@ const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve()
 
 async function fixture(operation: 'publish' | 'update', options: {
   ignoresAbort?: boolean; verify?: ACKCollectorDeps['verifyIdentity'];
+  detailedVerify?: ACKCollectorDeps['verifyIdentityDetailed'];
 } = {}) {
   const releases = new Map<string, () => void>();
+  const logs: string[] = [];
   const signals = new Map<string, AbortSignal | undefined>();
   let active = 0;
   const verify = options.verify ?? vi.fn(async () => true);
@@ -26,6 +28,7 @@ async function fixture(operation: 'publish' | 'update', options: {
   }));
   const collector = new ACKCollector({
     gossipPublish: async () => {}, getConnectedCorePeers: () => peers, verifyIdentity: verify,
+    verifyIdentityDetailed: options.detailedVerify, log: message => logs.push(message),
     sendP2P: async (peer, _protocol, _data, opts?: { signal?: AbortSignal }) => {
       signals.set(peer, opts?.signal);
       active++;
@@ -39,7 +42,7 @@ async function fixture(operation: 'publish' | 'update', options: {
     },
   });
   return {
-    releases, signals, verify, active: () => active,
+    releases, signals, verify, logs, active: () => active,
     collect: (signal?: AbortSignal) => operation === 'publish'
       ? collector.collect({ merkleRoot: root, contextGraphId: 42n, contextGraphIdStr: '42',
           publisherPeerId: 'publisher', publicByteSize: 100n, isPrivate: false, kaCount: 1,
@@ -122,22 +125,51 @@ describe.each(['publish', 'update'] as const)('%s ACK round retirement', operati
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('fences an identity read already in flight when quorum settles', async () => {
+  it.each(['legacy', 'detailed'] as const)('fences an in-flight %s identity result after quorum', async verifier => {
     let release!: () => void;
     const pending = new Promise<void>(resolve => { release = resolve; });
     const verify = vi.fn(async (_address: string, id: bigint) => {
       if (id === 4n) await pending;
       return true;
     });
-    const f = await fixture(operation, { verify });
+    const f = await fixture(operation, { verify,
+      ...(verifier === 'detailed' ? { detailedVerify: async (address, id) => ({ valid: await verify(address, id) }) } : {}),
+    });
     const run = f.collect(); await flush();
     f.releases.get(peers[3])!(); await flush();
     expect(verify).toHaveBeenCalledTimes(1);
     for (const peer of peers.slice(0, 3)) f.releases.get(peer)!();
     const result = await run;
+    const settledLogs = [...f.logs];
+    expect(settledLogs.filter(message => message.includes('Valid ACK from'))).toHaveLength(3);
     release(); await flush();
+    expect(f.logs).toEqual(settledLogs);
     expect(result.acks.map(a => a.nodeIdentityId)).toEqual([1n, 2n, 3n]);
     expect(f.active()).toBe(0);
+  });
+
+
+  it.each(['legacy', 'detailed'] as const)('cancels obsolete %s identity work through the round signal', async verifier => {
+    let active = 0;
+    let signal: AbortSignal | undefined;
+    const verify = vi.fn(async (_address: string, id: bigint, options?: { signal?: AbortSignal }) => {
+      if (id !== 4n) return true;
+      signal = options?.signal; active++;
+      try {
+        await new Promise<void>((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+        return true;
+      } finally { active--; }
+    });
+    const f = await fixture(operation, { verify,
+      ...(verifier === 'detailed' ? { detailedVerify: async (address, id, options) => ({ valid: await verify(address, id, options) }) } : {}),
+    });
+    const run = f.collect(); await flush();
+    f.releases.get(peers[3])!(); await flush();
+    expect(active).toBe(1);
+    for (const peer of peers.slice(0, 3)) f.releases.get(peer)!();
+    expect((await run).acks).toHaveLength(3); await flush();
+    expect(signal?.aborted).toBe(true);
+    expect(active).toBe(0);
   });
 
 });

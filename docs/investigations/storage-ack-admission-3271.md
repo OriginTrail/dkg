@@ -105,8 +105,10 @@ results cannot add ACKs, trigger further verification or change the settled
 round. Three valid unique identities are still required; concurrency, candidate
 selection, deadlines and retry budgets retain their existing values.
 
-Cancellation does not prove that an older remote handler stopped its store work,
-or cancel an identity RPC already started. The receiver and local self-ACK
+The same signal reaches identity verification through its existing chain-read
+options. Native cancellable reads stop; custom verifiers that ignore it retain
+their own physical lifetime. Cancellation does not prove that an older remote
+handler stopped its store work. The receiver and local self-ACK
 transport keep their existing physical-completion/drain ownership. A custom
 transport that ignores the optional signal may continue running, but its late
 reply is fenced. The real-P2P regression deliberately keeps one remote handler
