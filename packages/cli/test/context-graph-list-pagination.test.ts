@@ -3,7 +3,6 @@ import {
   buildContextGraphListPage,
   canonicalizeContextGraphRowsForPaging,
   CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
-  CONTEXT_GRAPH_LIST_MAX_LIMIT,
   CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
   handleContextGraphListRoute,
   parseContextGraphListQuery,
@@ -536,8 +535,15 @@ describe('bounded context-graph listing', () => {
   });
 
   it('avoids whole-registry serialization across repeated conditional requests', async () => {
-    const listContextGraphs = vi.fn(async () => rows(1_200));
-    const stringify = vi.spyOn(JSON, 'stringify');
+    const registry = rows(1_200);
+    const listContextGraphs = vi.fn(async () => registry);
+    const serialize = JSON.stringify;
+    let largestSerialization = 0;
+    const stringify = vi.spyOn(JSON, 'stringify').mockImplementation(((...args: Parameters<typeof serialize>) => {
+      const output = serialize(...args);
+      largestSerialization = Math.max(largestSerialization, Buffer.byteLength(output ?? ''));
+      return output;
+    }) as typeof serialize);
     const first = responseRecorder();
     await handleContextGraphListRoute({
       req: { headers: {} },
@@ -577,11 +583,10 @@ describe('bounded context-graph listing', () => {
       });
     }
 
-    const largeArraySerializations = stringify.mock.calls.filter(([value]) => (
-      Array.isArray(value) && value.length > CONTEXT_GRAPH_LIST_MAX_LIMIT
-    ));
     stringify.mockRestore();
-    expect(largeArraySerializations).toHaveLength(0);
+    // The whole registry cannot fit in one page's bound, in whatever shape it is serialized.
+    expect(Buffer.byteLength(serialize(registry))).toBeGreaterThan(CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES);
+    expect(largestSerialization).toBeLessThanOrEqual(CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES);
   });
 
   it('includes page construction in route timing and scopes exposed headers to this route', async () => {
