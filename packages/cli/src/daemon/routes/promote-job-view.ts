@@ -1,4 +1,4 @@
-import type { PromoteJob, PromoteJobState } from '@origintrail-official/dkg-publisher';
+import { jobFailureReason, type PromoteJob, type PromoteJobState } from '@origintrail-official/dkg-publisher';
 
 // ── Async-promote wire schema (RFC §3.2 + §3.3) ──────────────────────────────
 //
@@ -20,6 +20,11 @@ export interface PromoteJobErrorView {
   diagnosticCode?: string;
   /** Which authority prerequisite a retryable attempt waited for (a closed-set token). */
   authorityReason?: string;
+  /**
+   * A short reason (`jobFailureReason`): at most 512 characters, without transaction payloads, long
+   * hex or request details, any URL reduced to its host. A row stored before reasons were bounded is
+   * cut the same way here.
+   */
   message: string;
   retryable: boolean;
 }
@@ -70,7 +75,7 @@ export function promoteJobToView(job: PromoteJob): PromoteJobView {
   const lastError: PromoteJobErrorView | undefined = job.attempt.lastError
     ? {
         code: job.attempt.lastError.classification,
-        message: job.attempt.lastError.message,
+        message: jobFailureReason(job.attempt.lastError.message),
         retryable: job.attempt.lastError.retryable,
         ...(job.attempt.lastError.diagnosticCode ? { diagnosticCode: job.attempt.lastError.diagnosticCode } : {}),
         ...(job.attempt.lastError.authorityReason ? { authorityReason: job.attempt.lastError.authorityReason } : {}),

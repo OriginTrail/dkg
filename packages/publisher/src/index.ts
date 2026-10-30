@@ -354,6 +354,12 @@ export {
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
 } from './lift-job.js';
+export {
+  JOB_FAILURE_REASON_MAX_LENGTH,
+  jobFailureReason,
+  jobFailureText,
+  type JobFailureText,
+} from './job-failure-reason.js';
 // GH#2270 — publisher RUNTIME configuration (not lift-job domain model): the
 // ONE retry-tuning validation/defaults owner, consumed by the daemon config
 // boundary so ranges and defaults cannot drift cross-package.
