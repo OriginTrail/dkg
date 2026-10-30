@@ -44,7 +44,7 @@ export async function openFreshPublicCheckpointEdge(options: FreshCheckpointEdge
     || native.inventoryDigest !== snapshot.inventoryDigest || native.journal !== join(prepared.directory, 'native/store.jnl'))
     throw new Error('Invalid native checkpoint handoff');
   const lifetime = checkpointLifetime(options.signal, prepared.manifest.deadline);
-  let agent: import('./dkg-agent.js').DKGAgent | undefined;
+  let session: Awaited<ReturnType<typeof openCheckpointEdgeSession>> | undefined;
   try {
     if (await nativeCheckpointShaFile(runtime.jar) !== runtime.jarSha256
       || await nativeCheckpointShaFile(native.journal) !== native.journalSha256) throw new Error('Native checkpoint handoff hash mismatch');
@@ -71,11 +71,11 @@ export async function openFreshPublicCheckpointEdge(options: FreshCheckpointEdge
     await syncCheckpointDirectory(folder);
     assertCheckpointInventoryUnchanged(prepared.manifest.observation, prepared.manifest.freshObservation);
     const inventory = await CheckpointInventory.create(folder, prepared.manifest.freshObservation);
-    const session = await openCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory);
-    agent = session.agent;
-    return { agent, dataDir: config.dataDir, async complete() {
+    session = await openCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory);
+    const owned = session;
+    return { agent: owned.agent, dataDir: config.dataDir, close: owned.close, async complete() {
       try {
-        const result = await session.complete();
+        const result = await owned.complete();
         lifetime.signal.throwIfAborted();
         await writeCheckpointFile(join(folder, 'BOOTSTRAP-COMPLETE.json'), encodeSnapshotBootstrapRecord({ version: 1,
           chainId: snapshot.chainId, deploymentId: snapshot.deploymentId, contextGraphId: snapshot.contextGraphId,
@@ -89,7 +89,7 @@ export async function openFreshPublicCheckpointEdge(options: FreshCheckpointEdge
     }, dispose: () => lifetime.dispose() };
   } catch (error) {
     lifetime.dispose();
-    await agent?.stop();
+    await session?.close();
     throw error;
   }
 }
@@ -100,6 +100,6 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
   try {
     await session.agent.start();
     return { agent: session.agent, dataDir: session.dataDir, result: await session.complete() };
-  } catch (error) { await session.agent.stop(); throw error; }
+  } catch (error) { await session.close(); throw error; }
   finally { session.dispose(); }
 }

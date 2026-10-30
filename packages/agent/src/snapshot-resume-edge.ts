@@ -59,6 +59,6 @@ export async function resumePublicCheckpointEdge(options: Parameters<typeof open
   try {
     await session.agent.start();
     return { agent: session.agent, dataDir: session.dataDir, result: await session.complete() };
-  } catch (error) { await session.agent.stop(); throw error; }
+  } catch (error) { await session.close(); throw error; }
   finally { session.dispose(); }
 }
