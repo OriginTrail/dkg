@@ -24,9 +24,9 @@ Use the installed node's skill and version when integrating. Live state is subst
 
 ## Context Graph Listing
 
-`GET /api/context-graph/list` without query parameters retains the legacy
-`{ "contextGraphs": [...] }` response for existing clients. New clients should
-use the bounded form:
+`GET /api/context-graph/list` without any of the options below retains the legacy
+`{ "contextGraphs": [...] }` response for existing clients, and a parameter the
+route does not know is ignored. New clients should use the bounded form:
 
 ```text
 GET /api/context-graph/list?limit=100&projection=summary

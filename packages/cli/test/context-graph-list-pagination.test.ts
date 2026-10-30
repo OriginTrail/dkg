@@ -66,12 +66,21 @@ describe('bounded context-graph listing', () => {
     });
   });
 
+  it.each(['_=1737000000', 'scope=all', 'limt=20'])('keeps the legacy mode for ?%s, which names no bounded option', (query) => {
+    expect(parseContextGraphListQuery(new URLSearchParams(query))).toEqual({ ok: true, mode: 'legacy' });
+  });
+
+  it('ignores a name it does not know next to a bounded option', () => {
+    const parsed = parseContextGraphListQuery(new URLSearchParams('limit=5&_=1737000000'));
+    expect(parsed).toMatchObject({ ok: true, mode: 'paged', query: { limit: 5 } });
+    expect(parsed).toEqual(parseContextGraphListQuery(new URLSearchParams('limit=5')));
+  });
+
   it.each([
     [{ limit: '0' }, /between 1 and 100/],
     [{ limit: '101' }, /between 1 and 100/],
     [{ subscribed: 'yes' }, /must be "true" or "false"/],
     [{ projection: 'tiny' }, /must be "full" or "summary"/],
-    [{ limt: '20' }, /Unknown query parameter/],
   ])('rejects an invalid bounded query %#', (input, expected) => {
     const parsed = parseContextGraphListQuery(new URLSearchParams(input));
     expect(parsed.ok).toBe(false);
@@ -604,6 +613,20 @@ describe('bounded context-graph listing', () => {
     expect(jsonResponseHeaders(unrelated)['Access-Control-Expose-Headers']).toBe('Retry-After, x-dkg-operation-id');
     expect(jsonResponseHeaders(unrelated, undefined, { 'Access-Control-Expose-Headers': 'ETag, retry-after' })['Access-Control-Expose-Headers'])
       .toBe('retry-after, x-dkg-operation-id, ETag');
+  });
+
+  it('answers a request that names no bounded option with the legacy body', async () => {
+    const response = responseRecorder();
+    await handleContextGraphListRoute({
+      req: { headers: {} },
+      res: response.res,
+      agent: { listContextGraphs: vi.fn(async () => rows(2)) },
+      url: new URL('http://localhost/api/context-graph/list?_=1737000000'),
+      requestAgentAddress: null,
+    } as unknown as RequestContext);
+    expect(response.state.status).toBe(200);
+    expect(response.state.headers).toMatchObject({ 'X-DKG-List-Mode': 'legacy' });
+    expect(JSON.parse(response.state.body ?? '{}').contextGraphs).toHaveLength(2);
   });
 
   it('keeps what changes the meaning of a row in the summary projection', () => {

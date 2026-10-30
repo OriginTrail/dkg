@@ -128,15 +128,11 @@ function decodeCursor(cursor: string): {
 export function parseContextGraphListQuery(
   searchParams: URLSearchParams,
 ): ContextGraphListQueryResult {
-  if ([...searchParams.keys()].length === 0) return { ok: true, mode: 'legacy' };
-
-  for (const key of searchParams.keys()) {
-    if (!KNOWN_QUERY_KEYS.has(key)) {
-      return {
-        ok: false,
-        error: `Unknown query parameter "${key}"; supported: ${[...KNOWN_QUERY_KEYS].join(', ')}`,
-      };
-    }
+  // The route never read its query string before paging, so a request that
+  // names no bounded option keeps the legacy body, and a name that is not one
+  // of them is ignored (a cache-buster, a client's own tracking parameter).
+  if (![...searchParams.keys()].some((key) => KNOWN_QUERY_KEYS.has(key))) {
+    return { ok: true, mode: 'legacy' };
   }
 
   const rawLimit = searchParams.get(CONTEXT_GRAPH_LIST_WIRE_KEYS.limit);
