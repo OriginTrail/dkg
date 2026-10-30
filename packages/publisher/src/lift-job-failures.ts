@@ -114,9 +114,14 @@ export interface LiftJobFailurePolicy {
    *      transaction whose local recording failed, so a re-run can never double-publish.
    *   3. `resolution` is 'reset_to_accepted' — the job is completable by re-running it from
    *      the start, with no chain evidence to reconcile first.
-   * `quorum_unmet` (GH#1620), `workspace_unavailable` (GH#2270), and
-   * `fee_cap_below_base_fee` are the only codes that qualify today. The field is
-   * optional on this PUBLIC interface (external
+   * `quorum_unmet` (GH#1620), `workspace_unavailable` (GH#2270), `authority_unavailable`,
+   * `fee_cap_below_base_fee` and `insufficient_funds` (#3591) are the only codes that qualify
+   * today. `insufficient_funds` qualifies through `provenIneffective` below: the node refused the
+   * transaction before the mempool, or the adapter reported that no wallet could fund the
+   * publication, so nothing the attempt sent took effect (1 and 2), and the job re-runs from the
+   * start on a wallet that can pay (3). A revert whose text merely mentions funds is
+   * `tx_reverted`, which stays terminal.
+   * The field is optional on this PUBLIC interface (external
    * constructors keep compiling) but REQUIRED on every built-in table entry
    * via `BuiltInLiftJobFailurePolicy`: `autoRetry: false` is an explicit
    * policy decision (manual-only), never an omission a reader must interpret.
@@ -144,8 +149,14 @@ export interface LiftJobFailurePolicy {
    *   - `insufficient_funds` — a DEFINITIVE pre-acceptance reject (see
    *     `isDefinitivePreAcceptanceSendFailure`): the node refused the transaction before it entered
    *     the mempool. The #1851 pre-send write-ahead may already have persisted a hash for that
-   *     attempt, and this is what lets an operator top the wallet up and re-submit instead of
-   *     waiting for proof that cannot arrive.
+   *     attempt, and this is what lets the job re-run (#3591: automatically, on a wallet that can
+   *     pay) instead of waiting for proof that cannot arrive.
+   *     The chain adapter surfaces this refusal only when no earlier attempt at the same signed
+   *     transaction may have been accepted; after such an attempt it reports an unknown outcome,
+   *     which stays held.
+   *
+   * Either proof covers only the failed attempt's own transaction: a job that also carries an
+   * earlier attempt's open hash stays held on it (`isHeldForChainProof`).
    *
    * Everything else is `false`, including every timeout and `confirmation_mismatch`, whose whole
    * meaning is that the local view and the chain disagree. Like `autoRetry` the field is optional
@@ -218,7 +229,9 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   // provenIneffective: the receipt exists and reports failure — the transaction published nothing.
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
   // provenIneffective: a DEFINITIVE pre-acceptance reject — the node refused it before the mempool.
-  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: true, autoRetry: false },
+  // #3591 — the wallet could not pay, the job is sound: the retry lane re-runs it, and funding-aware
+  // claims keep it accepted until a wallet that can pay claims it (a refused wallet waits for a top-up).
+  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: true, autoRetry: true },
   nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
   inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', provenIneffective: false, autoRetry: false },

@@ -2924,6 +2924,11 @@ export class EVMChainAdapterBase {
     }
   }
 
+  /** #3591 — fresh native and TRAC balances of `address` (each `null` when its read fails): the async publisher's claim gate. */
+  async readPublisherWalletBalances(address: string): Promise<{ native: bigint | null; trac: bigint | null }> {
+    return this.getWalletFunding(address, { forceRefresh: true });
+  }
+
   /** Snapshot native+TRAC balances for every operational wallet (best-effort,
    *  force-refreshed) for the no-funded-wallet diagnostic. */
   protected async snapshotPublisherWalletBalances(): Promise<PublisherWalletBalance[]> {

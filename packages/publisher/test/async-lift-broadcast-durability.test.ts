@@ -312,7 +312,7 @@ describe('async lift publisher broadcast durability', () => {
 
     expect(processed?.status).toBe('failed');
     expect(processed?.failure?.code).toBe('insufficient_funds');
-    // Terminal funding failure, off the chain-recovery track (no tx was sent).
+    // A funding failure, off the chain-recovery track (no tx was sent).
     expect(processed?.failure?.resolution).not.toBe('retry_recovery');
     expect(await publisher.recover()).toBe(0);
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
@@ -430,9 +430,9 @@ describe('async lift publisher broadcast durability', () => {
   // #1867 — a send that fails DEFINITIVELY before mempool acceptance (insufficient funds
   // at eth_sendRawTransaction) throws AFTER the durable 'broadcast' record. Instead of
   // stranding the job on the ~15-min recovery chase (ending in recovery_state_inconsistent),
-  // it must be an immediate terminal broadcast-phase failure — insufficient_funds — with no
-  // recovery lookup and no resend.
-  it('records an immediate terminal insufficient_funds when the send is rejected before acceptance (#1867)', async () => {
+  // it must be an immediate broadcast-phase failure — insufficient_funds — with no recovery
+  // lookup and no resend. #3591: the publisher's own retry lane re-runs it from the start.
+  it('records an immediate insufficient_funds when the send is rejected before acceptance (#1867)', async () => {
     const publisher = createPublisher(store, {
       knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
         new Error('insufficient funds for gas * price + value'),
@@ -447,10 +447,10 @@ describe('async lift publisher broadcast durability', () => {
     expect(processed?.status).toBe('failed');
     expect(processed?.status).not.toBe('broadcast');
     expect(processed?.failure?.code).toBe('insufficient_funds');
-    // Terminal, off the chain-recovery track (fail_job, non-retryable).
-    expect(processed?.failure?.resolution).toBe('fail_job');
+    // Off the chain-recovery track: re-run from the start (reset_to_accepted), never chased.
+    expect(processed?.failure?.resolution).toBe('reset_to_accepted');
     expect(processed?.failure?.resolution).not.toBe('retry_recovery');
-    expect(processed?.failure?.retryable).toBe(false);
+    expect(processed?.timestamps.nextRetryAt).toBeDefined();
     // The attempted broadcast tx hash is retained on the failed job for diagnostics.
     expect(processed?.broadcast?.txHash).toBe(TX_HASH);
 
@@ -532,8 +532,8 @@ describe('async lift publisher broadcast durability', () => {
     expect((await publisher.getStatus(jobId))?.status).toBe('broadcast');
   });
 
-  // The genuine node-level pre-send reject (contains no "revert") still terminal-fails.
-  it('still terminal-fails a node-level "insufficient funds for gas" pre-send reject', async () => {
+  // The genuine node-level pre-send reject (contains no "revert") still fails at once.
+  it('still fails a node-level "insufficient funds for gas" pre-send reject at once', async () => {
     const publisher = createPublisher(store, {
       knowledgeAssetVmPublishHandler: firesBroadcastThenThrows(
         new Error('insufficient funds for gas * price + value'),
@@ -555,6 +555,7 @@ describe('async lift publisher broadcast durability', () => {
   // deliberately do NOT contain "insufficient funds" (that collision is the locked edge above).
   it.each([
     ['a plain RPC timeout', 'ETIMEDOUT: request timed out'],
+    ['a broadcast whose outcome is unknown', 'V10 publish broadcast failed on all configured RPC endpoints for tx 0xabc: This operation was aborted'],
     ['a nonce race', 'nonce too low'],
     ['a replacement-underpriced reject', 'replacement transaction underpriced'],
     ['an already-known tx', 'already known'],
@@ -620,8 +621,8 @@ describe('async lift publisher broadcast durability', () => {
   // and must NOT silently widen if the mapper later gains new broadcast-phase codes; unifying
   // via the mapper would also reintroduce the throw path the classifier deliberately avoids).
   // This test pins their agreement without coupling: every whitelisted error maps to the
-  // terminal insufficient_funds failure from the 'broadcast' state.
-  it('every whitelisted error maps to a terminal insufficient_funds from broadcast', () => {
+  // proven-ineffective insufficient_funds failure from the 'broadcast' state.
+  it('every whitelisted error maps to insufficient_funds from broadcast', () => {
     const whitelisted: unknown[] = [
       new Error('insufficient funds for gas * price + value'),
       Object.assign(new Error('re-wrapped'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE }),
@@ -635,8 +636,8 @@ describe('async lift publisher broadcast durability', () => {
         errorPayloadRef: 'urn:dkg:test:error',
       });
       expect(failure.code).toBe('insufficient_funds');
-      expect(failure.mode).toBe('terminal');
-      expect(failure.retryable).toBe(false);
+      expect(failure.phase).toBe('broadcast');
+      expect(failure.resolution).toBe('reset_to_accepted');
     }
   });
 

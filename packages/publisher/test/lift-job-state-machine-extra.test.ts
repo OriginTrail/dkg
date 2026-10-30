@@ -373,13 +373,15 @@ describe('LiftJob failure-code policy — exhaustive [P-14]', () => {
     }
   });
 
-  it('insufficient_funds and tx_reverted are terminal-fail (no retry, no recovery)', () => {
-    // These are spec-§6 hard-fail codes: the publisher must NOT retry them
-    // because the underlying cost / contract reason will not change on retry.
+  it('tx_reverted is terminal-fail; insufficient_funds re-runs from the start (#3591)', () => {
+    // A revert's contract reason will not change on retry. A refusal for funds proves the
+    // transaction never took effect: the job is sound and re-runs on a wallet that can pay.
     const fundsP = getLiftJobFailurePolicy('insufficient_funds');
-    expect(fundsP.mode).toBe('terminal');
-    expect(fundsP.retryable).toBe(false);
-    expect(fundsP.resolution).toBe('fail_job');
+    expect(fundsP.mode).toBe('retryable');
+    expect(fundsP.retryable).toBe(true);
+    expect(fundsP.resolution).toBe('reset_to_accepted');
+    expect(fundsP.autoRetry).toBe(true);
+    expect(fundsP.provenIneffective).toBe(true);
 
     const revertP = getLiftJobFailurePolicy('tx_reverted');
     expect(revertP.mode).toBe('terminal');
