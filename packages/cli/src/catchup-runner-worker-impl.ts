@@ -7,13 +7,15 @@ import {
   catchupWaveSizes,
   classifyDurableProgress,
   classifySharedMemoryFreshness,
+  createSharedMemoryCatchupRoundAggregation,
   createFailedPeerDurableSyncResult,
   emptySharedMemorySyncResult,
+  foldSharedMemoryRound,
   mapWithConcurrency,
-  mergeFleetSharedMemoryDiagnostics,
   resolveSwmCatchupPassConfig,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
+  sharedMemoryCatchupPlaneProven,
   type CatchupPlaneContext,
   type DurableProgressClassification,
   type DurableSyncResult,
@@ -27,6 +29,7 @@ import {
 import {
   addCatchupPlaneEvidence,
   catchupPeerPlaneEvidence,
+  catchupSharedMemoryPlaneEvidence,
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
@@ -269,7 +272,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   const passTracker = new SwmCatchupPassTracker<SwmSnapshotCoverage>();
   let deferredBackpressure = 0;
   let dataSynced = 0;
-  let sharedMemorySynced = 0;
   // Also DISTINCT peers, for the reason above — a peer that denies on every
   // pass would otherwise be counted once per pass. The agent driver already
   // models this as a set (`accessDeniedPeers`), so a scalar here additionally
@@ -287,7 +289,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
   };
 
-  const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
+  const diagnostics: Omit<NonNullable<CatchupJobResult['diagnostics']>, 'sharedMemory'> = {
     noProtocolPeers: 0,
     durable: {
       fetchedMetaTriples: 0,
@@ -309,28 +311,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       deferredBackpressure: 0,
       deniedPhases: 0,
     },
-    sharedMemory: {
-      snapshotPlaneIncomplete: 0,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      bytesReceived: 0,
-      resumedPhases: 0,
-      timedOutPhases: 0,
-      completedPhases: 0,
-      checkpointAdvances: 0,
-      emptyResponses: 0,
-      droppedDataTriples: 0,
-      failedPeers: 0,
-      failedPhases: 0,
-      deferredBackpressure: 0,
-      deniedPhases: 0,
-      continuationPasses: 0,
-      replayPhaseBytesReceived: 0,
-      snapshotPhaseBytesReceived: 0,
-    },
   };
+  const sharedAggregation = createSharedMemoryCatchupRoundAggregation(
+    {
+      responded: peersResponded,
+      denied: deniedPeers,
+    },
+  );
 
   // Probe every connected peer for PROTOCOL_SYNC up front, bounded by the shared
   // catch-up cap. This stays eager on purpose: `syncCapablePeers` and
@@ -409,7 +396,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     || catchupPlaneProvenBySelectedScope(authorityEvidence[plane])
     || catchupPlaneProvenByAuthorityHostedEmpty(
       authorityEvidence[plane],
-      diagnostics[plane],
+      plane === 'sharedMemory' ? sharedAggregation.diagnostics : diagnostics.durable,
       { isPrivate: prepared.isPrivateContextGraph },
     );
 
@@ -434,6 +421,43 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       && authoritySettles('sharedMemory')) {
       authorityProven.sharedMemory = true;
     }
+  };
+
+  /**
+   * Fold a shared-memory round and its per-plane proof together. Keeping the
+   * progress classifier, aggregate, pass tracker, and readiness evidence in
+   * one reducer ensures continuation rounds follow exactly the same semantics
+   * as the opening walk.
+   */
+  const foldSharedMemory = ({
+    peerId,
+    sharedResult,
+    fromAuthority,
+    continuation,
+  }: {
+    peerId: string;
+    sharedResult: CatchupSharedMemoryPlane;
+    fromAuthority: boolean;
+    continuation: boolean;
+  }): DurableProgressClassification => {
+    const payload = sharedResult.payload;
+    const shared = payload.swmCoverage
+      ? { ...payload, swmCoverage: { ...payload.swmCoverage, fromAuthority } }
+      : payload;
+    const progress = foldSharedMemoryRound(sharedAggregation, peerId, shared, {
+      progress: sharedResult.progress,
+      countJobDeferral: !continuation,
+    });
+    passTracker.recordPeerRound(peerId, shared.swmCoverage, progress.completedWithoutFailure);
+
+    const evidence = catchupSharedMemoryPlaneEvidence(progress.contentEvidence);
+    if (sharedResult.selectedScopeProven) evidence.selectedScopeCompletePeers = 1;
+    addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, evidence);
+    if (fromAuthority) {
+      addCatchupPlaneEvidence(authorityEvidence.sharedMemory, evidence);
+      if (progress.completedWithoutFailure) authorityAnswered.sharedMemory = true;
+    }
+    return progress;
   };
 
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
@@ -595,18 +619,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   ): void => {
     let peerDenied = false;
     const shared = sharedResult?.payload ?? null;
-    const sharedCompletedWithoutFailure = sharedResult?.progress.completedWithoutFailure ?? false;
     // Preparation may have named this peer a complete provider before the
     // kill switch revoked its selected lane. The typed fallback still carries
     // useful ordinary progress, but it no longer speaks for the whole graph.
     const sharedFromAuthority = fromSharedMemoryAuthority && !sharedResult?.legacyFallback;
-    if (shared) {
-      passTracker.recordPeerRound(
-        peerId,
-        shared.swmCoverage,
-        sharedCompletedWithoutFailure,
-      );
-    }
     if (durable) {
       dataSynced += durable.insertedDataTriples ?? 0;
       diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
@@ -646,25 +662,17 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       }
     }
 
-    if (shared) {
-      sharedMemorySynced += shared.insertedDataTriples ?? 0;
-      const sharedForDiagnostics = shared.swmCoverage
-        ? {
-          ...shared,
-          swmCoverage: {
-            ...shared.swmCoverage,
-            fromAuthority: sharedFromAuthority,
-          },
-        }
-        : shared;
-      diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
-        diagnostics.sharedMemory,
-        sharedForDiagnostics,
-      );
+    if (sharedResult) {
+      const sharedProgress = foldSharedMemory({
+        peerId,
+        sharedResult,
+        fromAuthority: sharedFromAuthority,
+        continuation: isContinuationRound,
+      });
       // The DIAGNOSTIC above counts every deferral, including continuation
       // ones — that is the honest observability number. The JOB-LEVEL scalar
-      // below must not, and the reason is a behaviour change rather than a
-      // tidy-up.
+      // in the shared aggregation excludes continuation rounds, and the reason
+      // is a behaviour change rather than a tidy-up.
       //
       // `deferredBackpressure > 0` makes the daemon route short-circuit BEFORE
       // classification (`routes/context-graph.ts`), which is the only path to
@@ -682,35 +690,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // anticipates it ("sized so at least two extra passes fit even when a
       // peer's plane is deferred"), so this is a designed-for state, not an
       // edge case.
-      if (!isContinuationRound) {
-        deferredBackpressure += shared.deferredBackpressure ?? 0;
-      }
-      peerDenied = peerDenied || shared.deniedPhases > 0;
-
-      // Shared memory carries no verified-private-only signal, so the shared
-      // evidence only ever has data/empty set — the same reducer still applies.
-      const sharedEvidence = catchupPeerPlaneEvidence(shared, {
-        completedWithoutFailure: sharedCompletedWithoutFailure,
-        fromAuthority: sharedFromAuthority,
-        plane: 'shared-memory',
-      });
-      if (sharedResult?.selectedScopeProven) {
-        sharedEvidence.selectedScopeCompletePeers = 1;
-      }
-      addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
-      if (sharedFromAuthority) {
-        addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
-        if (sharedCompletedWithoutFailure) {
-          authorityAnswered.sharedMemory = true;
-        }
-      }
+      peerDenied = peerDenied || sharedProgress.denied;
     }
 
     if (peerDenied) {
       deniedPeers.add(peerId);
     }
 
-    if (catchupPeerResponded(durable, shared)) {
+    if (durable && catchupPeerResponded(durable, null)) {
       peersResponded.add(peerId);
     }
 
@@ -844,7 +831,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       units: [{
         key: request.contextGraphId,
         tracker: passTracker,
-        planeProven: () => catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
+        planeProven: () => sharedMemoryCatchupPlaneProven(sharedAggregation),
       }],
       config: passConfig,
       nowMs: catchupPassNowMs,
@@ -858,14 +845,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         // is `''`, which is falsy and omits the clause), so it would have degraded
         // quietly instead of rendering malformed text; this makes the defensive
         // entry provably dead rather than load-bearing.
-        diagnostics.sharedMemory.continuationStopReason = stop.reason;
+        sharedAggregation.diagnostics.continuationStopReason = stop.reason;
         // Logged even when no extra pass ran. "Why did it stop" is the question a
         // partial catch-up raises, and the answer is otherwise only reconstructable
         // from counters — `no-capable-peers` after a converged walk and after an
         // abandoned one look identical in the numbers.
         await logPassLine(`Catch-up SWM pass loop for "${request.contextGraphId}" `
           + `stopped after ${1 + stop.continuationPasses} pass(es): ${stop.reason}; `
-          + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
+          + `${describeCoverage(sharedAggregation.diagnostics.swmCoverage)}`);
       },
       runPass: async ([candidate], deadlineMs) => {
         if (!candidate) return;
@@ -891,12 +878,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
             + `${pass.progressBefore} -> ${pass.progress()} resolved `
             + 'summed across peers, '
             + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
-            + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
+            + `${describeCoverage(sharedAggregation.diagnostics.swmCoverage)}`);
         });
       },
     });
     if (execution.continuationPasses > 0) {
-      diagnostics.sharedMemory.continuationPasses = execution.continuationPasses;
+      sharedAggregation.diagnostics.continuationPasses = execution.continuationPasses;
     }
   }
 
@@ -906,6 +893,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   if (prepared.authoritativePeerId !== undefined) {
     diagnostics.durable.authorityUnanswered = !authorityAnswered.durable;
   }
+  diagnostics.noProtocolPeers = noProtocolPeers;
+  const finalSharedMemory: NonNullable<CatchupJobResult['diagnostics']>['sharedMemory'] = { ...sharedAggregation.diagnostics };
   if (
     request.includeSharedMemory
     && (
@@ -913,12 +902,17 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       || authoritativeSharedMemoryPeerIds.size > 0
     )
   ) {
-    diagnostics.sharedMemory.authorityUnanswered = !authorityAnswered.sharedMemory;
+    finalSharedMemory.authorityUnanswered = !authorityAnswered.sharedMemory;
   }
-
-  diagnostics.noProtocolPeers = noProtocolPeers;
-  if (deferredBackpressure === 0) {
-    await invoke('finalizeCatchup', request.contextGraphId, dataSynced, sharedMemorySynced);
+  const totalDeferredBackpressure = deferredBackpressure
+    + sharedAggregation.jobDeferredBackpressure;
+  if (totalDeferredBackpressure === 0) {
+    await invoke(
+      'finalizeCatchup',
+      request.contextGraphId,
+      dataSynced,
+      sharedAggregation.insertedDataTriples,
+    );
   }
 
   return {
@@ -930,13 +924,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersResponded: peersResponded.size,
     peersSucceeded: peersSucceeded.size,
     peersNotAttempted: syncCapable.length - peersTried.size,
-    deferredBackpressure,
+    deferredBackpressure: totalDeferredBackpressure,
     dataSynced,
-    sharedMemorySynced,
+    sharedMemorySynced: sharedAggregation.insertedDataTriples,
     denied: deniedPeers.size > 0,
     deniedPeers: deniedPeers.size,
     cleanPlaneCompletions,
-    diagnostics,
+    diagnostics: { ...diagnostics, sharedMemory: finalSharedMemory },
   };
 }
 

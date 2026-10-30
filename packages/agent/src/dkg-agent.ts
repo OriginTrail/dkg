@@ -1,3 +1,4 @@
+export type { ContextGraphCatchupDiagnostics, CatchupResultCore, ContextGraphCatchupResult } from './sync/catchup-result.js';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';

@@ -17,9 +17,9 @@ import type { PreparedContentCacheConfig } from './sync/responder/prepared-conte
  */
 
 import type { ethers } from 'ethers';
-import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
 import type { ChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 export type {
+  SharedMemorySyncAggregate,
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
   SwmSnapshotCoverage,
@@ -1255,11 +1255,7 @@ export interface DurableSyncDiagnostics {
   deferredBackpressure?: number;
 }
 
-export interface CatchupSyncDiagnostics {
-  noProtocolPeers: number;
-  durable: DurableSyncDiagnostics;
-  sharedMemory: SharedMemorySyncDiagnostics;
-}
+export type { CatchupSyncDiagnostics, ContextGraphCatchupDiagnostics, CatchupResultCore, ContextGraphCatchupResult } from './sync/catchup-result.js';
 
 export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;

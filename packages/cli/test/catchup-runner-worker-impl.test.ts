@@ -2447,7 +2447,13 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
             };
           case 'syncSharedMemory':
             sharedCalls.push(peerId);
-            if (peerId === CURATOR) return sharedResult();
+            if (peerId === CURATOR) return {
+              ...sharedResult(),
+              swmCoverage: {
+                ...partialSharedRound(2, 2).swmCoverage,
+                peerIdSuffix: CURATOR.slice(-8),
+              },
+            };
             otherSharedCalls += 1;
             return otherSharedCalls === 1
               ? partialSharedRound(2, 3)
@@ -2462,8 +2468,11 @@ describe('#2050 continuation loop — a failed-but-productive pass earns another
     expect(sharedCalls.filter((peerId) => peerId === OTHER)).toHaveLength(2);
     expect(durableCalls.filter((peerId) => peerId === OTHER)).toHaveLength(1);
     expect(result.diagnostics?.sharedMemory?.swmCoverage).toMatchObject({
-      snapshotsResolved: 3,
-      snapshotsTotal: 3,
+      // Authority attribution wins over the larger non-authority manifest.
+      fromAuthority: true,
+      peerIdSuffix: CURATOR.slice(-8),
+      snapshotsResolved: 2,
+      snapshotsTotal: 2,
     });
     expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(1);
   });

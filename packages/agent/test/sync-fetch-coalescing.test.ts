@@ -2442,6 +2442,27 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('reports mandatory first-pass SWM backpressure at both job and plane levels', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    try {
+      await agent.start();
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      stubDurableSync(agent, async () => cleanDurableSyncResult());
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
+        ...cleanSharedMemorySyncResult(), deferredBackpressure: 1,
+      });
+      const result = await agent.runCatchupOverPeers('coalesced-cg', true, [{ toString: () => PEER_A }], {
+        swmCatchupPassConfig: { budgetMs: 60_000, maxPasses: 1 },
+      });
+      expect(result.deferredBackpressure).toBe(1);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
+      expect(result.sharedMemoryCompletedCleanly).toBe(false);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it.each([
     ['timeout', { timedOutPhases: 1 }],
     ['phase failure', { failedPhases: 1 }],
@@ -2493,6 +2514,12 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(sharedCalls).toBe(2);
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.cleanSharedMemoryPeerIds).toEqual([]);
+      if (_failureKind === 'backpressure deferral') {
+        // Continuation pressure is retained for observability, but it must not
+        // demote a pass-one job that already made progress into a deferred job.
+        expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
+        expect(result.deferredBackpressure).toBe(0);
+      }
     } finally {
       await agent.stop().catch(() => {});
     }

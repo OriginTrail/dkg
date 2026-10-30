@@ -226,6 +226,7 @@ export default defineConfig({
           // already succeeded (the daemon route short-circuits classification
           // on the job-level scalar), and denial counts DISTINCT peers.
           'test/catchup-runner-worker-continuation-deferral.test.ts',
+          'test/catchup-runner-parity.test.ts',
           'test/relay-status-block.test.ts',
           // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
           // plus one real-histogram smoke test, and the route block shape.

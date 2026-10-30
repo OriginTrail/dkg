@@ -1,6 +1,7 @@
 import {
   classifyDurableProgress,
-  sharedMemoryRoundFoundNothingMissing,
+  classifySharedMemoryRound,
+  type SharedMemoryRoundContentEvidence,
   type DurableProgressSummary,
   type SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
@@ -102,6 +103,18 @@ export interface CatchupPlaneRoundDiagnostics {
   authorityUnanswered?: boolean;
 }
 
+/** Convert the shared classifier's proof to worker peer counters without re-reading its payload. */
+export function catchupSharedMemoryPlaneEvidence(content: SharedMemoryRoundContentEvidence): CatchupPlaneCompletionEvidence {
+  return {
+    verifiedDataPeers: content.cleanDataTriples > 0 ? 1 : 0,
+    verifiedPrivateOnlyPeers: content.verifiedPrivateOnly ? 1 : 0,
+    heldContentPeers: content.cleanHeldAssets > 0 ? 1 : 0,
+    emptyPeers: content.emptyResponse ? 1 : 0,
+    authorityEmptyPeers: 0,
+    ...(content.incompleteResponder ? { incompleteResponders: 1 } : {}),
+  };
+}
+
 /**
  * Reduce ONE peer's plane result to the evidence a round accumulates from it.
  *
@@ -147,6 +160,11 @@ export function catchupPeerPlaneEvidence(
     authorityEmptyPeers: 0,
   };
   if (!plane) return none;
+  if (options.plane === 'shared-memory') {
+    const progress = options.completedWithoutFailure === undefined ? undefined
+      : { ...classifyDurableProgress(plane), completedWithoutFailure: options.completedWithoutFailure };
+    return catchupSharedMemoryPlaneEvidence(classifySharedMemoryRound(plane, progress).contentEvidence);
+  }
   if (!(options.completedWithoutFailure
     ?? catchupPlaneCompletedWithoutFailure(plane, options.complete))) {
     // The peer answered and its round was not clean. A pure transport failure is
@@ -184,16 +202,13 @@ export function catchupPeerPlaneEvidence(
   // manifest, and the background reconciler remains the convergence mechanism —
   // and it is what keeps the amplification fixed for an SWM-heavy graph, which
   // issue #2006 measured at 122,705 fetched triples on the shared plane alone.
-  const answered = options.plane !== 'shared-memory'
-    && ((plane.emptyResponses ?? 0) > 0
+  const answered = ((plane.emptyResponses ?? 0) > 0
       || (plane.metaOnlyResponses ?? 0) > 0
       || (plane.insertedMetaTriples ?? 0) > 0);
   return {
     verifiedDataPeers: (plane.insertedDataTriples ?? 0) > 0 ? 1 : 0,
     verifiedPrivateOnlyPeers: (plane.verifiedPrivateOnlyResponses ?? 0) > 0 ? 1 : 0,
-    heldContentPeers: (options.plane === 'shared-memory'
-      ? sharedMemoryRoundFoundNothingMissing(plane)
-      : (plane.verifiedHeldAssets ?? 0) > 0) ? 1 : 0,
+    heldContentPeers: (plane.verifiedHeldAssets ?? 0) > 0 ? 1 : 0,
     emptyPeers: (plane.emptyResponses ?? 0) > 0 ? 1 : 0,
     authorityEmptyPeers: options.fromAuthority && carriedNoData && answered ? 1 : 0,
   };

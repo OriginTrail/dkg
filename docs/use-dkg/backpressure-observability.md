@@ -171,3 +171,19 @@ Observation never blocks the work it observes:
 - one broken source shows in the registry's `failures` list and does not hide healthy sources;
 - a failing log callback does not stop the monitor;
 - the monitor's timer stops when the daemon shuts down.
+
+### Catch-up result deferrals
+
+The inline and worker catch-up runners use the same deferral contract.
+`result.deferredBackpressure` counts local scheduler deferrals in required work:
+the durable lane and the first shared-memory pass. Shared-memory diagnostics
+also count deferrals in bounded continuation passes. Thus a continuation-only
+deferral can produce `result.deferredBackpressure === 0` while
+`result.diagnostics.sharedMemory.deferredBackpressure > 0`.
+
+This lets the daemon evaluate completion evidence instead of immediately marking
+the whole job deferred because an extra SWM pass could not acquire capacity.
+It does not declare an incomplete graph ready: the normal per-plane completion
+and inventory checks still apply. Required-pass deferrals continue to request
+retry through the job-level scalar. This makes the inline result match the worker
+contract; consumers needing all local pressure should read the plane diagnostics.

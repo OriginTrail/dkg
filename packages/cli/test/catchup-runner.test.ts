@@ -215,6 +215,14 @@ describe('catchup runner progress accounting', () => {
     expect(catchupPeerSucceeded(durable, null, false)).toBe(true);
   });
 
+  it('recognizes legacy insertedTriples evidence without treating a deferred peer as successful', () => {
+    const legacy = { insertedTriples: 3, deferredBackpressure: 1 };
+    expect(catchupPeerResponded(null, legacy)).toBe(true);
+    expect(catchupPeerSucceeded(null, legacy, false)).toBe(false);
+    expect(catchupPeerSucceeded(null, { ...legacy, deferredBackpressure: 0 }, false)).toBe(true);
+    expect(catchupPeerResponded(null, { deferredBackpressure: 1 })).toBe(false);
+  });
+
   it('classifies local scheduler deferral separately from a remote response or success', () => {
     const deferredBeforeFetch = {
       failedPeers: 0,

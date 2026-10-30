@@ -6,6 +6,8 @@ import type { DurableSyncResult } from '../dkg-agent-types.js';
  * classified without first manufacturing a full requester result.
  */
 export interface DurableProgressSummary {
+  readonly bytesReceived?: number;
+  readonly emptyResponses?: number;
   readonly insertedTriples?: number;
   readonly insertedDataTriples?: number;
   readonly insertedMetaTriples?: number;
@@ -33,6 +35,8 @@ export interface DurableProgressClassificationOptions {
 
 /** Typed policy decisions shared by reconnect and explicit catch-up paths. */
 export interface DurableProgressClassification {
+  /** A present plane answered; a deferred plane must carry partial evidence. */
+  readonly responded: boolean;
   readonly insertedDataTriples: number;
   readonly hasInsertedData: boolean;
   readonly hasMetadataEvidence: boolean;
@@ -140,6 +144,10 @@ export function classifyDurableProgress(
 
 
   return {
+    responded: progress != null && !transportFailed && (!deferredByBackpressure
+      || (progress.bytesReceived ?? 0) > 0 || completedPhases > 0
+      || (progress.emptyResponses ?? 0) > 0 || insertedMetaTriples > 0
+      || (progress.insertedDataTriples ?? insertedTriples) > 0),
     insertedDataTriples,
     hasInsertedData,
     hasMetadataEvidence,

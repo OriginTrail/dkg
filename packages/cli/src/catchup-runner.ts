@@ -7,12 +7,13 @@ import {
   normalizeDurableSyncResult,
   normalizeSyncAdmissionSource,
   type DKGAgent,
-  type CatchupPassDecisionReason,
+  type CatchupResultCore,
+  type CatchupSyncDiagnostics,
+  type SharedMemorySyncAggregate,
   type DurableProgressClassification,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncResult,
-  type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { advertisesSyncProtocol, createOperationContext } from '@origintrail-official/dkg-core';
@@ -42,26 +43,18 @@ export {
 } from './catchup-proof.js';
 export type { CatchupPhaseProgress, CatchupPlaneCompletionEvidence, CatchupPlaneRoundDiagnostics } from './catchup-proof.js';
 
-export interface CatchupJobResult {
-  connectedPeers: number;
+interface CatchupJobDiagnostics extends CatchupSyncDiagnostics {
+  durable: DurableSyncDiagnostics & Required<Pick<DurableSyncDiagnostics, 'deferredBackpressure'>> & {
+    deniedPhases?: number;
+    /** A resolvable curator never cleanly answered this plane. */
+    authorityUnanswered?: boolean;
+  };
+  sharedMemory: SharedMemorySyncAggregate & { authorityUnanswered?: boolean };
+}
+
+export interface CatchupJobResult extends CatchupResultCore {
   totalPeers?: number;
   selectedPeers?: number;
-  syncCapablePeers: number;
-  peersTried: number;
-  /**
-   * Subset of `peersTried` whose per-peer sync round reached a responder
-   * and did not collapse into a transport failure. A responder can still
-   * time out part-way through, deny access, or serve metadata-only rows; this
-   * counter exists so daemon status mapping can distinguish "curator offline"
-   * from "reachable peer answered but did not complete cleanly".
-   */
-  peersResponded: number;
-  /**
-   * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, timeout, or explicit ACL denial, and with either real
-   * progress or a clean non-metadata-only empty completion.
-   */
-  peersSucceeded: number;
   /**
    * Sync-capable peers this run deliberately never contacted because an earlier
    * wave already proved every requested plane. These are neither failures nor
@@ -69,12 +62,6 @@ export interface CatchupJobResult {
    * early-stopped run from a run where peers were unreachable.
    */
   peersNotAttempted?: number;
-  /** Context Graph phases deferred by this node's local sync scheduler. */
-  deferredBackpressure: number;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  denied: boolean;
-  deniedPeers: number;
   /**
    * Per-plane evidence produced before peer results are aggregated. Aggregate
    * diagnostics intentionally retain every timeout/denial for observability,
@@ -86,78 +73,7 @@ export interface CatchupJobResult {
     durable: CatchupPlaneCompletionEvidence & { verifiedPrivateOnlyPeers: number };
     sharedMemory: CatchupPlaneCompletionEvidence;
   };
-  diagnostics?: {
-    noProtocolPeers: number;
-    durable: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
-      verifiedPrivateOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-      failedPhases: number;
-      deferredBackpressure: number;
-      deniedPhases?: number;
-      /** A resolvable curator never cleanly answered this plane; see
-       * `catchupPlaneProvenByUnanimousEmpty`. */
-      authorityUnanswered?: boolean;
-    };
-    sharedMemory: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      emptyResponses: number;
-      droppedDataTriples: number;
-      failedPeers: number;
-      failedPhases: number;
-      deferredBackpressure: number;
-      deniedPhases?: number;
-      /** A resolvable curator never cleanly answered this plane; see
-       * `catchupPlaneProvenByUnanimousEmpty`. */
-      authorityUnanswered?: boolean;
-      /**
-       * Public-SWM snapshot coverage for this graph, selected WHOLE from one
-       * peer round by `selectSwmSnapshotCoverage`. The counts, the peer they
-       * are attributed to and the missing sample are never mixed across peers.
-       */
-      swmCoverage?: SwmSnapshotCoverage;
-      /** Plane-neutral evidence that local admission yielded. */
-      localYield?: true;
-      /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
-      snapshotPlaneIncomplete: number;
-      /** Extra passes over the peer set beyond the first. */
-      continuationPasses: number;
-      /**
-       * Why the bounded repeat stopped, as the policy's own closed union — so a
-       * new reason cannot reach the terminal message unnoticed.
-       */
-      continuationStopReason?: CatchupPassDecisionReason;
-      /**
-       * `bytesReceived` split into its replay half (metadata + aggregate data,
-       * which every pass re-fetches in full) and its useful half (snapshot
-       * content), so the cost of repeating the walk stays measurable instead of
-       * being merged into one scalar. The two sum to `bytesReceived`.
-       */
-      replayPhaseBytesReceived: number;
-      snapshotPhaseBytesReceived: number;
-    };
-  };
+  diagnostics?: CatchupJobDiagnostics;
 }
 
 export interface CatchupRunRequest {
@@ -636,40 +552,21 @@ export function catchupPeerSucceeded(
     || durableProgress.denied
     || Boolean(sharedProgress?.denied)
   ) return false;
-  if (durableProgress.deferredByBackpressure || sharedProgress?.deferredByBackpressure) return false;
-  const peerTransportFailed = durableProgress.transportFailed || Boolean(sharedProgress?.transportFailed);
-  if (peerTransportFailed) return false;
-  const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
-  if (peerPhaseFailed) return false;
-  if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  if (durableProgress.hasBlockingFailure || sharedProgress?.hasBlockingFailure) return false;
   if (sharedCompletion?.terminalBoundaryRequired
     && !sharedCompletion.progress.completedWithoutFailure) return false;
   const peerMadeProgress = durableProgress.madeReadinessProgress
     || Boolean(sharedProgress?.madeReadinessProgress);
   const peerMetadataOnly = !peerMadeProgress
     && (durableProgress.hasMetadataEvidence || Boolean(sharedProgress?.hasMetadataEvidence));
-  const peerTimedOut = durableProgress.timedOut || Boolean(sharedProgress?.timedOut);
-  return !peerTimedOut && (peerMadeProgress || !peerMetadataOnly);
+  return peerMadeProgress || !peerMetadataOnly;
 }
 
 export function catchupPeerResponded(
   durable: CatchupPhaseProgress | null | undefined,
   shared: CatchupPhaseProgress | null | undefined,
 ): boolean {
-  // A plane the walk deliberately skipped (already proven by an earlier peer)
-  // is absent, not silent: it must not be read as this peer having answered.
-  const phaseResponded = (phase: CatchupPhaseProgress | null | undefined): boolean => {
-    if (!phase) return false;
-    const progress = classifyDurableProgress(phase);
-    if (progress.transportFailed) return false;
-    if (!progress.deferredByBackpressure) return true;
-    return (phase.bytesReceived ?? 0) > 0
-      || (phase.completedPhases ?? 0) > 0
-      || (phase.emptyResponses ?? 0) > 0
-      || (phase.insertedMetaTriples ?? 0) > 0
-      || (phase.insertedDataTriples ?? phase.insertedTriples ?? 0) > 0;
-  };
-  return phaseResponded(durable) || phaseResponded(shared);
+  return classifyDurableProgress(durable).responded || classifyDurableProgress(shared).responded;
 }
 
 export interface CatchupRunner {
