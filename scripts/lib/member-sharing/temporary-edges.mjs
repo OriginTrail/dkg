@@ -209,6 +209,38 @@ export class TemporaryEdges {
     }
   }
 
+  /**
+   * A feeder that failed while it wrote a large graph (one that was fresh has
+   * died within seconds): the owner writes from now on, as after a failed
+   * activation. It is stopped if it can be; a stop that fails leaves it for
+   * finishFeeder.
+   */
+  async giveUpFeeder(error) {
+    this.#feederState = 'needs-stop';
+    await this.#stopFeeder().catch(() => {});
+    this.log.note(`the feeder failed while it wrote a large graph (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts; ${this.#keepFeederLogs()}`);
+  }
+
+  /**
+   * What a feeder that failed left behind, before its folder goes: the run may
+   * still pass, and console.log has what a dying daemon could not write to its
+   * own log. Says where they are.
+   */
+  #keepFeederLogs() {
+    const { devnet, feeder } = this;
+    const kept = join(devnet.dir, 'issue-3251-member-sharing', this.stamp);
+    try {
+      mkdirSync(kept, { recursive: true });
+      for (const name of ['console.log', 'daemon.log']) {
+        const file = join(devnet.nodeDir(feeder), name);
+        if (existsSync(file)) copyFileSync(file, join(kept, `node${feeder.number}-${feeder.role}.${name}`));
+      }
+      return `its logs are kept in ${kept}`;
+    } catch (error) {
+      return `its logs could not be kept: ${error?.message ?? error}`;
+    }
+  }
+
   /** Audit the outgoing participant before removing evidence; always attempt shutdown twice. */
   async finishFeeder(beforeRelease, failed) {
     if (!this.feederRunning) return;

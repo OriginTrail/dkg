@@ -22,13 +22,16 @@ import { busyMember } from '../member-sharing/busy-member.mjs';
  * write is found by its reads at `receivedAt` (given the transfer; null: never
  * found). `policy` is the general pool's policy its trace records. `transfers`
  * gives each attempt's transfer (the first one's by default the options
- * themselves); `attempts` is how many case 6 may make; `connect` stands for the
- * dials before each attempt. Returns the lines case 6 reported, the large
- * graphs it asked for and unsubscribed from, and how often it dialed.
+ * themselves); a transfer's `refusals` is how many of its subscribes are refused
+ * first (Infinity: all of them). `attempts` is how many case 6 may make; `connect`
+ * stands for the dials before each attempt; `sizing` and `largeGraph` are case
+ * 6's. Returns the lines case 6 reported, the large graphs it asked for and
+ * unsubscribed from, how often it dialed and subscribed, what case 6 returned
+ * (`heldInAll`), and the file of member 2's trace.
  */
 async function runCase6(t, {
   runsMs, afterwards = 'nothing', readmitRunsMs = 60_000, receivedAt, slot = 'general', lostRelease = false,
-  policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true, attempts, transfers, connect = async () => {},
+  policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true, attempts, transfers, connect = async () => {}, sizing, largeGraph: writesLargeGraph,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-case6-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -56,10 +59,18 @@ async function runCase6(t, {
   };
   const asked = [];
   const unsubscribed = [];
+  let subscribes = 0;
+  const refused = new Map();
   const graphs = {
     async subscribe(node, graph) {
-      attempt += 1;
+      subscribes += 1;
+      attempt = graph.key === 'large' ? 1 : Number(graph.key.slice('large'.length));
       const plan1 = plan[Math.min(attempt, plan.length) - 1];
+      const refusedSoFar = refused.get(graph.key) ?? 0;
+      if (refusedSoFar < (plan1.refusals ?? 0)) {
+        refused.set(graph.key, refusedSoFar + 1);
+        throw new Error(`${node.label} could not subscribe to ${graph.key}: HTTP 503 no authority yet`);
+      }
       const { afterwards: after = 'nothing', readmitRunsMs: again = 60_000, slot: slotOf = 'general', lostRelease: lost = false } = plan1;
       transfer = { ...plan1, endsAt: Date.now() + plan1.runsMs };
       const id = `41-${attempt}`;
@@ -107,13 +118,17 @@ async function runCase6(t, {
     note: text => { lines.push(['NOTE', text]); },
     reportPair: pair => { lines.push(['PAIR', pair.caseId, pair.record.value, pair.progress.view === null ? 'missing' : 'held']); },
   };
-  const largeGraph = async (number, size) => { asked.push([number, size]); return largeGraphOf(number, size); };
+  const largeGraph = async (number, size) => {
+    asked.push([number, size]);
+    if (writesLargeGraph) await writesLargeGraph(number, size);
+    return largeGraphOf(number, size);
+  };
   let dialed = 0;
-  await busyMember({
+  const heldInAll = await busyMember({
     devnet, edges: { owner, member1, member2 }, graphs, io, report, precondition: async () => true, boundMs: 60_000, sub: 's', admitMs: 2_000,
-    attempts, largeGraph, connect: async () => { dialed += 1; await connect(dialed); },
+    attempts, largeGraph, connect: async () => { dialed += 1; await connect(dialed); }, sizing,
   }, pub, first);
-  return Object.assign(lines, { asked, unsubscribed, dialed });
+  return Object.assign(lines, { asked, unsubscribed, dialed, subscribes, heldInAll, trace: member2.trace });
 }
 
 const notExercised = (lines, reason) => {
@@ -256,6 +271,68 @@ test('case 6: the members dial again before each attempt; an attempt whose dial 
   assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'),
     [['FAIL', 6, 'node9 (member2) could not dial the feeder through the relay: HTTP 0, attempt 2 of 3']]);
   assert.equal(lines.asked.length, 1);
+});
+
+test('case 6: the next graph is sized to hold the slot for as long as a write can take to arrive, not only as long as the last writes took', async t => {
+  // The writes arrive at once, just after the transfer gave up the slot: about 2 s from its admission. Without the
+  // cap, the next graph must hold the slot for the whole 60 s bound at the rate measured.
+  const lines = await runCase6(t, { attempts: 2, transfers: [{ ...tooShort, afterwards: 'pull' }, holds], sizing: { maxTriples: 100_000_000 } });
+  assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'), held);
+  const [[, size]] = lines.asked;
+  assert.ok(size.expectedHoldMs >= 60_000, JSON.stringify(size));
+  // With the default cap it is as large as one node holds well, whatever the last writes needed.
+  const capped = await runCase6(t, { attempts: 2, transfers: [{ ...tooShort, afterwards: 'pull' }, holds] });
+  assert.deepEqual(capped.asked.map(([, { assets, triples }]) => [assets, triples]), [[26, 9847]]);
+});
+
+test('case 6: a refused subscribe is asked again and the attempt goes on', async t => {
+  const lines = await runCase6(t, { transfers: [{ ...holds, refusals: 1 }] });
+  assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'), held);
+  assert.equal(lines.subscribes, 2);
+});
+
+test('case 6: a subscribe that keeps being refused ends its attempt, not the run: another follows, and the last is judged', async t => {
+  // It never joined that graph, so it does not leave it.
+  const again = await runCase6(t, { attempts: 2, transfers: [{ ...holds, refusals: Infinity }, holds] });
+  assert.deepEqual(again.filter(entry => entry[0] !== 'NOTE'), held);
+  assert.match(again.find(entry => entry[0] === 'NOTE')[1], /^case 6, attempt 1 of 2: member2 could not subscribe to the large graph \(64 assets of 2000 triples\) within 2 s: .*HTTP 503 no authority yet; attempt 2 transfers a large graph of 26 assets of 9847 triples, no rate was measured$/);
+  assert.deepEqual(again.unsubscribed, []);
+  // The last attempt fails the case and returns: nothing is thrown at the cases after it.
+  const last = await runCase6(t, { attempts: 2, transfers: [{ ...holds, refusals: Infinity }] });
+  assert.deepEqual(last.filter(entry => entry[0] !== 'NOTE').map(([kind, id]) => [kind, id]), [['FAIL', 6]]);
+  assert.match(last.find(entry => entry[0] === 'FAIL')[2], /^not exercised: member2 could not subscribe to the large graph .* in the last of 2 attempts$/);
+  const only = await runCase6(t, { transfers: [{ ...holds, refusals: Infinity }] });
+  assert.match(only.find(entry => entry[0] === 'FAIL')[2], /^not exercised: member2 could not subscribe to the large graph .*HTTP 503 no authority yet$/);
+});
+
+test('case 6: once its transfer is over, the attempt judged says how long it held the slot and how far past the last receipt check', async t => {
+  // It holds the slot about 5 s in all: 1.2 s before the writes, and about 3 s past their receipts.
+  const lines = await runCase6(t, { runsMs: 4_000, receivedAt: () => Date.now() + 300 });
+  assert.deepEqual(lines.filter(entry => entry[0] !== 'NOTE'), held);
+  assert.match(lines.heldInAll(), /^case 6: member2's transfer of the large graph held its general sync slot \d+ s in all so far, \d+ s past the last receipt check$/);
+  const deadline = Date.now() + 15_000;
+  while (lines.heldInAll().includes('so far') && Date.now() < deadline) await new Promise(resolve => { setTimeout(resolve, 200); });
+  const [, inAll, past] = lines.heldInAll().match(/^case 6: member2's transfer of the large graph held its general sync slot (\d+) s in all, (\d+) s past the last receipt check$/) ?? [];
+  assert.ok(Number(inAll) >= 5 && Number(past) >= 1, lines.heldInAll());
+  // A trace that no longer shows it says so.
+  rmSync(lines.trace);
+  assert.equal(lines.heldInAll(), "case 6: the trace no longer shows member2's transfer of the large graph");
+  // Only the attempt judged has one to tell, and an attempt that never got as far as its writes has none.
+  const again = await runCase6(t, { attempts: 2, transfers: [{ ...tooShort, afterwards: 'pull' }, holds] });
+  assert.match(again.heldInAll(), /^case 6, attempt 2 of 2: member2's transfer/);
+  const none = await runCase6(t, { ...holds, writesTrace: false });
+  assert.equal(none.heldInAll, undefined);
+});
+
+test('case 6: a later large graph that cannot be set up fails the case, with the attempt before judged', async t => {
+  const lines = await runCase6(t, {
+    attempts: 2, transfers: [{ ...tooShort, afterwards: 'pull' }, holds],
+    largeGraph: async () => { throw new Error('the owner refused the asset'); },
+  });
+  const fails = lines.filter(entry => entry[0] === 'FAIL').map(entry => entry[2]);
+  assert.equal(fails.length, 4, JSON.stringify(lines));
+  assert.ok(fails.slice(0, 3).every(text => text.endsWith(': not exercised')), JSON.stringify(fails));
+  assert.equal(fails[3], 'the large graph of attempt 2 could not be set up: the owner refused the asset');
 });
 
 test('case 6: an attempt count below one makes one attempt', async t => {

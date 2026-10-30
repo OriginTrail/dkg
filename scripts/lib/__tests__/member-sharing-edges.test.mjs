@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { writeLargeGraph } from '../member-sharing/busy-member.mjs';
 import { openDevnet } from '../member-sharing/devnet.mjs';
 import { createGraphs } from '../member-sharing/graphs.mjs';
 import { auditFeederIsolation } from '../member-sharing/feeder-isolation.mjs';
@@ -294,6 +295,112 @@ test('case 6 preparation owns author selection, audits before renewal and stops 
   events.push('case 5');
   assert.deepEqual(events, ['audit', 'case 5']);
   assert.equal(edges.feederRunning, false);
+});
+
+/**
+ * What writeLargeGraph asks of the nodes, against the real TemporaryEdges on a
+ * fake devnet: `refuses(author)` says whether a node refuses every asset it is
+ * asked to write, as a feeder that died does. `created` keeps which node created
+ * which graph, `written` how many assets of how many triples each graph got, and
+ * `audits` when the feeder was checked out of the public graph.
+ */
+function largeGraphFixture(t, { refuses = () => false, stopStatus } = {}) {
+  const devnet = fakeDevnet(t, { stopStatus });
+  const notes = [];
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note: text => notes.push(text) } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  const created = [];
+  const written = [];
+  const audits = [];
+  const ctx = {
+    edges, stamp: 'S', say() {}, audit: async when => { audits.push(when); },
+    graphs: {
+      async createGraph(key, body, { by }) { created.push([key, by.role]); return { key, id: `${by.role}/${key}` }; },
+      async keepCoresOut() {},
+    },
+    io: {
+      async createAndShare(author, { contextGraphId, quads }) {
+        if (refuses(author)) return { error: 'the author refused the asset: HTTP 0 fetch failed' };
+        const last = written.at(-1);
+        if (last?.graph === contextGraphId) last.assets += 1;
+        else written.push({ graph: contextGraphId, assets: 1, triples: quads.length });
+        return {};
+      },
+    },
+  };
+  return { devnet, edges, ctx, notes, created, written, audits };
+}
+
+test('case 6: the owner writes the first large graph as asked; a later one comes whole from a fresh feeder', async t => {
+  const { devnet, edges, ctx, created, written, audits } = largeGraphFixture(t);
+  // The first is what the suite was asked for, even when a later graph on the owner would be cut to less.
+  const first = await writeLargeGraph(ctx, 1, { assets: 20, triples: 8000 });
+  assert.deepEqual(first, { key: 'large', id: 'owner/large', size: { assets: 20, triples: 8000 } });
+  assert.ok(!devnet.calls.includes('addnode 10 edge'), 'the first attempt needs no feeder');
+  const second = await writeLargeGraph(ctx, 2, { assets: 3, triples: 100 });
+  assert.deepEqual(second, { key: 'large2', id: 'feeder/large2', size: { assets: 3, triples: 100 } });
+  assert.ok(devnet.calls.includes('addnode 10 edge'));
+  assert.deepEqual(audits, [], 'nothing to audit before the first feeder');
+  await writeLargeGraph(ctx, 3, { assets: 4, triples: 100 });
+  assert.deepEqual(audits, ['before attempt 3 of case 6']);
+  assert.deepEqual(created, [['large', 'owner'], ['large2', 'feeder'], ['large3', 'feeder']]);
+  assert.deepEqual(written, [
+    { graph: 'owner/large', assets: 20, triples: 8000 }, { graph: 'feeder/large2', assets: 3, triples: 100 }, { graph: 'feeder/large3', assets: 4, triples: 100 },
+  ]);
+  assert.equal(edges.largeAuthor, edges.feeder);
+});
+
+test('case 6: a feeder that fails while it writes the large graph is given up, unaudited, and the owner writes the graph, no larger than it can take', async t => {
+  const fixture = largeGraphFixture(t, {
+    refuses: author => {
+      if (author.role !== 'feeder') return false;
+      writeFileSync(join(fixture.devnet.nodeDir(10), 'console.log'), 'what it could not log itself\n');
+      writeFileSync(join(fixture.devnet.nodeDir(10), 'daemon.log'), 'its last log line\n');
+      return true;
+    },
+  });
+  const { devnet, edges, ctx, notes, created, written, audits } = fixture;
+  const graph = await writeLargeGraph(ctx, 2, { assets: 26, triples: 9847 });
+  assert.deepEqual(graph, { key: 'large2', id: 'owner/large2', size: { assets: 12, triples: 9847 } });
+  assert.deepEqual(created, [['large2', 'feeder'], ['large2', 'owner']]);
+  assert.deepEqual(written, [{ graph: 'owner/large2', assets: 12, triples: 9847 }]);
+  // No write is made while a large graph is written, so the feeder has carried none.
+  assert.deepEqual(audits, []);
+  assert.match(notes.at(-1), /^the feeder failed while it wrote a large graph \(asset 0 of the large2 graph: the author refused the asset: HTTP 0 fetch failed\): the owner writes/);
+  assert.deepEqual(devnet.calls.filter(call => /^(addnode|stop-node) 10/.test(call)), ['addnode 10 edge', 'stop-node 10']);
+  assert.ok(!edges.feederRunning && !edges.feederUp);
+  // Its logs outlast its folder, also when the run passes: nothing else tells why it failed.
+  const kept = join(devnet.dir, 'issue-3251-member-sharing', 'S');
+  assert.ok(notes.at(-1).endsWith(`its logs are kept in ${kept}`), notes.at(-1));
+  assert.equal(readFileSync(join(kept, 'node10-feeder.console.log'), 'utf8'), 'what it could not log itself\n');
+  assert.equal(readFileSync(join(kept, 'node10-feeder.daemon.log'), 'utf8'), 'its last log line\n');
+  // The next attempt goes to the owner too, and no feeder is started again.
+  const next = await writeLargeGraph(ctx, 3, { assets: 26, triples: 9847 });
+  assert.deepEqual(next.size, { assets: 12, triples: 9847 });
+  assert.deepEqual(devnet.calls.filter(call => /^(addnode|stop-node) 10/.test(call)), ['addnode 10 edge', 'stop-node 10']);
+  // After case 6 nothing is left to audit or to stop, so case 2 is not failed for a feeder that cannot answer.
+  await edges.finishFeeder(async () => { audits.push('after case 6'); }, () => assert.fail('there is nothing to stop'));
+  assert.deepEqual(audits, []);
+});
+
+test('case 6: a given-up feeder that cannot be stopped stays for the stop after case 6', async t => {
+  let refuse = true;
+  const { edges, ctx, audits } = largeGraphFixture(t, { refuses: author => author.role === 'feeder', stopStatus: () => (refuse ? 1 : 0) });
+  assert.equal((await writeLargeGraph(ctx, 2, { assets: 1, triples: 100 })).id, 'owner/large2');
+  assert.equal(edges.feederRunning, true);
+  assert.equal(edges.largeAuthor, edges.owner);
+  // It is still running beside the cases to come, so it is audited as any feeder that ran.
+  refuse = false;
+  await edges.finishFeeder(async () => { audits.push('after case 6'); }, () => assert.fail('shutdown must recover'));
+  assert.deepEqual(audits, ['after case 6']);
+  assert.equal(edges.feederRunning, false);
+});
+
+test('case 6: the owner failing to write a large graph is reported to the case', async t => {
+  const { ctx, created } = largeGraphFixture(t, { refuses: () => true });
+  await assert.rejects(writeLargeGraph(ctx, 2, { assets: 1, triples: 100 }), /asset 0 of the large2 graph: the author refused the asset/);
+  assert.deepEqual(created, [['large2', 'feeder'], ['large2', 'owner']]);
+  await assert.rejects(writeLargeGraph(ctx, 1, { assets: 1, triples: 100 }), /asset 0 of the large graph/);
 });
 
 test('failed renewal selects the owner permanently while shutdown remains retryable', async t => {
