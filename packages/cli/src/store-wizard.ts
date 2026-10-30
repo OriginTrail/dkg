@@ -85,24 +85,38 @@ export interface PromptStoreBackendResult {
 
 /**
  * The node settings a `store` block holds beside its backend and options:
- * `controlReservedSlots`, the switch for the async queues' store control path
- * (OT-RFC-73 P14). They belong to the node, not to the backend, so a helper
- * that rewrites the block keeps them from the existing block, whatever backend
- * it writes: a re-run of `dkg init` or of a setup command with `--store` must
- * never turn the path back on after the operator switched it off. Any value is
- * kept as it is, a malformed one included (the daemon refuses that and keeps
- * the path off; a dropped key would mean the default). Clearing the block for
- * the embedded store drops them with it: that store never uses the path.
+ * `changelog`, `graphSetIndex`, `controlReservedSlots` (the switch for the
+ * async queues' store control path, OT-RFC-73 P14), and any key a later
+ * release adds. They belong to the node, not to the backend, so a helper that
+ * rewrites the block keeps every one of them from the existing block, whatever
+ * backend it writes: a re-run of `dkg init` or of a setup command with
+ * `--store` must never reset a setting the operator chose, such as turning the
+ * control path back on after the operator switched it off. Any value is kept
+ * as it is, a malformed one included (the daemon refuses that and keeps the
+ * path off; a dropped key would mean the default). Clearing the block for the
+ * embedded store drops them with it, since the local default has no block to
+ * hold them; the helpers name what that drops.
  */
-export type NodeStoreSettings = Pick<NonNullable<DkgConfig['store']>, 'controlReservedSlots'>;
+export type NodeStoreSettings = Omit<NonNullable<DkgConfig['store']>, 'backend' | 'options'>;
 
-function keepNodeStoreSettings<T extends object>(
-  block: T,
-  existing: NodeStoreSettings | undefined,
-): T & NodeStoreSettings {
-  return existing?.controlReservedSlots === undefined
-    ? block
-    : { ...block, controlReservedSlots: existing.controlReservedSlots };
+/** Every key of the existing block except `backend` and `options`, which the helpers rewrite. */
+function nodeStoreSettings(existing: unknown): Record<string, unknown> {
+  if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) return {};
+  const settings: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(existing)) {
+    if (key !== 'backend' && key !== 'options' && value !== undefined) settings[key] = value;
+  }
+  return settings;
+}
+
+function keepNodeStoreSettings<T extends object>(block: T, existing: unknown): T & NodeStoreSettings {
+  return { ...block, ...nodeStoreSettings(existing) } as T & NodeStoreSettings;
+}
+
+function logDroppedNodeStoreSettings(existing: unknown, log: (msg: string) => void): void {
+  const keys = Object.keys(nodeStoreSettings(existing));
+  if (keys.length === 0) return;
+  log(`  The local default store has no store block, so its settings are dropped: ${keys.map((key) => `store.${key}`).join(', ')}.`);
 }
 
 // An explicit embedded/local store block carried through verbatim on an
@@ -178,7 +192,9 @@ export async function promptStoreBackend(
   opts: PromptStoreBackendOptions,
 ): Promise<PromptStoreBackendResult> {
   const { storeBlock } = await chooseStoreBlock(opts);
-  return { storeBlock: storeBlock && keepNodeStoreSettings(storeBlock, opts.existingStore) };
+  if (storeBlock) return { storeBlock: keepNodeStoreSettings(storeBlock, opts.existingStore) };
+  logDroppedNodeStoreSettings(opts.existingStore, opts.log ?? console.log);
+  return { storeBlock: null };
 }
 
 /** The wizard itself: the backend and its options, before the node settings are carried over. */
@@ -474,6 +490,7 @@ export async function applyStoreFlagsToConfig(
     const existing = await load();
     if (existing.store) {
       log(`  Removing existing store block (--store ${backend} → local default).`);
+      logDroppedNodeStoreSettings(existing.store, log);
       const next = { ...existing };
       delete next.store;
       await save(next);

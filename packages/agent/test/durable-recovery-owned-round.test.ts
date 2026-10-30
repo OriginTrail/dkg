@@ -24,6 +24,16 @@ it.each<DurableRecoveryRoundDecision>([
   expect(physical).toHaveBeenCalledOnce();
   expect(physical.mock.calls[0]![0]).toMatchObject({ contextGraphId: input.contextGraphId, recovery: input.recovery });
 });
+it.each([
+  ['refused at once', new SyncBackpressureBusyError('Sync backpressure rejected durable:owned-cg:peer', 'queue_full', 'global inflight=1/1, queued=0/0'), 0],
+  ['displaced', new SyncBackpressureBusyError('Sync backpressure displaced owned-cg', 'displaced'), 1],
+] as const)('defers a round %s, logging it only when the admission did not report it', async (_case, refusal, lines) => {
+  const input = request();
+  vi.mocked(input.host.admission.run).mockRejectedValue(refusal);
+  const outcome = await runGraphOwnedDurableRecovery(input);
+  expect(outcome).toMatchObject({ decision: { strategy: 'not-started' }, result: { deferredBackpressure: 1 } });
+  expect(input.host.log.info).toHaveBeenCalledTimes(lines);
+});
 it.each(['cancelled', 'deferred'] as const)('reports not-started explicitly for %s admission', async state => {
   const physical = vi.spyOn(graph, 'runAdmittedGraphOwnedDurableGraph');
   const input = request();

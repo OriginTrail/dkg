@@ -18,6 +18,7 @@ dkg start [-f]                           # start the node daemon (-f for foregro
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
+dkg debug cpu-profile [--seconds <n>]    # record a CPU profile of the node (node-admin token; 10 s default, 60 s max)
 dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 
@@ -228,10 +229,9 @@ instead. A Knowledge Asset publish, share, file import, or a create that also
 shares or publishes, that gets no answer in time is reported as outcome
 unknown, not as failed: the daemon keeps working after the client stops
 waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
-retrying. Any other request that times out fails with a `TimeoutError`.
-That includes `ka share-async`, `ka publish-async` and `publisher publish-async`,
-though a job may still exist: find the job and follow
-[Retry safely](../build/async-jobs.md#retry-safely) instead of running them again.
+retrying. The CLI's `ka share-async`, `ka publish-async` and `publisher publish-async`
+are reported as outcome unknown too, naming the job list to check (`dkg ka share-jobs`
+or `dkg publisher jobs`). Any other request that times out fails with a `TimeoutError`.
 
 On a slow node or store, override the read and long deadlines, in
 milliseconds, with environment variables (for the MCP server, in the MCP

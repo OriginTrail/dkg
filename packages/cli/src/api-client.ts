@@ -1,4 +1,5 @@
 import { createPublicCheckpointClient } from './public-checkpoint-client.js';
+import { normalizeContextGraphIdOrUri } from './context-graph-identifiers.js';
 import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
 export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
 import type { QueryOptions } from './query-options.js';
@@ -37,6 +38,7 @@ import {
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -123,6 +125,16 @@ function knowledgeAssetHistoryHint(name: string, contextGraphId: string, subGrap
 
 function knowledgeAssetMutationDeadline(name: string, contextGraphId: string, subGraphName?: string): RequestDeadline {
   return { outcomeUnknownHint: knowledgeAssetHistoryHint(name, contextGraphId, subGraphName) };
+}
+
+/** An unanswered async admission may still have stored a job: point at the job list, not at a re-run. */
+function asyncJobAdmissionDeadline(kind: 'share' | 'publish', name: string, contextGraphId: string): RequestDeadline {
+  // Jobs are stored under the bare ID, and the share-job list compares its filter as given.
+  const id = normalizeContextGraphIdOrUri(contextGraphId);
+  const jobList = kind === 'share'
+    ? `dkg ka share-jobs --context-graph-id ${id}`
+    : `dkg publisher jobs --context-graph ${id}`;
+  return { outcomeUnknownHint: `A ${kind} job for "${name}" may exist: look for it with \`${jobList}\` before retrying.` };
 }
 
 export interface PublisherJobResponse {
@@ -292,8 +304,11 @@ export interface KnowledgeAssetShareJobView {
   startedAt?: string;
   finishedAt?: string;
   entitiesPromoted?: number;
+  /** The attempts counted against the job's budget: never more than `maxAttempts`. */
   attempts: number;
   maxAttempts: number;
+  /** The attempts automatic recovery made after the budget was spent; absent when there were none. */
+  recoveryAttempts?: number;
   nextRetryAt?: string;
   lastError?: {
     code: string;
@@ -1049,7 +1064,11 @@ export class ApiClient {
     options?: KnowledgeAssetShareAsyncOptions,
   ): Promise<{ jobId: string; state: 'queued' }> {
     assertSupportedAsyncShareOptions(options);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`,
+      { contextGraphId, ...(options ?? {}) },
+      asyncJobAdmissionDeadline('share', name, contextGraphId),
+    );
   }
 
   async knowledgeAssetShareJobs(options?: ShareJobsListOptions): Promise<ShareJobsListResult> {
@@ -1120,7 +1139,7 @@ export class ApiClient {
       // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    }, asyncJobAdmissionDeadline('publish', name, contextGraphId));
   }
 
   async createAssertion(
@@ -2392,6 +2411,16 @@ export class ApiClient {
     if (opts.resultKind) params.set('resultKind', opts.resultKind);
     if (opts.resultName) params.set('resultName', opts.resultName);
     return this.get(`/api/ccl/results?${params.toString()}`);
+  }
+
+  /**
+   * Node-admin token only. The node records a CPU profile of its main thread
+   * for `seconds` (its default when absent; clamped to 1-60 s), writes it on
+   * its own host and answers with the file's path.
+   */
+  async recordCpuProfile(seconds?: number): Promise<CpuProfileResult> {
+    return this.post(CPU_PROFILE_PATH, seconds === undefined ? {} : { seconds },
+      { timeoutMs: cpuProfileRequestTimeoutMs(seconds) });
   }
 
   async shutdown(): Promise<void> {

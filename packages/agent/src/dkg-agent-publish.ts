@@ -7,6 +7,7 @@ import { tryWithKeyedLocks, assertionLifecycleWriteLockKey, type PromoteExecutio
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
+import { resolvePromoteRecipientsWithinBound } from './internal/promote/assertion-promote-precommit.js';
 import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLocalPublish } from './queued-publish-finalization.js';
 
 /**
@@ -4252,10 +4253,13 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    const resolution = await withRpcUsageSite(
+    // The bounded repeat of the share's recipient read (#3044): an authority
+    // that moved while the keys resolved is read again before the publish fails.
+    const resolveRecipients = () => resolvePromoteRecipientsWithinBound(() => withRpcUsageSite(
       CG_AUTH_RPC_SITES.curatedKeyContext,
       () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
-    );
+    ));
+    const resolution = await resolveRecipients();
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
@@ -4337,10 +4341,7 @@ export class PublishMethods extends DKGAgentBase {
     // once more. On a difference the resolution starts over, as a new attempt would,
     // and sets up an epoch for the authority as it is now. An authority that keeps
     // moving gives the attempt back as the typed authority failure.
-    const current = await withRpcUsageSite(
-      CG_AUTH_RPC_SITES.curatedKeyContext,
-      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
-    );
+    const current = await resolveRecipients();
     if (!current.requiresEncryption
       || computeSwmSenderKeyMembershipHash({ contextGraphId, subGraphName,
         members: current.recipients.map((recipient) => ({ agentAddress: recipient.agentAddress, recipientKeyId: recipient.recipientKeyId })),

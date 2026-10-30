@@ -135,10 +135,11 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
         stopOnBackoffWorthyFailure
         && durableSyncAccumulatorHasPeerTransportFailure(part),
       ),
-      onDeferred: (item, error) => host.log.info(
-        ctx,
-        `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
-      ),
+      onDeferred: (item, error) => {
+        // A refusal at once is counted in the node's refusal summary by the admission; displaced or timed-out work is not.
+        if (error.state !== undefined) return;
+        host.log.info(ctx, `Deferring durable sync at CG ${item.contextGraphId} due to local backpressure: ${error.message}`);
+      },
     });
     return {
       admission: admissionBoundary.snapshot(),
