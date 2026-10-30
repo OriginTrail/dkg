@@ -877,12 +877,11 @@ export type ChainProofDisposition =
  * The dispatcher's decision table, over the job and the chain's verdict alone.
  *
  * `reverted` is the only verdict whose disposition depends on the JOB, and the question it asks is
- * whose transaction reverted. A job that failed from 'broadcast'/'included' signed that one
- * itself, so `tx_reverted` is a true statement about it and releases the hold the registry's way.
- * A job holding an INHERITED hash failed before signing anything — the reverted transaction
- * belongs to an earlier attempt, `LIFT_JOB_FAILURE_ALLOWED_STATES` rejects `tx_reverted` from a
- * pre-send state for exactly that reason, and the honest release is the same reset a proven
- * absence gets.
+ * whose transaction reverted. A job whose evidence is its own 'broadcast'/'included' record signed
+ * that one itself, so `tx_reverted` is a true statement about it and releases the hold the
+ * registry's way. A job asked about an INHERITED hash signed nothing, or had its own attempt refused
+ * (#3591) — the reverted transaction belongs to an earlier attempt, so `tx_reverted` is not true of
+ * this one, and the honest release is the same reset a proven absence gets.
  *
  * `unrecognized` sits with `pending`/`inconclusive` and not with the absences: a mined transaction
  * carrying no publish this adapter can parse is a fact about THAT transaction, not proof that no
@@ -906,7 +905,8 @@ export function decideChainProofDisposition(
       // the operator's by-id clear as the exit.
       return queuedLiftOperationKind(job) === 'update' ? { action: 'hold' } : { action: 'reset' };
     case 'reverted':
-      if (job.failure.failedFromState === 'broadcast' || job.failure.failedFromState === 'included') {
+      if (job.failure.failedFromState === 'included'
+        || (job.failure.failedFromState === 'broadcast' && job.broadcast?.txHash === getLiftJobTransactionEvidence(job))) {
         return { action: 'refail_reverted', failedFromState: job.failure.failedFromState };
       }
       // r16 (3814610383) — the INHERITED-hash fall-through re-queues the job, and re-queuing an
