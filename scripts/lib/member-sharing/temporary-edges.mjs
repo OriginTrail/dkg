@@ -12,15 +12,27 @@
 // to (DKG_SYNC_ADMISSION_TRACE). The feeder, when a fourth node number is
 // free, holds the large graph of a later attempt of case 6 and serves it to
 // member 2; it runs only while case 6 needs it, fresh for each attempt.
+//
+// A node's daemon can leave without being asked, and its supervisor starts it
+// again with nothing said anywhere; a node that came back can leave a run
+// passing. So the suite reads each node's log before its folder goes, says so
+// in a note, and keeps what the node left behind. A write it refused meanwhile
+// still fails.
 
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { brief, lastLines, waitFor } from './devnet.mjs';
-import { connectionsObservation, topologyProblems } from '../qa/member-sharing.mjs';
+import { connectionsObservation, topologyProblems, workerEnds, workersThatLeft } from '../qa/member-sharing.mjs';
 
 // devnet.sh addnode takes node numbers up to 10 (one Hardhat key each).
 export const NODE_CANDIDATES = [7, 8, 9, 10];
+// Every temporary node's daemon preloads this: nothing else records how its worker ended.
+const EXIT_TRACE = fileURLToPath(new URL('./worker-exit-trace.cjs', import.meta.url));
+const WORKER_EXITS = 'worker-exits.jsonl';
+// What a node leaves behind that is worth more than its folder.
+const KEPT_LOGS = ['console.log', 'daemon.log', 'sync-admissions.jsonl', WORKER_EXITS, 'worker-stderr.log'];
 // Nobody listens on the discard port: a dial of it is refused at once.
 const DEAD_DIRECT_ADDRESS = '/ip4/127.0.0.1/tcp/9';
 // Every node folder this suite creates carries this file, so that a later run
@@ -136,8 +148,10 @@ export class TemporaryEdges {
       return { problem: `no three free node numbers among ${candidates.join(', ')} (${taken.join('; ') || 'MEMBER_SHARING_NODES must name three or four'})` };
     }
     const [owner, member1, member2, feeder] = free;
+    const nodeOptions = [process.env.NODE_OPTIONS, `--require ${JSON.stringify(EXIT_TRACE)}`].filter(Boolean).join(' ');
     const record = (number, role, subject, relay, overrides, env = {}) => ({
-      number, role, member: role.startsWith('member'), subject, label: `node${number} (${role})`, relay, overrides, env, peerId: null, agentAddress: null,
+      number, role, member: role.startsWith('member'), subject, label: `node${number} (${role})`, relay, overrides,
+      env: { NODE_OPTIONS: nodeOptions, ...env }, peerId: null, agentAddress: null,
     });
     // Reachable through relays only: the owner through node 1 and node 2, member 1
     // through node 1 (the devnet's relay for an Edge), member 2 through node 2.
@@ -218,27 +232,49 @@ export class TemporaryEdges {
   async giveUpFeeder(error) {
     this.#feederState = 'needs-stop';
     await this.#stopFeeder().catch(() => {});
-    this.log.note(`the feeder failed while it wrote a large graph (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts; ${this.#keepFeederLogs()}`);
+    this.log.note(`the feeder failed while it wrote a large graph (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts; ${this.#keptLogs(this.feeder)}`);
   }
 
+  /** Where this run keeps what its nodes left behind. */
+  get #keptDir() { return join(this.devnet.dir, 'issue-3251-member-sharing', this.stamp); }
+
   /**
-   * What a feeder that failed left behind, before its folder goes: the run may
-   * still pass, and console.log has what a dying daemon could not write to its
-   * own log. Says where they are.
+   * What a node left behind, before its folder goes (KEPT_LOGS; a feeder that
+   * replaced another keeps its own names). Returns the problem, or null.
    */
-  #keepFeederLogs() {
-    const { devnet, feeder } = this;
-    const kept = join(devnet.dir, 'issue-3251-member-sharing', this.stamp);
+  #keepLogs(node) {
     try {
-      mkdirSync(kept, { recursive: true });
-      for (const name of ['console.log', 'daemon.log']) {
-        const file = join(devnet.nodeDir(feeder), name);
-        if (existsSync(file)) copyFileSync(file, join(kept, `node${feeder.number}-${feeder.role}.${name}`));
+      const instance = node.instance > 1 ? `-${node.instance}` : '';
+      for (const name of KEPT_LOGS) {
+        const file = join(this.devnet.nodeDir(node), name);
+        if (!existsSync(file)) continue;
+        mkdirSync(this.#keptDir, { recursive: true });
+        copyFileSync(file, join(this.#keptDir, `node${node.number}-${node.role}${instance}.${name}`));
       }
-      return `its logs are kept in ${kept}`;
+      return null;
     } catch (error) {
       return `its logs could not be kept: ${error?.message ?? error}`;
     }
+  }
+
+  /** The same, said. */
+  #keptLogs(node) { return this.#keepLogs(node) ?? `its logs are kept in ${this.#keptDir}`; }
+
+  /**
+   * Says so when a node's daemon left without being asked, in this log's own
+   * words (workersThatLeft), with how its supervisor saw it end (workerEnds),
+   * and keeps what it left behind. Read once the node is stopped. Returns
+   * whether it did.
+   */
+  #noteWorkersThatLeft(node) {
+    const read = name => { try { return readFileSync(join(this.devnet.nodeDir(node), name), 'utf8'); } catch { return ''; } };
+    const left = workersThatLeft(read('daemon.log'));
+    if (left.length === 0) return false;
+    const after = left.map(({ restartedAt }) => (restartedAt ? `its supervisor started it again at ${restartedAt}` : 'it did not start again'));
+    const ends = workerEnds(read(WORKER_EXITS));
+    this.log.note(`${node.label}: its daemon left without shutting down ${left.length} time(s), which this suite did not ask for: ${after.join('; ')}; `
+      + `${ends.length ? `its supervisor saw ${ends.join(', ')}` : 'how it ended was not recorded'}; ${this.#keptLogs(node)}`);
+    return true;
   }
 
   /** Audit the outgoing participant before removing evidence; always attempt shutdown twice. */
@@ -269,6 +305,7 @@ export class TemporaryEdges {
     await this.#stopFeeder();
     if (existsSync(this.devnet.nodeDir(feeder.number))) {
       if (!this.claims(feeder)) throw new Error(`node${feeder.number} is no longer this run's; it is left as it is`);
+      this.#noteWorkersThatLeft(feeder);
       const problem = this.removeStoppedOwnNode(feeder.number);
       if (problem) { this.#feederState = 'needs-stop'; throw new Error(problem); }
     }
@@ -279,6 +316,7 @@ export class TemporaryEdges {
     this.started = this.started.filter(node => node !== feeder);
     feeder.peerId = null;
     feeder.agentAddress = null;
+    feeder.instance = (feeder.instance ?? 1) + 1;
     await this.#startFeeder();
   }
 
@@ -413,8 +451,9 @@ export class TemporaryEdges {
   }
 
   /**
-   * Stops every node this run added and removes it; the logs of a failed run
-   * are kept first. With `keep`, the nodes are left running.
+   * Stops every node this run added and removes it; the logs of a failed run,
+   * and of a node whose daemon left without being asked, are kept first. With
+   * `keep`, the nodes are left running.
    */
   cleanup({ keep, failed }) {
     // A start still running (the run is being interrupted): it is cancelled,
@@ -428,7 +467,6 @@ export class TemporaryEdges {
       if (this.started.length) this.log.say(`MEMBER_SHARING_KEEP_NODES=1: node(s) ${this.started.map(node => node.number).join(', ')} left running`);
       return;
     }
-    const kept = join(this.devnet.dir, 'issue-3251-member-sharing', this.stamp);
     for (const node of this.started) {
       // Only a folder that still carries this run's claim is stopped and
       // removed: a number whose folder this run gave up (a feeder it replaced)
@@ -439,14 +477,13 @@ export class TemporaryEdges {
         continue;
       }
       this.devnet.devnetShSync(['stop-node', String(node.number)]);
-      if (failed && existsSync(this.devnet.logFile(node))) {
-        mkdirSync(kept, { recursive: true });
-        copyFileSync(this.devnet.logFile(node), join(kept, `node${node.number}-${node.role}.daemon.log`));
-        if (node.trace && existsSync(node.trace)) copyFileSync(node.trace, join(kept, `node${node.number}-${node.role}.sync-admissions.jsonl`));
+      if (!this.#noteWorkersThatLeft(node) && failed) {
+        const kept = this.#keepLogs(node);
+        if (kept) this.log.say(`${node.label}: ${kept}`);
       }
       const problem = this.removeOwnNode(node.number);
       if (problem) this.log.say(problem);
     }
-    if (failed && existsSync(kept)) this.log.say(`kept the logs of the temporary nodes in ${kept}`);
+    if (failed && existsSync(this.#keptDir)) this.log.say(`kept the logs of the temporary nodes in ${this.#keptDir}`);
   }
 }

@@ -4,6 +4,7 @@ import { classify } from '../qa/known-gaps.mjs';
 import {
   caseVerdicts, connectionsObservation, describe, foldRead, foldSubscription, freshSubscription, inScope, judgeHeld,
   linkProblem, literalText, pairHeld, pairResult, shareAdmission, sharedMemoryScope, subscriptionResults, topologyProblems,
+  workerEnds, workersThatLeft,
 } from '../qa/member-sharing.mjs';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -247,4 +248,32 @@ test('a pair is held, missing (with what each read last saw) or not written, as 
     text: '"member1 live sub-graph (9)" by node8 (member1) in registered/s at node9 (member2): not written, the author refused the asset: HTTP 404',
     evidence: { registered: true, private: false, member: true, definitionHeld: false, definitionSeen: false, errorCode: 'CONTEXT_GRAPH_NOT_FOUND' },
   });
+});
+
+test('a daemon\'s log says which of its workers left without being asked to stop', () => {
+  const start = at => `[${at}] Starting DKG edge node "devnet-node-7" (v10, abc)...\n2026-10-30 18:39:44 connect x [DKGAgent] Starting DKG node\n`;
+  const stop = at => `[${at}] Shutting down...\n[${at}] Stopped.\n`;
+  // Every start stopped first, as a run with the suite's own restarts: the agent's own start line is not a worker's.
+  assert.deepEqual(workersThatLeft(''), []);
+  assert.deepEqual(workersThatLeft(start('T1') + stop('T2')), []);
+  assert.deepEqual(workersThatLeft(start('T1') + stop('T2') + start('T3') + stop('T4')), []);
+  // Started again with no stop between: its supervisor did that.
+  assert.deepEqual(workersThatLeft(start('T1') + start('T2') + stop('T3')), [{ restartedAt: 'T2' }]);
+  assert.deepEqual(workersThatLeft(start('T1') + start('T2') + start('T3') + stop('T4')), [{ restartedAt: 'T2' }, { restartedAt: 'T3' }]);
+  // No stop after the last start: it left and nothing started it again.
+  assert.deepEqual(workersThatLeft(start('T1') + stop('T2') + start('T3')), [{ restartedAt: null }]);
+  assert.deepEqual(workersThatLeft(start('T1') + start('T2')), [{ restartedAt: 'T2' }, { restartedAt: null }]);
+  // A core's start reads the same; a line that only mentions the words does not count.
+  assert.deepEqual(workersThatLeft('[T1] Starting DKG core node "n" (v)...\n[T2] Starting DKG core node "n" (v)...\n[T3] Shutting down...\n'), [{ restartedAt: 'T2' }]);
+  assert.deepEqual(workersThatLeft(`${start('T1')}[T2] Publisher: Shutting down... later\n`), [{ restartedAt: null }]);
+});
+
+test('a worker that ended other than cleanly is named with what its supervisor saw', () => {
+  const end = fields => `${JSON.stringify({ at: 'T', event: 'worker-exit', worker: 5, ...fields })}\n`;
+  assert.deepEqual(workerEnds(''), []);
+  assert.deepEqual(workerEnds(end({ code: 0, signal: null })), []);
+  assert.deepEqual(workerEnds(end({ code: null, signal: 'SIGKILL' })), ['worker 5 end at T with signal SIGKILL']);
+  assert.deepEqual(workerEnds(end({ code: 3, signal: null })), ['worker 5 end at T with exit code 3']);
+  // What the worker itself said is for the kept file, and half a line is what a dying process can leave.
+  assert.deepEqual(workerEnds(`{"event":"exit","code":3}\n{"event":"uncaught"}\n${end({ code: 1, signal: null })}{"event":"worker-ex`), ['worker 5 end at T with exit code 1']);
 });

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -381,6 +382,136 @@ test('case 6: a feeder that fails while it writes the large graph is given up, u
   // After case 6 nothing is left to audit or to stop, so case 2 is not failed for a feeder that cannot answer.
   await edges.finishFeeder(async () => { audits.push('after case 6'); }, () => assert.fail('there is nothing to stop'));
   assert.deepEqual(audits, []);
+});
+
+/** A log as a daemon writes it: `events` are 'start' and 'stop', each a line with its time. */
+const daemonLog = (...events) => events.map((event, i) => {
+  const at = `2026-10-30T17:40:0${i}.000Z`;
+  return event === 'start'
+    ? `[${at}] Starting DKG edge node "devnet-node"...\n2026-10-30 18:40:0${i} connect x [DKGAgent] Starting DKG node\n`
+    : `[${at}] Shutting down...\n[${at}] Stopped.\n`;
+}).join('');
+const WORKER_END = '{"at":"T1","role":"daemon-supervisor","event":"worker-exit","worker":44162,"code":null,"signal":"SIGSEGV"}\n';
+
+/** Three started nodes, each with what `files(node)` puts into its folder, and what the cleanup says of them. */
+async function startedNodes(t, files) {
+  const devnet = fakeDevnet(t);
+  const notes = [];
+  const said = [];
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say: text => said.push(text), note: text => notes.push(text) } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  for (const node of edges.nodes) {
+    await edges.start(node);
+    for (const [name, text] of Object.entries(files(node))) writeFileSync(join(devnet.nodeDir(node), name), text);
+  }
+  return { devnet, edges, notes, said, kept: join(devnet.dir, 'issue-3251-member-sharing', 'S') };
+}
+
+test('a node whose daemon left and came back is noted and its logs kept, also when the run passes; the others are not', async t => {
+  const { devnet, edges, notes, said, kept } = await startedNodes(t, node => (node.role === 'owner'
+    ? { 'daemon.log': daemonLog('start', 'start', 'stop'), 'console.log': 'the start command\n', 'worker-exits.jsonl': WORKER_END, 'worker-stderr.log': 'FATAL ERROR\n' }
+    : { 'daemon.log': daemonLog('start', 'stop') }));
+  edges.cleanup({ keep: false, failed: false });
+  assert.deepEqual(notes, [
+    `node7 (owner): its daemon left without shutting down 1 time(s), which this suite did not ask for: its supervisor started it again at 2026-10-30T17:40:01.000Z; `
+    + `its supervisor saw worker 44162 end at T1 with signal SIGSEGV; its logs are kept in ${kept}`,
+  ]);
+  assert.equal(readFileSync(join(kept, 'node7-owner.console.log'), 'utf8'), 'the start command\n');
+  assert.equal(readFileSync(join(kept, 'node7-owner.worker-exits.jsonl'), 'utf8'), WORKER_END);
+  assert.equal(readFileSync(join(kept, 'node7-owner.worker-stderr.log'), 'utf8'), 'FATAL ERROR\n');
+  assert.match(readFileSync(join(kept, 'node7-owner.daemon.log'), 'utf8'), /Shutting down/);
+  // The folders go all the same, and a node that did as it was told keeps nothing on a passing run.
+  assert.ok(!existsSync(devnet.nodeDir(7)));
+  assert.ok(!existsSync(join(kept, 'node8-member1.daemon.log')));
+  assert.deepEqual(said, []);
+});
+
+test('a node whose daemon left and did not come back is noted, and a restart the suite asked for is not', async t => {
+  const { edges, notes, kept } = await startedNodes(t, node => ({
+    owner: { 'daemon.log': daemonLog('start') },
+    member1: { 'daemon.log': daemonLog('start', 'stop', 'start', 'stop') },
+    member2: { 'daemon.log': daemonLog('start', 'stop') },
+  })[node.role]);
+  edges.cleanup({ keep: false, failed: false });
+  assert.deepEqual(notes, [
+    `node7 (owner): its daemon left without shutting down 1 time(s), which this suite did not ask for: it did not start again; how it ended was not recorded; its logs are kept in ${kept}`,
+  ]);
+});
+
+test('a failing run keeps what every node left behind', async t => {
+  const { devnet, edges, notes, said, kept } = await startedNodes(t, node => ({
+    'daemon.log': daemonLog('start', 'stop'), 'console.log': `start of ${node.role}\n`, 'worker-exits.jsonl': '{"event":"worker-exit","code":0}\n', 'worker-stderr.log': `stderr of ${node.role}\n`,
+    ...(node.role === 'member2' ? { 'sync-admissions.jsonl': 'the trace\n' } : {}),
+  }));
+  edges.cleanup({ keep: false, failed: true });
+  assert.deepEqual(notes, []);
+  assert.deepEqual(said, [`kept the logs of the temporary nodes in ${kept}`]);
+  for (const [number, role] of [[7, 'owner'], [8, 'member1'], [9, 'member2']]) {
+    assert.equal(readFileSync(join(kept, `node${number}-${role}.console.log`), 'utf8'), `start of ${role}\n`);
+    assert.equal(readFileSync(join(kept, `node${number}-${role}.worker-stderr.log`), 'utf8'), `stderr of ${role}\n`);
+    assert.ok(existsSync(join(kept, `node${number}-${role}.daemon.log`)));
+    assert.ok(existsSync(join(kept, `node${number}-${role}.worker-exits.jsonl`)));
+    assert.ok(!existsSync(devnet.nodeDir(number)));
+  }
+  assert.equal(readFileSync(join(kept, 'node9-member2.sync-admissions.jsonl'), 'utf8'), 'the trace\n');
+});
+
+test('a clean passing run keeps and says nothing', async t => {
+  const { edges, notes, said, kept } = await startedNodes(t, () => ({ 'daemon.log': daemonLog('start', 'stop') }));
+  edges.cleanup({ keep: false, failed: false });
+  assert.deepEqual(notes, []);
+  assert.deepEqual(said, []);
+  assert.ok(!existsSync(kept));
+});
+
+test('a node still running when the cleanup stops it is not taken for one that left: its log is read after the stop', async t => {
+  const { devnet, edges, notes } = await startedNodes(t, () => ({ 'daemon.log': daemonLog('start') }));
+  devnet.devnetShSync = args => {
+    if (args[0] === 'stop-node') writeFileSync(join(devnet.nodeDir(Number(args[1])), 'daemon.log'), daemonLog('start', 'stop'));
+    return { status: 0, output: '' };
+  };
+  edges.cleanup({ keep: false, failed: false });
+  assert.deepEqual(notes, []);
+});
+
+test('logs that cannot be kept are said so, and the cleanup goes on', async t => {
+  const { devnet, edges, notes, said } = await startedNodes(t, node => ({ 'daemon.log': node.role === 'owner' ? daemonLog('start') : daemonLog('start', 'stop') }));
+  // A file where the folder for the logs must go.
+  writeFileSync(join(devnet.dir, 'issue-3251-member-sharing'), '');
+  edges.cleanup({ keep: false, failed: true });
+  assert.match(notes[0], /^node7 \(owner\): .*its logs could not be kept: /);
+  assert.ok(said.some(text => /^node8 \(member1\): its logs could not be kept: /.test(text)));
+  assert.ok(!existsSync(devnet.nodeDir(9)));
+});
+
+test('a feeder that left is noted before the next one takes its number, and each keeps its logs under its own name', async t => {
+  const { devnet, edges, ctx, notes } = largeGraphFixture(t);
+  await writeLargeGraph(ctx, 2, { assets: 1, triples: 100 });
+  const first = join(devnet.nodeDir(10), 'daemon.log');
+  writeFileSync(first, daemonLog('start', 'start', 'stop'));
+  await writeLargeGraph(ctx, 3, { assets: 1, triples: 100 });
+  const kept = join(devnet.dir, 'issue-3251-member-sharing', 'S');
+  assert.match(notes.at(-1), /^node10 \(feeder\): its daemon left without shutting down 1 time\(s\)/);
+  assert.equal(readFileSync(join(kept, 'node10-feeder.daemon.log'), 'utf8'), daemonLog('start', 'start', 'stop'));
+  // The feeder that replaced it, left the same way.
+  writeFileSync(first, daemonLog('start'));
+  edges.cleanup({ keep: false, failed: false });
+  assert.equal(readFileSync(join(kept, 'node10-feeder-2.daemon.log'), 'utf8'), daemonLog('start'));
+  assert.equal(readFileSync(join(kept, 'node10-feeder.daemon.log'), 'utf8'), daemonLog('start', 'start', 'stop'));
+});
+
+test('a node that cannot be reached says why: gone before the request, or gone during it', async t => {
+  const server = createServer(request => request.socket.destroy());
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const devnet = openDevnet({ repoRoot: '/', dir: '/nonexistent', adminToken: 't', apiPortBase: server.address().port, libp2pPortBase: 1 });
+  const during = await devnet.api(1, 'POST', '/x', { large: true });
+  assert.equal(during.status, 0);
+  assert.match(during.text, /^fetch failed \((UND_ERR_SOCKET|ECONNRESET)\)$/);
+  await new Promise(resolve => server.close(resolve));
+  const before = await devnet.api(1, 'POST', '/x', { large: true });
+  assert.equal(before.status, 0);
+  assert.equal(before.text, 'fetch failed (ECONNREFUSED)');
 });
 
 test('case 6: a given-up feeder that cannot be stopped stays for the stop after case 6', async t => {

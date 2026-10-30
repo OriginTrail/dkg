@@ -134,6 +134,12 @@
 // alone. At the end the suite removes a node's folder only once nothing
 // listens on its ports.
 //
+// A temporary node's daemon that leaves without being asked, which its
+// supervisor then starts again with nothing said anywhere, gets a note at the
+// end of the run, with how it ended, and the node's logs are kept, also when
+// the run passes (member-sharing/temporary-edges.mjs). A write it refused
+// meanwhile still fails.
+//
 // Exit codes: 0 every case passed; 1 a case failed or was not run; 3 the
 // devnet cannot host the scenario and nothing was exercised: no devnet, node 1
 // or node 2 not a Core, or fewer than three node numbers free of other
