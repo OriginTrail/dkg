@@ -56,6 +56,7 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => [],
+    listFinalizedPrivateRepairsAsync: async () => [],
     repairFinalizedPrivatePlacement: async () => {},
     readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'revision-1' }),
     reconcile: async ({ signal }: { signal: AbortSignal }) => { await reconcile(signal); return null; },

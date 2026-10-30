@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { setImmediate as nextTurn } from 'node:timers';
 import { computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import { resolveFinalizedPlacementDecisionV1 } from '../src/internal/finalized-placement-decision.js';
@@ -101,6 +102,106 @@ describe('mixed finalized placement lanes', () => {
     expect(f.repairPrivate).not.toHaveBeenCalled();
     expect(f.readAuthority.mock.calls.length).toBeGreaterThanOrEqual(rows.length);
     expect(f.readAuthority.mock.calls.length).toBeLessThanOrEqual(3 * rows.length);
+  });
+
+  it('lets foreground callbacks run before a cooling backlog finishes', async () => {
+    const rows = Array.from({ length: 1000 }, (_, index) => ({ ...privateRepair(), assertionCoordinate: `yield-${index}` }));
+    const f = fixture(0, { readPrivateFailure: () => ({ kind: 'unknown', consecutiveFailures: 2,
+      sameKindFailures: 2, firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: 10_000, parked: false }) });
+    f.setPrivateRepairs(rows);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    const authority = f.readAuthority.getMockImplementation()!;
+    let reads = 0;
+    let foregroundReads = Infinity;
+    let foreground!: Promise<void>;
+    f.readAuthority.mockImplementation(graph => {
+      if (++reads === 1) foreground = new Promise(resolve => nextTurn(() => {
+        foregroundReads = reads; resolve();
+      }));
+      return authority(graph);
+    });
+    f.owner.start(ctx); await f.owner.whenIdle(); await foreground;
+    expect(foregroundReads).toBeGreaterThan(0);
+    expect(foregroundReads).toBeLessThan(rows.length);
+    expect(f.repairPrivate).not.toHaveBeenCalled();
+  });
+  it('rechecks authority after yielding before admitting later repairs', async () => {
+    const f = fixture(0);
+    f.setPrivateRepairs(Array.from({ length: 100 }, (_, index) => ({ ...privateRepair(), assertionCoordinate: `authority-${index}` })));
+    const authority = f.readAuthority.getMockImplementation()!;
+    let scheduled = false;
+    f.readAuthority.mockImplementation(graph => {
+      if (!scheduled) { scheduled = true; nextTurn(() => f.setAvailable(false)); }
+      return authority(graph);
+    });
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    expect(f.repairPrivate.mock.calls.length).toBeGreaterThan(0);
+    expect(f.repairPrivate.mock.calls.length).toBeLessThan(100);
+  });
+
+  it('stops admission when closed during a yielded pass', async () => {
+    const f = fixture(0);
+    f.setPrivateRepairs(Array.from({ length: 100 }, (_, index) => ({ ...privateRepair(), assertionCoordinate: `close-${index}` })));
+    const authority = f.readAuthority.getMockImplementation()!;
+    let closing: Promise<void> | undefined;
+    let scheduled = false;
+    let admittedAtClose = 0;
+    f.readAuthority.mockImplementation(graph => {
+      if (!scheduled) {
+        scheduled = true;
+        nextTurn(() => { admittedAtClose = f.repairPrivate.mock.calls.length; closing = f.owner.close(); });
+      }
+      return authority(graph);
+    });
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    await closing;
+    expect(admittedAtClose).toBeGreaterThan(0);
+    expect(admittedAtClose).toBeLessThan(100);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(admittedAtClose);
+  });
+
+  it('yields during cold durable failure-history restoration', async () => {
+    let reads = 0;
+    let observed = Infinity;
+    let foreground!: Promise<void>;
+    const f = fixture(0, { readPrivateFailure: () => {
+      if (++reads === 1) foreground = new Promise(resolve => nextTurn(() => { observed = reads; resolve(); }));
+      return { kind: 'unknown', consecutiveFailures: 2, sameKindFailures: 2,
+        firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: 10_000, parked: false };
+    } });
+    f.setPrivateRepairs(Array.from({ length: 100 }, (_, index) => ({ ...privateRepair(), assertionCoordinate: `cold-${index}` })));
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    await foreground;
+    expect(observed).toBeGreaterThan(0);
+    expect(observed).toBeLessThan(100);
+    expect(reads).toBe(100);
+    expect(f.repairPrivate).not.toHaveBeenCalled();
+  });
+
+  it('keeps a request arriving during an asynchronous listing until its own attempt', async () => {
+    let finishFirst!: () => void;
+    let entered!: () => void;
+    const listingStarted = new Promise<void>(resolve => { entered = resolve; });
+    let reads = 0;
+    const later = { ...privateRepair(), assertionCoordinate: 'arrived-during-list' };
+    const f = fixture(0, { listFinalizedPrivateRepairsAsync: async () => {
+      if (++reads === 1) { await new Promise<void>(resolve => { finishFirst = resolve; entered(); }); return []; }
+      return [later];
+    } });
+    f.owner.start(ctx);
+    await listingStarted;
+    let releasedWithoutAttempt = false;
+    const request = f.owner.requestFinalizedPrivate({ repair: later, ctx, observer: {
+      cooldownSkipped: () => {}, released: attempt => { if (!attempt) releasedWithoutAttempt = true; },
+    } });
+    finishFirst();
+    await request.whenAttempted;
+    await f.owner.whenIdle();
+    expect(releasedWithoutAttempt).toBe(false);
+    expect(f.repairPrivate).toHaveBeenCalledOnce();
   });
 
 });
