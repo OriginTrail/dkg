@@ -114,6 +114,8 @@ describe('the offline publisher reads leave the store file unchanged', () => {
           ...actual,
           createPublisherInspector: async (args: Parameters<typeof actual.createPublisherInspector>[0]) => {
             const inspector = await actual.createPublisherInspector(args);
+            // The worker store loads its file when its thread starts; its first answer comes after that load.
+            await inspector.publisher.getStats();
             await admitJobs(backend, storePath, ['c']);
             return inspector;
           },
