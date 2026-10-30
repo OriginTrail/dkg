@@ -1,4 +1,5 @@
 import type { CoreFields } from './schema.js';
+import { STREAMS } from './registry.js';
 
 export interface KafkaStreamKa {
   '@context': Record<string, string>;
@@ -20,6 +21,7 @@ const DKG_STREAMS_MAPPING: Array<[keyof CoreFields, string]> = [
   ['kafkaAuthMethod', 'dkg-streams:kafkaAuthMethod'],
   ['kafkaSaslMechanism', 'dkg-streams:kafkaSaslMechanism'],
   ['dataFormat', 'dkg-streams:dataFormat'],
+  ['clusterId', 'dkg-streams:clusterId'],
 ];
 
 export function mergeAugmentFragment(
@@ -29,21 +31,22 @@ export function mergeAugmentFragment(
 ): KafkaStreamKa {
   // ADR 0004: `@type` and `@context` are extensible (multi-type / multi-prefix).
   // Every other key keeps the core-wins-with-log-once contract.
-  const merged: KafkaStreamKa = { ...baseKa };
+  // Use exactly the context we will publish, independently of fragment key order.
+  const context = mergeContexts(baseKa['@context'], augmentFragment['@context'], loggedCollisionKeys);
+  const merged: KafkaStreamKa = { ...baseKa, '@context': context };
   for (const [key, value] of Object.entries(augmentFragment)) {
     if (key === '@type') {
       merged['@type'] = mergeTypes(baseKa['@type'], value);
       continue;
     }
     if (key === '@context') {
-      merged['@context'] = mergeContexts(baseKa['@context'], value, loggedCollisionKeys);
       continue;
     }
     if (key.startsWith('@')) {
       logCollisionOnce(key, loggedCollisionKeys);
       continue;
     }
-    if (key in baseKa) {
+    if (key in baseKa || isCoreProperty(key, context)) {
       logCollisionOnce(key, loggedCollisionKeys);
       continue;
     }
@@ -54,6 +57,35 @@ export function mergeAugmentFragment(
     merged[key] = value;
   }
   return merged;
+}
+
+function isCoreProperty(key: string, context: Record<string, string>): boolean {
+  const resolved = resolveContextIri(key, context);
+  return resolved === undefined || resolved.startsWith(STREAMS);
+}
+
+function resolveContextIri(
+  term: string, context: Record<string, string>, vocab = true, seen = new Set<string>(),
+): string | undefined {
+  // Context merging accepts only local string definitions. Follow term and
+  // compact-prefix chains without loading remote contexts; cycles fail closed.
+  if (seen.has(term)) return undefined;
+  const next = new Set(seen).add(term);
+  // Bare term-definition values also expand against the effective @vocab.
+  if (Object.hasOwn(context, term)) return resolveContextIri(context[term], context, true, next);
+  const colon = term.indexOf(':');
+  if (colon !== -1) {
+    const prefix = term.slice(0, colon);
+    if (prefix === '_' || term.slice(colon + 1).startsWith('//')) return term;
+    if (!Object.hasOwn(context, prefix)) return term;
+    const namespace = resolveContextIri(prefix, context, false, next);
+    return namespace === undefined ? undefined : namespace + term.slice(colon + 1);
+  }
+  if (vocab && Object.hasOwn(context, '@vocab')) {
+    const namespace = resolveContextIri(context['@vocab'], context, false, next);
+    return namespace === undefined ? undefined : namespace + term;
+  }
+  return term;
 }
 
 function mergeTypes(baseType: KafkaStreamKa['@type'], extType: unknown): string | string[] {
@@ -81,11 +113,23 @@ function mergeContexts(
   const merged: Record<string, string> = { ...baseCtx };
   for (const [prefix, iri] of Object.entries(extCtx as Record<string, unknown>)) {
     if (typeof iri !== 'string') continue;
-    if (prefix in baseCtx) {
+    // Base/import/language directives can alter core identifiers or literals;
+    // the extension contract permits local aliases, not document-wide policy.
+    if (prefix.startsWith('@') && prefix !== '@vocab') {
+      throw new Error('Extension @context supports only local aliases and @vocab');
+    }
+    if (prefix in baseCtx || (!prefix.startsWith('@') && isCoreProperty(prefix, baseCtx))) {
       logCollisionOnce(`@context:${prefix}`, loggedCollisionKeys);
       continue;
     }
     merged[prefix] = iri;
+  }
+  if (Object.hasOwn(merged, '@vocab')) {
+    const vocab = resolveContextIri(merged['@vocab'], merged, false);
+    if (!vocab || !/^[A-Za-z][A-Za-z\d+.-]*:/.test(vocab)) {
+      throw new Error('Extension @vocab must resolve to an absolute IRI');
+    }
+    merged['@vocab'] = vocab;
   }
   return merged;
 }
@@ -134,5 +178,9 @@ export function buildKa(parsed: CoreFields): KafkaStreamKa {
       ka[iri] = value;
     }
   }
+  for (const field of ['providerIri', 'schemaIri'] as const) {
+    if (parsed[field] !== undefined) ka[`dkg-streams:${field}`] = { '@id': parsed[field] };
+  }
+  if (parsed.about !== undefined) ka['schema:about'] = parsed.about.map(iri => ({ '@id': iri }));
   return ka;
 }

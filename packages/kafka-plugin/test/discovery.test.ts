@@ -191,11 +191,11 @@ describe('discovery — buildSingleByUalQuery', () => {
     expect(ka!['dkg-streams:kafkaBootstrapUrl']).toBe('kafka://broker:9092');
     expect(ka!['@type']).toBe('dkg-streams:KafkaStream');
 
-    // Guard the failure mode itself: had DISTINCT been absent, the engine would
-    // have surfaced each row twice and the scalars would collapse into arrays.
+    // Reconstruction also deduplicates payload triples independently of any
+    // additional metadata bindings returned by the adapter.
     const duplicatedRows = [...distinctRows, ...distinctRows];
     const duplicatedKa = bindingsToKa(duplicatedRows.map((row) => ({ ...row, ual: 'did:dkg:1/0xabc' })));
-    expect(duplicatedKa!['schema:name']).toEqual(['demo', 'demo']);
+    expect(duplicatedKa!['schema:name']).toBe('demo');
   });
   it('rejects UAL strings containing illegal SPARQL delimiters', () => {
     expect(() =>

@@ -7,11 +7,14 @@ import { coreSchema, CORE_FIELDS, type CoreFields } from './schema.js';
 import { buildKa, mergeAugmentFragment } from './ka-builder.js';
 import type { KafkaPluginExtension } from './extension.js';
 import { parsePagination, PaginationError } from './pagination.js';
+import { parseRegistryFilters } from './registry-filters.js';
+import { includeRegistry, withRegistry } from './registry-response.js';
 import {
   buildListQuery,
   buildCountQuery,
   buildSingleByUalQuery,
   buildPageContentQuery,
+  buildPublisherQuery,
   bindingsToKa,
 } from './discovery.js';
 
@@ -149,17 +152,17 @@ async function handlePostRegister(
     let fragment;
     try {
       fragment = opts.extension.augment(extensionFields);
+      ka = mergeAugmentFragment(baseKa, fragment, loggedCollisionKeys) as unknown as Record<string, unknown>;
     } catch (err) {
       return jsonResponse(ctx.res, 400, {
         error: 'InvalidContent',
         message: err instanceof Error ? err.message : String(err),
       });
     }
-    ka = mergeAugmentFragment(baseKa, fragment, loggedCollisionKeys) as unknown as Record<
-      string,
-      unknown
-    >;
   }
+  // The enqueue principal and the signing publisher can differ under curation.
+  // This stamp records the authenticated requester, never a supplied provider.
+  ka['dkg-streams:registeredByAgentAddress'] = ctx.requestAgentAddress.toLowerCase();
   // Keep connection details private while exposing one application-level
   // discovery/challenge triple on the same subject. V2 metadata points to the
   // exact public and private graphs, so no rootEntity rows are required.
@@ -271,8 +274,12 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
   // The daemon parses `url` before dispatch, so the query is always available here.
   const searchParams = ctx.url.searchParams;
   let pagination;
+  let filters;
+  let registryRequested;
   try {
     pagination = parsePagination(searchParams);
+    filters = parseRegistryFilters(searchParams);
+    registryRequested = includeRegistry(searchParams);
   } catch (err) {
     if (err instanceof PaginationError) {
       return jsonResponse(ctx.res, 400, {
@@ -281,19 +288,20 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
         details: [{ path: err.field, message: err.message }],
       });
     }
-    throw err;
+    return jsonResponse(ctx.res, 400, { error: 'InvalidContent', message: 'Invalid registry filters or response options' });
   }
 
   const subGraphName = resolvePublishSubGraphName(opts);
   let countQuery: string;
   let listQuery: string;
   try {
-    countQuery = buildCountQuery({ contextGraphId: cgId, subGraphName });
+    countQuery = buildCountQuery({ contextGraphId: cgId, subGraphName, filters });
     listQuery = buildListQuery({
       contextGraphId: cgId,
       subGraphName,
       limit: pagination.limit,
       offset: pagination.offset,
+      filters,
     });
   } catch (err) {
     return jsonResponse(ctx.res, 500, {
@@ -306,6 +314,7 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
   let countBindings: Array<Record<string, unknown>>;
   let pageBindings: Array<Record<string, unknown>>;
   let contentBindings: Array<Record<string, unknown>> = [];
+  let publisherBindings: Array<Record<string, unknown>> = [];
   try {
     const fetchBindings = async (sparql: string): Promise<Array<Record<string, unknown>>> =>
       (await ctx.agent.query(sparql, queryOptions)).bindings;
@@ -320,7 +329,10 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
       return ual && root && contentGraph ? [{ ual, root, contentGraph }] : [];
     });
     if (targets.length > 0) {
-      contentBindings = await fetchBindings(buildPageContentQuery(targets));
+      [contentBindings, publisherBindings] = await Promise.all([
+        fetchBindings(buildPageContentQuery(targets)),
+        registryRequested ? fetchBindings(buildPublisherQuery(cgId, targets.map(target => target.ual))) : [],
+      ]);
     }
   } catch (err) {
     return queryFailedResponse(ctx.res, err);
@@ -342,7 +354,13 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
   for (const ual of orderedUals) {
     const subjectBindings = grouped.get(ual) ?? [];
     const ka = bindingsToKa(subjectBindings);
-    if (ka) items.push(ka as Record<string, unknown>);
+    if (ka) {
+      try {
+        items.push(withRegistry(ka, ual, cgId, publisherBindings.filter(row => unwrapBindingValue(row.ual) === ual), registryRequested));
+      } catch {
+        return jsonResponse(ctx.res, 503, { error: 'RegistryDescriptorInvalid' });
+      }
+    }
   }
 
   return jsonResponse(ctx.res, 200, {
@@ -370,8 +388,10 @@ async function handleGetSingle(
   }
 
   let sparql: string;
+  let registryRequested;
   const subGraphName = resolvePublishSubGraphName(opts);
   try {
+    registryRequested = includeRegistry(ctx.url.searchParams);
     sparql = buildSingleByUalQuery({ contextGraphId: cgId, subGraphName, ual });
   } catch (err) {
     return jsonResponse(ctx.res, 400, {
@@ -394,7 +414,19 @@ async function handleGetSingle(
       message: `UAL ${ual} not found in context graph ${cgId}`,
     });
   }
-  return jsonResponse(ctx.res, 200, ka);
+  let publisherBindings: Array<Record<string, unknown>> = [];
+  if (registryRequested) {
+    try {
+      publisherBindings = (await ctx.agent.query(buildPublisherQuery(cgId, [ual]), discoveryQueryOptions(ctx, cgId, subGraphName))).bindings;
+    } catch (err) {
+      return queryFailedResponse(ctx.res, err);
+    }
+  }
+  try {
+    return jsonResponse(ctx.res, 200, withRegistry(ka, ual, cgId, publisherBindings, registryRequested));
+  } catch {
+    return jsonResponse(ctx.res, 503, { error: 'RegistryDescriptorInvalid' });
+  }
 }
 
 function discoveryQueryOptions(

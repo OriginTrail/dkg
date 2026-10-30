@@ -9,6 +9,8 @@ import { createHandler } from '../src/handler.mjs';
 import { createDkgSink } from '../src/dkg-sink.mjs';
 import { Journal } from '../src/journal.mjs';
 import { hash, buildAsset } from '../src/asset.mjs';
+import { descriptorHash } from '@origintrail-official/kafka-plugin/registry';
+import { enrollKafkaSource } from '../src/registry.mjs';
 
 const owner = '0x' + 'a'.repeat(40);
 const source = { id: 'kafka-test', kind: 'kafka', clusterId: 'local-poc', brokers: ['localhost:19092'],
@@ -120,6 +122,26 @@ test('replayed offset reuses the same KA and original fetch time', async t => {
   const state = await f.run();
   assert.equal(f.api.writes, 1);
   assert.equal(state.sources[source.id].kafka.reused, 1);
+});
+
+test('enrolled registry source survives worker restart and preserves registration provenance on replay', async t => {
+  const descriptor = { name: 'Generic application events', kafkaBootstrapUrl: 'kafka://localhost:19092',
+    kafkaTopicName: source.topic, kafkaAuthMethod: 'PLAINTEXT', dataFormat: 'JSON', clusterId: source.clusterId };
+  const registryRef = { version: 1, ual: 'urn:registry:application-events', contextGraphId: 'catalog',
+    descriptor, descriptorHash: descriptorHash(descriptor) };
+  const { kind: _kind, topic: _topic, brokers: _brokers, ssl: _ssl, ...local } = source;
+  const enrolled = enrollKafkaSource(registryRef, { ...local, fromBeginning: true, allowPlaintext: true });
+  const f = await fixture(t, [enrolled]);
+  const first = await f.run();
+  assert.equal(first.sources[source.id].lastStatus, 'completed');
+  assert.equal(first.sources[source.id].kafka.created, 1);
+  await f.restart();
+  f.setQueue([{ ...message(), fetchedAt: '2030-01-01T00:00:00Z' }]);
+  const replay = await f.run();
+  assert.equal(replay.sources[source.id].kafka.reused, 1);
+  assert.equal(f.api.writes, 1);
+  assert.deepEqual(f.commits, ['0', '0']);
+  assert.ok([...f.api.assets.values()][0].quads.some(q => q.predicate.endsWith('registryUal') && q.object === registryRef.ual));
 });
 
 test('lost create response recovers exact readback without a second create', async t => {
