@@ -438,6 +438,18 @@ test('a node whose daemon left and did not come back is noted, and a restart the
   ]);
 });
 
+test('a worker that died before it logged anything is noted from what its supervisor saw, and its trace is kept', async t => {
+  const { edges, notes, kept } = await startedNodes(t, node => (node.role === 'owner'
+    ? { 'daemon.log': daemonLog('start', 'stop'), 'worker-exits.jsonl': WORKER_END }
+    : { 'daemon.log': daemonLog('start', 'stop'), 'worker-exits.jsonl': '{"event":"worker-exit","code":0}\n' }));
+  edges.cleanup({ keep: false, failed: false });
+  assert.deepEqual(notes, [
+    `node7 (owner): its daemon left without shutting down 1 time(s), which this suite did not ask for: its supervisor saw worker 44162 end at T1 with signal SIGSEGV; its logs are kept in ${kept}`,
+  ]);
+  assert.equal(readFileSync(join(kept, 'node7-owner.worker-exits.jsonl'), 'utf8'), WORKER_END);
+  assert.ok(!existsSync(join(kept, 'node8-member1.worker-exits.jsonl')));
+});
+
 test('a failing run keeps what every node left behind', async t => {
   const { devnet, edges, notes, said, kept } = await startedNodes(t, node => ({
     'daemon.log': daemonLog('start', 'stop'), 'console.log': `start of ${node.role}\n`, 'worker-exits.jsonl': '{"event":"worker-exit","code":0}\n', 'worker-stderr.log': `stderr of ${node.role}\n`,
@@ -480,7 +492,7 @@ test('logs that cannot be kept are said so, and the cleanup goes on', async t =>
   writeFileSync(join(devnet.dir, 'issue-3251-member-sharing'), '');
   edges.cleanup({ keep: false, failed: true });
   assert.match(notes[0], /^node7 \(owner\): .*its logs could not be kept: /);
-  assert.ok(said.some(text => /^node8 \(member1\): its logs could not be kept: /.test(text)));
+  assert.ok(said.some(text => text.startsWith('node8 (member1): its logs could not be kept: ')));
   assert.ok(!existsSync(devnet.nodeDir(9)));
 });
 

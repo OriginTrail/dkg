@@ -261,19 +261,19 @@ export class TemporaryEdges {
   #keptLogs(node) { return this.#keepLogs(node) ?? `its logs are kept in ${this.#keptDir}`; }
 
   /**
-   * Says so when a node's daemon left without being asked, in this log's own
-   * words (workersThatLeft), with how its supervisor saw it end (workerEnds),
-   * and keeps what it left behind. Read once the node is stopped. Returns
-   * whether it did.
+   * Says so when a node's daemon left without being asked, as its log shows
+   * (workersThatLeft) or as its supervisor saw (workerEnds): a worker that dies
+   * before it logs anything leaves a log with no trace of it. Keeps what it
+   * left behind. Read once the node is stopped. Returns whether it did.
    */
   #noteWorkersThatLeft(node) {
     const read = name => { try { return readFileSync(join(this.devnet.nodeDir(node), name), 'utf8'); } catch { return ''; } };
     const left = workersThatLeft(read('daemon.log'));
-    if (left.length === 0) return false;
-    const after = left.map(({ restartedAt }) => (restartedAt ? `its supervisor started it again at ${restartedAt}` : 'it did not start again'));
     const ends = workerEnds(read(WORKER_EXITS));
-    this.log.note(`${node.label}: its daemon left without shutting down ${left.length} time(s), which this suite did not ask for: ${after.join('; ')}; `
-      + `${ends.length ? `its supervisor saw ${ends.join(', ')}` : 'how it ended was not recorded'}; ${this.#keptLogs(node)}`);
+    if (left.length === 0 && ends.length === 0) return false;
+    const after = left.map(({ restartedAt }) => (restartedAt ? `its supervisor started it again at ${restartedAt}` : 'it did not start again'));
+    const seen = ends.length ? `its supervisor saw ${ends.join(', ')}` : 'how it ended was not recorded';
+    this.log.note(`${node.label}: its daemon left without shutting down ${Math.max(left.length, ends.length)} time(s), which this suite did not ask for: ${[...after, seen, this.#keptLogs(node)].join('; ')}`);
     return true;
   }
 
