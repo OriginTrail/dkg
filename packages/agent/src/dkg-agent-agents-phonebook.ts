@@ -3,7 +3,8 @@
 /**
  * On-demand `agents` phonebook mixin: the enable gate, the per-agent fetcher,
  * the subscribe/reconcile trigger, the public-policy read, and the fetcher's
- * agent-backed dependencies. The fetcher itself lives in
+ * agent-backed dependencies, with the lookup of a graph owner's current peers
+ * and the broadcast of this node's own profile. The fetcher itself lives in
  * `sync/on-demand-agents-phonebook.ts`; re-scheduling VM recovery for graphs
  * whose curator now resolves stays with VM-reconcile scheduling.
  */
@@ -15,9 +16,12 @@ import {
   createOperationContext,
   deriveCuratorDidFromCgId,
   SYSTEM_CONTEXT_GRAPHS,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
+import { resolveWorkspaceAgentRecipientKeys, type PublishResult } from '@origintrail-official/dkg-publisher';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { agentProfileResendsFor, AgentProfileResends } from './p2p/agent-profile-resends.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 import { resolveBooleanSwitch } from './sync/backpressure.js';
 import { systemContextGraphSyncOptionsOf } from './sync/system-context-graph-policy.js';
 import {
@@ -26,13 +30,17 @@ import {
   resolveOnDemandAgentsPhonebookFetch,
   type AgentsPhonebookAccessPolicy,
   type AgentsPhonebookFetchTrigger,
+  type AgentsPhonebookWalletNeed,
   type OnDemandAgentsPhonebookDeps,
 } from './sync/on-demand-agents-phonebook.js';
 import { PeerProfileFollowUp, peerProfileFollowUpFor } from './sync/peer-profile-follow-up.js';
+import type { GraphOwnerRoutePorts } from './swm/relay-only-share-routes.js';
 import type { PeerSyncSession } from './sync/peer-sync-session.js';
 
 /** Wall-clock budget of one follow-up pull of a peer's `agents` graph. */
 const PEER_PROFILE_PULL_TIMEOUT_MS = 60_000;
+/** Peers of a wallet one lookup returns; the route tries them a few at a time. */
+const AGENT_CURRENT_PEERS_LIMIT = 64;
 
 export class AgentsPhonebookMethods extends DKGAgentBase {
   /**
@@ -76,20 +84,67 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
   }
 
   /**
-   * Fetch the `agents` phonebook for recipient agents a private share has no
-   * key for, and wait for it (#2849). Resolves with the lower-cased wallets
-   * whose key the store holds afterwards; never throws.
+   * Fetch the `agents` phonebook for agents a caller cannot resolve, and wait
+   * for it: a private share with no key for a recipient (#2849), or with `need`
+   * at `peer` a route with no current peer of an owner. Resolves with the
+   * lower-cased wallets that resolve afterwards; never throws.
    */
   async ensureAgentsInOnDemandPhonebook(
     this: DKGAgent,
     wallets: readonly string[],
     signal?: AbortSignal,
+    need?: AgentsPhonebookWalletNeed,
   ): Promise<ReadonlySet<string>> {
     try {
-      return await this.onDemandAgentsPhonebook().ensureWallets(wallets, signal);
+      return await this.onDemandAgentsPhonebook().ensureWallets(wallets, signal, need);
     } catch {
       return new Set();
     }
+  }
+
+  /**
+   * The peers of a graph's owner for the owner route, newest first and without
+   * stale ones. An Edge keeps no `agents` phonebook, so when no peer is left
+   * that is connected or has not failed lately, this fetches the owner's profile
+   * from a Core's and looks the owner's peers up again.
+   */
+  async lookUpGraphOwnerPeers(
+    this: DKGAgent,
+    contextGraphId: string,
+    peers: Pick<GraphOwnerRoutePorts, 'isConnected' | 'failedRecently'>,
+    signal?: AbortSignal,
+  ): Promise<readonly string[]> {
+    const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
+    const wallet = ownerDid === null ? undefined : ownerDid.slice(AGENT_DID_PREFIX.length);
+    const lookUp = async () => {
+      const resolution = await this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal });
+      const fromPhonebook = wallet !== undefined && !resolution.curatorIsLocal;
+      const peerIds = fromPhonebook
+        ? await this.discovery.findCurrentAgentPeerIds(wallet, { limit: AGENT_CURRENT_PEERS_LIMIT, signal, isLive: peers.isConnected })
+        : resolution.peerIds;
+      return { fromPhonebook, peerIds: peerIds.filter((peerId) => peerId !== this.peerId) };
+    };
+    const owner = await lookUp();
+    const noneLeft = owner.peerIds.every((peerId) => !peers.isConnected(peerId) && peers.failedRecently(peerId));
+    if (wallet === undefined || !owner.fromPhonebook || !noneLeft) return owner.peerIds;
+    await this.ensureAgentsInOnDemandPhonebook([wallet], signal, 'peer');
+    return (await lookUp()).peerIds;
+  }
+
+  /**
+   * Broadcast this node's profile. A broadcast no admitted peer got is sent
+   * again, a bounded number of times, until one does or a newer profile takes
+   * over (`p2p/agent-profile-resends.ts`). Never throws for a lack of peers.
+   */
+  async broadcastAgentProfile(this: DKGAgent, result: PublishResult, ctx: OperationContext): Promise<void> {
+    const send = () => this.broadcastPublish(AGENT_REGISTRY_CONTEXT_GRAPH, result, ctx);
+    const resends = agentProfileResendsFor(this, () => new AgentProfileResends({
+      isRunning: () => this.started === true,
+      isAdmitted: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
+      logInfo: (message) => this.log.info(ctx, message),
+      logWarn: (message) => this.log.warn(ctx, message),
+    }));
+    resends.track(await send(), send);
   }
 
   /**
@@ -162,9 +217,11 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
         const subscription = this.subscribedContextGraphs.get(contextGraphId);
         return subscription?.subscribed === true || subscription?.coreHosted === true;
       },
-      phonebookHasWallet: async (wallet, signal) => (
-        await this.discovery.findAgentPeerPageByAddress(wallet, { limit: 1, signal })
-      ).peerIds.length > 0,
+      phonebookHasWallet: async (wallet, signal) => {
+        const route = this.graphOwnerRoutePortsV1();
+        const peerIds = await this.discovery.findCurrentAgentPeerIds(wallet, { limit: AGENT_CURRENT_PEERS_LIMIT, signal, isLive: route.isConnected });
+        return peerIds.some((peerId) => route.isConnected(peerId) || !route.failedRecently(peerId));
+      },
       // The same resolution a private share runs: a verified, unrevoked key.
       recipientKeyKnown: async (wallet) => {
         try {
