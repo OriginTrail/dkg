@@ -303,8 +303,11 @@ export interface KnowledgeAssetShareJobView {
   startedAt?: string;
   finishedAt?: string;
   entitiesPromoted?: number;
+  /** The attempts counted against the job's budget: never more than `maxAttempts`. */
   attempts: number;
   maxAttempts: number;
+  /** The attempts automatic recovery made after the budget was spent; absent when there were none. */
+  recoveryAttempts?: number;
   nextRetryAt?: string;
   lastError?: {
     code: string;
