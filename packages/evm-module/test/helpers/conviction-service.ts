@@ -1,8 +1,8 @@
 // Shared set-up for the service plan period tests (OT-RFC-27): Hub
-// registration of QueryInferenceStorage, ConvictionServiceStorage and
-// ServiceSubscriptions, the EIP-712 ServiceAssignment consent, funding
-// requests for one-epoch periods, a model of the label basis, and synthetic
-// accounts from before the schedule cut-over.
+// registration of QueryInferenceStorage, ConvictionServiceStorage,
+// ServiceSubscriptions and ServiceSubscriptionsWallet, the EIP-712
+// ServiceAssignment consent, funding requests for one-epoch periods, a model of
+// the label basis, and synthetic accounts from before the schedule cut-over.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { ethers } from 'ethers';
@@ -16,6 +16,7 @@ import {
   PublishingConvictionStorage,
   QueryInferenceStorage,
   ServiceSubscriptions,
+  ServiceSubscriptionsWallet,
 } from '../../typechain';
 import { PoolModel, prorateActiveSink } from './emission-model';
 
@@ -55,10 +56,11 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
 
 /**
  * Deploy QueryInferenceStorage, ConvictionServiceStorage and
- * ServiceSubscriptions and register each in the Hub's contract set, as the
- * development deploy does: the Hub registration, then `initialize()` through
- * `Hub.forwardCall`. The storages come first, because the logic contract
- * wires them at initialization.
+ * ServiceSubscriptions (and, with `wallet`, ServiceSubscriptionsWallet, which
+ * needs the Token and the vault in the Hub) and register each in the Hub's
+ * contract set, as the development deploy does: the Hub registration, then
+ * `initialize()` through `Hub.forwardCall`. The storages come first, because
+ * the logic contracts wire them at initialization.
  *
  * As the development deploy does, it also sets the activation epoch to the
  * current epoch, so periods can be funded at once; `activate: false` leaves it
@@ -66,17 +68,19 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
  */
 export async function registerServiceContracts(
   hub: Hub,
-  opts: { activate?: boolean } = {},
+  opts: { activate?: boolean; wallet?: boolean } = {},
 ): Promise<{
   QIS: QueryInferenceStorage;
   CSS: ConvictionServiceStorage;
   SS: ServiceSubscriptions;
+  SSW?: ServiceSubscriptionsWallet;
 }> {
   const QIS = await registerOne<QueryInferenceStorage>(hub, 'QueryInferenceStorage');
   if (opts.activate !== false) await activateQueryInference(hub, QIS);
   const CSS = await registerOne<ConvictionServiceStorage>(hub, 'ConvictionServiceStorage');
   const SS = await registerOne<ServiceSubscriptions>(hub, 'ServiceSubscriptions');
-  return { QIS, CSS, SS };
+  const SSW = opts.wallet ? await registerOne<ServiceSubscriptionsWallet>(hub, 'ServiceSubscriptionsWallet') : undefined;
+  return { QIS, CSS, SS, SSW };
 }
 
 /** Set QueryInferenceStorage's activation epoch through Hub.forwardCall; defaults to the current epoch. */
@@ -181,6 +185,9 @@ export type Request = {
   buckets: Bucket[];
 };
 
+/** A wallet funding request: an account's request without the account. */
+export type WalletRequest = Omit<Request, 'accountId'>;
+
 /** A bucket id that sorts by `rank`, so tests can order buckets explicitly. */
 export const bucketId = (rank: number): string => ethers.toBeHex(BigInt(rank) + 1n, 32);
 
@@ -206,6 +213,12 @@ export function requestOf(accountId: bigint, epoch: bigint, overrides: Partial<R
     buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC)],
     ...overrides,
   };
+}
+
+/** A one-bucket inference wallet request for the period of `epoch`. */
+export function walletRequestOf(epoch: bigint, overrides: Partial<WalletRequest> = {}): WalletRequest {
+  const { accountId: _accountId, ...rest } = requestOf(0n, epoch, overrides);
+  return rest;
 }
 
 /** The id of the period `buyer` funds for `epoch`: keccak256(abi.encode(buyer, epoch)). */

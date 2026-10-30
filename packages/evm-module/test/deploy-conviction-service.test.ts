@@ -2,7 +2,8 @@
 // the Hub transaction step they end in:
 //   - deploy/active/052c_deploy_conviction_service_storage.ts, which checks the
 //     preconditions of the schedule cut-over before it is forwarded;
-//   - deploy/active/052d_deploy_service_subscriptions.ts, which refuses to run
+//   - deploy/active/052d_deploy_service_subscriptions.ts, which deploys
+//     ServiceSubscriptions and ServiceSubscriptionsWallet, and refuses to run
 //     against a PublishingConviction without coverServiceCost;
 //   - deploy/active/052e_deploy_query_inference_storage.ts, which sets the
 //     activation epoch to the deployment epoch on development only;
@@ -245,11 +246,11 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
     return { hre, deployed };
   };
 
-  it('deploys against 10.1.0 or later', async () => {
+  it('deploys ServiceSubscriptions, then ServiceSubscriptionsWallet, against 10.1.0 or later', async () => {
     for (const version of ['10.1.0', '10.1.3', '11.0.0']) {
       const { hre, deployed } = ssHre(version);
       const lines = await captured(() => deployServiceSubscriptions(hre as never));
-      expect(deployed).to.deep.equal(['ServiceSubscriptions']);
+      expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
       expect(lines).to.have.length(0);
     }
   });
@@ -284,7 +285,7 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
     ]) {
       const { hre, deployed } = ssHre('10.0.7', where);
       const lines = await captured(() => deployServiceSubscriptions(hre as never));
-      expect(deployed).to.deep.equal(['ServiceSubscriptions']);
+      expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
       expect(lines.join('\n')).to.match(new RegExp(`${where.network} keeps PublishingConviction 10\\.0\\.7.*stays off`));
     }
   });

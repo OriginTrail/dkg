@@ -1,0 +1,591 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "hubAddress",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "bucketId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "BucketTermsChanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "reason",
+        "type": "string"
+      }
+    ],
+    "name": "InvalidFundingRequest",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "NotPeriodBuyer",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "PeriodAlreadyFunded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint40",
+        "name": "periodEnd",
+        "type": "uint40"
+      }
+    ],
+    "name": "PeriodEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "PeriodNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint40",
+        "name": "activationEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "currentEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "QueryInferenceNotActive",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "QueryInferencePaused",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint8",
+        "name": "bits",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "SafeCastOverflowedUintDowncast",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "TokenTransferFailed",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "msg",
+        "type": "string"
+      }
+    ],
+    "name": "UnauthorizedAccess",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "WrongFundingSource",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddressHub",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroSessionKey",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "sessionKey",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "periodStart",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "periodEnd",
+        "type": "uint40"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint16",
+        "name": "discountBps",
+        "type": "uint16"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "name": "buckets",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "PeriodFunded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "name": "additions",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "PeriodToppedUp",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "chronos",
+    "outputs": [
+      {
+        "internalType": "contract Chronos",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "convictionServiceStorage",
+    "outputs": [
+      {
+        "internalType": "contract ConvictionServiceStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "epoch",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "sessionKey",
+            "type": "address"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "planDigest",
+            "type": "bytes32"
+          },
+          {
+            "components": [
+              {
+                "internalType": "bytes32",
+                "name": "bucketId",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "uint8",
+                "name": "serviceClass",
+                "type": "uint8"
+              },
+              {
+                "internalType": "uint96",
+                "name": "value",
+                "type": "uint96"
+              },
+              {
+                "internalType": "uint96",
+                "name": "maxAskWeiPerUnit",
+                "type": "uint96"
+              }
+            ],
+            "internalType": "struct IServicePeriodFunding.BucketInput[]",
+            "name": "buckets",
+            "type": "tuple[]"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsWallet.WalletFundingRequest",
+        "name": "r",
+        "type": "tuple"
+      }
+    ],
+    "name": "fundFromWallet",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "hub",
+    "outputs": [
+      {
+        "internalType": "contract Hub",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "initialize",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "name",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "queryInferenceStorage",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bool",
+        "name": "_status",
+        "type": "bool"
+      }
+    ],
+    "name": "setStatus",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "stakingStorageAddress",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "status",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "tokenContract",
+    "outputs": [
+      {
+        "internalType": "contract IERC20",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "name": "additions",
+        "type": "tuple[]"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      }
+    ],
+    "name": "topUpFromWallet",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "version",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "pure",
+    "type": "function"
+  }
+]
