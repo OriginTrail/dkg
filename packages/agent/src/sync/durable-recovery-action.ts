@@ -14,7 +14,7 @@ export function recoveryActionDiagnostics(result: DurableSyncResult): DurableRec
   return diagnostics;
 }
 export function exactRecoveryActionOutcome(
-  result: DurableSyncResult, found = true, admission: DurableSyncAdmissionOutcome = 'work-started',
+  result: DurableSyncResult, found: boolean, admission: DurableSyncAdmissionOutcome,
 ): ExactRecoveryActionOutcome {
   return { diagnostics: recoveryActionDiagnostics(result), selection: found && result.complete ? 'complete' : 'incomplete', admission };
 }
