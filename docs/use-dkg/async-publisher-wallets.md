@@ -196,7 +196,7 @@ A refusal for funds (`insufficient_funds`) happens before the transaction enters
 - While no wallet can pay, jobs wait as `accepted` instead of failing. Top up a wallet and they continue.
 - A refused wallet that is not topped up gets one more attempt after an hour, since a stated cost goes stale when gas prices fall.
 
-The exclusion is kept in memory, so after a restart a wallet that is still short is refused once more before it is excluded again. A job that may have sent a transaction is not affected: it stays held until chain proof settles it. That includes a refusal that follows an attempt whose outcome is unknown: one endpoint may have accepted the transaction and lost its answer while the next one refuses it, so such a refusal proves nothing. A job that failed with `insufficient_funds` before this behaviour existed stays failed; re-submitting its request creates a new job.
+The exclusion is kept in memory, so after a restart a wallet that is still short is refused once more before it is excluded again. A job that may have sent a transaction is not affected: it stays held until chain proof settles it. A refusal settles only the refused transaction. It does not release a job while an earlier transaction of that job is still unsettled, or when another endpoint may have accepted the same transaction and lost its answer. A job that failed with `insufficient_funds` before this behaviour existed stays failed; re-submitting its request creates a new job.
 
 ## Identity And Attribution
 

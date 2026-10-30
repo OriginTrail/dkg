@@ -13,6 +13,8 @@ import { QuorumUnmetError, TripleStoreAsyncLiftPublisher, type AsyncLiftPublishe
 import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
 import { WALLET_FUNDING_COOLDOWN_BASE_MS } from '../src/async-lift-wallet-funding.js';
+import { retryBroadcastEndpointSet } from '../../chain/src/evm-adapter-rpc.js';
+import { RpcFailoverClient } from '../../chain/src/rpc-failover-client.js';
 import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
 import { completeResult } from './_helpers/journal-completion.js';
 
@@ -21,6 +23,33 @@ const COST = 2_047n;
 const RETRY_MS = 10;
 /** Past the claim lease of five minutes. */
 const LOCK_LEASE_PAST_MS = 6 * 60_000;
+
+/** An endpoint that may have taken the transaction, then lost its answer. */
+const lostAnswer = () => Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+/** A node turning the transaction away before the mempool. */
+const refusal = () => Object.assign(
+  new Error(`insufficient funds for gas * price + value: balance 1, tx cost ${COST}, overshot ${COST - 1n}`),
+  { code: 'INSUFFICIENT_FUNDS' },
+);
+
+/** Loses its answer the first time; asked again, it refuses, as a node that lags behind the mempool can. */
+function lostAnswerThenRefusal() {
+  let sends = 0;
+  return () => (sends++ === 0 ? lostAnswer() : refusal());
+}
+
+/** The adapter's real broadcast path, set retries included, over two endpoints that answer as scripted. */
+function realSend(first: () => Error, second: () => Error) {
+  const endpoint = (answer: () => Error, rpcUrl: string) => ({
+    provider: { broadcastTransaction: async () => { throw answer(); } } as never,
+    rpcUrl,
+  });
+  const endpoints = [endpoint(first, 'https://rpc-1.example'), endpoint(second, 'https://rpc-2.example')];
+  const client = new RpcFailoverClient(() => endpoints, () => 'evm:31337', {
+    prepareForSigning: async () => { throw new Error('a signed transaction is never prepared again'); },
+  });
+  return (txHash: string) => retryBroadcastEndpointSet(() => client.broadcast('0xsigned', txHash, 'V10 publish'));
+}
 
 function fixture(store = new OxigraphStore()) {
   const clock = { now: 1_000 };
@@ -37,6 +66,8 @@ function fixture(store = new OxigraphStore()) {
   const beforeSigning: unknown[] = [];
   /** Wallets whose next send is ambiguous: the write-ahead is recorded, then the RPC times out. */
   const ambiguous = new Set<string>();
+  /** The send itself, where a test wants the real one. */
+  let send: ((txHash: string) => Promise<void>) | undefined;
   let refusedTx = 0;
   let ids = 0;
   const handler: NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> = {
@@ -52,6 +83,7 @@ function fixture(store = new OxigraphStore()) {
       const txHash = covered ? KA_VM_EXECUTOR_TX_HASH : (`0x${(++refusedTx).toString(16).padStart(64, 'a')}` as `0x${string}`);
       await publishOptions.onBeforeBroadcast?.({ txHash, operationKind: 'create' });
       if (ambiguous.delete(walletId)) throw new Error('ETIMEDOUT: request timed out');
+      await send?.(txHash);
       // The node turns away what the wallet cannot pay for, before the mempool, and says why.
       if (!covered) {
         throw new Error(`insufficient funds for gas * price + value: address 0x00000000000000000000000000000000000000a1 have ${balances.get(walletId) ?? 0n} want ${cost}`);
@@ -70,6 +102,7 @@ function fixture(store = new OxigraphStore()) {
     fund: (walletId: string, wei: bigint) => { balances.set(walletId, wei); },
     cover: (walletId: string, wei: bigint) => { coverage.set(walletId, wei); },
     price: (name: string, wei: bigint) => { costs.set(name, wei); },
+    sendThrough: (real: (txHash: string) => Promise<void>) => { send = real; },
     publisher: () => new TripleStoreAsyncLiftPublisher(store, {
       now: () => clock.now,
       idGenerator: () => `job-${++ids}`,
@@ -243,6 +276,45 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
     expect(await after.processNext('sender')).toBeNull();
     expect(await after.getStatus(ambiguousJob)).toMatchObject({ status: 'broadcast', claim: { walletId: 'sender' } });
     expect(f.signed).toEqual(['sender', 'short', 'short']);
+  });
+
+  it('keeps a job held when an endpoint refuses a transaction an earlier endpoint may have accepted', async () => {
+    const f = fixture();
+    f.fund('sender', 10_000n);
+    f.fund('other', 10_000n);
+    f.sendThrough(realSend(lostAnswerThenRefusal(), refusal));
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'lost-answer' }));
+    const sent = await publisher.processNext('sender');
+
+    // Not a refusal: the hash stays on the job, which keeps its wallet and waits for chain proof.
+    expect(sent).toMatchObject({ jobId, status: 'broadcast', broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH, walletId: 'sender' } });
+    expect(sent?.failure).toBeUndefined();
+
+    // Nothing resets or re-runs it, however long it waits and whichever wallet asks.
+    f.clock.now += WALLET_FUNDING_COOLDOWN_BASE_MS;
+    expect(await publisher.processNext('other')).toBeNull();
+    expect(await publisher.processNext('sender')).toBeNull();
+    const restarted = f.publisher();
+    expect(await restarted.processNext('other')).toBeNull();
+    expect(await restarted.getStatus(jobId)).toMatchObject({ status: 'broadcast', broadcast: { txHash: KA_VM_EXECUTOR_TX_HASH } });
+    expect(f.signed).toEqual(['sender']);
+  });
+
+  it('still takes a refusal that is the first answer for a refusal, through the same send path', async () => {
+    const f = fixture();
+    f.fund('short', 10_000n);
+    f.sendThrough(realSend(refusal, refusal));
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+
+    const { refused } = await refuseOn(f, publisher, 'short', 'refused-first');
+
+    expect(refused.failure.code).toBe('insufficient_funds');
+    expect(isHeldForChainProof(refused)).toBe(false);
+    expect(refused.timestamps.nextRetryAt).toBe(f.clock.now + RETRY_MS);
   });
 
   it('does not hold a re-run that fails before signing on the refused transaction', async () => {

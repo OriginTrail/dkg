@@ -993,6 +993,28 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       expect(released?.recovery?.txHashAccounted).toBe(true);
     });
 
+    it('still ends the hold on a proven revert of the newest hash, beside an older open one (#3591)', async () => {
+      // A record with an older open hash is held whatever its code says. Chain proof tracks the
+      // newest hash and its rebuilt record drops the older one, so that hold can still end.
+      const publisher = dispatcher({ status: 'reverted' });
+      const failed = await failAfterRecordedTxHash(publisher);
+      const carried = {
+        ...failed,
+        recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: `0x${'dd'.repeat(32)}`, walletIdChecked: 'wallet-older' },
+      } as unknown as LiftJob;
+      await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await h.store.insert(serializeJob(carried, DEFAULT_CONTROL_GRAPH_URI));
+      expect(isHeldForChainProof(expectFailed(await publisher.getStatus(failed.jobId)))).toBe(true);
+
+      expect(await publisher.recover()).toBe(1);
+
+      const reverted = expectFailed(await publisher.getStatus(failed.jobId));
+      expect(reverted.failure.code).toBe('tx_reverted');
+      expect(reverted.broadcast?.txHash).toBe(TX_HASH);
+      expect(reverted.recovery).toBeUndefined();
+      expect(isHeldForChainProof(reverted)).toBe(false);
+    });
+
     it('does NOT mark a hash accounted on any reset that did not ask the chain', async () => {
       // The interrupted-recovery reset and the manual reaccept carry the same hash forward, and
       // neither has established anything about it. If either marked it accounted, a genuinely

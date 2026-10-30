@@ -5,8 +5,8 @@
  * drift apart, each reading the same job and each free to disagree about it.
  *
  * The precedence, read top to bottom:
- *   1. {@link isProvenIneffectiveLiftFailure} — does the failure code PROVE the transaction had
- *      no effect? Then nothing below needs to account for it.
+ *   1. {@link isProvenIneffectiveLiftFailure} — does the failure code PROVE its transaction had no
+ *      effect? Then nothing below accounts for that one (2 still covers an older open hash).
  *   2. {@link isHeldForChainProof} — otherwise, is a transaction unaccounted for? A held job is
  *      never republished, keeps its lifecycle subject, and survives bulk cleanup.
  *   3. {@link classifyRetryAction} — the WRITE decision for a retry pass, over the job alone.
@@ -32,6 +32,7 @@ import {
 } from './async-lift-publisher-utils.js';
 import { knowledgeAssetAgentAddressesEqual } from '@origintrail-official/dkg-core';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
+import { carriesOpenInheritedHash } from './lift-job-tx-hash-accounting.js';
 import type { LiftJobFailureCode, PersistedLiftJob } from './lift-job.js';
 import type {
   PendingTransactionClearOverride,
@@ -71,11 +72,7 @@ export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
   // established the transaction's fate and released the job on the strength of it, the hash stays
   // for audit but stops holding anything: continuing to read it as unaccounted would strand the
   // job forever, because it can never be proven a second time — nothing new was ever sent.
-  const recovery = job.recovery;
-  if (!recovery?.txHashChecked) return false;
-  // Only a RESET record can carry the accounted mark; a finalized-from-chain record is not a
-  // job that is still waiting on anything.
-  return recovery.action !== 'reset_to_accepted' || recovery.txHashAccounted !== true;
+  return carriesOpenInheritedHash(job);
 }
 
 /**
@@ -109,7 +106,9 @@ export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolea
  * re-submit publishes the same KA a second time.
  */
 export function isHeldForChainProof(job: PersistedFailedJob): boolean {
-  return hasBroadcastEvidence(job) && !isProvenIneffectiveLiftFailure(job.failure.code);
+  if (!hasBroadcastEvidence(job)) return false;
+  // #3591 — a proof of no effect covers the failed attempt's own transaction, never an earlier one.
+  return !isProvenIneffectiveLiftFailure(job.failure.code) || carriesOpenInheritedHash(job);
 }
 
 /**

@@ -20,6 +20,17 @@ export function isFailedJobTxHashAccounted(
 }
 
 /**
+ * Does the job carry a hash from an earlier attempt that is still an open question? Only a RESET
+ * record can carry the accounted mark; a finalized-from-chain record is not a job that is still
+ * waiting on anything.
+ */
+export function carriesOpenInheritedHash(job: PersistedLiftJob): boolean {
+  const recovery = job.recovery;
+  if (!recovery?.txHashChecked) return false;
+  return recovery.action !== 'reset_to_accepted' || recovery.txHashAccounted !== true;
+}
+
+/**
  * Is this the inherited hash an earlier reset already marked accounted? Every reset that carries it
  * forward keeps the mark. It only ever keeps one: a reset that has asked the chain nothing never
  * turns an open question into an accounted one.

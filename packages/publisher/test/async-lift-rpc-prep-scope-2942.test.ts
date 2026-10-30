@@ -14,6 +14,7 @@
  *      the hash is unaccounted, and rides the retry lane once the dispatcher accounted for it.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
+import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core';
 import type { ActiveLiftJobClaim, LiftJob } from '../src/index.js';
 import { RpcPreconditionError } from '../src/index.js';
 import { hasBroadcastEvidence, isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
@@ -324,6 +325,81 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
       expect(failed.failure.failedFromState).toBe('validated');
 
       expect(decideChainProofDisposition(failed, 'reverted')).toEqual({ action: expected });
+    });
+
+    describe('a proof of no effect covers only its own attempt (#3591)', () => {
+      const noFundedWallet = () => Object.assign(
+        new Error('No operational wallet has enough funds to publish'),
+        { code: NO_FUNDED_PUBLISHER_WALLET_CODE },
+      );
+      const OWN_TX_HASH = `0x${'ee'.repeat(32)}` as const;
+
+      it('keeps an UNACCOUNTED inherited hash held when the re-run is refused before signing', async () => {
+        const publisher = h.createPublisher(RETRY_LANE);
+        const { session } = await validatedWithInheritedHash(publisher, { accounted: false });
+
+        const failed = expectFailed(await session.recordExecutionFailure('broadcast', noFundedWallet(), { neverDispatched: true }));
+
+        expect(failed.failure.code).toBe('insufficient_funds');
+        expect(failed.broadcast).toBeUndefined();
+        expect(failed.recovery?.txHashChecked).toBe(TX_HASH);
+        expect(failed.recovery?.txHashAccounted).toBeUndefined();
+        expect(isHeldForChainProof(failed)).toBe(true);
+        expect(failed.timestamps.nextRetryAt).toBeUndefined();
+        h.advance(60_000);
+        expect(await publisher.claimNext('wallet-2')).toBeNull();
+        expect(publisher.describeConfiguredRetryState(failed)).toMatchObject({
+          autoRetryEligible: false,
+          waitingReason: 'pending_chain_proof',
+        });
+      });
+
+      it('keeps it held when the re-run signed its own transaction and that one was refused', async () => {
+        const publisher = h.createPublisher(RETRY_LANE);
+        const { session, jobId } = await validatedWithInheritedHash(publisher, { accounted: false });
+        await publisher.update(jobId, 'broadcast', {
+          broadcast: { txHash: OWN_TX_HASH, walletId: 'wallet-1', nonce: 7, operationKind: 'create' },
+        });
+
+        const failed = expectFailed(await session.recordExecutionFailure('broadcast', new Error('insufficient funds for gas * price + value')));
+
+        expect(failed.failure.code).toBe('insufficient_funds');
+        expect(failed.broadcast?.txHash).toBe(OWN_TX_HASH);
+        expect(failed.recovery?.txHashChecked).toBe(TX_HASH);
+        expect(failed.recovery?.txHashAccounted).toBeUndefined();
+        expect(isHeldForChainProof(failed)).toBe(true);
+        expect(failed.timestamps.nextRetryAt).toBeUndefined();
+        h.advance(60_000);
+        expect(await publisher.claimNext('wallet-2')).toBeNull();
+      });
+
+      it('keeps it held when the re-run signed its own transaction and that one reverted', async () => {
+        const publisher = h.createPublisher(RETRY_LANE);
+        const { session, jobId } = await validatedWithInheritedHash(publisher, { accounted: false });
+        await publisher.update(jobId, 'broadcast', {
+          broadcast: { txHash: OWN_TX_HASH, walletId: 'wallet-1', nonce: 7, operationKind: 'create' },
+        });
+
+        const failed = expectFailed(await session.recordExecutionFailure('broadcast', new Error('execution reverted: TooLowBalance')));
+
+        expect(failed.failure.code).toBe('tx_reverted');
+        expect(failed.recovery?.txHashChecked).toBe(TX_HASH);
+        expect(isHeldForChainProof(failed)).toBe(true);
+      });
+
+      it('lets a re-run retry when the inherited hash is ACCOUNTED, since the refusal then leaves nothing open', async () => {
+        const publisher = h.createPublisher(RETRY_LANE);
+        const { session, jobId } = await validatedWithInheritedHash(publisher, { accounted: true });
+
+        const failed = expectFailed(await session.recordExecutionFailure('broadcast', noFundedWallet(), { neverDispatched: true }));
+
+        expect(failed.failure.code).toBe('insufficient_funds');
+        expect(failed.recovery?.txHashAccounted).toBe(true);
+        expect(isHeldForChainProof(failed)).toBe(false);
+        expect(failed.timestamps.nextRetryAt).toBeDefined();
+        h.advance(100);
+        expect((await publisher.claimNext('wallet-2'))?.jobId).toBe(jobId);
+      });
     });
 
     it('rides the retry lane once the dispatcher has ACCOUNTED for the inherited hash', async () => {

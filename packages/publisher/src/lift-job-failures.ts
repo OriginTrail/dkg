@@ -154,6 +154,9 @@ export interface LiftJobFailurePolicy {
    *     transaction may have been accepted; after such an attempt it reports an unknown outcome,
    *     which stays held.
    *
+   * Either proof covers only the failed attempt's own transaction: a job that also carries an
+   * earlier attempt's open hash stays held on it (`isHeldForChainProof`).
+   *
    * Everything else is `false`, including every timeout and `confirmation_mismatch`, whose whole
    * meaning is that the local view and the chain disagree. Like `autoRetry` the field is optional
    * on this PUBLIC interface (external constructors keep compiling) but REQUIRED on every built-in

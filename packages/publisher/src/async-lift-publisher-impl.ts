@@ -3565,12 +3565,13 @@ export class TripleStoreAsyncLiftPublisher
    * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
    * transaction reverted.
    *
-   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
-   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
-   * therefore how the hold is released — through the disposition module's own rule rather than
-   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
-   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
-   * binding the KA's lifecycle, which is what lets the same KA be published again.
+   * The code is not cosmetic: `isHeldForChainProof` lets a proven-ineffective failure go unless it
+   * also carries an older open hash, and `tx_reverted` is one of the two codes the registry marks
+   * proven-ineffective. Writing it is therefore how the hold is released — through the disposition
+   * module's own rule rather than around it — while `broadcast` stays on the job and the rebuild
+   * drops `recovery`, so an operator can still see which transaction was checked.
+   * `isOccupyingLifecycleJob` then stops binding the KA's lifecycle, which is what lets the same
+   * KA be published again.
    *
    * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
    * gas to revert again.
