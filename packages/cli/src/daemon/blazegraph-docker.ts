@@ -32,7 +32,7 @@
 import { spawn } from 'node:child_process';
 import * as net from 'node:net';
 import * as os from 'node:os';
-import { blazegraphHealthCmd as policyHealthCmd, buildBlazegraphPolicyRunArgs, computeBlazegraphHeapMb, fetchWithDeadline, sanitiseContainerName, blazegraphVolumeName, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
+import { blazegraphHealthCmd as policyHealthCmd, buildBlazegraphPolicyRunArgs, computeBlazegraphHeapMb, fetchWithDeadline, sanitiseContainerName, blazegraphMigrationVolumeName, blazegraphVolumeName, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
 export { blazegraphMigrationVolumeName, computeBlazegraphHeapMb, blazegraphVolumeName, deriveBlazegraphContainerName, parseBlazegraphNamespaceEndpoint, fetchWithDeadline, STORE_PROBE_TIMEOUT_MS } from './blazegraph-container-policy.js';
 import blazegraphRuntimeContract from
   '@origintrail-official/dkg/blazegraph-runtime-contract';
@@ -386,6 +386,28 @@ async function finaliseReusedContainer(opts: {
 // Public entry point
 // --------------------------------------------------------------------
 
+/**
+ * A migrated store's journal lives in the replacement volume, and Docker keeps
+ * no record of which copy is current. A new container takes that volume only
+ * when no other journal volume exists, and otherwise nothing is chosen for it.
+ */
+async function journalVolumeForNewContainer(docker: DockerRunner, containerName: string, log: (message: string) => void): Promise<string | undefined> {
+  const exists = async (volume: string): Promise<boolean> => {
+    const result = await docker.run(['volume', 'inspect', volume]);
+    if (result.exitCode === 0) return true;
+    if (/no such volume/i.test(result.stderr)) return false;
+    throw new Error(`Cannot check journal volume "${volume}": ${result.stderr.trim() || 'docker volume inspect failed'}. `
+      + 'Refusing to start a store that may miss its journal.');
+  };
+  const migrated = blazegraphMigrationVolumeName(containerName);
+  if (!await exists(migrated)) return undefined;
+  const original = blazegraphVolumeName(containerName);
+  if (await exists(original)) throw new Error(`Container "${containerName}" is gone and both journal volumes "${original}" and "${migrated}" exist. `
+    + 'Docker does not record which one is current, so neither was chosen. Inspect them, and remove or rename the stale one before retrying.');
+  log(`  Reattaching migrated journal volume "${migrated}".`);
+  return migrated;
+}
+
 export async function provisionBlazegraphDocker(
   opts: ProvisionBlazegraphDockerOptions,
 ): Promise<ProvisionBlazegraphDockerResult> {
@@ -466,10 +488,11 @@ export async function provisionBlazegraphDocker(
   }
 
   // 4. Fresh create path — choose a port and run.
+  const volumeName = recreationVolumeName ?? await journalVolumeForNewContainer(docker, containerName, log);
   const portStart = opts.port ?? DEFAULT_HOST_PORT_START;
   const chosenPort = await findFreePort(portStart, portRange, isPortFree, log);
   log(`  Starting Blazegraph container "${containerName}" on port ${chosenPort}…`);
-  const runResult = await docker.run(buildBlazegraphRunArgs({ containerName, hostPort: chosenPort, namespace, heapMb, volumeName: recreationVolumeName }));
+  const runResult = await docker.run(buildBlazegraphRunArgs({ containerName, hostPort: chosenPort, namespace, heapMb, volumeName }));
   if (runResult.exitCode !== 0) {
     throw new Error(
       `Failed to start Blazegraph container — docker run exited ${runResult.exitCode}. ` +

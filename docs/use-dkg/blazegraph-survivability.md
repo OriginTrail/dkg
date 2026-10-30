@@ -71,6 +71,11 @@ with the same options. Recovery verifies that exact container and clears the
 barrier. Any replacement volume that run left behind stops a later migration
 until you inspect and remove it.
 
+A hardened store keeps its journal in the replacement volume. If its container is
+removed later, provisioning reattaches that volume. If the original volume also
+exists, provisioning refuses and names both, because Docker does not record which
+one is current.
+
 `--migration-dir` chooses the export directory, `--port` must match the configured
 store endpoint, and `--container` overrides the derived container name. Stop the
 daemon with `dkg stop` before executing a migration. `--yes` only skips the

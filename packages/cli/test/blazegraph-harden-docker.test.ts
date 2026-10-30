@@ -212,7 +212,18 @@ try {
   const retained = await fetch(provisioned.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' },
     body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:new-after-migration> { <urn:new> <urn:value> ?v } }')}` });
   assert.equal((await retained.json()).results.bindings[0].v.value, 'newer-primary');
-
+  // Provisioning again after the container is gone must not start over on another journal.
+  assert.equal((await docker.run(['rm', '-f', name])).exitCode, 0);
+  const originalVolumeExists = (await docker.run(['volume', 'inspect', volumes[0]])).exitCode === 0;
+  const again = provisionBlazegraphDocker({ namespace, containerName: name, port: provisioned.port, docker,
+    env: { DKG_BLAZEGRAPH_HEAP_MB: '256' }, pollTimeoutMs: 60000, pollIntervalMs: 500, log: console.log });
+  if (originalVolumeExists) await assert.rejects(again, /both journal volumes/);
+  else {
+    const reattached = await again;
+    const read = await fetch(reattached.url, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/sparql-results+json' },
+      body: `query=${encodeURIComponent('SELECT ?v WHERE { GRAPH <urn:dkg:new-after-migration> { <urn:new> <urn:value> ?v } }')}` });
+    assert.equal((await read.json()).results.bindings[0].v.value, 'newer-primary');
+  }
 
 } finally {
   for (const container of [name, `${name}-backup`]) await docker.run(['rm', '-f', container]);
