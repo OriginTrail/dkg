@@ -49,7 +49,7 @@ export type ProvenRegisteredPrivateEmptyVmInspectionV1 = {
 };
 
 export type InspectedPrivateEmptyVmReadinessV1 =
-  | { readonly proven: false; readonly retryable?: boolean; readonly inspection: InspectedContextGraphReadinessV1 }
+  | (Extract<RegisteredPrivateEmptyVmAttemptV1, { proven: false }> & { readonly inspection: InspectedContextGraphReadinessV1 })
   | { readonly proven: true; readonly inspection: ProvenRegisteredPrivateEmptyVmInspectionV1 };
 
 export interface PreparedPrivateEmptyVmReadinessV1 {
@@ -86,13 +86,18 @@ function finalizePrivateEmptyVmEvidence(
   attempt: RegisteredPrivateEmptyVmAttemptV1,
   inspection: InspectedContextGraphReadinessV1,
   isSubscribed: () => boolean,
+  holdsLocalApproval: () => boolean,
   signal?: AbortSignal,
 ): InspectedPrivateEmptyVmReadinessV1 {
   if (!attempt.proven) {
-    // A transient pre-proof observation cannot overrule a later definitive
-    // denial or a removed subscription at the final live fence.
-    if (signal?.aborted || !isSubscribed() || inspection.authority.outcome === 'denied') {
-      return { ...UNPROVEN_PRIVATE_EMPTY_VM, inspection };
+    // A transient pre-proof observation cannot overrule a removed subscription
+    // at the final live fence, nor a definitive denial of a caller this node
+    // holds no approval for. With that approval the denial may only mean the
+    // chain's roster has not reached this node yet: the attempt keeps its own
+    // disposition, and it is not a proof either way.
+    if (signal?.aborted || !isSubscribed()) return { ...UNPROVEN_PRIVATE_EMPTY_VM, inspection };
+    if (inspection.authority.outcome === 'denied' && !holdsLocalApproval()) {
+      return { ...UNPROVEN_PRIVATE_EMPTY_VM, final: true, stage: 'authority-denied', inspection };
     }
     return { ...attempt, inspection };
   }
@@ -100,16 +105,17 @@ function finalizePrivateEmptyVmEvidence(
     tracePrivateEmptyVm('post-proof-metadata-changed');
     return {
       ...(signal?.aborted || !isSubscribed() ? UNPROVEN_PRIVATE_EMPTY_VM : RETRYABLE_PRIVATE_EMPTY_VM),
+      stage: 'post-proof-metadata-changed',
       inspection,
     };
   }
   if (inspection.authority.outcome === 'unavailable') {
     tracePrivateEmptyVm('post-proof-authority-unavailable');
-    return { ...RETRYABLE_PRIVATE_EMPTY_VM, inspection };
+    return { ...RETRYABLE_PRIVATE_EMPTY_VM, stage: 'post-proof-authority-unavailable', inspection };
   }
   if (!hasValidatedPrivateEmptyVmInspection(inspection, attempt.onChainId)) {
     tracePrivateEmptyVm('post-proof-authority-changed');
-    return { ...UNPROVEN_PRIVATE_EMPTY_VM, inspection };
+    return { ...UNPROVEN_PRIVATE_EMPTY_VM, stage: 'post-proof-authority-changed', inspection };
   }
   tracePrivateEmptyVm('proven');
   return { proven: true, inspection };
@@ -202,9 +208,12 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
     },
   ): Promise<PreparedPrivateEmptyVmReadinessV1> {
     const { contextGraphId, callerAgentAddress, signal } = input;
+    const holdsLocalApproval = () => callerAgentAddress !== undefined
+      && this.localApprovedAgentByCG?.get(contextGraphId)?.toLowerCase() === callerAgentAddress.toLowerCase();
     const attempt = input.attemptPrivateEmptyVm && callerAgentAddress !== undefined
       ? await attemptRegisteredPrivateEmptyVmV1(this, {
         isSubscribed: () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+        holdsLocalApproval,
         readMetadataRevision: () => this.contextGraphMetaProjection
           .readContextGraphAuthorityFactsRevision(contextGraphId),
         readChainConfig: () => this.config.chainConfig,
@@ -235,6 +244,7 @@ export class RegisteredPrivateEmptyVmMethods extends DKGAgentBase {
         }, (inspection) => commit(finalizePrivateEmptyVmEvidence(
           attempt, inspection,
           () => this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true,
+          holdsLocalApproval,
           signal,
         )));
       },
