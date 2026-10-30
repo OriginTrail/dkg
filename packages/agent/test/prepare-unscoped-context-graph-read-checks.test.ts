@@ -1,10 +1,11 @@
+import { scalarRegistrationAdmissionFor } from '../src/internal/scalar-registration-admission.js';
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphCatalogUri,
   contextGraphDataUri, contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, withDefaultStoreWorkPriority, type QueryOptions, type TripleStore, type StorePressureSnapshot } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StorePriorityScheduler, withDefaultStoreWorkPriority, type QueryOptions, type TripleStore, type StorePressureSnapshot } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
@@ -22,7 +23,7 @@ import {
 
 const commitment = (id: string) => ethers.keccak256(ethers.toUtf8Bytes(id));
 
-function dependencies() {
+function dependencies(owner: object = {}) {
   const inputs = new Map<string, Partial<ContextGraphReadAuthorityInput>>();
   const getRegisteredAuthority = vi.fn<(id: string) => ReturnType<ContextGraphReadAuthorityInput['getRegisteredAuthority']>>(
     async () => ({ kind: 'unregistered' }),
@@ -39,6 +40,7 @@ function dependencies() {
       new Map(names.map((name) => [name, null]))
     ));
   const deps = {
+    scalarRegistrationAdmission: scalarRegistrationAdmissionFor(owner),
     inputs, getRegisteredAuthority, isPrivateLocalGraph,
     createReadAuthorityInput: vi.fn<UnscopedContextGraphReadCheckDependencies['createReadAuthorityInput']>((id) => ({
       contextGraphId: id, callerAgentAddress: 'outsider', allowSubscriptionFallback: true,
@@ -79,6 +81,155 @@ function dependencies() {
 }
 
 describe('prepared unscoped Context Graph read checks', () => {
+
+  it('shares four scalar provider slots across independent calls with fresh dependencies for one agent', async () => {
+    const agent = {}, held = Promise.withResolvers<void>();
+    const first = dependencies(agent), second = dependencies(agent);
+    const calls: string[] = []; let active = 0, peak = 0;
+    for (const deps of [first, second]) {
+      deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+      deps.getRegisteredAuthority.mockImplementation(async id => {
+        calls.push(id); peak = Math.max(peak, ++active);
+        try { await held.promise; return { kind: 'unregistered' }; } finally { active--; }
+      });
+    }
+    const signal = new AbortController().signal;
+    const a = prepareUnscopedContextGraphReadChecks(first, Array.from({ length: 8 }, (_, i) => `a-${i}`), signal);
+    const b = prepareUnscopedContextGraphReadChecks(second, Array.from({ length: 4 }, (_, i) => `b-${i}`), signal);
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(calls).toEqual(['a-0', 'a-1', 'a-2', 'a-3']); expect(active).toBe(4);
+    } finally { held.resolve(); }
+    await Promise.all([a, b]);
+    expect(peak).toBe(4); expect(active).toBe(0); expect(calls).toHaveLength(12);
+    expect(calls.indexOf('b-0')).toBeLessThan(calls.indexOf('a-4'));
+  });
+
+  it('keeps scalar preparation capacity independent across agents', async () => {
+    const held = Promise.withResolvers<void>(); let active = 0, peak = 0;
+    const calls = [dependencies({}), dependencies({})].map(deps => {
+      deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+      deps.getRegisteredAuthority.mockImplementation(async () => {
+        peak = Math.max(peak, ++active);
+        try { await held.promise; return { kind: 'unregistered' }; } finally { active--; }
+      });
+      return prepareUnscopedContextGraphReadChecks(deps, ['a', 'b', 'c', 'd'], new AbortController().signal);
+    });
+    try { await new Promise<void>(resolve => setImmediate(resolve)); expect(active).toBe(8); }
+    finally { held.resolve(); }
+    await Promise.all(calls); expect(peak).toBe(8); expect(active).toBe(0);
+  });
+
+  it('cancels a queued scalar caller while non-cooperative providers retain physical ownership', async () => {
+    const agent = {}, held = Promise.withResolvers<void>();
+    const active = dependencies(agent), queued = dependencies(agent), survivor = dependencies(agent);
+    for (const deps of [active, queued, survivor]) deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+    active.getRegisteredAuthority.mockImplementation(async () => { await held.promise; return { kind: 'public', onChainId: 1n }; });
+    const stopActive = new AbortController(), stopQueued = new AbortController();
+    const running = prepareUnscopedContextGraphReadChecks(active, ['a', 'b', 'c', 'd'], stopActive.signal);
+    const rejectedActive = expect(running).rejects.toThrow('active cancelled');
+    const waiting = prepareUnscopedContextGraphReadChecks(queued, ['queued'], stopQueued.signal);
+    const rejectedQueued = expect(waiting).rejects.toThrow('queued cancelled');
+    let next: ReturnType<typeof prepareUnscopedContextGraphReadChecks> | undefined;
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(active.getRegisteredAuthority).toHaveBeenCalledTimes(4);
+      stopQueued.abort(new Error('queued cancelled')); await rejectedQueued;
+      stopActive.abort(new Error('active cancelled'));
+      next = prepareUnscopedContextGraphReadChecks(survivor, ['survivor'], new AbortController().signal);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(queued.getRegisteredAuthority).not.toHaveBeenCalled();
+      expect(survivor.getRegisteredAuthority).not.toHaveBeenCalled();
+    } finally { held.resolve(); }
+    await rejectedActive; await next;
+    expect(survivor.getRegisteredAuthority).toHaveBeenCalledOnce();
+  });
+
+  it('bounds live scalar revalidation across callers and releases failing providers', async () => {
+    const agent = {}, first = dependencies(agent), second = dependencies(agent);
+    for (const deps of [first, second]) {
+      deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+      deps.getRegisteredAuthority.mockResolvedValue({ kind: 'public', onChainId: 1n });
+    }
+    const signal = new AbortController().signal;
+    const [a, b] = await Promise.all([
+      prepareUnscopedContextGraphReadChecks(first, ['a', 'b', 'c', 'd'], signal),
+      prepareUnscopedContextGraphReadChecks(second, ['e', 'f', 'g', 'h'], signal),
+    ]);
+    const held = Promise.withResolvers<void>(); let active = 0, peak = 0;
+    for (const deps of [first, second]) deps.getRegisteredAuthority.mockImplementation(async id => {
+      peak = Math.max(peak, ++active);
+      try { await held.promise; if (id === 'a') throw new Error('registration unavailable');
+        return { kind: 'public', onChainId: 1n }; } finally { active--; }
+    });
+    const reads = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((id, i) => (i < 4 ? a : b)(id, signal));
+    try { await new Promise<void>(resolve => setImmediate(resolve)); expect(active).toBe(4); }
+    finally { held.resolve(); }
+    expect(await Promise.all(reads)).toEqual([false, true, true, true, true, true, true, true]);
+    expect(peak).toBe(4); expect(active).toBe(0);
+    first.getRegisteredAuthority.mockResolvedValue({ kind: 'public', onChainId: 1n });
+    await expect(a('a', signal)).resolves.toBe(true);
+  });
+
+  it('stops scalar preparation on cancellation without starting the remaining graph reads', async () => {
+    const deps = dependencies();
+    deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+    const original = deps.createReadAuthorityInput.getMockImplementation()!;
+    const entered: string[] = [];
+    deps.createReadAuthorityInput.mockImplementation((id, signal) => ({
+      ...original(id, signal),
+      getRegisteredAuthority: () => new Promise((_resolve, reject) => {
+        entered.push(id);
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      }),
+    }));
+    const stop = new AbortController();
+    const ids = Array.from({ length: 52 }, (_, i) => `cancelled-${i}`);
+    const pending = prepareUnscopedContextGraphReadChecks(deps, ids, stop.signal);
+    const outcome = expect(pending).rejects.toThrow('caller left');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(entered).toHaveLength(4);
+    stop.abort(new Error('caller left'));
+    await outcome;
+    expect(entered).toHaveLength(4);
+  });
+
+  it('leaves store admission headroom during two concurrent scalar authority scans', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2, ackReservedSlots: 0, healthReservedSlots: 0,
+      backgroundReservedSlots: 0, queueLimits: 64, queueWaitTimeoutMs: 10_000,
+    });
+    const deps = dependencies();
+    deps.prepareRegistrationReadPlan.mockResolvedValue(null);
+    const read = <T>(source: string, value: T) => scheduler.run('normal', source, async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 2));
+      return value;
+    });
+    deps.getRegisteredAuthority.mockImplementation(() => read(
+      'agent.contextGraph.registrationStatus', { kind: 'unregistered' as const },
+    ));
+    deps.findContextGraphIdsWithReadAuthorityFacts.mockImplementation(() => read(
+      'agent.contextGraph.authorityFactsSnapshot', new Set(['private']),
+    ));
+    deps.isPrivateLocalGraph.mockImplementation(async (id) => id === 'private');
+    const ids = ['private', ...Array.from({ length: 51 }, (_, i) => `public-${i}`)];
+    const signal = new AbortController().signal;
+    const scans = [0, 1].map(() => prepareUnscopedContextGraphReadChecks(deps, ids, signal));
+    // A normal peer-discovery read must retain admission alongside both scans.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const discovery = read('agent.contextGraphMetadataRelocation.candidates', true);
+    const outcomes = await Promise.allSettled([...scans, discovery]);
+    expect(outcomes.every((result) => result.status === 'fulfilled')).toBe(true);
+    expect(scheduler.getBackpressureSnapshot().totals.rejectedTotal).toBe(0);
+    for (const result of outcomes.slice(0, 2)) {
+      if (result.status !== 'fulfilled' || typeof result.value !== 'function') continue;
+      expect(await result.value('private', signal)).toBe(false);
+      expect(await result.value('public-0', signal)).toBe(true);
+    }
+    expect(scheduler.snapshot.normalQueued).toBe(0);
+    expect(scheduler.snapshot.normalInflight).toBe(0);
+  });
+
   it.each(['rejected', 'replaced'] as const)(
     'revalidates a prepared approved-private replica after it is %s',
     async (change) => {
@@ -291,8 +442,8 @@ describe('prepared unscoped Context Graph read checks', () => {
     const check = await prepareUnscopedContextGraphReadChecks(deps, ids, signal);
     expect(await Promise.all(ids.map((id) => check(id, signal)))).toEqual(ids.map(() => true));
     expect(deps.getRegisteredAuthority).toHaveBeenCalledTimes(ids.length);
-    expect(peak).toBeGreaterThan(4);
-    expect(peak).toBeLessThanOrEqual(32);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(4);
     expect(deps.findContextGraphIdsWithReadAuthorityFacts).toHaveBeenCalledOnce();
     expect(deps.isPrivateLocalGraph).not.toHaveBeenCalled();
   });

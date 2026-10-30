@@ -40,13 +40,20 @@ export class LocalContextGraphRegistrationStatusStore {
     this.#markProjectionDirty = options.markProjectionDirty;
   }
 
-  async read(contextGraphId: string): Promise<LocalContextGraphRegistrationStatus | null> {
+  async read(
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<LocalContextGraphRegistrationStatus | null> {
+    options.signal?.throwIfAborted();
     const graph = contextGraphMetaGraphUri(contextGraphId);
     const subject = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.#store.query(
       `SELECT ?status WHERE { GRAPH <${graph}> { <${subject}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } }`,
-      { source: 'agent.contextGraph.registrationStatus' },
+      { source: 'agent.contextGraph.registrationStatus', signal: options.signal },
     );
+    // Synchronous or custom stores may return after the caller abandoned the
+    // read. Such a value must not become a local-first authorization proof.
+    options.signal?.throwIfAborted();
     if (result.type !== 'bindings') return null;
     const statuses = new Set(result.bindings
       .map((binding) => binding['status'])
