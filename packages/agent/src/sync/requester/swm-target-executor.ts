@@ -300,7 +300,7 @@ export class SwmTargetExecutorV1 {
       await insertKeepingOnePublishedAt(this.#ports.store, quads, {
         source: 'agent.sharedMemorySync', seam: 'swm-sync', recordDrops: this.#ports.recordDrops,
       });
-      await this.#registerSyncedSubGraphs(target, quads);
+      await this.#registerSyncedSubGraphs(input, quads);
     };
     return runSharedMemorySync({
       mode,
@@ -334,10 +334,10 @@ export class SwmTargetExecutorV1 {
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: (contextGraphId, descriptor) => (
-        this.#retireFinalizedTwinAfterWrite(target, contextGraphId, descriptor)
+        this.#retireFinalizedTwinAfterWrite(input, contextGraphId, descriptor)
       ),
       heldAsRetiredFinalizedTwin: (contextGraphId, descriptor) => (
-        this.#heldAsRetiredFinalizedTwin(target, contextGraphId, descriptor)
+        this.#heldAsRetiredFinalizedTwin(input, contextGraphId, descriptor)
       ),
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,

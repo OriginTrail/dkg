@@ -48,11 +48,7 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './page-fetch.js';
-import {
-  completeSharedMemoryMetadataFetcher,
-  normalizeSharedMemoryFetcherContext,
-  type CanonicalSharedMemoryFetcherContext,
-} from './shared-memory-metadata-fetcher.js';
+import { completeSharedMemoryMetadataFetcher, normalizeSharedMemoryFetcherContext, type CanonicalSharedMemoryFetcherContext } from './shared-memory-metadata-fetcher.js';
 import {
   materializeGraphScopedSwmRecoveryAsset,
   type GraphScopedSwmRecoveryDescriptor,
@@ -340,9 +336,7 @@ export interface SharedMemorySyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(
-  context => runSharedMemorySyncCore(normalizeSharedMemoryFetcherContext(context)),
-);
+export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(context => runSharedMemorySyncCore(normalizeSharedMemoryFetcherContext(context)));
 
 async function runSharedMemorySyncCore(
   context: CanonicalSharedMemoryFetcherContext<Omit<SharedMemorySyncContext, 'publicSnapshotStore'> & {
