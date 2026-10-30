@@ -52,6 +52,21 @@ when this profile is unavailable. Existing initialized directories are refused.
 
 ## Operator preparation
 
+The serving Core must run compatible code **and** explicitly enable
+`DKG_PUBLIC_SNAPSHOT_BULK=1` in its service environment. Installing the code or
+selecting the Edge's native backend does not enable the Core responder. Preserve
+the existing exact-batch responder gate and export-capable store requirements.
+Check the running service environment after startup; a package version or a
+healthy status endpoint alone does not establish checkpoint compatibility.
+The Edge still negotiates `/dkg/experimental/public-checkpoint/1.0.0` and applies
+all ordinary source authentication and public-data checks.
+
+If preparation reports `No compatible public checkpoint core; use incremental
+recovery`, check that explicit Core opt-in first. Detached daemon startup failures
+are recorded as `[startup] Failed: ...` in `daemon.log` before its writer closes.
+Preserve the failed preparation directory and use a fresh profile for a separately
+authorized attempt; do not erase it or silently retry with a different transport.
+
 Configure the daemon's local pinned native runtime with
 `DKG_PUBLIC_CHECKPOINT_JAVA`, `DKG_PUBLIC_CHECKPOINT_JAR` and
 `DKG_PUBLIC_CHECKPOINT_JAR_SHA256`. No executable path is accepted over the API.

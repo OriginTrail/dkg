@@ -8,8 +8,8 @@ import { cg } from './bulk-graph-fixture.js';
 afterEach(() => vi.unstubAllEnvs());
 
 /** Real agents, loopback transport and stores; only chain authority is a local fixture. */
-export async function checkpointAgentFixture() {
-  vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '1');
+export async function checkpointAgentFixture(options: { servingEnabled?: boolean } = {}) {
+  vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', options.servingEnabled === false ? '0' : '1');
   const f = await checkpointFixture({}, 'rpc-only');
   const chain = new MockChainAdapter(f.initial.snapshot.chainId);
   Object.defineProperty(chain, 'deploymentId', { value: 'fixture' });
