@@ -58,11 +58,12 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * value and the same weighted by the seller's stake factor, which is
  * captured once per batch and never revised.
  *
- * Finalization (`finalizeClaims`). Every period of an epoch e shares one batch
- * deadline, the epoch's end plus the grace of e, which falls in e + 1, the
- * period's due epoch. A seller's claims in a bucket are finalized there and
- * only there: after that deadline, during e + 1, and void once e + 1 has
- * ended. Anyone may finalize, and the value goes to the seller the claim
+ * Finalization (`finalizeClaims`). An epoch e has one batch deadline, its end
+ * plus the receipt grace of e, which falls in e + 1, the due epoch of its
+ * periods; a Conviction Account period whose assignment ended sooner has an
+ * earlier deadline of its own. A seller's claims in a bucket are finalized in
+ * e + 1 and only there, after the epoch's deadline, and are void once e + 1
+ * has ended. Anyone may finalize, and the value goes to the seller the claim
  * names, who must have a positive node score in e + 1. A bucket's claims
  * above its funded cap all shrink by the same ratio, so the order of batches
  * gives no priority, and the result counts as R and QueryInferenceScore in
@@ -116,8 +117,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     uint256 private constant _SECP256K1_HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
     /// @dev The low 255 bits of an EIP-2098 `vs`: its `s`.
     uint256 private constant _S_MASK = (uint256(1) << 255) - 1;
-    /// @dev No nonce word is cached yet; a word index is at most 2^56 − 1.
-    uint256 private constant _NO_WORD = type(uint256).max;
+    /// @dev Nothing is cached yet: no nonce word, whose index is at most
+    ///      2^56 − 1, and no epoch.
+    uint256 private constant _NONE = type(uint256).max;
 
     // ============================================================
     //                          Formats
@@ -319,7 +321,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         bytes32[] digests; // every receipt digest, in order
         uint256 next; // the next free index in `digests`
         uint256 value;
-        uint256 graceEpoch; // the epoch whose grace `grace` is, or _NO_WORD
+        uint256 graceEpoch; // the epoch whose grace `grace` is, or _NONE
         uint256 grace;
     }
 
@@ -414,7 +416,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
             digests: new bytes32[](itemCount),
             next: 0,
             value: 0,
-            graceEpoch: _NO_WORD,
+            graceEpoch: _NONE,
             grace: 0
         });
         for (uint256 g; g < groupCount; g++) {
@@ -465,7 +467,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         QueryInferenceStorage qis = queryInferenceStorage;
         (uint40 activation, bool isPaused) = qis.fundingState();
         uint256 current = _requireLive(activation, isPaused);
-        uint256 graceEpoch = _NO_WORD;
+        uint256 graceEpoch = _NONE;
         uint256 grace;
         for (uint256 i; i < refs.length; i++) {
             ClaimRef calldata ref = refs[i];
@@ -780,7 +782,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
 
         uint256 first = b.next;
         uint256 value;
-        uint256 word = _NO_WORD;
+        uint256 word = _NONE;
         uint256 stored; // the cached word's bits in the storage
         uint256 used; // the bits this group sets in it
         for (uint256 j; j < n; j++) {

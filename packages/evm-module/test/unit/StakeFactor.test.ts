@@ -19,7 +19,6 @@ import {
   Hub,
   ParametersStorage,
   Profile,
-  QueryInferenceSettlement,
   RandomSampling,
   RandomSamplingStorage,
   StakingV10,
