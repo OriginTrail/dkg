@@ -17,6 +17,13 @@ interface DemandV1 { readonly connectionGeneration: number; readonly selectionGe
 export interface Rfc64CatalogReplayScopeAdmissionV1 { admit(): void; reject(): void }
 declare const executionBrand: unique symbol;
 export interface Rfc64CatalogReplayScopeExecutionV1 { readonly [executionBrand]: true }
+/**
+ * Scheduled retries of an unfinished replay on one connection of its peer. A
+ * later circuit to a peer already admitted raises no demand of its own, so
+ * nothing else asks that peer again while it stays connected. Beyond this
+ * bound, a full pass or the peer's next connection does.
+ */
+export const RFC64_CATALOG_UNFINISHED_REPLAY_MAX_RETRIES_V1 = 4;
 
 /** Owns demand, admission and cooldown independently of fence availability. */
 export class Rfc64CatalogReplayScopeLifecycleV1 {
@@ -26,6 +33,8 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   #execution: Rfc64CatalogReplayScopeExecutionV1 | null = null;
   #failures = 0;
   #eligibleAt = 0;
+  /** Retries used on a connection, and whether another is owed. It holds no fence while it waits. */
+  #unfinished: Readonly<{ connectionGeneration: number; retries: number; owed: boolean }> | null = null;
   constructor(readonly contextGraphId: string, readonly peerId: string, readonly debounceMs: number) {}
 
   get outstanding(): number { return Number(this.#current !== null) + Number(this.#successor !== null); }
@@ -35,6 +44,25 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   ready(now: number): boolean { return this.queued && this.#eligibleAt <= now; }
   awaitingFence(): boolean {
     return this.#current?.phase.state === 'waiting-for-fence';
+  }
+  /** When a retry owed on this connection falls due; null when none is. */
+  retryDueAt(connectionGeneration: number): number | null {
+    const unfinished = this.#unfinished;
+    return unfinished?.owed === true && unfinished.connectionGeneration === connectionGeneration ? this.#eligibleAt : null;
+  }
+  /** The peer did not stay: its next connection raises its own demand. */
+  dropRetry(): void {
+    if (this.#unfinished !== null) this.#unfinished = { ...this.#unfinished, owed: false };
+  }
+  /**
+   * Turn the retry owed into a demand. Null when a demand of this connection is
+   * there already, which then serves for it. No demand of an earlier connection
+   * can be, as that connection's retries end when the next one opens, so this
+   * never needs the deferred custody of a successor.
+   */
+  takeRetry(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
+    this.dropRetry();
+    return this.reserve(connectionGeneration, reserveFence, () => null);
   }
   reserve(connectionGeneration: number, reserveFence: () => FenceV1 | null,
     reserveDeferred: () => Readonly<{ release(): void }> | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
@@ -117,6 +145,10 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     this.#execution = null;
     this.#failures = failed ? this.#failures + 1 : 0;
     this.#eligibleAt = now + (failed ? this.#retryDelay() : this.debounceMs);
+    const { connectionGeneration } = demand;
+    const earlier = this.#unfinished?.connectionGeneration === connectionGeneration ? this.#unfinished.retries : -1;
+    this.#unfinished = failed ? { connectionGeneration, retries: earlier + 1,
+      owed: earlier + 1 < RFC64_CATALOG_UNFINISHED_REPLAY_MAX_RETRIES_V1 } : null;
     this.#release(demand);
   }
 
@@ -125,6 +157,7 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     if (this.#selection.state === 'selected') {
       this.#selection = { state: 'retired', generation: this.#selection.generation + 1 };
     }
+    this.#unfinished = null;
     if (this.#successor !== null) this.#release(this.#successor);
     if (this.#current !== null && !this.executing) this.#release(this.#current);
   }
