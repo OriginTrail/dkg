@@ -4,12 +4,14 @@ import { generateOwnershipQuads, generateShareMetadata, storeKnowledgeAssetOpera
 import { storeWorkspaceOperationPublicQuads } from '../../publisher/src/workspace-resolution.js';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { admitSharedMemoryMetadata, type SharedMemoryAdmissionScope } from '../src/sync/shared-memory-metadata-admission.js';
-import { projectLegacySwmHydration, projectSwmPersistence, swmHeadRejectionError } from '../src/sync/shared-memory-metadata-projections.js';
+import { projectLegacySwmHydration, projectSwmPersistence, projectSwmRecovery, swmHeadRejectionError } from '../src/sync/shared-memory-metadata-projections.js';
 import { swmRecordKey } from '../src/sync/shared-memory-metadata-records.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { createGraphScopedRecoveryPlan } from '../src/sync/requester/graph-scoped-recovery-plan.js';
+import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 import { legacySwm20260507 } from './fixtures/legacy-swm-20260507.js';
 
 const CG = 'admission-cg';
@@ -399,5 +401,55 @@ describe('shared-memory metadata protocol admission', () => {
     expect(persisted).not.toEqual(expect.arrayContaining([metadata[valid.length]]));
     expect(owned.get(ROOT)).toBe('peer-source');
     expect(owned.has('urn:data:unrelated')).toBe(false);
+  });
+
+  describe('a head refused at admission', () => {
+    const REFUSED_HEAD = 'urn:not-a-ka#dkg-swm-head';
+    const shares = () => {
+      const fixtures = swmFixtures(CG);
+      const valid = fixtures.share({ ual: UAL, version: 1, operationId: 'valid', marker: 'valid' });
+      const refused = fixtures.share({ ual: `${UAL.slice(0, -1)}2`, version: 1, operationId: 'refused', marker: 'refused' });
+      const rows = [...valid.meta, ...refused.meta.map(row => row.subject === refused.headSubject ? { ...row, subject: REFUSED_HEAD } : row)];
+      return { valid, refused, rows };
+    };
+
+    it('is set aside with the operation it names, and the other heads of its graph are kept', () => {
+      const { valid, refused, rows } = shares();
+      const model = admitSharedMemoryMetadata(rows, contextScope(CG));
+      expect(projectSwmPersistence(model).some(row => row.subject === REFUSED_HEAD)).toBe(false);
+      const plan = createGraphScopedRecoveryPlan({ contextGraphId: CG, metaQuads: projectSwmPersistence(model),
+        rejectedHeads: projectSwmRecovery(model).rejectedHeads }, true);
+      expect([...plan.snapshotDescriptorsByRef.keys()]).toEqual([valid.digest]);
+      expect(plan.descriptorsAuthoritative).toBe(false);
+      expect(plan.diagnostic).toContain(REFUSED_HEAD);
+      expect(plan.blocksRef(refused.digest)).toBe(true);
+      expect(plan.blocksRef(valid.digest)).toBe(false);
+    });
+
+    it('blocks every ref when it names no operation, as any head without one does', () => {
+      const { valid, refused, rows } = shares();
+      const unnamed = rows.filter(row => row.subject !== REFUSED_HEAD || row.predicate !== `${DKG}shareOperationId`);
+      const model = admitSharedMemoryMetadata(unnamed, contextScope(CG));
+      const plan = createGraphScopedRecoveryPlan({ contextGraphId: CG, metaQuads: projectSwmPersistence(model),
+        rejectedHeads: projectSwmRecovery(model).rejectedHeads }, true);
+      expect(plan.blocksRef(valid.digest)).toBe(true);
+      expect(plan.blocksRef(refused.digest)).toBe(true);
+    });
+
+    it('holds the round incomplete through the real worker while the other asset materializes', async () => {
+      const worker = new SyncVerifyWorker(); workers.push(worker);
+      const store = new OxigraphStore(); stores.push(store);
+      const { valid, refused, rows } = shares();
+      const summary = await makeSwmSyncHarness({
+        ctx: createOperationContext('sync'), contextGraphId: CG, store, servedMeta: rows,
+        cachedSnapshots: new Map([[valid.digest, valid.payload], [refused.digest, refused.payload]]),
+        processSharedMemoryBatch: (...args) => worker.processSharedMemoryBatch(...args),
+      }).run();
+      expect(await store.countQuads(valid.assertionGraph)).toBe(valid.payload.length);
+      expect(await store.countQuads(refused.assertionGraph)).toBe(0);
+      expect((await readGraph(store, META)).filter(row => row.subject === REFUSED_HEAD)).toEqual([]);
+      expect(summary.swmCoverage).toMatchObject({ descriptorsAuthoritative: false });
+      expect(summary.failedPhases).toBeGreaterThan(0);
+    });
   });
 });
