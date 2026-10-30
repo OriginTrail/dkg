@@ -48,13 +48,14 @@ const LANE_GROUPS = {
   ],
   tornado_publisher: [{ id: 'publisher', packages: ['publisher'], shards: 4, runner: 'vitest' }],
   tornado_agent: [{ id: 'agent', packages: ['agent'], shards: AGENT_SHARD_POLICY.descriptors.length, runner: 'agent' }],
-  bura_cli: [{ id: 'cli', packages: ['cli'], shards: 4, runner: 'weighted' }],
+  // Keep the expanded CLI inventory within the existing 15-minute job budget.
+  bura_cli: [{ id: 'cli', packages: ['cli'], shards: 8, runner: 'weighted' }],
   bura_query: [{ id: 'query', packages: ['query'], shards: 1 }],
   kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui', 'node-store'], shards: 1 }],
   kosava_supporting: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
     packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'kafka-source', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
-  }],
+  }, { id: 'semantic-runtime', packages: ['semantic-runtime', 'graph-computer'], shards: 1, maxWorkers: 1 }],
   kosava_hardhat_plugins: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }],
 };
 for (const lane of Object.keys(LANE_GROUPS)) {

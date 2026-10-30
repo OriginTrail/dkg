@@ -122,6 +122,7 @@ export type KnownSwmSenderKeyPackageAckReasonCode =
   | 'revoked-key'
   | 'bad-signature'
   | 'agent-gate-pending'
+  | 'authority-unavailable'
   // The receiver cannot evaluate its agent gate until its software or
   // configuration changes (for example, its chain adapter cannot read the
   // participant roster). Terminal: retrying cannot succeed.
@@ -142,6 +143,7 @@ export const SWM_SENDER_KEY_PACKAGE_ACK_REASON_CODES: readonly KnownSwmSenderKey
   'revoked-key',
   'bad-signature',
   'agent-gate-pending',
+  'authority-unavailable',
   'agent-gate-unavailable',
   'not-agent-gated',
   'unknown',
@@ -149,6 +151,7 @@ export const SWM_SENDER_KEY_PACKAGE_ACK_REASON_CODES: readonly KnownSwmSenderKey
 
 export const SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES: readonly KnownSwmSenderKeyPackageAckReasonCode[] = [
   'agent-gate-pending',
+  'authority-unavailable',
 ];
 
 export const SWM_SENDER_KEY_PACKAGE_ACK_TERMINAL_REASON_CODES: readonly KnownSwmSenderKeyPackageAckReasonCode[] =

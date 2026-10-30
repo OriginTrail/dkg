@@ -216,11 +216,11 @@ describe('foreground supervisor restart command', () => {
     const root = await mkdtemp(join(tmpdir(), 'dkg-start-shutdown-policy-'));
     try {
       await writeFile(join(root, 'config.json'), '{}');
-      const cliPath = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+      const cliPath = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
       const startedAt = Date.now();
       let failure: unknown;
       try {
-        await execFileAsync(process.execPath, ['--import', 'tsx', cliPath, 'start'], {
+        await execFileAsync(process.execPath, [cliPath, 'start'], {
           cwd: fileURLToPath(new URL('..', import.meta.url)),
           env: {
             ...process.env,

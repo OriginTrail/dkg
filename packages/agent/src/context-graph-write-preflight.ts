@@ -42,6 +42,7 @@ export function normalizeWritePreflightCaller(callerAgentAddress: string | null 
 }
 
 interface WritePreflightSubscriptions {
+  readonly locallyCreated?: boolean;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load'>;
   readonly current: (contextGraphId: string) => Pick<ContextGraphSub, 'subscribed' | 'synced'> | undefined;
 }
@@ -221,6 +222,7 @@ export async function probeContextGraphWritePreflight(
       // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
       // for the 503-diagnostics path (unchanged wire behaviour).
       storeAvailable: !storeUnavailable,
+      locallyCreated: subscriptions.locallyCreated === true,
       ...(exists !== undefined ? { exists } : {}),
       ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
       ...(inMemorySubscription

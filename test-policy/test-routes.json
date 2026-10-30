@@ -1,5 +1,18 @@
 [
   {
+    "pattern": "packages/chain/node26/**/*.test.ts",
+    "lane": "chain-rpc-node26",
+    "reason": "Actual undici 8 TLS, environment-proxy and cold-start checks run unconditionally in the required Node 26 evidence gate; generic Node 22/24 unit coverage stays separate.",
+    "cadence": "required",
+    "command": "node scripts/ci/run-chain-rpc-node26.mjs",
+    "prerequisites": [
+      "Node 26 with bundled undici 8",
+      "DKG_REQUIRE_UNDICI8_FETCH=1",
+      "pnpm frozen install",
+      "local TLS loopback"
+    ]
+  },
+  {
     "pattern": "scripts/repro/publisher-live-control-restart.test.mts",
     "lane": "native-crash-campaign",
     "reason": "Five serial runtime starts prove persisted publisher pause, resume, startup override and graceful shutdown fencing in the first required CLI shard",
@@ -185,6 +198,13 @@
     "prerequisites": [
       "Prometheus promtool"
     ]
+  },
+  {
+    "pattern": "scripts/run-semantic-runtime-live-smoke.sh",
+    "lane": "devnet",
+    "reason": "Semantic runtime smoke uses an isolated devnet and explicitly enabled runtime",
+    "cadence": "manual",
+    "command": "bash {file}"
   },
   {
     "pattern": "scripts/*test*.sh",

@@ -149,6 +149,12 @@ export const WORKSPACE_RULES = Object.freeze({
     // chain: the chain scope's node-ui identity-wallet suite starts a DKGAgent.
     evmScopes: ['chain', 'agent'],
   },
+  'packages/semantic-runtime': {
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
+  },
+  'packages/graph-computer': {
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_supporting', 'kosava_hardhat_plugins'], evmScopes: [],
+  },
   'packages/cli': {
     // tornado_blazegraph: that job's storage conformance suite runs the CLI's
     // built Oxigraph launcher (test-systems/storage-conformance.test.ts),
@@ -156,7 +162,7 @@ export const WORKSPACE_RULES = Object.freeze({
     // registry, node-ui, graph-viz, mcp-dkg and the three agent adapters.
     // kosava_node_ui: node-ui tests scan the CLI daemon sources
     // (packages/node-ui/test/helpers/read-cli-daemon.ts).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
@@ -259,6 +265,8 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/publisher': ['tornado_publisher'],
   'packages/random-sampling': ['kosava_hardhat_plugins'],
   'packages/agent': ['tornado_agent'],
+  'packages/semantic-runtime': ['kosava_supporting'],
+  'packages/graph-computer': ['kosava_supporting'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
   'packages/node-store': ['kosava_node_ui'],
@@ -316,7 +324,7 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|signed-http-response-guard|agent-http-(?:auth|signing)|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -466,7 +474,7 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests load the CLI confirmed-publication proof helper',
   },
   {
-    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
+    patterns: [/^packages\/cli\/src\/(?:auth|agent-http-(?:auth|signing)|boolean-env-override|config|config-file-source|daemon\/public-checkpoint-config|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
     lanes: ['kosava_supporting'],
