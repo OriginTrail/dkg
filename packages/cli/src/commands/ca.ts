@@ -97,7 +97,7 @@ function addCapOptions(command: Command, kind: 'consent' | 'caps'): Command {
     : command.option(`${flag} <TRAC>`, description));
   amount('--max-period', 'Cap on the cost of one period, in TRAC after the discount');
   amount('--max-inference', `Cap on the inference cost of one period${otherwise('the period cap')}`);
-  amount('--max-query', `Cap on the query cost of one period${otherwise('0, no query services')}`);
+  amount('--max-query', `Cap on the query cost of one period${otherwise('the period cap')}`);
   amount('--max-window', `Cap on the cost per billing window, 0 for none${otherwise('0')}`);
   amount('--max-total', 'Cap on the total cost of the assignment');
   command.option('--max-period-days <n>', `Longest period, in whole days${otherwise('31')}`);

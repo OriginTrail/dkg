@@ -109,9 +109,9 @@ export interface CaTermsWire {
 }
 
 /**
- * The caps a buyer key consents to. The inference cap defaults to the period
- * cap, the query and window caps to 0 (no query, no window cap),
- * `maxPeriodSeconds` to 31 days, `nonce` to `"auto"`: the account's current one.
+ * The caps a buyer key consents to. The inference and query caps default to
+ * the period cap, the window cap to 0 (no window cap), `maxPeriodSeconds` to
+ * 31 days, `nonce` to `"auto"`: the account's current one.
  */
 export interface CaConsentInput {
   maxCostPerPeriod: string;

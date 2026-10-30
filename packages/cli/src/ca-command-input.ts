@@ -129,8 +129,8 @@ export function capsFromOptions(opts: CaCapOptions): CaCapsInput {
 
 /**
  * The caps of a consent. `--max-period`, `--max-total` and `--expires` are
- * required; the node applies the defaults of the rest (the inference cap is the
- * period cap, the query and window caps 0, the longest period 31 days).
+ * required; the node applies the defaults of the rest (the inference and query
+ * caps are the period cap, the window cap 0, the longest period 31 days).
  */
 export function consentFromOptions(opts: CaCapOptions): CaConsentInput {
   const caps = capsFromOptions(opts);

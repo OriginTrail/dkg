@@ -154,7 +154,7 @@ describe('/api/ca against the contracts on Hardhat', () => {
   it('assigns node B on its consent, sent by the owner node', async () => {
     const expiresAt = new Date((chainNow + 30 * DAY) * 1000).toISOString();
     const consent = await b.client.ca.consent(accountId, { maxCostPerPeriod: '25', maxCostPerWindow: '100', maxTotalCost: '1000', expiresAt });
-    expect(consent.terms).toMatchObject({ accountId, assignee: localBuyer.address, nonce: '0', maxQueryCostPerPeriod: '0' });
+    expect(consent.terms).toMatchObject({ accountId, assignee: localBuyer.address, nonce: '0', maxQueryCostPerPeriod: ethers.parseEther('25').toString() });
     expect(ethers.verifyTypedData(consent.domain, (await a.client.ca.contracts()).types, consent.terms, consent.assigneeSignature)).toBe(localBuyer.address);
     // The assignee node cannot submit it without the owner's signature, nor can any other node.
     expect((await refusal(b.client.ca.assign(accountId, consent))).status).toBe(400);
@@ -198,7 +198,7 @@ describe('/api/ca against the contracts on Hardhat', () => {
 
   it('changes the caps on the owner node, keeping the usage: below it they refuse funding, raised again they allow it', async () => {
     const assignee = localBuyer.address;
-    const tightened = await a.client.ca.updateCaps(accountId, assignee, { maxCostPerPeriod: '5', maxInferenceCostPerPeriod: '5', maxTotalCost: '5' });
+    const tightened = await a.client.ca.updateCaps(accountId, assignee, { maxCostPerPeriod: '5', maxInferenceCostPerPeriod: '5', maxQueryCostPerPeriod: '5', maxTotalCost: '5' });
     expect(tightened).toMatchObject({ unchanged: false, caps: { maxTotalCostTrac: '5.0', maxCostPerWindowTrac: '100.0' }, usage: { totalCostTrac: '7.0', periods: 1 } });
     // A retry sends nothing.
     expect((await a.client.ca.updateCaps(accountId, assignee, { maxTotalCost: '5' })).unchanged).toBe(true);
@@ -208,7 +208,7 @@ describe('/api/ca against the contracts on Hardhat', () => {
     const capped = await refusal(b.client.ca.fund(accountId, plan(ethers.id('second period of node B'), '1')));
     expect(capped).toMatchObject({ status: 409, error: 'CapExceeded', body: { args: { cap: 'maxTotalCost' } } });
 
-    await a.client.ca.updateCaps(accountId, assignee, { maxCostPerPeriod: '25', maxInferenceCostPerPeriod: '25', maxTotalCost: '1000' });
+    await a.client.ca.updateCaps(accountId, assignee, { maxCostPerPeriod: '25', maxInferenceCostPerPeriod: '25', maxQueryCostPerPeriod: '25', maxTotalCost: '1000' });
     await b.client.ca.fund(accountId, plan(ethers.id('third period of node B'), '10'));
     const [stored] = (await a.client.ca.assignments(accountId)).assignments;
     expect(stored!.usage).toMatchObject({ totalCostTrac: '14.0', periods: 2 });

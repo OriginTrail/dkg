@@ -63,7 +63,7 @@ The caps are amounts of cost, the allowance drawn after the account's discount, 
 | --- | --- | --- |
 | `--max-period` | the cost of one period | required |
 | `--max-inference` | the inference cost of one period | `--max-period` |
-| `--max-query` | the query cost of one period | `0`: no query services |
+| `--max-query` | the query cost of one period | `--max-period` |
 | `--max-window` | the cost per billing window | `0`: no window cap |
 | `--max-total` | the total cost of the assignment | required |
 | `--max-period-days` | the longest period, in whole days | `31` |

@@ -364,6 +364,9 @@ describe('dkg ca consent', () => {
       maxCostPerPeriod: '25', maxInferenceCostPerPeriod: '20', maxQueryCostPerPeriod: '5', maxCostPerWindow: '100',
       maxTotalCost: '1000', maxPeriodSeconds: 30 * DAY, expiresAt: EXPIRES,
     });
+    // An explicit --max-query 0 is sent, so the node keeps it instead of its default, the period cap.
+    await run([...required, '--max-query', '0', '--out', join(dir, 'q.json')], { consent });
+    expect(consent).toHaveBeenLastCalledWith('42', { maxCostPerPeriod: '25', maxQueryCostPerPeriod: '0', maxTotalCost: '1000', expiresAt: EXPIRES });
   });
 
   it('prints the consent as JSON without --out, with the summary on stderr', async () => {

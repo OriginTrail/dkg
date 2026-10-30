@@ -132,7 +132,7 @@ function stubAgent(over: Record<string, unknown> = {}) {
 const CONSENT_BODY = { maxCostPerPeriod: '25', maxCostPerWindow: '100', maxTotalCost: '1000', expiresAt: '2096-01-01T00:00:00Z' };
 const WIRE_TERMS = {
   accountId: '42', assignee: BUYER, maxCostPerPeriod: '25000000000000000000', maxInferenceCostPerPeriod: '25000000000000000000',
-  maxQueryCostPerPeriod: '0', maxCostPerWindow: '100000000000000000000', maxTotalCost: '1000000000000000000000',
+  maxQueryCostPerPeriod: '25000000000000000000', maxCostPerWindow: '100000000000000000000', maxTotalCost: '1000000000000000000000',
   maxPeriodSeconds: 2678400, expiresAt: 3976214400, nonce: '3',
 };
 const PLAN = {
@@ -393,8 +393,8 @@ describe('POST /api/ca/:id/consent', () => {
     expect(json.domain).toEqual(DOMAIN);
     expect(agent.getConvictionServiceAssignmentNonce).toHaveBeenCalledWith(42n);
     const signed = agent.signConvictionServiceConsent.mock.calls[0]![0];
-    // Defaults: the inference cap is the period cap; no query; 31 days.
-    expect(signed).toMatchObject({ assignee: BUYER, maxInferenceCostPerPeriod: 25n * TRAC, maxQueryCostPerPeriod: 0n, maxPeriodSeconds: 2_678_400, nonce: 3n });
+    // Defaults: the inference and query caps are the period cap; 31 days.
+    expect(signed).toMatchObject({ assignee: BUYER, maxInferenceCostPerPeriod: 25n * TRAC, maxQueryCostPerPeriod: 25n * TRAC, maxPeriodSeconds: 2_678_400, nonce: 3n });
     expect(json.digest).toBe(serviceAssignmentDigest(DOMAIN, signed));
     expect(agent.assignConvictionServiceBuyer).not.toHaveBeenCalled();
   });
@@ -412,7 +412,7 @@ describe('POST /api/ca/:id/consent', () => {
     for (const [body, reason] of [
       [{ ...CONSENT_BODY, maxTotalCost: '10' }, 'maxTotalCost'],
       [{ ...CONSENT_BODY, maxCostPerWindow: '10' }, 'maxCostPerWindow'],
-      [{ ...CONSENT_BODY, maxInferenceCostPerPeriod: '0' }, 'classCaps'],
+      [{ ...CONSENT_BODY, maxInferenceCostPerPeriod: '0', maxQueryCostPerPeriod: '0' }, 'classCaps'],
       [{ ...CONSENT_BODY, expiresAt: '2001-01-01T00:00:00Z' }, 'expiresAt'],
     ] as const) {
       const answer = await call(agent, 'POST', '/api/ca/42/consent', body);
@@ -430,6 +430,21 @@ describe('POST /api/ca/:id/consent', () => {
     }
     expect(agent.signConvictionServiceConsent).toHaveBeenCalledTimes(1);
   });
+
+  it('defaults the query cap to the period cap, as the inference cap, while an explicit 0 allows no query services', async () => {
+    const agent = stubAgent();
+    const period = (25n * TRAC).toString();
+    const byDefault = await call(agent, 'POST', '/api/ca/42/consent', CONSENT_BODY);
+    expect(byDefault.json.terms).toMatchObject({ maxInferenceCostPerPeriod: period, maxQueryCostPerPeriod: period });
+    const noQuery = await call(agent, 'POST', '/api/ca/42/consent', { ...CONSENT_BODY, maxQueryCostPerPeriod: '0' });
+    expect(noQuery.status).toBe(200);
+    expect(noQuery.json.terms).toMatchObject({ maxInferenceCostPerPeriod: period, maxQueryCostPerPeriod: '0' });
+    // An inference cap of 0 on its own leaves a consent to query services only.
+    const queryOnly = await call(agent, 'POST', '/api/ca/42/consent', { ...CONSENT_BODY, maxInferenceCostPerPeriod: '0' });
+    expect(queryOnly.status).toBe(200);
+    expect(queryOnly.json.terms).toMatchObject({ maxInferenceCostPerPeriod: '0', maxQueryCostPerPeriod: period });
+    expect(agent.signConvictionServiceConsent.mock.calls.map(([t]) => t.maxQueryCostPerPeriod)).toEqual([25n * TRAC, 0n, 25n * TRAC]);
+  });
 });
 
 describe('POST /api/ca/:id/assignments', () => {
@@ -446,7 +461,7 @@ describe('POST /api/ca/:id/assignments', () => {
     expect(sendAs).toBe('owner');
     expect(signatures).toEqual({ owner: undefined, assignee: consent.assigneeSignature });
     expect(terms).toEqual({
-      accountId: 42n, assignee: BUYER, maxCostPerPeriod: 25n * TRAC, maxInferenceCostPerPeriod: 25n * TRAC, maxQueryCostPerPeriod: 0n,
+      accountId: 42n, assignee: BUYER, maxCostPerPeriod: 25n * TRAC, maxInferenceCostPerPeriod: 25n * TRAC, maxQueryCostPerPeriod: 25n * TRAC,
       maxCostPerWindow: 100n * TRAC, maxTotalCost: 1000n * TRAC, maxPeriodSeconds: 2_678_400, expiresAt: 3_976_214_400, nonce: 3n,
     });
     const missing = await call(agent, 'POST', '/api/ca/42/assignments', { terms: WIRE_TERMS });
@@ -634,7 +649,7 @@ describe('the whole flow over the mock adapter', () => {
     });
 
     // Tighten the total below the usage: the next funding is refused, the usage kept.
-    const caps = await call(agent, 'POST', `/api/ca/${id}/assignments/${buyer.address}/caps`, { maxCostPerPeriod: '2', maxInferenceCostPerPeriod: '2', maxTotalCost: '2' }, as);
+    const caps = await call(agent, 'POST', `/api/ca/${id}/assignments/${buyer.address}/caps`, { maxCostPerPeriod: '2', maxInferenceCostPerPeriod: '2', maxQueryCostPerPeriod: '2', maxTotalCost: '2' }, as);
     expect(caps.json).toMatchObject({ unchanged: false, usage: { totalCostTrac: '2.5', periods: 1 } });
     const capped = await call(agent, 'POST', `/api/ca/${id}/periods`, { ...PLAN, periodId: bytes32(0xa2), buckets: [{ ...PLAN.buckets[0], value: '1' }] }, as);
     expect([capped.status, capped.json.error, capped.json.args.cap]).toEqual([409, 'CapExceeded', 'maxTotalCost']);

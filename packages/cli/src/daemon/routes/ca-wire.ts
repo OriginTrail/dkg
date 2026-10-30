@@ -137,10 +137,9 @@ export function parseCapsInput(body: Record<string, unknown>, extraFields: reado
 
 /**
  * The caps of a consent: `maxCostPerPeriod`, `maxTotalCost` and `expiresAt`
- * are required; the inference cap defaults to the period cap, the query cap
- * and the window cap to 0 (no query; no window cap), `maxPeriodSeconds` to
- * 31 days. `nonce` is `"auto"` (the default: the account's current nonce) or
- * a decimal number.
+ * are required; the inference and query caps default to the period cap, the
+ * window cap to 0 (no window cap), `maxPeriodSeconds` to 31 days. `nonce` is
+ * `"auto"` (the default: the account's current nonce) or a decimal number.
  */
 export function parseConsentInput(body: Record<string, unknown>): { caps: CaAssignmentCaps; nonce: bigint | 'auto' } {
   const given = parseCapsInput(body, ['nonce']);
@@ -150,7 +149,7 @@ export function parseConsentInput(body: Record<string, unknown>): { caps: CaAssi
   const caps: CaAssignmentCaps = {
     maxCostPerPeriod: given.maxCostPerPeriod!,
     maxInferenceCostPerPeriod: given.maxInferenceCostPerPeriod ?? given.maxCostPerPeriod!,
-    maxQueryCostPerPeriod: given.maxQueryCostPerPeriod ?? 0n,
+    maxQueryCostPerPeriod: given.maxQueryCostPerPeriod ?? given.maxCostPerPeriod!,
     maxCostPerWindow: given.maxCostPerWindow ?? 0n,
     maxTotalCost: given.maxTotalCost!,
     maxPeriodSeconds: given.maxPeriodSeconds ?? CA_DEFAULT_MAX_PERIOD_SECONDS,

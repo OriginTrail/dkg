@@ -133,7 +133,7 @@ describe('the dkg ca how-to against the contracts on Hardhat', () => {
     expect(out).toContain('Consent signed by the buyer key; nothing was sent:');
     expect(out).toContain(`Next, on the owner node: dkg ca assign ${accountId} --consent consent.json`);
     const consent = JSON.parse(await readFile(join(work, 'consent.json'), 'utf8')) as CaConsentResponse;
-    expect(consent.terms).toMatchObject({ accountId, assignee: buyer.address, maxQueryCostPerPeriod: '0', maxPeriodSeconds: 31 * DAY });
+    expect(consent.terms).toMatchObject({ accountId, assignee: buyer.address, maxQueryCostPerPeriod: ethers.parseEther('25').toString(), maxPeriodSeconds: 31 * DAY });
   });
 
   it('3. assigns the buyer key on the owner node', async () => {
@@ -173,7 +173,7 @@ describe('the dkg ca how-to against the contracts on Hardhat', () => {
   });
 
   it('6. changes the caps on the owner node: below the usage they refuse funding, raised again they allow it', async () => {
-    const tightened = await ok(a, 'caps', accountId, buyer.address, '--max-period', '5', '--max-inference', '5', '--max-total', '5');
+    const tightened = await ok(a, 'caps', accountId, buyer.address, '--max-period', '5', '--max-inference', '5', '--max-query', '5', '--max-total', '5');
     expect(tightened).toContain('are updated:');
     expect(tightened).toContain('maxTotalCost is below the usage, so every funding is refused until it is raised.');
     await writePlan('plan-2.json', '1');
@@ -183,7 +183,7 @@ describe('the dkg ca how-to against the contracts on Hardhat', () => {
     const periodId = await periodIdOf('plan-2.json');
     expect(periodId).toBeDefined();
 
-    expect(await ok(a, 'caps', accountId, buyer.address, '--max-period', '25', '--max-inference', '25', '--max-total', '1000')).toContain('are updated:');
+    expect(await ok(a, 'caps', accountId, buyer.address, '--max-period', '25', '--max-inference', '25', '--max-query', '25', '--max-total', '1000')).toContain('are updated:');
     // The refused run sent nothing, so the same plan file now funds its period once.
     const funded = await dkg(b, 'fund', accountId, '--plan', 'plan-2.json');
     expect(funded.code, funded.stderr).toBe(0);
