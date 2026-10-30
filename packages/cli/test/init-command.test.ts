@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   questions: [] as string[],
   loadConfig: vi.fn(),
   saveConfig: vi.fn<(config: DkgConfig) => Promise<void>>(),
+  realStoreWizard: false,
 }));
 vi.mock('../src/config.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/config.js')>(),
@@ -32,15 +33,20 @@ vi.mock('node:readline', async (importOriginal) => ({
     close: () => {},
   }),
 }));
-vi.mock('../src/store-wizard.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/store-wizard.js')>(),
-  promptStoreBackend: async () => ({ storeBlock: null }),
-}));
+vi.mock('../src/store-wizard.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/store-wizard.js')>();
+  return {
+    ...actual,
+    promptStoreBackend: async (opts: Parameters<typeof actual.promptStoreBackend>[0]) =>
+      (mocks.realStoreWizard ? actual.promptStoreBackend(opts) : { storeBlock: null }),
+  };
+});
 vi.mock('@origintrail-official/dkg-agent', async (importOriginal) => ({
   ...await importOriginal<typeof import('@origintrail-official/dkg-agent')>(),
   loadOpWallets: async () => [],
 }));
 
+import { resolveStoreControlConfig } from '@origintrail-official/dkg-storage';
 import { loadNetworkConfig, resolveChainConfig } from '../src/config.js';
 import { registerInitCommand } from '../src/commands/init.js';
 
@@ -66,6 +72,7 @@ describe('init wizard chain persistence', () => {
     await writeFile(join(mocks.home, 'config.json'), '{}');
     mocks.answers = {};
     mocks.questions = [];
+    mocks.realStoreWizard = false;
     mocks.saveConfig.mockResolvedValue(undefined);
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -73,6 +80,7 @@ describe('init wizard chain persistence', () => {
   });
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     await rm(mocks.home, { recursive: true, force: true });
   });
 
@@ -172,6 +180,36 @@ describe('init wizard chain persistence', () => {
     const defaults = resolveChainConfig(undefined, network)!;
     expect(resolveChainConfig(saved, network)).toMatchObject({
       rpcUrl: defaults.rpcUrl, rpcUrls: defaults.rpcUrls, hubAddress: defaults.hubAddress, chainId: defaults.chainId,
+    });
+  });
+
+  // OT-RFC-73 P14: `store.controlReservedSlots: 0` is the documented way to switch the control path off on a node. A
+  // re-run of `dkg init` that keeps the store (Enter through its prompts) must keep it, or the next restart applies
+  // the default, which is on for Blazegraph and managed oxigraph-server on more than 2 CPUs.
+  describe('store block', () => {
+    it('keeps store.controlReservedSlots when a re-run keeps the managed oxigraph-server store, so the path stays off', async () => {
+      mocks.realStoreWizard = true;
+      const store = { backend: 'oxigraph-server', options: {}, controlReservedSlots: 0 };
+      mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet', store });
+
+      const saved = await runInit();
+      expect(saved.store).toEqual(store);
+      expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: saved.store!.backend, configured: saved.store!.controlReservedSlots }))
+        .toMatchObject({ slots: { share: 0, publisher: 0 }, source: 'config' });
+    });
+
+    it('keeps store.controlReservedSlots when a re-run keeps the Blazegraph store, so the path stays off', async () => {
+      const url = 'http://blaze.test/bigdata/namespace/kb/sparql';
+      mocks.realStoreWizard = true;
+      vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ boolean: true }), { status: 200 }));
+      mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet',
+        store: { backend: 'blazegraph', options: { url }, controlReservedSlots: 0 } });
+
+      const saved = await runInit();
+      expect(mocks.questions.some((prompt) => prompt.startsWith('Blazegraph SPARQL endpoint URL'))).toBe(true);
+      expect(saved.store).toEqual({ backend: 'blazegraph', options: { url, managedByDkg: false }, controlReservedSlots: 0 });
+      expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: saved.store!.backend, configured: saved.store!.controlReservedSlots }))
+        .toMatchObject({ slots: { share: 0, publisher: 0 }, source: 'config' });
     });
   });
 });

@@ -6,6 +6,8 @@ import {
   classifyContextGraphRegistrationFailure,
   markContextGraphRegistrationNotSubmitted,
 } from '../src/context-graph-registration-error.js';
+import { RemoteSignerError } from '../src/remote-signer-errors.js';
+import { isTransactionNotSubmitted, markTransactionNotSubmitted } from '../src/transaction-submission.js';
 
 describe('Context Graph registration failure classification', () => {
   it.each([
@@ -31,6 +33,20 @@ describe('Context Graph registration failure classification', () => {
     }),
   ])('retains pending when registration may have been submitted', (error) => {
     expect(classifyContextGraphRegistrationFailure(error)).toBe('outcome-ambiguous');
+  });
+
+  it('classifies a failure raised before its transaction was sent as definitive, by that mark alone', () => {
+    const refusal = new RemoteSignerError('REMOTE_SIGNER_REJECTED', 'Remote signer at unix:/s rejected eth_signTransaction: policy');
+    expect(classifyContextGraphRegistrationFailure(refusal)).toBe('outcome-ambiguous');
+    // The write path marks the error itself, out of sight of anything that serializes it.
+    expect(markTransactionNotSubmitted(refusal)).toBe(refusal);
+    expect(Object.keys(refusal)).not.toContain('transactionSubmitted');
+    expect(classifyContextGraphRegistrationFailure(refusal)).toBe('definitive-failure');
+    // A sealed error is left as it is, never wrapped, and keeps its outcome open.
+    const sealed = Object.preventExtensions(new Error('sealed failure'));
+    expect(markTransactionNotSubmitted(sealed)).toBe(sealed);
+    expect(isTransactionNotSubmitted(sealed)).toBe(false);
+    expect(classifyContextGraphRegistrationFailure(sealed)).toBe('outcome-ambiguous');
   });
 
   it('wraps a sealed preparatory failure in a typed pre-submission verdict', () => {

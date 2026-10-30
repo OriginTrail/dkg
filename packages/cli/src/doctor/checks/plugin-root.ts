@@ -19,6 +19,7 @@
  * conservative read of "verify resolves" but a deterministic one.
  */
 import { join } from 'node:path';
+import { configFileLabel, readConfigMapping } from '../config-file.js';
 import type { DoctorDeps, Finding } from '../types.js';
 
 interface RoutePluginEntry {
@@ -44,19 +45,6 @@ function readRoutePlugins(config: Record<string, unknown> | undefined): RoutePlu
     }
   }
   return entries;
-}
-
-async function loadConfig(deps: DoctorDeps): Promise<Record<string, unknown> | undefined> {
-  const raw = await deps.readFile(join(deps.dkgHome, 'config.json'));
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null
-      ? (parsed as Record<string, unknown>)
-      : undefined;
-  } catch {
-    return undefined;
-  }
 }
 
 function isAbsolutePathSpec(spec: string): boolean {
@@ -92,9 +80,9 @@ export async function runPluginRootCheck(deps: DoctorDeps): Promise<Finding[]> {
     });
   }
 
-  const config = await loadConfig(deps);
-  const entries = readRoutePlugins(config);
-  if (entries.length === 0) return findings;
+  const loaded = await readConfigMapping(deps);
+  const entries = readRoutePlugins(loaded?.config);
+  if (!loaded || entries.length === 0) return findings;
 
   for (const { spec } of entries) {
     if (isAbsolutePathSpec(spec)) {
@@ -103,7 +91,7 @@ export async function runPluginRootCheck(deps: DoctorDeps): Promise<Finding[]> {
           check: 'plugin-root',
           severity: 'error',
           message: `routePlugin path not found: ${spec}`,
-          advisory: 'The plugin file no longer exists at the configured path. Fix the absolute path in ~/.dkg/config.json#routePlugins, or remove the entry.',
+          advisory: `The plugin file no longer exists at the configured path. Fix the absolute path in ${configFileLabel(deps, loaded.source.path)}#routePlugins, or remove the entry.`,
           subject: spec,
         });
       }

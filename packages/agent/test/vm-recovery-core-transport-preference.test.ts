@@ -1,5 +1,5 @@
 import type { CoreTransportPreference } from '../src/vm-recovery-core-transport-preference.js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext, PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
@@ -16,6 +16,9 @@ const third = '12D3KooWZZZOtherReplica';
 const cg = '0x0000000000000000000000000000000000000001/core-transport';
 type Harness = Awaited<ReturnType<typeof harness>>;
 const agents: Array<{ stop(): Promise<void> }> = [];
+// Legacy preference cases explicitly choose their transport; streaming cases
+// below turn it on and test the same selection/ownership rules separately.
+beforeEach(() => vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '0'));
 
 async function harness(accessPolicy: 0 | 1 = 0, behavior?: (peer: string, ordinal: number) => 'found' | 'clean-absent' | 'incomplete' | 'unverified', peers = [older, core], options: { targetCount?: number; knownSizing?: boolean } = {}) {
   const h = await createVmRecoveryHostHarness({
@@ -225,8 +228,8 @@ describe('verified public Core transport preference', () => {
             cg, '2', core, h.internals.getSyncReconcilerConnectionKey(core),
           )).toBe(true);
         } else {
-          h.internals.closeVmReconcileRotationState();
-          if (change === 'restart') h.internals.openVmReconcileRotationState();
+          h.internals.workLifetime.close(); h.internals.closeVmReconcileRotationState();
+          if (change === 'restart') { h.internals.workLifetime.open(); h.internals.openVmReconcileRotationState(); }
         }
       }
       return result;
@@ -275,9 +278,9 @@ describe('verified public Core transport preference', () => {
     expect(remember(h)).toBe(true);
     h.internals.clearVmReconcileRotationStateForContextGraph(cg);
     expect(preferenceEntries(h).has(cg)).toBe(false);
-    h.internals.closeVmReconcileRotationState();
+    h.internals.workLifetime.close(); h.internals.closeVmReconcileRotationState();
     expect(preferenceEntries(h).size).toBe(0);
-    h.internals.openVmReconcileRotationState();
+    h.internals.workLifetime.open(); h.internals.openVmReconcileRotationState();
     expect(preferenceEntries(h).size).toBe(0);
   });
 
@@ -405,7 +408,7 @@ describe('experimental Core ordering without holder credit', () => {
     if (change === 'binding-generation') h.internals.contextGraphBindingState.bump(cg);
     if (change === 'selected-binding') vi.spyOn(h.internals.selectedVmReconcileCursors, 'get').mockReturnValue({ bindingGeneration: 99 });
     if (change === 'deployment') vi.spyOn(h.chainAdapter, 'deploymentId', 'get').mockReturnValue('mock:replacement');
-    if (change === 'lifecycle') h.internals.vmReconcileLifecycleGeneration += 1;
+    if (change === 'lifecycle') h.internals.workLifetime.close();
     if (change === 'expiry') h.internals.vmReconcileRotationNow = () => prior.expiresAt + 1;
     if (change === 'reconnect') h.internals.node.libp2p.getConnections = () => [older, core, third]
       .map(peerId => ({ remotePeer: { toString: () => peerId }, timeline: { open: 99 } }));
@@ -615,7 +618,7 @@ describe('experimental carried public Core holder', () => {
     if (change === 'binding-generation') h.internals.contextGraphBindingState.bump(cg);
     if (change === 'selected-binding') vi.spyOn(h.internals.selectedVmReconcileCursors, 'get').mockReturnValue({ bindingGeneration: 99 });
     if (change === 'deployment') vi.spyOn(h.chainAdapter, 'deploymentId', 'get').mockReturnValue('mock:replacement');
-    if (change === 'lifecycle') h.internals.vmReconcileLifecycleGeneration += 1;
+    if (change === 'lifecycle') h.internals.workLifetime.close();
     if (change === 'expiry') h.internals.vmReconcileRotationNow = () => prior.expiresAt + 1;
     if (change === 'reconnect') h.internals.node.libp2p.getConnections = () => [older, core, third]
       .map(peerId => ({ remotePeer: { toString: () => peerId }, timeline: { open: 99 } }));

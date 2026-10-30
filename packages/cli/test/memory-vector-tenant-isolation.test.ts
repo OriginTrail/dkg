@@ -74,10 +74,12 @@ function request(store: VectorStore, principal: Parameters<typeof requestAuthent
     peerId: PEER, getDefaultAgentAddress: () => A,
     listLocalAgents: () => [A, B].map(agentAddress => ({ agentAddress })),
     resolveContextGraphReadAuthority: vi.fn(async () => ({
-      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+      outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant',
     })),
     canUseSharedMemoryForContextGraph: async () => true,
-    query: vi.fn(async () => ({ bindings: [] })),
+    query: vi.fn(async (_sparql: string, _options?: { view?: string }) => ({
+      bindings: [] as Array<{ entity: string; name: string; desc: string }>,
+    })),
     listContextGraphs: async () => [{ id: CG, subscribed: true, synced: true }],
     contextGraphExists: async () => true,
     assertion: { create: vi.fn(async () => 'wm-graph'), write: vi.fn(async () => undefined) },
@@ -100,6 +102,103 @@ async function search(store: VectorStore, principal: Parameters<typeof requestAu
 }
 
 describe('enabled vector memory search tenant isolation', () => {
+  it.each(['working-memory', 'shared-working-memory'])(
+    'merges vector and text overlap from %s without replacing vector metadata', async (textView) => {
+      const store = createStore();
+      await insert(store, 'overlap', 'wm', A);
+      const { ctx, res, agent } = request(store, { kind: 'agent', agentAddress: A });
+      agent.query.mockImplementation(async (_sparql, options) => ({
+        bindings: options?.view === textView
+          ? [{ entity: 'overlap', name: 'text label', desc: 'text description' }] : [],
+      }));
+      await handleMemoryRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toMatchObject({ resultCount: 1, results: [{
+        entityUri: 'overlap', label: 'label:overlap', sources: ['vector', 'sparql'],
+        similarity: 1, sourceFile: 'source:overlap', snippet: 'secret:overlap', memoryLayer: 'wm',
+      }] });
+    },
+  );
+
+  it('ranks each layer by merged vector similarity before allocating fair slots', async () => {
+    const store = createStore();
+    for (const [entityUri, memoryLayer, score] of [
+      ['a', 'wm', 0.9], ['b', 'wm', 0.8], ['b', 'swm', 0.99], ['c', 'swm', 0.95],
+    ] as const) {
+      await store.insert({ embedding: [score, Math.sqrt(1 - score * score)], entityUri, memoryLayer,
+        sourceUri: `source:${entityUri}:${memoryLayer}`, contextGraphId: CG, model: 'test', agentAddress: A });
+    }
+    const { ctx, res } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'secret', memoryLayers: ['wm', 'swm'], limit: 2,
+    }));
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).results).toMatchObject([
+      { entityUri: 'b', similarity: 0.99, sourceFile: 'source:b:swm', memoryLayer: 'wm' },
+      { entityUri: 'c', similarity: 0.95, sourceFile: 'source:c:swm', memoryLayer: 'swm' },
+    ]);
+  });
+
+  it('keeps SWM vector metadata when the fair slot comes from a WM text duplicate', async () => {
+    const store = createStore();
+    await insert(store, 'reverse-overlap', 'swm', B);
+    const { ctx, res, agent } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'secret', memoryLayers: ['wm', 'swm'], limit: 1,
+    }));
+    agent.query.mockImplementation(async (_sparql, options) => ({
+      bindings: options?.view === 'working-memory'
+        ? [{ entity: 'reverse-overlap', name: 'text label', desc: 'text description' }] : [],
+    }));
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ resultCount: 1, results: [{
+      entityUri: 'reverse-overlap', label: 'label:reverse-overlap', sources: ['vector', 'sparql'],
+      similarity: 1, sourceFile: 'source:reverse-overlap', snippet: 'secret:reverse-overlap', memoryLayer: 'wm',
+    }] });
+  });
+
+  it('preserves text evidence when its full layer rejects a duplicate retained in another layer', async () => {
+    const store = createStore();
+    await insert(store, 'retained', 'wm', A);
+    await insert(store, 'competing', 'swm', B);
+    const { ctx, res, agent } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'secret', memoryLayers: ['wm', 'swm'], limit: 1,
+    }));
+    agent.query.mockImplementation(async (_sparql, options) => ({
+      bindings: options?.view === 'shared-working-memory'
+        ? [{ entity: 'retained', name: 'text label', desc: 'text description' }] : [],
+    }));
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ resultCount: 1, results: [{
+      entityUri: 'retained', label: 'label:retained', sources: ['vector', 'sparql'],
+      similarity: 1, sourceFile: 'source:retained', snippet: 'secret:retained', memoryLayer: 'wm',
+    }] });
+  });
+
+  it('retains vector-only matches in every layer even when WM occupies the global top three', async () => {
+    const store = createStore();
+    for (let n = 0; n < 5; n++) await insert(store, `alice-${n}`, 'wm', A);
+    await insert(store, 'shared', 'swm', B);
+    await insert(store, 'verified', 'vm', B);
+    await insert(store, 'bob', 'wm', B);
+    const { ctx, res, agent } = request(store, { kind: 'agent', agentAddress: A });
+    (ctx.req as any).__dkgPrebufferedBody = Buffer.from(JSON.stringify({
+      contextGraphId: CG, query: 'vector-only-query', memoryLayers: ['wm', 'swm', 'vm'], limit: 3,
+    }));
+    await handleMemoryRoutes(ctx);
+    const body = JSON.parse(res.body);
+    expect(body.results.map((row: any) => row.memoryLayer)).toEqual(['wm', 'swm', 'vm']);
+    expect(body.results.map((row: any) => row.entityUri)).toContain('shared');
+    expect(body.results.map((row: any) => row.entityUri)).toContain('verified');
+    expect(JSON.stringify(body)).not.toContain('secret:bob');
+    expect(body.resultCount).toBe(3);
+    expect(agent.query).toHaveBeenCalledTimes(3);
+  });
+
   it.each([PEER, PEER.toUpperCase()])('preserves exact peer ownership without granting reverse default aliases: %s', async (caller) => {
     const store = createStore();
     await insert(store, 'default-wallet', 'wm', A);
@@ -189,6 +288,6 @@ describe('enabled vector memory search tenant isolation', () => {
     await handleMemoryRoutes(ctx);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).results.map((row: { entityUri: string }) => row.entityUri)).toEqual(['bob']);
-    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, { callerAgentAddress: B });
+    expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: B, signal: expect.any(AbortSignal) }));
   });
 });

@@ -28,9 +28,24 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
+import { startFakeRemoteSigner } from '../../chain/test/helpers/fake-remote-signer.js';
+import { connectRemoteSigners } from '@origintrail-official/dkg-chain';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
+import jsonld from 'jsonld';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
+
+const originalDocumentLoader = jsonld.documentLoader;
+beforeAll(() => {
+  // Publication and admission fixtures must resolve their vocabulary locally.
+  // A remote context outage must never mask the converter or queue guards.
+  jsonld.documentLoader = async (url) => {
+    throw new Error(`Unexpected remote JSON-LD context in publication fixture: ${url}`);
+  };
+});
+afterAll(() => {
+  jsonld.documentLoader = originalDocumentLoader;
+});
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -133,7 +148,7 @@ describe('publishJsonLd', () => {
     await agent.registerContextGraph('bare-priv');
 
     const result = await agent.publish('bare-priv', {
-      '@context': 'http://schema.org/',
+      '@context': { '@vocab': 'http://schema.org/' },
       '@id': 'http://example.org/Alice',
       '@type': 'Person',
       'name': 'Alice',
@@ -161,7 +176,7 @@ describe('publishJsonLd', () => {
 
     const result = await agent.publish('pub-env', {
       public: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/Bob',
         '@type': 'Person',
         'name': 'Bob',
@@ -173,7 +188,7 @@ describe('publishJsonLd', () => {
     // …/_verifiable_memory/{author}/{number} graph. Read-both (root OR the
     // _verifiable_memory/ prefix, minus staging) matches the production read path.
     const askResult = await store.query(
-      `ASK { GRAPH ?g { <http://example.org/Bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> }
+      `ASK { GRAPH ?g { <http://example.org/Bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> ; <http://schema.org/name> "Bob" }
         FILTER((STRSTARTS(STR(?g), "did:dkg:context-graph:pub-env/_verifiable_memory/") && !CONTAINS(STR(?g), "/staging/")) || STR(?g) = "did:dkg:context-graph:pub-env") }`,
     );
     expect(askResult.type).toBe('boolean');
@@ -189,13 +204,13 @@ describe('publishJsonLd', () => {
 
     const result = await agent.publish('split-test', {
       public: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/Carol',
         '@type': 'Person',
         'name': 'Carol',
       },
       private: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/Carol',
         'email': 'carol@example.org',
       },
@@ -232,7 +247,7 @@ describe('publishJsonLd', () => {
 
     const result = await agent.publish('priv-only', {
       private: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/Secret',
         '@type': 'Thing',
         'name': 'Top Secret',
@@ -328,7 +343,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-maxretries',
         {
           private: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/AsyncMaxRetries',
             '@type': 'Thing',
             'name': 'Async MaxRetries',
@@ -384,7 +399,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-pointer',
       {
         private: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': 'http://example.org/AsyncPointer',
           '@type': 'Thing',
           'name': 'Async Pointer',
@@ -412,7 +427,7 @@ describe('publishJsonLd', () => {
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     const content = (name: string) => ({
       private: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': `http://example.org/${name}`,
         '@type': 'Thing',
         'name': name,
@@ -475,7 +490,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-priv-only',
       {
         private: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'name': 'Private Async',
@@ -549,7 +564,7 @@ describe('publishJsonLd', () => {
     const { captureID } = await agent.publishAsync(
       'did:dkg:context-graph:async-bare-private',
       {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': root,
         '@type': 'Thing',
         'name': 'Bare Async Private',
@@ -611,7 +626,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-seal-e2e',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'name': 'E2E Author Attestation',
@@ -669,7 +684,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-seal-distinct',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'name': 'Async Seal Distinct',
@@ -723,6 +738,80 @@ describe('publishJsonLd', () => {
     expect(recoveredFromSeal.toLowerCase()).toBe(tenant.agentAddress.toLowerCase());
   }, CHAIN_JSONLD_TIMEOUT_MS);
 
+  it('async publish with authorAgentAddress of an agent whose author key an external signer holds signs through it', async () => {
+    const authorKey = new ethers.Wallet(HARDHAT_KEYS.EXTRA2);
+    const fake = await startFakeRemoteSigner({
+      credentials: [
+        { token: 'async-payer-credential', keys: [HARDHAT_KEYS.EXTRA3] },
+        { token: 'async-author-credential', keys: [authorKey.privateKey] },
+      ],
+    });
+    try {
+      const remote = await connectRemoteSigners({
+        url: fake.url,
+        authToken: 'async-payer-credential',
+        author: { authToken: 'async-author-credential' },
+      });
+      const { agent, store } = await createAgent('AsyncExternalAuthorBot', {
+        authorSigners: remote.authors,
+      });
+      await agent.createContextGraph({ id: 'async-external-author', name: 'AsyncExternalAuthor', description: '' });
+      await agent.registerContextGraph('async-external-author');
+      const writer = await agent.registerAgent('ExternalWriter', { address: authorKey.address });
+      expect(writer.mode).toBe('self-sovereign');
+      // An inline context, so the test does not fetch one.
+      const content = (id: string) => ({
+        public: { '@context': { '@vocab': 'http://schema.org/' }, '@id': `http://example.org/${id}`, '@type': 'Thing', 'name': id },
+      });
+
+      const before = fake.requests.length;
+      const { captureID } = await agent.publishAsync(
+        'did:dkg:context-graph:async-external-author',
+        content('AsyncExternalAuthorEntity'),
+        { localOnly: true, authorAgentAddress: writer.agentAddress },
+      );
+
+      // The author attestation was requested from the signer, with the author credential, and nothing else.
+      const signed = fake.requests.slice(before).filter((request) => request.method !== 'eth_accounts');
+      expect(signed.map((request) => [request.method, request.authorization]))
+        .toEqual([['eth_signTypedData_v4', 'Bearer async-author-credential']]);
+      expect(ethers.getAddress(String(signed[0].params[0]))).toBe(authorKey.address);
+
+      const seal = expectQueuedKaRequest(await new TripleStoreAsyncLiftPublisher(store).getStatus(captureID)).seal;
+      expect(ethers.getAddress(seal!.authorAddress)).toBe(authorKey.address);
+      const reservedKaId = BigInt(seal!.reservedKaId!);
+      expect(reservedKaId >> 96n).toBe(BigInt(authorKey.address));
+      const chain = (agent as unknown as {
+        chain: { getKnowledgeAssetsLifecycleAddress(): Promise<string>; getEvmChainId(): Promise<bigint> };
+      }).chain;
+      const typed = buildAuthorAttestationTypedData({
+        chainId: await chain.getEvmChainId(),
+        kav10Address: await chain.getKnowledgeAssetsLifecycleAddress(),
+        merkleRoot: ethers.getBytes(seal!.merkleRoot),
+        authorAddress: seal!.authorAddress,
+        reservedKaId,
+        schemeVersion: seal!.schemeVersion,
+      });
+      const recovered = ethers.recoverAddress(
+        ethers.TypedDataEncoder.hash(typed.domain, typed.types, typed.message),
+        ethers.Signature.from({ r: seal!.signature.r, yParityAndS: seal!.signature.vs }).serialized,
+      );
+      expect(recovered).toBe(authorKey.address);
+
+      // A self-sovereign agent whose key the signer does not hold is still refused.
+      const outside = await agent.registerAgent('OutsideWriter', {
+        publicKey: new ethers.Wallet(HARDHAT_KEYS.EXTRA1).signingKey.publicKey,
+      });
+      await expect(agent.publishAsync(
+        'did:dkg:context-graph:async-external-author',
+        content('AsyncOutsideAuthorEntity'),
+        { localOnly: true, authorAgentAddress: outside.agentAddress },
+      )).rejects.toThrow(/self-sovereign/);
+    } finally {
+      await fake.close();
+    }
+  }, CHAIN_JSONLD_TIMEOUT_MS);
+
   it('async publish rejects authorAgentAddress for unknown / self-sovereign agents', async () => {
     // Mirrors the sync `assertionFinalize` error semantics: the daemon
     // refuses to sign for an agent it doesn't custodially hold the key
@@ -738,7 +827,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-reject',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/RejectEntity',
             '@type': 'Thing',
             'name': 'Reject',
@@ -757,7 +846,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-reject',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/RejectEntity2',
             '@type': 'Thing',
             'name': 'Reject2',
@@ -781,7 +870,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-seal-parity',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'name': 'Async Seal Parity',
@@ -819,7 +908,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-non-v10',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/NonV10Entity',
             '@type': 'Thing',
             'name': 'Non-V10 Async',
@@ -848,7 +937,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-throw',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/ThrowEntity',
             '@type': 'Thing',
             'name': 'Throw',
@@ -878,7 +967,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-explicit-throw',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/ExplicitThrow',
             '@type': 'Thing',
             'name': 'ExplicitThrow',
@@ -905,7 +994,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-seal',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'name': 'Async Seal Public',
@@ -932,7 +1021,7 @@ describe('publishJsonLd', () => {
     const { captureID } = await agent.publishAsync(
       'did:dkg:context-graph:async-seal-priv',
       {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': root,
         '@type': 'Thing',
         'name': 'Private-only Async',
@@ -957,7 +1046,7 @@ describe('publishJsonLd', () => {
     const { captureID } = await agent.publishAsync(
       'did:dkg:context-graph:async-seal-disk-snapshot',
       {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': root,
         '@type': 'Thing',
         'name': 'Private async with disk-backed public snapshot',
@@ -1012,7 +1101,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-presigned',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/PreSignedEntity',
             '@type': 'Thing',
             'name': 'PreSigned',
@@ -1039,7 +1128,7 @@ describe('publishJsonLd', () => {
     const externalAuthor = ethers.Wallet.createRandom();
     const content = {
       public: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/ValidPreSignedEntity',
         '@type': 'Thing',
         'name': 'Valid PreSigned',
@@ -1128,7 +1217,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-mutex',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/MutexEntity',
             '@type': 'Thing',
             'name': 'Mutex',
@@ -1170,7 +1259,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-seal-callback',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': 'http://example.org/SelfSovEntity',
           '@type': 'Thing',
           'name': 'SelfSov',
@@ -1251,7 +1340,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-seal-cb-noaddr',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/CBNoAddr',
             '@type': 'Thing',
             'name': 'CBNoAddr',
@@ -1288,7 +1377,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-cb-e2e',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': 'http://example.org/CBE2EEntity',
           '@type': 'Thing',
           'name': 'Callback E2E',
@@ -1344,7 +1433,7 @@ describe('publishJsonLd', () => {
 
     const content = {
       public: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/PriorVerEntity',
         '@type': 'Thing',
         'name': 'PriorVer',
@@ -1395,7 +1484,7 @@ describe('publishJsonLd', () => {
     await agent.registerContextGraph('async-invalid-access-envelope');
     const content = {
       public: {
-        '@context': 'http://schema.org/',
+        '@context': { '@vocab': 'http://schema.org/' },
         '@id': 'http://example.org/InvalidAccessEnvelope',
         '@type': 'Thing',
         'name': 'Invalid access envelope',
@@ -1427,13 +1516,15 @@ describe('publishJsonLd', () => {
     const { agent, store } = await createAgent('AsyncEntityProofsBot');
     await agent.createContextGraph({ id: 'async-entity-proofs', name: 'AsyncEntityProofs', description: '' });
     await agent.registerContextGraph('async-entity-proofs');
+    const metadataQuery = 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <did:dkg:context-graph:async-entity-proofs/_meta> { ?s ?p ?o } }';
+    const metadataBefore = await store.query(metadataQuery);
 
     await expect(
       agent.publishAsync(
         'did:dkg:context-graph:async-entity-proofs',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/EntityProofsRoot',
             '@type': 'Thing',
             'name': 'EntityProofs',
@@ -1446,6 +1537,7 @@ describe('publishJsonLd', () => {
       ),
     ).rejects.toThrow(/does not support entityProofs/);
 
+    expect(await store.query(metadataQuery)).toEqual(metadataBefore);
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(store);
     expect(await asyncPublisher.list()).toEqual([]);
   }, CHAIN_JSONLD_TIMEOUT_MS);
@@ -1460,7 +1552,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-node-id-override',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': 'http://example.org/NodeIdOverrideRoot',
           '@type': 'Thing',
           'name': 'NodeIdOverride',
@@ -1487,7 +1579,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-node-id-zero',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': 'http://example.org/NodeIdZeroRoot',
           '@type': 'Thing',
           'name': 'NodeIdZero',
@@ -1519,7 +1611,7 @@ describe('publishJsonLd', () => {
           'did:dkg:context-graph:async-no-signer',
           {
             public: {
-              '@context': 'http://schema.org/',
+              '@context': { '@vocab': 'http://schema.org/' },
               '@id': 'http://example.org/NoSignerEntity',
               '@type': 'Thing',
               'name': 'NoSigner',
@@ -1571,7 +1663,7 @@ describe('publishJsonLd', () => {
         'did:dkg:context-graph:async-sync-parity',
         {
           public: {
-            '@context': 'http://schema.org/',
+            '@context': { '@vocab': 'http://schema.org/' },
             '@id': 'http://example.org/SyncParityEntity',
             '@type': 'Thing',
             'name': 'SyncParity',
@@ -1597,7 +1689,7 @@ describe('publishJsonLd', () => {
       'did:dkg:context-graph:async-no-onchain',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': 'http://example.org/NoOnChainEntity',
           '@type': 'Thing',
           'name': 'NoOnChain',
@@ -1666,13 +1758,13 @@ describe('publishJsonLd', () => {
       'async-subgraph',
       {
         public: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'description': 'Public Subgraph Marker',
         },
         private: {
-          '@context': 'http://schema.org/',
+          '@context': { '@vocab': 'http://schema.org/' },
           '@id': root,
           '@type': 'Thing',
           'name': 'Private Subgraph Async',

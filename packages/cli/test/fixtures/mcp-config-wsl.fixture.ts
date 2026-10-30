@@ -1,8 +1,9 @@
 /** Mandatory native WSL fixture; runs the built CLI modules with Linux Node. */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, lstatSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, lstatSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import TOML from '@iarna/toml';
 import { windowsPowerShellExecutable } from '../../dist/mcp-config-metadata.js';
 import { detectClients } from '../../dist/mcp-client-registry.js';
@@ -12,7 +13,10 @@ import { mcpUninstallAction } from '../../dist/mcp-uninstall.js';
 assert.equal(process.platform, 'linux', 'fixture must run inside WSL using Linux Node');
 assert(process.env.WSL_DISTRO_NAME, 'fixture requires a real WSL distribution');
 const windowsRoot = process.argv[2];
+const windowsNode = process.argv[3];
+assert(windowsNode, 'Windows Node executable is required for the actual client launch');
 assert(windowsRoot, 'Windows-side temporary root is required');
+const projectMarker = "native-wsl-project 'literal' $HOME";
 const directory = mkdtempSync(join(windowsRoot, "dkg-wsl-acl 'quoted'-"));
 const cursorDirectory = join(directory, '.cursor');
 mkdirSync(cursorDirectory);
@@ -29,24 +33,28 @@ async function main(): Promise<void> {
   const priorDkgHome = process.env.DKG_HOME;
   const priorPath = process.env.PATH;
   const priorCwd = process.cwd();
+  const priorEntrypoint = process.argv[1];
+  const priorWslEnvironment = process.env.WSLENV;
   const linuxHome = mkdtempSync('/tmp/dkg-wsl-native-home-');
   try {
+    delete process.env.WSLENV;
     // The isolated Linux home and the Windows USERPROFILE resolver name the
     // same Windows directory, exactly as in the reported aliasing case.
     process.env.HOME = directory;
+    process.argv[1] = fileURLToPath(new URL('../cli.js', import.meta.url));
     const nodeHome = join(directory, '.dkg');
     process.env.DKG_HOME = nodeHome;
     mkdirSync(nodeHome);
-    writeFileSync(join(nodeHome, 'config.json'), JSON.stringify({ name: 'Metadata fixture', networkConfig: 'testnet', apiPort: 9200 }));
-    writeFileSync(path, JSON.stringify({ mcpServers: { dkg: { command: 'old', env: { EXTRA: 'keep' } }, sibling: { command: 'other' } } }));
+    writeFileSync(join(nodeHome, 'config.json'), JSON.stringify({ name: 'Metadata fixture', networkConfig: 'testnet', apiPort: 59231 }));
+    writeFileSync(path, JSON.stringify({ mcpServers: { dkg: { command: 'old', env: { EXTRA: 'keep', DKG_PROJECT: projectMarker } }, sibling: { command: 'other' } } }));
     protect(path);
     const descriptor = () => powershell('(Get-Acl -LiteralPath $env:DKG_NATIVE_FIXTURE_PATH).Sddl');
     const before = descriptor();
     assert.equal(powershell('(Get-Acl -LiteralPath $env:DKG_NATIVE_FIXTURE_PATH).AreAccessRulesProtected'), 'True');
-    const clients = detectClients(name => name === 'USERPROFILE' ? directory : null)
+    const aliasedClients = detectClients(name => name === 'USERPROFILE' ? directory : null)
       .filter(target => target.id === 'cursor');
-    assert.deepEqual(clients.map(target => target.location), ['native', 'windows-wsl']);
-    assert(clients.every(target => target.configPath === path));
+    assert.deepEqual(aliasedClients.map(target => target.location), ['native', 'windows-wsl']);
+    assert(aliasedClients.every(target => target.configPath === path));
     const unexpected = (): never => { throw new Error('Metadata fixture must not initialize, start, or fund a node'); };
     const untrusted = join(directory, 'untrusted');
     mkdirSync(untrusted);
@@ -61,7 +69,7 @@ async function main(): Promise<void> {
     rmSync(marker);
     const setupOptions = { installed: true, start: false, fund: false, verify: false, force: true, yes: true } as const;
     const setupDeps: Parameters<typeof mcpSetupAction>[1] = {
-      detectClients: () => clients,
+      detectClients: () => aliasedClients,
       loadNetworkConfig: unexpected,
       ensureDkgNodeConfig: unexpected,
       startDaemon: unexpected,
@@ -71,33 +79,88 @@ async function main(): Promise<void> {
       resolveKnownNetworkConfigName: () => 'testnet',
       resolveDkgConfigHome: () => nodeHome,
     };
-    let registrationPlans = 0;
-    await mcpSetupAction(setupOptions, {
-      ...setupDeps,
-      confirmPlan: async (planned) => {
-        assert.equal(planned.length, 1, 'one physical leaf must produce one registration write');
-        assert.equal(planned[0]!.s.target.file.destination, realpathSync(path));
-        assert.equal(planned[0]!.action, 'refresh');
-        registrationPlans += planned.length;
-        return [...planned];
-      },
+    const originalBytes = readFileSync(path, 'utf8');
+    await assert.rejects(mcpSetupAction(setupOptions, { ...setupDeps, confirmPlan: async planned => {
+      assert.equal(planned.length, 1, 'one physical leaf must produce one decision');
+      assert.equal(planned[0]!.action, 'skip', 'incompatible client runtimes must fail closed');
+      return [...planned];
+    } }), /No client configs updated.*1 client\(s\) failed:/s);
+    assert.equal(readFileSync(path, 'utf8'), originalBytes, 'aliased setup must leave bytes unchanged');
+    assert.equal(descriptor(), before, 'aliased setup must leave metadata unchanged');
+    // Removing an old shared entry is still valid and must retain NTFS metadata,
+    // even when the operator selects its native alias.
+    await mcpUninstallAction({ yes: true, client: 'cursor:native' }, {
+      detectClients: () => aliasedClients, log: () => {},
     });
-    assert.equal(registrationPlans, 1);
+    assert.equal(descriptor(), before, 'aliased uninstall must retain the protected descriptor');
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mcpServers: { sibling: { command: 'other' } } });
+    writeFileSync(path, originalBytes);
+    assert.equal(descriptor(), before);
+
+
+    // Distinct physical files allow native Linux and Windows clients to coexist.
+    process.env.HOME = linuxHome;
+    const linuxCursorDirectory = join(linuxHome, '.cursor');
+    mkdirSync(linuxCursorDirectory);
+    const linuxCursorPath = join(linuxCursorDirectory, 'mcp.json');
+    const clients = detectClients(name => name === 'USERPROFILE' ? directory : null)
+      .filter(target => target.id === 'cursor');
+    assert.deepEqual(clients.map(target => target.configPath), [linuxCursorPath, path]);
+    const separateDeps = { ...setupDeps, detectClients: () => clients };
+    const resolvedEntries = new Map<string, { command: string; args: string[] }>();
+    await mcpSetupAction({ ...setupOptions, force: false }, { ...separateDeps, confirmPlan: async planned => {
+      assert.deepEqual(planned.map(item => item.action), ['register', 'refresh']);
+      for (const item of planned) {
+        assert(item.action !== 'skip');
+        assert.equal(item.s.kind, 'classified');
+        resolvedEntries.set(item.s.target.file.destination, item.s.entry);
+      }
+      return [...planned];
+    } });
     assert.equal(existsSync(marker), false, 'setup must not execute the PATH/cwd shadow PowerShell');
     assert.equal(descriptor(), before, 'setup must preserve the complete protected security descriptor');
     const registered = JSON.parse(readFileSync(path, 'utf8')).mcpServers.dkg;
-    assert.equal(registered.command, process.execPath);
-    assert.deepEqual(registered.env, { EXTRA: 'keep', DKG_HOME: nodeHome });
-    // Even an explicit native selector must retain the Windows persistence
-    // strategy when both logical locations resolve to this one NTFS file.
-    await mcpUninstallAction({ yes: true, client: 'cursor:native' }, {
-      detectClients: () => clients,
-      log: () => {},
-    });
+    const native = JSON.parse(readFileSync(linuxCursorPath, 'utf8')).mcpServers.dkg;
+    for (const [configPath, entry] of resolvedEntries) {
+      const persisted = JSON.parse(readFileSync(configPath, 'utf8')).mcpServers.dkg;
+      assert.equal(persisted.command, entry.command);
+      assert.deepEqual(persisted.args, entry.args);
+    }
+    assert.equal(native.command, process.execPath);
+    assert.deepEqual(native.args, [process.argv[1], 'mcp', 'serve']);
+    assert.deepEqual(native.env, { DKG_HOME: nodeHome });
+    assert.match(registered.command, /\\System32\\wsl\.exe$/);
+    assert.deepEqual(registered.args.slice(0, 2), ['--distribution', process.env.WSL_DISTRO_NAME]);
+    assert.deepEqual(registered.env, { EXTRA: 'keep', DKG_PROJECT: projectMarker, DKG_HOME: nodeHome,
+      WSLENV: 'DKG_HOME/u:DKG_PROJECT/u:EXTRA/u' });
+    assert.equal('environmentTransfer' in registered, false);
+    assert(registered.args.includes(`DKG_HOME=${nodeHome}`));
+    await mcpSetupAction({ ...setupOptions, force: false }, { ...separateDeps, confirmPlan: async planned => {
+      assert.deepEqual(planned.map(item => [item.s.state, item.action]), [['registered', 'skip'], ['registered', 'skip']]);
+      return [...planned];
+    } });
+
+    // A real Windows Node process launches the exact registered command/argv,
+    // as a GUI MCP client does. It initializes the production MCP server over
+    // stdio; no tool call, daemon, faucet or network request is needed.
+    // Cold module imports across the CI checkout's NTFS/WSL boundary took 146s
+    // before setup even began. Bound this correctness smoke independently of
+    // interactive client startup performance; retain real initialize/tools-list.
+    const smoke = fileURLToPath(new URL('../../../../scripts/test-mcp-wsl-launch.mjs', import.meta.url));
+    console.log(execFileSync(process.execPath, [smoke, path, windowsNode, projectMarker, '59231'], {
+      encoding: 'utf8', timeout: 310_000, maxBuffer: 1024 * 1024,
+    }).trim());
+    await mcpUninstallAction({ yes: true, client: 'cursor:native' }, { detectClients: () => clients, log: () => {} });
+    assert.equal(JSON.parse(readFileSync(path, 'utf8')).mcpServers.dkg.command, registered.command,
+      'uninstalling the native client must retain the Windows registration');
+    await mcpUninstallAction({ yes: true, client: 'cursor:windows-wsl' }, { detectClients: () => clients, log: () => {} });
     assert.equal(existsSync(marker), false, 'uninstall must not execute the PATH/cwd shadow PowerShell');
     assert.equal(descriptor(), before, 'uninstall must preserve the complete protected security descriptor');
     assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), { mcpServers: { sibling: { command: 'other' } } });
-    assert.deepEqual(readdirSync(cursorDirectory).sort(), ['mcp.json', 'skills']);
+    assert.deepEqual(readdirSync(cursorDirectory), ['mcp.json'], 'Windows config leaves no transaction artifacts');
+    assert.equal(existsSync(join(linuxCursorDirectory, 'skills', 'dkg-node', 'SKILL.md')), true,
+      'setup delivers the bundled skill under the selected Linux HOME');
+    process.env.HOME = directory;
 
     // Codex has no Windows-side alias. Its native WSL configuration can still
     // live on NTFS, including first-time setup and a Linux-home symlink.
@@ -148,10 +211,13 @@ async function main(): Promise<void> {
     assert.deepEqual({ uid: after.uid, gid: after.gid, mode: after.mode }, { uid, gid, mode });
     assert.deepEqual(JSON.parse(readFileSync(linuxConfig, 'utf8')), { mcpServers: { sibling: { command: 'keep' } } });
     assert.equal(existsSync(marker), false, 'all native-only operations must ignore shadow PowerShell');
-    console.log('Real WSL setup/uninstall passed for aliased clients, native-only Codex on NTFS, Linux-home symlinks, first-time creation, and native Linux metadata.');
+    console.log('Real WSL setup/uninstall passed for rejected aliases, separate native/Windows launchers, production MCP stdio initialization, native-only Codex on NTFS, Linux-home symlinks, first-time creation, and native Linux metadata.');
 
   } finally {
     process.chdir(priorCwd);
+    process.argv[1] = priorEntrypoint;
+    if (priorWslEnvironment === undefined) delete process.env.WSLENV;
+    else process.env.WSLENV = priorWslEnvironment;
     if (priorPath === undefined) delete process.env.PATH;
     else process.env.PATH = priorPath;
     if (priorHome === undefined) delete process.env.HOME;

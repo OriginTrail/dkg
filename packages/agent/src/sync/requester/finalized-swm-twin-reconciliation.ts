@@ -1,3 +1,5 @@
+import { commitmentFromVmAsset, type FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
+import { readFinalizedTwinSwmHead } from './finalized-swm-twin-head.js';
 import {
   MemoryLayer,
   assertSafeIri,
@@ -27,6 +29,9 @@ import {
 } from '@origintrail-official/dkg-storage';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
+import {
+  literalValue, normalizeHex32, optionalHex32, parseInteger, parseSafeCount,
+} from './finalized-swm-twin-literals.js';
 import { ethers } from 'ethers';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -40,6 +45,19 @@ export type FinalizedSwmTwinReconciliationOutcome =
   | 'swm-commitment-mismatch'
   | 'vm-changed'
   | 'content-mismatch';
+
+/**
+ * The descriptor path's outcomes: also a copy whose graph is gone while rows
+ * of a head that is not exact are left ('retired-head-residue'), which a
+ * caller that has not written the snapshot must not take for a finished
+ * retirement. The VM and catalog arrivals read it as 'already-retired-finalized'.
+ */
+export type FinalizedSwmTwinDescriptorReconciliationOutcome =
+  | FinalizedSwmTwinReconciliationOutcome
+  | 'retired-head-residue';
+
+/** The shared proof's own result, before an entry point names an inexact head over an empty graph. */
+type FinalizedSwmTwinProofOutcome = FinalizedSwmTwinReconciliationOutcome | 'inexact-head-without-data';
 
 export interface FinalizedSwmTwinRetirement {
   readonly contextGraphId: string;
@@ -199,13 +217,21 @@ export async function reconcileFinalizedSwmTwin(params: {
   readonly asset: VerifiedGraphScopedAsset;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
-  const evidence = evidenceFromVmAsset(params.asset);
-  return reconcileFinalizedSwmTwinEvidence({
-    store: params.store,
-    writeLocks: params.writeLocks,
-    evidence,
-    retire: params.retire,
+  return reconcileFinalizedSwmTwinFromCommitment({
+    store: params.store, writeLocks: params.writeLocks,
+    commitment: commitmentFromVmAsset(params.asset), retire: params.retire,
   });
+}
+
+/** Held recovery retains this compact evidence under its live content fence. */
+export async function reconcileFinalizedSwmTwinFromCommitment(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly commitment: FinalizedVmAssetCommitment;
+  readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
+}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  const outcome = await reconcileFinalizedSwmTwinEvidence({ ...params, evidence: evidenceFromVmCommitment(params.commitment) });
+  return outcome === 'inexact-head-without-data' ? 'already-retired-finalized' : outcome;
 }
 
 /**
@@ -214,6 +240,9 @@ export async function reconcileFinalizedSwmTwin(params: {
  * finalized graph. The descriptor is authenticated by the SWM parser and its
  * count/digest-bound snapshot materializer; this function still re-reads both
  * local graphs and the current head under the per-KA lock before deletion.
+ * It tells an absent copy from a head left in part ('retired-head-residue'),
+ * so a caller that has not written the snapshot can refuse what its write
+ * would repair.
  */
 export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   readonly store: TripleStore;
@@ -221,14 +250,15 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   readonly contextGraphId: string;
   readonly descriptor: GraphScopedSwmRecoveryDescriptor;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+}): Promise<FinalizedSwmTwinDescriptorReconciliationOutcome> {
   const evidence = evidenceFromSwmDescriptor(params.contextGraphId, params.descriptor);
-  return reconcileFinalizedSwmTwinEvidence({
+  const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
     retire: params.retire,
   });
+  return outcome === 'inexact-head-without-data' ? 'retired-head-residue' : outcome;
 }
 
 /**
@@ -245,12 +275,13 @@ export async function reconcileFinalizedSwmTwinFromCatalogProjection(params: {
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
   const evidence = evidenceFromCatalogProjection(params.evidence);
-  return reconcileFinalizedSwmTwinEvidence({
+  const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
     retire: params.retire,
   });
+  return outcome === 'inexact-head-without-data' ? 'already-retired-finalized' : outcome;
 }
 
 interface CommonFinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
@@ -292,7 +323,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly evidence: FinalizedSwmTwinEvidence;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+}): Promise<FinalizedSwmTwinProofOutcome> {
   const { evidence } = params;
   const lockKey = swmKaWriteLockKey(
     evidence.contextGraphId,
@@ -305,12 +336,12 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // under the shared SWM write lock before rereading the complete VM payload;
     // a later SWM arrival runs its own symmetric reconciliation after commit.
     const vmArrivalHead = evidence.arrival === 'vm'
-      ? await readExactSwmHead(params.store, {
+      ? await readFinalizedTwinSwmHead(params.store, {
           metaGraph: evidence.swmMetaGraph,
           headSubject: evidence.headSubject,
         })
       : undefined;
-    if (vmArrivalHead === null) return 'head-missing-or-ambiguous';
+    if (vmArrivalHead && vmArrivalHead.kind !== 'exact') return 'head-missing-or-ambiguous';
 
     // A public-byte match alone is insufficient: VM graph names are stable
     // across assertion versions and a private-only update can preserve every
@@ -324,18 +355,20 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       return 'vm-metadata-mismatch';
     }
 
-    const head = vmArrivalHead ?? await readExactSwmHead(params.store, {
+    const head = vmArrivalHead ?? await readFinalizedTwinSwmHead(params.store, {
       metaGraph: evidence.swmMetaGraph,
       headSubject: evidence.headSubject,
     });
-    if (head === null) {
+    if (head.kind !== 'exact') {
       // Only the post-SWM-materialization call can interpret a missing head as
       // terminal. At that call site the descriptor and graph were just written
       // under the same KA lock; a missing head here means a concurrent VM-first
       // reconciliation completed after that lock was released. Suppressing the
       // outer bulk metadata append prevents resurrection of a dangling head.
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
-      if (swmQuads.length === 0) return 'already-retired-finalized';
+      if (swmQuads.length === 0) {
+        return head.kind === 'inexact' ? 'inexact-head-without-data' : 'already-retired-finalized';
+      }
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
       await retireAndInvalidate(params, evidence);
       return 'retired';
@@ -380,9 +413,9 @@ async function retireAndInvalidate(
   }).catch(() => {});
 }
 
-function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalizedSwmTwinEvidence {
+function evidenceFromVmCommitment(asset: FinalizedVmAssetCommitment): VmArrivalFinalizedSwmTwinEvidence {
   const scope = createGraphKnowledgeAssetScope(asset.ual, asset.assertionVersion);
-  const subGraphName = optionalMetadataLiteral(asset, `${DKG}subGraphName`);
+  const subGraphName = asset.subGraphName;
   if (subGraphName !== undefined) {
     const validation = validateSubGraphName(subGraphName);
     if (!validation.valid) throw new Error(`Authenticated VM graph has invalid subgraph: ${validation.reason}`);
@@ -405,16 +438,13 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalize
     subGraphName,
   );
   const swmMetaGraph = contextGraphSharedMemoryMetaUri(asset.contextGraphId, subGraphName);
-  const expectedPublicQuadsCount = requiredMetadataCount(asset, `${DKG}publicTripleCount`);
-  const privateTripleCount = requiredMetadataCount(asset, `${DKG}privateTripleCount`);
-  const privateMerkleRoot = optionalMetadataHex32(asset, `${DKG}privateMerkleRoot`);
+  const expectedPublicQuadsCount = asset.publicTripleCount;
+  const privateTripleCount = asset.privateTripleCount;
+  const privateMerkleRoot = asset.privateMerkleRoot === undefined ? undefined : normalizeHex32(asset.privateMerkleRoot);
   if ((privateTripleCount > 0) !== (privateMerkleRoot !== undefined)) {
     throw new Error('Authenticated VM metadata has an inconsistent private commitment');
   }
-  const expectedMerkleRoot = requiredMetadataHex32(asset, `${DKG}merkleRoot`);
-  if (optionalMetadataLiteral(asset, `${DKG}status`) !== 'confirmed') {
-    throw new Error('Authenticated VM metadata is not confirmed');
-  }
+  const expectedMerkleRoot = normalizeHex32(asset.merkleRootHex);
   return {
     arrival: 'vm',
     contextGraphId: asset.contextGraphId,
@@ -426,7 +456,7 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalize
     swmGraph,
     swmMetaGraph,
     headSubject: `${asset.ual}#dkg-swm-head`,
-    expectedVmDigest: workspacePublicQuadsDigest(asset.dataQuads),
+    expectedVmDigest: asset.publicQuadsDigest,
     expectedPublicQuadsCount,
     privateTripleCount,
     ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
@@ -673,48 +703,6 @@ function swmCommitmentMatchesEvidence(
     && commitment.privateMerkleRoot === evidence.privateMerkleRoot;
 }
 
-function metadataObjects(asset: VerifiedGraphScopedAsset, predicate: string): string[] {
-  return asset.metadataQuads
-    .filter((quad) => (
-      quad.graph === asset.metaGraph
-      && quad.subject === asset.ual
-      && quad.predicate === predicate
-    ))
-    .map((quad) => quad.object);
-}
-
-function optionalMetadataLiteral(
-  asset: VerifiedGraphScopedAsset,
-  predicate: string,
-): string | undefined {
-  const values = metadataObjects(asset, predicate);
-  if (values.length > 1) throw new Error(`Authenticated VM metadata has ambiguous ${predicate}`);
-  return values[0] === undefined ? undefined : literalValue(values[0]);
-}
-
-function requiredMetadataCount(asset: VerifiedGraphScopedAsset, predicate: string): number {
-  const values = metadataObjects(asset, predicate);
-  if (values.length !== 1) throw new Error(`Authenticated VM metadata has non-unique ${predicate}`);
-  const value = parseSafeCount(values[0]);
-  if (value === null) throw new Error(`Authenticated VM metadata has invalid ${predicate}`);
-  return value;
-}
-
-function optionalMetadataHex32(
-  asset: VerifiedGraphScopedAsset,
-  predicate: string,
-): string | undefined {
-  const values = metadataObjects(asset, predicate);
-  if (values.length > 1) throw new Error(`Authenticated VM metadata has ambiguous ${predicate}`);
-  return optionalHex32(values[0]);
-}
-
-function requiredMetadataHex32(asset: VerifiedGraphScopedAsset, predicate: string): string {
-  const value = optionalMetadataHex32(asset, predicate);
-  if (value === undefined) throw new Error(`Authenticated VM metadata has invalid ${predicate}`);
-  return value;
-}
-
 async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]> {
   const result = await store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`,
@@ -729,69 +717,4 @@ async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]
     throw new Error(`Unexpected exact-graph query result for ${graph}: ${result.type}`);
   }
   return result.quads.map((quad) => ({ ...quad, graph: '' }));
-}
-
-async function readExactSwmHead(
-  store: TripleStore,
-  input: Readonly<{ metaGraph: string; headSubject: string }>,
-): Promise<Readonly<{
-  version: bigint;
-  kaUal: string;
-  assertionGraph: string;
-  shareOperationId: string;
-}> | null> {
-  const result = await store.query(
-    `SELECT DISTINCT ?version ?kaUal ?assertionGraph ?shareOperationId WHERE { `
-    + `GRAPH <${assertSafeIri(input.metaGraph)}> { `
-    + `<${assertSafeIri(input.headSubject)}> <${DKG}assertionVersion> ?version ; `
-    + `<${DKG}kaUal> ?kaUal ; <${DKG}assertionGraph> ?assertionGraph ; `
-    + `<${DKG}shareOperationId> ?shareOperationId } }`,
-    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readHead' },
-  );
-  if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
-  const row = result.bindings[0]!;
-  const version = parseInteger(row['version']);
-  const kaUal = row['kaUal'];
-  const assertionGraph = row['assertionGraph'];
-  const shareOperationId = literalValue(row['shareOperationId'])?.trim();
-  if (version === null || !kaUal || !assertionGraph || !shareOperationId) return null;
-  return { version, kaUal, assertionGraph, shareOperationId };
-}
-
-function parseInteger(value: string | undefined): bigint | null {
-  if (!value) return null;
-  const match = /^"?([0-9]+)"?(?:\^\^<[^>]+>)?$/.exec(value);
-  if (!match?.[1]) return null;
-  try {
-    return BigInt(match[1]);
-  } catch {
-    return null;
-  }
-}
-
-function parseSafeCount(value: string | undefined): number | null {
-  const parsed = parseInteger(value);
-  if (parsed === null || parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(parsed);
-}
-
-function literalValue(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = /^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^<[^>]+>|@[A-Za-z0-9-]+)?$/.exec(value);
-  return match?.[1] ?? value;
-}
-
-function normalizeHex32(value: string): string {
-  const raw = literalValue(value)?.trim().replace(/^0x/i, '').toLowerCase();
-  if (!raw || !/^[0-9a-f]{64}$/.test(raw)) throw new Error('Expected a 32-byte hexadecimal value');
-  return `0x${raw}`;
-}
-
-function optionalHex32(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  try {
-    return normalizeHex32(value);
-  } catch {
-    return undefined;
-  }
 }

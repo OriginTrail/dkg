@@ -64,7 +64,7 @@ the writer, but do not encrypt GossipSub payload bytes.
 
 ## Quick Start
 
-**Prerequisites:** Node.js 22.13+ (or 23.4+), npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+**Prerequisites:** Node.js 22.23.4+, 24.22.1+ or 26.12.1+, npm 10+. DKG starts on Node.js 22.13+ (or 23.4+), but older releases miss the [2026-10-21 Node.js security fixes](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases), and `dkg start` and `dkg doctor` warn about them. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ### Hermes adapter
 
@@ -272,6 +272,8 @@ dkg ka import-file <name> -c <cg> --input-file <file>         # import a documen
 dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF payload quads to WM
 dkg ka finalize <name> -c <cg>                                # seal the WM draft
 dkg ka share <name> -c <cg>                                   # share finalized WM to SWM
+dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
+dkg ka share-jobs [--context-graph-id <cg>] [--state <s>]     # list async share jobs; --all or --page-size <n> to page
 dkg ka publish <name> -c <cg>                                 # sync publish from SWM to VM
 dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue VM publish
 dkg ka query <name> -c <cg>                                   # read KA WM quads
@@ -296,8 +298,8 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
 dkg publisher publish-async <cg> <name> [--publisher-node-identity-id 0]  # alias for dkg ka publish-async
-dkg publisher jobs                       # list publisher jobs
-dkg publisher stats                      # publisher throughput stats
+dkg publisher jobs [--status <s>]        # list publisher jobs; --all or --page-size <n> to page
+dkg publisher stats                      # job counts by status (JSON)
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
@@ -327,7 +329,7 @@ dkg rollback                               # roll back to previous version
 dkg doctor [--json]                        # diagnostic report: install layout, version skew, orphan clones, UI mismatch, plugin root, config sanity
 ```
 
-Run `dkg <command> --help` for per-command options.
+Run `dkg <command> --help` for per-command options. The [CLI reference](docs/references/cli.md) keeps the full list.
 
 ---
 
@@ -409,7 +411,7 @@ A fresh setup uses a daemon-managed, disk-backed [Oxigraph](https://github.com/o
 | `blazegraph` | External Blazegraph deployment, optionally provisioned by `dkg init`. |
 | `sparql-http` | Any compatible external SPARQL endpoint, with optional authorization. |
 
-See [Using an external SPARQL store](docs/use-dkg/storage-sparql-http.md) for configuration, managed-Oxigraph options, backend-switch safeguards, and limitations.
+See [Storage Backends](docs/use-dkg/storage-sparql-http.md) for configuration, managed-Oxigraph options, backend-switch safeguards, and limitations.
 
 ---
 
@@ -581,7 +583,7 @@ This is a pnpm + Turborepo monorepo.
 
 ## Development
 
-Clone the repo and use pnpm (v10+) with Node.js 22.13+ (or 23.4+) to work across all workspace packages:
+Clone the repo and use pnpm (v10+) with Node.js 22.23.4+ (22.13+ or 23.4+ still runs, without the 2026-10-21 security fixes) to work across all workspace packages:
 
 ```bash
 pnpm install                                     # install all workspace deps

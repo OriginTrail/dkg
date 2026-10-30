@@ -21,6 +21,8 @@ persistence.inventory.purgeNextStartupStaleCandidateBatch();
 persistence.inventory.compareAndSwapSwmAuthorInventoryV1({});
 // @ts-expect-error SWM inventory lifecycle belongs exclusively to persistence
 persistence.swmAuthorInventory.close();
+// @ts-expect-error owed share inventory lifecycle belongs exclusively to persistence
+await persistence.owedShareInventories.close();
 
 // @ts-expect-error public inventory foundations do not expose sibling-resource authority
 ownedInventory.controlObjectStoreOwnership;
@@ -32,3 +34,11 @@ await openRfc64ControlObjectStoreForOwnedPersistenceRootV1(
 await openRfc64ControlObjectStoreForOwnedPersistenceRootV1('/tmp/rfc64-sync');
 // @ts-expect-error a raw filesystem path cannot bypass inventory lease ownership
 await openRfc64KaBundleStoreForOwnedPersistenceRootV1('/tmp/rfc64-sync');
+
+
+// Scheduling-only fences do not authorize deleting durable failure evidence.
+declare const repair: import('../src/rfc64/finalized-private-placement-repair-store-v1.js').Rfc64FinalizedPrivatePlacementRepairV1;
+// @ts-expect-error failure writes require validated evidence, not a scheduling-only fence
+persistence.finalizedPrivatePlacementRepairs.writeFailure(repair, null);
+// @ts-expect-error the batch persistence boundary also excludes fence-only resets
+persistence.finalizedPrivatePlacementRepairs.writeFailures([{ repair, state: null }]);

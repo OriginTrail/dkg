@@ -21,6 +21,7 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
 });
 
 import type { DKGAgent } from '../src/index.js';
+import { catalogRepairDiagnosticV1, catalogRepairErrorSummaryV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import {
   Rfc64CatalogMutationMemoryV1,
   installRfc64CatalogMutationMemoryV1,
@@ -94,7 +95,8 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
         controlObjects: 3 + 2 * 2,
         // The authority for every use of the remembered state: coverage, then under the lock.
         appliedHead: 2,
-        inventorySnapshot: 1,
+        inventorySnapshot: 0,
+        inventoryRow: 1,
         cas: 1,
       });
     }
@@ -123,7 +125,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     // What the answer rests on is read from the durable store again, and nothing else: the applied
     // head record; the head and its delegation; the head, its directory root and its bucket as a
     // successor would read them; and the bundle of the row the marker is about.
-    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2 + 3, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
+    expect(stores.reads).toEqual({ bundles: 1, controlObjects: 2 + 3, appliedHead: 1, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
     expect(verifications.transferredBundle).toBe(0);
     expect(appliedHead(agent)).toEqual(head);
     expect(persistenceOf(agent).finalizedPrivatePlacementRepairs.list()).toEqual([]);
@@ -153,7 +155,7 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     // the applied head, then head, directory root and bucket, and its delegation. Nothing of it
     // is read a second time before the marker is retired.
     expect(reads[1]).toEqual(reads[0]);
-    expect(reads[1]).toEqual({ bundles: 3, controlObjects: 1 + 3 + 1, appliedHead: 1, inventorySnapshot: 0, cas: 0 });
+    expect(reads[1]).toEqual({ bundles: 3, controlObjects: 1 + 3 + 1, appliedHead: 1, inventorySnapshot: 0, inventoryRow: 0, cas: 0 });
     expect(rfc64CatalogMutationMemoryV1(remembering).retained.states).toBe(1);
   }, 60_000);
 
@@ -321,8 +323,11 @@ describe('RFC-64 catalog placement over a remembered catalog', () => {
     await upsert(agent, await asset(3));
     expect(memory.retained.states).toBe(1);
     // An older version of a row on another coordinate is not a placement.
-    await expect(upsert(agent, { ...(await asset(2)), assertionCoordinate: 'elsewhere' as never }))
-      .rejects.toThrow(/not a newer assertion version on the same coordinate/u);
+    const conflict = await upsert(agent, { ...(await asset(2)), assertionCoordinate: 'private-coordinate' as never })
+      .catch((error: unknown) => error);
+    expect(conflict).toBeInstanceOf(Error);
+    expect(catalogRepairDiagnosticV1(conflict).kind).toBe('version_conflict');
+    expect(catalogRepairErrorSummaryV1(conflict)).not.toContain('private-coordinate');
     expect(memory.retained).toEqual({ scopes: 0, states: 0, bytes: 0 });
 
     // A delayed confirmation of the older version is complete as it stands, and changes nothing.

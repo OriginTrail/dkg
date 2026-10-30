@@ -14,6 +14,7 @@ import {
 import type { DKGAgent } from './dkg-agent.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { buildSyncRequestEnvelope, type SyncRequestEnvelope } from './sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
 import { isSyncRequestEnvelopeBoundToPeer } from './sync/auth/request-authorize.js';
 import {
   SYNC_AUTH_MAX_AGE_MS,
@@ -650,7 +651,7 @@ export class ImportedArtifactMethods extends DKGAgentBase {
           getIdentityId: () => this.chain.getIdentityId(),
           signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
           claimedAgentAddress,
-          claimedAgentPrivateKey: claimedAgent?.privateKey,
+          claimedAgentSigner: claimedAgentSyncRequestSigner(this.config?.authorSigners, claimedAgentAddress, claimedAgent),
         })
       : new TextEncoder().encode(JSON.stringify({
           contextGraphId: params.contextGraphId,

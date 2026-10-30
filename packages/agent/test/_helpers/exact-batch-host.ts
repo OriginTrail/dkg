@@ -12,6 +12,7 @@ import { ContextGraphMetaProjection } from '../../src/context-graph-meta-project
 import { createProjectionMutationObserver } from '../../src/internal/projection-mutation-observer.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../../src/internal/context-graph-cache-invalidating-store.js';
 import { ContextGraphBindingState } from '../../src/context-graph-binding-state.js';
+import { AgentWorkLifetime } from '../../src/agent-work-lifetime.js';
 import { ContextGraphResolveMethods } from '../../src/dkg-agent-cg-resolve.js';
 import { LifecycleSyncMethods } from '../../src/dkg-agent-lifecycle.js';
 import { SyncVerifyWorker } from '../../src/sync-verify-worker.js';
@@ -81,8 +82,8 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
     fetchSyncPages: vi.fn(), insertSyncedQuadsAndInvalidateListCache: vi.fn(),
     subscribedContextGraphs: new Map([[CG, { onChainId: '14' }]]),
     contextGraphBindingState: new ContextGraphBindingState(), graphScopedStoreClosed: false,
+    workLifetime: new AgentWorkLifetime(),
     captureExperimentalExactBatchRefusalScope: LifecycleSyncMethods.prototype.captureExperimentalExactBatchRefusalScope,
-    graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
     requireLocalCgMatchesOnChainSlot: vi.fn(async (cg: string, id: string) => cg === CG && id === '14'),
     syncCheckpoints: { delete: vi.fn(), set: vi.fn(), setManifestBoundOffset: vi.fn() },
     oversizeTombstoneLog: { record: vi.fn() }, invalidateListContextGraphsCache: vi.fn(),
@@ -94,7 +95,7 @@ export function createExactBatchHostFixture(cleanups: Array<() => Promise<void>>
   const run = (exactAssetSelection = selection as typeof selection | ReturnType<typeof createChallengePinnedExactAssetSelection>, exactRecoveryTransportMode: ExactRecoveryTransportMode = 'stream-preferred',
     handedOver: { registeredPublicEvidence?: VmRecoveryRegisteredPublicEvidence; operationFetchDeadline?: number; signal?: AbortSignal } = {}) => (
     LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(host, ctx, 'fixture-source', CG, 1,
-      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, ...handedOver })
+      { exactAssetSelection, exactRecoveryTransportMode, fetchTimeoutMs: 120_000, authenticationTimeoutMs: 30_000, onAtomicCommitStarted: atomicStarted, operationFetchDeadline: handedOver.operationFetchDeadline, signal: handedOver.signal, registeredPublicEvidence: handedOver.registeredPublicEvidence })
   );
   const frames: ExactBatchFrame[] = items.flatMap((item, assetIndex) => [
     { kind: K.META, assetIndex, sequence: 0, payload: new TextEncoder().encode(item.meta.map(quadToNQuad).join('\n') + '\n') },

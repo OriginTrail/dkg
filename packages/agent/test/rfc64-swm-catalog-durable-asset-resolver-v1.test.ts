@@ -462,14 +462,14 @@ describe('RFC-64 durable catalog asset resolver after the assertion was re-opene
     );
   });
 
-  it('prefers a stored seal to the one the caller was handed', async () => {
+  it('prefers the exact retained obligation seal before mutable stored seals', async () => {
     await seedVmProjection(store, seal, PROJECTION_QUADS);
-    // Same seal, another object: the resolved one is built from the stored subject.
+    // Same exact sealed obligation, independently owned by the durable marker.
     const handed = Object.freeze({ ...seal });
 
     const resolved = await resolveConfirmedRepair(seal, handed);
     expect(resolved.seal).toEqual(seal);
-    expect(resolved.seal).not.toBe(handed);
+    expect(resolved.seal).toBe(handed);
   });
 
   it('still verifies the content against the archived seal', async () => {

@@ -3,7 +3,7 @@
 
 
 /** A context graph member identity: a bare agent address or its `did:dkg:agent:` DID. */
-function memberAgentAddress(value: string): string | undefined {
+export function memberAgentAddress(value: string): string | undefined {
   const match = /^(?:did:dkg:agent:)?(0x[0-9a-fA-F]{40})$/.exec(value.trim());
   return match?.[1]?.toLowerCase();
 }
@@ -34,4 +34,25 @@ export function isLocalPrivateMember(
   return localAgents.some((local) => (
     local !== undefined && members.has(memberAgentAddress(local))
   ));
+}
+
+/**
+ * Whether `meta` lists one of `localAgents` among its allowed agents or
+ * participants, and not among its revoked agents: on a curated public graph,
+ * this node is one of the graph's members (#3421).
+ */
+export function listsLocalAllowedAgent(
+  meta: {
+    readonly allowedAgents: readonly string[];
+    readonly participantAgents: readonly string[];
+    readonly revokedAgents: readonly string[];
+  },
+  localAgents: readonly string[],
+): boolean {
+  const revoked = new Set(meta.revokedAgents.map(memberAgentAddress));
+  const listed = new Set([...meta.allowedAgents, ...meta.participantAgents].map(memberAgentAddress));
+  return localAgents.some((local) => {
+    const address = memberAgentAddress(local);
+    return address !== undefined && listed.has(address) && !revoked.has(address);
+  });
 }

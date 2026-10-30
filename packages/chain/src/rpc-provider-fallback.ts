@@ -26,12 +26,14 @@ export async function readFirstProviderWithTransientRetry<TProvider, TResult>(
     retryDelayMs: number;
     isRetryable: (err: unknown) => boolean;
     signal?: AbortSignal;
+    /** Retain caller-owned admission/drain until the provider pass physically settles. */
+    awaitPhysicalSettlement?: boolean;
   },
 ): Promise<TResult | null> {
   return withRpcRequestContext({ signal: opts.signal }, async () => {
     const signal = activeRpcRequestAbortSignal();
     const responseTimeoutMs = resolveCapMs('pointRead', providers.length);
-    const result = await resolveWithinAbort(async () => {
+    const read = async () => {
       try {
         const pass = await runRpcProviderPass(providers, (provider) => (signal?.aborted ? null : () => (
           withRpcResponseStallScope(responseTimeoutMs, (attemptSignal) => (
@@ -55,7 +57,8 @@ export async function readFirstProviderWithTransientRetry<TProvider, TResult>(
         if (signal?.aborted || classifyRpcRetryDisposition(error) === 'retry-later') return null;
         throw error;
       }
-    }, signal);
+    };
+    const result = opts.awaitPhysicalSettlement ? await read() : await resolveWithinAbort(read, signal);
     return signal?.aborted ? null : result;
   });
 }

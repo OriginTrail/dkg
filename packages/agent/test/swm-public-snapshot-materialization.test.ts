@@ -143,6 +143,8 @@ interface HarnessOverrides {
   selectRepairIdentity?: () =>
     Awaited<ReturnType<SharedMemorySnapshotMaterializer['selectRepairIdentity']>>;
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
+  /** This node already retired the snapshot as a finalized twin, and no copy is back. */
+  heldAsRetiredFinalizedTwin?: () => Promise<boolean>;
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
   onStoreInsert?: () => void | Promise<void>;
@@ -240,6 +242,11 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('version-read');
           return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
         },
+        // A newer stored head here is gossip's, written with its content.
+        isNewerStoredHeadMaterialized: async () => {
+          events.push('newer-head-content-checked');
+          return true;
+        },
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
           if (overrides.replaceImpl) return overrides.replaceImpl(graphUri, quads);
@@ -268,6 +275,7 @@ function harness(overrides: HarnessOverrides = {}) {
         await overrides.reconcileImpl?.();
         return overrides.reconcileDisposition ?? 'preserve';
       },
+      ...(overrides.heldAsRetiredFinalizedTwin ? { heldAsRetiredFinalizedTwin: overrides.heldAsRetiredFinalizedTwin } : {}),
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
@@ -432,6 +440,22 @@ describe('public SWM snapshot materialization', () => {
     expect(h.inserted[0]).toHaveLength(h.fx.meta.length);
     expect(h.inserted[0]).toEqual(expect.arrayContaining(h.fx.meta));
     expect(h.events.slice(released + 1)).not.toContain('meta-inserted');
+  });
+
+  it('counts a snapshot this node retired as a finalized twin as held, and writes nothing for it', async () => {
+    const h = harness({ heldAsRetiredFinalizedTwin: async () => true });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(summary.alreadyHeldAssets).toBe(1);
+    expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 1, snapshotsTotal: 1, missingCount: 0 });
+    // No KA lock, no graph or head write, no second retirement...
+    expect(h.events).not.toContain('lock-requested');
+    expect(h.replaced).toEqual([]);
+    expect(h.headSwaps).toEqual([]);
+    expect(h.events).not.toContain('finalized-twin-reconciled');
+    // ...and the closing bulk append leaves its metadata out, as the retirement did.
+    const sameRow = (a: Quad, b: Quad) => a.subject === b.subject && a.predicate === b.predicate && a.object === b.object;
+    expect(h.inserted.flat().filter((quad) => h.fx.meta.some((row) => sameRow(row, quad)))).toEqual([]);
   });
 
   it('does not bulk-recreate metadata after freshly materializing and retiring a twin', async () => {

@@ -7,9 +7,10 @@
  * were when it resolved its target, and checks at every step that they are
  * still the current ones. When they are not it stops, with the error a pass
  * also ends on at shutdown. On a running node that is not a failure of the
- * graph. Something stored the graph's row again under the pass: a subscribe
- * request for a graph the node already holds, for one, or a sync round that
- * updated the row. The work has to be done again on the row as it is now.
+ * graph. Something stored the graph's row again under the pass: a catch-up or
+ * a sync round that updated the row, for one. (A write that changes nothing,
+ * such as a repeated subscribe, keeps the row and overtakes nothing.) The
+ * work has to be done again on the row as it is now.
  *
  * Treated as a failed pass, it held the graph's live nudges until the graph's
  * turn in the periodic sweep. Asked again instead, the graph gets its next

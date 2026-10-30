@@ -47,6 +47,7 @@ import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.
 import { retainedAuthorityReaderFixture } from '../../chain/test/helpers/retained-authority-reader.js';
 import { RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
+import { localGossipSigner } from '../src/external-author-signing.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 import { readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
@@ -833,7 +834,7 @@ describe('approved private bare-name replica authorization', () => {
       contextGraphId,
       encryptedPayload,
       createOperationContext('share'),
-      { ...curatorAgent, privateKey: curatorAgent.privateKey },
+      localGossipSigner(curatorAgent.agentAddress, curatorAgent.privateKey!),
       shareOperationId,
     );
     await curator.awaitInFlightSubstrateFanOuts();
@@ -1968,6 +1969,19 @@ describe('approved private bare-name replica authorization', () => {
       expect.stringMatching(/^0x[0-9a-f]{64}$/u),
       { awaitsProviderAuthorization: true, retryIncompletePrivate: true },
     );
+  });
+
+  it('asks the rows that shares admitted behind the fence still owe to be written once the authority is accepted', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const drain = vi.spyOn(fixture.receiver, 'requestRfc64OwedShareInventoryDrainV1');
+
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    expect(drain).toHaveBeenCalledOnce();
   });
 
   it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {

@@ -59,6 +59,18 @@ test('Node 26 routing covers callers, helpers, shared dependencies, runtime and 
   }
 });
 
+test('the Node 26 runner builds every workspace package the lane loads, since the job installs without building', async () => {
+  const { NODE26_WORKSPACE_BUILDS } = await import('../../ci/run-chain-rpc-node26.mjs');
+  const loaded = [
+    'packages/chain/src/rpc-http1-dispatcher.ts',
+    'packages/chain/test/rpc-http1-dispatcher.unit.test.ts',
+    'packages/chain/test/helpers/local-tls.ts',
+    'packages/chain/test/helpers/chain-rpc-fetch-child.mjs',
+  ].flatMap((file) => [...read(file).matchAll(/from ['"](@origintrail-official\/[^'"/]+)/g)].map((match) => match[1]));
+  const built = NODE26_WORKSPACE_BUILDS.map((workspace) => JSON.parse(read(`${workspace}/package.json`)).name);
+  assert.deepEqual([...new Set(loaded)].sort(), [...built].sort());
+});
+
 test('irrelevant and docs-only PRs explicitly omit Node 26; full and release dispatch require it', () => {
   for (const file of ['packages/network-sim/src/index.ts', 'packages/node-ui/src/ui/pages/Dashboard.tsx', 'docs/ci-delta-policy.md', 'CHANGELOG.md']) {
     const plan = pullRequestPlan([change(file)]);

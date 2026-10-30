@@ -1,5 +1,5 @@
+import type { VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
 import type {
-  AdmissionJournalEntry,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
   PersistedLiftJob,
@@ -24,6 +24,8 @@ import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './as
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
 import type { TargetedLiftJobClearOptions, TerminalJobClearOutcome } from './terminal-job-clear.js';
+import type { VmPublishJobPager } from './lift-job-page.js';
+import type { VmPublishRetentionAccess } from './async-lift-retention-access.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -211,7 +213,7 @@ export interface AsyncLiftPublisher {
    */
   update(jobId: string, status: LiftJobState, data?: Partial<LiftJob>): Promise<void>;
   getStatus(jobId: string): Promise<PersistedLiftJob | null>;
-  list(filter?: { status?: LiftJobState }): Promise<PersistedLiftJob[]>;
+  list(filter?: { status?: LiftJobState; contextGraphId?: string }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<PersistedLiftJob | null>;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
@@ -251,14 +253,15 @@ export interface AsyncLiftPublisher {
   readonly reconciliationScheduling?: {
     /**
      * EXCLUSIVE, ATOMIC attachment of the scheduling listeners — deliberately not pub/sub.
-     * Scheduling has exactly one owner (the runner driving this publisher), so attaching TAKES
-     * OVER both callbacks together: a later attachment supersedes the earlier one wholesale —
+     * Scheduling has one owner per in-process store/queue, so attaching TAKES
+     * OVER all callbacks together: a later attachment supersedes the earlier one wholesale —
      * the safe handover when a new runner incarnation starts while its predecessor is still
      * stopping — and ownership can never be split between incarnations. The returned detach
      * releases only the caller's OWN attachment (a stale detach from a superseded owner is a
-     * no-op).
+     * no-op). Publisher instances sharing the documented store/decorator identity and graph
+     * share this attachment; independent connections and processes retain polling fallback.
      *
-     * Both pokes are scheduling-only and establish nothing — the invited operation re-checks
+     * All pokes are scheduling-only and establish nothing — the invited operation re-checks
      * its own guards. `onReconciliationDemand` fires when a tx-bearing job stops being
      * executor-owned (a detached receipt settles, or `processNext` hands back a live broadcast
      * after an ambiguous send) — only once the work is visible to a
@@ -270,6 +273,8 @@ export interface AsyncLiftPublisher {
     attachScheduler(scheduler: {
       onReconciliationDemand(): void;
       onWalletRelease(walletId: string): void;
+      /** Accepted work is durable (or processing resumed); wake claim loops, preserving their guards. */
+      onWorkAvailable?(): void;
     }): () => void;
     /**
      * Run one reconcile pass and report BOTH what it settled and whether actionable live work
@@ -290,6 +295,8 @@ export interface AsyncLiftPublisher {
     recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
+  /** Single admission owner; older structural publishers may omit live claim control. */
+  readonly claimControl?: import('./async-lift-claim-gate.js').AsyncLiftClaimControl;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(jobId: string): Promise<void>;
@@ -372,42 +379,7 @@ export interface VmPublishIntentRecoveryPublisher extends AsyncLiftPublisher {
   lookupKnowledgeAssetVmPublishJobByIntent(facts: IntentLookupInput): Promise<IntentLookupResult>;
 }
 
-/** #1829 — read query for the append-only journal (facts-pure, or by jobId). */
-export interface JournalReadInput {
-  readonly contextGraphId: string;
-  readonly name: string;
-  readonly subGraphName?: string;
-  readonly agentAddress?: string;
-  /** Optional per-version filter WITHIN the lineage; never the lineage key itself. */
-  readonly intentKey?: string;
-}
-
-/**
- * #1829 — result of a journal read. `entries` are seq-ordered; `maxSeq` is -1 for an
- * empty lineage. `complete` = `entries.length === maxSeq + 1` (no seq gap) — authoritative
- * on oxigraph-worker; best-effort on external SPARQL backends (no fsync, so the
- * highest-seq entry can be lost on a crash without a gap being visible). `txHashes` are
- * ATTEMPTED submissions — a reconciler MUST verify each against chain; a hash here is
- * never proof the tx was sent (a pre-flush 'broadcast' entry can survive a rolled-back
- * attempt).
- */
-export interface JournalReadResult {
-  readonly entries: readonly AdmissionJournalEntry[];
-  readonly maxSeq: number;
-  readonly complete: boolean;
-  readonly txHashes: readonly string[];
-}
-
-/**
- * #1829 — read-only append-only journal reader. Segregated off the base contract (like
- * the #1828 recovery lookup): only the daemon control instance serves it.
- */
-export interface VmPublishAdmissionJournalReader {
-  /** Facts-pure lineage read (derives lineageKey from facts, never the ephemeral index). */
-  readJournalByIntent(facts: JournalReadInput): Promise<JournalReadResult>;
-  /** All journal entries bearing this jobId (a successor job continues the lineage seq). */
-  readJournalByJob(jobId: string): Promise<JournalReadResult>;
-}
+export type { JournalReadInput, JournalReadResult, VmPublishAdmissionJournalReader } from './async-lift-control-plane.js';
 
 /**
  * #1837 — atomic by-jobId terminal cleanup. Segregated off the base contract (like the
@@ -453,6 +425,8 @@ export interface VmPublisherControl
     VmPublishIntentIndexBackfiller,
     VmPublishAdmissionJournalReader,
     VmPublishTerminalJobClearer,
+    VmPublishJobPager,
+    VmPublishRetentionAccess,
     AsyncLiftDetailedRetrier,
     AsyncLiftRetryStateReader {}
 
@@ -602,9 +576,26 @@ export type AsyncKnowledgeAssetVmPublishPreflightResult =
   | { readonly action: 'execute' }
   | { readonly action: 'noop'; readonly reason?: string };
 
+/** Unmarked legacy results remain eligible for recovery, never certified completion. */
+export type AsyncKnowledgeAssetVmPublishExecutionResult =
+  | (PublishResult & { readonly localFinalizationComplete?: undefined })
+  | AsyncKnowledgeAssetVmPublishCertifiedResult;
+
+/** Process-local completion evidence returned by the named-KA executor. */
+export interface AsyncKnowledgeAssetVmPublishCertifiedResult extends PublishResult {
+  /**
+   * Process-local evidence from the executor: all required local finalization writes succeeded,
+   * or catalog placement has a durable independent repair owner. Existing best-effort gossip
+   * remains best-effort. The certificate requires a confirmed on-chain result.
+   */
+  readonly localFinalizationComplete: true;
+  readonly status: 'confirmed';
+  readonly onChainResult: NonNullable<PublishResult['onChainResult']>;
+}
+
 /** Cohesive lifecycle boundary for one named-KA async queue job. */
 export interface AsyncKnowledgeAssetVmPublishJobHandler {
-  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<PublishResult>;
+  execute(input: AsyncKnowledgeAssetVmPublishExecutionInput): Promise<AsyncKnowledgeAssetVmPublishExecutionResult>;
   preflight?(
     input: AsyncKnowledgeAssetVmPublishPreflightInput,
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult>;

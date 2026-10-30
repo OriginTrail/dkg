@@ -1,3 +1,4 @@
+import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -17,6 +18,7 @@ import { isAdmittedContextGraphSubscription } from './context-graph-subscription
 import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
+import { ensureCoreHostedDefinition } from './core-hosted-definition.js';
 import { Buffer } from 'node:buffer';
 import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryPassAuthority, type VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
@@ -208,6 +210,7 @@ import {
   decodeSwmHostCatchupResponse,
   DEFAULT_MAX_BYTES as SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES,
   DEFAULT_MAX_ENTRIES as SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES,
+  normalizeCatchupMaxEntries,
   SWM_HOST_CATCHUP_WIRE_VERSION,
   type SwmHostCatchupResponseEntry,
 } from './swm/host-catchup-wire.js';
@@ -736,14 +739,6 @@ function rotatePeerIds(peerIds: readonly string[], offset: number): string[] {
   if (peerIds.length === 0) return [];
   const start = offset % peerIds.length;
   return [...peerIds.slice(start), ...peerIds.slice(0, start)];
-}
-
-/** Track the raw dependency even if an abort race releases its caller first. */
-function trackVmReconcilePhysicalRun<T>(runs: Set<Promise<unknown>>, run: Promise<T>): Promise<T> {
-  runs.add(run);
-  const retire = () => { runs.delete(run); };
-  void run.then(retire, retire);
-  return run;
 }
 
 export class SwmHostModeMethods extends DKGAgentBase {
@@ -1344,7 +1339,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       await this.hostModeReconcileInflight;
       return;
     }
-    const inflight = (async () => {
+    const inflight = withDefaultStoreWorkPriority('background', async () => {
       try {
         const graphManager = new GraphManager(this.store);
         const knownCgs = (
@@ -1371,7 +1366,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       } finally {
         this.hostModeReconcileInflight = undefined;
       }
-    })();
+    });
     this.hostModeReconcileInflight = inflight;
     await inflight;
   }
@@ -2967,6 +2962,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       `Phase D: marked public cg=${numericStr} as core-hosted under "${localCgId}" ` +
       '(will chain-reconcile to VM across restarts)',
     );
+    // A Core serves the owner's definition of the graphs it hosts to their
+    // subscribers; fetched in the background, retried while it is missing.
+    void ensureCoreHostedDefinition(this, localCgId, 'recorded');
     const outcome = options.durable === true
       ? await this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
       : 'recorded';
@@ -3261,12 +3259,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<string | null> {
     signal?.throwIfAborted();
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !signal?.aborted
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     if (!isLifecycleCurrent()) return null;
     let targetOnChain: bigint | null = null;
     try { targetOnChain = BigInt(onChainId); } catch { targetOnChain = null; }
@@ -3367,12 +3365,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const eventIdentity = Object.freeze(options.eventIdentity ? { ...options.eventIdentity } : { eventKind: 'legacy-unpositioned' as const });
     const { blockNumber, blockHash, txHash: eventTxHash } = eventIdentity;
     signal?.throwIfAborted();
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !signal?.aborted
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     if (!isLifecycleCurrent() || kaId <= 0n || merkleRoot.length !== 32) return [];
     this.expireVmRefreshTargets(ctx);
     const update = `update${blockNumber === undefined ? '' : ` at block ${blockNumber}`}`;
@@ -3701,7 +3699,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     });
     workers.set(localCgId, worker);
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, worker);
+    this.workLifetime.track(worker);
     return worker;
   }
 
@@ -3981,14 +3979,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const signal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const signal = this.workLifetime?.signal;
     const isCurrent = (): boolean => {
       const current = this.subscribedContextGraphs.get(localCgId);
       return !this.vmReconcileRotationClosed
         && !this.graphScopedStoreClosed
         && !signal?.aborted
-        && this.vmReconcileLifecycleGeneration === lifecycleGeneration
+        && this.workLifetime.generation === lifecycleGeneration
         && current === subscription
         && Boolean(current?.subscribed || current?.coreHosted);
     };
@@ -4011,7 +4009,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
       }
     })();
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
+    this.workLifetime.track(authorityRead);
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
@@ -4224,7 +4222,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw error;
     });
 
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
+    this.workLifetime.track(physicalRun);
     return raceVmReconcileAbort(physicalRun, signal);
   }
 
@@ -4279,11 +4277,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     source: VmReconcileSource,
   ): Promise<ContextGraphReconcileResult> {
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
     // Retired name-hash id: it names no local graph any more, the answer target
     // resolution would give without a chain read (see supersedingContextGraphIdFor).
@@ -4512,8 +4510,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       // The pass stopped because its target is no longer the graph's current
       // one, on a node that is not shutting down: the graph's row was stored
-      // again under it, by a subscribe request for a graph the node already
-      // holds, for one. That is not a failure of the graph. Asked again
+      // again under it with a change, by a catch-up or a sync round that
+      // ended, for one. That is not a failure of the graph. Asked again
       // shortly, it gets a pass on the row as it is now; left as a failed pass
       // it lost its live nudges until its turn in the periodic sweep. Only a
       // graph the sweep would still select is asked again.
@@ -4534,7 +4532,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (overtaken) throw new VmReconcileOvertakenError(err);
       throw err;
     });
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
+    this.workLifetime.track(physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);
   }
 
@@ -4649,7 +4647,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
     // read may ignore it. Keep that physical dependency in the shutdown drain.
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
+    this.workLifetime.track(authorityRead);
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) {
@@ -4908,7 +4906,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): boolean {
     if (
       this.vmReconcileRotationClosed
-      || this.vmReconcileLifecycleGeneration !== lifecycleGeneration
+      || this.workLifetime.generation !== lifecycleGeneration
     ) return false;
     if (target.kind === 'rfc64-selected') {
       const current = this.selectedVmReconcileCursors.get(localCgId);
@@ -5106,7 +5104,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     watermark: number,
     target: VmReconcileTarget,
   ): Promise<void> {
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const lifecycleGeneration = this.workLifetime.generation;
     const isTargetCurrent = () => this.isVmReconcileTargetCurrent(
       localCgId,
       target,
@@ -5583,13 +5581,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       holderReuseEnabled: resolveExactBatchStreamEnabled,
       captureScope: (localCgId, candidatePeerIds) => typeof this.chain.deploymentId === 'string' ? {
         deploymentId: this.chain.deploymentId,
-        lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+        lifecycleGeneration: this.workLifetime.generation,
         bindingGeneration: this.contextGraphBindingState.capture(localCgId),
         selectedBindingGeneration: this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration,
         candidatePeerIds: [...candidatePeerIds],
       } : undefined,
       scopeIsCurrent: (localCgId, scope) => this.chain.deploymentId === scope.deploymentId
-        && this.vmReconcileLifecycleGeneration === scope.lifecycleGeneration
+        && this.workLifetime.generation === scope.lifecycleGeneration
         && !this.vmReconcileRotationClosed
         && this.contextGraphBindingState.capture(localCgId) === scope.bindingGeneration
         && this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration === scope.selectedBindingGeneration
@@ -6067,8 +6065,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   closeVmReconcileRotationState(this: DKGAgent): void {
-    this.vmReconcileLifecycleController?.abort();
-    this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
     this.vmReconcileScheduling?.resetSweep();
     // Some lifecycle tests intentionally construct a narrow partial agent
@@ -6085,17 +6081,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmRefreshQueue?.clear();
     // Cancel speculative sizing reads and let shutdown wait for them to settle.
     const preparation = existingVmRecoveryPreparation(this);
-    if (preparation && this.vmReconcilePhysicalRuns) {
-      trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, preparation.close());
+    if (preparation && this.workLifetime) {
+      this.workLifetime.track(preparation.close());
     } else {
       void preparation?.close();
     }
   }
 
   openVmReconcileRotationState(this: DKGAgent): void {
-    if (!this.vmReconcileLifecycleController || this.vmReconcileLifecycleController.signal.aborted) {
-      this.vmReconcileLifecycleController = new AbortController();
-    }
     this.vmReconcileRotationClosed = false;
   }
 
@@ -6715,10 +6708,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     signal?: AbortSignal,
     revalidateTarget?: () => Promise<boolean>,
   ): Promise<PendingOrdinalRecoveryResult> {
-    const rotationGeneration = this.vmReconcileLifecycleGeneration;
+    const rotationGeneration = this.workLifetime.generation;
     const isRecoveryCurrent = () => !this.vmReconcileRotationClosed
       && !signal?.aborted
-      && this.vmReconcileLifecycleGeneration === rotationGeneration
+      && this.workLifetime.generation === rotationGeneration
       && isTargetCurrent();
     const ctx = createOperationContext('system');
     // Advisory sizing preparation (opt-in, default off). Created lazily and
@@ -8188,32 +8181,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async catchupSwmFromHost(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
-    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number },
-  ): Promise<{
-    rounds: number;
-    fetched: number;
-    /**
-     * Number of envelopes whose apply path returned `applied: true`.
-     * NOT the same as triples — one envelope can carry many quads.
-     * For triples-applied accounting, callers MUST sum
-     * {@link appliedTriples}. Codex PR #610 R2 caught the previous
-     * conflation where `memory.ts` aggregated this count into a
-     * field named `totalInsertedTriples`.
-     */
-    applied: number;
-    /**
-     * Total triples (N-Quads) inserted by successful replays.
-     * Summed from `SharedMemoryApplyOutcome.insertedTriples`.
-     */
-    appliedTriples: number;
-    skipped: number;
-    nextSeqno: number;
-    denied?: string;
-  }> {
+    options?: SwmHostCatchupOptions,
+  ): Promise<SwmHostCatchupResult> {
     const ctx = createOperationContext('share');
     let sinceSeqno = options?.sinceSeqno ?? 0;
     const maxRounds = Math.max(1, options?.maxRounds ?? 8);
-    const maxEntries = options?.maxEntriesPerRound ?? SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES;
+    // Signed and sent as the same value: the digest binds `maxEntries`.
+    const maxEntries = normalizeCatchupMaxEntries(options?.maxEntriesPerRound);
     const maxBytes = SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES;
     // OT-RFC-38 LU-6 B1 — every catchup request is signed by the
     // requesting participant key so the host can authenticate via
@@ -8240,6 +8214,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let appliedTriples = 0;
     let skipped = 0;
     let lastDenied: string | undefined;
+    const reported: SwmHostCatchupEntryReport[] | undefined = options?.reportEntries ? [] : undefined;
     while (rounds < maxRounds) {
       rounds += 1;
       const signedReq = await mintSignedCatchupRequest({
@@ -8318,6 +8293,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       for (const entry of resp.entries) {
         fetched += 1;
         const envelope = Buffer.from(entry.envelopeB64, 'base64');
+        reported?.push({ seqno: entry.seqno, envelopeSha256: createHash('sha256').update(envelope).digest('hex') });
         try {
           const outcome = await handler.handle(
             new Uint8Array(envelope),
@@ -8348,7 +8324,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       sinceSeqno = resp.nextSeqno;
       if (!resp.truncated) break;
     }
-    return { rounds, fetched, applied, appliedTriples, skipped, nextSeqno: sinceSeqno, ...(lastDenied ? { denied: lastDenied } : {}) };
+    return {
+      rounds, fetched, applied, appliedTriples, skipped, nextSeqno: sinceSeqno,
+      ...(lastDenied ? { denied: lastDenied } : {}),
+      ...(reported ? { entries: reported } : {}),
+    };
   }
 
   /**
@@ -8361,18 +8341,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   async catchupSwmFromConnectedHosts(this: DKGAgent,
     contextGraphId: string,
-    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number; peers?: string[] },
-  ): Promise<Array<{
-    peerId: string;
-    rounds: number;
-    fetched: number;
-    applied: number;
-    appliedTriples: number;
-    skipped: number;
-    nextSeqno: number;
-    denied?: string;
-    error?: string;
-  }>> {
+    options?: SwmConnectedHostCatchupOptions,
+  ): Promise<SwmConnectedHostCatchupResult[]> {
     const ctx = createOperationContext('share');
     const explicitPeers = options?.peers;
     const rawCandidates: string[] = (() => {
@@ -8395,17 +8365,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ctx,
       `host-catchup peer order for "${contextGraphId}": cores=${coreCount} total=${candidates.length}`,
     );
-    const results: Array<{
-      peerId: string;
-      rounds: number;
-      fetched: number;
-      applied: number;
-      appliedTriples: number;
-      skipped: number;
-      nextSeqno: number;
-      denied?: string;
-      error?: string;
-    }> = [];
+    const results: SwmConnectedHostCatchupResult[] = [];
     for (const peerId of candidates) {
       try {
         // Codex PR #610 round-2 #2: resume from the highest seqno we
@@ -8424,6 +8384,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           sinceSeqno: resumeSeqno,
           maxRounds: options?.maxRounds,
           maxEntriesPerRound: options?.maxEntriesPerRound,
+          reportEntries: options?.reportEntries,
         });
         if (r.nextSeqno > 0) {
           let perPeer = this.lastHostCatchupSeqno.get(contextGraphId);

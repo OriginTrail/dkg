@@ -1,0 +1,61 @@
+{
+  "numTotalTestSuites": 2,
+  "numPassedTestSuites": 2,
+  "numFailedTestSuites": 0,
+  "numPendingTestSuites": 0,
+  "numTotalTests": 2,
+  "numPassedTests": 1,
+  "numFailedTests": 0,
+  "numPendingTests": 1,
+  "numTodoTests": 0,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 1793292968066,
+  "success": true,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": [
+            "follow-up pull of a peer's own agent profile"
+          ],
+          "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
+          "status": "passed",
+          "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
+          "duration": 2684.9587919999994,
+          "failureMessages": [],
+          "meta": {}
+        },
+        {
+          "ancestorTitles": [
+            "follow-up pull of a peer's own agent profile"
+          ],
+          "fullName": "follow-up pull of a peer's own agent profile pulls nothing more when the connect-time pull brought the profile, or on an Edge, which does not pull the agents graph on connect",
+          "status": "skipped",
+          "title": "pulls nothing more when the connect-time pull brought the profile, or on an Edge, which does not pull the agents graph on connect",
+          "failureMessages": [],
+          "meta": {}
+        }
+      ],
+      "startTime": 1793292975290,
+      "endTime": 1793292977974.9587,
+      "status": "passed",
+      "message": "",
+      "name": "<checkout>/packages/agent/test/peer-profile-follow-up-agent.test.ts"
+    }
+  ]
+}

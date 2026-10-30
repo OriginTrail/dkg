@@ -4,7 +4,7 @@ import { generateOwnershipQuads, generateShareMetadata, storeKnowledgeAssetOpera
 import { storeWorkspaceOperationPublicQuads } from '../../publisher/src/workspace-resolution.js';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { admitSharedMemoryMetadata, type SharedMemoryAdmissionScope } from '../src/sync/shared-memory-metadata-admission.js';
-import { projectLegacySwmHydration, projectSwmPersistence, projectStrictSwmRecovery } from '../src/sync/shared-memory-metadata-projections.js';
+import { projectLegacySwmHydration, projectSwmPersistence, swmHeadRejectionError } from '../src/sync/shared-memory-metadata-projections.js';
 import { swmRecordKey } from '../src/sync/shared-memory-metadata-records.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
@@ -326,8 +326,9 @@ describe('shared-memory metadata protocol admission', () => {
     expect(projectSwmPersistence(model)).toEqual([]);
     expect(model.rejections).toEqual([{
       role: 'rejected', recordRole: 'head', reason: 'outOfScope', subject: share.headSubject, metaGraph: graph,
+      shareOperationIds: ['unregistered'],
     }]);
-    expect(() => projectStrictSwmRecovery(model)).toThrow(`unregistered metadata graph ${graph}`);
+    expect(swmHeadRejectionError(model.rejections[0]!).message).toContain(`unregistered metadata graph ${graph}`);
     expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: rows,
       registeredSubGraphNames: ['private'], excludedSubGraphNames: ['private'],
     })).toThrow(`unregistered metadata graph ${graph}`);

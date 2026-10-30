@@ -1,3 +1,4 @@
+import { earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';
 import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
@@ -447,11 +448,7 @@ function decodeWorkspaceOperationRows(input: {
     : undefined;
   const effectiveAccessPolicy = accessPolicy
     ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public');
-  const publishedAtStamps = (input.operationValues.get(`${DKG}publishedAt`) ?? [])
-    .map((value) => Date.parse(stripLiteral(value)?.trim() ?? ''));
-  const publishedAtMs = publishedAtStamps.length === 0
-    ? undefined
-    : publishedAtStamps.reduce((min, ms) => Math.min(min, ms), Number.POSITIVE_INFINITY);
+  const publishedAtMs = earliestWorkspaceOperationTimestamp(input.operationValues.get(`${DKG}publishedAt`) ?? []);
   let operationVersion: bigint;
   try {
     operationVersion = parsePositiveBigIntLiteral(operation.required(`${DKG}assertionVersion`, 'assertionVersion'));
@@ -467,7 +464,7 @@ function decodeWorkspaceOperationRows(input: {
     !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
     !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
     !publisherPeerId ||
-    publishedAtStamps.some((ms) => !Number.isSafeInteger(ms) || ms < 0) ||
+    (publishedAtMs !== undefined && !isResolverWorkspaceOperationTimestamp(publishedAtMs)) ||
     operationUal !== ual ||
     operationVersion.toString() !== input.scope.assertionVersion ||
     (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
@@ -619,7 +616,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     `{ <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION ` +
     `{ <${assertSafeIri(subject)}> <${DKG}shareOperationId> ?id . ` +
     `?op <${DKG}shareOperationId> ?id ; ?p ?o . BIND(?op AS ?s) } } }`,
-    ...(params.queryOptions === undefined ? [] : [params.queryOptions]),
+    params.queryOptions ?? { source: 'publisher.workspaceHead.acquire' },
   );
   if (acquisition.type !== 'bindings') {
     throw new Error(

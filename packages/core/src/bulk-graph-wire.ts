@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: Apache-2.0
+import { decodeFixedHeaderFrames } from './fixed-header-frame-decoder.js';
+/** Separate protocol: CREDIT is staged receipt; COMMIT alone means durable application. */
+export const BULK_GRAPH_PROTOCOL = '/dkg/experimental/bulk-graph/1.0.0';
+export const BULK_GRAPH_CHUNK_BYTES = 100_000_000;
+export const BULK_GRAPH_MAX_ASSETS = 1024;
+export const BULK_GRAPH_FRAME_BYTES = 64 * 1024;
+export const BULK_GRAPH_REQUEST_BYTES = 512 * 1024;
+export const BULK_GRAPH_HEADER_BYTES = 20;
+/** Shared bytes only: FINAL_ACK meaning belongs to the negotiated protocol. */
+export const GRAPH_TRANSFER_KIND = Object.freeze({ REQUEST: 1, META: 2, DATA: 3, ASSET_END: 4,
+  CREDIT: 5, FINAL_ACK: 6, CHUNK_END: 7, REFUSE: 8 });
+const { FINAL_ACK, ...framing } = GRAPH_TRANSFER_KIND;
+export const BULK_GRAPH_KIND = Object.freeze({ ...framing, COMMIT: FINAL_ACK });
+export const PUBLIC_CHECKPOINT_KIND = Object.freeze({ ...framing, PERSISTED: FINAL_ACK });
+export interface BulkGraphFrame { kind: number; index: number; sequence: number; payload: Uint8Array }
+const MAGIC = 0x444b4732;
+export function validateBulkGraphHeader(kind: number, index: number, sequence: number, length: number): void {
+  if (![kind,index,sequence,length].every(Number.isSafeInteger) || kind < 1 || kind > 8
+    || index < 0 || index > BULK_GRAPH_MAX_ASSETS || sequence < 0 || sequence > 0xffffffff || length < 0)
+    throw new Error('Invalid bulk graph frame header');
+  const limit = kind === GRAPH_TRANSFER_KIND.REQUEST ? BULK_GRAPH_REQUEST_BYTES
+    : kind === GRAPH_TRANSFER_KIND.META ? 128 * 1024 : BULK_GRAPH_FRAME_BYTES;
+  if (length > limit || ([4,5,6].includes(kind) && length !== 0)
+    || ([1,2,3,7,8].includes(kind) && length === 0)) throw new Error('Invalid bulk graph frame length');
+}
+export function encodeBulkGraphFrame(frame: BulkGraphFrame): Uint8Array {
+  if (!(frame.payload instanceof Uint8Array)) throw new TypeError('Bulk graph payload must be bytes');
+  validateBulkGraphHeader(frame.kind, frame.index, frame.sequence, frame.payload.length);
+  const bytes = new Uint8Array(BULK_GRAPH_HEADER_BYTES + frame.payload.length);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, MAGIC); view.setUint8(4, frame.kind); view.setUint32(8, frame.index);
+  view.setUint32(12, frame.sequence); view.setUint32(16, frame.payload.length);
+  bytes.set(frame.payload, BULK_GRAPH_HEADER_BYTES); return bytes;
+}
+/** Header-first allocation, independent of the native stream's chunk boundaries. */
+export async function* decodeBulkGraphFrames(source: AsyncIterable<Uint8Array>, signal?: AbortSignal): AsyncGenerator<BulkGraphFrame> {
+  yield* decodeFixedHeaderFrames(source, {
+    headerBytes: BULK_GRAPH_HEADER_BYTES, signal,
+    bytesError: 'Bulk graph stream must yield bytes', truncatedError: 'Truncated bulk graph frame',
+    parseHeader: bytes => {
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      if (view.getUint32(0) !== MAGIC || view.getUint8(5) || view.getUint16(6)) throw new Error('Invalid bulk graph wire version');
+      const kind = view.getUint8(4), index = view.getUint32(8), sequence = view.getUint32(12), length = view.getUint32(16);
+      validateBulkGraphHeader(kind, index, sequence, length);
+      return { value: { kind, index, sequence }, length };
+    },
+    complete: (header, payload) => ({ ...header, payload }),
+  });
+}

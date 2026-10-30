@@ -94,7 +94,7 @@ function verifySyncedDataImpl(
   };
 }
 
-function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
+export function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
   const rawQuads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   const quads: Quad[] = [];
@@ -249,6 +249,7 @@ function processDurableBatch(
     && totalFetchedDataQuads === 0
     && !verifiedFullyPrivateResponse
     && !cleanEmptySinceBatchDelta
+    && mode.kind !== 'heldMetadata'
     ? 1
     : 0;
   if (metaOnlyResponses > 0) {
@@ -281,7 +282,7 @@ function processDurableBatch(
 }
 
 function durableIntegrityMode(mode: DurableBatchVerificationMode): DurableIntegrityVerificationMode {
-  if (mode.kind === 'fullSnapshot') return mode;
+  if (mode.kind === 'fullSnapshot' || mode.kind === 'heldMetadata') return mode;
   if (mode.kind === 'changelogPage') {
     return { kind: 'changelogPage', changedDataGraphs: new Set(mode.changedDataGraphs) };
   }
@@ -339,7 +340,8 @@ export function processDurableBatchForWire(
   };
 }
 
-function processSharedMemoryBatch(
+/** Exported for tests that run the pull verifier on the main thread, as `verifySyncedData` is. */
+export function processSharedMemoryBatch(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
   contextGraphId?: string,

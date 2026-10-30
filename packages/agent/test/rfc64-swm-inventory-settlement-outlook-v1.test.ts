@@ -6,6 +6,7 @@
  * of the same asset waits on that tail before it answers.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { activeDefaultStoreWorkPriority, StorePriorityScheduler, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import { Rfc64CatalogAutoPublishMethods } from '../src/dkg-agent-rfc64-catalog-auto-publish.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 import { rfc64SwmInventorySettlementCanConvergeV1 } from '../src/rfc64/swm-inventory-settlement-outlook-v1.js';
@@ -143,5 +144,67 @@ describe('durable SWM promotion observer: settlement retries', () => {
 
     expect(host.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledTimes(1);
     expect(host.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+describe('detached SWM observer store priority', () => {
+  it.each([false, true])('keeps foreground pointer writes normal and all 17 detached observers background (failure=%s)', async (failObserver) => {
+    const { host, observe } = createObserverHost({ current: 'authority-rpc-circuit-open' });
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(host);
+    const scheduler = new StorePriorityScheduler();
+    const pointerLanes: string[] = [];
+    const observerLanes: Array<{ priority: string | undefined; backgroundInflight: number }> = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const firstSixteenEntered = new Promise<void>((resolve) => { entered = resolve; });
+    host.recordRfc64SwmAuthorInventoryShadowV1.mockImplementation(async () => {
+      await scheduler.run(undefined, 'agent.rfc64.swmInventory.seal', async () => {
+        observerLanes.push({ priority: activeDefaultStoreWorkPriority(), backgroundInflight: scheduler.snapshot.backgroundInflight });
+      });
+      if (observerLanes.length === 16) entered();
+      await gate;
+      if (failObserver) throw new Error('inventory unavailable');
+      return DORMANT_NO_LANE;
+    });
+    Object.assign(host, {
+      _stampSwmPointer: async () => scheduler.run(undefined, 'pointer-write', async () => {
+        pointerLanes.push(activeDefaultStoreWorkPriority() ?? 'normal');
+      }),
+      scheduleRfc64SwmInventoryObserverV1: (params: { assertionCoordinate: string }) => {
+        runtime.schedule(params.assertionCoordinate, observe);
+      },
+    });
+    try {
+      await withDefaultStoreWorkPriority('normal', () => Promise.all(Array.from({ length: 17 }, (_, index) => (
+        Rfc64CatalogAutoPublishMethods.prototype.afterDurableSwmPromotionV1.call(host as never, {
+          contextGraphId: CG, subGraphName: null, assertionCoordinate: 'asset-' + index,
+          lifecycleAgentAddress: '0x' + '11'.repeat(20), shareOperationId: 'share-' + index,
+          ctx: { operationId: 'op', operation: 'share' },
+        } as never)
+      ))));
+      await firstSixteenEntered;
+      expect(runtime.inFlightCount).toBe(17);
+      expect(observerLanes).toHaveLength(16);
+    } finally {
+      release();
+      await runtime.drain();
+    }
+    expect(pointerLanes).toEqual(Array(17).fill('normal'));
+    expect(observerLanes).toEqual(Array(17).fill({ priority: 'background', backgroundInflight: 1 }));
+    expect(host.log.warn).toHaveBeenCalledTimes(failObserver ? 17 : 0);
+    expect(runtime.inFlightCount).toBe(0);
+    expect(host.requestRfc64SwmCatalogProjectionV1).not.toHaveBeenCalled();
+  });
+
+  it('does no inventory work after its lifecycle owner closes', async () => {
+    const { host, observe } = createObserverHost({ current: 'authority-rpc-circuit-open' });
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(host);
+    await runtime.closeAndDrain();
+    await withDefaultStoreWorkPriority('normal', observe);
+    expect(host.recordRfc64SwmAuthorInventoryShadowV1).not.toHaveBeenCalled();
+    expect(runtime.schedule('closed', observe)).toBe(false);
+    expect(host.log.warn).not.toHaveBeenCalled();
   });
 });

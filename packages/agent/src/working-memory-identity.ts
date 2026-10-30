@@ -23,3 +23,15 @@ export function resolveWorkingMemoryIdentityAliases(
       ? [node.peerId!] : isLegacyPeer ? [node.defaultAgentAddress!] : undefined,
   };
 }
+
+/** Canonical draft policy shared by ordinary queries, inventory and statistics. */
+export function resolveCallerDraftAccess(
+  node: { readonly defaultAgentAddress?: string; readonly peerId?: string },
+  callerAgentAddress?: string,
+  excludeWorkingMemory = false,
+): NonNullable<import('@origintrail-official/dkg-query').QueryOptions['draftAccess']> {
+  const owner = callerAgentAddress ?? node.defaultAgentAddress ?? node.peerId;
+  if (excludeWorkingMemory || !owner) return { kind: 'none' };
+  const aliases = resolveWorkingMemoryIdentityAliases(node, owner, address => address.toLowerCase()).aliases ?? [];
+  return { kind: 'owners', owners: [owner, ...aliases] };
+}

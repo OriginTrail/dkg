@@ -9,6 +9,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { stripMetadataLiteral } from './metadata-literal.js';
 
 export type SharedMemoryContextScope = {
   readonly kind: 'context';
@@ -52,6 +53,8 @@ export interface SwmRecordRejection {
     | 'unsupportedVersion' | 'modernFieldsWithoutVersion' | 'missingLegacyRoot';
   readonly subject: string;
   readonly metaGraph: string;
+  /** Operations a rejected head names, kept for the round that sets it aside. */
+  readonly shareOperationIds?: readonly string[];
 }
 
 export function swmRecordKey(metaGraph: string, subject: string): string {
@@ -71,6 +74,11 @@ function swmDataGraphFromMetaGraph(metaGraph: string, scope: SharedMemoryAdmissi
   const name = metaGraph.slice(root.length + 1, -suffix.length);
   return validateSubGraphName(name).valid && scope.registeredSubGraphNames.has(name)
     ? metaGraph.slice(0, -'_meta'.length) : undefined;
+}
+
+function namedShareOperationIds(rows: readonly IndexedSwmRow[]): string[] {
+  return [...new Set(rows.filter(({ quad }) => quad.predicate === P.shareOperationId)
+    .map(({ quad }) => stripMetadataLiteral(quad.object).trim()).filter(id => id.length > 0))];
 }
 
 /** A suffix alone is a valid user IRI, not evidence of a protocol head. */
@@ -97,6 +105,7 @@ export function indexSwmMetadata(quads: readonly Quad[], scope: SharedMemoryAdmi
     else if (hasSwmHeadEnvelope(group)) rejections.push({
       role: 'rejected', recordRole: 'head', subject: group.subject, metaGraph: group.metaGraph,
       reason: dataGraph === undefined ? 'outOfScope' : 'unsafeSubject',
+      shareOperationIds: namedShareOperationIds(group.rows),
     });
   }
   return { sources, rejections };
@@ -155,9 +164,12 @@ export function decodeSwmOperation(source: SwmRecordSource, scope: SharedMemoryA
 
 export function decodeSwmHead(source: SwmRecordSource): AdmittedSwmHead | SwmRecordRejection | undefined {
   if (!hasSwmHeadEnvelope(source)) return undefined;
+  const nonCanonical = (): SwmRecordRejection => ({
+    ...rejection(source, 'head', 'nonCanonicalSubject'), shareOperationIds: namedShareOperationIds(source.rows),
+  });
   try {
-    if (workspaceKnowledgeAssetHeadSubject(source.subject.slice(0, -SWM_HEAD_SUFFIX.length)) !== source.subject) return rejection(source, 'head', 'nonCanonicalSubject');
-  } catch { return rejection(source, 'head', 'nonCanonicalSubject'); }
+    if (workspaceKnowledgeAssetHeadSubject(source.subject.slice(0, -SWM_HEAD_SUFFIX.length)) !== source.subject) return nonCanonical();
+  } catch { return nonCanonical(); }
   return { ...recordRows(source, selectRows(source, 'headV2')), role: 'head' };
 }
 

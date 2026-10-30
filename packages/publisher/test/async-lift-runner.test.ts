@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AsyncLiftPublisher, LiftJob } from '../src/index.js';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
+import type { LiftJob } from '../src/index.js';
+import { createRunnerPublisher as createPublisher } from './_helpers/async-lift-runner-fixture.js';
 import { AsyncLiftRunner } from '../src/index.js';
 
 async function waitFor(assertion: () => void, timeout = 5000): Promise<void> {
@@ -13,29 +15,6 @@ async function waitFor(assertion: () => void, timeout = 5000): Promise<void> {
       await new Promise(r => setTimeout(r, 10));
     }
   }
-}
-
-function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLiftPublisher {
-  return {
-    lift: async () => {},
-    claimNext: async () => null,
-    update: async () => {},
-    getStatus: async () => null,
-    list: async () => [],
-    processNext: async () => null,
-    recordPublishResult: async () => {},
-    recordPublishFailure: async () => {},
-    recover: async () => 0,
-    reconcileTransactions: async () => 0,
-    drainDetachedExecutions: async () => {},
-    getStats: () => ({}),
-    pause: () => {},
-    resume: () => {},
-    cancel: async () => {},
-    retry: async () => {},
-    clear: async () => {},
-    ...overrides,
-  } as unknown as AsyncLiftPublisher;
 }
 
 describe('AsyncLiftRunner', () => {
@@ -102,39 +81,6 @@ describe('AsyncLiftRunner', () => {
       expect(reconcileCalls).toBeGreaterThanOrEqual(1);
     });
     await expect(runner.stop()).resolves.toBeUndefined();
-  });
-
-  it('can recover in paused maintenance mode before wallet processing starts', async () => {
-    const order: string[] = [];
-    let paused = false;
-    let runner!: AsyncLiftRunner;
-    const publisher = createPublisher({
-      pause: async () => {
-        paused = true;
-        order.push('pause');
-      },
-      recover: async () => {
-        order.push('recover');
-        return 0;
-      },
-      processNext: async () => {
-        order.push(paused ? 'process-paused' : 'process-active');
-        return null;
-      },
-    } as any);
-
-    runner = new AsyncLiftRunner({
-      publisher,
-      walletIds: ['wallet-1'],
-      startPaused: true,
-      sleep: async () => { void runner.stop(); },
-    });
-
-    await runner.start();
-    await waitFor(() => expect(order).toContain('process-paused'));
-    await runner.stop();
-
-    expect(order.slice(0, 3)).toEqual(['pause', 'recover', 'process-paused']);
   });
 
   it('runs recovery before processing wallets', async () => {
@@ -395,6 +341,23 @@ describe('AsyncLiftRunner', () => {
     await start;
 
     expect(sleepCalls).toContainEqual([50]);
+  });
+
+  it('tells the usage line which wallets run workers while it runs, and none once stopped', async () => {
+    asyncAdmissionUsage.setLiftWallets([]);
+    const runner = new AsyncLiftRunner({
+      publisher: createPublisher({ processNext: async () => null }),
+      walletIds: ['wallet-1', 'wallet-2'],
+      pollIntervalMs: 1,
+      recoveryIntervalMs: 50,
+    });
+    expect(asyncAdmissionUsage.take().liftWallets).toBe(0);
+
+    await runner.start();
+    expect(asyncAdmissionUsage.take().liftWallets).toBe(2);
+
+    await runner.stop();
+    expect(asyncAdmissionUsage.take().liftWallets).toBe(0);
   });
 
   it('rejects startup without wallets', async () => {

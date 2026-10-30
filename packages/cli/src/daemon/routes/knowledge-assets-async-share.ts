@@ -1,3 +1,6 @@
+import { classifyPromoteAdmissionError, promoteConflictResponse } from './promote-admission-response.js';
+import { PromoteJobCancellationConflictError } from '@origintrail-official/dkg-publisher';
+import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/knowledge-assets-async-share.ts
 //
 // Async SWM-share queue routes for the GitHub-shaped Knowledge Asset HTTP
@@ -22,9 +25,11 @@
 // error mapping, and response shapes are identical to the legacy handlers.
 // Shared logic lives in `./shared-assertion-helpers.js`.
 
-import type { RequestContext } from "./context.js";
+import { type RequestContext } from "./context.js";
 import { authenticatedAgentAddress } from '../../auth.js';
 import { respondTerminalClearOutcome } from "./terminal-clear-response.js";
+import { parseListPaging } from "./list-paging-query.js";
+import { respondShareJobPage } from "./share-job-page.js";
 import {
   jsonResponse,
   readBody,
@@ -121,11 +126,10 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
       state: "queued",
     });
   } catch (err: any) {
+    const admission = classifyPromoteAdmissionError(err);
+    if (admission) return jsonResponse(res, admission.status, admission.body, undefined, admission.headers);
     if (err instanceof PromoteJobConflictError) {
-      return jsonResponse(res, 409, {
-        error: err.message,
-        existingJobId: err.existingJobId,
-      });
+      return jsonResponse(res, 409, promoteConflictResponse(err));
     }
     if (
       err.message?.includes("required") ||
@@ -140,9 +144,11 @@ export async function handleKaShareAsyncEnqueue(ctx: RequestContext, name: strin
 
 // ── GET /api/knowledge-assets/swm/share-jobs ──────────────────────────────────
 //   ?contextGraphId=<cg>&state=queued,running,...&limit=<n>
+//   ?contextGraphId=<cg>&state=queued,running,...&pageSize=<n>&cursor=<nextCursor>
 //
 // Faithful port of GET /api/assertion/promote-async. List jobs filtered by
-// contextGraphId / state.
+// contextGraphId / state: the complete listing, or with `pageSize` / `cursor`
+// one page of it (OT-RFC-73 P9b, `share-job-page.ts`).
 export async function handleKaShareJobsList(ctx: RequestContext): Promise<void> {
   const { res, agent, url } = ctx;
   if (asyncPromoteUnavailable(res)) return;
@@ -171,6 +177,12 @@ export async function handleKaShareJobsList(ctx: RequestContext): Promise<void> 
       error: "limit must be a positive integer ≤ 1000",
     });
   }
+  const paging = parseListPaging(url, res);
+  if (!paging) return; // a 400 was already sent
+  if (contextGraphId !== undefined || !hasNodeOperatorReadAccess(ctx)) {
+    if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
+  }
+  if (paging.paged) return respondShareJobPage(ctx, { state: stateFilter, contextGraphId }, paging);
   const jobs = await agent.assertion.listPromoteAsyncJobs({
     state: stateFilter,
     contextGraphId,
@@ -191,13 +203,15 @@ export async function handleKaShareJobStatus(ctx: RequestContext, jobId: string)
   if (!job) {
     return jsonResponse(res, 404, { error: `Promote job not found: ${jobId}` });
   }
+  if (!(await requireContextGraphReadAuthority(ctx, job.request.contextGraphId))) return;
   return jsonResponse(res, 200, promoteJobToView(job));
 }
 
 // ── DELETE /api/knowledge-assets/swm/share-jobs/:jobId ────────────────────────
 //
 // Faithful port of DELETE /api/assertion/promote-async/:jobId — cancel a
-// queued/failed_retrying job. The caller passes the already url-decoded +
+// `queued` job (any other state, or a job that still owns a durable share
+// obligation, answers 409). The caller passes the already url-decoded +
 // validated `jobId`.
 export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;
@@ -210,7 +224,7 @@ export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string)
       return jsonResponse(res, 404, { error: err.message });
     }
     // "Cannot cancel job in state 'running'" etc.
-    if (err.message?.includes("Cannot cancel")) {
+    if (err instanceof PromoteJobCancellationConflictError || err.message?.includes("Cannot cancel")) {
       return jsonResponse(res, 409, { error: err.message });
     }
     throw err;

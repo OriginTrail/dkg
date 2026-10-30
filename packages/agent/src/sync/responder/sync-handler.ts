@@ -1,3 +1,4 @@
+import { preparedCacheFailureCause, createPreparedContentCache, resolvePreparedContentCacheConfig, type PreparedContentCacheConfig } from './prepared-content-cache.js';
 import {
   createOperationContext,
   DEFAULT_MAX_READ_BYTES,
@@ -107,6 +108,8 @@ interface RegisterSyncHandlerParams {
   sharedMemoryTtlMs: number;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  preparedContentCache?: PreparedContentCacheConfig;
+  dataDir?: string;
   peerId: string;
   parseSyncRequest: (data: Uint8Array) => SyncRequestEnvelope;
   authorizeSyncRequest: (
@@ -114,6 +117,8 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /** Called for every shared-memory request this node authorized; the requester follows that graph. */
+  onSharedMemoryRequestAuthorized?: (contextGraphId: string, remotePeerId: string) => void;
   /** Default absent. Experimental registrations reuse these exact owned resources. */
   onExperimentalExactBatchResources?: (resources: ExperimentalExactBatchResponderResources) => void;
   /**
@@ -127,6 +132,8 @@ interface RegisterSyncHandlerParams {
    * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
    */
   shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
+  /** Awaited before the first page of a durable `_meta` snapshot is read (a Core refreshes a hosted graph's definition). Must not throw. */
+  beforeServingDurableMeta?: (contextGraphId: string, signal?: AbortSignal) => Promise<void>;
   /**
    * Return `true` while `contextGraphId` must not be served in any phase yet
    * (production: `ontology` until the startup metadata relocation finishes).
@@ -433,7 +440,7 @@ function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined):
   });
 }
 
-export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
+export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeAndDrain(): Promise<void> } {
   const {
     register,
     protocolSync,
@@ -494,7 +501,14 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
     responderSnapshotBudget,
   );
-  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget });
+  const preparedOptions = resolvePreparedContentCacheConfig(params.preparedContentCache, params.dataDir);
+  let cacheWarned = false;
+  const preparedContentCache = preparedOptions ? createPreparedContentCache(preparedOptions, (error, operation) => {
+    if (cacheWarned) return;
+    cacheWarned = true;
+    params.logWarn(createOperationContext('sync'), `Prepared content cache ${operation} failed (${preparedCacheFailureCause(error)}); using verified export`);
+  }) : undefined;
+  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget, preparedContentCache });
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -708,6 +722,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         logWarn(createOperationContext('sync'), `Denied sync request for "${contextGraphId}" from peer ${peerId} (phase=${phase})`);
         return { kind: 'respond', bytes: new TextEncoder().encode(syncDeniedResponse) };
       }
+      if (isWorkspace) params.onSharedMemoryRequestAuthorized?.(contextGraphId, peerId);
       return { kind: 'authorized', authDurationMs };
     };
 
@@ -846,6 +861,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             `Sync responder withholding durable meta for "${contextGraphId}" (serve-skip policy)`,
           );
         } else {
+          if (offset === 0 && assetUals === undefined) await params.beforeServingDurableMeta?.(contextGraphId, signal);
           const queryStartedAt = Date.now();
           const session = prepareResponderSession(
             'Durable meta',
@@ -1085,4 +1101,5 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       throw preLimiterErr;
     }
   }));
+  return { closeAndDrain: () => preparedContentCache?.closeAndDrain() ?? Promise.resolve() };
 }

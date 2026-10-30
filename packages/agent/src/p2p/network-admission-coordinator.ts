@@ -6,14 +6,18 @@ import {
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionService } from './network-admission.js';
+import {
+  NetworkAdmissionService,
+  type NetworkAdmissionProbeBackoff,
+  type NetworkAdmissionVerdict,
+} from './network-admission.js';
 import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
-import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 
 export interface NetworkAdmissionConnection {
@@ -25,6 +29,7 @@ export interface NetworkAdmissionConnection {
 export interface NetworkAdmissionCoordinatorOptions {
   admission: NetworkAdmissionService;
   identity?: DkgNetworkIdentity;
+  cacheIdentities?: readonly DkgNetworkIdentity[];
   selfPeerId: string;
   sign: (payload: Uint8Array) => Promise<Uint8Array>;
   sendIdentityProbe: (
@@ -82,6 +87,12 @@ const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
 
+type AdmissionState =
+  | { kind: 'cached'; verdict: NetworkAdmissionVerdict }
+  | { kind: 'in-flight'; attempt: InFlightAdmissionAttempt }
+  | { kind: 'backed-off'; backoff: NetworkAdmissionProbeBackoff }
+  | { kind: 'probe' };
+
 /**
  * Most identity probes one admission caller keeps in flight: the ceiling of a
  * preflight round, and the bound the catch-up connected-peer filter
@@ -95,13 +106,13 @@ export interface NetworkIdentityProtocolRegistrar {
 
 class InFlightAdmissionAttempt {
   private readonly controller = new AbortController();
-  private readonly promise: Promise<boolean>;
+  private readonly promise: Promise<NetworkAdmissionVerdict>;
   private waiters = 0;
   private settled = false;
 
   constructor(
     private readonly defaultTimeoutMs: number,
-    work: (signal: AbortSignal) => Promise<boolean>,
+    work: (signal: AbortSignal) => Promise<NetworkAdmissionVerdict>,
     onSettled: (attempt: InFlightAdmissionAttempt) => void,
   ) {
     this.promise = Promise.resolve().then(() => work(this.controller.signal)).finally(() => {
@@ -110,13 +121,13 @@ class InFlightAdmissionAttempt {
     });
   }
 
-  wait(options: NetworkAdmissionAttemptOptions): Promise<boolean> {
+  wait(options: NetworkAdmissionAttemptOptions): Promise<NetworkAdmissionVerdict> {
     const signal = options.signal;
     const timeoutMs = options.timeoutMs;
     if (signal?.aborted) return Promise.reject(abortErrorFromSignal(signal.reason));
     this.waiters += 1;
 
-    return new Promise<boolean>((resolve, reject) => {
+    return new Promise<NetworkAdmissionVerdict>((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let released = false;
       const cleanup = () => {
@@ -158,11 +169,12 @@ class InFlightAdmissionAttempt {
  * A retryable identity-probe failure.
  *
  * Logging contract: the coordinator logs the failed probe itself, once, with
- * its reason and the backoff it starts. A backed-off skip throws this error
- * too, but no new probe ran: it repeats the reason of the probe that opened
- * the backoff window. Callers handle the error without logging it again
- * (GH#1578: one warning per failed probe, not one per connection callback).
- * A new throw site must keep that contract or use another error type.
+ * its reason and the backoff it starts. A backed-off skip throws the subclass
+ * {@link NetworkAdmissionProbeBackoffError}: no new probe ran, and it repeats
+ * the reason of the probe that opened the backoff window. Callers handle
+ * either error without logging it again at warning level (GH#1578, GH#3579:
+ * one warning per failed probe, not one per caller or per skip). A new throw
+ * site must keep that contract or use another error type.
  */
 export class NetworkAdmissionProbeError extends Error {
   readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
@@ -170,6 +182,21 @@ export class NetworkAdmissionProbeError extends Error {
   constructor(peerId: string, reason: string) {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
+  }
+}
+
+/**
+ * An automatic admission attempt skipped inside a failed probe's backoff
+ * window. No probe ran, so the peer is simply not admitted yet; automatic
+ * probes resume after `retryAfterMs`.
+ */
+export class NetworkAdmissionProbeBackoffError extends NetworkAdmissionProbeError {
+  readonly retryAfterMs: number;
+
+  constructor(peerId: string, backoff: Pick<NetworkAdmissionProbeBackoff, 'reason' | 'retryAfterMs'>) {
+    super(peerId, `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`);
+    this.name = 'NetworkAdmissionProbeBackoffError';
+    this.retryAfterMs = backoff.retryAfterMs;
   }
 }
 
@@ -194,6 +221,7 @@ export class NetworkAdmissionInvalidPeerIdError extends Error {
 export class NetworkAdmissionCoordinator {
   private readonly admission: NetworkAdmissionService;
   private readonly identity?: DkgNetworkIdentity;
+  private readonly cacheIdentities: readonly DkgNetworkIdentity[];
   private readonly selfPeerId: string;
   private readonly sign: (payload: Uint8Array) => Promise<Uint8Array>;
   private readonly sendIdentityProbe: NetworkAdmissionCoordinatorOptions['sendIdentityProbe'];
@@ -210,6 +238,7 @@ export class NetworkAdmissionCoordinator {
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
     this.identity = options.identity;
+    this.cacheIdentities = Object.freeze((options.cacheIdentities ?? []).slice(0, 16).map(i => Object.freeze({ ...i })));
     this.selfPeerId = options.identity?.networkId
       ? canonicalAdmissionPeerId(options.selfPeerId)
       : options.selfPeerId.trim();
@@ -237,6 +266,17 @@ export class NetworkAdmissionCoordinator {
   isRejectedPeer(peerId: string): boolean {
     if (!this.enabled) return false;
     return this.admission.isRejectedPeer(peerId);
+  }
+
+  /**
+   * Whether an automatic admission attempt would skip the peer now: it has no
+   * cached verdict and no probe in flight, and a failed probe's backoff window
+   * is still open. Callers can leave such a peer out instead of asking.
+   */
+  isProbeBackedOff(peerId: string): boolean {
+    if (!this.enabled) return false;
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    return canonicalPeerId !== null && this.admissionState(canonicalPeerId).kind === 'backed-off';
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
@@ -277,12 +317,15 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    return this.ensureAdmittedWithPolicy(
-      remotePeer,
-      ctx,
-      AUTOMATIC_ADMISSION_POLICY,
-      options,
-    );
+    return (await this.ensureVerdictWithPolicy(remotePeer, ctx, AUTOMATIC_ADMISSION_POLICY, options)) === 'same-network';
+  }
+
+  /** This verdict permits only the public chain-cache protocols, never normal admission. */
+  async ensureCacheAdmitted(remotePeer: string, ctx: OperationContext, options: NetworkAdmissionAttemptOptions = {}): Promise<boolean> {
+    if (!this.enabled || !this.cacheIdentities.length) return false;
+    const verdict = await this.ensureVerdictWithPolicy(remotePeer, ctx, AUTOMATIC_ADMISSION_POLICY, options);
+    options.signal?.throwIfAborted();
+    return verdict === 'same-network' || verdict === 'cache-only';
   }
 
   async ensureExplicitConnectAdmitted(
@@ -290,12 +333,7 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    return this.ensureAdmittedWithPolicy(
-      remotePeer,
-      ctx,
-      EXPLICIT_CONNECT_ADMISSION_POLICY,
-      options,
-    );
+    return (await this.ensureVerdictWithPolicy(remotePeer, ctx, EXPLICIT_CONNECT_ADMISSION_POLICY, options)) === 'same-network';
   }
 
   /**
@@ -337,12 +375,7 @@ export class NetworkAdmissionCoordinator {
       async (peerId) => {
         if (!this.admission.claimRetryablePreflightProbe(peerId)) return false;
         try {
-          return await this.ensureAdmittedWithPolicy(
-            peerId,
-            ctx,
-            EXPLICIT_CONNECT_ADMISSION_POLICY,
-            {},
-          );
+          return (await this.ensureVerdictWithPolicy(peerId, ctx, EXPLICIT_CONNECT_ADMISSION_POLICY, {})) === 'same-network';
         } catch (error) {
           this.admission.markRetryablePreflightProbeAttempted(peerId);
           throw error;
@@ -356,23 +389,20 @@ export class NetworkAdmissionCoordinator {
     return { checked: pending.length, admitted, unresolved };
   }
 
-  private async ensureAdmittedWithPolicy(
+  private async ensureVerdictWithPolicy(
     remotePeer: string,
     ctx: OperationContext,
     policy: NetworkAdmissionAttemptPolicy,
     options: NetworkAdmissionAttemptOptions,
-  ): Promise<boolean> {
-    if (!this.enabled) return true;
+  ): Promise<NetworkAdmissionVerdict> {
+    options.signal?.throwIfAborted();
+    if (!this.enabled) return 'same-network';
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
-    if (this.admission.isAcceptedPeer(remotePeerId)) return true;
-    if (this.admission.isRejectedPeer(remotePeerId)) return false;
-    if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
-
-    const existing = this.inFlight.get(remotePeerId);
-    if (existing) return existing.wait(options);
-
-    if (policy.probeRetrySuppression === 'respect') {
-      this.assertProbeNotSuppressed(remotePeerId);
+    const state = this.admissionState(remotePeerId);
+    if (state.kind === 'cached') return state.verdict;
+    if (state.kind === 'in-flight') return state.attempt.wait(options);
+    if (state.kind === 'backed-off' && policy.probeRetrySuppression === 'respect') {
+      throw new NetworkAdmissionProbeBackoffError(remotePeerId, state.backoff);
     }
 
     const attempt = new InFlightAdmissionAttempt(
@@ -386,14 +416,18 @@ export class NetworkAdmissionCoordinator {
     return attempt.wait(options);
   }
 
-  private assertProbeNotSuppressed(remotePeerId: CanonicalPeerId): void {
+  /**
+   * Where an attempt for the peer starts, in this order: its cached verdict,
+   * the probe in flight, the backoff a failed probe opened, or a new probe.
+   * The attempt's policy decides whether the backoff holds.
+   */
+  private admissionState(remotePeerId: CanonicalPeerId): AdmissionState {
+    const verdict = this.admission.cachedVerdict(remotePeerId);
+    if (verdict !== undefined) return { kind: 'cached', verdict };
+    const attempt = this.inFlight.get(remotePeerId);
+    if (attempt) return { kind: 'in-flight', attempt };
     const backoff = this.admission.getRetryableProbeBackoff(remotePeerId);
-    if (backoff) {
-      throw new NetworkAdmissionProbeError(
-        remotePeerId,
-        `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`,
-      );
-    }
+    return backoff ? { kind: 'backed-off', backoff } : { kind: 'probe' };
   }
 
   /**
@@ -425,9 +459,9 @@ export class NetworkAdmissionCoordinator {
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
     signal: AbortSignal,
-  ): Promise<boolean> {
+  ): Promise<NetworkAdmissionVerdict> {
     const identity = this.identity;
-    if (!this.enabled) return true;
+    if (!this.enabled) return 'same-network';
     if (!identity?.networkId) {
       throw new Error('network identity is required when network admission is enabled');
     }
@@ -496,13 +530,24 @@ export class NetworkAdmissionCoordinator {
       nonce,
       requesterPeerId: this.selfPeerId,
     });
+    signal.throwIfAborted();
     if (verdict.ok) {
       this.admission.markVerifiedSameNetwork(remotePeer);
       notifyBestEffort(() => this.onPeerVerified?.(remotePeer));
-      return true;
+      return 'same-network';
+    }
+    for (const cacheIdentity of this.cacheIdentities) {
+      const cacheVerdict = await verifyNetworkIdentityResponse({ response: claimed, remotePeerId: remotePeer,
+        localIdentity: cacheIdentity, nonce, requesterPeerId: this.selfPeerId });
+      signal.throwIfAborted();
+      if (cacheVerdict.ok) {
+        this.admission.markVerifiedCacheOnly(remotePeer);
+        // Do not mark same-network, call onPeerVerified, or populate normal peer selection.
+        return 'cache-only';
+      }
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
-    return false;
+    return 'rejected';
   }
 
   private async rejectPeer(remotePeer: CanonicalPeerId, ctx: OperationContext, reason: string): Promise<void> {

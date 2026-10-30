@@ -33,26 +33,21 @@ export function projectLegacySwmHydration(model: AdmittedSharedMemoryMetadata): 
 }
 
 /** Recovery must name one context and its admitted lanes; broad input is invalid. */
-export function projectStrictSwmRecovery(model: AdmittedSharedMemoryMetadata<SharedMemoryContextScope>): {
-  heads: AdmittedSwmHead[]; graphOperations: ReadonlyMap<string, AdmittedGraphSwmOperation>;
+export function projectSwmRecovery(model: AdmittedSharedMemoryMetadata<SharedMemoryContextScope>): {
+  heads: AdmittedSwmHead[]; graphOperations: ReadonlyMap<string, AdmittedGraphSwmOperation>; rejectedHeads: SwmRecordRejection[];
 } {
-  assertSwmRecoveryHeadsAccepted(model.rejections);
   const heads: AdmittedSwmHead[] = [];
   const graphOperations = new Map<string, AdmittedGraphSwmOperation>();
   for (const record of model.records) {
     if (record.role === 'head') heads.push(record);
     else if (record.role === 'graphOperation') graphOperations.set(swmRecordKey(record.metaGraph, record.subject), record);
   }
-  return { heads, graphOperations };
+  return { heads, graphOperations, rejectedHeads: model.rejections.filter(rejection => rejection.recordRole === 'head') };
 }
 
 /** Rejection evidence must survive the worker's persistence projection. */
-export function assertSwmRecoveryHeadsAccepted(rejections: readonly SwmRecordRejection[]): void {
-  for (const rejection of rejections) {
-    if (rejection.recordRole !== 'head') continue;
-    if (rejection.reason === 'outOfScope') {
-      throw new Error(`Graph-scoped SWM head ${rejection.subject} is in an unregistered metadata graph ${rejection.metaGraph}`);
-    }
-    throw new Error(`Graph-scoped SWM head ${rejection.subject} has a non-canonical or mismatched kaUal`);
-  }
+export function swmHeadRejectionError(rejection: SwmRecordRejection): Error {
+  return rejection.reason === 'outOfScope'
+    ? new Error(`Graph-scoped SWM head ${rejection.subject} is in an unregistered metadata graph ${rejection.metaGraph}`)
+    : new Error(`Graph-scoped SWM head ${rejection.subject} has a non-canonical or mismatched kaUal`);
 }
