@@ -8,7 +8,7 @@ import {
 } from '../dist/index.js';
 
 const row: Record<string, string> = { event: 'urn:event:1', eventTime: '"2026-09-07T00:00:00Z"' };
-const projection: EPCISEventProjection = toEpcisEvent(row);
+const projection = toEpcisEvent(row) satisfies EPCISEventProjection;
 const projectedTime: string | undefined = projection.eventTime;
 const projectedLocation: string | undefined = projection.readPoint?.id;
 const projectedChildren: string | undefined = projection.childEPCs?.[0];
