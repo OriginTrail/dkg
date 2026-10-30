@@ -6,8 +6,8 @@
 //   - the domain separator and the ServiceAssignment digest against ethers'
 //     own EIP-712 encoder, the one wallets and external signers use, field by
 //     field and at the type bounds;
-//   - the subscription id;
-//   - initialize: onlyHub, the four dependencies it wires, and re-wiring after
+//   - the subscription id, one per buyer key and epoch;
+//   - initialize: onlyHub, the five dependencies it wires, and re-wiring after
 //     the Hub re-registers one.
 //
 // Opt-in, consent, caps, funding and labels run against the real account stack
@@ -33,7 +33,6 @@ import {
 const MAX_UINT96 = (1n << 96n) - 1n;
 const MAX_UINT64 = (1n << 64n) - 1n;
 const MAX_UINT40 = (1n << 40n) - 1n;
-const MAX_UINT32 = (1n << 32n) - 1n;
 
 type Fixture = {
   accounts: SignerWithAddress[];
@@ -54,11 +53,6 @@ const termsOf = (overrides: Partial<Terms> = {}): Terms => ({
   accountId: 7n,
   assignee: ethers.getAddress('0x00000000000000000000000000000000000000a1'),
   maxCostPerPeriod: 25n * TRAC,
-  maxInferenceCostPerPeriod: 20n * TRAC,
-  maxQueryCostPerPeriod: 5n * TRAC,
-  maxCostPerWindow: 100n * TRAC,
-  maxTotalCost: 1_000n * TRAC,
-  maxPeriodSeconds: 31n * DAY,
   expiresAt: 4_000_000_000n,
   nonce: 3n,
   ...overrides,
@@ -76,9 +70,9 @@ describe('@unit ServiceSubscriptions', () => {
   });
 
   describe('metadata and EIP-712 constants', () => {
-    it('is named ServiceSubscriptions, version 1.0.0, with a 10,000 bps denominator', async () => {
+    it('is named ServiceSubscriptions, version 1.1.0, with a 10,000 bps denominator', async () => {
       expect(await SS.name()).to.equal('ServiceSubscriptions');
-      expect(await SS.version()).to.equal('1.0.0');
+      expect(await SS.version()).to.equal('1.1.0');
       expect(await SS.BPS_DENOMINATOR()).to.equal(10_000n);
       expect(await SS.hub()).to.equal(await HubContract.getAddress());
     });
@@ -87,9 +81,7 @@ describe('@unit ServiceSubscriptions', () => {
       const encoder = ethers.TypedDataEncoder.from(SERVICE_ASSIGNMENT_TYPES);
       const typeString = encoder.encodeType('ServiceAssignment');
       expect(typeString).to.equal(
-        'ServiceAssignment(uint256 accountId,address assignee,uint96 maxCostPerPeriod,' +
-          'uint96 maxInferenceCostPerPeriod,uint96 maxQueryCostPerPeriod,uint96 maxCostPerWindow,' +
-          'uint96 maxTotalCost,uint32 maxPeriodSeconds,uint40 expiresAt,uint64 nonce)',
+        'ServiceAssignment(uint256 accountId,address assignee,uint96 maxCostPerPeriod,uint40 expiresAt,uint64 nonce)',
       );
       expect(await SS.SERVICE_ASSIGNMENT_TYPEHASH()).to.equal(ethers.id(typeString));
     });
@@ -119,16 +111,11 @@ describe('@unit ServiceSubscriptions', () => {
       const domain = await domainOf(SS);
       for (const terms of [
         termsOf(),
-        termsOf({ maxCostPerWindow: 0n, maxQueryCostPerPeriod: 0n, nonce: 0n }),
+        termsOf({ maxCostPerPeriod: 1n, nonce: 0n }),
         termsOf({
           accountId: ethers.MaxUint256,
           assignee: ethers.getAddress('0xffffffffffffffffffffffffffffffffffffffff'),
           maxCostPerPeriod: MAX_UINT96,
-          maxInferenceCostPerPeriod: MAX_UINT96,
-          maxQueryCostPerPeriod: MAX_UINT96,
-          maxCostPerWindow: MAX_UINT96,
-          maxTotalCost: MAX_UINT96,
-          maxPeriodSeconds: MAX_UINT32,
           expiresAt: MAX_UINT40,
           nonce: MAX_UINT64,
         }),
@@ -146,11 +133,6 @@ describe('@unit ServiceSubscriptions', () => {
         { accountId: base.accountId + 1n },
         { assignee: ethers.getAddress('0x00000000000000000000000000000000000000a2') },
         { maxCostPerPeriod: base.maxCostPerPeriod + 1n },
-        { maxInferenceCostPerPeriod: base.maxInferenceCostPerPeriod + 1n },
-        { maxQueryCostPerPeriod: base.maxQueryCostPerPeriod + 1n },
-        { maxCostPerWindow: base.maxCostPerWindow + 1n },
-        { maxTotalCost: base.maxTotalCost + 1n },
-        { maxPeriodSeconds: base.maxPeriodSeconds + 1n },
         { expiresAt: base.expiresAt + 1n },
         { nonce: base.nonce + 1n },
       ];
@@ -172,28 +154,33 @@ describe('@unit ServiceSubscriptions', () => {
   });
 
   describe('subscription id', () => {
-    it('subscriptionIdOf is keccak256(abi.encode(assignee, periodId)), so it is unique per buyer key', async () => {
+    it('subscriptionIdOf is keccak256(abi.encode(assignee, epoch)), so it is unique per buyer key and epoch', async () => {
       const coder = ethers.AbiCoder.defaultAbiCoder();
-      const periodId = ethers.id('period-1');
       for (const assignee of [accounts[1].address, accounts[2].address]) {
-        expect(await SS.subscriptionIdOf(assignee, periodId)).to.equal(
-          ethers.keccak256(coder.encode(['address', 'bytes32'], [assignee, periodId])),
-        );
+        for (const epoch of [1n, 2n, (1n << 40n) - 1n]) {
+          expect(await SS.subscriptionIdOf(assignee, epoch)).to.equal(
+            ethers.keccak256(coder.encode(['address', 'uint256'], [assignee, epoch])),
+          );
+        }
       }
-      expect(await SS.subscriptionIdOf(accounts[1].address, periodId)).to.not.equal(
-        await SS.subscriptionIdOf(accounts[2].address, periodId),
+      expect(await SS.subscriptionIdOf(accounts[1].address, 5n)).to.not.equal(
+        await SS.subscriptionIdOf(accounts[2].address, 5n),
+      );
+      expect(await SS.subscriptionIdOf(accounts[1].address, 5n)).to.not.equal(
+        await SS.subscriptionIdOf(accounts[1].address, 6n),
       );
     });
   });
 
   describe('initialize', () => {
-    it('wires PublishingConvictionStorage, ConvictionServiceStorage, Chronos and ParametersStorage from the Hub', async () => {
+    it('wires PublishingConvictionStorage, ConvictionServiceStorage, Chronos, ParametersStorage and QueryInferenceStorage from the Hub', async () => {
       expect(await SS.publishingConvictionStorage()).to.equal(
         await HubContract.getContractAddress('PublishingConvictionStorage'),
       );
       expect(await SS.convictionServiceStorage()).to.equal(await CSS.getAddress());
       expect(await SS.chronos()).to.equal(await HubContract.getContractAddress('Chronos'));
       expect(await SS.parametersStorage()).to.equal(await HubContract.getContractAddress('ParametersStorage'));
+      expect(await SS.queryInferenceStorage()).to.equal(await HubContract.getContractAddress('QueryInferenceStorage'));
     });
 
     it('is onlyHub: a stranger and a Hub-registered contract are refused', async () => {
@@ -221,6 +208,10 @@ describe('@unit ServiceSubscriptions', () => {
         await hre.ethers.getContractFactory('ServiceSubscriptions')
       ).deploy(await HubContract.getAddress())) as unknown as ServiceSubscriptions;
       await fresh.waitForDeployment();
+      await HubContract.removeContractByName('QueryInferenceStorage');
+      await expect(fresh.initialize())
+        .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')
+        .withArgs('QueryInferenceStorage');
       await HubContract.removeContractByName('ConvictionServiceStorage');
       await expect(fresh.initialize())
         .to.be.revertedWithCustomError(HubContract, 'ContractDoesNotExist')

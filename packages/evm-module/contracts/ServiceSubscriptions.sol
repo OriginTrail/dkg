@@ -7,14 +7,17 @@ import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
 import {IConvictionServiceErrors} from "./interfaces/IConvictionServiceErrors.sol";
+import {IServicePeriodFunding} from "./interfaces/IServicePeriodFunding.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {PublishingConvictionStorage} from "./storage/PublishingConvictionStorage.sol";
 import {ConvictionServiceStorage} from "./storage/ConvictionServiceStorage.sol";
+import {QueryInferenceStorage} from "./storage/QueryInferenceStorage.sol";
 import {PublishingConviction} from "./PublishingConviction.sol";
 import {ConvictionScheduleLib} from "./libraries/ConvictionScheduleLib.sol";
 import {PublishingMathLib} from "./libraries/PublishingMathLib.sol";
+import {ServicePeriodLib} from "./libraries/ServicePeriodLib.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
@@ -25,9 +28,14 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * @notice Conviction Account service spending (OT-RFC-27, "NeuroSymbolic
  *         Marketplace"): the owner of a Conviction Account opts it in and
  *         assigns bounded plan-funding authority to a buyer key, with that
- *         key's signed consent; the buyer key then funds one weekly or monthly
- *         service plan period per transaction from the account's existing
- *         allowance.
+ *         key's signed consent; the buyer key then funds service plan
+ *         periods, one transaction each, from the account's existing
+ *         allowance, and tops them up within the period.
+ *
+ * A plan period is one chain epoch, the current one or the next, and a buyer
+ * key funds at most one period per epoch, from an account or, through
+ * `ServiceSubscriptionsWallet`, from its wallet; both share one id per buyer
+ * key and epoch.
  *
  * A funded period moves no TRAC. `PublishingConviction.coverServiceCost`
  * draws the cost from the account's allowance exactly as a publish does (the
@@ -44,15 +52,16 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *
  * Architecture (the pattern of `PublishingConviction`):
  *   - Stateless logic. Every byte of service-spending state lives in
- *     `ConvictionServiceStorage`; this contract holds only Hub-resolved
- *     references. `PublishingConvictionStorage`, `ConvictionServiceStorage`,
- *     `Chronos` and `ParametersStorage` are wired at `initialize()`.
- *     `PublishingConviction` and `DKGPublishingConvictionNFT` are resolved from
- *     the Hub on every call, so either can be re-registered.
+ *     `ConvictionServiceStorage` and `QueryInferenceStorage`; this contract
+ *     holds only Hub-resolved references. `PublishingConvictionStorage`,
+ *     `ConvictionServiceStorage`, `QueryInferenceStorage`, `Chronos` and
+ *     `ParametersStorage` are wired at `initialize()`. `PublishingConviction`
+ *     and `DKGPublishingConvictionNFT` are resolved from the Hub on every
+ *     call, so either can be re-registered.
  *   - It calls only the Hub, `PublishingConviction`, the two account
- *     storages, `Chronos`, `ParametersStorage`, the NFT's `ownerOf` and, as a
- *     staticcall before any state write, ERC-1271 wallets. It never calls the
- *     Token or the vault, and accepts no ETH.
+ *     storages, `QueryInferenceStorage`, `Chronos`, `ParametersStorage`, the
+ *     NFT's `ownerOf` and, as a staticcall before any state write, ERC-1271
+ *     wallets. It never calls the Token or the vault, and accepts no ETH.
  *
  * Gates:
  *   - Only the current NFT owner switches service spending, revokes, updates
@@ -62,9 +71,13 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     one EIP-712 digest that carries the account's current nonce. A party
  *     consents by sending the transaction, or by a signature: ERC-1271 for an
  *     address with code, ECDSA with a low `s` for an EOA.
- *   - Only the assignee funds, as `msg.sender`, within the caps stored at
- *     that block. A publishing agent registration never grants service
- *     spending, and an assignment never grants publishing.
+ *   - Only the assignee funds and tops up, as `msg.sender`, within the
+ *     assignment's one limit, the most a period may cost, its top-ups
+ *     included, as stored at that block. Both service classes are allowed. A
+ *     publishing agent registration never grants service spending, and an
+ *     assignment never grants publishing.
+ *   - Every funding and top-up is refused while `QueryInferenceStorage` is
+ *     paused, and every funding needs a non-zero session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
  *     protocol treasury is wired: an account scheduled while a treasury is
  *     wired emits to stakers net of a fee no storage records, which the label
@@ -76,7 +89,8 @@ contract ServiceSubscriptions is
     ContractStatus,
     IInitializable,
     IPublishingConvictionErrors,
-    IConvictionServiceErrors
+    IConvictionServiceErrors,
+    IServicePeriodFunding
 {
     string private constant _NAME = "ServiceSubscriptions";
     // Version history:
@@ -84,7 +98,12 @@ contract ServiceSubscriptions is
     //           opt-in, two-party consent to an assignment with cost caps, the
     //           owner's cap updates and revocation, period funding through
     //           `PublishingConviction.coverServiceCost`, and the labels.
-    string private constant _VERSION = "1.0.0";
+    //   1.1.0 — a period is one epoch, the current one or the next, one per
+    //           buyer key and epoch; an assignment holds one cost limit per
+    //           period and an expiry; top-ups and upgrades within the period
+    //           (`topUpFromConviction`); a non-zero session key; no funding
+    //           or top-up while `QueryInferenceStorage` is paused.
+    string private constant _VERSION = "1.1.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -94,11 +113,7 @@ contract ServiceSubscriptions is
     bytes32 private constant _EIP712_NAME_HASH = keccak256(bytes("DKGConvictionServices"));
     bytes32 private constant _EIP712_VERSION_HASH = keccak256(bytes("1"));
     bytes32 public constant SERVICE_ASSIGNMENT_TYPEHASH =
-        keccak256(
-            "ServiceAssignment(uint256 accountId,address assignee,uint96 maxCostPerPeriod,"
-            "uint96 maxInferenceCostPerPeriod,uint96 maxQueryCostPerPeriod,uint96 maxCostPerWindow,"
-            "uint96 maxTotalCost,uint32 maxPeriodSeconds,uint40 expiresAt,uint64 nonce)"
-        );
+        keccak256("ServiceAssignment(uint256 accountId,address assignee,uint96 maxCostPerPeriod,uint40 expiresAt,uint64 nonce)");
     /// @dev `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
     bytes4 private constant _ERC1271_MAGIC_VALUE = 0x1626ba7e;
     /// @dev floor(secp256k1n / 2). An EOA signature with a larger `s` is the
@@ -106,43 +121,27 @@ contract ServiceSubscriptions is
     ///      does not check this itself.
     uint256 private constant _SECP256K1_HALF_N = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
-    uint8 private constant _CLASS_INFERENCE = 1;
-    uint8 private constant _CLASS_QUERY = 2;
-
     // ============================================================
     //                          Inputs
     // ============================================================
 
     /// @notice The terms both parties consent to. They are the EIP-712
-    ///         `ServiceAssignment` message: every cap is in COST, TRAC wei
+    ///         `ServiceAssignment` message. The limit is in COST, TRAC wei
     ///         drawn from the account's allowance after its discount.
     struct AssignmentTerms {
         uint256 accountId;
         address assignee;
-        uint96 maxCostPerPeriod;
-        uint96 maxInferenceCostPerPeriod; // 0 = the inference class is not allowed
-        uint96 maxQueryCostPerPeriod; // 0 = the query class is not allowed
-        uint96 maxCostPerWindow; // 0 = no per-window cap
-        uint96 maxTotalCost; // counted since the assignment
-        uint32 maxPeriodSeconds;
+        uint96 maxCostPerPeriod; // the most one period may cost, its top-ups included
         uint40 expiresAt;
         uint64 nonce; // the account's current assignment nonce
     }
 
-    /// @notice One service bucket of a funding request.
-    struct BucketInput {
-        bytes32 bucketId; // a canonical model or service
-        uint8 serviceClass; // 1 = inference (units: tokens), 2 = query (units: query units)
-        uint96 value; // the funded bucket value before the discount, TRAC wei
-        uint96 maxAskWeiPerUnit; // the buyer's price cap per unit
-    }
-
-    /// @notice A buyer key's request to fund one plan period.
+    /// @notice A buyer key's request to fund one plan period from an account.
+    ///         The buckets have the shape `IServicePeriodFunding.BucketInput`.
     struct FundingRequest {
         uint256 accountId;
-        bytes32 periodId; // chosen by the buyer, unique per buyer key
-        address sessionKey; // the buyer's request-signing key; may be zero
-        uint32 periodSeconds;
+        uint256 epoch; // the period's epoch: the current one or the next
+        address sessionKey; // the buyer's request-signing key; never zero
         bytes32 planDigest; // the buyer's commitment to its plan, opaque here
         BucketInput[] buckets; // 1 to maxBucketsPerPeriod, strictly increasing bucketId
     }
@@ -155,13 +154,14 @@ contract ServiceSubscriptions is
     ConvictionServiceStorage public convictionServiceStorage;
     Chronos public chronos;
     ParametersStorage public parametersStorage;
+    QueryInferenceStorage public queryInferenceStorage;
 
     // ============================================================
     //                          Events
     // ============================================================
 
     event ServiceSpendingSet(uint256 indexed accountId, bool enabled);
-    /// @notice A new assignment, with the caps both parties consented to.
+    /// @notice A new assignment, with the terms both parties consented to.
     ///         `termsDigest` is the EIP-712 digest they consented over, and
     ///         `nonce` the account nonce it consumed.
     event ServiceAssigned(
@@ -169,48 +169,22 @@ contract ServiceSubscriptions is
         address indexed assignee,
         bytes32 termsDigest,
         uint96 maxCostPerPeriod,
-        uint96 maxInferenceCostPerPeriod,
-        uint96 maxQueryCostPerPeriod,
-        uint96 maxCostPerWindow,
-        uint96 maxTotalCost,
-        uint32 maxPeriodSeconds,
         uint40 expiresAt,
         uint64 nonce
     );
     event ServiceRevoked(uint256 indexed accountId, address indexed assignee);
-    /// @notice The owner replaced an assignment's caps. Its usage and nonce
-    ///         are unchanged.
+    /// @notice The owner replaced an assignment's limit and expiry. Its usage
+    ///         and nonce are unchanged.
     event CapsUpdated(
         uint256 indexed accountId,
         address indexed assignee,
         uint96 maxCostPerPeriod,
-        uint96 maxInferenceCostPerPeriod,
-        uint96 maxQueryCostPerPeriod,
-        uint96 maxCostPerWindow,
-        uint96 maxTotalCost,
-        uint32 maxPeriodSeconds,
         uint40 expiresAt
     );
     /// @notice The account's assignment nonce moved: the next assignment must
     ///         carry `nextNonce`, so terms signed at an older nonce no longer
     ///         assign.
     event AssignmentNonceAdvanced(uint256 indexed accountId, uint64 nextNonce);
-    /// @notice A plan period was funded. Sellers verify their plan line
-    ///         against this event and the stored record.
-    event PeriodFunded(
-        bytes32 indexed subscriptionId,
-        uint256 indexed accountId,
-        address indexed assignee,
-        bytes32 periodId,
-        address sessionKey,
-        bytes32 planDigest,
-        uint40 periodStart,
-        uint40 periodEnd,
-        uint96 value,
-        uint96 cost,
-        uint16 discountBps,
-        BucketInput[] buckets
-    );
     /// @notice `amount` of a period's cost was labelled as service-funded
     ///         emission in epochs `fromEpoch` to `toEpoch`: against the base
     ///         schedule, or, when `fromTopUp`, as the top-up overflow's own
@@ -240,8 +214,6 @@ contract ServiceSubscriptions is
     error AssignmentRevoked(uint256 accountId, address assignee);
     error AssignmentExpired(uint256 accountId, address assignee);
     error CapsUnchanged(uint256 accountId, address assignee);
-    error InvalidFundingRequest(string reason);
-    error PeriodAlreadyFunded(bytes32 subscriptionId);
     error CapExceeded(string cap, uint256 limit, uint256 attempted);
     error LabelCapacityExceeded(uint256 accountId, uint96 unplaced);
     error DrawMismatch(uint96 expectedCost, uint96 cost, uint40 expectedWindow, uint40 window);
@@ -258,6 +230,7 @@ contract ServiceSubscriptions is
         convictionServiceStorage = ConvictionServiceStorage(hub.getContractAddress("ConvictionServiceStorage"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
+        queryInferenceStorage = QueryInferenceStorage(hub.getContractAddress("QueryInferenceStorage"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -329,16 +302,9 @@ contract ServiceSubscriptions is
         if (css.serviceSpendingEnabledAt(t.accountId) == 0) revert ServiceSpendingDisabled(t.accountId);
 
         if (t.assignee == address(0)) revert InvalidAssignmentTerms("assignee");
-        ConvictionServiceStorage.AssignmentCaps memory caps = ConvictionServiceStorage.AssignmentCaps({
-            maxCostPerPeriod: t.maxCostPerPeriod,
-            maxInferenceCostPerPeriod: t.maxInferenceCostPerPeriod,
-            maxQueryCostPerPeriod: t.maxQueryCostPerPeriod,
-            maxCostPerWindow: t.maxCostPerWindow,
-            maxTotalCost: t.maxTotalCost,
-            maxPeriodSeconds: t.maxPeriodSeconds,
-            expiresAt: t.expiresAt
-        });
-        _validateCaps(caps, css.maxPeriodSeconds());
+        _validateCaps(
+            ConvictionServiceStorage.AssignmentCaps({maxCostPerPeriod: t.maxCostPerPeriod, expiresAt: t.expiresAt})
+        );
 
         uint64 expected = css.assignmentNonce(t.accountId);
         if (t.nonce != expected) revert InvalidAssignmentNonce(t.accountId, expected, t.nonce);
@@ -353,11 +319,6 @@ contract ServiceSubscriptions is
             t.assignee,
             ConvictionServiceStorage.Assignment({
                 maxCostPerPeriod: t.maxCostPerPeriod,
-                maxInferenceCostPerPeriod: t.maxInferenceCostPerPeriod,
-                maxQueryCostPerPeriod: t.maxQueryCostPerPeriod,
-                maxCostPerWindow: t.maxCostPerWindow,
-                maxTotalCost: t.maxTotalCost,
-                maxPeriodSeconds: t.maxPeriodSeconds,
                 assignedAt: SafeCast.toUint40(block.timestamp),
                 expiresAt: t.expiresAt,
                 revokedAt: 0,
@@ -365,19 +326,7 @@ contract ServiceSubscriptions is
             })
         );
 
-        emit ServiceAssigned(
-            t.accountId,
-            t.assignee,
-            digest,
-            t.maxCostPerPeriod,
-            t.maxInferenceCostPerPeriod,
-            t.maxQueryCostPerPeriod,
-            t.maxCostPerWindow,
-            t.maxTotalCost,
-            t.maxPeriodSeconds,
-            t.expiresAt,
-            used
-        );
+        emit ServiceAssigned(t.accountId, t.assignee, digest, t.maxCostPerPeriod, t.expiresAt, used);
         emit AssignmentNonceAdvanced(t.accountId, used + 1);
     }
 
@@ -402,19 +351,19 @@ contract ServiceSubscriptions is
     }
 
     /**
-     * @notice Replace the caps of `assignee`'s live assignment over
-     *         `accountId`. Owner only, at any time, whether service spending is
-     *         on or off.
-     * @dev The caps bound only what the owner lets the buyer key draw, and
-     *      oblige the buyer to nothing, so a change in either direction needs
+     * @notice Replace the limit and the expiry of `assignee`'s live assignment
+     *         over `accountId`. Owner only, at any time, whether service
+     *         spending is on or off.
+     * @dev The limit bounds only what the owner lets the buyer key draw, and
+     *      obliges the buyer to nothing, so a change in either direction needs
      *      no consent from the assignee. The usage, `assignedAt`, the
-     *      assignment's nonce and the account's nonce stay as they are: only a
-     *      new `assign` counts usage from zero again. A cap below the usage
-     *      counted so far is allowed, and refuses every funding it bounds. An
-     *      expired assignment is renewed only by a new `assign`, so a later
-     *      `expiresAt` here never revives one. Terms signed at the current
-     *      nonce stay valid; an owner who tightens caps and wants to rule them
-     *      out also calls `advanceAssignmentNonce`.
+     *      assignment's nonce and the account's nonce stay as they are. A
+     *      limit below a period's cost so far is allowed, and refuses every
+     *      top-up of that period. An expired assignment is renewed only by a
+     *      new `assign`, so a later `expiresAt` here never revives one. Terms
+     *      signed at the current nonce stay valid; an owner who tightens the
+     *      limit and wants to rule them out also calls
+     *      `advanceAssignmentNonce`.
      */
     function updateAssignmentCaps(
         uint256 accountId,
@@ -424,32 +373,14 @@ contract ServiceSubscriptions is
         _requireOwner(accountId);
         ConvictionServiceStorage css = convictionServiceStorage;
         ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, accountId, assignee);
-        _validateCaps(caps, css.maxPeriodSeconds());
-        if (
-            caps.maxCostPerPeriod == a.maxCostPerPeriod &&
-            caps.maxInferenceCostPerPeriod == a.maxInferenceCostPerPeriod &&
-            caps.maxQueryCostPerPeriod == a.maxQueryCostPerPeriod &&
-            caps.maxCostPerWindow == a.maxCostPerWindow &&
-            caps.maxTotalCost == a.maxTotalCost &&
-            caps.maxPeriodSeconds == a.maxPeriodSeconds &&
-            caps.expiresAt == a.expiresAt
-        ) {
+        _validateCaps(caps);
+        if (caps.maxCostPerPeriod == a.maxCostPerPeriod && caps.expiresAt == a.expiresAt) {
             revert CapsUnchanged(accountId, assignee);
         }
 
         css.setAssignmentCaps(accountId, assignee, caps);
 
-        emit CapsUpdated(
-            accountId,
-            assignee,
-            caps.maxCostPerPeriod,
-            caps.maxInferenceCostPerPeriod,
-            caps.maxQueryCostPerPeriod,
-            caps.maxCostPerWindow,
-            caps.maxTotalCost,
-            caps.maxPeriodSeconds,
-            caps.expiresAt
-        );
+        emit CapsUpdated(accountId, assignee, caps.maxCostPerPeriod, caps.expiresAt);
     }
 
     /// @notice Advance `accountId`'s assignment nonce, so terms signed at the
@@ -461,137 +392,99 @@ contract ServiceSubscriptions is
     }
 
     // ============================================================
-    //                       Buyer action
+    //                       Buyer actions
     // ============================================================
 
     /**
-     * @notice Fund one plan period from `r.accountId`'s allowance, as the
-     *         assignee (`msg.sender`). Atomic: every refusal reverts the whole
-     *         transaction, so nothing is ever funded partially.
-     * @dev The cheap, read-only refusals come first: the opt-in and the
-     *      assignment, the buckets, the period length, the period id, and the
-     *      caps as stored at this block. Then `coverServiceCost` draws the cost
-     *      (window allowance first, then the top-up buffer) and the cost is
-     *      labelled: the window part against the account's base schedule,
-     *      nearest epochs first, the top-up part as the emission its draw
-     *      made. Last, the usage and the period record are written.
+     * @notice Fund the plan period of `r.epoch` from `r.accountId`'s
+     *         allowance, as the assignee (`msg.sender`). Atomic: every refusal
+     *         reverts the whole transaction, so nothing is ever funded
+     *         partially.
+     * @dev The cheap, read-only refusals come first: the pause, the session
+     *      key, the period's epoch, the opt-in and the assignment, the
+     *      buckets, one period per buyer key and epoch, and the assignment's
+     *      limit as stored at this block. Then `coverServiceCost` draws the
+     *      cost (window allowance first, then the top-up buffer) and the cost
+     *      is labelled: the window part against the account's base schedule,
+     *      nearest epochs first from the current epoch, the top-up part as the
+     *      emission its draw made. A period funded ahead draws and labels from
+     *      the window and the epoch the funding runs in. Last, the usage and
+     *      the period record are written.
      *
-     *      The record's `periodStart` is the block time, which is never 0, and
-     *      a period id that already holds a record is refused, so the storage
-     *      never receives a record that reads as absent nor a second record
-     *      under one id.
-     * @return subscriptionId `subscriptionIdOf(msg.sender, r.periodId)`.
+     *      The period runs to the start of the next epoch, from the later of
+     *      the block time and its epoch's start, which is never 0, and an id
+     *      that already holds a record is refused, so the storage never
+     *      receives a record that reads as absent nor a second record under
+     *      one id.
+     * @return subscriptionId `subscriptionIdOf(msg.sender, r.epoch)`.
      * @return cost The cost drawn from the allowance.
      */
     function fundFromConviction(FundingRequest calldata r) external returns (bytes32 subscriptionId, uint96 cost) {
         ConvictionServiceStorage css = convictionServiceStorage;
         address assignee = msg.sender;
 
-        // 1. The opt-in and a live assignment.
+        // 1. Not paused, a session key, and the period of the current epoch or
+        //    the next one.
+        ServicePeriodLib.requireNotPaused(queryInferenceStorage);
+        if (r.sessionKey == address(0)) revert ZeroSessionKey();
+        (uint40 periodStart, uint40 periodEnd) = ServicePeriodLib.periodOf(
+            chronos,
+            r.epoch,
+            chronos.getCurrentEpoch()
+        );
+
+        // 2. The opt-in and a live assignment.
         if (css.serviceSpendingEnabledAt(r.accountId) == 0) revert ServiceSpendingDisabled(r.accountId);
         ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, r.accountId, assignee);
 
-        // 2. The buckets, and the value per class.
-        uint256 n = r.buckets.length;
-        if (n == 0 || n > css.maxBucketsPerPeriod()) revert InvalidFundingRequest("bucketCount");
-        ConvictionServiceStorage.Bucket[] memory buckets = new ConvictionServiceStorage.Bucket[](n);
-        uint256 inferenceValue;
-        uint256 queryValue;
-        for (uint256 i; i < n; i++) {
-            BucketInput calldata b = r.buckets[i];
-            if (i > 0 && b.bucketId <= r.buckets[i - 1].bucketId) revert InvalidFundingRequest("bucketOrder");
-            if (b.serviceClass == _CLASS_INFERENCE) {
-                inferenceValue += b.value;
-            } else if (b.serviceClass == _CLASS_QUERY) {
-                queryValue += b.value;
-            } else {
-                revert InvalidFundingRequest("serviceClass");
-            }
-            if (b.value == 0) revert InvalidFundingRequest("bucketValue");
-            if (b.maxAskWeiPerUnit == 0) revert InvalidFundingRequest("maxAskWeiPerUnit");
-            buckets[i] = ConvictionServiceStorage.Bucket({
-                bucketId: b.bucketId,
-                serviceClass: b.serviceClass,
-                value: b.value,
-                maxAskWeiPerUnit: b.maxAskWeiPerUnit
-            });
-        }
+        // 3. The buckets and their value.
+        (ConvictionServiceStorage.Bucket[] memory buckets, uint96 value) = ServicePeriodLib.fundingBuckets(
+            r.buckets,
+            css.maxBucketsPerPeriod()
+        );
 
-        // 3. The period length.
-        uint256 maxSeconds = css.maxPeriodSeconds();
-        if (a.maxPeriodSeconds < maxSeconds) maxSeconds = a.maxPeriodSeconds;
-        if (r.periodSeconds == 0 || r.periodSeconds > maxSeconds) revert InvalidFundingRequest("periodSeconds");
-
-        // 4. The value.
-        uint256 totalValue = inferenceValue + queryValue;
-        if (totalValue > type(uint96).max) revert InvalidFundingRequest("value");
-        uint96 value = uint96(totalValue);
-
-        // 5. The period id funds once.
-        subscriptionId = subscriptionIdOf(assignee, r.periodId);
+        // 4. One period per buyer key and epoch.
+        subscriptionId = ServicePeriodLib.subscriptionIdOf(assignee, r.epoch);
         if (css.subscriptionExists(subscriptionId)) revert PeriodAlreadyFunded(subscriptionId);
 
-        // 6. The cost at the account's tier, and per class (no floor per class).
+        // 5. The cost at the account's tier, within the limit stored at this
+        //    block.
         PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(r.accountId);
         cost = _discounted(value, acct.discountBps);
-        uint256 kept = BPS_DENOMINATOR - uint256(acct.discountBps);
-
-        // 7. The caps stored at this block.
         if (cost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, cost);
-        _checkClassCap("maxInferenceCostPerPeriod", inferenceValue, kept, a.maxInferenceCostPerPeriod);
-        _checkClassCap("maxQueryCostPerPeriod", queryValue, kept, a.maxQueryCostPerPeriod);
-        uint256 epLen = chronos.epochLength();
-        uint40 window = _currentBillingWindow(acct, epLen);
-        {
-            ConvictionServiceStorage.Usage memory u = css.getUsage(r.accountId, assignee);
-            uint256 windowCost = (u.window == window ? uint256(u.windowCost) : 0) + cost;
-            if (a.maxCostPerWindow != 0 && windowCost > a.maxCostPerWindow) {
-                revert CapExceeded("maxCostPerWindow", a.maxCostPerWindow, windowCost);
-            }
-            uint256 totalCost = uint256(u.totalCost) + cost;
-            if (totalCost > a.maxTotalCost) revert CapExceeded("maxTotalCost", a.maxTotalCost, totalCost);
-        }
 
-        // 8. The draw.
-        PublishingConviction.ServiceDraw memory d = _publishingConviction().coverServiceCost(
+        // 6. The draw and its labels.
+        uint256 epLen = chronos.epochLength();
+        PublishingConviction.ServiceDraw memory d = _drawAndLabel(
+            css,
             r.accountId,
             assignee,
             subscriptionId,
-            value
+            value,
+            cost,
+            _currentBillingWindow(acct, epLen),
+            acct,
+            epLen
         );
-        if (d.cost != cost || d.window != window) revert DrawMismatch(cost, d.cost, window, d.window);
 
-        // 9. The window part of service draws, before the labels: the label
-        //    basis of an account from before the cut-over reads it.
-        if (d.drawnFromWindow > 0) {
-            css.increaseServiceSpent(r.accountId, d.window, d.drawnFromWindow);
-        }
+        // 7. The usage.
+        css.recordUsage(r.accountId, assignee);
 
-        // 10. The labels.
-        _labelBase(css, r.accountId, acct, epLen, d.drawnFromWindow, d.epoch, subscriptionId);
-        _labelTopUp(css, r.accountId, d, subscriptionId);
-
-        // 11. The usage.
-        css.recordUsage(r.accountId, assignee, d.window, d.cost);
-
-        // 12. The record. `periodStart` is the block time, never 0, and
-        //     SafeCast refuses rather than wrap it.
-        uint40 periodStart = SafeCast.toUint40(block.timestamp);
-        uint40 periodEnd = SafeCast.toUint40(uint256(periodStart) + r.periodSeconds);
+        // 8. The record. The period id is the period's epoch.
         css.createSubscription(
             subscriptionId,
             ConvictionServiceStorage.Subscription({
                 accountId: r.accountId,
                 assignee: assignee,
                 sessionKey: r.sessionKey,
-                periodId: r.periodId,
+                periodId: bytes32(r.epoch),
                 planDigest: r.planDigest,
                 periodStart: periodStart,
                 periodEnd: periodEnd,
                 fundedEpoch: d.epoch,
                 fundedWindow: d.window,
                 discountBps: d.discountBps,
-                bucketCount: uint8(n),
+                bucketCount: uint8(buckets.length),
                 value: value,
                 cost: d.cost,
                 drawnFromWindow: d.drawnFromWindow,
@@ -600,12 +493,12 @@ contract ServiceSubscriptions is
             buckets
         );
 
-        // 13.
+        // 9.
         emit PeriodFunded(
             subscriptionId,
             r.accountId,
             assignee,
-            r.periodId,
+            r.epoch,
             r.sessionKey,
             r.planDigest,
             periodStart,
@@ -615,6 +508,85 @@ contract ServiceSubscriptions is
             d.discountBps,
             r.buckets
         );
+    }
+
+    /**
+     * @notice Top up or upgrade a period funded from a Conviction Account, as
+     *         the buyer key that funded it: add value to its buckets, or add
+     *         buckets. Atomic, as a funding is.
+     * @dev Refused while paused, and unless the period was funded from an
+     *      account by `msg.sender` and has not ended. An addition to a stored
+     *      bucket repeats its class and price cap, which never change within a
+     *      period; a new bucket is appended under the funding rules. The
+     *      opt-in, a live assignment and its limit are checked as for a
+     *      funding, the limit against the period's cost with this top-up
+     *      added. The draw and the labels follow as for a funding, at the
+     *      account's own tier; a top-up funds no new period, so the usage is
+     *      unchanged.
+     * @return cost The cost drawn from the allowance.
+     */
+    function topUpFromConviction(
+        bytes32 subscriptionId,
+        BucketInput[] calldata additions,
+        bytes32 planDigest
+    ) external returns (uint96 cost) {
+        ConvictionServiceStorage css = convictionServiceStorage;
+        address assignee = msg.sender;
+
+        // 1. Not paused, and the period is open to this top-up.
+        ServicePeriodLib.requireNotPaused(queryInferenceStorage);
+        ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
+        ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
+
+        // 2. The opt-in and a live assignment.
+        if (css.serviceSpendingEnabledAt(s.accountId) == 0) revert ServiceSpendingDisabled(s.accountId);
+        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee);
+
+        // 3. The additions, merged into the stored buckets.
+        ServicePeriodLib.TopUp memory t = ServicePeriodLib.mergeTopUp(
+            css.getBuckets(subscriptionId),
+            additions,
+            css.maxBucketsPerPeriod(),
+            s.value
+        );
+
+        // 4. The cost at the account's tier, and the period's cost with it
+        //    within the limit stored at this block.
+        PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(s.accountId);
+        cost = _discounted(t.value, acct.discountBps);
+        uint256 periodCost = uint256(s.cost) + cost;
+        if (periodCost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, periodCost);
+
+        // 5. The draw and its labels.
+        uint256 epLen = chronos.epochLength();
+        PublishingConviction.ServiceDraw memory d = _drawAndLabel(
+            css,
+            s.accountId,
+            assignee,
+            subscriptionId,
+            t.value,
+            cost,
+            _currentBillingWindow(acct, epLen),
+            acct,
+            epLen
+        );
+
+        // 6. The record.
+        css.applyTopUp(
+            subscriptionId,
+            ConvictionServiceStorage.TopUpAmounts({
+                value: t.value,
+                cost: d.cost,
+                drawnFromWindow: d.drawnFromWindow,
+                drawnFromTopUp: d.drawnFromTopUp
+            }),
+            planDigest,
+            t.added,
+            t.appended
+        );
+
+        // 7.
+        emit PeriodToppedUp(subscriptionId, s.accountId, assignee, t.value, d.cost, planDigest, additions);
     }
 
     // ============================================================
@@ -640,27 +612,16 @@ contract ServiceSubscriptions is
     ///         owner and the assignee consent to.
     function hashAssignment(AssignmentTerms calldata t) public view returns (bytes32 digest) {
         bytes32 structHash = keccak256(
-            abi.encode(
-                SERVICE_ASSIGNMENT_TYPEHASH,
-                t.accountId,
-                t.assignee,
-                t.maxCostPerPeriod,
-                t.maxInferenceCostPerPeriod,
-                t.maxQueryCostPerPeriod,
-                t.maxCostPerWindow,
-                t.maxTotalCost,
-                t.maxPeriodSeconds,
-                t.expiresAt,
-                t.nonce
-            )
+            abi.encode(SERVICE_ASSIGNMENT_TYPEHASH, t.accountId, t.assignee, t.maxCostPerPeriod, t.expiresAt, t.nonce)
         );
         digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
     }
 
-    /// @notice The id of the period `assignee` funds under `periodId`:
-    ///         `keccak256(abi.encode(assignee, periodId))`, unique per buyer key.
-    function subscriptionIdOf(address assignee, bytes32 periodId) public pure returns (bytes32) {
-        return keccak256(abi.encode(assignee, periodId));
+    /// @notice The id of the period `assignee` funds for `epoch`:
+    ///         `keccak256(abi.encode(assignee, epoch))`, one per buyer key and
+    ///         epoch, for a period funded from an account or from a wallet.
+    function subscriptionIdOf(address assignee, uint256 epoch) public pure returns (bytes32) {
+        return ServicePeriodLib.subscriptionIdOf(assignee, epoch);
     }
 
     /// @notice The cost of a bucket value at the account's discount tier:
@@ -931,22 +892,9 @@ contract ServiceSubscriptions is
     //                         Internal
     // ============================================================
 
-    function _validateCaps(ConvictionServiceStorage.AssignmentCaps memory c, uint256 maxPeriodSeconds) internal view {
+    /// @dev A limit above 0, and an expiry after the block time.
+    function _validateCaps(ConvictionServiceStorage.AssignmentCaps memory c) internal view {
         if (c.maxCostPerPeriod == 0) revert InvalidAssignmentTerms("maxCostPerPeriod");
-        if (c.maxInferenceCostPerPeriod > c.maxCostPerPeriod) {
-            revert InvalidAssignmentTerms("maxInferenceCostPerPeriod");
-        }
-        if (c.maxQueryCostPerPeriod > c.maxCostPerPeriod) revert InvalidAssignmentTerms("maxQueryCostPerPeriod");
-        if (c.maxInferenceCostPerPeriod == 0 && c.maxQueryCostPerPeriod == 0) {
-            revert InvalidAssignmentTerms("classCaps");
-        }
-        if (c.maxTotalCost < c.maxCostPerPeriod) revert InvalidAssignmentTerms("maxTotalCost");
-        if (c.maxCostPerWindow != 0 && c.maxCostPerWindow < c.maxCostPerPeriod) {
-            revert InvalidAssignmentTerms("maxCostPerWindow");
-        }
-        if (c.maxPeriodSeconds == 0 || c.maxPeriodSeconds > maxPeriodSeconds) {
-            revert InvalidAssignmentTerms("maxPeriodSeconds");
-        }
         if (c.expiresAt <= block.timestamp) revert InvalidAssignmentTerms("expiresAt");
     }
 
@@ -962,12 +910,32 @@ contract ServiceSubscriptions is
         if (block.timestamp >= uint256(a.expiresAt)) revert AssignmentExpired(accountId, assignee);
     }
 
-    /// @dev A class whose cap is 0 is not allowed: any bucket of it reverts,
-    ///      even one whose cost the discount rounds to 0.
-    function _checkClassCap(string memory cap, uint256 classValue, uint256 kept, uint96 limit) internal pure {
-        if (classValue == 0) return;
-        uint256 classCost = (classValue * kept) / BPS_DENOMINATOR;
-        if (limit == 0 || classCost > limit) revert CapExceeded(cap, limit, classCost);
+    /**
+     * @dev Draw `value` through `coverServiceCost`, which must return the cost
+     *      and the window computed here, then record the window part of the
+     *      draw and label the cost. The window part is recorded before the
+     *      labels: the label basis of an account from before the cut-over
+     *      reads it.
+     */
+    function _drawAndLabel(
+        ConvictionServiceStorage css,
+        uint256 accountId,
+        address assignee,
+        bytes32 subscriptionId,
+        uint96 value,
+        uint96 cost,
+        uint40 window,
+        PublishingConvictionStorage.Account memory acct,
+        uint256 epLen
+    ) internal returns (PublishingConviction.ServiceDraw memory d) {
+        d = _publishingConviction().coverServiceCost(accountId, assignee, subscriptionId, value);
+        if (d.cost != cost || d.window != window) revert DrawMismatch(cost, d.cost, window, d.window);
+
+        if (d.drawnFromWindow > 0) {
+            css.increaseServiceSpent(accountId, d.window, d.drawnFromWindow);
+        }
+        _labelBase(css, accountId, acct, epLen, d.drawnFromWindow, d.epoch, subscriptionId);
+        _labelTopUp(css, accountId, d, subscriptionId);
     }
 
     /**

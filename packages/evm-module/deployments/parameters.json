@@ -32,8 +32,14 @@
             }
         },
         "ConvictionServiceStorage": {
-            "maxPeriodSeconds": "2678400",
             "maxBucketsPerPeriod": "16"
+        },
+        "QueryInferenceStorage": {
+            "receiptGraceSeconds": "3600",
+            "maxItemsPerBatch": "256",
+            "maxGroupsPerBatch": "32",
+            "maxCloseStepsPerClaim": "32",
+            "lambdaBps": "5000"
         }
     },
     "devnet": {
@@ -119,8 +125,14 @@
             }
         },
         "ConvictionServiceStorage": {
-            "maxPeriodSeconds": "2678400",
             "maxBucketsPerPeriod": "16"
+        },
+        "QueryInferenceStorage": {
+            "receiptGraceSeconds": "3600",
+            "maxItemsPerBatch": "256",
+            "maxGroupsPerBatch": "32",
+            "maxCloseStepsPerClaim": "32",
+            "lambdaBps": "5000"
         }
     },
     "mainnet": {

@@ -24,6 +24,10 @@
 // The patterns: the whole window at the start of every window, at its end,
 // only late in the lock, and random mixes. The lock is 12 epochs; with
 // CA_LONG=1, a lock of 60 runs as well.
+//
+// A plan period is one epoch, and a buyer key funds at most one period per
+// epoch, so each funding draws a buyer key that has not funded the current
+// epoch from a pool, and assigns it to the account on its first use there.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -62,15 +66,8 @@ import { PoolModel, prorateActiveSink, scheduleModel } from './helpers/emission-
 
 const STAKER_SHARD_ID = 1n;
 const HUGE = 1n << 95n;
-// Caps no sequence reaches: the property is about the allowance and the labels.
-const CAPS: Partial<Terms> = {
-  maxCostPerPeriod: HUGE,
-  maxInferenceCostPerPeriod: HUGE,
-  maxQueryCostPerPeriod: HUGE,
-  maxCostPerWindow: 0n,
-  maxTotalCost: HUGE,
-  maxPeriodSeconds: 31n * DAY,
-};
+// A limit no sequence reaches: the property is about the allowance and the labels.
+const CAPS: Partial<Terms> = { maxCostPerPeriod: HUGE };
 const LOCKS = process.env.CA_LONG === '1' ? [12n, 60n] : [12n];
 
 type Fixture = {
@@ -161,8 +158,12 @@ describe('@integration Conviction service labels: whole-lock property test', fun
   let epLen: bigint;
   let lock: bigint;
   let owner: SignerWithAddress;
-  let buyer: SignerWithAddress;
+  let buyerKeys: SignerWithAddress[];
   let nftSigner: SignerWithAddress;
+  /** buyer key => the last epoch it funded a period for. */
+  const lastFunded = new Map<string, bigint>();
+  /** buyer key => the accounts it is assigned to. */
+  const assignedTo = new Map<string, Set<bigint>>();
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
@@ -181,7 +182,9 @@ describe('@integration Conviction service labels: whole-lock property test', fun
     } = await loadFixture(deployFixture));
     epLen = await ChronosContract.epochLength();
     owner = accounts[20];
-    buyer = accounts[21];
+    buyerKeys = accounts.slice(40, 100);
+    lastFunded.clear();
+    assignedTo.clear();
     const nftAddress = await NFT.getAddress();
     await hre.network.provider.send('hardhat_setBalance', [nftAddress, '0x1000000000000000000']);
     nftSigner = await hre.ethers.getImpersonatedSigner(nftAddress);
@@ -216,20 +219,31 @@ describe('@integration Conviction service labels: whole-lock property test', fun
     return model.perEpoch;
   };
 
-  const assignBuyer = async (accountId: bigint) => {
+  const assignKey = async (accountId: bigint, key: SignerWithAddress) => {
     const terms: Terms = {
       accountId,
-      assignee: buyer.address,
+      assignee: key.address,
       maxCostPerPeriod: CAPS.maxCostPerPeriod!,
-      maxInferenceCostPerPeriod: CAPS.maxInferenceCostPerPeriod!,
-      maxQueryCostPerPeriod: CAPS.maxQueryCostPerPeriod!,
-      maxCostPerWindow: CAPS.maxCostPerWindow!,
-      maxTotalCost: CAPS.maxTotalCost!,
-      maxPeriodSeconds: CAPS.maxPeriodSeconds!,
       expiresAt: (await latest()) + 10_000n * DAY,
       nonce: await CSS.assignmentNonce(accountId),
     };
-    await SS.connect(owner).assign(terms, '0x', await signTerms(buyer, SS, terms));
+    await SS.connect(owner).assign(terms, '0x', await signTerms(key, SS, terms));
+    let set = assignedTo.get(key.address);
+    if (!set) assignedTo.set(key.address, (set = new Set()));
+    set.add(accountId);
+  };
+  const assignBuyer = async (accountId: bigint) => assignKey(accountId, buyerKeys[0]);
+
+  /**
+   * A buyer key assigned to `a` that has not funded a period for the current
+   * epoch, and that epoch: a period is one epoch, one per buyer key.
+   */
+  const keyFor = async (a: Tracked) => {
+    const before = await ChronosContract.getCurrentEpoch();
+    const key = buyerKeys.find((k) => lastFunded.get(k.address) !== before);
+    if (!key) throw new Error(`no buyer key left that has not funded epoch ${before}`);
+    if (!assignedTo.get(key.address)?.has(a.id)) await assignKey(a.id, key);
+    return { key, epoch: await ChronosContract.getCurrentEpoch() };
   };
 
   const track = async (
@@ -338,7 +352,10 @@ describe('@integration Conviction service labels: whole-lock property test', fun
       expect(a.legacy, `${where}: ${a.name}, scheduled at creation, ran out of label capacity by ${short}`).to.equal(true);
       expect(short, `${where}: ${a.name} label shortfall`).to.be.lessThan(lock * lock);
       const value = valueFor(cost, a.bps);
-      await expect(SS.connect(buyer).fundFromConviction(requestOf(a.id, { buckets: [bucket(0, CLASS_INFERENCE, value)] })))
+      const { key, epoch } = await keyFor(a);
+      await expect(
+        SS.connect(key).fundFromConviction(requestOf(a.id, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value)] })),
+      )
         .to.be.revertedWithCustomError(SS, 'LabelCapacityExceeded')
         .withArgs(a.id, short);
       a.shortfall += short;
@@ -347,20 +364,22 @@ describe('@integration Conviction service labels: whole-lock property test', fun
     }
     const value = valueFor(cost, a.bps);
     expect(costOf(value, a.bps)).to.equal(cost);
+    const { key, epoch: periodEpoch } = await keyFor(a);
     const cursorBefore = await CSS.labelCursor(a.id);
-    const r = requestOf(a.id, { buckets: [bucket(0, CLASS_INFERENCE, value)] });
+    const r = requestOf(a.id, periodEpoch, { buckets: [bucket(0, CLASS_INFERENCE, value)] });
 
     let receipt: ContractTransactionReceipt;
     try {
-      receipt = (await (await SS.connect(buyer).fundFromConviction(r)).wait())!;
+      receipt = (await (await SS.connect(key).fundFromConviction(r)).wait())!;
     } catch (err) {
       throw new Error(`${where}: a funding of ${cost} on ${a.name}, which the allowance covers, was refused: ${err}`);
     }
+    lastFunded.set(key.address, periodEpoch);
 
     const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
     expect(covered.cost, where).to.equal(cost);
     expect(covered.drawnFromWindow + covered.drawnFromTopUp, where).to.equal(cost);
-    const s = await CSS.getSubscription(await SS.subscriptionIdOf(buyer.address, r.periodId));
+    const s = await CSS.getSubscription(await SS.subscriptionIdOf(key.address, r.epoch));
     expect(s.drawnFromWindow + s.drawnFromTopUp, where).to.equal(s.cost);
     expect(s.periodStart, where).to.equal(await blockTime(receipt));
     const epoch: bigint = covered.epoch;
@@ -465,7 +484,8 @@ describe('@integration Conviction service labels: whole-lock property test', fun
     if (end > (await latest())) await time.increaseTo(end);
     for (const a of all) {
       const acct = await PCS.getAccount(a.id);
-      await expect(SS.connect(buyer).fundFromConviction(requestOf(a.id)))
+      const { key, epoch } = await keyFor(a);
+      await expect(SS.connect(key).fundFromConviction(requestOf(a.id, epoch)))
         .to.be.revertedWithCustomError(SS, 'AccountExpired')
         .withArgs(a.id, acct.expiresAtEpoch);
       expect(a.fundings, `${where}: ${a.name} fundings`).to.be.greaterThan(0);

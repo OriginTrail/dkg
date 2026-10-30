@@ -8,19 +8,29 @@ import {
 } from '../../utils/conviction-service-deploy';
 
 /**
- * V10 — deploys `ServiceSubscriptions`, the stateless logic of Conviction
- * Account service spending (OT-RFC-27): the owner's opt-in, buyer-key
- * assignments with the consent of both parties over one EIP-712 digest, the
- * owner's cap updates and revocations, and `fundFromConviction`, which funds
- * one plan period from the account's allowance through
- * `PublishingConviction.coverServiceCost` and labels its cost on the account's
- * own scheduled emission. No TRAC moves.
+ * V10 — deploys the two stateless contracts that fund plan periods of one
+ * epoch (OT-RFC-27):
+ *   - `ServiceSubscriptions`, Conviction Account service spending: the owner's
+ *     opt-in, buyer-key assignments with the consent of both parties over one
+ *     EIP-712 digest, the owner's limit updates and revocations, and
+ *     `fundFromConviction` and `topUpFromConviction`, which draw from the
+ *     account's allowance through `PublishingConviction.coverServiceCost` and
+ *     label the cost on the account's own scheduled emission. No TRAC moves.
+ *     `initialize()` wires `PublishingConvictionStorage`,
+ *     `ConvictionServiceStorage`, `Chronos`, `ParametersStorage` and
+ *     `QueryInferenceStorage`. `PublishingConviction` and
+ *     `DKGPublishingConvictionNFT` are resolved from the Hub on every call, so
+ *     either can be re-registered without re-initializing it.
+ *   - `ServiceSubscriptionsWallet`, periods funded from the buyer key's wallet:
+ *     `fundFromWallet` and `topUpFromWallet` move the whole value into the vault,
+ *     with no fee, and book it as due in `QueryInferenceStorage`. `initialize()`
+ *     wires the Token, `ConvictionStakingStorage` (the vault),
+ *     `ConvictionServiceStorage`, `QueryInferenceStorage` and `Chronos`.
  *
- * Its state is in `ConvictionServiceStorage` (052c). `initialize()` wires
- * `PublishingConvictionStorage`, `ConvictionServiceStorage`, `Chronos` and
- * `ParametersStorage`. `PublishingConviction` and `DKGPublishingConvictionNFT`
- * are resolved from the Hub on every call, so either can be re-registered
- * without re-initializing this contract.
+ * Both record their periods in `ConvictionServiceStorage` (052c) and read
+ * `QueryInferenceStorage` (052e), which is deployed first, so on development,
+ * where each contract is initialized as it is deployed, both are registered by
+ * then.
  *
  * Fundings need `PublishingConviction` 10.1.0 or later, the first build with
  * `coverServiceCost`. On a network whose deployments file records an older
@@ -39,7 +49,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   if (hre.network.config.environment === 'mainnet') {
     console.log(
       `[ServiceSubscriptions] ${hre.network.name}: Conviction Account service spending is not ` +
-        'deployed on mainnet yet, so this step is skipped.',
+        'deployed on mainnet yet, so this step, and ServiceSubscriptionsWallet with it, is skipped.',
     );
     return;
   }
@@ -63,13 +73,19 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   await hre.helpers.deploy({
     newContractName: 'ServiceSubscriptions',
   });
+  await hre.helpers.deploy({
+    newContractName: 'ServiceSubscriptionsWallet',
+  });
 };
 
 export default func;
-func.tags = ['ServiceSubscriptions', 'v10'];
+func.tags = ['ServiceSubscriptions', 'ServiceSubscriptionsWallet', 'v10'];
 func.dependencies = [
   'Hub',
+  'Token',
+  'ConvictionStakingStorage',
   'ConvictionServiceStorage',
+  'QueryInferenceStorage',
   'PublishingConvictionStorage',
   'PublishingConviction',
   'Chronos',

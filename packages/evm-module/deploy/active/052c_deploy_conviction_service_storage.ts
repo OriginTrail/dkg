@@ -8,16 +8,17 @@ import {
 } from '../../utils/conviction-service-deploy';
 
 /**
- * V10 — deploys `ConvictionServiceStorage`, the state store for Conviction
- * Account service spending (OT-RFC-27): the opt-in switch per account, the
- * buyer-key assignments and their usage, the service labels per account and
- * epoch, and the funded plan periods with their buckets.
+ * V10 — deploys `ConvictionServiceStorage` 1.1.0, the state store for service
+ * plan periods (OT-RFC-27): the opt-in switch per account, the buyer-key
+ * assignments and their usage, the service labels per account and epoch, and
+ * the funded plan periods of one epoch, from an account or a wallet, with their
+ * buckets and top-ups.
  *
  * It is registered in the Hub's contract set, never as an asset storage: its
  * mutators are `onlyContracts`, which reads the contract set. On a live
  * network `998_initialize_contracts.ts` registers it, runs its `initialize()`
- * (which seeds `maxPeriodSeconds` and `maxBucketsPerPeriod` where unset) and
- * then forwards the parameters of `deployments/parameters.json`, all in one
+ * (which seeds `maxBucketsPerPeriod` where unset) and then forwards the
+ * parameters of `deployments/parameters.json`, all in one
  * `Hub.setAndReinitializeContracts`.
  *
  * `exactScheduleFrom`, the schedule cut-over, goes in the per-network
@@ -58,9 +59,9 @@ import {
  * So a refused run deploys nothing that a later run would take as deployed
  * although the Hub never registered it.
  *
- * On a mainnet network the step is skipped, as is 052d: service spending
- * reaches mainnet only as its own, deliberate release, so an ordinary mainnet
- * deploy never registers these contracts.
+ * On a mainnet network the step is skipped, as are 052d and 052e: service
+ * spending reaches mainnet only as its own, deliberate release, so an ordinary
+ * mainnet deploy never registers these contracts.
  */
 
 async function checkCutOver(hre: HardhatRuntimeEnvironment, configured: bigint, onChain: bigint): Promise<void> {

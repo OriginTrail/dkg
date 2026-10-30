@@ -9,15 +9,16 @@
 //     replay, the domain, every invalid term, a transferred NFT, high-s and
 //     compact signatures, and the separation from publishing agents;
 //   - revoke, and advancing the nonce;
-//   - caps update: owner only, live assignments only, valid and changed caps,
-//     usage and nonces kept, applied from the next funding in both directions,
-//     caps below the usage, a paused account, and terms signed before an update;
+//   - caps update: owner only, live assignments only, a valid and changed limit
+//     and expiry, usage and nonces kept, applied from the next funding in both
+//     directions, a paused account, and terms signed before an update;
 //   - fund, happy path: every discount tier, the 1-wei floor, the top-up branch;
-//   - fund, refusals: every cap, a class with no cap, the period length, the
-//     buckets, the assignment, the allowance, an expired account, a wired
-//     treasury, the gate on coverServiceCost, a mismatched draw and a full
-//     label basis, each without partial effect;
-//   - period records: the record is always visible, and an id funds once;
+//   - fund, refusals: the period limit, the period's epoch, the buckets, the
+//     assignment, the allowance, an expired account, a wired treasury, the gate
+//     on coverServiceCost, a mismatched draw and a full label basis, each
+//     without partial effect;
+//   - period records: the record is always visible, and a buyer key funds one
+//     period per epoch;
 //   - shared allowance with publishing through KnowledgeAssetsLifecycle;
 //   - no TRAC moves: no Token log, an unchanged vault, an unchanged pool for a
 //     base-only funding and exactly the overflow's ranges for a top-up funding;
@@ -98,14 +99,8 @@ const TIERS: Array<[bigint, bigint]> = [
   [500_000n * TRAC, 5_000n],
   [1_000_000n * TRAC, 7_500n],
 ];
-// Caps that no test of the draw itself reaches.
-const WIDE: Partial<Terms> = {
-  maxCostPerPeriod: 50_000n * TRAC,
-  maxInferenceCostPerPeriod: 50_000n * TRAC,
-  maxQueryCostPerPeriod: 50_000n * TRAC,
-  maxCostPerWindow: 0n,
-  maxTotalCost: 1_000_000n * TRAC,
-};
+// A limit that no test of the draw itself reaches.
+const WIDE: Partial<Terms> = { maxCostPerPeriod: 50_000n * TRAC };
 
 type Fixture = {
   accounts: SignerWithAddress[];
@@ -244,11 +239,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     accountId,
     assignee,
     maxCostPerPeriod: 1_000n * TRAC,
-    maxInferenceCostPerPeriod: 1_000n * TRAC,
-    maxQueryCostPerPeriod: 1_000n * TRAC,
-    maxCostPerWindow: 0n,
-    maxTotalCost: 100_000n * TRAC,
-    maxPeriodSeconds: 31n * DAY,
     expiresAt: (await latest()) + 400n * DAY,
     nonce: await CSS.assignmentNonce(accountId),
     ...overrides,
@@ -276,8 +266,16 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     return { subscriptionId, cost, receipt };
   };
 
-  const inference = (accountId: bigint, value: bigint, overrides: Partial<Request> = {}) =>
-    requestOf(accountId, { buckets: [bucket(0, CLASS_INFERENCE, value)], ...overrides });
+  /** The current epoch, and the next one: the two a period may be funded for. */
+  const epochNow = async () => ChronosContract.getCurrentEpoch();
+  const epochNext = async () => (await epochNow()) + 1n;
+
+  /** A one-bucket inference request, for the current epoch unless `overrides.epoch` names another. */
+  const inference = async (accountId: bigint, value: bigint, overrides: Partial<Request> = {}) =>
+    requestOf(accountId, overrides.epoch ?? (await epochNow()), {
+      buckets: [bucket(0, CLASS_INFERENCE, value)],
+      ...overrides,
+    });
 
   const impersonate = async (address: string) => {
     await hre.network.provider.send('hardhat_setBalance', [address, '0x1000000000000000000']);
@@ -344,7 +342,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       serviceSpent: await CSS.serviceSpent(accountId, window),
       labelTotal: await CSS.accountServiceLabelTotal(accountId),
       cursor: await CSS.labelCursor(accountId),
-      usage: [u.totalCost, u.windowCost, u.window, u.periods],
+      usage: [u.periods],
       periods: await CSS.accountSubscriptionCount(accountId),
     };
   };
@@ -406,13 +404,13 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           .withArgs(accountId, false);
         expect(await CSS.serviceSpendingEnabledAt(accountId)).to.equal(0n);
         expect(await CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
-        await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+        await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
           .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
           .withArgs(accountId);
 
         const again = await SS.connect(owner).setServiceSpending(accountId, true);
         expect(await CSS.serviceSpendingEnabledAt(accountId)).to.equal(await blockTime((await again.wait())!));
-        await fund(inference(accountId, TRAC));
+        await fund(await inference(accountId, TRAC));
       });
 
       it('an expired account reverts AccountExpired; switching off still works after expiry', async () => {
@@ -551,30 +549,10 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const digest = await SS.hashAssignment(t);
       await expect(tx)
         .to.emit(SS, 'ServiceAssigned')
-        .withArgs(
-          t.accountId,
-          t.assignee,
-          digest,
-          t.maxCostPerPeriod,
-          t.maxInferenceCostPerPeriod,
-          t.maxQueryCostPerPeriod,
-          t.maxCostPerWindow,
-          t.maxTotalCost,
-          t.maxPeriodSeconds,
-          t.expiresAt,
-          nonce,
-        );
+        .withArgs(t.accountId, t.assignee, digest, t.maxCostPerPeriod, t.expiresAt, nonce);
       await expect(tx).to.emit(SS, 'AssignmentNonceAdvanced').withArgs(t.accountId, nonce + 1n);
       const a = await CSS.getAssignment(t.accountId, t.assignee);
-      expect([
-        a.maxCostPerPeriod,
-        a.maxInferenceCostPerPeriod,
-        a.maxQueryCostPerPeriod,
-        a.maxCostPerWindow,
-        a.maxTotalCost,
-        a.maxPeriodSeconds,
-        a.expiresAt,
-      ]).to.deep.equal(Object.values(capsOf(t)));
+      expect([a.maxCostPerPeriod, a.expiresAt]).to.deep.equal(Object.values(capsOf(t)));
       expect(a.assignedAt).to.equal(await blockTime((await tx.wait())!));
       expect(a.revokedAt).to.equal(0n);
       expect(a.nonce).to.equal(nonce);
@@ -587,8 +565,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expectAssigned(await SS.connect(owner).assign(t, '0x', await signTerms(buyer, SS, t)), t, 0n);
       expect(await CSS.assigneeCount(accountId)).to.equal(1n);
       expect(await CSS.assigneeAt(accountId, 0n)).to.equal(buyer.address);
-      const u = await CSS.getUsage(accountId, buyer.address);
-      expect([u.totalCost, u.windowCost, u.window, u.periods]).to.deep.equal([0n, 0n, 0n, 0n]);
+      expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
     });
 
     it("the assignee sends, with the owner's signature", async () => {
@@ -632,7 +609,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expectAssigned(await SS.connect(relayer).assign(t, ownerSig, buyerSig), t, 0n);
 
       const wallet = await impersonate(buyerWalletAddress);
-      const { cost } = await fund(inference(accountId, 10n * TRAC), wallet);
+      const { cost } = await fund(await inference(accountId, 10n * TRAC), wallet);
       expect(cost).to.equal(costOf(10n * TRAC, 3_000n));
     });
 
@@ -654,7 +631,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         .to.be.revertedWithCustomError(SS, 'InvalidConsentSignature')
         .withArgs(owner.address);
       await expectAssigned(await SS.connect(owner).assign(t, '0x', '0x'), t, 0n);
-      await fund(inference(accountId, TRAC), owner);
+      await fund(await inference(accountId, TRAC), owner);
     });
 
     it('a wrong nonce reverts InvalidAssignmentNonce', async () => {
@@ -699,13 +676,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const cases: Array<[Partial<Terms>, string]> = [
         [{ assignee: ethers.ZeroAddress }, 'assignee'],
         [{ maxCostPerPeriod: 0n }, 'maxCostPerPeriod'],
-        [{ maxInferenceCostPerPeriod: 1_000n * TRAC + 1n }, 'maxInferenceCostPerPeriod'],
-        [{ maxQueryCostPerPeriod: 1_000n * TRAC + 1n }, 'maxQueryCostPerPeriod'],
-        [{ maxInferenceCostPerPeriod: 0n, maxQueryCostPerPeriod: 0n }, 'classCaps'],
-        [{ maxTotalCost: 1_000n * TRAC - 1n }, 'maxTotalCost'],
-        [{ maxCostPerWindow: 1_000n * TRAC - 1n }, 'maxCostPerWindow'],
-        [{ maxPeriodSeconds: 0n }, 'maxPeriodSeconds'],
-        [{ maxPeriodSeconds: 31n * DAY + 1n }, 'maxPeriodSeconds'],
         [{ expiresAt: now }, 'expiresAt'],
         [{ expiresAt: 0n }, 'expiresAt'],
       ];
@@ -715,16 +685,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           .to.be.revertedWithCustomError(SS, 'InvalidAssignmentTerms')
           .withArgs(reason);
       }
-      // Each bound is inclusive, and one class may be closed.
-      const t = await termsFor(accountId, buyer.address, {
-        maxCostPerPeriod: 25n * TRAC,
-        maxInferenceCostPerPeriod: 25n * TRAC,
-        maxQueryCostPerPeriod: 0n,
-        maxCostPerWindow: 25n * TRAC,
-        maxTotalCost: 25n * TRAC,
-        maxPeriodSeconds: 31n * DAY,
-        expiresAt: (await latest()) + 100n,
-      });
+      // A limit of 1 wei, and an expiry just after the block time.
+      const t = await termsFor(accountId, buyer.address, { maxCostPerPeriod: 1n, expiresAt: (await latest()) + 100n });
       await expectAssigned(await SS.connect(owner).assign(t, '0x', await signTerms(buyer, SS, t)), t, 0n);
     });
 
@@ -751,7 +713,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         .withArgs(newOwner.address);
 
       expect(await CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
-      await fund(inference(accountId, TRAC));
+      await fund(await inference(accountId, TRAC));
 
       for (const call of [
         SS.connect(owner).revoke(accountId, buyer.address),
@@ -817,7 +779,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
     it('a publishing agent registration grants no service spending, and an assignment grants no publishing', async () => {
       await NFT.connect(owner).registerAgent(accountId, buyer2.address);
-      await expect(SS.connect(buyer2).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer2).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'NotAssigned')
         .withArgs(accountId, buyer2.address);
       await assignAs(await termsFor(accountId, buyer.address), buyer);
@@ -827,18 +789,13 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
     it('a new assignment of the same assignee replaces its terms and counts its usage from zero', async () => {
       await assignAs(await termsFor(accountId, buyer.address), buyer);
-      await fund(inference(accountId, 10n * TRAC));
-      await fund(inference(accountId, 10n * TRAC));
+      await fund(await inference(accountId, 10n * TRAC));
+      await fund(await inference(accountId, 10n * TRAC, { epoch: await epochNext() }));
       expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(2n);
 
-      const t = await termsFor(accountId, buyer.address, {
-        maxCostPerPeriod: 5n * TRAC,
-        maxInferenceCostPerPeriod: 5n * TRAC,
-        maxQueryCostPerPeriod: 0n,
-      });
+      const t = await termsFor(accountId, buyer.address, { maxCostPerPeriod: 5n * TRAC });
       await expectAssigned(await assignAs(t, buyer), t, 1n);
-      const u = await CSS.getUsage(accountId, buyer.address);
-      expect([u.totalCost, u.windowCost, u.window, u.periods]).to.deep.equal([0n, 0n, 0n, 0n]);
+      expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
       expect(await CSS.assigneeCount(accountId)).to.equal(1n);
     });
   });
@@ -864,7 +821,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     });
 
     it('is immediate for new periods, records the time and advances the nonce', async () => {
-      await fund(inference(accountId, TRAC));
+      await fund(await inference(accountId, TRAC));
       const tx = await SS.connect(owner).revoke(accountId, buyer.address);
       await expect(tx).to.emit(SS, 'ServiceRevoked').withArgs(accountId, buyer.address);
       await expect(tx).to.emit(SS, 'AssignmentNonceAdvanced').withArgs(accountId, 2n);
@@ -872,7 +829,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         await blockTime((await tx.wait())!),
       );
       expect(await CSS.isAssignmentActive(accountId, buyer.address)).to.equal(false);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC, { epoch: await epochNext() })))
         .to.be.revertedWithCustomError(SS, 'AssignmentRevoked')
         .withArgs(accountId, buyer.address);
       await expect(SS.connect(owner).revoke(accountId, buyer.address))
@@ -893,7 +850,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     });
 
     it('a funded period keeps its record and its buckets', async () => {
-      const { subscriptionId } = await fund(inference(accountId, 10n * TRAC));
+      const { subscriptionId } = await fund(await inference(accountId, 10n * TRAC));
       const record = plain(await CSS.getSubscription(subscriptionId));
       const buckets = (await CSS.getBuckets(subscriptionId)).map(plain);
       await SS.connect(owner).revoke(accountId, buyer.address);
@@ -911,7 +868,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const a = await CSS.getAssignment(accountId, buyer.address);
       expect(a.revokedAt).to.equal(0n);
       expect(a.nonce).to.equal(2n);
-      await fund(inference(accountId, TRAC));
+      await fund(await inference(accountId, TRAC));
     });
 
     it('advanceAssignmentNonce is owner only, keeps the assignments, and terms signed at the old nonce then fail', async () => {
@@ -939,13 +896,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   describe('caps update', () => {
     let accountId: bigint;
     let terms: Terms;
-    const CAPS: Partial<Terms> = {
-      maxCostPerPeriod: 50n * TRAC,
-      maxInferenceCostPerPeriod: 50n * TRAC,
-      maxQueryCostPerPeriod: 50n * TRAC,
-      maxCostPerWindow: 200n * TRAC,
-      maxTotalCost: 1_000n * TRAC,
-    };
+    const CAPS: Partial<Terms> = { maxCostPerPeriod: 50n * TRAC };
 
     beforeEach(async () => {
       await cutOver();
@@ -957,20 +908,12 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       SS.connect(sender).updateAssignmentCaps(accountId, assignee, caps);
     const capsTuple = async () => {
       const a = await CSS.getAssignment(accountId, buyer.address);
-      return [
-        a.maxCostPerPeriod,
-        a.maxInferenceCostPerPeriod,
-        a.maxQueryCostPerPeriod,
-        a.maxCostPerWindow,
-        a.maxTotalCost,
-        a.maxPeriodSeconds,
-        a.expiresAt,
-      ];
+      return [a.maxCostPerPeriod, a.expiresAt];
     };
 
     it('is owner only: the assignee and anyone else revert NotAccountOwner', async () => {
       for (const caller of [buyer, stranger, relayer]) {
-        await expect(update(capsWith({ maxTotalCost: 900n * TRAC }), caller))
+        await expect(update(capsWith({ maxCostPerPeriod: 45n * TRAC }), caller))
           .to.be.revertedWithCustomError(SS, 'NotAccountOwner')
           .withArgs(accountId, caller.address);
       }
@@ -981,7 +924,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         .to.be.revertedWithCustomError(SS, 'NotAssigned')
         .withArgs(accountId, stranger.address);
       await SS.connect(owner).revoke(accountId, buyer.address);
-      await expect(update(capsWith({ maxTotalCost: 900n * TRAC })))
+      await expect(update(capsWith({ maxCostPerPeriod: 45n * TRAC })))
         .to.be.revertedWithCustomError(SS, 'AssignmentRevoked')
         .withArgs(accountId, buyer.address);
     });
@@ -997,13 +940,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const now = await latest();
       const cases: Array<[Partial<Caps>, string]> = [
         [{ maxCostPerPeriod: 0n }, 'maxCostPerPeriod'],
-        [{ maxInferenceCostPerPeriod: 50n * TRAC + 1n }, 'maxInferenceCostPerPeriod'],
-        [{ maxQueryCostPerPeriod: 50n * TRAC + 1n }, 'maxQueryCostPerPeriod'],
-        [{ maxInferenceCostPerPeriod: 0n, maxQueryCostPerPeriod: 0n }, 'classCaps'],
-        [{ maxTotalCost: 50n * TRAC - 1n }, 'maxTotalCost'],
-        [{ maxCostPerWindow: 50n * TRAC - 1n }, 'maxCostPerWindow'],
-        [{ maxPeriodSeconds: 0n }, 'maxPeriodSeconds'],
-        [{ maxPeriodSeconds: 31n * DAY + 1n }, 'maxPeriodSeconds'],
         [{ expiresAt: now }, 'expiresAt'],
       ];
       for (const [overrides, reason] of cases) {
@@ -1014,21 +950,22 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expect(update(capsWith()))
         .to.be.revertedWithCustomError(SS, 'CapsUnchanged')
         .withArgs(accountId, buyer.address);
-      // Any one limit is a change, the expiry included.
+      // Either limit is a change, the expiry included.
       await update(capsWith({ expiresAt: terms.expiresAt + 1n }));
+      await update(capsWith({ maxCostPerPeriod: 49n * TRAC, expiresAt: terms.expiresAt + 1n }));
     });
 
     it('keeps the usage, assignedAt, the assignment nonce and the account nonce', async () => {
-      await fund(inference(accountId, 30n * TRAC));
-      await fund(inference(accountId, 20n * TRAC));
+      await fund(await inference(accountId, 30n * TRAC));
+      await fund(await inference(accountId, 20n * TRAC, { epoch: await epochNext() }));
       await time.increase(epLen);
-      await fund(inference(accountId, 10n * TRAC));
+      await fund(await inference(accountId, 10n * TRAC, { epoch: await epochNext() }));
       const before = await CSS.getAssignment(accountId, buyer.address);
       const usage = plain(await CSS.getUsage(accountId, buyer.address));
-      expect(usage).to.deep.equal({ totalCost: 60n * TRAC, windowCost: 10n * TRAC, window: 1n, periods: 3n });
+      expect(usage).to.deep.equal({ periods: 3n });
       const nonce = await CSS.assignmentNonce(accountId);
 
-      const caps = capsWith({ maxCostPerPeriod: 40n * TRAC, maxInferenceCostPerPeriod: 40n * TRAC, maxQueryCostPerPeriod: 0n });
+      const caps = capsWith({ maxCostPerPeriod: 40n * TRAC });
       await update(caps);
 
       expect(plain(await CSS.getUsage(accountId, buyer.address))).to.deep.equal(usage);
@@ -1040,95 +977,57 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     });
 
     it('applies from the next funding: a raised cap admits what the old cap refused, a lowered cap refuses what it admitted', async () => {
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, 60n * TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 60n * TRAC)))
         .to.be.revertedWithCustomError(SS, 'CapExceeded')
         .withArgs('maxCostPerPeriod', 50n * TRAC, 60n * TRAC);
-      await update(capsWith({ maxCostPerPeriod: 80n * TRAC, maxInferenceCostPerPeriod: 80n * TRAC }));
-      await fund(inference(accountId, 60n * TRAC));
+      await update(capsWith({ maxCostPerPeriod: 80n * TRAC }));
+      await fund(await inference(accountId, 60n * TRAC));
 
-      await update(
-        capsWith({ maxCostPerPeriod: 40n * TRAC, maxInferenceCostPerPeriod: 40n * TRAC, maxQueryCostPerPeriod: 40n * TRAC }),
-      );
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, 45n * TRAC)))
+      await update(capsWith({ maxCostPerPeriod: 40n * TRAC }));
+      const next = await epochNext();
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 45n * TRAC, { epoch: next })))
         .to.be.revertedWithCustomError(SS, 'CapExceeded')
         .withArgs('maxCostPerPeriod', 40n * TRAC, 45n * TRAC);
-      await fund(inference(accountId, 40n * TRAC));
-    });
-
-    it('a total cap below the usage refuses every funding until it is raised, and the usage counts on', async () => {
-      for (let i = 0; i < 3; i++) await fund(inference(accountId, 50n * TRAC));
-      await update(capsWith({ maxTotalCost: 100n * TRAC }));
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
-        .to.be.revertedWithCustomError(SS, 'CapExceeded')
-        .withArgs('maxTotalCost', 100n * TRAC, 151n * TRAC);
-      await time.increase(epLen);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
-        .to.be.revertedWithCustomError(SS, 'CapExceeded')
-        .withArgs('maxTotalCost', 100n * TRAC, 151n * TRAC);
-      await update(capsWith({ maxTotalCost: 1_000n * TRAC, expiresAt: terms.expiresAt + 1n }));
-      await fund(inference(accountId, 10n * TRAC));
-      expect((await CSS.getUsage(accountId, buyer.address)).totalCost).to.equal(160n * TRAC);
-    });
-
-    it("a window cap below the window's usage refuses only the rest of that window", async () => {
-      for (let i = 0; i < 3; i++) await fund(inference(accountId, 50n * TRAC));
-      await update(capsWith({ maxCostPerWindow: 100n * TRAC }));
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
-        .to.be.revertedWithCustomError(SS, 'CapExceeded')
-        .withArgs('maxCostPerWindow', 100n * TRAC, 151n * TRAC);
-      await time.increase(epLen);
-      await fund(inference(accountId, 50n * TRAC));
-      await fund(inference(accountId, 50n * TRAC));
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
-        .to.be.revertedWithCustomError(SS, 'CapExceeded')
-        .withArgs('maxCostPerWindow', 100n * TRAC, 101n * TRAC);
+      await fund(await inference(accountId, 40n * TRAC, { epoch: next }));
     });
 
     it('works while service spending is off, and the new caps hold once it is back on', async () => {
       await SS.connect(owner).setServiceSpending(accountId, false);
-      await update(capsWith({ maxCostPerPeriod: 20n * TRAC, maxInferenceCostPerPeriod: 20n * TRAC, maxQueryCostPerPeriod: 20n * TRAC }));
+      await update(capsWith({ maxCostPerPeriod: 20n * TRAC }));
       await SS.connect(owner).setServiceSpending(accountId, true);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, 25n * TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 25n * TRAC)))
         .to.be.revertedWithCustomError(SS, 'CapExceeded')
         .withArgs('maxCostPerPeriod', 20n * TRAC, 25n * TRAC);
-      await fund(inference(accountId, 20n * TRAC));
+      await fund(await inference(accountId, 20n * TRAC));
     });
 
     it('a funded period keeps its record', async () => {
-      const { subscriptionId } = await fund(inference(accountId, 40n * TRAC, { periodSeconds: 30n * DAY }));
+      const { subscriptionId } = await fund(await inference(accountId, 40n * TRAC));
       const record = plain(await CSS.getSubscription(subscriptionId));
-      await update(capsWith({ maxCostPerPeriod: 10n * TRAC, maxInferenceCostPerPeriod: 10n * TRAC, maxQueryCostPerPeriod: 0n, maxPeriodSeconds: DAY }));
+      await update(capsWith({ maxCostPerPeriod: 10n * TRAC }));
       expect(plain(await CSS.getSubscription(subscriptionId))).to.deep.equal(record);
     });
 
     it('CapsUpdated carries the new caps', async () => {
-      const caps = capsWith({
-        maxCostPerPeriod: 30n * TRAC,
-        maxInferenceCostPerPeriod: 30n * TRAC,
-        maxQueryCostPerPeriod: 7n * TRAC,
-        maxCostPerWindow: 0n,
-        maxTotalCost: 300n * TRAC,
-        maxPeriodSeconds: 7n * DAY,
-        expiresAt: terms.expiresAt - DAY,
-      });
+      const caps = capsWith({ maxCostPerPeriod: 30n * TRAC, expiresAt: terms.expiresAt - DAY });
       await expect(update(caps))
         .to.emit(SS, 'CapsUpdated')
         .withArgs(accountId, buyer.address, ...Object.values(caps));
     });
 
     it('terms signed before an update still assign and reset the usage; after advanceAssignmentNonce they fail', async () => {
-      const t = await termsFor(accountId, buyer.address, { ...CAPS, maxTotalCost: 2_000n * TRAC });
+      const t = await termsFor(accountId, buyer.address, { maxCostPerPeriod: 70n * TRAC });
       const sig = await signTerms(buyer, SS, t);
-      await fund(inference(accountId, 30n * TRAC));
-      await update(capsWith({ maxTotalCost: 500n * TRAC }));
+      await fund(await inference(accountId, 30n * TRAC));
+      await update(capsWith({ maxCostPerPeriod: 45n * TRAC }));
       expect(await CSS.assignmentNonce(accountId)).to.equal(t.nonce);
       await SS.connect(owner).assign(t, '0x', sig);
-      expect((await CSS.getAssignment(accountId, buyer.address)).maxTotalCost).to.equal(2_000n * TRAC);
-      expect((await CSS.getUsage(accountId, buyer.address)).totalCost).to.equal(0n);
+      expect((await CSS.getAssignment(accountId, buyer.address)).maxCostPerPeriod).to.equal(70n * TRAC);
+      expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
 
-      const next = await termsFor(accountId, buyer.address, { ...CAPS, maxTotalCost: 3_000n * TRAC });
+      const next = await termsFor(accountId, buyer.address, { maxCostPerPeriod: 80n * TRAC });
       const nextSig = await signTerms(buyer, SS, next);
-      await update(capsWith({ maxTotalCost: 400n * TRAC, expiresAt: next.expiresAt }));
+      await update(capsWith({ maxCostPerPeriod: 35n * TRAC, expiresAt: next.expiresAt }));
       await SS.connect(owner).advanceAssignmentNonce(accountId);
       await expect(SS.connect(owner).assign(next, '0x', nextSig))
         .to.be.revertedWithCustomError(SS, 'InvalidAssignmentNonce')
@@ -1148,8 +1047,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     for (const [committed, bps] of TIERS) {
       it(`at the ${Number(bps) / 100} % tier: the cost, the events, the record, the buckets and the usage`, async () => {
         const { accountId, createdAt } = await openAccount({ committed: committed + 11n, caps: WIDE });
-        const r = requestOf(accountId, {
-          periodSeconds: 30n * DAY,
+        const r = requestOf(accountId, await epochNow(), {
           buckets: [bucket(0, CLASS_INFERENCE, 7n * TRAC + 3n), bucket(1, CLASS_QUERY, 3n * TRAC + 1n)],
         });
         const value = 10n * TRAC + 4n;
@@ -1158,9 +1056,11 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
         const { subscriptionId, cost: returned, receipt } = await fund(r);
         expect(returned).to.equal(cost);
-        expect(subscriptionId).to.equal(await SS.subscriptionIdOf(buyer.address, r.periodId));
+        expect(subscriptionId).to.equal(await SS.subscriptionIdOf(buyer.address, r.epoch));
         const ts = await blockTime(receipt);
         const epoch = await ChronosContract.epochAtTimestamp(ts);
+        expect(epoch).to.equal(r.epoch);
+        const periodEnd = await ChronosContract.timestampForEpoch(epoch + 1n);
         const window = (ts - createdAt) / epLen;
 
         const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
@@ -1173,7 +1073,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           pf.subscriptionId,
           pf.accountId,
           pf.assignee,
-          pf.periodId,
+          pf.epoch,
           pf.sessionKey,
           pf.planDigest,
           pf.periodStart,
@@ -1185,11 +1085,11 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           subscriptionId,
           accountId,
           buyer.address,
-          r.periodId,
+          r.epoch,
           SESSION_KEY,
           r.planDigest,
           ts,
-          ts + 30n * DAY,
+          periodEnd,
           value,
           cost,
           bps,
@@ -1211,10 +1111,10 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           accountId,
           assignee: buyer.address,
           sessionKey: SESSION_KEY,
-          periodId: r.periodId,
+          periodId: ethers.toBeHex(r.epoch, 32),
           planDigest: r.planDigest,
           periodStart: ts,
-          periodEnd: ts + 30n * DAY,
+          periodEnd,
           fundedEpoch: epoch,
           fundedWindow: window,
           discountBps: bps,
@@ -1228,12 +1128,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         expect(await CSS.accountSubscriptionCount(accountId)).to.equal(1n);
         expect(await CSS.accountSubscriptionAt(accountId, 0n)).to.equal(subscriptionId);
 
-        expect(plain(await CSS.getUsage(accountId, buyer.address))).to.deep.equal({
-          totalCost: cost,
-          windowCost: cost,
-          window,
-          periods: 1n,
-        });
+        expect(plain(await CSS.getUsage(accountId, buyer.address))).to.deep.equal({ periods: 1n });
         expect(await PCS.windowSpent(accountId, window)).to.equal(cost);
         expect(await CSS.serviceSpent(accountId, window)).to.equal(cost);
 
@@ -1250,22 +1145,22 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
     it('the 1-wei floor: a value the discount rounds to 0 costs 1 wei', async () => {
       const { accountId } = await openAccount({ committed: 1_000_000n * TRAC, caps: WIDE });
-      const { cost, receipt } = await fund(inference(accountId, 3n));
+      const { cost, receipt } = await fund(await inference(accountId, 3n));
       expect(cost).to.equal(1n);
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.value, covered.cost, covered.drawnFromWindow]).to.deep.equal([3n, 1n, 1n]);
       expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(1n);
-      expect((await CSS.getUsage(accountId, buyer.address)).totalCost).to.equal(1n);
+      expect((await CSS.getSubscription(await SS.subscriptionIdOf(buyer.address, await epochNow()))).cost).to.equal(1n);
     });
 
     it('once the window is spent, the cost comes from the top-up buffer and is labelled as exactly the emission it makes', async () => {
       const { accountId } = await openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
-      const spend = await fund(inference(accountId, valueFor(B, 3_000n)));
+      const spend = await fund(await inference(accountId, valueFor(B, 3_000n)));
       expect(spend.cost).to.equal(B);
       await topUp(accountId, 2_000n * TRAC);
 
-      const r = inference(accountId, 1_000n * TRAC);
+      const r = await inference(accountId, 1_000n * TRAC, { epoch: await epochNext() });
       const { subscriptionId, cost, receipt } = await fund(r);
       expect(cost).to.equal(700n * TRAC);
       const ts = await blockTime(receipt);
@@ -1300,9 +1195,11 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     it('a draw split between the window and the top-up buffer labels each part its own way', async () => {
       const { accountId, createdAt } = await openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
-      await fund(inference(accountId, valueFor(B - 100n * TRAC, 3_000n)));
+      await fund(await inference(accountId, valueFor(B - 100n * TRAC, 3_000n)));
       await topUp(accountId, 1_000n * TRAC);
-      const { cost, receipt } = await fund(inference(accountId, valueFor(300n * TRAC, 3_000n)));
+      const { cost, receipt } = await fund(
+        await inference(accountId, valueFor(300n * TRAC, 3_000n), { epoch: await epochNext() }),
+      );
       expect(cost).to.equal(300n * TRAC);
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([100n * TRAC, 200n * TRAC]);
@@ -1326,96 +1223,67 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await cutOver();
     });
 
-    describe('the caps', () => {
+    describe('the limit', () => {
       let accountId: bigint;
 
       // No discount, so a cost equals its value.
       beforeEach(async () => {
-        ({ accountId } = await openAccount({
-          committed: SMALL,
-          caps: {
-            maxCostPerPeriod: 40n * TRAC,
-            maxInferenceCostPerPeriod: 30n * TRAC,
-            maxQueryCostPerPeriod: 20n * TRAC,
-            maxCostPerWindow: 100n * TRAC,
-            maxTotalCost: 200n * TRAC,
-          },
-        }));
+        ({ accountId } = await openAccount({ committed: SMALL, caps: { maxCostPerPeriod: 40n * TRAC } }));
       });
 
-      const both = (inferenceValue: bigint, queryValue: bigint) =>
-        requestOf(accountId, {
+      const both = async (inferenceValue: bigint, queryValue: bigint, epoch?: bigint) =>
+        requestOf(accountId, epoch ?? (await epochNow()), {
           buckets: [bucket(0, CLASS_INFERENCE, inferenceValue), bucket(1, CLASS_QUERY, queryValue)],
         });
-      const refused = (r: Request, cap: string, limit: bigint, attempted: bigint) =>
-        expect(SS.connect(buyer).fundFromConviction(r))
+
+      it('the period limit, over both classes', async () => {
+        await expect(SS.connect(buyer).fundFromConviction(await both(25n * TRAC, 16n * TRAC)))
           .to.be.revertedWithCustomError(SS, 'CapExceeded')
-          .withArgs(cap, limit, attempted);
-
-      it('the period cap', async () => {
-        await refused(both(25n * TRAC, 16n * TRAC), 'maxCostPerPeriod', 40n * TRAC, 41n * TRAC);
-        await fund(both(25n * TRAC, 15n * TRAC));
+          .withArgs('maxCostPerPeriod', 40n * TRAC, 41n * TRAC);
+        await fund(await both(25n * TRAC, 15n * TRAC));
       });
 
-      it('the inference cap', async () => {
-        await refused(inference(accountId, 31n * TRAC), 'maxInferenceCostPerPeriod', 30n * TRAC, 31n * TRAC);
-        await fund(inference(accountId, 30n * TRAC));
+      it('both service classes are always allowed, alone or together, up to the limit', async () => {
+        const query = requestOf(accountId, await epochNow(), { buckets: [bucket(0, CLASS_QUERY, 40n * TRAC)] });
+        await fund(query);
+        await fund(await inference(accountId, 40n * TRAC, { epoch: await epochNext() }));
+        await assignAs(await termsFor(accountId, buyer2.address, { maxCostPerPeriod: 40n * TRAC }), buyer2);
+        await fund(await both(1n, 40n * TRAC - 1n), buyer2);
       });
 
-      it('the query cap', async () => {
-        const query = (v: bigint) => requestOf(accountId, { buckets: [bucket(0, CLASS_QUERY, v)] });
-        await refused(query(21n * TRAC), 'maxQueryCostPerPeriod', 20n * TRAC, 21n * TRAC);
-        await fund(query(20n * TRAC));
-      });
-
-      it('the window cap', async () => {
-        await fund(inference(accountId, 30n * TRAC));
-        await fund(both(30n * TRAC, 10n * TRAC));
-        await refused(both(20n * TRAC, 11n * TRAC), 'maxCostPerWindow', 100n * TRAC, 101n * TRAC);
-        await fund(both(20n * TRAC, 10n * TRAC));
-      });
-
-      it('the total cap', async () => {
-        for (let w = 0; w < 3; w++) {
-          await fund(both(30n * TRAC, 10n * TRAC));
-          if (w < 2) await fund(both(30n * TRAC, 10n * TRAC));
-          await time.increase(epLen);
-        }
-        await refused(inference(accountId, 1n), 'maxTotalCost', 200n * TRAC, 200n * TRAC + 1n);
-      });
-
-      it('a class whose cap is 0 refuses any bucket of it, even one whose cost the discount rounds to 0', async () => {
-        const big = await openAccount({
-          committed: 1_000_000n * TRAC,
-          caps: { maxCostPerPeriod: 10n * TRAC, maxInferenceCostPerPeriod: 10n * TRAC, maxQueryCostPerPeriod: 0n },
-        });
-        // At the 75 % tier a value of 3 wei costs 0 before the floor.
-        const dust = requestOf(big.accountId, {
-          buckets: [bucket(0, CLASS_INFERENCE, TRAC), bucket(1, CLASS_QUERY, 3n)],
-        });
-        await expect(SS.connect(buyer).fundFromConviction(dust))
-          .to.be.revertedWithCustomError(SS, 'CapExceeded')
-          .withArgs('maxQueryCostPerPeriod', 0n, 0n);
-        await fund(inference(big.accountId, TRAC));
+      it('the limit is per period: every period of the same buyer key may reach it', async () => {
+        await fund(await inference(accountId, 40n * TRAC));
+        await fund(await inference(accountId, 40n * TRAC, { epoch: await epochNext() }));
+        await time.increase(epLen);
+        await fund(await inference(accountId, 40n * TRAC, { epoch: await epochNext() }));
+        expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(3n);
       });
     });
 
-    it('the period length: 0, above the assignment maximum and above the storage maximum', async () => {
-      const { accountId } = await openAccount({ committed: SMALL, caps: { maxPeriodSeconds: 7n * DAY } });
-      for (const periodSeconds of [0n, 7n * DAY + 1n]) {
-        await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC, { periodSeconds })))
+    it("the period's epoch: only the current epoch or the next one, once per buyer key", async () => {
+      const { accountId } = await openAccount({ committed: SMALL });
+      await time.increase(2n * epLen);
+      const now = await epochNow();
+      for (const epoch of [0n, now - 1n, now + 2n, now + 100n]) {
+        await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC, { epoch })), `epoch ${epoch}`)
           .to.be.revertedWithCustomError(SS, 'InvalidFundingRequest')
-          .withArgs('periodSeconds');
+          .withArgs('epoch');
       }
-      await fund(inference(accountId, TRAC, { periodSeconds: 7n * DAY }));
-      await HubContract.forwardCall(
-        await CSS.getAddress(),
-        CSS.interface.encodeFunctionData('setMaxPeriodSeconds', [3n * DAY]),
-      );
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC, { periodSeconds: 3n * DAY + 1n })))
-        .to.be.revertedWithCustomError(SS, 'InvalidFundingRequest')
-        .withArgs('periodSeconds');
-      await fund(inference(accountId, TRAC, { periodSeconds: 3n * DAY }));
+      await fund(await inference(accountId, TRAC, { epoch: now }));
+      await fund(await inference(accountId, TRAC, { epoch: now + 1n }));
+      for (const epoch of [now, now + 1n]) {
+        await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC, { epoch })))
+          .to.be.revertedWithCustomError(SS, 'PeriodAlreadyFunded')
+          .withArgs(await SS.subscriptionIdOf(buyer.address, epoch));
+      }
+    });
+
+    it('a zero session key is refused', async () => {
+      const { accountId } = await openAccount({ committed: SMALL });
+      await expect(
+        SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC, { sessionKey: ethers.ZeroAddress })),
+      ).to.be.revertedWithCustomError(SS, 'ZeroSessionKey');
+      await fund(await inference(accountId, TRAC));
     });
 
     it('the buckets: none, too many, unsorted, duplicate, zero value, unknown class, zero ask, and a sum beyond uint96', async () => {
@@ -1434,38 +1302,38 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         [[bucket(1, CLASS_INFERENCE, MAX_UINT96), bucket(2, CLASS_QUERY, 1n)], 'value'],
       ];
       for (const [buckets, reason] of cases) {
-        await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, { buckets })), reason)
+        await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, await epochNow(), { buckets })), reason)
           .to.be.revertedWithCustomError(SS, 'InvalidFundingRequest')
           .withArgs(reason);
       }
-      const { subscriptionId } = await fund(requestOf(accountId, { buckets: many(max) }));
+      const { subscriptionId } = await fund(requestOf(accountId, await epochNow(), { buckets: many(max) }));
       expect((await CSS.getSubscription(subscriptionId)).bucketCount).to.equal(BigInt(max));
       expect(await CSS.getBuckets(subscriptionId)).to.have.length(max);
     });
 
     it('NotAssigned, AssignmentRevoked, AssignmentExpired and ServiceSpendingDisabled', async () => {
       const { accountId } = await openAccount({ committed: SMALL });
-      await expect(SS.connect(stranger).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(stranger).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'NotAssigned')
         .withArgs(accountId, stranger.address);
-      await expect(SS.connect(buyer).fundFromConviction(inference(424242n, TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(424242n, TRAC)))
         .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
         .withArgs(424242n);
       await SS.connect(owner).setServiceSpending(accountId, false);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
         .withArgs(accountId);
       await SS.connect(owner).setServiceSpending(accountId, true);
       await SS.connect(owner).revoke(accountId, buyer.address);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'AssignmentRevoked')
         .withArgs(accountId, buyer.address);
 
       const short = await termsFor(accountId, buyer2.address, { expiresAt: (await latest()) + 5n * DAY });
       await assignAs(short, buyer2);
-      await fund(inference(accountId, TRAC), buyer2);
+      await fund(await inference(accountId, TRAC), buyer2);
       await time.increaseTo(short.expiresAt);
-      await expect(SS.connect(buyer2).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer2).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
         .withArgs(accountId, buyer2.address);
     });
@@ -1473,18 +1341,19 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     it('InsufficientAllowance, with no partial effect', async () => {
       const { accountId } = await openAccount({ committed: SMALL, caps: WIDE });
       await topUp(accountId, 100n * TRAC);
-      await fund(inference(accountId, 600n * TRAC));
+      await fund(await inference(accountId, 600n * TRAC));
       const before = await fundingState(accountId, buyer.address, 0n);
-      const r = inference(accountId, 501n * TRAC);
+      const next = await epochNext();
+      const r = await inference(accountId, 501n * TRAC, { epoch: next });
       const epoch = await ChronosContract.getCurrentEpoch();
       await expect(SS.connect(buyer).fundFromConviction(r))
         .to.be.revertedWithCustomError(SS, 'InsufficientAllowance')
         .withArgs(accountId, epoch, 501n * TRAC, 500n * TRAC);
       expect(await fundingState(accountId, buyer.address, 0n)).to.deep.equal(before);
-      expect(await CSS.subscriptionExists(await SS.subscriptionIdOf(buyer.address, r.periodId))).to.equal(false);
+      expect(await CSS.subscriptionExists(await SS.subscriptionIdOf(buyer.address, r.epoch))).to.equal(false);
 
       // Exactly what is left: the window, then the buffer.
-      const { receipt } = await fund(inference(accountId, 500n * TRAC));
+      const { receipt } = await fund(await inference(accountId, 500n * TRAC, { epoch: next }));
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([400n * TRAC, 100n * TRAC]);
     });
@@ -1494,7 +1363,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const acct = await PCS.getAccount(accountId);
       expect((await CSS.getAssignment(accountId, buyer.address)).expiresAt).to.be.greaterThan(acct.expiresAtTimestamp);
       await time.increaseTo(acct.expiresAtTimestamp);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'AccountExpired')
         .withArgs(accountId, acct.expiresAtEpoch);
     });
@@ -1502,11 +1371,11 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     it('a wired treasury pauses funding with ServiceFundingPausedTreasuryWired', async () => {
       const { accountId } = await openAccount({ committed: SMALL });
       await Params.setProtocolTreasury(treasury.address);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'ServiceFundingPausedTreasuryWired')
         .withArgs(treasury.address);
       await Params.setProtocolTreasury(ethers.ZeroAddress);
-      await fund(inference(accountId, TRAC));
+      await fund(await inference(accountId, TRAC));
     });
 
     it('coverServiceCost called from any address but ServiceSubscriptions reverts OnlyServiceSubscriptions', async () => {
@@ -1527,12 +1396,12 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await HubContract.setContractAddress('PublishingConviction', await skew.getAddress());
 
       // The stand-in charges the undiscounted value.
-      await expect(SS.connect(buyer).fundFromConviction(inference(discounted.accountId, 10n * TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(discounted.accountId, 10n * TRAC)))
         .to.be.revertedWithCustomError(SS, 'DrawMismatch')
         .withArgs(7n * TRAC, 10n * TRAC, 0n, 0n);
       // With no discount the cost matches, and a wrong window is refused.
       await skew.setWindow(5n);
-      await expect(SS.connect(buyer).fundFromConviction(inference(plain.accountId, 10n * TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(plain.accountId, 10n * TRAC)))
         .to.be.revertedWithCustomError(SS, 'DrawMismatch')
         .withArgs(10n * TRAC, 10n * TRAC, 0n, 5n);
     });
@@ -1554,12 +1423,12 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await SS.baseLabelCapacity(accountId)).to.equal(5n * TRAC);
 
       const before = await fundingState(accountId, buyer.address, 0n);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, 8n * TRAC)))
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 8n * TRAC)))
         .to.be.revertedWithCustomError(SS, 'LabelCapacityExceeded')
         .withArgs(accountId, 3n * TRAC);
       expect(await fundingState(accountId, buyer.address, 0n)).to.deep.equal(before);
 
-      await fund(inference(accountId, 5n * TRAC));
+      await fund(await inference(accountId, 5n * TRAC));
       expect(await SS.baseLabelCapacity(accountId)).to.equal(0n);
       expect(await CSS.baseLabel(accountId, widest)).to.equal(S.get(widest)!);
     });
@@ -1574,17 +1443,22 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await cutOver();
     });
 
-    it('every period is recorded with periodStart = the block time, so its record reads as existing', async () => {
+    it('every period starts at the block time during its epoch, or at its epoch start ahead of it, so its record reads as existing', async () => {
       const { accountId } = await openAccount({ committed: SMALL });
       const ids: string[] = [];
       for (let i = 0; i < 3; i++) {
-        const { subscriptionId, receipt } = await fund(inference(accountId, TRAC));
+        // The current epoch first, then the next one, then, an epoch later, the next one again.
+        if (i === 2) await time.increase(epLen);
+        const epoch = i === 0 ? await epochNow() : await epochNext();
+        const { subscriptionId, receipt } = await fund(await inference(accountId, TRAC, { epoch }));
         const s = await CSS.getSubscription(subscriptionId);
-        expect(s.periodStart).to.equal(await blockTime(receipt));
+        const ts = await blockTime(receipt);
+        const epochStart = await ChronosContract.timestampForEpoch(epoch);
+        expect(s.periodStart).to.equal(ts > epochStart ? ts : epochStart);
+        expect(s.periodEnd).to.equal(await ChronosContract.timestampForEpoch(epoch + 1n));
         expect(s.periodStart).to.be.greaterThan(0n);
         expect(await CSS.subscriptionExists(subscriptionId)).to.equal(true);
         ids.push(subscriptionId);
-        await time.increase(epLen / 2n);
       }
       expect(await CSS.accountSubscriptionCount(accountId)).to.equal(3n);
       for (let i = 0; i < ids.length; i++) {
@@ -1592,9 +1466,9 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       }
     });
 
-    it('a period id that already holds a record reverts PeriodAlreadyFunded and changes nothing; another buyer key may use it', async () => {
+    it('a second funding for an epoch reverts PeriodAlreadyFunded and changes nothing; another buyer key may fund that epoch', async () => {
       const { accountId } = await openAccount({ committed: SMALL });
-      const r = requestOf(accountId, {
+      const r = requestOf(accountId, await epochNow(), {
         buckets: [bucket(0, CLASS_INFERENCE, 2n * TRAC), bucket(1, CLASS_QUERY, TRAC)],
       });
       const { subscriptionId } = await fund(r);
@@ -1603,7 +1477,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expect(SS.connect(buyer).fundFromConviction(r))
         .to.be.revertedWithCustomError(SS, 'PeriodAlreadyFunded')
         .withArgs(subscriptionId);
-      // A different plan under the same period id is the same period.
+      // A different plan for the same epoch is the same period.
       await expect(SS.connect(buyer).fundFromConviction({ ...r, buckets: [bucket(0, CLASS_INFERENCE, TRAC)] }))
         .to.be.revertedWithCustomError(SS, 'PeriodAlreadyFunded')
         .withArgs(subscriptionId);
@@ -1721,14 +1595,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await eventsOf(p1, PC, 'CostCovered')).to.have.length(1);
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(100n * TRAC);
 
-      await fund(inference(accountId, 300n * TRAC));
+      await fund(await inference(accountId, 300n * TRAC));
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(400n * TRAC);
       expect(await CSS.serviceSpent(accountId, 0n)).to.equal(300n * TRAC);
 
       await publish(200n * TRAC);
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(600n * TRAC);
 
-      await fund(inference(accountId, B - 600n * TRAC));
+      await fund(await inference(accountId, B - 600n * TRAC, { epoch: await epochNext() }));
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(B);
       expect(await CSS.serviceSpent(accountId, 0n)).to.equal(B - 300n * TRAC);
 
@@ -1739,7 +1613,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await eventsOf(p3, PC, 'CostCovered')).to.have.length(0);
       expect(balance + 50n * TRAC - (await Token.balanceOf(agent.address))).to.equal(50n * TRAC);
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(B);
-      await expect(SS.connect(buyer).fundFromConviction(inference(accountId, TRAC)))
+      await assignAs(await termsFor(accountId, buyer2.address, WIDE), buyer2);
+      await expect(SS.connect(buyer2).fundFromConviction(await inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(SS, 'InsufficientAllowance')
         .withArgs(accountId, await ChronosContract.getCurrentEpoch(), TRAC, 0n);
     });
@@ -1766,7 +1641,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const remainder = await ES.accumulatedRemainder(STAKER_SHARD_ID);
       const vault = await Token.balanceOf(await Vault.getAddress());
 
-      const { receipt } = await fund(inference(accountId, 1_000n * TRAC));
+      const { receipt } = await fund(await inference(accountId, 1_000n * TRAC));
       expect(await tokenLogs(receipt)).to.have.length(0);
       expect(await creditedRanges(receipt)).to.have.length(0);
       expect(await Token.balanceOf(await Vault.getAddress())).to.equal(vault);
@@ -1781,7 +1656,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
     it("a top-up funding moves no token and adds to the pool exactly the overflow's ranges", async () => {
       const { accountId, createdAt } = await openAccount({ caps: WIDE });
-      await fund(inference(accountId, valueFor(COMMITTED / lock, 3_000n)));
+      await fund(await inference(accountId, valueFor(COMMITTED / lock, 3_000n)));
       await topUp(accountId, 1_000n * TRAC);
       // The shard's division remainder carry is 0, so each epoch gets its range's exact share.
       expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(0n);
@@ -1789,7 +1664,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const pool = await poolSnapshot(first - 1n, last + 1n);
       const vault = await Token.balanceOf(await Vault.getAddress());
 
-      const { cost, receipt } = await fund(inference(accountId, 1_000n * TRAC));
+      const { cost, receipt } = await fund(await inference(accountId, 1_000n * TRAC, { epoch: await epochNext() }));
       expect(await tokenLogs(receipt)).to.have.length(0);
       expect(await Token.balanceOf(await Vault.getAddress())).to.equal(vault);
 
@@ -1835,7 +1710,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const { accountId, createdAt } = await openAccount({ committed: SMALL, caps: WIDE });
       const B = SMALL / lock;
       await topUp(accountId, 70n * TRAC);
-      await fund(inference(accountId, 400n * TRAC));
+      await fund(await inference(accountId, 400n * TRAC));
       const createdEpoch = await ChronosContract.epochAtTimestamp(createdAt);
       const createdOffset = createdAt - (await ChronosContract.timestampForEpoch(createdEpoch));
 
@@ -1849,7 +1724,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await SS.currentWindowAllowance(accountId)).to.deep.equal([1n, B, 70n * TRAC, false]);
       expect(await PC.getRemainingAllowance(accountId, createdEpoch + 1n)).to.equal(B - 400n * TRAC + 70n * TRAC);
       // A funding draws on window 1, as currentWindowAllowance said.
-      const { receipt } = await fund(inference(accountId, 10n * TRAC));
+      const { receipt } = await fund(await inference(accountId, 10n * TRAC));
       expect((await eventsOf(receipt, PC, 'ServiceCostCovered'))[0].window).to.equal(1n);
 
       // After expiry the window is capped at the lock, and nothing is left of the base allowance.
@@ -1872,7 +1747,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       // Nothing is labelled yet, and the span starts after the current epoch.
       expect(await ChronosContract.getCurrentEpoch()).to.be.lessThan(first);
       expect(await SS.baseLabelCapacity(accountId)).to.equal(COMMITTED);
-      const { cost } = await fund(inference(accountId, 2_000n * TRAC));
+      const { cost } = await fund(await inference(accountId, 2_000n * TRAC));
       expect(await SS.baseLabelCapacity(accountId)).to.equal(COMMITTED - cost);
 
       // Later, the epochs before the current one no longer count.

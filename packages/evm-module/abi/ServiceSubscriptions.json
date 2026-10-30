@@ -61,6 +61,17 @@
   {
     "inputs": [
       {
+        "internalType": "bytes32",
+        "name": "bucketId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "BucketTermsChanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "string",
         "name": "cap",
         "type": "string"
@@ -287,9 +298,73 @@
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "caller",
+        "type": "address"
+      }
+    ],
+    "name": "NotPeriodBuyer",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
       }
     ],
     "name": "PeriodAlreadyFunded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint40",
+        "name": "periodEnd",
+        "type": "uint40"
+      }
+    ],
+    "name": "PeriodEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "PeriodNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint40",
+        "name": "activationEpoch",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint256",
+        "name": "currentEpoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "QueryInferenceNotActive",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "QueryInferencePaused",
     "type": "error"
   },
   {
@@ -374,6 +449,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "WrongFundingSource",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
@@ -386,6 +477,11 @@
   {
     "inputs": [],
     "name": "ZeroServiceValue",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroSessionKey",
     "type": "error"
   },
   {
@@ -430,36 +526,6 @@
       },
       {
         "indexed": false,
-        "internalType": "uint96",
-        "name": "maxInferenceCostPerPeriod",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxQueryCostPerPeriod",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxCostPerWindow",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxTotalCost",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint32",
-        "name": "maxPeriodSeconds",
-        "type": "uint32"
-      },
-      {
-        "indexed": false,
         "internalType": "uint40",
         "name": "expiresAt",
         "type": "uint40"
@@ -491,9 +557,9 @@
       },
       {
         "indexed": false,
-        "internalType": "bytes32",
-        "name": "periodId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
       },
       {
         "indexed": false,
@@ -561,12 +627,83 @@
           }
         ],
         "indexed": false,
-        "internalType": "struct ServiceSubscriptions.BucketInput[]",
+        "internalType": "struct IServicePeriodFunding.BucketInput[]",
         "name": "buckets",
         "type": "tuple[]"
       }
     ],
     "name": "PeriodFunded",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "indexed": false,
+        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "name": "additions",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "PeriodToppedUp",
     "type": "event"
   },
   {
@@ -595,36 +732,6 @@
         "internalType": "uint96",
         "name": "maxCostPerPeriod",
         "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxInferenceCostPerPeriod",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxQueryCostPerPeriod",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxCostPerWindow",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxTotalCost",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint32",
-        "name": "maxPeriodSeconds",
-        "type": "uint32"
       },
       {
         "indexed": false,
@@ -780,31 +887,6 @@
             "internalType": "uint96",
             "name": "maxCostPerPeriod",
             "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxInferenceCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxQueryCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerWindow",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxTotalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "maxPeriodSeconds",
-            "type": "uint32"
           },
           {
             "internalType": "uint40",
@@ -963,19 +1045,14 @@
             "type": "uint256"
           },
           {
-            "internalType": "bytes32",
-            "name": "periodId",
-            "type": "bytes32"
+            "internalType": "uint256",
+            "name": "epoch",
+            "type": "uint256"
           },
           {
             "internalType": "address",
             "name": "sessionKey",
             "type": "address"
-          },
-          {
-            "internalType": "uint32",
-            "name": "periodSeconds",
-            "type": "uint32"
           },
           {
             "internalType": "bytes32",
@@ -1005,7 +1082,7 @@
                 "type": "uint96"
               }
             ],
-            "internalType": "struct ServiceSubscriptions.BucketInput[]",
+            "internalType": "struct IServicePeriodFunding.BucketInput[]",
             "name": "buckets",
             "type": "tuple[]"
           }
@@ -1049,31 +1126,6 @@
             "internalType": "uint96",
             "name": "maxCostPerPeriod",
             "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxInferenceCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxQueryCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerWindow",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxTotalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "maxPeriodSeconds",
-            "type": "uint32"
           },
           {
             "internalType": "uint40",
@@ -1191,6 +1243,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "queryInferenceStorage",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",
@@ -1284,9 +1349,9 @@
         "type": "address"
       },
       {
-        "internalType": "bytes32",
-        "name": "periodId",
-        "type": "bytes32"
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
       }
     ],
     "name": "subscriptionIdOf",
@@ -1298,6 +1363,57 @@
       }
     ],
     "stateMutability": "pure",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "name": "additions",
+        "type": "tuple[]"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "planDigest",
+        "type": "bytes32"
+      }
+    ],
+    "name": "topUpFromConviction",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1318,31 +1434,6 @@
             "internalType": "uint96",
             "name": "maxCostPerPeriod",
             "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxInferenceCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxQueryCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerWindow",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "maxTotalCost",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint32",
-            "name": "maxPeriodSeconds",
-            "type": "uint32"
           },
           {
             "internalType": "uint40",
