@@ -6252,6 +6252,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const runSync = async (
       metaFetcher: SwmMetaFetcher,
     ): Promise<SharedMemorySyncExecution> => {
+      // A fresh pull answers a change notice. What this transfer kept from an
+      // earlier round may predate the change, so the round reads from the start.
+      if (options?.freshSnapshot) {
+        for (const { contextGraphId } of selectedPublicTargets) metaFetcher.strategy.release(contextGraphId);
+      }
       const syncPublicContextGraph = async (
         contextGraphId: string,
         remainingContextGraphs: number,

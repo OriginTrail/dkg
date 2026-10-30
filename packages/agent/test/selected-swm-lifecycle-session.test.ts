@@ -567,6 +567,92 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     }
   });
 
+  it('a fresh pull drops a metadata prefix kept from before the change notice', async () => {
+    const publicCg = 'ordinary-fresh-pull-after-prefix';
+    const manifest = snapshotManifest(publicCg, 2);
+    const checkpointsAtFetch: number[] = [];
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      metaPages: [
+        { quads: manifest.meta.slice(0, 1), resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+        { quads: manifest.meta, resumedFromOffset: 0, nextOffset: manifest.meta.length, completed: true, timedOut: false },
+      ],
+      onMetaFetch: () => { checkpointsAtFetch.push(harness.agent.syncCheckpoints.size); },
+    });
+    const plan = { targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }] };
+    try {
+      const first = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+      expect(first.metadataContinuationYields).toBe(1);
+      expect(harness.agent.syncCheckpoints.size).toBe(1);
+
+      const fresh = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        sharedMemorySyncPlan: plan, freshSnapshot: true,
+      });
+      // The responder cursor of the kept prefix is gone before the page is asked for.
+      expect(checkpointsAtFetch).toEqual([0, 0]);
+      expect(fresh.swmCoverage).toMatchObject({ snapshotsResolved: 2, snapshotsTotal: 2 });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('a fresh pull reads the manifest again when a completed one is kept for its unfinished walk', async () => {
+    const publicCg = 'ordinary-fresh-pull-after-walk';
+    const manifest = snapshotManifest(publicCg, 2);
+    const payload = (ref: string) => manifest.payloadByRef.get(ref) ?? [];
+    let served = false;
+    const page = (quads: typeof manifest.meta) => ({
+      quads, resumedFromOffset: 0, nextOffset: quads.length, completed: true, timedOut: false,
+    });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: { meta: manifest.meta, payloadByRef: new Map() },
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      // The peer's manifest grows by the asset its change notice announces.
+      metaPages: [page(manifest.meta.slice(0, manifest.meta.length / 2)), page(manifest.meta)],
+      snapshotAnswer: (ref) => (served ? payload(ref) : []),
+    });
+    const plan = { targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }] };
+    try {
+      const first = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+      expect(first.swmCoverage).toMatchObject({ snapshotsResolved: 0, snapshotsTotal: 1 });
+      expect(harness.probes.metaFetches()).toBe(1);
+
+      served = true;
+      const fresh = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        sharedMemorySyncPlan: plan, freshSnapshot: true,
+      });
+      expect(harness.probes.metaFetches()).toBe(2);
+      expect(fresh.swmCoverage).toMatchObject({ snapshotsResolved: 2, snapshotsTotal: 2 });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('an ordinary round that is not fresh goes on with the prefix it kept', async () => {
+    const publicCg = 'ordinary-not-fresh-keeps-prefix';
+    const manifest = snapshotManifest(publicCg, 2);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      metaPages: [
+        { quads: manifest.meta.slice(0, 1), resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+        { quads: manifest.meta.slice(1), resumedFromOffset: 1, nextOffset: manifest.meta.length, completed: true, timedOut: false },
+      ],
+    });
+    const plan = { targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }] };
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+      const next = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+      expect(next.swmCoverage).toMatchObject({ snapshotsResolved: 2, snapshotsTotal: 2 });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('shares one row of retention across ordinary and selected owners until the ordinary prefix is released', async () => {
     const publicCg = 'ordinary-selected-global-retention';
     const manifest = snapshotManifest(publicCg, 1);
