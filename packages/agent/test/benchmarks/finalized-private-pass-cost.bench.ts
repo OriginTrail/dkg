@@ -6,9 +6,10 @@
  *
  *   pnpm --filter @origintrail-official/dkg-agent run benchmark:private-placement-pass
  *
- * For each backlog size in PRIVATE_PLACEMENT_PASS_BENCH_SIZES (default 3534,10602) it measures the
- * first pass of a started supervisor, which decodes every marker and parks them all on the one
- * attempt the full catalog refuses. Then, PRIVATE_PLACEMENT_PASS_BENCH_PASSES times (default 10),
+ * For each backlog size in PRIVATE_PLACEMENT_PASS_BENCH_SIZES (default 3534,10602) it fills a store
+ * and opens it again, as a restart does, so nothing is decoded yet. It then measures the first pass
+ * of a started supervisor, which decodes every marker and parks them all on the one attempt the
+ * full catalog refuses. Then, PRIVATE_PLACEMENT_PASS_BENCH_PASSES times (default 10),
  * a pass that a start asks for and one that a placement request for a parked marker asks for, with
  * every marker parked:
  *
@@ -174,16 +175,19 @@ describe('finalized-private placement pass over a parked backlog', () => {
   for (const size of SIZES) {
     it(`measures passes over ${size} parked markers`, async () => {
       const dataDir = mkdtempSync(join(tmpdir(), 'private-placement-pass-bench-'));
-      const inventory = await openInventoryV1(dataDir);
+      let inventory = await openInventoryV1(dataDir);
       let owner: Rfc64SwmCatalogProjectionOwnerV1 | undefined;
       try {
-        const store = createRfc64FinalizedPrivatePlacementRepairStoreV1(inventory);
+        const filling = createRfc64FinalizedPrivatePlacementRepairStoreV1(inventory);
         const v2 = Math.round((size * 128) / 3534);
         const fillStartedAt = performance.now();
-        for (let index = 0; index < size - v2; index += 1) await store.put(v1Marker(index + 1));
-        for (let index = 0; index < v2; index += 1) await store.put(await v2Marker(1_000_000 + index));
+        for (let index = 0; index < size - v2; index += 1) await filling.put(v1Marker(index + 1));
+        for (let index = 0; index < v2; index += 1) await filling.put(await v2Marker(1_000_000 + index));
         const fillMs = performance.now() - fillStartedAt;
-        expect(store.list()).toHaveLength(size);
+        // A listing here would decode every marker before the first pass is measured.
+        inventory.close();
+        inventory = await openInventoryV1(dataDir);
+        const store = createRfc64FinalizedPrivatePlacementRepairStoreV1(inventory);
 
         const calls: Calls = { attempts: 0, heads: 0, failureReads: 0, failureWrites: 0, authority: 0 };
         owner = supervisor(store, calls);
