@@ -132,6 +132,7 @@ export default defineConfig({
           'test/context-graph-subscribe-readiness.test.ts',
           'test/approved-member-empty-graph-first-write.test.ts',
           'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-empty-vm-repeat.test.ts',
           'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
