@@ -35,9 +35,6 @@ interface ContextGraphListAuthorization {
 
 interface ContextGraphListAuthorizationSession extends ContextGraphListAuthorization {
   cache?: ContextGraphListCacheEntry;
-  inFlight?: {
-    readonly request: Promise<ContextGraphPageWalkResult>;
-  };
 }
 
 let currentAuthorizationSession: ContextGraphListAuthorizationSession | undefined;
@@ -162,21 +159,16 @@ function isSnapshotChanged(error: unknown): boolean {
     && response?.code === CONTEXT_GRAPH_LIST_ERROR_CODES.snapshotChanged;
 }
 
-export async function fetchContextGraphs(): Promise<ContextGraphListView> {
+/**
+ * One walk per call. `fetchContextGraphs` (query-api.ts) owns sharing a walk
+ * between callers and retiring it when a mutation or a retry invalidates it.
+ */
+export async function loadContextGraphList(): Promise<ContextGraphListView> {
   for (let attempt = 0; attempt < CONTEXT_GRAPH_LIST_MAX_RESTARTS; attempt += 1) {
-    const authorization = captureAuthorization();
-    const session = authorization;
-    const cached = session.cache;
-    let inFlight = session.inFlight;
-    if (!inFlight) {
-      inFlight = {
-        request: fetchContextGraphPages(authorization, cached),
-      };
-      session.inFlight = inFlight;
-    }
+    const session = captureAuthorization();
     try {
-      const result = await inFlight.request;
-      if (!authorizationIsCurrent(authorization)) continue;
+      const result = await fetchContextGraphPages(session, session.cache);
+      if (!authorizationIsCurrent(session)) continue;
       if (result.kind === 'not-modified') {
         return cloneView(result.view);
       }
@@ -191,10 +183,6 @@ export async function fetchContextGraphs(): Promise<ContextGraphListView> {
       return cloneView(result.view);
     } catch (error) {
       if (!(error instanceof AuthorizationChangedError) && !isSnapshotChanged(error)) throw error;
-    } finally {
-      if (session.inFlight === inFlight) {
-        session.inFlight = undefined;
-      }
     }
   }
   throw new Error('Context-graph list changed repeatedly while loading');

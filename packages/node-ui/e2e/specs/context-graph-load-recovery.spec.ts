@@ -5,7 +5,7 @@ import { PRIMARY_CG } from '../helpers/real-node.js';
 // response, then remove it and verify that Retry restores actual seeded data.
 for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
   test(`context graph inventory recovers from unavailable ${endpoint}`, async ({ page, shell, dashboard }) => {
-    const route = `**${endpoint}`;
+    const route = `**${endpoint}**`;
     await page.route(route, intercepted => intercepted.fulfill({
       status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Temporary test outage' }),
     }));

@@ -17,7 +17,6 @@ import {
   requestLongMutation,
 } from './http.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
-import { fetchContextGraphs } from './context-graph-api.js';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
 // keep working (barrel), and domain clients from their extracted modules.

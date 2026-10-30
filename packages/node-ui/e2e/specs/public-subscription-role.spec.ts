@@ -17,7 +17,7 @@ test('a public subscriber is browseable without claiming agent membership', asyn
   await page.route('**/api/**', route => route.continue({
     headers: { ...route.request().headers(), authorization: `Bearer ${token}` },
   }));
-  const listResponse = page.waitForResponse(response => response.url().endsWith('/api/context-graph/list') && response.ok());
+  const listResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/context-graph/list' && response.ok());
   await page.reload();
   const list = await (await listResponse).json();
   const graph = list.contextGraphs.find((cg: { id: string }) => cg.id === PRIMARY_CG);

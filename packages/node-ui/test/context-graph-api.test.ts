@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { fetchContextGraphs } from '../src/ui/context-graph-api.js';
+import { loadContextGraphList as fetchContextGraphs } from '../src/ui/context-graph-api.js';
 import type { ContextGraphListSummaryRow } from '@origintrail-official/dkg-core/context-graph-list-wire';
 
 let server: Server;
@@ -192,9 +192,9 @@ describe('context graph API', () => {
     expect(requestLog).toHaveLength(2);
   });
 
-  it('coalesces concurrent context-graph walks and returns independent arrays', async () => {
+  it('gives each call its own walk and its own arrays: the read cache above shares them', async () => {
     contextGraphPagination = {
-      etag: '"context-graphs-coalesced"',
+      etag: '"context-graphs-independent"',
       pages: { '': { contextGraphs: [contextGraphSummary('cg-shared')] } },
     };
 
@@ -202,7 +202,7 @@ describe('context graph API', () => {
     const second = fetchContextGraphs();
     const [firstResult, secondResult] = await Promise.all([first, second]);
 
-    expect(requestLog).toHaveLength(1);
+    expect(requestLog).toHaveLength(2);
     expect(firstResult).toEqual(secondResult);
     expect(firstResult.contextGraphs).not.toBe(secondResult.contextGraphs);
   });
@@ -405,6 +405,11 @@ describe('context graph API', () => {
         delayMs: 120,
       },
     );
+    // A walk that lost its identity starts over under the current one.
+    contextGraphPagination = {
+      etag: '"token-a-fresh"',
+      pages: { '': { contextGraphs: [contextGraphSummary('fresh-a')] } },
+    };
 
     const oldA = fetchContextGraphs();
     while (requestLog.length < 1) await new Promise((resolveRequest) => setTimeout(resolveRequest, 0));
@@ -419,11 +424,11 @@ describe('context graph API', () => {
       { contextGraphs: [contextGraphSummary('fresh-a')] },
       { contextGraphs: [contextGraphSummary('fresh-a')] },
     ]);
-    expect(requestLog).toHaveLength(3);
-    expect(requestLog.map((entry) => entry.headers.authorization)).toEqual([
+    expect(requestLog.slice(0, 3).map((entry) => entry.headers.authorization)).toEqual([
       'Bearer token-a',
       'Bearer token-b',
       'Bearer token-a',
     ]);
+    expect(requestLog.slice(3).every((entry) => entry.headers.authorization === 'Bearer token-a')).toBe(true);
   });
 });
