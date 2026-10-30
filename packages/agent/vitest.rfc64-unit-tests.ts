@@ -127,6 +127,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-head-replay-peers.test.ts",
   "test/rfc64-unregistered-seed-fetch-agent.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
+  "test/catalog-replay-store-pressure.test.ts",
   "test/rfc64-catalog-replay-staged-corroboration.test.ts",
   "test/rfc64-catalog-replay-physical-bounds.test.ts",
   "test/rfc64-catalog-replay-budget-observation.test.ts",

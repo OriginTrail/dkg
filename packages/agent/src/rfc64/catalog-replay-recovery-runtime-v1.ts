@@ -1,6 +1,6 @@
 import type { Rfc64CatalogReplayExecutionOwnerV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerFenceLeaseV1, Rfc64CatalogReplayPeerReservationV1, Rfc64CatalogReplayRecoveryResultV1 } from './catalog-replay-types-v1.js';
 export type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerFenceLeaseV1, Rfc64CatalogReplayPeerReservationV1, Rfc64CatalogReplayRecoveryResultV1 } from './catalog-replay-types-v1.js';
-import { CatalogReplayChunkV1, type CatalogReplayPeerWorkV1 } from './catalog-replay-peer-work-v1.js';
+import { CatalogReplayChunkV1, Rfc64CatalogReplayPeerAdmissionV1, type CatalogReplayPeerWorkV1 } from './catalog-replay-peer-work-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { FullReplayPassV1, ReplayRunEvidenceV1, resolveReplayRunSettlementV1, type ReplayRunSettlementV1, recordReplayPeerOutcomeV1, emptyReplayTargetsV1, mergeReplayTargetsV1, type BoundedReplayTargetsV1 } from './catalog-replay-evidence-v1.js';
 import { Rfc64CatalogReplayPeerWorklistV1 } from './catalog-replay-peer-worklist-v1.js';
@@ -210,6 +210,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   #nextPeerGeneration = 0;
   readonly #byContextGraph = new Map<string, ReplayProgressV1<Target>>();
   readonly #ports: Rfc64CatalogReplayRecoveryPortsV1<Target>;
+  readonly #peerRequests = new Rfc64CatalogReplayPeerAdmissionV1();
   #revision = 0;
   constructor(ports: Rfc64CatalogReplayRecoveryPortsV1<Target>) {
     this.#ports = ports;
@@ -393,7 +394,15 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
             for (let attempt = 0; attempt < 2; attempt += 1) {
               try {
                 owner.signal?.throwIfAborted();
-                const completion = await this.#ports.requestPeer(contextGraphId, peerId, owner.signal);
+                const completion = await this.#peerRequests.run(owner.signal, async () => {
+                  // Admission belongs to the captured policy/progress and run.
+                  // Retirement while queued cannot authorize a fresh provider read.
+                  if (this.#byContextGraph.get(contextGraphId) !== progress
+                    || progress.run.kind !== 'running' || progress.run.value !== run) {
+                    return { status: 'local-unavailable' } as const;
+                  }
+                  return this.#ports.requestPeer(contextGraphId, peerId, owner.signal);
+                });
                 owner.signal?.throwIfAborted();
                 if (completion.status === 'local-unavailable') {
                   // A local fault is not provider evidence: it may neither
