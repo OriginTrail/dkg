@@ -5,7 +5,7 @@ import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
 import { CatalogRepairConditionErrorV1, CatalogRepairLaneInactiveErrorV1, catalogRepairDiagnosticV1 } from '../rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1, Rfc64PrivatePlacementFailureWriteV1 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
 import { resetPrivatePlacementFailureStateV1, summarizePrivatePlacementFailuresV1, type PrivatePlacementFailureStateV1 } from '../rfc64/private-placement-failure-state-v1.js';
-import { finalizedPlacementAuthorityRevisionV1, finalizedPlacementDecisionInputV1, readFinalizedPlacementAuthorityV1, resolveFinalizedPlacementDecisionV1, type FinalizedPlacementDecisionV1, type FinalizedPlacementAuthorityV1 } from './finalized-placement-decision.js';
+import { finalizedPlacementAuthorityRevisionV1, readFinalizedPlacementAuthorityV1, resolveFinalizedPlacementDecisionV1, type FinalizedPlacementDecisionV1, type FinalizedPlacementAuthorityV1 } from './finalized-placement-decision.js';
 import { FinalizedPrivateRepairRetryV1 } from './finalized-private-repair-retry.js';
 import { finalizedPrivateRepairKeyV1 } from './finalized-private-placement-key.js';
 import type { CatalogPlacementTimingV1, CatalogPlacementAttemptV1, CatalogPlacementWaiterObserverV1, FinalizedPrivatePlacementQueueStatusV1 } from './catalog-placement-timing.js';
@@ -24,8 +24,8 @@ interface RetryEntry {
   readonly retry: FinalizedPrivateRepairRetryV1;
   failureHistoryRead: boolean;
   attempts: number;
-  /** GH#3134 — the decision under the available authority last read, and what it read of it. */
-  decided?: Readonly<{ input: string; decision: MarkerDecisionV1 }>;
+  /** GH#3134 — the decision under the available authority last read, and its lane revision. */
+  decided?: Readonly<{ revision: string; decision: MarkerDecisionV1 }>;
 }
 interface ResetPlan {
   readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
@@ -43,8 +43,6 @@ interface GraphRead {
   readonly authority: FinalizedPlacementAuthorityV1;
   /** The lane revision; undefined while the authority is unavailable. */
   readonly revision: string | undefined;
-  /** What a placement decision reads of the authority; undefined while it is unavailable. */
-  readonly decisionInput: string | undefined;
   /** An unavailable authority over a pending reset: the lane's waiters are released already. */
   blocked: boolean;
 }
@@ -274,18 +272,18 @@ export class FinalizedPrivatePlacementOwnerV1 {
     let read = pass.graphs.get(contextGraphId);
     if (read === undefined) {
       const authority = this.#readAuthority(contextGraphId);
-      read = { authority, revision: laneRevisionV1(authority), decisionInput: finalizedPlacementDecisionInputV1(authority), blocked: false };
+      read = { authority, revision: laneRevisionV1(authority), blocked: false };
       pass.graphs.set(contextGraphId, read);
     }
     return read;
   }
 
-  /** The marker's decision under `read`; one made under an available authority is kept while it reads the same. */
+  /** The marker's decision under `read`; one made under an available authority is kept while the lane revision stays. */
   #decision(entry: RetryEntry, repair: Rfc64FinalizedPrivatePlacementRepairV1, read: GraphRead): MarkerDecisionV1 {
-    const input = read.decisionInput;
-    if (input !== undefined && entry.decided?.input === input) return entry.decided.decision;
+    const { revision } = read;
+    if (revision !== undefined && entry.decided?.revision === revision) return entry.decided.decision;
     const decision = resolveFinalizedPlacementDecisionV1(repair, () => read.authority);
-    entry.decided = input === undefined ? undefined : Object.freeze({ input, decision });
+    entry.decided = revision === undefined ? undefined : Object.freeze({ revision, decision });
     return decision;
   }
 

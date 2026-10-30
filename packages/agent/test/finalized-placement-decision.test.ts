@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
-import { finalizedPlacementDecisionInputV1, resolveFinalizedPlacementDecisionV1, type PlacementLaneV1 } from '../src/internal/finalized-placement-decision.js';
+import { finalizedPlacementAuthorityRevisionV1, resolveFinalizedPlacementDecisionV1, type PlacementLaneV1 } from '../src/internal/finalized-placement-decision.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import { authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 import { privateRepair } from './support/catalog-repair-backoff-fixture.js';
@@ -30,7 +30,7 @@ describe('canonical placement decision', () => {
       expect(decision.capacityScope).toEqual({ ...repair.inventoryScope, bucketCount: '1' });
     });
 
-  it('keeps a marker decision only on what the decision reads of the lane', async () => {
+  it('names in the lane revision everything the decision reads of the lane', async () => {
     const legacy = privateRepair();
     if (legacy.version !== 1) throw new Error('expected pinned legacy fixture');
     const seal = await authorSealV1(102n);
@@ -40,8 +40,9 @@ describe('canonical placement decision', () => {
       assertionVersion: seal.assertionVersion,
       sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal), seal,
     };
+    const { authorAddress: _author, ...scopeBase } = legacy.inventoryScope;
     const lanes = ([['private', true], ['private', false], ['public', false]] as const)
-      .map(([kind, acceptsFinalizedVmRepair]) => ({ kind, acceptsFinalizedVmRepair, scopeBase: legacy.inventoryScope }));
+      .map(([kind, acceptsFinalizedVmRepair]) => ({ kind, acceptsFinalizedVmRepair, scopeBase }));
     const read = new Set<string | symbol>();
     for (const lane of lanes) {
       const watched = new Proxy(lane, { get(target, field, receiver) { read.add(field); return Reflect.get(target, field, receiver); } });
@@ -49,13 +50,18 @@ describe('canonical placement decision', () => {
         resolveFinalizedPlacementDecisionV1(repair, () => ({ status: 'active', lane: watched as PlacementLaneV1 }));
       }
     }
-    // A field added here belongs in finalizedPlacementDecisionInputV1 as well, or kept decisions go stale.
+    // A field added here belongs in the revision as well, or a marker keeps a stale decision.
     expect([...read].sort()).toEqual(['acceptsFinalizedVmRepair', 'kind', 'scopeBase']);
-    const inputs = lanes.map((lane) => finalizedPlacementDecisionInputV1({ status: 'active', lane: lane as PlacementLaneV1 }));
-    expect(new Set(inputs).size).toBe(lanes.length);
-    const nextEra = { ...lanes[0]!, scopeBase: { ...lanes[0]!.scopeBase, era: `${lanes[0]!.scopeBase.era}1` } };
-    expect(finalizedPlacementDecisionInputV1({ status: 'active', lane: nextEra as PlacementLaneV1 })).not.toBe(inputs[0]);
-    expect(finalizedPlacementDecisionInputV1({ status: 'inactive' })).toBe('inactive');
-    expect(finalizedPlacementDecisionInputV1({ status: 'unavailable', error: new Error('unavailable') })).toBeUndefined();
+
+    const revision = (lane: object) => JSON.stringify(finalizedPlacementAuthorityRevisionV1({ status: 'active', lane: lane as PlacementLaneV1 }));
+    const lane = lanes[0]!;
+    expect(new Set(lanes.map(revision)).size).toBe(lanes.length);
+    for (const field of Object.keys(scopeBase)) {
+      expect(revision({ ...lane, scopeBase: { ...scopeBase, [field]: 'changed' } }), field).not.toBe(revision(lane));
+    }
+    // The same scope is the same revision, however it was built.
+    expect(revision({ ...lane, scopeBase: Object.fromEntries(Object.entries(scopeBase).reverse()) })).toBe(revision(lane));
+    expect(finalizedPlacementAuthorityRevisionV1({ status: 'inactive' })).toBeNull();
+    expect(finalizedPlacementAuthorityRevisionV1({ status: 'unavailable', error: new Error('unavailable') })).toBeUndefined();
   });
 });
