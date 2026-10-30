@@ -34,6 +34,28 @@ async function turn() {
 }
 
 describe('catalog replay store pressure', () => {
+
+  it.each(['clear', 'reset', 'policy replacement'] as const)('does not dispatch a retired queued owner after %s', async mode => {
+    const held = Promise.withResolvers<void>(); const calls: string[] = [];
+    const owner = runtime(async id => {
+      calls.push(id); if (id === 'active') await held.promise;
+      return { status: 'completed', targets: [] } as const;
+    });
+    const active = full(owner, 'active', 4), retired = full(owner, 'retired', 1);
+    let survivor: ReturnType<typeof full> | undefined;
+    try {
+      await turn(); expect(calls).toEqual(['active', 'active', 'active', 'active']);
+      if (mode === 'clear') owner.clear('retired');
+      else if (mode === 'reset') owner.reset();
+      else await owner.request({ kind: 'pending-recovery', contextGraphId: 'retired', policyDigest: 'replacement' });
+      survivor = full(owner, 'survivor', 1);
+      await turn(); expect(calls).toHaveLength(4);
+    } finally { held.resolve(); }
+    await Promise.all([active, retired, survivor]);
+    expect(calls).toEqual(['active', 'active', 'active', 'active', 'survivor']);
+    expect(owner.status('retired', 'current-policy')).toBeNull();
+  });
+
   it('bounds graph-by-peer authorization fanout and leaves ordinary store headroom', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 2,

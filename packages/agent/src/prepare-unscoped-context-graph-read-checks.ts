@@ -1,3 +1,4 @@
+import type { FIFOAdmission } from './internal/fifo-admission.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -15,6 +16,7 @@ import type { RegisteredContextGraphAuthority } from
 export type ContextGraphReadCheck = (id: string, signal: AbortSignal) => Promise<boolean>;
 
 export interface UnscopedContextGraphReadCheckDependencies {
+  readonly scalarRegistrationAdmission: Pick<FIFOAdmission, 'run'>;
   createReadAuthorityInput(id: string, signal: AbortSignal): ContextGraphReadAuthorityInput;
   prepareRegistrationReadPlan(
     ids: readonly string[], signal: AbortSignal,
@@ -24,10 +26,8 @@ export interface UnscopedContextGraphReadCheckDependencies {
   ): Promise<ContextGraphReadAuthorityFactsSnapshot>;
 }
 
-// Scalar authority reads also enter the ordinary store queue. Two overlapping
-// 32-row preparations leave no room for the concurrent metadata snapshot or
-// peer-discovery work on a node with a 64-entry queue. Pace this producer;
-// preserving the scheduler's existing bounds also preserves its other lanes.
+// A request has four workers; physical provider admission is shared per agent,
+// so independent callers cannot multiply concurrent scalar authority reads.
 const SCALAR_REGISTRATION_PREPARATION_CONCURRENCY = 4;
 
 async function prepareScalarRegistrationRead(
@@ -47,7 +47,9 @@ async function prepareScalarRegistrationRead(
       signal.throwIfAborted();
       const input = deps.createReadAuthorityInput(id, signal);
       try {
-        authorities.set(id, await input.getRegisteredAuthority());
+        authorities.set(id, await deps.scalarRegistrationAdmission.run(
+          () => input.getRegisteredAuthority(), signal,
+        ));
       } catch (error) {
         authorities.set(id, {
           kind: 'unavailable',
@@ -123,7 +125,9 @@ export async function prepareUnscopedContextGraphReadChecks(
     signal.throwIfAborted();
     readSignal.throwIfAborted();
     const input = deps.createReadAuthorityInput(id, readSignal);
-    const liveRegistration = input.getRegisteredAuthority;
+    const liveRegistration = () => deps.scalarRegistrationAdmission.run(
+      () => input.getRegisteredAuthority(), readSignal,
+    );
     const livePrivateMetadata = input.isPrivateLocalGraph;
     let metadataAbsenceEligible = false;
     const preparedInput: ContextGraphReadAuthorityInput = {
