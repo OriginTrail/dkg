@@ -25,13 +25,14 @@ import { busyMember } from '../member-sharing/busy-member.mjs';
  * themselves); a transfer's `refusals` is how many of its subscribes are refused
  * first (Infinity: all of them). `attempts` is how many case 6 may make; `connect`
  * stands for the dials before each attempt; `sizing` and `largeGraph` are case
- * 6's. Returns the lines case 6 reported, the large graphs it asked for and
- * unsubscribed from, how often it dialed and subscribed, what case 6 returned
- * (`heldInAll`), and the file of member 2's trace.
+ * 6's; with `leaveFails`, member 2 refuses to leave a graph. Returns the lines
+ * case 6 reported, the large graphs it asked for and unsubscribed from, how
+ * often it dialed and subscribed, what case 6 returned (`heldInAll`), and the
+ * file of member 2's trace.
  */
 async function runCase6(t, {
   runsMs, afterwards = 'nothing', readmitRunsMs = 60_000, receivedAt, slot = 'general', lostRelease = false,
-  policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true, attempts, transfers, connect = async () => {}, sizing, largeGraph: writesLargeGraph,
+  policy = { limit: 1, queueLimit: 0, partitioned: false }, writesTrace = true, attempts, transfers, connect = async () => {}, sizing, largeGraph: writesLargeGraph, leaveFails = false,
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-case6-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -99,7 +100,10 @@ async function runCase6(t, {
       }, plan1.runsMs));
       return Date.now();
     },
-    async unsubscribe(node, graph) { unsubscribed.push(graph.key); },
+    async unsubscribe(node, graph) {
+      unsubscribed.push(graph.key);
+      if (leaveFails) throw new Error(`${node.label} could not unsubscribe from ${graph.key}: HTTP 503 busy`);
+    },
   };
   const io = {
     async writeAndWatch(caseId, author, graph, sub, what, nodes) {
@@ -292,17 +296,30 @@ test('case 6: a refused subscribe is asked again and the attempt goes on', async
 });
 
 test('case 6: a subscribe that keeps being refused ends its attempt, not the run: another follows, and the last is judged', async t => {
-  // It never joined that graph, so it does not leave it.
   const again = await runCase6(t, { attempts: 2, transfers: [{ ...holds, refusals: Infinity }, holds] });
   assert.deepEqual(again.filter(entry => entry[0] !== 'NOTE'), held);
   assert.match(again.find(entry => entry[0] === 'NOTE')[1], /^case 6, attempt 1 of 2: member2 could not subscribe to the large graph \(64 assets of 2000 triples\) within 2 s: .*HTTP 503 no authority yet; attempt 2 transfers a large graph of 26 assets of 9847 triples, no rate was measured$/);
-  assert.deepEqual(again.unsubscribed, []);
+  // A subscribe that kept being refused may have taken effect all the same, with its answer lost: member 2 leaves
+  // that graph, whose periodic pulls would hold a reserved slot.
+  assert.deepEqual(again.unsubscribed, ['large']);
   // The last attempt fails the case and returns: nothing is thrown at the cases after it.
   const last = await runCase6(t, { attempts: 2, transfers: [{ ...holds, refusals: Infinity }] });
   assert.deepEqual(last.filter(entry => entry[0] !== 'NOTE').map(([kind, id]) => [kind, id]), [['FAIL', 6]]);
   assert.match(last.find(entry => entry[0] === 'FAIL')[2], /^not exercised: member2 could not subscribe to the large graph .* in the last of 2 attempts$/);
   const only = await runCase6(t, { transfers: [{ ...holds, refusals: Infinity }] });
   assert.match(only.find(entry => entry[0] === 'FAIL')[2], /^not exercised: member2 could not subscribe to the large graph .*HTTP 503 no authority yet$/);
+});
+
+test('case 6: a refusal to leave stops the case only for a graph member 2 is known to have joined', async t => {
+  // After a subscribe that was never confirmed it may not have joined, so the next attempt goes ahead.
+  const unconfirmed = await runCase6(t, { attempts: 2, leaveFails: true, transfers: [{ ...holds, refusals: Infinity }, holds] });
+  assert.deepEqual(unconfirmed.filter(entry => entry[0] !== 'NOTE'), held);
+  assert.ok(unconfirmed.some(entry => entry[0] === 'NOTE' && /^case 6, attempt 1 of 2: member2 could not leave the large graph it may not have joined: .*HTTP 503 busy$/.test(entry[1])), JSON.stringify(unconfirmed));
+  // Still following a graph it did join, its periodic pulls would hold a reserved slot through the next attempt.
+  const joined = await runCase6(t, { attempts: 2, leaveFails: true, transfers: [{ ...tooShort, afterwards: 'pull' }, holds] });
+  assert.equal(joined.asked.length, 0);
+  const fails = joined.filter(entry => entry[0] === 'FAIL').map(entry => entry[2]);
+  assert.match(fails.at(-1), /^the large graph of attempt 2 could not be set up: .*HTTP 503 busy$/);
 });
 
 test('case 6: once its transfer is over, the attempt judged says how long it held the slot and how far past the last receipt check', async t => {

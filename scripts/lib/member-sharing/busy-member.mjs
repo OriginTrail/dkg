@@ -55,22 +55,26 @@ export async function fillBigGraph(io, author, graph, { assets, triples, stamp }
  * say, stamp, audit (when) }. Returns the graph, with the `size` it carries.
  */
 export async function writeLargeGraph(ctx, attempt, size) {
-  const { edges, graphs, io, say, stamp, audit } = ctx;
+  const { edges, say, audit } = ctx;
   const author = await edges.prepareLargeGraphAuthor(attempt, () => audit(`before attempt ${attempt} of case 6`));
-  if (author === edges.feeder) say(`feeder ${author.label} up, holding nothing yet, and dialed by member2`);
-  const carried = attempt > 1 && author === edges.owner ? ownerLargeSize(size) : size;
+  if (author === edges.owner) return createLargeGraph(ctx, author, attempt, attempt > 1 ? ownerLargeSize(size) : size);
+  say(`feeder ${author.label} up, holding nothing yet, and dialed by member2`);
   try {
-    const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false }, { by: author });
-    await graphs.keepCoresOut(graph);
-    const started = Date.now();
-    await fillBigGraph(io, author, graph, { ...carried, stamp });
-    say(`large graph ${graph.key} written: ${sizeText(carried)} in ${seconds(Date.now() - started)} s`);
-    return { ...graph, size: carried };
+    return await createLargeGraph(ctx, author, attempt, size);
   } catch (error) {
-    if (author === edges.owner) throw error;
     await edges.giveUpFeeder(error);
-    return writeLargeGraph(ctx, attempt, size);
+    return createLargeGraph(ctx, edges.owner, attempt, ownerLargeSize(size));
   }
+}
+
+/** The graph of writeLargeGraph, on `author`, carrying `size`. */
+async function createLargeGraph({ graphs, io, say, stamp }, author, attempt, size) {
+  const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false }, { by: author });
+  await graphs.keepCoresOut(graph);
+  const started = Date.now();
+  await fillBigGraph(io, author, graph, { ...size, stamp });
+  say(`large graph ${graph.key} written: ${sizeText(size)} in ${seconds(Date.now() - started)} s`);
+  return { ...graph, size };
 }
 
 /** The admissions member 2's trace holds now (null when it wrote none). */
@@ -132,8 +136,13 @@ export async function busyMember(ctx, pub, big) {
     const sizing = size.expectedHoldMs === null ? 'no rate was measured' : `sized to hold the slot about ${seconds(size.expectedHoldMs)} s at the rate measured`;
     report.note(`case 6, attempt ${attempt} of ${attempts}: ${outcome.why}; attempt ${attempt + 1} transfers a large graph of ${sizeText(size)}, ${sizing}`);
     try {
-      // Member 2 stops following the last large graph: its periodic pulls of it would hold a reserved slot.
-      if (outcome.subscribed !== false) await graphs.unsubscribe(edges.member2, big);
+      // Member 2 stops following the last large graph: its periodic pulls of it would hold a reserved slot. A subscribe
+      // that kept being refused may still have taken effect, with its answer lost, so it leaves that graph too; a
+      // refusal to leave then says nothing, as it may never have joined.
+      await graphs.unsubscribe(edges.member2, big).catch(error => {
+        if (outcome.subscribed !== false) throw error;
+        report.note(`case 6, attempt ${attempt} of ${attempts}: member2 could not leave the large graph it may not have joined: ${error?.message ?? error}`);
+      });
       big = await largeGraph(attempt + 1, size);
     } catch (error) {
       outcome.judge();
@@ -147,8 +156,8 @@ export async function busyMember(ctx, pub, big) {
  * { again: false, heldInAll (see busyMember) } when it is judged as the case;
  * returns { again: true, why, measured: { heldMs, neededMs }, judge } when
  * another attempt is to follow: `judge` reports it as the case after all (when
- * the next one cannot start), and `subscribed: false` says member 2 never
- * joined this attempt's graph.
+ * the next one cannot start), and `subscribed: false` says no subscribe to this
+ * attempt's graph was ever confirmed.
  */
 async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
   const { devnet, edges, io, report, precondition, boundMs, sub, admitMs = 60_000, idleMs = 1_500 } = ctx;
