@@ -678,17 +678,24 @@ describe('GossipPublishHandler', () => {
 
     it('of a known agent reaches the store and dates its peer, instead of being dropped as a replay', async () => {
       const { store, handler } = createHandler();
-      const seen = secondsAgo(60);
       const later = secondsAgo(1);
-      await handler.handlePublishMessage(profileMessage('peer-old', seen), agentsCg, undefined, 'peer-old');
-      expect(await values(store, 'peerId')).toEqual(['"peer-old"']);
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(86_000)), agentsCg, undefined, 'peer-1');
+      expect(await values(store, 'peerId')).toEqual(['"peer-1"']);
 
-      await handler.handlePublishMessage(profileMessage('peer-new', later), agentsCg, undefined, 'peer-new');
-      expect(await values(store, 'peerId')).toEqual(['"peer-new"', '"peer-old"']);
-      expect(await values(store, 'datedPeer')).toEqual([`"peer-new ${later}"`, `"peer-old ${seen}"`]);
+      await handler.handlePublishMessage(profileMessage('peer-1', later), agentsCg, undefined, 'peer-1');
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-1 ${later}"`]);
       expect(await values(store, 'lastSeen')).toEqual([`"${later}"`]);
-      expect(await values(store, 'relayAddress')).toEqual(['"/dns4/relay-of-peer-new/tcp/9090"', '"/dns4/relay-of-peer-old/tcp/9090"']);
       expect(await store.countQuads(`${agentsGraph}/_meta`)).toBe(0);
+    });
+
+    it('from a peer the known agent does not list is not stored', async () => {
+      const { store, handler } = createHandler();
+      const seen = secondsAgo(60);
+      await handler.handlePublishMessage(profileMessage('peer-1', seen), agentsCg, undefined, 'peer-1');
+      await handler.handlePublishMessage(profileMessage('peer-2', secondsAgo(1)), agentsCg, undefined, 'peer-2');
+      expect(await values(store, 'peerId')).toEqual(['"peer-1"']);
+      expect(await values(store, 'lastSeen')).toEqual([`"${seen}"`]);
+      expect(await values(store, 'relayAddress')).toEqual(['"/dns4/relay-of-peer-1/tcp/9090"']);
     });
 
     it('brings a heartbeat of the same peer in without growing the subject', async () => {
@@ -705,13 +712,13 @@ describe('GossipPublishHandler', () => {
       expect(await store.countQuads(agentsGraph)).toBe(first);
     });
 
-    it('that is older stays behind the newer one', async () => {
+    it('that is older changes nothing', async () => {
       const { store, handler } = createHandler();
       const newest = secondsAgo(1);
-      await handler.handlePublishMessage(profileMessage('peer-new', newest), agentsCg, undefined, 'peer-new');
-      await handler.handlePublishMessage(profileMessage('peer-old', secondsAgo(600)), agentsCg, undefined, 'peer-old');
+      await handler.handlePublishMessage(profileMessage('peer-1', newest), agentsCg, undefined, 'peer-1');
+      await handler.handlePublishMessage(profileMessage('peer-1', secondsAgo(600)), agentsCg, undefined, 'peer-1');
       expect(await values(store, 'lastSeen')).toEqual([`"${newest}"`]);
-      expect(await values(store, 'peerId')).toEqual(['"peer-new"', '"peer-old"']);
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-1 ${newest}"`]);
     });
 
     it('from another peer than the one it names is not stored', async () => {

@@ -15,6 +15,8 @@
  * - A peer leaves the subject by age only, once its date passes the staleness
  *   bound while another peer of the subject is current. An update never removes
  *   another peer, or what another peer may have written.
+ * - A gossiped profile of a subject with peers counts only when it names one of
+ *   them. A new peer of a known wallet arrives with a sync.
  * - The relay address, the public key and the role name no peer. An update sets
  *   them when its peer is the only one the subject keeps. Beside another current
  *   peer it only adds its values, up to a bound, and those of the others go once
@@ -356,6 +358,12 @@ function joinSyncPages(state: StoreProfileState, subject: string, update: readon
   return joined;
 }
 
+/** Whether a subject with peers lists a peer the update names. */
+function namesListedPeer(update: readonly Quad[], held: readonly Quad[]): boolean {
+  const listed = peerTerms(held);
+  return listed.size === 0 || [...peerTerms(update).keys()].some((peerId) => listed.has(peerId));
+}
+
 function isUpdateQuad(quad: Quad): boolean {
   return quad.graph === AGENTS_DATA_GRAPH && NODE_FIELDS.has(quad.predicate)
     && quad.subject.startsWith(AGENT_SUBJECT_PREFIX) && isSafeIri(quad.subject)
@@ -367,16 +375,17 @@ function isUpdateQuad(quad: Quad): boolean {
  * Store `quads` through `insert`, with the node fields of agent profiles among
  * them applied as this module describes. Quads of any other kind go to `insert`
  * unchanged. Resolves with what `insert` stored. `syncPage` says the quads are a
- * page of a sync, which may stop inside a subject; a gossiped profile is whole.
+ * page of a sync, which may stop inside a subject; `listedPeersOnly` says they
+ * are a gossiped profile.
  */
 export async function storeAgentProfileQuads(
   store: TripleStore,
   quads: readonly Quad[],
   insert: (quads: Quad[]) => Promise<Quad[]>,
-  options: QueryOptions & { readonly nowMs?: number; readonly syncPage?: boolean } = {},
+  options: QueryOptions & { readonly nowMs?: number; readonly syncPage?: boolean; readonly listedPeersOnly?: boolean } = {},
 ): Promise<Quad[]> {
   if (quads.length === 0) return [];
-  const { nowMs, syncPage = false, ...storeOptions } = options;
+  const { nowMs, syncPage = false, listedPeersOnly = false, ...storeOptions } = options;
   const updates = new Map<string, Quad[]>();
   const others: Quad[] = [];
   for (const quad of quads) {
@@ -397,7 +406,9 @@ export async function storeAgentProfileQuads(
     const lastSubject = [...updates.keys()].at(-1);
     for (const [subject, update] of updates) {
       const whole = syncPage ? joinSyncPages(state, subject, update, at, subject === lastSubject) : update;
-      const writes = planAgentProfileWrites(whole, held.get(subject) ?? [], at);
+      const heldFields = held.get(subject) ?? [];
+      if (listedPeersOnly && !namesListedPeer(whole, heldFields)) continue;
+      const writes = planAgentProfileWrites(whole, heldFields, at);
       others.push(...writes.insert);
       removes.push(...writes.remove);
     }

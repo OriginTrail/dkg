@@ -708,6 +708,7 @@ export class GossipPublishHandler {
           this.store,
           gossipedAgentProfileQuads(normalized, { fromPeerId, knownAgent: isReplay }),
           async (quads) => { await this.store.insert(quads); return quads; },
+          { listedPeersOnly: true },
         );
         if (stored.length > 0) this.callbacks.markCgMetaDirtyFromQuads?.(stored);
       } else if (normalized.length > 0 && !isReplay) {

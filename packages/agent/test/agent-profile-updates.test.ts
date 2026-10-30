@@ -173,6 +173,24 @@ describe('applying agent profile updates to the store', () => {
     expect(await values(RELAY)).toEqual([literal('/dns4/relay-of-peer-new/tcp/9090'), literal('/dns4/relay-of-peer-old/tcp/9090')]);
   });
 
+  it('takes a gossiped profile of a subject with peers only from one of them', async () => {
+    const { store, insert, apply, values, datesHeld } = fixture();
+    const gossiped = (quads: Quad[]) => storeAgentProfileQuads(store, quads, insert, { nowMs: NOW, listedPeersOnly: true });
+    await gossiped(profile('peer-1', minutesAgo(600)));
+    expect(await values(PEER_ID), 'the first sighting of a subject').toEqual([literal('peer-1')]);
+
+    await gossiped(profile('peer-2', minutesAgo(1)));
+    expect(await values(PEER_ID)).toEqual([literal('peer-1')]);
+    expect(await values(RELAY)).toEqual([literal('/dns4/relay-of-peer-1/tcp/9090')]);
+
+    await gossiped(profile('peer-1', minutesAgo(1)));
+    expect(await datesHeld()).toEqual([date('peer-1', 1)]);
+
+    await apply(profile('peer-2', minutesAgo(600)));
+    await gossiped(profile('peer-2', minutesAgo(0)));
+    expect(await datesHeld(), 'a peer a sync listed').toEqual([date('peer-1', 1), date('peer-2', 0)]);
+  });
+
   it('does not bring back a peer past the staleness bound, beside a current one', async () => {
     const { apply, values } = fixture();
     await apply(profile('peer-new', minutesAgo(1)));
