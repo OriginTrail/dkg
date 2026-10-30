@@ -12,6 +12,7 @@ import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js'
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
 import { handleQueryRoutes } from '../src/daemon/routes/query.js';
+import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { daemonState } from '../src/daemon/state.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -20,6 +21,7 @@ const CG = 'private-target';
 const CALLER = '0x2222222222222222222222222222222222222222';
 const SECRET = 'private row';
 type Route = { name: string; path: string; method?: string; body?: object; run: (ctx: RequestContext) => Promise<unknown> };
+const membersRoute: Route = { name: 'membership cache', path: `/api/context-graph/${CG}/members`, run: handleStatusRoutes };
 const routes: Route[] = [
   { name: 'CCL results', path: `/api/ccl/results?contextGraphId=${CG}`, run: handleCclRoutes },
   { name: 'CCL evaluation', path: '/api/ccl/eval', method: 'POST', body: { contextGraphId: CG, name: 'policy' }, run: handleCclRoutes },
@@ -41,6 +43,7 @@ const routes: Route[] = [
   { name: 'publisher legacy job', path: '/api/publisher/jobs/job', run: handlePublisherRoutes },
   { name: 'publisher legacy payload', path: '/api/publisher/jobs/job/payload', run: handlePublisherRoutes },
   { name: 'publisher scoped inventory', path: `/api/publisher/jobs?contextGraphId=${CG}`, run: handlePublisherRoutes },
+  membersRoute,
 ];
 const previousWorker = daemonState.promoteWorkerAvailable;
 afterEach(() => { daemonState.promoteWorkerAvailable = previousWorker; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -69,6 +72,7 @@ function fixture(route: Route, decision: ContextGraphReadAuthorityDecision, oper
   const agent = { resolveContextGraphReadAuthority: authority,
     listCclEvaluations: read, evaluateCclPolicy: read, listCclPolicies: read, resolveCclPolicy: read,
     assertion: { history: read, query: read, listPromoteAsyncJobs: vi.fn(async () => []), getPromoteAsyncStatus: vi.fn(async () => job) },
+    readContextGraphNamedGraphStats: vi.fn<DKGAgent['readContextGraphNamedGraphStats']>(async () => []),
     listSubGraphs: vi.fn(async () => []), getContextGraphAllowedAgents: read, query,
     canReadContextGraph: vi.fn(async () => decision.outcome === 'allowed'),
   };
@@ -78,7 +82,7 @@ function fixture(route: Route, decision: ContextGraphReadAuthorityDecision, oper
   const ctx = { req, res, agent, publisherControl, publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } }, config: { llm: { apiKey: 'fixture' } },
     path: url.pathname, url, requestAgentAddress: CALLER,
     authentication: requestAuthentication(operator ? { kind: 'nodeOperator' } : { kind: 'agent', agentAddress: CALLER }),
-    extractionStatus: new Map(), tracker: {}, emitMemoryGraphChanged: vi.fn(),
+    extractionStatus: new Map(), tracker: {}, emitMemoryGraphChanged: vi.fn(), dashDb: { listContextGraphMembers: read },
   } as unknown as RequestContext;
   return { ctx, res, read, query, authority, agent, publisherControl };
 }
@@ -253,26 +257,48 @@ describe('caller-bound graph reads', () => {
     },
   );
 
-  it('returns subgraph counts through the bearer-scoped physical query', async () => {
+  it('returns subgraph counts through caller-bound typed statistics', async () => {
     const h = fixture(routes[5], decisions.allowed);
     const nodeAddress = '0x1111111111111111111111111111111111111111';
     Object.assign(h.ctx.agent, { agentAddress: nodeAddress });
     h.agent.listSubGraphs.mockResolvedValue([{ name: 'docs', uri: `did:dkg:context-graph:${CG}/docs` }] as never);
-    h.query.mockResolvedValue({ bindings: [
-      { g: `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`, entities: '2', triples: '5' },
-      { g: { value: `did:dkg:context-graph:${CG}/docs` }, entities: { value: '3' }, triples: { value: '7' } },
-      { g: `did:dkg:context-graph:${CG}/_meta`, entities: '99', triples: '99' },
-      { g: 'did:dkg:context-graph:other/docs', entities: '99', triples: '99' },
-    ] } as never);
+    h.agent.readContextGraphNamedGraphStats.mockResolvedValue([
+      { graph: `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`, entityCount: 2, tripleCount: 5 },
+      { graph: `did:dkg:context-graph:${CG}/docs`, entityCount: 3, tripleCount: 7 },
+      { graph: `did:dkg:context-graph:${CG}/_meta`, entityCount: 99, tripleCount: 99 },
+      { graph: 'did:dkg:context-graph:other/docs', entityCount: 99, tripleCount: 99 },
+    ]);
     await routes[5].run(h.ctx);
-    expect(h.query).toHaveBeenCalledExactlyOnceWith(expect.any(String), expect.objectContaining({
-      contextGraphId: CG, includeContextGraphPartitions: true, callerAgentAddress: CALLER,
-    }));
+    expect(h.agent.readContextGraphNamedGraphStats).toHaveBeenCalledExactlyOnceWith(CG, {
+      callerAgentAddress: CALLER, signal: expect.any(AbortSignal),
+      priority: 'background', source: 'node-ui.sub-graph-stats',
+    });
+    expect(h.agent.readContextGraphNamedGraphStats.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    expect(h.query).not.toHaveBeenCalled();
     expect(CALLER).not.toBe(nodeAddress);
     expect(h.res.statusCode).toBe(200);
     expect(JSON.parse(h.res.body)).toMatchObject({ contextGraphId: CG,
       subGraphs: [{ name: 'docs', entityCount: 5, tripleCount: 12 }],
     });
+  });
+
+  it('forwards HTTP cancellation to the typed statistics operation', async () => {
+    const h = fixture(routes[5], decisions.allowed);
+    let suppliedSignal: AbortSignal | undefined;
+    let initiallyAborted: boolean | undefined;
+    h.agent.readContextGraphNamedGraphStats.mockImplementation(async (_id, options) => {
+      suppliedSignal = options?.signal;
+      initiallyAborted = suppliedSignal?.aborted;
+      h.ctx.req.emit('aborted');
+      return [];
+    });
+    await routes[5].run(h.ctx);
+    expect(h.agent.readContextGraphNamedGraphStats).toHaveBeenCalledOnce();
+    expect(suppliedSignal).toBeInstanceOf(AbortSignal);
+    expect(initiallyAborted).toBe(false);
+    expect(suppliedSignal?.aborted).toBe(true);
+    expect(h.res.writableEnded).toBe(false);
+    expect(h.res.body).toBe('');
   });
 
   it('keeps an accepted agent credential scoped when authentication is disabled', async () => {
@@ -316,6 +342,37 @@ describe('caller-bound graph reads', () => {
       expect(h.res.statusCode).toBe(200);
       expect(h.authority).toHaveBeenLastCalledWith(CG, expect.objectContaining({ callerAgentAddress: undefined }));
     }
+  });
+
+  it('refuses the membership cache with the same response as the participant roster', async () => {
+    const members = fixture(membersRoute, decisions.denied);
+    const participants = fixture(routes[6], decisions.denied);
+    await membersRoute.run(members.ctx);
+    await routes[6].run(participants.ctx);
+    expect(members.res.statusCode).toBe(403);
+    expect(members.res.body).toBe(participants.res.body);
+  });
+
+  it.each([false, true])('returns the membership cache unchanged to an admitted reader (operator=%s)', async operator => {
+    const h = fixture(membersRoute, decisions.allowed, operator);
+    const rows = [{ context_graph_id: CG, principal_type: 'agent', principal_id: CALLER, status: 'active' }];
+    const list = vi.fn(() => rows);
+    Object.assign(h.ctx, { dashDb: { listContextGraphMembers: list } });
+    await membersRoute.run(h.ctx);
+    expect(h.res.statusCode).toBe(200);
+    expect(JSON.parse(h.res.body)).toEqual({ contextGraphId: CG, members: rows });
+    expect(list).toHaveBeenCalledExactlyOnceWith(CG);
+    expect(h.authority).toHaveBeenCalledTimes(operator ? 0 : 1);
+  });
+
+  it('rejects an invalid membership-cache id before resolving authority', async () => {
+    const route = { ...membersRoute, path: '/api/context-graph/not%20valid/members' };
+    const h = fixture(route, decisions.allowed);
+    await route.run(h.ctx);
+    expect(h.res.statusCode).toBe(400);
+    expect(JSON.parse(h.res.body)).toEqual({ error: 'Invalid context graph id' });
+    expect(h.authority).not.toHaveBeenCalled();
+    expect(h.read).not.toHaveBeenCalled();
   });
 
   it('propagates unrelated authority failures while removing the request listeners', async () => {

@@ -1,3 +1,4 @@
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { vi } from 'vitest';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -183,6 +184,8 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     canReadContextGraph: vi.fn(async () => true),
     subscribeToContextGraph: vi.fn(),
   });
+  Object.assign(agent, { contextGraphSubscriptionDormancyById: new Map() });
+  Object.assign(agent, { contextGraphSubscriptionActivations: createTestSubscriptionActivations(agent) });
   return {
     agent,
     query,

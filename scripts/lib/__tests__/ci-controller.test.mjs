@@ -53,6 +53,8 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   };
   fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
   execFileSync('git', ['init', '-q', repository], { env: isolatedGit });
+  // Commits, merges and fetches otherwise start detached Git maintenance, which can race the fixture's removal.
+  git('config', 'maintenance.auto', 'false');
   const manifest = { name: '@origintrail-official/dkg-agent', exports: { '.': './dist/index.js' } };
   const base = commitManifest(manifest, 'base');
   const exportsHead = commitManifest({ ...manifest, exports: { ...manifest.exports, './sync': './dist/sync.js' } }, 'exports');
@@ -350,6 +352,7 @@ test('the protected history fetch reaches a pin hidden behind merges of older br
 
   const origin = temporaryDirectory('dkg-pin-origin-');
   git(origin, pinDate, 'init', '--quiet', '--initial-branch=testnet-canary');
+  git(origin, pinDate, 'config', 'maintenance.auto', 'false');
   const commit = (message, date) => {
     git(origin, date, 'commit', '--quiet', '--allow-empty', '--no-gpg-sign', '-m', message);
     return git(origin, date, 'rev-parse', 'HEAD');
@@ -372,6 +375,7 @@ test('the protected history fetch reaches a pin hidden behind merges of older br
   const checkout = () => {
     const directory = temporaryDirectory('dkg-pin-checkout-');
     git(directory, pinDate, 'init', '--quiet');
+    git(directory, pinDate, 'config', 'maintenance.auto', 'false');
     git(directory, pinDate, 'remote', 'add', 'origin', pathToFileURL(origin).href);
     git(directory, pinDate, 'fetch', '--quiet', '--no-tags', '--depth=1', 'origin', 'refs/heads/testnet-canary');
     const run = (command, args, options) => execFileSync(command, args, {

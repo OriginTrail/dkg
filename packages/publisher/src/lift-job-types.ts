@@ -90,6 +90,8 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly publishEpochs?: number;
   /** Immutable token-pricing basis captured when the queued publish is admitted. */
   readonly pricingPolicy?: PublicationPricingPolicy;
+  /** Admission-time catalog obligation survives rollout changes during confirmed recovery. */
+  readonly catalogObligationRequired?: boolean;
   readonly clearSharedMemoryAfter?: boolean;
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
 }

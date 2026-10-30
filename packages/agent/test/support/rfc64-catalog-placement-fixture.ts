@@ -81,11 +81,12 @@ export async function startPlacementAgentV1(
   });
   if (options.shareTimeProjection === true) return agent;
   vi.spyOn(agent, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneV1.bind(agent);
-  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
+  const realLane = (agent as any).resolveRfc64CatalogAuthoringLaneDecisionV1.bind(agent);
+  vi.spyOn(agent as any, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation(
     (contextGraphId: unknown, subGraphName: unknown) => {
-      const lane = realLane(contextGraphId, subGraphName);
-      return lane === null ? null : { ...lane, acceptsFinalizedVmRepair: true };
+      const decision = realLane(contextGraphId, subGraphName);
+      return decision.status === 'active'
+        ? { ...decision, lane: { ...decision.lane, acceptsFinalizedVmRepair: true } } : decision;
     },
   );
   return agent;

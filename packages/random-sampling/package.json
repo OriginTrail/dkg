@@ -1,14 +1,15 @@
 {
   "name": "@origintrail-official/dkg-random-sampling",
-  "version": "10.0.25",
+  "version": "10.0.27",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && pnpm run test:types",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs random-sampling",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test:types": "tsc --project tsconfig.type-tests.json"
   },
   "dependencies": {
     "@origintrail-official/dkg-chain": "workspace:*",

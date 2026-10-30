@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Async Publisher Wallets
 
-Async publisher wallets are transaction signers for queued Verifiable Memory publish jobs. They live in `publisher-wallets.json` under the DKG data directory and are managed with:
+Async publishing moves Knowledge Assets from Shared Working Memory to Verifiable Memory in the background. Each publish is a job in the node's publish queue. Publisher wallets sign the jobs' on-chain transactions, and each wallet runs one publisher worker.
+
+The wallets live in `publisher-wallets.json` under the DKG data directory. Manage them with:
 
 ```bash
 dkg publisher wallet add <privateKey>
@@ -16,6 +18,16 @@ dkg publisher wallet remove <address>
 dkg publisher enable
 dkg publisher publish-async <context-graph-id> <name>
 ```
+
+Queue settings are on [Async Queue Operations](async-queue-operations.md). What each answer means for a client is on [Async Share and Publish Jobs](../build/async-jobs.md).
+
+## Receipt, finality, and local completion
+
+A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.
+
+`GET /api/publisher/job?id=<id>` and `GET /api/publisher/jobs` expose `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds). The first records the receipt-confirmation callback, or the inclusion itself when nothing was observed earlier (it then equals `includedAt`). The second is recorded only when a reconciliation or recovery pass proves the transaction at the configured confirmation depth. A job whose executor completes before any such pass has no `finalityObservedAt`: reaching `finalized` is local completion, and it is not recorded as a chain observation. Both are distinct from `includedAt` and `finalizedAt`, which describe job transitions. Receipt observations are diagnostics and never release a wallet or authorize a publish. Observations are matched to the job's transaction hash. A daemon that runs the publisher shows them on these endpoints as soon as they are made, and the next state transition persists them. A restart before that transition loses the observation, and a job view read by another process shows it only once it is persisted. Older jobs and local-only finalizations omit both fields.
+
+The default scheduler has four total slots (capped by available logical CPUs), with one slot each reserved for ACK and health work. This leaves two shared normal/background slots on a four-CPU host. Background work protects one normal slot and uses at most one slot by default. These are intentional backend admission limits, rather than a count of publisher wallets; six wallets do not imply six concurrent store operations. `DKG_STORE_MAX_CONCURRENT` and the lane reservation settings control these limits. Post-confirmation store work uses this scheduler, and the daemon's main event loop also gates the completion of job-state reads and writes.
 
 ## Pause and resume the running publisher
 
@@ -33,27 +45,25 @@ The live runtime persists desired state in `publisher-control.json` in its data 
 
 A missing runtime returns HTTP 503. A persistence/control failure also returns 503, fences the runtime, and requires restart to reload durable intent; a failed request has no acknowledgement. A status read during a transition may show the previous acknowledged desired state alongside gates already closing. File contents are synced before atomic rename, and the parent directory is synced on supported POSIX hosts. Windows preserves process-restart state without claiming the same directory-fsync power-loss guarantee.
 
-The isolated native restart campaign runs actual two-wallet runtime composition, authenticated loopback HTTP routes, persistent Oxigraph queue evidence and SIGKILL/restart. After building publisher and CLI, run `node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts`. It uses a disposable data directory and `NoChainAdapter`; it verifies queue/control behavior rather than on-chain execution.
-
-## Receipt, finality, and local completion
-
-A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.
-
-`GET /api/publisher/job?id=<id>` and `GET /api/publisher/jobs` expose `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds). The first records the receipt-confirmation callback, or the inclusion itself when nothing was observed earlier (it then equals `includedAt`). The second is recorded only when a reconciliation or recovery pass proves the transaction at the configured confirmation depth. A job whose executor completes before any such pass has no `finalityObservedAt`: reaching `finalized` is local completion, and it is not recorded as a chain observation. Both are distinct from `includedAt` and `finalizedAt`, which describe job transitions. Receipt observations are diagnostics and never release a wallet or authorize a publish. Observations are matched to the job's transaction hash. A daemon that runs the publisher shows them on these endpoints as soon as they are made, and the next state transition persists them. A restart before that transition loses the observation, and a job view read by another process shows it only once it is persisted. Older jobs and local-only finalizations omit both fields.
-
-RFC-64 exact-set verification yields between rows after roughly 25 ms of work, allowing receipt polling and store timers to progress. Every row still passes verification before signing and bundle/control-object staging. One large row or whole-object codec operation can take longer than a slice.
-
-The default scheduler has four total slots (capped by available logical CPUs), with one slot each reserved for ACK and health work. This leaves two shared normal/background slots on a four-CPU host. Background work protects one normal slot and uses at most one slot by default. These are intentional backend admission limits, rather than a count of publisher wallets; six wallets do not imply six concurrent store operations. `DKG_STORE_MAX_CONCURRENT` and the lane reservation settings control these limits. Job-state reads/writes and post-confirmation store work use this scheduler, and the daemon's main event loop also gates their completion.
-
 ## Admission retries
 
 All publisher wallets share the daemon's RPC request budget. For rate sizing,
 the restart requirement and diagnosing local wait versus provider latency, see
 [RPC Request Budget](rpc-request-budget.md).
 
-Before `POST /api/knowledge-assets/{name}/vm/publish-async` enqueues a job, it verifies the immutable SWM snapshot. Temporary store pressure or recovery returns `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, and `Retry-After: 1`. Retry the same request after the store recovers without re-sharing valid content. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`; so does a finalized update that is not numbered one above the KA's latest confirmed version, which could never be published (see [Stale update intents](#stale-update-intents) below and [Editing a published Knowledge Asset](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset)).
+Before `vm/publish-async` creates a job, it checks the shared snapshot. Store pressure gets a retryable `503`. Resend the same request, without sharing again, only if it says `jobCreated: false`; otherwise a job may exist, so [find it first](../build/async-jobs.md#retry-safely). For `409 PUBLISH_INTENT_STALE`, see [Stale update intents](#stale-update-intents).
 
-These pre-enqueue failures include `jobCreated: false`: this request did not reach enqueue, although an earlier job may exist for the KA. The separate `outcome` describes the failed store operation (`not_started` or `indeterminate`); even an indeterminate read can reject before job creation. Once enqueue begins, a store failure omits `jobCreated` because a job may already have been persisted. Use the publisher job lookup before assuming that no job exists.
+## Clearing finished jobs
+
+Finished jobs stay until they are cleared. `dkg publisher clear finalized|failed`, or `POST /api/publisher/clear` with the node-admin token, clears them in bulk and returns the count removed.
+
+A re-submit of a Knowledge Asset is matched to its newest job, by context graph, name, sub-graph and agent lane. A bulk clear never lets an older failed job become the newest again. So it keeps a finalized job while an older failed job of the same asset remains. It also never removes a held job. It can remove fewer jobs than are listed, and it is slow on a large queue.
+
+`POST /api/publisher/clear-job { "jobId": "…" }` removes one job, even the newest. Clearing a single job is API-only for now. After you clear the newest job, a re-submit can restart an older failed job of the same asset. A [held](#held-jobs) job is removed only with `"allowPendingTransaction": true`: check its transaction first, or a re-submit can publish again.
+
+If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first. `jobs`, `job` and `stats` refuse in the same way; with no daemon running they open the store read-only.
+
+Old finalized jobs can also be removed on a timer. This cleanup is off by default; see [Async Queue Operations](async-queue-operations.md#clean-up-finished-jobs).
 
 ## Stale update intents
 
@@ -61,12 +71,13 @@ An update of an already-published KA can only be published as **one above the KA
 
 Recovery, per KA:
 
-1. If a failed job for the KA is still listed (`GET /api/publisher/jobs?status=failed`), clear it by id: `POST /api/publisher/clear-job { "jobId": "…" }`. `POST /api/publisher/retry` skips a job whose retry budget is spent, a re-submit of the stale request is refused at admission (so it never reaches the job), and the job keeps owning the KA until it is cleared; a corrected publish is otherwise refused with `409` and the job's `existingJobId`.
-2. `POST /api/knowledge-assets/{name}/wm/pull-from { "layer": "swm" }` re-opens the shared content as a draft (add `"onConflict": "replace"` if a WM draft already exists). If the message says the **published version moved on** (the sealed number is *below* the required one), use `"layer": "vm"` instead and re-apply your edits.
-3. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
-4. `swm/share`, then `vm/publish-async` (or `vm/publish`).
+1. If you sent this publish before, read that job first ([Retry safely](../build/async-jobs.md#retry-safely)). If it is `finalized` and carries your seal, the update is published: stop. If it is still running or [held](#held-jobs), wait until it finalizes or fails and is no longer held, then check again.
+2. If a failed job still holds the KA (a corrected publish gets `409` with its `existingJobId`), read it with `GET /api/publisher/job?id=<id>`. A `retryState.waitingReason` of `pending_chain_proof` or `recovery` means it may have sent a transaction, perhaps the one that moved the version on: follow [Held jobs](#held-jobs) and do not clear it. Otherwise clear it by id: `POST /api/publisher/clear-job { "jobId": "…" }`.
+3. `POST /api/knowledge-assets/{name}/wm/pull-from { "layer": "swm" }` re-opens the shared content as a draft (add `"onConflict": "replace"` if a WM draft already exists). If the message says the **published version moved on** (the sealed number is *below* the required one), use `"layer": "vm"` instead and re-apply your edits.
+4. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
+5. `swm/share`, then `vm/publish-async` (or `vm/publish`).
 
-A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized (tracked in [#2964](https://github.com/OriginTrail/dkg/issues/2964)).
+A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized.
 
 ## Held jobs
 
@@ -118,7 +129,7 @@ Retryable jobs that carry no transaction evidence get a blocker too. `not_auto_r
 2. **Tell the three problems apart.** A provider or access problem leaves the record complete (`chain_recheck_pending`): recovery keeps asking and resumes by itself once the lookup works. Missing local evidence shows up as the `missing` gaps above. An operation-specific limit (an UPDATE has no absence proof; a CREATE needs its nonce and pinned asset identity) is why a complete-looking record can still be held.
 3. **Restore the lookup or the capability, or inspect the transaction yourself**, then request only the control that applies. `POST /api/publisher/retry` and a re-submit refuse a held job by design; recovery is the only automatic exit.
 4. **If no adequate proof can be obtained, an operator cannot manufacture a safe retry either.** Keep the hold and its evidence. Elapsed time is not proof of non-effect, and neither is a missing receipt; escalating or deliberately abandoning the job is a decision, not a proof.
-5. **What clearing does.** `POST /api/publisher/clear-job` with `{ "jobId": "<id>", "allowPendingTransaction": true }` (node-operator token, or the agent that enqueued the job) removes that one record: it **abandons this node's tracking** of the job. It does not cancel a transaction that was already sent, does not prove that none was, and does not authorize a duplicate-safe replacement — a re-submit afterwards mints a **new** job for the Knowledge Asset, which may publish it a second time. A clear never touches the journal, so whatever it recorded about the job (best-effort, named-KA jobs) stays readable. `POST /api/publisher/cancel` removes only a job that is still `accepted` and cannot act on a held one.
+5. **What clearing does.** `POST /api/publisher/clear-job { "jobId": "<id>", "allowPendingTransaction": true }` removes that one record. A held job needs the flag (node-operator token, or the agent that enqueued the job), as does a job recovery owns or one still in flight. Without it the clear answers `409` with `reason: "pending_transaction"` for a held job or one recovery owns, and `"nonterminal"` for one still in flight. Clearing **abandons this node's tracking** of the job. It does not cancel a transaction that was already sent, does not prove that none was, and does not authorize a duplicate-safe replacement — a re-submit afterwards mints a **new** job for the Knowledge Asset, which may publish it a second time. A clear never touches the journal, so whatever it recorded about the job (best-effort, named-KA jobs) stays readable. `POST /api/publisher/cancel` removes only a job that is still `accepted` and cannot act on a held one.
 
 ## Publication latency and store pressure
 
@@ -143,6 +154,11 @@ incomplete results, or lost claim ownership retain the existing recovery path.
 Private catalog placement remains asynchronous after its durable repair marker
 is stored; publication does not wait for placement.
 
+The five-minute `async_admission_usage` log line shows publisher pick-up,
+claim-to-finish time and the accepted backlog;
+[Monitor Store and Queue Pressure](backpressure-observability.md#async-admission-usage-line)
+says which fields to read.
+
 Use `GET /api/diagnostics/backpressure` to inspect store lane occupancy. The
 `dkg.store.scheduler_queue_wait_ms` and
 `dkg.store.scheduler_operation_duration_ms` histograms separate admission wait
@@ -159,6 +175,7 @@ are hashed; job IDs are retained for correlation, so treat these logs as
 operational diagnostics. A free wallet can still wait for the claim lock or
 store capacity, and a worker may still be finishing an earlier execution after
 its wallet is released. Do not infer wallet availability from job finalization.
+
 ## Funding
 
 Every async publisher wallet needs the chain's native gas token because it submits on-chain transactions.

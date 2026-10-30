@@ -6,7 +6,7 @@
  * matches the in-process result. The dist artifact must exist (test depends on
  * `pnpm build` having run first; CI runs `pnpm -r build` before tests).
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -22,12 +22,18 @@ import { WorkerThreadProofBuilder } from '../src/proof-worker.js';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ENTRY = resolve(HERE, '../dist/proof-worker-entry.js');
 
-describe.skipIf(!existsSync(ENTRY))('WorkerThreadProofBuilder (requires dist build)', () => {
+describe('WorkerThreadProofBuilder (requires dist build)', () => {
   let builder: WorkerThreadProofBuilder;
 
   beforeAll(() => {
+    expect(existsSync(ENTRY), 'Build random-sampling before running the real worker tests').toBe(true);
+  });
+
+  beforeEach(() => {
     builder = new WorkerThreadProofBuilder({ entryPath: ENTRY });
   });
+
+  afterEach(async () => { await builder?.close(); });
 
   it('builds catalog proof material that matches the in-process result (content-bound)', async () => {
     const triples = [
@@ -42,7 +48,7 @@ describe.skipIf(!existsSync(ENTRY))('WorkerThreadProofBuilder (requires dist bui
 
     for (let chunkId = 0; chunkId < tree.leafCount; chunkId++) {
       const inProcess = buildV10CatalogProofMaterial(contents, chunkId, expected);
-      const fromWorker = await builder.build({ contents, privateRoots: [], chunkId, expected, kind: 'catalog' });
+      const fromWorker = await builder.build({ contents, chunkId, expected, kind: 'catalog' });
       expect(fromWorker.content).toEqual(inProcess.content);
       expect(fromWorker.leaf).toEqual(inProcess.leaf);
       expect(fromWorker.proof.length).toEqual(inProcess.proof.length);
@@ -51,17 +57,14 @@ describe.skipIf(!existsSync(ENTRY))('WorkerThreadProofBuilder (requires dist bui
       }
     }
 
-    await builder.close();
   });
 
   it('rejects with a named error class on root mismatch', async () => {
     const contents = [tripleContentV10('urn:e:1', 'urn:p', '"a"')];
     const wrongRoot = new Uint8Array(32).fill(0xff);
 
-    const local = new WorkerThreadProofBuilder({ entryPath: ENTRY });
     await expect(
-      local.build({ contents, privateRoots: [], chunkId: 0, expected: { merkleRoot: wrongRoot, merkleLeafCount: 1 }, kind: 'catalog' }),
+      builder.build({ contents, chunkId: 0, expected: { merkleRoot: wrongRoot, merkleLeafCount: 1 }, kind: 'catalog' }),
     ).rejects.toMatchObject({ name: 'V10ProofRootMismatchError' });
-    await local.close();
   });
 });

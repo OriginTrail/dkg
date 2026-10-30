@@ -29,7 +29,9 @@ export async function durableSynchronousShare(
     if (error instanceof PromoteStaleAdmissionError) {
       // The winner may already be complete. Observe only an exact durable owner;
       // inability to read one must not invent a recovery promise or retry a mutation.
-      const owners = await queue.list({ contextGraphId }).catch(() => []);
+      // Only jobs stored under this selector's own key can be its owner, so read those (any state) and not the whole context graph.
+      const selector = { contextGraphId, assertionName: name, agentAddress: prepared.agentAddress, subGraphName: options?.subGraphName };
+      const owners = await (queue.listForSelector?.(selector) ?? queue.list({ contextGraphId })).catch(() => []);
       const owner = owners.find(candidate => candidate.request.assertionName === name
         && candidate.request.agentAddress === prepared.agentAddress
         && candidate.request.subGraphName === options?.subGraphName

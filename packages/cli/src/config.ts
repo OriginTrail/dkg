@@ -6,7 +6,7 @@ import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origint
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
+import { configFileSources, parseConfigText } from './config-file-source.js';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -53,8 +53,7 @@ import {
   DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
-  resolveFinalityConfirmations,
-  resolveReceiptTimeoutMs,
+  resolveFinalityConfirmations, resolveReceiptTimeoutMs,
   type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
@@ -633,10 +632,10 @@ export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
 }
-
 export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
   /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
   DKG_Core_chain_cache?: boolean;
+  publicSnapshotBootstrap?: import('./daemon/public-checkpoint-config.js').DaemonPublicCheckpointConfig;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -775,8 +774,8 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). */
-  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean };
+  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). */
+  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
    * ACTIVATES on boot (gossip + sync). A large stale backlog otherwise fans out
@@ -1029,7 +1028,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
     /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
     retryBackoffMaxMs?: number;
   };
-  /** WM → SWM worker, enabled by default; see docs/promote-queue-operations.md. */
+  /** WM → SWM worker, enabled by default; see docs/use-dkg/async-queue-operations.md. */
   promoteQueue?: {
     /** Default 5. Attempt budget; typed prerequisites also retain their retry window. */
     maxRetries?: number;
@@ -1056,6 +1055,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
      */
     postCommitRecoveryIntervalMs?: number;
   };
+  queueRetention?: import('./retention-config.js').RetentionConfigInput; // async queue retention, default off; docs/use-dkg/async-queue-operations.md
   /**
    * Allowed CORS origins. When unset, only the API port's loopback origins
    * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
@@ -2427,24 +2427,22 @@ export class DkgHomeFiles {
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  configExists(): boolean { return configFileSources(this.home).some((source) => existsSync(source.path)); }
 
   readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
+    for (const source of configFileSources(this.home)) {
+      if (existsSync(source.path)) return parseConfigText(source, readFileSync(source.path, 'utf-8'));
+    }
     return null;
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
+    for (const source of configFileSources(this.home)) {
+      try {
+        return mergePersistedConfig(parseConfigText(source, await readFile(source.path, 'utf-8')));
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
     }
     return { ...DEFAULT_CONFIG };
   }
@@ -2482,7 +2480,7 @@ export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
 export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
 /** Reject a misplaced trust policy instead of silently ignoring it. */
-export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+export function assertAuthorityIndexConfigPlacement(config: { core?: unknown }): void {
   if (config.core !== null && typeof config.core === 'object'
     && Object.hasOwn(config.core, 'authorityIndex')) {
     throw new TypeError(
