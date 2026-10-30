@@ -15,8 +15,8 @@ import {
   saveConfig,
   dkgDir,
   readPid,
-  isProcessRunning,
 } from '../config.js';
+import { daemonStoreMigrationRefusal } from '../daemon/store-maintenance-gate.js';
 import {
   deriveBlazegraphContainerName,
   blazegraphMigrationVolumeName,
@@ -160,9 +160,9 @@ export function registerStoreCommand(program: Command): void {
       // Writers must remain stopped through verification and any rollback:
       // an acknowledged replacement write would be absent from the backup.
       const pid = existsSync(join(dkgDir(), 'daemon.pid')) ? await readPid() : null;
-      const daemonRunning = pid != null && isProcessRunning(pid);
-      if (daemonRunning && !opts.dryRun) {
-        console.error(`DKG daemon is running (pid ${pid}). Stop it with \`dkg stop\` before hardening the store; --yes only skips confirmation.`);
+      const daemonRefusal = pid != null && !opts.dryRun ? daemonStoreMigrationRefusal(pid) : undefined;
+      if (daemonRefusal !== undefined) {
+        console.error(daemonRefusal);
         process.exit(1);
       }
 

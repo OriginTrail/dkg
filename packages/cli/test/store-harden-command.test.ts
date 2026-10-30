@@ -22,7 +22,6 @@ const mocks = vi.hoisted(() => ({
   saveConfig: vi.fn(),
   dkgDir: vi.fn(),
   readPid: vi.fn(),
-  isProcessRunning: vi.fn(),
   executeHardenMigration: vi.fn(),
   // Scripted answer for the confirmation prompt; null = prompting is an error.
   confirmAnswer: { value: null as string | null },
@@ -37,7 +36,6 @@ vi.mock('../src/config.js', async importOriginal => {
     saveConfig: mocks.saveConfig,
     dkgDir: mocks.dkgDir,
     readPid: mocks.readPid,
-    isProcessRunning: mocks.isProcessRunning,
   };
 });
 
@@ -99,6 +97,14 @@ async function runHarden(...args: string[]): Promise<void> {
   await program.parseAsync(['node', 'dkg', 'store', 'harden', ...args]);
 }
 
+/** Answer the liveness probe of the recorded daemon pid. */
+function answerDaemonProbe(answer: 'running' | 'EPERM'): void {
+  vi.spyOn(process, 'kill').mockImplementation(() => {
+    if (answer === 'running') return true;
+    throw Object.assign(new Error('probe failed'), { code: answer });
+  });
+}
+
 describe('dkg store harden command wrapper', () => {
   let home: string;
 
@@ -110,7 +116,6 @@ describe('dkg store harden command wrapper', () => {
     mocks.loadConfig.mockResolvedValue({ name: 'test-node', store: MANAGED_STORE() });
     mocks.saveConfig.mockResolvedValue(undefined);
     mocks.readPid.mockResolvedValue(null);
-    mocks.isProcessRunning.mockReturnValue(false);
     mocks.executeHardenMigration.mockImplementation(async (opts: { dryRun?: boolean }) =>
       opts.dryRun ? DRY_RUN_RESULT : HARDENED_RESULT,
     );
@@ -137,7 +142,7 @@ describe('dkg store harden command wrapper', () => {
   it('refuses a running daemon without --yes BEFORE any executor call (even the preview)', async () => {
     writeFileSync(join(home, 'daemon.pid'), '4242\n');
     mocks.readPid.mockResolvedValue(4242);
-    mocks.isProcessRunning.mockReturnValue(true);
+    answerDaemonProbe('running');
     await expect(runHarden()).rejects.toThrow('process.exit:1');
     // Not even the dry-run preview may run: the refusal is the FIRST gate
     // after config validation, so a wedged store can be hardened calmly
@@ -149,17 +154,27 @@ describe('dkg store harden command wrapper', () => {
   it('refuses a running daemon even WITH --yes before any preview or mutation', async () => {
     writeFileSync(join(home, 'daemon.pid'), '4242\n');
     mocks.readPid.mockResolvedValue(4242);
-    mocks.isProcessRunning.mockReturnValue(true);
+    answerDaemonProbe('running');
     await expect(runHarden('--yes')).rejects.toThrow('process.exit:1');
     expect(mocks.executeHardenMigration).not.toHaveBeenCalled();
     expect(mocks.saveConfig).not.toHaveBeenCalled();
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Stop it with `dkg stop`'));
   });
 
+  it('refuses a daemon pid this account cannot check before any preview or mutation', async () => {
+    writeFileSync(join(home, 'daemon.pid'), '4242\n');
+    mocks.readPid.mockResolvedValue(4242);
+    answerDaemonProbe('EPERM');
+    await expect(runHarden('--yes')).rejects.toThrow('process.exit:1');
+    expect(mocks.executeHardenMigration).not.toHaveBeenCalled();
+    expect(mocks.saveConfig).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Cannot verify daemon state'));
+  });
+
   it('allows a read-only dry-run while the daemon is running', async () => {
     writeFileSync(join(home, 'daemon.pid'), '4242\n');
     mocks.readPid.mockResolvedValue(4242);
-    mocks.isProcessRunning.mockReturnValue(true);
+    answerDaemonProbe('running');
     await runHarden('--dry-run', '--yes');
     expect(mocks.executeHardenMigration).toHaveBeenCalledOnce();
     expect(mocks.executeHardenMigration.mock.calls[0][0].dryRun).toBe(true);

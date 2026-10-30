@@ -14,7 +14,7 @@
  * No real Docker, no real fetch — journal files are tiny stand-ins in a
  * tmp dir.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
@@ -96,6 +96,37 @@ describe('executeHardenMigration', () => {
     expect(calls.every(args => args[0] === 'inspect')).toBe(true);
     expect(queries).toEqual([]);
     expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
+  });
+
+  describe('a recorded daemon pid', () => {
+    /** Answer the probe of the recorded pid with `code`; every other pid stays real. */
+    const answerDaemonProbe = (code: string) => {
+      mkdirSync(dkgHome, { recursive: true });
+      writeFileSync(join(dkgHome, 'daemon.pid'), '4242');
+      const kill = process.kill.bind(process);
+      vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+        if (pid === 4242) throw Object.assign(new Error('probe failed'), { code });
+        return kill(pid, signal);
+      });
+    };
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it.each(['EPERM', 'EIO'])('refuses the migration when the probe answers %s, with no container mutation', async code => {
+      answerDaemonProbe(code);
+      const { runner, calls } = scriptedDocker({ initial: 'legacy', migrationDir });
+      const { fn, calls: queries } = verifierFetch();
+      await expect(executeHardenMigration(baseOpts(runner, fn))).rejects.toThrow(/Cannot verify daemon state/);
+      expect(calls.every(args => args[0] === 'inspect')).toBe(true);
+      expect(queries).toEqual([]);
+      expect(existsSync(storeHardenLockPath(dkgHome))).toBe(false);
+    });
+
+    it('migrates when the probe answers ESRCH, which proves the daemon gone', async () => {
+      answerDaemonProbe('ESRCH');
+      const { runner } = scriptedDocker({ initial: 'legacy', migrationDir });
+      const { fn } = verifierFetch();
+      await expect(executeHardenMigration(baseOpts(runner, fn))).resolves.toMatchObject({ outcome: 'hardened' });
+    });
   });
 
   it('releases the startup barrier when initial migration logging fails before any container mutation', async () => {
