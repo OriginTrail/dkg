@@ -32,6 +32,18 @@ describe('prepareQueuedKnowledgeAssetVmPublishOptions', () => {
     expect(prepared.trustedNonManifestCatalogTriples).toBeUndefined();
   });
 
+  it('carries the explicit live curated policy into detached catalog capability', () => {
+    const resolvedInline = vi.fn();
+    const prepared = prepareQueuedKnowledgeAssetVmPublishOptions({
+      contextGraphId: 'curated-cg', snapshotQuads, onChainContextGraphId: '7',
+      resolvedEncryptInlinePayload: resolvedInline, resolvedEncryptInlineChunked: undefined,
+      queuedEncryptInlinePayload: undefined, queuedEncryptInlineChunked: undefined,
+    });
+    expect(prepared.encryptInlinePayload).toBe(resolvedInline);
+    expect(prepared.trustedNonManifestCatalogTriples).toHaveLength(4);
+    expect(prepared.quads).toEqual(snapshotQuads);
+  });
+
   it('retains queued fail-closed callbacks only when no live on-chain policy was resolved', () => {
     const queuedInline = vi.fn();
     const queuedChunked = vi.fn();

@@ -14,6 +14,13 @@ export {
 export { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, isWorkspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export * from './publisher.js';
 export * from './publication-pricing.js';
+export {
+  MINT_ADOPTION_REFUSED_CODE,
+  MintAdoptionRefusedError,
+  type MintAdoptionExpectation,
+  type MintAdoptionRefusalReason,
+} from './adopt-existing-mint.js';
+export { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
 export type { LiftJobTailStep, LiftJobTailStepObserver } from './lift-job-tail-steps.js';
@@ -618,3 +625,9 @@ export {
 
 export { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';
 export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, projectGraphKnowledgeAssetReplayControls } from './graph-knowledge-asset-controls.js';
+
+export { prepareMintAdoption, revalidatePreparedMintAdoption } from './adopt-existing-mint.js';
+
+export { withAssertionLifecycleWriteLease, assertAssertionLifecycleWriteLease, type AssertionLifecycleWriteLease } from './store-write-locks.js';
+
+export type { PreparedMintAdoption, MintAdoptionRequest } from './adopt-existing-mint.js';

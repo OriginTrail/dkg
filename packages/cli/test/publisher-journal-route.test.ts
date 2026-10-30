@@ -154,9 +154,9 @@ describe('#1829 GET /api/publisher/journal', () => {
   });
 
   it.each([true, false])('preserves empty raw-job journals only for operators (operator=%s)', async operator => {
-    const { store, publisher } = await createMixedPublisherInventory('music-social');
+    const { store } = await createMixedPublisherInventory('music-social');
     stores.push(store);
-    const ctx = createContext('/api/publisher/journal?jobId=legacy', publisher, '0x0',
+    const ctx = createContext('/api/publisher/journal?jobId=legacy', createPublisherControlFromStore(store), '0x0',
       requestAuthentication(operator ? { kind: 'nodeOperator' }
         : { kind: 'agent', agentAddress: '0x3333333333333333333333333333333333333333' }));
     const authority = vi.fn();

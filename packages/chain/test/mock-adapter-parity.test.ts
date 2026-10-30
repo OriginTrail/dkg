@@ -238,6 +238,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // All three PUBLIC surfaces are mirrored on the mock; this is EVM receipt plumbing over
   // `getTransactionReceiptWithFailover` — same category as the two parse helpers above.
   'readPublishReceipt',
+  // TS-private halves of the public `resolveKnowledgeAssetMint`, which the mock mirrors from
+  // its event log: the creation-log scan and the per-transaction receipt proof.
+  'findMintTransactionHashes',
+  'resolveMintTransaction',
   // TS-private header-timestamp policy shared by the two publish-receipt parsers above
   // (`skipBlockTimestamp`: 0 for a caller that never reads it, else the finalized header read).
   // EVM receipt plumbing — the mock builds its publish results without a block header.

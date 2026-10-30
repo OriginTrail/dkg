@@ -18,6 +18,7 @@ import {
   messageIndicatesNoFundedPublisherWallet,
 } from '@origintrail-official/dkg-core';
 import { loadAbi, loadVendoredAbis } from './evm-adapter-abi.js';
+import { forEachEvmErrorEnvelope, structuredRevertData, type RawRevertData } from './evm-error-envelopes.js';
 import { isRemoteSignerError } from './remote-signer-errors.js';
 
 export function errorMessage(err: unknown): string {
@@ -240,29 +241,6 @@ type EvmErrorLike = {
   [key: string]: unknown;
 };
 
-type RawRevertData = string | Uint8Array;
-
-const RAW_REVERT_DATA_WRAPPER_KEYS = [
-  'error',
-  'cause',
-  'info',
-  'data',
-  'originalError',
-] as const;
-
-function isRawRevertData(raw: unknown): raw is RawRevertData {
-  if (raw instanceof Uint8Array) return true;
-  return typeof raw === 'string' && /^0x[0-9a-fA-F]+$/.test(raw);
-}
-
-function rawRevertDataFromDirectFields(err: EvmErrorLike): RawRevertData[] {
-  const candidates: RawRevertData[] = [];
-  for (const raw of [err.data, err.errorData]) {
-    if (isRawRevertData(raw)) candidates.push(raw);
-  }
-  return candidates;
-}
-
 function rawRevertDataFromMessage(message: string): string | null {
   // Match the revert-data hex across the RPC-shape variants we see in the
   // wild. CH-10:
@@ -280,28 +258,6 @@ function rawRevertDataFromMessage(message: string): string | null {
   return match?.[1] ?? null;
 }
 
-function rawRevertDataFromWrapperFields(err: EvmErrorLike): RawRevertData[] {
-  const candidates: RawRevertData[] = [];
-  const seen = new Set<unknown>();
-  const visit = (value: unknown, depth: number) => {
-    if (!value || typeof value !== 'object' || seen.has(value) || depth > 5) return;
-    seen.add(value);
-    const e = value as EvmErrorLike;
-    candidates.push(...rawRevertDataFromDirectFields(e));
-    if (typeof e.message === 'string') {
-      const messageData = rawRevertDataFromMessage(e.message);
-      if (messageData) candidates.push(messageData);
-    }
-    for (const key of RAW_REVERT_DATA_WRAPPER_KEYS) {
-      visit(e[key], depth + 1);
-    }
-  };
-  for (const key of RAW_REVERT_DATA_WRAPPER_KEYS) {
-    visit(err[key], 1);
-  }
-  return candidates;
-}
-
 /**
  * Enrich a caught EVM error with a decoded custom error name.
  * Modifies the error message in-place and returns the decoded name (if any).
@@ -311,11 +267,18 @@ export function enrichEvmError(err: unknown): string | null {
   const e = err as EvmErrorLike;
   const message = typeof e.message === 'string' ? e.message : '';
   const messageData = rawRevertDataFromMessage(message);
-  const candidates = [
-    ...rawRevertDataFromDirectFields(e),
-    ...rawRevertDataFromWrapperFields(e),
-    ...(messageData ? [messageData] : []),
-  ];
+  // Each envelope's structured data first, then (for wrapped errors) the data
+  // its message quotes; the outer message is the last resort. This diagnostic
+  // layer reads message text; strict decoders use the structured data alone.
+  const candidates: RawRevertData[] = [];
+  forEachEvmErrorEnvelope(e, (envelope, depth) => {
+    candidates.push(...structuredRevertData(envelope));
+    const nestedMessageData = depth > 0 && typeof envelope.message === 'string'
+      ? rawRevertDataFromMessage(envelope.message)
+      : null;
+    if (nestedMessageData) candidates.push(nestedMessageData);
+  });
+  if (messageData) candidates.push(messageData);
   let decoded: ReturnType<typeof decodeEvmError> = null;
   for (const data of candidates) {
     decoded = decodeEvmError(data);

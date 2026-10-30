@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   ASSERTION_SEAL_PREDICATES,
   MemoryLayer,
@@ -27,11 +27,11 @@ afterEach(async () => {
   agents.length = 0;
 });
 
-async function createAgent(): Promise<DKGAgent> {
+async function createAgent(chainAdapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP)): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'RootlessFinalizeRecovery',
     listenPort: 0,
-    chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+    chainAdapter,
     kaNumberAllocator: makeTestKaNumberAllocator(),
     nodeRole: 'core',
   });
@@ -286,10 +286,12 @@ describe('graph-scoped assertion finalization recovery', () => {
     expect(leakedInternalGraphs).toEqual([]);
   }, 60_000);
 
-  it('publishes only the exact sealed SWM graph and fails before chain work on tampering', async () => {
-    const agent = await createAgent();
+  it('publishes only the exact sealed SWM graph and fails before chain submission on tampering', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const agent = await createAgent(chain);
     const contextGraphId = `rootless-vm-boundary-${Date.now()}`;
     await agent.createContextGraph({ id: contextGraphId, name: 'Rootless VM boundary' });
+    const mint = vi.spyOn(chain, 'createKnowledgeAssets');
     const author = agent.defaultAgentAddress ?? agent.peerId;
     const name = 'exact-vm-boundary';
     await agent.assertion.create(contextGraphId, name);
@@ -340,7 +342,8 @@ describe('graph-scoped assertion finalization recovery', () => {
     await agent.store.insert([tamperQuad]);
     await expect(
       agent.publishFromFinalizedAssertion(contextGraphId, name),
-    ).rejects.toThrow(/SWM triple count mismatch/);
+    ).rejects.toThrow(/public triple count mismatch/i);
+    expect(mint).not.toHaveBeenCalled();
     await agent.store.delete([tamperQuad]);
 
     let captured: {

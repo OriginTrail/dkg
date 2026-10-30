@@ -1,6 +1,8 @@
 import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
 import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
+import { handleKnowledgeAssetMintReconcile } from './knowledge-asset-mint-reconcile.js';
+import { SELECTED_AUTHOR_FIELD, resolveSelectedAuthorAgentAddress } from './selected-author.js';
 import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
 import { durableSynchronousShare, shareOperationFields, synchronousShareSuccessBody } from './durable-synchronous-share.js';
@@ -97,6 +99,7 @@ import {
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
+  respondMintAdoptionRefused,
 } from './knowledge-assets-error-mapping.js';
 
 import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from './confirmed-catalog-obligation.js';
@@ -131,12 +134,9 @@ const FINALIZE_ONLY_CREATE_FIELDS = [
   "schemeVersion",
 ] as const;
 
-
-
 function hex(bytes: Uint8Array): string {
   return "0x" + Buffer.from(bytes).toString("hex");
 }
-
 
 function rejectKaIdMutationIdentifier(seg: string, res: RequestContext["res"]): boolean {
   if (classifyKaIdentifier(seg, { includeCompact: false }).kind !== "kaId") return false;
@@ -492,35 +492,6 @@ function resolveStandaloneVmPublishOptions(
     }
   }
   return resolveFinalizedPublishOptions(ctx, raw);
-}
-
-const SELECTED_AUTHOR_FIELD = "selectedAuthorAgentAddress";
-
-/**
- * GH#1786 — read + validate the resident-author selector. Distinct from the
- * rejected `authorAgentAddress` (which would OVERRIDE authorship — the seal
- * already encodes the author): this only SELECTS among authors who already have
- * a finalized assertion at this coordinate, so a client can act on a
- * 409 `AMBIGUOUS_ASSERTION_AUTHOR`. Returns `{ ok: false }` after having written
- * a 400 (caller must return).
- */
-function resolveSelectedAuthorAgentAddress(
-  ctx: RequestContext,
-  source: Record<string, unknown>,
-): { ok: true; value?: string } | { ok: false } {
-  const raw = source[SELECTED_AUTHOR_FIELD];
-  // Only `undefined` counts as absent. A PRESENT `null` (a common client
-  // serialization of "nothing selected") must fail closed like any other malformed
-  // value — treating it as absent would fall back to normal author resolution and
-  // could publish a different author with 200 instead of a request-shape error.
-  if (raw === undefined) return { ok: true };
-  if (typeof raw !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(raw)) {
-    jsonResponse(ctx.res, 400, {
-      error: `"${SELECTED_AUTHOR_FIELD}" must be a 0x-prefixed 20-byte EVM address`,
-    });
-    return { ok: false };
-  }
-  return { ok: true, value: raw };
 }
 
 async function resolvePromoteStorageLane(
@@ -1012,6 +983,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   const verb = segs[2];
 
   if (method === 'POST' && layer === 'vm' && verb === 'repair-descriptor') return handlePublishedDescriptorRepair(ctx, name, writePreflightContextGraphOpts);
+  if (method === 'POST' && layer === 'vm' && verb === 'reconcile') return handleKnowledgeAssetMintReconcile(ctx, name, writePreflightContextGraphOpts);
   // Shared GET preflight: decode/validate the :identifier, require + normalize
   // contextGraphId, validate subGraphName, extract optional agentAddress. For
   // agent-scoped bearer tokens, omitted agentAddress defaults to the token's
@@ -1584,7 +1556,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
         if (respondCatalogPublicationAdmissionError(res, e)) return;
-        if (respondPublicationPricingPolicyError(res, e)) return;
+        if (respondPublicationPricingPolicyError(res, e) || respondMintAdoptionRefused(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;
         // GH#2958 — the finalized version is not the next publishable one (the async lane maps

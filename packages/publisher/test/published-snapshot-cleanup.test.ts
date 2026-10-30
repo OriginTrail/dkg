@@ -745,7 +745,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     const v2 = await share(f, 2);
     // A later version is shared before the publication of version 2 returns.
     let v3!: Awaited<ReturnType<typeof share>>;
-    vi.spyOn(f.publisher, 'publish').mockImplementationOnce(async () => {
+    vi.spyOn(f.publisher as unknown as { publishPreparedContent(): Promise<unknown> }, 'publishPreparedContent').mockImplementationOnce(async () => {
       v3 = await share(f, 3);
       return { kaId: 1n, ual: UAL, merkleRoot: new Uint8Array(32), kaManifest: [], status: 'confirmed', publicQuads: v2.quads };
     });

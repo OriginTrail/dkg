@@ -1,3 +1,4 @@
+import type { PreparedPublicationContent, PublicationExecution } from '../src/prepared-publication.js';
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
 import { NoChainAdapter, RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
@@ -18,7 +19,7 @@ import {
   generatedPrivateCatalogFloorQuads,
   generatedPrivateCatalogTripleKeys,
 } from '../src/index.js';
-import type { PublishResult } from '../src/publisher.js';
+import type { PublishResult, PublishOptions } from '../src/publisher.js';
 
 const CONTEXT_GRAPH = 'publish-boundary';
 const CONTEXT_GRAPH_URI = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
@@ -38,6 +39,17 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
     return impl(...args);
   };
   return Object.assign(fn, { calls });
+}
+
+type PublicationStages = {
+  preparePublicationContent(options: PublishOptions, policy?: unknown): Promise<PreparedPublicationContent>;
+  publishPreparedContent(content: PreparedPublicationContent, execution: PublicationExecution): Promise<PublishResult>;
+};
+function captureContentPreparation(publisher: DKGPublisher) {
+  const stages = publisher as unknown as PublicationStages;
+  const prepareSpy = recorder(stages.preparePublicationContent.bind(publisher));
+  stages.preparePublicationContent = prepareSpy;
+  return { stages, prepareSpy };
 }
 
 function q(subject: string, predicate = 'http://schema.org/name', object = '"value"', graph = SWM_GRAPH): Quad {
@@ -86,14 +98,14 @@ async function makePublisher(chain = new NoChainAdapter(), status: PublishResult
     status,
     publicQuads: [],
   };
-  const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => publishResult);
-  (publisher as unknown as { publish: typeof publishSpy }).publish = publishSpy;
-  return { publisher, store, publishSpy };
+  const { stages, prepareSpy } = captureContentPreparation(publisher);
+  stages.publishPreparedContent = async () => publishResult;
+  return { publisher, store, prepareSpy };
 }
 
 describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: one KA, N entities)', () => {
   it('allows selection "all" when shared memory resolves to one payload root', async () => {
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
       q('urn:test:root:one', WORKSPACE_OWNER_PREDICATE, '"peer-a"'),
@@ -108,8 +120,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       status: 'tentative',
     });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    const publishArgs = publishSpy.calls[0][0];
+    expect(prepareSpy.calls).toHaveLength(1);
+    const publishArgs = prepareSpy.calls[0][0];
     expect(publishArgs.publisherPeerId).toBe('peer-swm');
     expect(publishArgs.quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"value"', graph: '' },
@@ -117,7 +129,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
   });
 
   it('selection "all" reads promoted per-KA SWM graphs', async () => {
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"promoted"', PER_KA_SWM_GRAPH),
     ]);
@@ -126,14 +138,14 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       status: 'tentative',
     });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    expect(publishSpy.calls[0][0].quads).toEqual([
+    expect(prepareSpy.calls).toHaveLength(1);
+    expect(prepareSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
     ]);
   });
 
   it('publishes ALL payload roots as one KA when selection "all" resolves to multiple roots (OT-RFC-44)', async () => {
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
       q('urn:test:root:two'),
@@ -147,8 +159,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'))
       .resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
+    expect(prepareSpy.calls).toHaveLength(1);
+    const subjects = new Set(prepareSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
   });
@@ -163,7 +175,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     // merkle recompute would then disagree with the seal, and the publish would
     // flip to `tentative kaId:"0"` for end users. The devnet suite's SWM-drain
     // workaround hides exactly this, so pin it at the publisher seam instead.
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
       q('urn:test:root:one', 'http://schema.org/description', '"one-desc"'),
@@ -178,8 +190,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: ['urn:test:root:one'] }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    const publishArgs = publishSpy.calls[0][0];
+    expect(prepareSpy.calls).toHaveLength(1);
+    const publishArgs = prepareSpy.calls[0][0];
     // GREEDY: assert the EXACT payload, not just a count. Every quad must
     // belong to root:one and NONE may belong to the co-resident root:two.
     // (CONSTRUCT order isn't guaranteed, so match set-wise, not positionally.)
@@ -194,7 +206,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
   });
 
   it('explicit rootEntities selection reads promoted per-KA SWM graphs', async () => {
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"promoted"', PER_KA_SWM_GRAPH),
       q('urn:test:root:two', 'http://schema.org/name', '"bare"'),
@@ -204,14 +216,14 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       publisher.publishFromSharedMemory(CONTEXT_GRAPH, { rootEntities: ['urn:test:root:one'] }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    expect(publishSpy.calls[0][0].quads).toEqual([
+    expect(prepareSpy.calls).toHaveLength(1);
+    expect(prepareSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"promoted"', graph: '' },
     ]);
   });
 
   it('named-KA scope excludes a foreign share with the same subject IRI', async () => {
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
       q('urn:test:root:one', 'http://schema.org/name', '"same-author-sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
@@ -233,7 +245,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       },
     );
 
-    expect(publishSpy.calls[0][0].quads).toEqual([
+    expect(prepareSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"local"', graph: '' },
     ]);
   });
@@ -333,7 +345,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
   });
 
   it('rejects a family-wide remaining clear for an exact named lifecycle', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(new NoChainAdapter(), 'confirmed');
+    const { publisher, store, prepareSpy } = await makePublisher(new NoChainAdapter(), 'confirmed');
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"local"', PER_KA_SWM_GRAPH),
       q('urn:test:root:two', 'http://schema.org/name', '"sibling"', SAME_AUTHOR_SIBLING_SWM_GRAPH),
@@ -354,13 +366,13 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       },
     )).rejects.toThrow(/cannot be combined with a named-lifecycle/);
 
-    expect(publishSpy.calls).toHaveLength(0);
+    expect(prepareSpy.calls).toHaveLength(0);
     expect(await store.deleteByPattern({ graph: PER_KA_SWM_GRAPH })).toBe(1);
     expect(await store.deleteByPattern({ graph: SAME_AUTHOR_SIBLING_SWM_GRAPH })).toBe(1);
   });
 
   it('loads selected data root plus generated private-CG catalog root and threads trusted floor', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(privatePolicyChain());
+    const { publisher, store, prepareSpy } = await makePublisher(privatePolicyChain());
     const cgDid = `did:dkg:context-graph:${CONTEXT_GRAPH}`;
     await store.insert([
       onChainIdQuad('1'),
@@ -377,8 +389,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    const publishArgs = publishSpy.calls[0][0];
+    expect(prepareSpy.calls).toHaveLength(1);
+    const publishArgs = prepareSpy.calls[0][0];
     expect(publishArgs.trustedNonManifestCatalogTriples).toEqual(
       generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
     );
@@ -477,7 +489,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         if (fail && site === 'access-policy') throw unavailable;
         return 1;
       };
-      const { publisher, store, publishSpy } = await makePublisher(chain);
+      const { publisher, store, prepareSpy } = await makePublisher(chain);
       // Deliberately omit local on-chain metadata: an explicit matching binding is sufficient.
       await store.insert([q('urn:test:root:one'), ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH)]);
       const publish = () => publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
@@ -487,12 +499,12 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
       });
       await expect(publish()).resolves.toMatchObject({ status: 'tentative' });
-      expect(publishSpy.calls).toHaveLength(1);
+      expect(prepareSpy.calls).toHaveLength(1);
       fail = true;
       await expect(publish()).rejects.toMatchObject({
         code: 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE', site, cause: unavailable,
       });
-      expect(publishSpy.calls).toHaveLength(1);
+      expect(prepareSpy.calls).toHaveLength(1);
       // Failure of an atomic proof must never splice in latest-state point reads.
       if (site === 'finalized-proof') expect({ nameReads, policyReads }).toEqual({ nameReads: 0, policyReads: 0 });
     },
@@ -514,7 +526,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
         return ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH));
       };
       chain.getContextGraphAccessPolicy = async () => { fallbackReads += 1; return 1; };
-      const { publisher, store, publishSpy } = await makePublisher(chain);
+      const { publisher, store, prepareSpy } = await makePublisher(chain);
       await store.insert([q('urn:test:root:one'), ...generatedPrivateCatalogFloorQuads(CONTEXT_GRAPH, SWM_GRAPH)]);
       const refused = publisher.publishFromSharedMemory(CONTEXT_GRAPH, {
         rootEntities: ['urn:test:root:one', CONTEXT_GRAPH_URI],
@@ -524,7 +536,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       });
       await expect(refused).rejects.toThrow(/trustedNonManifestCatalogTriples is only allowed/);
       await expect(refused).rejects.not.toHaveProperty('code', 'CATALOG_FLOOR_AUTHORITY_UNAVAILABLE');
-      expect(publishSpy.calls).toHaveLength(0);
+      expect(prepareSpy.calls).toHaveLength(0);
       expect(fallbackReads).toBe(0);
     },
   );
@@ -681,7 +693,7 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
   });
 
   it('falls back to direct publish when SWM ACKs fail with NO_DATA_IN_SWM', async () => {
-    const { publisher, store } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     const fallbackResult: PublishResult = {
       kaId: 2n,
       ual: 'did:dkg:0x0000000000000000000000000000000000000001/2',
@@ -696,17 +708,15 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       status: 'tentative',
       publicQuads: [],
     };
-    // First publish (from SWM) rejects with the SWM-ack failure; the direct-
-    // publish fallback then resolves. Drive both outcomes from a queue on a
-    // fresh recorder that replaces the default makePublisher() one.
+    // Acquisition retries with inline transport while content preparation runs once.
     const outcomes: Array<() => Promise<PublishResult>> = [
       async () => {
         throw new Error('storage_ack_insufficient: STORAGE_ACK_DECLINE:NO_DATA_IN_SWM');
       },
       async () => fallbackResult,
     ];
-    const publishSpy = recorder(async (..._args: Parameters<DKGPublisher['publish']>) => outcomes.shift()!());
-    (publisher as unknown as { publish: typeof publishSpy }).publish = publishSpy;
+    const acquire = recorder(async (..._args: Parameters<PublicationStages['publishPreparedContent']>) => outcomes.shift()!());
+    (publisher as unknown as PublicationStages).publishPreparedContent = acquire;
     await store.insert([
       q('urn:test:root:one', 'http://schema.org/name', '"ready"'),
     ]);
@@ -714,16 +724,18 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all'))
       .resolves.toMatchObject({ kaId: 2n, status: 'tentative' });
 
-    expect(publishSpy.calls).toHaveLength(2);
-    expect(publishSpy.calls[0][0]).toMatchObject({ fromSharedMemory: true });
-    expect(publishSpy.calls[1][0]).toMatchObject({ fromSharedMemory: false });
-    expect((publishSpy.calls[1][0] as any).quads).toEqual([
+    expect(prepareSpy.calls).toHaveLength(1);
+    expect(acquire.calls).toHaveLength(2);
+    expect(acquire.calls[0][1]).toMatchObject({ fromSharedMemory: true });
+    expect(acquire.calls[1][1]).toMatchObject({ fromSharedMemory: false });
+    expect(acquire.calls[1][0].payload).toBe(acquire.calls[0][0].payload);
+    expect(prepareSpy.calls[0][0].quads).toEqual([
       { subject: 'urn:test:root:one', predicate: 'http://schema.org/name', object: '"ready"', graph: '' },
     ]);
   });
 
   it('publishes both explicit rootEntities as one KA when they resolve to multiple payload roots (OT-RFC-44)', async () => {
-    const { publisher, store, publishSpy } = await makePublisher();
+    const { publisher, store, prepareSpy } = await makePublisher();
     await store.insert([
       q('urn:test:root:one'),
       q('urn:test:root:two'),
@@ -737,8 +749,8 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
       }),
     ).resolves.toMatchObject({ status: 'tentative' });
 
-    expect(publishSpy.calls).toHaveLength(1);
-    const subjects = new Set(publishSpy.calls[0][0].quads.map((qq: any) => qq.subject));
+    expect(prepareSpy.calls).toHaveLength(1);
+    const subjects = new Set(prepareSpy.calls[0][0].quads.map((qq: any) => qq.subject));
     expect(subjects.has('urn:test:root:one')).toBe(true);
     expect(subjects.has('urn:test:root:two')).toBe(true);
   });
@@ -752,8 +764,14 @@ describe('publishFromSharedMemory VM registration guard', () => {
     return chain;
   }
 
+  async function makeRegistrationPublisher() {
+    const { publisher, store } = await makeRealPublisher(registrationGuardChain());
+    const { prepareSpy } = captureContentPreparation(publisher);
+    return { publisher, store, prepareSpy };
+  }
+
   it('accepts a graph whose on-chain binding is only in its own _meta', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store, prepareSpy } = await makeRegistrationPublisher();
     await store.insert([
       q('urn:test:root:one'),
       {
@@ -767,24 +785,24 @@ describe('publishFromSharedMemory VM registration guard', () => {
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
       status: 'tentative',
     });
-    expect(publishSpy.calls).toHaveLength(1);
+    expect(prepareSpy.calls).toHaveLength(1);
   });
 
   it('rejects a graph with neither a registration status nor an on-chain binding', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store } = await makeRegistrationPublisher();
     await store.insert([q('urn:test:root:one')]);
 
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).rejects.toMatchObject({
       code: 'CG_NOT_REGISTERED',
     });
-    expect(publishSpy.calls).toHaveLength(0);
+    expect(await store.countQuads(CONTEXT_GRAPH_URI)).toBe(0);
   });
 
   // An edge learns a public graph's id from the ContextGraphCreated event and
   // syncs no `ontology` graph, so its store can hold only the local bootstrap's
   // `unregistered` marker while the agent resolves the id from chain.
   it('accepts the on-chain id the caller resolved when the store has no binding', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store, prepareSpy } = await makeRegistrationPublisher();
     await store.insert([
       q('urn:test:root:one'),
       {
@@ -798,18 +816,18 @@ describe('publishFromSharedMemory VM registration guard', () => {
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       onChainContextGraphId: '7',
     })).resolves.toMatchObject({ status: 'tentative' });
-    expect(publishSpy.calls).toHaveLength(1);
-    expect(publishSpy.calls[0][0].publishContextGraphId).toBe('7');
+    expect(prepareSpy.calls).toHaveLength(1);
+    expect(prepareSpy.calls[0][0].publishContextGraphId).toBe('7');
   });
 
   it('still rejects when the resolved on-chain id is blank', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store } = await makeRegistrationPublisher();
     await store.insert([q('urn:test:root:one')]);
 
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       onChainContextGraphId: '  ',
     })).rejects.toMatchObject({ code: 'CG_NOT_REGISTERED' });
-    expect(publishSpy.calls).toHaveLength(0);
+    expect(await store.countQuads(CONTEXT_GRAPH_URI)).toBe(0);
   });
 });
 

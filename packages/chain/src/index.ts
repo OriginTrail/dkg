@@ -253,6 +253,16 @@ export {
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
+  KA_ID_ALREADY_MINTED_SELECTOR,
+  kaIdAlreadyMintedFromError,
+  kaIdAlreadyMintedRevert,
+} from './ka-id-already-minted.js';
+export type {
+  KnowledgeAssetMintEvidence,
+  KnowledgeAssetMintLookupOptions,
+  KnowledgeAssetMintResolution,
+} from './knowledge-asset-mint-evidence.js';
+export {
   EVMChainAdapter,
   type EVMAdapterConfig,
   type EVMAdapterOptions,

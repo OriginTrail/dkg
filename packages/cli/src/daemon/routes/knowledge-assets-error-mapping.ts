@@ -10,7 +10,7 @@ import {
   ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
 } from '@origintrail-official/dkg-core';
-import { PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
+import { MINT_ADOPTION_REFUSED_CODE, PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE, SUB_GRAPH_NOT_FOUND_CODE } from '@origintrail-official/dkg-publisher';
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -72,6 +72,25 @@ export function respondPublicationPricingPolicyError(res: RequestContext["res"],
   if (e?.code !== PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE) return false;
   jsonResponse(res, 409, {
     code: e.code,
+    error: e.message ?? String(e),
+  });
+  return true;
+}
+
+/**
+ * A publish whose transaction mined after the node stopped waiting, whose
+ * existing mint could not be proven against the seal. Missing or not-yet-final
+ * evidence may still appear (503 + `retryable`); a mismatch, or an id that is
+ * not minted at all (reconcile), never will (409). Shared by `vm/publish` and
+ * `vm/reconcile`.
+ */
+export function respondMintAdoptionRefused(res: RequestContext["res"], e: any): boolean {
+  if (e?.code !== MINT_ADOPTION_REFUSED_CODE) return false;
+  jsonResponse(res, e.retryable ? 503 : 409, {
+    code: e.code,
+    reason: e.reason,
+    kaId: String(e.kaId),
+    retryable: e.retryable === true,
     error: e.message ?? String(e),
   });
   return true;

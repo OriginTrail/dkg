@@ -121,7 +121,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
         return;
       }
 
-      const lifecycle = url.match(/^\/api\/knowledge-assets\/paper\/(wm\/write|wm\/finalize|swm\/share|swm\/share-async|vm\/publish|vm\/publish-async|wm\/pull-from|wm\/discard)$/);
+      const lifecycle = url.match(/^\/api\/knowledge-assets\/paper\/(wm\/write|wm\/finalize|swm\/share|swm\/share-async|vm\/publish|vm\/publish-async|vm\/reconcile|wm\/pull-from|wm\/discard)$/);
       if (method === 'POST' && lifecycle) {
         const body = await readJsonBody(req);
         calls.push({ method, url, body });
@@ -189,6 +189,14 @@ describe.sequential('knowledge-asset CLI smoke', () => {
             privateTripleCount: 0,
             sealMerkleRoot: `0x${'44'.repeat(32)}`,
             intentKey: `sha256:${'55'.repeat(32)}`,
+          }));
+        } else if (lifecycle[1] === 'vm/reconcile') {
+          res.end(JSON.stringify({
+            status: 'adopted',
+            ual: 'did:dkg:31337/0x1111111111111111111111111111111111111111/7',
+            kaId: '7',
+            txHash: body.txHash ?? '0xlatemint',
+            blockNumber: 48853001,
           }));
         } else if (lifecycle[1] === 'wm/pull-from') {
           res.end(JSON.stringify({ wmDraft: 'open', seededFrom: { layer: body.layer }, replaced: body.onConflict === 'replace' }));
@@ -731,6 +739,22 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       .toMatchObject({ alsoShareSwm: true });
     expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/swm/share')?.body)
       .toMatchObject({ contextGraphId: 'partial-share' });
+  }, 60000);
+
+  it('records a late-mined publish through ka reconcile without the publish options', async () => {
+    calls = [];
+    const invocation = testInvocation(dkgHome, smokeApiPort);
+    const txHash = `0x${'ab'.repeat(32)}`;
+
+    const help = await runCli(['ka', 'reconcile', '--help'], invocation);
+    expect(help.stdout).toContain('--tx-hash <hash>');
+    expect(help.stdout).not.toContain('--publish-epochs');
+
+    const reconciled = await runCli(['ka', 'reconcile', 'paper', '-c', 'research', '--sub-graph-name', 'lots', '--tx-hash', txHash], invocation);
+    expect(reconciled.stdout).toContain('Knowledge asset late mint recorded:');
+    expect(reconciled.stdout).toContain(`Tx hash: ${txHash}`);
+    expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/vm/reconcile')?.body)
+      .toEqual({ contextGraphId: 'research', subGraphName: 'lots', txHash });
   }, 60000);
 
   it('reports VM publish partial context-graph binding and keeps named publish cleanup out of KA commands', async () => {

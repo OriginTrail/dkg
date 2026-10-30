@@ -18,6 +18,14 @@ export type ConfirmedCatalogObligationInputV1 = Readonly<ObserveRfc64ConfirmedVm
   readonly confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
 }>;
 
+/** Preserve chain confirmation when the local catalog observer cannot retain its obligation. */
+export async function observeConfirmedPublicationWithRecoveryV1(input: ConfirmedCatalogObligationInputV1,
+  observe: (input: ObserveRfc64ConfirmedVmParamsV1) => Promise<void>): Promise<void> {
+  if (input.status !== 'confirmed') return;
+  try { await observe(input); }
+  catch (cause) { throw new ConfirmedCatalogObligationErrorV1(input, input.confirmedTransaction, cause); }
+}
+
 /** JSON-safe caller-retained evidence; recovery validates receipt and local seal before observation. */
 export interface ConfirmedCatalogObligationRecoveryV1 {
   readonly version: 1;

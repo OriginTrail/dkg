@@ -121,6 +121,8 @@ export default defineConfig({
           // Node-wide routes accept only node-admin callers. Pure route
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
+          // Late-mint reconcile and the vm/publish refusal mapping; pure route handlers.
+          'test/knowledge-asset-mint-reconcile-route.test.ts',
           'test/daemon-operator-scope-live.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
