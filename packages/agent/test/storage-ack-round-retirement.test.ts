@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { multiaddr } from '@multiformats/multiaddr';
 import { ethers } from 'ethers';
 import {
@@ -7,11 +7,16 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ACKCollector } from '@origintrail-official/dkg-publisher';
 import { Messenger } from '../src/p2p/messenger.js';
-import { createACKSendP2P } from '../src/internal/storage-ack-owned-request.js';
-import { LocalStorageACKTransport } from '../src/p2p/local-storage-ack-transport.js';
+import { DKGAgent } from '../src/index.js';
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
+import { registerStorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
+import { installStorageACKFixtureEndpoint } from './_helpers/storage-ack-endpoint-fixture.js';
 
 it('retires an obsolete real P2P send at quorum without claiming the remote handler stopped', async () => {
   const nodes: DKGNode[] = [];
+  const agent = await DKGAgent.create({ name: 'ACKRetirementRemote', store: new OxigraphStore(), chainAdapter: new MockChainAdapter() });
   const releases: (() => void)[] = [];
   const wallets = Array.from({ length: 4 }, () => ethers.Wallet.createRandom());
   const contract = '0x000000000000000000000000000000000000c10a';
@@ -47,13 +52,20 @@ it('retires an obsolete real P2P send at quorum without claiming the remote hand
       });
       await caller.node.libp2p.dial(multiaddr(peer.node.multiaddrs[0]));
     }
-    const sendP2P = createACKSendP2P({ timeoutMs: 5_000, messenger: {
+    const internals = agent as unknown as {
+      node: DKGNode; messenger: Pick<Messenger, 'sendRequestOwned'>;
+      networkAdmissionCoordinator: { isAcceptedPeer(peer: string): boolean };
+    };
+    internals.node = caller.node;
+    vi.spyOn(internals.networkAdmissionCoordinator, 'isAcceptedPeer').mockImplementation(peer => peers.includes(peer));
+    internals.messenger = {
       sendRequestOwned: async (...args) => {
         sends++;
         try { return await caller.messenger.sendRequestOwned(...args); }
         finally { sends--; }
       },
-    } });
+    };
+    const { sendP2P } = agent.createACKTransportFactory({ sendTimeoutMs: 5_000 })();
     const collector = new ACKCollector({ gossipPublish: async () => {}, sendP2P,
       getConnectedCorePeers: () => peers,
       verifyIdentity: async (address, id) => wallets[Number(id) - 1]?.address.toLowerCase() === address.toLowerCase(),
@@ -75,25 +87,45 @@ it('retires an obsolete real P2P send at quorum without claiming the remote hand
   } finally {
     for (const release of releases) release();
     for (const node of nodes.reverse()) await node.stop();
+    await agent.stop();
+    vi.restoreAllMocks();
   }
 }, 20_000);
 
-it('forwards caller cancellation to self-ACK work while retaining its physical drain', async () => {
-  const transport = new LocalStorageACKTransport();
+it('forwards caller cancellation through the registered agent self-ACK closure and retains physical drain', async () => {
+  const agent = await DKGAgent.create({ name: 'ACKRetirementLocal', nodeRole: 'core', store: new OxigraphStore(), chainAdapter: new MockChainAdapter() });
+  const internals = agent as unknown as { node: { peerId: string }; storageACKRegistrationRuntime: StorageACKRegistrationRuntime };
+  internals.node = { peerId: 'self-core' };
+  const runtime = internals.storageACKRegistrationRuntime;
   const controller = new AbortController();
   let signal: AbortSignal | undefined;
   let entered!: () => void, release!: () => void;
   const ready = new Promise<void>(resolve => { entered = resolve; });
   const completion = new Promise<void>(resolve => { release = resolve; });
-  const send = transport.send(requestSignal => {
+  const unexpectedRemote = () => { throw new Error('Fixture expects local dispatch'); };
+  const local = (_data: Uint8Array, _peer: string, requestSignal?: AbortSignal) => {
     signal = requestSignal; entered();
     return { response: completion.then(() => new Uint8Array()), completion };
-  }, 5_000, controller.signal).catch(error => error);
-  await ready;
-  controller.abort(new Error('quorum elsewhere'));
-  expect(await send).toBeInstanceOf(Error);
-  expect(signal?.aborted).toBe(true);
-  await expect(transport.drain(5)).rejects.toThrow(/did not retire/);
-  release();
-  await transport.drain();
+  };
+  await installStorageACKFixtureEndpoint(agent, registerStorageACKEndpoint({
+    registerGroup: () => () => {}, trackRemoteCompletion: () => {},
+    publish: unexpectedRemote, update: unexpectedRemote, publishLocal: local, updateLocal: local,
+  }));
+  const { sendP2P } = agent.createACKTransportFactory({ sendTimeoutMs: 5_000 })();
+  const send = sendP2P('self-core', PROTOCOL_STORAGE_ACK, new Uint8Array(), { signal: controller.signal }).catch(error => error);
+  try {
+    await ready;
+    controller.abort(new Error('quorum elsewhere'));
+    const result = await Promise.race([send, new Promise(resolve => setImmediate(() => resolve('still pending')))]);
+    expect(result).toBeInstanceOf(Error);
+    expect(signal?.aborted).toBe(true);
+    let drained = false;
+    const drain = runtime.closeAndDrain().then(() => { drained = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(drained).toBe(false);
+    release(); await drain;
+    expect(drained).toBe(true);
+  } finally {
+    release(); await send; await runtime.closeAndDrain(); await agent.stop();
+  }
 });
