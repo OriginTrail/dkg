@@ -1,4 +1,5 @@
-import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
+import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { jobFailureText } from './job-failure-reason.js';
 import type { LiftValidationDiagnostic } from './lift-validation-error.js';
 import type { LiftJobActiveState } from './lift-job-states.js';
 
@@ -271,6 +272,8 @@ export function getLiftJobFailurePolicy(code: LiftJobFailureCode): BuiltInLiftJo
   return LIFT_JOB_FAILURE_POLICIES[code];
 }
 
+const failureLog = new Logger('AsyncLiftPublisher');
+
 export function createLiftJobFailureMetadata(
   params: Omit<LiftJobFailureMetadata, 'phase' | 'mode' | 'retryable' | 'resolution'>,
 ): LiftJobFailureMetadata {
@@ -299,12 +302,18 @@ export function createLiftJobFailureMetadata(
     throw new Error(`Timeout metadata is not allowed for non-timeout LiftJob failure code ${params.code}`);
   }
 
+  // Every persisted failure message is a short reason (`jobFailureText`): a provider's text carries the
+  // request URL (ethers embeds it, and a configured URL can carry an API key), the transaction and the
+  // JSON-RPC payload, and the failure record is echoed by the job routes. Callers classify on the raw
+  // text and pass it here; the reduction lives at the one writer. When the reason had to be cut, the
+  // rest of the text, reduced the same way, goes to the node's own log and nowhere else.
+  const { reason, detail } = jobFailureText(params.message);
+  if (reason !== detail) {
+    failureLog.warn(createOperationContext('publish'), `${params.errorPayloadRef} failed (${params.code}): ${detail}`);
+  }
   return {
     ...params,
-    // Every persisted failure message is host-only: a provider's text carries the request URL (ethers
-    // embeds it), a configured URL can carry an API key, and the failure record is echoed by the job
-    // routes. Callers classify on the raw text and pass it here; the reduction lives at the one writer.
-    message: hostOnlyRpcText(params.message),
+    message: reason,
     phase: policy.phase,
     mode: policy.mode,
     retryable: policy.retryable,

@@ -206,6 +206,7 @@ import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.
 import { nodeUiTokenForRequest } from './node-ui-access.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import { createProtocolStores } from './protocol-persistence.js';
+import { createContextGraphJoinPolicyStore } from './join-policy-store.js';
 
 import { createAdmissionRecoveryCapabilityProbe, createInitialPublisherState, createPublicSnapshotStore, createPublisherControlFromStore, startPublisherRuntimeWithOutcome, type PublisherState } from '../publisher-runner.js';
 import { backfillVmPublishIntentIndexOnBoot } from './vm-publish-intent-backfill.js';
@@ -221,6 +222,7 @@ import { registerJoinMetadataEmptyVmSettlement } from '../context-graph-empty-vm
 import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
+import { daemonCpuProfiles } from './cpu-profile.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
 import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
@@ -2055,28 +2057,7 @@ async function runDaemonInnerWithStartupOwnership(
         dashDb.deleteContextGraphMember(contextGraphId, principalType, principalId);
       },
     },
-    contextGraphJoinPolicyStore: {
-      load: async (contextGraphId) => dashDb.getContextGraphJoinPolicy(contextGraphId),
-      save: async (record) => {
-        dashDb.setContextGraphJoinPolicy(record);
-      },
-      appendAudit: async (event) => {
-        dashDb.appendContextGraphJoinPolicyAudit(event);
-      },
-      saveWithAudit: async (record, event) => {
-        dashDb.setContextGraphJoinPolicyWithAudit(record, event);
-      },
-      getAutomaticApprovalUsage: async (contextGraphId, timestamp) =>
-        dashDb.getContextGraphAutomaticApprovalUsage(contextGraphId, timestamp),
-      reserveAutomaticApproval: async (input) =>
-        dashDb.reserveContextGraphAutomaticApproval(input),
-      markAutomaticApprovalRepairPending: async (input) =>
-        dashDb.markContextGraphAutomaticApprovalRepairPending(input),
-      getAutomaticApprovalRepair: async (contextGraphId, requestDigest) =>
-        dashDb.getContextGraphAutomaticApprovalRepair(contextGraphId, requestDigest),
-      commitAutomaticApproval: async (input) =>
-        dashDb.commitContextGraphAutomaticApproval(input),
-    },
+    contextGraphJoinPolicyStore: createContextGraphJoinPolicyStore(dashDb),
     messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: protocolStores.messengerStores.idempotencyStore,
@@ -3705,6 +3686,7 @@ async function runDaemonInnerWithStartupOwnership(
       endShareAdmissionWaits: () => agent.endLegacySwmShareAdmissionWaits(),
       endWriteReadinessWaits: endContextGraphWriteReadinessWaits,
       stopCatchupTriggers,
+      endCpuProfile: () => daemonCpuProfiles.end(),
     });
     const cleanupStateFiles = async () => {
       await removeOwnedDaemonRuntimeState().catch((err: any) =>

@@ -31,6 +31,7 @@ import { registerRandomSamplingCommand } from './commands/random-sampling.js';
 import { registerOkfCommand } from './commands/okf.js';
 import { registerLlmCommand } from './commands/llm.js';
 import { registerStoreCommand } from './commands/store.js';
+import { registerDebugCommand } from './commands/debug.js';
 
 const program = new Command();
 program
@@ -87,6 +88,7 @@ registerMaintenanceCommands(program);
 registerRandomSamplingCommand(program);
 registerOkfCommand(program);
 registerLlmCommand(program);
+registerDebugCommand(program);
 
 // ─── dkg integration ─────────────────────────────────────────────────
 

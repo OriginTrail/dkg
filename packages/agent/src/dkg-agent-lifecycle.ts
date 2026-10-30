@@ -1426,9 +1426,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           reservedSlotOnly: admission.reservedSlotOnly,
           signal: admissionBoundary.signal,
           logInfo,
-          // A control-plane fetch refused at once is counted, one warning per interval and at node stop.
+          // A control-plane fetch or durable sync refused at once is counted, one warning per interval and at node stop.
           reportRefusal: syncRefusalReporter(
-            { label, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
+            { label, lane, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
           ),
         },
         timedWork,
@@ -6628,6 +6628,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),
+        stopSignal: () => this.node.stopSignal ?? undefined,
+        inRecoveryScope: () => (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+        // The terms of the round's own admission (`executeSlice` above).
+        admissionAvailable: () => !syncAdmissionWouldBeRefused(resolveAgentSyncGlobalBackpressure(this.config), {
+          contextGraphId, lane: 'durable', priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
+          priorityClass: syncPriorityClass(FOREGROUND_CATCHUP_SYNC_PRIORITY), source: 'vm-recovery',
+        }),
       },
     });
   }
