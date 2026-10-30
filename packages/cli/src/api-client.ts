@@ -38,6 +38,7 @@ import {
   type KnowledgeAssetFinalizedPublishOptions,
 } from './finalized-publish-options.js';
 import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { CPU_PROFILE_PATH, cpuProfileRequestTimeoutMs, type CpuProfileResult } from './cpu-profile-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -2410,6 +2411,16 @@ export class ApiClient {
     if (opts.resultKind) params.set('resultKind', opts.resultKind);
     if (opts.resultName) params.set('resultName', opts.resultName);
     return this.get(`/api/ccl/results?${params.toString()}`);
+  }
+
+  /**
+   * Node-admin token only. The node records a CPU profile of its main thread
+   * for `seconds` (its default when absent; clamped to 1-60 s), writes it on
+   * its own host and answers with the file's path.
+   */
+  async recordCpuProfile(seconds?: number): Promise<CpuProfileResult> {
+    return this.post(CPU_PROFILE_PATH, seconds === undefined ? {} : { seconds },
+      { timeoutMs: cpuProfileRequestTimeoutMs(seconds) });
   }
 
   async shutdown(): Promise<void> {
