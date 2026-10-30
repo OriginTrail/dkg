@@ -1459,11 +1459,20 @@ describe('DKGAgent sync fetch coalescing', () => {
       );
       const joined = (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['private-cg'], { sharedMemorySyncPlan });
       await waitFor(() => fetches.length === 1);
+      let freshSettled = false;
+      void fresh.finally(() => { freshSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // The fresh request waits behind the blocked sync: it has read nothing yet.
+      expect(freshSettled).toBe(false);
+      expect(fetches).toEqual(['meta']);
 
       firstFetch.resolve(emptySyncPage(fetches[0]!));
       const [runningResult, freshResult, joinedResult] = await Promise.all([running, fresh, joined]);
       expect(joinedResult).toBe(runningResult);
       expect(freshResult).not.toBe(runningResult);
+      expect(freshResult).toMatchObject({ failedPeers: 0 });
+      // The fresh sync's own read, after the first sync's.
+      expect(fetches).toEqual(['meta', 'meta']);
     } finally {
       await agent.stop().catch(() => {});
     }
