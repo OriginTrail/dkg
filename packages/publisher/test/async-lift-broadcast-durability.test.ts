@@ -555,6 +555,7 @@ describe('async lift publisher broadcast durability', () => {
   // deliberately do NOT contain "insufficient funds" (that collision is the locked edge above).
   it.each([
     ['a plain RPC timeout', 'ETIMEDOUT: request timed out'],
+    ['a broadcast whose outcome is unknown', 'V10 publish broadcast failed on all configured RPC endpoints for tx 0xabc: This operation was aborted'],
     ['a nonce race', 'nonce too low'],
     ['a replacement-underpriced reject', 'replacement transaction underpriced'],
     ['an already-known tx', 'already known'],

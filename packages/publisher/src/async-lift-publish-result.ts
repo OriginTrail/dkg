@@ -293,6 +293,11 @@ export function mapPublishExceptionToLiftJobFailure(
  * deliberately EXCLUDED: a nonce error can follow a competing tx already propagating, and a
  * revert means the tx was mined. Widen only with a per-error pre-mempool proof.
  *
+ * ONE ENDPOINT'S REFUSAL SPEAKS FOR EVERY ATTEMPT ONLY BECAUSE THE ADAPTER SAYS SO: an endpoint can
+ * accept a transaction and lose its answer, and the next one can still refuse the same bytes. The
+ * chain adapter's broadcast therefore surfaces a refusal only when no earlier attempt at that signed
+ * transaction may have been accepted, and reports an unknown outcome otherwise (#3591).
+ *
  * REVERTS ARE NEVER PRE-ACCEPTANCE: a `revert`/`reverted` message means the tx was mined
  * (post-mempool), so it is excluded even when its (caller-controlled) revert string contains
  * "insufficient funds". This keeps ALL reverts uniformly on the recovery track — consistent

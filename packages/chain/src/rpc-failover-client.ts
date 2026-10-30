@@ -52,6 +52,7 @@ import { JsonRpcProvider, Contract, ethers } from 'ethers';
 import type { EvmSigner } from './evm-signer.js';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
+  broadcastAttemptMayHaveBeenAccepted,
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
@@ -59,7 +60,7 @@ import {
   isKnownTransactionError,
   sleep,
 } from './evm-adapter-rpc.js';
-import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorRetryAfterMs, isInsufficientFundsError } from './evm-adapter-errors.js';
 import {
   hostOnlyRpcText,
   noteRpcFailover,
@@ -585,6 +586,11 @@ export class RpcFailoverClient {
    * re-broadcast of the byte-identical tx cannot fail. A non-retryable error
    * propagates AT ONCE; all-endpoints exhaustion → typed `RPC_ENDPOINTS_EXHAUSTED`
    * (→ retryable 503), mirroring the preparation loop + CLI path.
+   *
+   * #3591 — callers re-run a job on a refusal for funds, because it proves the transaction never
+   * took effect. An endpoint can accept a transaction and lose its answer while the next one, which
+   * may lag behind it, still refuses the same bytes. So a refusal surfaces only when no earlier
+   * attempt may have been accepted; otherwise the loop goes on and the outcome stays unknown.
    */
   async broadcast(signedTx: string, txHash: string, label: string): Promise<void> {
     const chainId = this.chainId();
@@ -597,10 +603,12 @@ export class RpcFailoverClient {
           const canonical = this.getEndpoints();
           const attempts = this.stickiness.attempts(canonical, 'write');
           let lastRetryable: unknown;
+          let mayHaveBeenAccepted = false;
           for (let i = 0; i < attempts.length; i += 1) {
             const attempt = attempts[i];
             const endpoint = attempt.endpoint;
             const provider = endpoint.provider;
+            let sendStarted = false;
             span.addEvent('broadcast.attempt', { attempt: i + 1 });
             try {
               await this.validateEndpointForAttempt(
@@ -608,6 +616,7 @@ export class RpcFailoverClient {
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
                 `${label} chainId validation via RPC #${i + 1}`,
               );
+              sendStarted = true;
               await withRpcRequestTimeout(
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
                 `${label} broadcast via RPC #${i + 1}`,
@@ -644,12 +653,16 @@ export class RpcFailoverClient {
                 }
                 throw err;
               }
-              if (!isRpcEndpointFailoverEligible(err)) {
+              const refusedAfterPossibleAcceptance = mayHaveBeenAccepted && isInsufficientFundsError(err);
+              if (!refusedAfterPossibleAcceptance && !isRpcEndpointFailoverEligible(err)) {
                 this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(err), { retryable: false });
                 throw err;
               }
-              lastRetryable = err;
-              attempt.recordFailure(); // de-prefer a failed backend
+              if (!refusedAfterPossibleAcceptance) {
+                mayHaveBeenAccepted ||= sendStarted && broadcastAttemptMayHaveBeenAccepted(err);
+                lastRetryable = err;
+                attempt.recordFailure(); // de-prefer a failed backend
+              }
               if (i < attempts.length - 1) {
                 noteRpcFailover(`${label} broadcast`, endpoint.rpcUrl, err, attempts[i + 1].endpoint.rpcUrl);
               }
@@ -664,7 +677,7 @@ export class RpcFailoverClient {
           // populated/signed would otherwise surface code-less.
           throw new RpcEndpointsExhaustedError(
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${hostOnlyRpcText(errorMessage(lastRetryable))}`,
-            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
+            { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash, mayHaveBeenAccepted },
           );
         } finally {
           metrics.chainRpcDuration.record(Date.now() - startedAt, {

@@ -150,6 +150,9 @@ export interface LiftJobFailurePolicy {
    *     the mempool. The #1851 pre-send write-ahead may already have persisted a hash for that
    *     attempt, and this is what lets the job re-run (#3591: automatically, on a wallet that can
    *     pay) instead of waiting for proof that cannot arrive.
+   *     The chain adapter surfaces this refusal only when no earlier attempt at the same signed
+   *     transaction may have been accepted; after such an attempt it reports an unknown outcome,
+   *     which stays held.
    *
    * Everything else is `false`, including every timeout and `confirmation_mismatch`, whose whole
    * meaning is that the local view and the chain disagree. Like `autoRetry` the field is optional

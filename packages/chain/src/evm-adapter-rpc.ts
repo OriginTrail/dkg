@@ -14,8 +14,9 @@ import {
   errorMessage,
   errorName,
   errorStatus,
+  isInsufficientFundsError,
 } from './evm-adapter-errors.js';
-import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { createRpcTimeoutError, type RpcEndpointsExhaustedErrorLike } from './chain-rpc-transport-error.js';
 import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from './evm-adapter-constants.js';
 import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
   './context-graph-authority-index-snapshot.js';
@@ -51,20 +52,40 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Retry a signer-free broadcast pass after transient exhaustion of its endpoint set. */
+/**
+ * Retry a signer-free broadcast pass after transient exhaustion of its endpoint set.
+ *
+ * #3591 — a refusal for funds proves the transaction never took effect only while no earlier attempt
+ * at the same bytes may have been accepted. After a pass that may have left it with an endpoint, a
+ * later refusal proves nothing about that attempt, so the earlier unknown outcome stands.
+ */
 export async function retryBroadcastEndpointSet(broadcast: () => Promise<void>): Promise<void> {
+  let unknownOutcome: unknown;
   for (let pass = 0; ; pass += 1) {
     try {
       await broadcast();
       return;
     } catch (err) {
+      if (unknownOutcome !== undefined && isInsufficientFundsError(err)) throw unknownOutcome;
       if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
+        if ((err as RpcEndpointsExhaustedErrorLike).mayHaveBeenAccepted) unknownOutcome = err;
         await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
         continue;
       }
       throw err;
     }
   }
+}
+
+/**
+ * #3591 — may a failed `eth_sendRawTransaction` attempt have left the transaction with the endpoint?
+ * A throttled request did not, and neither did a connection that never opened. Anything else, such
+ * as a timeout, an abort, a reset or a 5xx, can follow an acceptance whose answer was lost.
+ */
+export function broadcastAttemptMayHaveBeenAccepted(err: unknown): boolean {
+  if (isThrottleRpcError(err)) return false;
+  const code = errorCode(err);
+  return code !== 'ECONNREFUSED' && code !== 'ENOTFOUND' && code !== 'EAI_AGAIN';
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
