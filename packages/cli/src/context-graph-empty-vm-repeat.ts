@@ -12,11 +12,11 @@
 // it subscribed again, although its join was approved.
 //
 // So a settlement that ends unproven, for a reason a later attempt can change,
-// arms one sequence for its graph. Each repeat is an ordinary settlement: the same
-// proof, needing every condition, committing under the same readiness lock. The
-// sequence ends when the graph is synced or no longer subscribed, when an attempt
-// answers finally, when the node stops, or at its bound. A later subscribe, join
-// metadata or catch-up job then starts a new one.
+// arms one sequence for its graph and caller. Each repeat is an ordinary
+// settlement: the same proof, needing every condition, committing under the same
+// readiness lock. The sequence ends when the graph is synced or no longer
+// subscribed, when an attempt answers finally, when the node stops, or at its
+// bound. A later subscribe, join metadata or catch-up job then starts a new one.
 //
 // An accepted authority for the graph runs the next attempt early, once per
 // attempt. It does not start an ended sequence: that wake-up comes with every
@@ -51,16 +51,18 @@ export interface PrivateEmptyVmRepeatOutcome {
 
 type RepeatAttempt = () => Promise<PrivateEmptyVmRepeatOutcome>;
 
+/** Each agent's sequences, one per graph and caller: an answer is the caller's it was read for. */
 const sequencesByAgent = new WeakMap<DKGAgent, Map<string, PrivateEmptyVmRepeatSequence>>();
 
 /**
- * Arm the graph's sequence after a settlement that ended unproven. A sequence
- * already armed keeps its schedule, so a stream of settlements cannot extend its
- * bound; it takes the newer attempt, whose caller is the latest to ask.
+ * Arm a sequence after a settlement that ended unproven. One already armed for
+ * this graph and caller keeps its schedule, so a stream of settlements cannot
+ * extend its bound.
  */
 export function armPrivateEmptyVmRepeat(input: {
   agent: DKGAgent;
   contextGraphId: string;
+  callerAgentAddress: string;
   attempt: RepeatAttempt;
 }): void {
   const { agent, contextGraphId, attempt } = input;
@@ -69,56 +71,45 @@ export function armPrivateEmptyVmRepeat(input: {
     sequences = new Map();
     sequencesByAgent.set(agent, sequences);
   }
-  const armed = sequences.get(contextGraphId);
-  if (armed !== undefined) {
-    armed.useAttempt(attempt);
-    return;
-  }
-  if (agent.node?.stopSignal?.aborted === true) return;
-  const sequence = new PrivateEmptyVmRepeatSequence(agent, contextGraphId, attempt, sequences);
-  sequences.set(contextGraphId, sequence);
+  const key = `${input.callerAgentAddress.toLowerCase()} ${contextGraphId}`;
+  if (sequences.has(key) || agent.node?.stopSignal?.aborted === true) return;
+  const sequence = new PrivateEmptyVmRepeatSequence(agent, contextGraphId, attempt, () => sequences.delete(key));
+  sequences.set(key, sequence);
   sequence.start();
 }
 
-/** The graph's authority was accepted: what the armed repeat waited for may be there now. */
+/** The graph's authority was accepted: what the armed repeats waited for may be there now. */
 export function expeditePrivateEmptyVmRepeat(agent: DKGAgent, contextGraphId: string): void {
-  sequencesByAgent.get(agent)?.get(contextGraphId)?.expedite();
+  for (const sequence of sequencesByAgent.get(agent)?.values() ?? []) {
+    if (sequence.contextGraphId === contextGraphId) sequence.expedite();
+  }
 }
 
 class PrivateEmptyVmRepeatSequence {
+  readonly contextGraphId: string;
   readonly #agent: DKGAgent;
-  readonly #contextGraphId: string;
-  readonly #sequences: Map<string, PrivateEmptyVmRepeatSequence>;
+  readonly #onEnd: () => void;
   readonly #startedAt = Date.now();
   readonly #stopSignal: AbortSignal | undefined;
   readonly #onStop = (): void => this.#end();
-  #attempt: RepeatAttempt;
+  readonly #attempt: RepeatAttempt;
   #repeatsRun = 0;
   #timer: unknown;
   #ended = false;
   /** The armed repeat was already started early once: the next one keeps its delay. */
   #expedited = false;
 
-  constructor(
-    agent: DKGAgent,
-    contextGraphId: string,
-    attempt: RepeatAttempt,
-    sequences: Map<string, PrivateEmptyVmRepeatSequence>,
-  ) {
+  constructor(agent: DKGAgent, contextGraphId: string, attempt: RepeatAttempt, onEnd: () => void) {
     this.#agent = agent;
-    this.#contextGraphId = contextGraphId;
+    this.contextGraphId = contextGraphId;
     this.#attempt = attempt;
-    this.#sequences = sequences;
+    this.#onEnd = onEnd;
     this.#stopSignal = agent.node?.stopSignal;
   }
 
   start(): void {
     this.#stopSignal?.addEventListener('abort', this.#onStop, { once: true });
     this.#armNext();
-  }
-
-  useAttempt(attempt: RepeatAttempt): void {
-    this.#attempt = attempt;
   }
 
   expedite(): void {
@@ -133,7 +124,7 @@ class PrivateEmptyVmRepeatSequence {
     const delayMs = PRIVATE_EMPTY_VM_REPEAT_DELAYS_MS[this.#repeatsRun];
     if (delayMs === undefined || Date.now() - this.#startedAt + delayMs > PRIVATE_EMPTY_VM_REPEAT_WINDOW_MS) {
       console.info(
-        `[private-empty-vm] "${this.#contextGraphId}" is still not proven after ${this.#repeatsRun} repeated `
+        `[private-empty-vm] "${this.contextGraphId}" is still not proven after ${this.#repeatsRun} repeated `
           + 'attempt(s); subscribe again to start over',
       );
       this.#end();
@@ -147,7 +138,7 @@ class PrivateEmptyVmRepeatSequence {
   }
 
   #wanted(): boolean {
-    const subscription = this.#agent.getSubscribedContextGraphs().get(this.#contextGraphId);
+    const subscription = this.#agent.getSubscribedContextGraphs().get(this.contextGraphId);
     return subscription?.subscribed === true && subscription.synced !== true;
   }
 
@@ -168,7 +159,7 @@ class PrivateEmptyVmRepeatSequence {
       this.#armNext();
     } catch (err) {
       console.warn(
-        `[private-empty-vm] repeat for "${this.#contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        `[private-empty-vm] repeat for "${this.contextGraphId}" failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       this.#end();
     }
@@ -179,6 +170,6 @@ class PrivateEmptyVmRepeatSequence {
     if (this.#timer !== undefined) privateEmptyVmRepeatTimers.clear(this.#timer);
     this.#timer = undefined;
     this.#stopSignal?.removeEventListener('abort', this.#onStop);
-    if (this.#sequences.get(this.#contextGraphId) === this) this.#sequences.delete(this.#contextGraphId);
+    this.#onEnd();
   }
 }

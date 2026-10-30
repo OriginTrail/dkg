@@ -287,15 +287,31 @@ describe('the repeat of the empty-VM proof', () => {
     expect(armed.map((repeat) => repeat.delayMs)).toEqual([15_000]);
   });
 
-  it('repeats for the latest caller to ask', async () => {
+  it('keeps a schedule for each caller, each repeating for its own', async () => {
     const node = memberNode();
     await node.settleAfterJoin();
     const other = `0x${'22'.repeat(20)}`;
     await settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, GRAPH, other);
+    expect(armed.map((repeat) => repeat.delayMs)).toEqual([15_000, 15_000]);
+    node.callers.length = 0;
 
     await fireRepeat();
+    await fireRepeat();
 
-    expect(node.callers.at(-1)).toBe(other);
+    expect(node.callers).toEqual([CALLER, other]);
+  });
+
+  it('does not take one caller\'s final answer as another\'s schedule', async () => {
+    const denied = `0x${'33'.repeat(20)}`;
+    const node = memberNode((attempt) => (node.callers[attempt - 1] === denied
+      ? { proven: false, final: true, stage: 'authority-not-registered-allowed' }
+      : TRY_LATER));
+    await node.settleAfterJoin();
+    await settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, GRAPH, denied);
+
+    expect(armed.map((repeat) => repeat.delayMs)).toEqual([15_000]);
+    await fireRepeat();
+    expect(node.callers.at(-1)).toBe(CALLER);
   });
 
   it.each([
@@ -341,8 +357,11 @@ describe('the repeat of the empty-VM proof', () => {
     completion: Record<string, unknown>,
     attempt: () => Promise<string> = async () => 'classified',
   ) => runPrivateEmptyVmAttemptAtCatchup({
-    agent: node.agent, store: node.dashboard, contextGraphId: GRAPH, callerAgentAddress: CALLER, attempt,
-    completion: () => ({ ...completion, inspection: INSPECTION }) as unknown as InspectedPrivateEmptyVmReadinessV1,
+    agent: node.agent, store: node.dashboard, contextGraphId: GRAPH, callerAgentAddress: CALLER,
+    attempt: async () => ({
+      value: await attempt(),
+      completion: { ...completion, inspection: INSPECTION } as unknown as InspectedPrivateEmptyVmReadinessV1,
+    }),
   });
 
   it('arms after a catch-up job whose own proof ended unproven, and logs its end', async () => {
@@ -433,6 +452,114 @@ describe('the repeat of the empty-VM proof', () => {
       expect(settlementLines()).toEqual([
         `[private-empty-vm] settlement ended: contextGraph=${GRAPH} origin=join-metadata stage=finalized-zero-proof-false`,
       ]);
+    });
+
+    describe('with another caller running', () => {
+      const OTHER = `0x${'22'.repeat(20)}`;
+      const atJoinOfOther = (node: ReturnType<typeof memberNode>) => settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, GRAPH, OTHER);
+
+      it('waits, then makes its own attempt when that one did not prove the graph', async () => {
+        const { pending, answerAll } = pendingProof();
+        const node = memberNode((attempt) => (attempt === 1 ? pending : { proven: true }));
+        const denied = node.settleAfterJoin();
+        await settled();
+
+        const other = atJoinOfOther(node);
+        await settled();
+        expect(node.attempts()).toBe(1);
+
+        answerAll({ proven: false, final: true, stage: 'authority-denied' });
+
+        await expect(denied).resolves.toBe(false);
+        await expect(other).resolves.toBe(true);
+        expect(node.callers).toEqual([CALLER, OTHER]);
+        expect(node.subscription().synced).toBe(true);
+      });
+
+      it('makes its own attempt after one that failed', async () => {
+        const { pending, answerAll } = pendingProof();
+        const node = memberNode(async (attempt) => {
+          if (attempt === 1) throw new Error(`commit failed: ${JSON.stringify(await pending)}`);
+          return { proven: true };
+        });
+        const failing = node.settleAfterJoin();
+        await settled();
+        const other = atJoinOfOther(node);
+        await settled();
+
+        answerAll(TRY_LATER);
+
+        await expect(failing).rejects.toThrow('commit failed');
+        await expect(other).resolves.toBe(true);
+        expect(node.attempts()).toBe(2);
+      });
+
+      it('takes a proof that held: the graph is ready, whoever asked', async () => {
+        const { pending, answerAll } = pendingProof();
+        const node = memberNode(() => pending);
+        const first = node.settleAfterJoin();
+        await settled();
+        const other = atJoinOfOther(node);
+        await settled();
+
+        answerAll({ proven: true });
+
+        await expect(first).resolves.toBe(true);
+        await expect(other).resolves.toBe(true);
+        expect(node.attempts()).toBe(1);
+      });
+
+      it('runs one at a time when several callers wait', async () => {
+        const answers = [pendingProof(), pendingProof(), pendingProof()];
+        let running = 0;
+        let mostRunning = 0;
+        const node = memberNode(async (attempt) => {
+          running += 1;
+          mostRunning = Math.max(mostRunning, running);
+          const answer = await answers[attempt - 1]!.pending;
+          running -= 1;
+          return answer;
+        });
+        const first = node.settleAfterJoin();
+        await settled();
+        const second = atJoinOfOther(node);
+        const third = settlePrivateEmptyVmAfterJoinMetadata(node.agent, node.dashboard, GRAPH, `0x${'33'.repeat(20)}`);
+        await settled();
+        expect(node.attempts()).toBe(1);
+
+        answers[0]!.answerAll(TRY_LATER);
+        await settled();
+        expect(node.attempts()).toBe(2);
+        answers[1]!.answerAll(TRY_LATER);
+        await settled();
+        expect(node.attempts()).toBe(3);
+        answers[2]!.answerAll(TRY_LATER);
+        await Promise.all([first, second, third]);
+
+        expect(mostRunning).toBe(1);
+      });
+
+      it('leaves it to its own deadline while it waits', async () => {
+        vi.spyOn(core, 'startRequestAbortLifecycle')
+          .mockImplementationOnce(() => {
+            const deadline = new AbortController();
+            return { signal: deadline.signal, deadline: deadline.signal, release: () => {} };
+          })
+          .mockImplementationOnce(() => {
+            const deadline = AbortSignal.timeout(20);
+            return { signal: deadline, deadline, release: () => {} };
+          });
+        const { pending, answerAll } = pendingProof();
+        const node = memberNode(() => pending);
+        const first = node.settleAfterJoin();
+        await settled();
+
+        await expect(atJoinOfOther(node)).resolves.toBe(false);
+
+        expect(node.attempts()).toBe(1);
+        answerAll(TRY_LATER);
+        await first;
+      });
     });
 
     it('leaves a joining caller to its own deadline', async () => {

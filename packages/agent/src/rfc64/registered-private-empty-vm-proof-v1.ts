@@ -41,12 +41,12 @@ export async function proveRegisteredPrivateEmptyVmV1(input: {
       hubAddress: input.hubAddress,
       session,
     });
-    if (facts === null) return 'unproven';
+    if (facts === null
+      || facts.nameHash !== ethers.keccak256(ethers.toUtf8Bytes(input.contextGraphId)).toLowerCase()
+      || facts.contextGraphStorageAddress !== input.governanceContractAddress) return 'unproven';
+    // The count is this graph's only once its name and storage binding hold.
     if (facts.kaCount !== 0n) return 'not-empty';
-    return facts.active && facts.accessPolicy === 1
-      && facts.nameHash === ethers.keccak256(ethers.toUtf8Bytes(input.contextGraphId)).toLowerCase()
-      && facts.contextGraphStorageAddress === input.governanceContractAddress
-      && facts.participantAgents.includes(input.callerAgentAddress)
+    return facts.active && facts.accessPolicy === 1 && facts.participantAgents.includes(input.callerAgentAddress)
       ? 'proven' : 'unproven';
   });
 }

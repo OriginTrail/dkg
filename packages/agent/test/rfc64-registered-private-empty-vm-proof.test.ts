@@ -81,6 +81,13 @@ describe('registered private empty-VM proof', () => {
   });
 
   it.each([
+    [{ kaCount: 1n, storageAddress: OTHER }, 'a rotated Hub binding'],
+    [{ kaCount: 1n, nameHash: ethers.ZeroHash }, 'an unrelated name'],
+  ] as const)('does not read a count as this graph\'s under %s (%s)', async (options) => {
+    expect(await proveRegisteredPrivateEmptyVmV1(request(snapshot(options).scope))).toBe('unproven');
+  });
+
+  it.each([
     [{ nameHash: ethers.ZeroHash }, 'unrelated name'],
     [{ active: false }, 'inactive graph'],
     [{ accessPolicy: 0 }, 'public graph'],

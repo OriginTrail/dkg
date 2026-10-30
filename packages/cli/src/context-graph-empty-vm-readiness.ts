@@ -54,6 +54,7 @@ function repeatUnlessSettled(
   armPrivateEmptyVmRepeat({
     agent,
     contextGraphId,
+    callerAgentAddress,
     attempt: async () => {
       const repeated = await settlePrivateEmptyVm(
         'repeat', agent, store, contextGraphId, callerAgentAddress, BACKGROUND_SETTLEMENT_TIMEOUT_MS,
@@ -105,24 +106,22 @@ export async function runPrivateEmptyVmAttemptAtCatchup<T>(input: {
   store: Partial<ContextGraphReadinessStore>;
   contextGraphId: string;
   callerAgentAddress: string;
-  attempt: () => Promise<T>;
-  /** The agent's final answer, once `attempt` has settled. */
-  completion: () => InspectedPrivateEmptyVmReadinessV1 | undefined;
+  /** What the job classified, and the agent's final answer it classified it on. */
+  attempt: () => Promise<{ readonly value: T; readonly completion: InspectedPrivateEmptyVmReadinessV1 }>;
 }): Promise<T> {
   const { agent, store, contextGraphId, callerAgentAddress } = input;
   const running = settlementsRunning(agent);
   for (let inFlight = running.get(contextGraphId); inFlight !== undefined; inFlight = running.get(contextGraphId)) {
-    await inFlight.catch(() => undefined);
+    await inFlight.settlement.catch(() => undefined);
   }
   const attempt = input.attempt();
-  const settlement = attempt.then((): PrivateEmptyVmSettlement => {
-    const completion = input.completion();
-    logSettlementEnd('catchup', contextGraphId, completion?.proven === true ? 'vm-ready' : completion?.stage ?? 'proof-false');
-    return { proven: completion?.proven === true, final: completion?.proven === false && completion.final === true };
+  const settlement = attempt.then(({ completion }): PrivateEmptyVmSettlement => {
+    logSettlementEnd('catchup', contextGraphId, completion.proven ? 'vm-ready' : completion.stage ?? 'proof-false');
+    return { proven: completion.proven, ...(!completion.proven && completion.final === true ? { final: true } : {}) };
   }, (): PrivateEmptyVmSettlement => ({ proven: false }));
-  running.set(contextGraphId, settlement);
+  running.set(contextGraphId, { callerAgentAddress, settlement });
   try {
-    const value = await attempt;
+    const { value } = await attempt;
     repeatUnlessSettled(await settlement, agent, store, contextGraphId, callerAgentAddress);
     return value;
   } finally {
@@ -188,10 +187,15 @@ export async function settlePrivateEmptyVmAfterJoinMetadata(
   return true;
 }
 
-/** The settlement running for each graph of an agent. */
-const settlementsInFlight = new WeakMap<DKGAgent, Map<string, Promise<PrivateEmptyVmSettlement>>>();
+interface RunningSettlement {
+  readonly callerAgentAddress: string;
+  readonly settlement: Promise<PrivateEmptyVmSettlement>;
+}
 
-function settlementsRunning(agent: DKGAgent): Map<string, Promise<PrivateEmptyVmSettlement>> {
+/** The settlement running for each graph of an agent. */
+const settlementsInFlight = new WeakMap<DKGAgent, Map<string, RunningSettlement>>();
+
+function settlementsRunning(agent: DKGAgent): Map<string, RunningSettlement> {
   let running = settlementsInFlight.get(agent);
   if (running === undefined) {
     running = new Map();
@@ -201,8 +205,11 @@ function settlementsRunning(agent: DKGAgent): Map<string, Promise<PrivateEmptyVm
 }
 
 /**
- * One attempt runs per graph. A caller that finds one running takes its result,
- * within its own deadline, rather than asking the chain a second time.
+ * One attempt runs per graph. A caller that finds one running waits for it,
+ * within its own deadline. It takes the result of its own caller's attempt, and of
+ * another caller's only if that proved the graph: a proof holds for the graph, but
+ * a refusal is an answer for the caller it was read for, so the next caller then
+ * makes its own attempt.
  */
 async function settlePrivateEmptyVm(
   origin: SettlementOrigin,
@@ -216,12 +223,18 @@ async function settlePrivateEmptyVm(
   const running = settlementsRunning(agent);
   const { signal, release } = startRequestAbortLifecycle(timeoutMs, [stopSignal]);
   try {
-    const inFlight = running.get(contextGraphId);
-    if (inFlight !== undefined) {
-      return await resolveWithinAbort(() => inFlight, signal) ?? { proven: false };
+    for (let inFlight = running.get(contextGraphId); inFlight !== undefined; inFlight = running.get(contextGraphId)) {
+      const { settlement } = inFlight;
+      const sameCaller = inFlight.callerAgentAddress.toLowerCase() === callerAgentAddress.toLowerCase();
+      const settled = await resolveWithinAbort(
+        () => (sameCaller ? settlement : settlement.catch((): PrivateEmptyVmSettlement => ({ proven: false }))),
+        signal,
+      );
+      if (settled === null) return { proven: false };
+      if (sameCaller || settled.proven) return settled;
     }
     const settlement = runSettlement(origin, agent, store, contextGraphId, callerAgentAddress, timeoutMs, signal, stopSignal);
-    running.set(contextGraphId, settlement);
+    running.set(contextGraphId, { callerAgentAddress, settlement });
     try {
       return await settlement;
     } finally {

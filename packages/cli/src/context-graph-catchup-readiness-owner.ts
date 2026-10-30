@@ -33,9 +33,7 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
     input.admissionAuthority, callerAgentAddress,
   ) && result.dataSynced === 0;
 
-  let finalCompletion: InspectedPrivateEmptyVmReadinessV1 | undefined;
   const decide = (completion: InspectedPrivateEmptyVmReadinessV1) => {
-    finalCompletion = completion;
     // The agent's final inspection and proof arrive in the same synchronous
     // callback. Normalize this source to durable-plane evidence here; the
     // classifier handles only plane evidence and peer status.
@@ -52,7 +50,7 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
       statePatch: classification.statePatch,
       readinessPatch: classification.readinessPatch,
     });
-    return classification;
+    return { value: classification, completion };
   };
 
   const attempt = async () => {
@@ -72,8 +70,6 @@ export async function classifyAndCommitContextGraphCatchup(input: CompletionInpu
       }, decide);
     });
   };
-  if (!privateZeroVmCandidate || callerAgentAddress === undefined) return attempt();
-  return runPrivateEmptyVmAttemptAtCatchup({
-    agent, store, contextGraphId, callerAgentAddress, attempt, completion: () => finalCompletion,
-  });
+  if (!privateZeroVmCandidate || callerAgentAddress === undefined) return (await attempt()).value;
+  return runPrivateEmptyVmAttemptAtCatchup({ agent, store, contextGraphId, callerAgentAddress, attempt });
 }
