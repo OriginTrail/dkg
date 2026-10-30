@@ -3,6 +3,7 @@ const common = { containerName: 'store', hostPort: 9999, heapMb: 2048 };
 const preview: HardenMigrationResult = { ...common, outcome: 'dry-run', steps: [], exportPath: null, journalBytes: null, backupContainerName: null };
 const completed: HardenMigrationResult = { ...common, outcome: 'hardened', exportPath: '/export', journalBytes: 1024, backupContainerName: 'backup' };
 const recovered: HardenMigrationResult = { ...common, outcome: 'recovered', exportPath: '/export', journalBytes: 1024, backupContainerName: null };
+const recoveredOriginal: HardenMigrationResult = { ...common, outcome: 'recovered', exportPath: null, journalBytes: null, backupContainerName: null };
 const already: HardenMigrationResult = { ...common, outcome: 'already-hardened', exportPath: null, journalBytes: null, backupContainerName: null };
 // @ts-expect-error preview must have the rendered step list
 const missingSteps: HardenMigrationResult = { ...common, outcome: 'dry-run', exportPath: null, journalBytes: null, backupContainerName: null };
@@ -21,11 +22,11 @@ const wrongSteps = { ...common, outcome: 'recovered' as const, exportPath: '/exp
 const completedWithSteps: HardenMigrationResult = wrongSteps;
 function consume(result: HardenMigrationResult) {
   if (result.outcome === 'dry-run') { const steps: unknown[] = result.steps; return steps; }
-  if (result.outcome === 'hardened' || result.outcome === 'recovered') {
+  if (result.outcome === 'hardened') {
     const path: string = result.exportPath, bytes: number = result.journalBytes; return [path, bytes];
   }
   if (result.exportPath === null) { const bytes: null = result.journalBytes, backup: null = result.backupContainerName; return [bytes, backup]; }
   const bytes: number = result.journalBytes; return bytes;
 }
-void [preview, completed, recovered, already, missingSteps, missingExport, missingRecoveryBytes, missingBackup,
+void [preview, completed, recovered, recoveredOriginal, already, missingSteps, missingExport, missingRecoveryBytes, missingBackup,
   mixedAlready, backupWithoutExport, completedWithSteps, consume];

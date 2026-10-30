@@ -60,11 +60,65 @@ describe('explicit reconciliation after actual harden owner SIGKILL', () => {
     expect(f.calls.slice(index).every(args => ['inspect', 'exec'].includes(args[0]!))).toBe(true);
     await expect(assertStoreMigrationInactive(home)).resolves.toBeUndefined();
   }, 15000);
-  it('refuses pre-export or historical unbound orphan markers instead of guessing evidence', async () => {
+  describe('an owner interrupted before its export checkpoint', () => {
+    /** Docker state and options as a recovery run sees them after `change`. */
+    const recoveryAfter = (f: Awaited<ReturnType<typeof interruptedReplacement>>, change: (state: Record<string, unknown>) => void) => {
+      const path = join(home, 'docker-state.json'), state = JSON.parse(readFileSync(path, 'utf8'));
+      change(state); writeFileSync(path, JSON.stringify(state));
+      const docker = crashDocker(home);
+      return { docker, options: { ...f.options, docker: docker.runner, recover: true } };
+    };
+
+    it('verifies the untouched original once it runs again, changing nothing in Docker', async () => {
+      const f = await interruptedReplacement(true);
+      expect(JSON.parse(f.marker).recovery).toMatchObject({ namespace: CRASH_NAMESPACE, migrationDir: home, hostPort: 9999 });
+      expect(JSON.parse(f.marker).recovery.exportBytes).toBeUndefined();
+
+      const stopped = recoveryAfter(f, state => { state.stopped = true; });
+      await expect(executeHardenMigration(stopped.options)).rejects.toThrow(/docker start/);
+      expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(f.marker);
+      await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+
+      const running = recoveryAfter(f, state => { state.stopped = false; });
+      await expect(executeHardenMigration(running.options)).resolves.toMatchObject({
+        outcome: 'recovered', exportPath: null, journalBytes: null, backupContainerName: null,
+      });
+      expect(running.docker.calls.every(args => ['inspect', 'exec'].includes(args[0]!))).toBe(true);
+      await expect(assertStoreMigrationInactive(home)).resolves.toBeUndefined();
+    }, 15000);
+
+    it('keeps the fence while the original does not answer', async () => {
+      const f = await interruptedReplacement(true);
+      const fetch: typeof globalThis.fetch = async () => new Response('unavailable', { status: 503 });
+      await expect(executeHardenMigration({ ...f.options, fetch, recover: true })).rejects.toThrow();
+      expect(readFileSync(storeHardenLockPath(home), 'utf8')).toBe(f.marker);
+    }, 15000);
+
+    it('keeps the fence for a different container under the original name', async () => {
+      const f = await interruptedReplacement(true);
+      const { options } = recoveryAfter(f, state => { state.sourceId = 'different-container-id'; });
+      await expect(executeHardenMigration(options)).rejects.toThrow(/original source/);
+      await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+    }, 15000);
+
+    it('keeps the fence when the original was not captured', async () => {
+      const f = await interruptedReplacement(true);
+      const marker = JSON.parse(f.marker); delete marker.recovery.sourceContainerId;
+      writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
+      await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/original source/);
+      await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+    }, 15000);
+
+    it('keeps the fence while its owner may be alive', async () => {
+      const f = await interruptedReplacement(true);
+      const marker = JSON.parse(f.marker); marker.pid = process.pid;
+      writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
+      await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/live or unverifiable/);
+      await expect(assertStoreMigrationInactive(home)).rejects.toThrow();
+    }, 15000);
+  });
+  it('refuses a historical orphan marker with no recovery evidence instead of guessing', async () => {
     const f = await interruptedReplacement(true);
-    expect(JSON.parse(f.marker).recovery).toMatchObject({ namespace: CRASH_NAMESPACE, migrationDir: home, hostPort: 9999 });
-    expect(JSON.parse(f.marker).recovery.exportBytes).toBeUndefined();
-    await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/does not certify/);
     const marker = JSON.parse(f.marker); delete marker.recovery; writeFileSync(storeHardenLockPath(home), JSON.stringify(marker));
     await expect(executeHardenMigration({ ...f.options, recover: true })).rejects.toThrow(/does not certify/);
     await expect(assertStoreMigrationInactive(home)).rejects.toThrow();

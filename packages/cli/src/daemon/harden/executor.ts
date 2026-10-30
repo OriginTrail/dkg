@@ -65,6 +65,8 @@ export type HardenMigrationResult = HardenMigrationResultFields & (
   | { outcome: 'dry-run'; steps: HardenStep[]; exportPath: null; journalBytes: null; backupContainerName: string | null }
   | (HardenExportEvidence & { outcome: 'hardened'; backupContainerName: string; steps?: never })
   | (HardenExportEvidence & { outcome: 'recovered'; backupContainerName: string | null; steps?: never })
+  // A run that stopped before its export checkpoint leaves only the original, with nothing retained.
+  | { outcome: 'recovered'; steps?: never; exportPath: null; journalBytes: null; backupContainerName: null }
   | ({ outcome: 'already-hardened'; steps?: never } & (
     | (HardenExportEvidence & { backupContainerName: string | null })
     | { exportPath: null; journalBytes: null; backupContainerName: null }

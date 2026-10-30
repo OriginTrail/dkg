@@ -45,10 +45,20 @@ export async function recoverHardenMigration(ctx: HardenWorkflowInputs): Promise
     if (backup.kind === 'failed') throw new Error('Cannot verify the migration backup state.');
     const backupExists = backup.kind === 'found';
     if (ctx.specification.state === 'legacy' && backupExists) throw new Error('The original-name legacy container is not a completed backup restore.');
-    if (await fileSize(ctx.specification.exportPath) !== evidence.exportBytes) throw new Error('Retained migration export is missing or changed; startup remains blocked.');
-    await verifyReplacement(ctx, hardenRecoveryStep(ctx.specification.containerName).dockerArgs, { path: ctx.specification.exportPath, bytes: evidence.exportBytes });
+    const { exportBytes } = evidence;
+    const common = { outcome: 'recovered' as const, containerName: ctx.specification.containerName, hostPort: ctx.specification.hostPort, heapMb: ctx.specification.heapMb };
+    if (exportBytes === undefined) {
+      // The owner stopped before its export checkpoint, and every swap comes after
+      // that. The captured original is still in place, with no export to compare.
+      if (ctx.specification.state !== 'legacy' || evidence.sourceContainerId === undefined) throw new Error('Cannot verify the captured original source container; startup remains blocked.');
+      if (!ctx.specification.running) throw new Error(`Start the original container with \`docker start ${ctx.specification.containerName}\`, then run recovery again; startup remains blocked.`);
+      await verifyReplacement(ctx, hardenRecoveryStep(ctx.specification.containerName).dockerArgs, { path: ctx.specification.exportPath, bytes: 0 });
+      await releaseStoreMigrationMarker(evidence);
+      return { ...common, backupContainerName: null, exportPath: null, journalBytes: null };
+    }
+    if (await fileSize(ctx.specification.exportPath) !== exportBytes) throw new Error('Retained migration export is missing or changed; startup remains blocked.');
+    await verifyReplacement(ctx, hardenRecoveryStep(ctx.specification.containerName).dockerArgs, { path: ctx.specification.exportPath, bytes: exportBytes });
     await releaseStoreMigrationMarker(evidence);
-    return { outcome: 'recovered', containerName: ctx.specification.containerName, backupContainerName: backupExists ? ctx.specification.backupName : null,
-      hostPort: ctx.specification.hostPort, heapMb: ctx.specification.heapMb, exportPath: ctx.specification.exportPath, journalBytes: evidence.exportBytes };
+    return { ...common, backupContainerName: backupExists ? ctx.specification.backupName : null, exportPath: ctx.specification.exportPath, journalBytes: exportBytes };
   });
 }

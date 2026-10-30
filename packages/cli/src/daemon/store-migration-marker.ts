@@ -115,7 +115,10 @@ export async function claimStoreMigrationMarker(path: string, containerName: str
   recovery?: StoreMigrationRecoveryProof): Promise<StoreMigrationMarkerOwnership> {
   const rawText = `${JSON.stringify({ pid: process.pid, containerName, startedAt: new Date().toISOString(),
     ...(recovery === undefined ? {} : { recovery }) })}\n`;
-  const file = await open(path, 'wx');
+  const file = await open(path, 'wx').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'EEXIST') error.message += '. A hardening run holds or left this marker. If it has stopped, use `dkg store harden --recover` with the same options.';
+    throw error;
+  });
   try { await file.writeFile(rawText); await file.sync(); } finally { await file.close(); }
   await syncDirectory(path);
   return { path, rawText };
@@ -146,13 +149,15 @@ export async function releaseStoreMigrationMarker(owner: StoreMigrationMarkerOwn
 
 /** Only explicit recovery may consume this certificate, with the exact original options. */
 export function requireStoreMigrationRecoveryMarker(path: string,
-  expected: Pick<RecoveryStoreMigrationMarker, 'containerName' | 'namespace' | 'migrationDir' | 'hostPort'>): StoreMigrationMarkerOwnership & { exportBytes: number; volumeAttemptId?: string; sourceContainerId?: string } {
+  expected: Pick<RecoveryStoreMigrationMarker, 'containerName' | 'namespace' | 'migrationDir' | 'hostPort'>): StoreMigrationMarkerOwnership & { exportBytes: number | undefined; volumeAttemptId?: string; sourceContainerId?: string } {
   const marker = readStoreMigrationMarker(path);
   if (marker.kind === 'unreadable') throw new Error('Invalid migration recovery marker; startup remains blocked.');
   const value = marker.kind === 'recovery-required' ? marker.value : marker.kind === 'active' ? marker.value.recovery : undefined;
   if (value === undefined || value.containerName !== expected.containerName
     || value.namespace !== expected.namespace || value.migrationDir !== resolve(expected.migrationDir)
-    || value.hostPort !== expected.hostPort || !positive(value.exportBytes)) {
+    || value.hostPort !== expected.hostPort
+    // A live claim without a size stopped before its export checkpoint; a retained certificate must carry one.
+    || (marker.kind === 'recovery-required' && !positive(value.exportBytes))) {
     throw new Error('Marker does not certify an incomplete migration for these recovery options; startup remains blocked.');
   }
   if (marker.kind === 'active') {

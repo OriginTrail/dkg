@@ -33,6 +33,7 @@ export function crashDocker(home: string) {
       : ok(JSON.stringify([{ Name: volume, Labels: { 'org.origintrail.dkg.harden-attempt': state.attempt } }]));
     if (args[0] === 'volume') state.attempt = args[3]!.split('=').slice(1).join('=');
     if (args[0] === 'stop') state.stopped = true;
+    if (args[0] === 'start') state.stopped = false;
     if (args[0] === 'cp') writeFileSync(args[2]!, Buffer.alloc(CRASH_BYTES, 7));
     if (args[0] === 'rename') { state.renamed = args[1] === CRASH_NAME; if (!state.renamed) state.replacement = false; }
     if (args[0] === 'run' && args[1] === '-d') state.replacement = true;

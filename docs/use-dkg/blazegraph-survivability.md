@@ -64,6 +64,11 @@ journal remain intact. Keep these copies until the replacement has been checked.
 If a process is killed during migration, keep its marker until the source data
 has been restored and verified; restarting writers before a pending rollback
 can lose their writes.
+A migration killed before its export checkpoint has swapped nothing: start the
+original container with `docker start <name>`, then run `dkg store harden --recover`
+with the same options. Recovery verifies that exact container and clears the
+barrier. Any replacement volume that run left behind stops a later migration
+until you inspect and remove it.
 
 `--migration-dir` chooses the export directory, `--port` must match the configured
 store endpoint, and `--container` overrides the derived container name. Stop the
