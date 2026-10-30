@@ -43,7 +43,8 @@ export async function runGraphOwnedDurableRecovery(request: GraphOwnedDurableRec
     if (operation.signal?.aborted) return notStarted();
     const busy = getSyncBackpressureBusyError(error);
     if (!busy) throw error;
-    host.log.info(ctx, `Deferring durable sync at CG ${contextGraphId} due to local backpressure: ${busy.message}`);
+    // A refusal at once is counted in the node's refusal summary by the admission; displaced or timed-out work is not.
+    if (busy.state === undefined) host.log.info(ctx, `Deferring durable sync at CG ${contextGraphId} due to local backpressure: ${busy.message}`);
     return notStarted(1);
   } finally { operation.dispose(); }
 }

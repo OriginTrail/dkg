@@ -237,6 +237,7 @@ export default defineConfig({
       "test/durable-sync-authority-boundary.test.ts",
       "test/durable-recovery-owner.test.ts",
       "test/durable-recovery-owned-round.test.ts",
+      "test/durable-recovery-turns.test.ts",
       "test/remove-sub-graph-index-hint.test.ts",
       "test/store-content-fence.test.ts",
       "test/durable-recovery-missing-assets.test.ts",
