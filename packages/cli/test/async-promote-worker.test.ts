@@ -788,8 +788,9 @@ describe('runPromoteJob', () => {
       expect(job).toMatchObject({ state: 'failed', attempt: { count: 7 } });
       expect(promoteJobToView(job)).toMatchObject({
         state: 'failed',
-        attempts: 7,
+        attempts: 3,
         maxAttempts: 3,
+        recoveryAttempts: 4,
         lastError: {
           code: 'transient',
           retryable: true,

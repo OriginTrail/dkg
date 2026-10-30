@@ -2,6 +2,7 @@ import { handlePublisherLiveControlRoute } from './publisher-live-control.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 import { parsePublisherJobsQuery, respondPublisherJobs } from './publisher-job-page.js';
+import { publisherIntentLookupView, publisherJobView } from './publisher-job-view.js';
 // daemon/routes/publisher.ts
 //
 // Route handlers for publisher jobs / stats / cancel / retry / clear.
@@ -414,7 +415,8 @@ function parsePublisherLifecycleFactsFromQuery(
  * all is what keeps a fifth surface from shipping without `retryState`.
  *
  * `retryState` is DERIVED (never persisted), so it sits BESIDE the job rather than inside it: the
- * job stays byte-identical to what the store holds.
+ * job stays what the store holds, apart from a failure reason stored before reasons were bounded
+ * (`publisherJobView`).
  *
  * `payload` is included only when passed — omitting it drops the key, while `null` is a REAL value
  * (a named lifecycle publish job has no raw prepared payload).
@@ -425,7 +427,7 @@ function wrappedJobDetailBody(
   payload?: AsyncPreparedPublishPayload | null,
 ): { job: PersistedLiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
-    job,
+    job: publisherJobView(job),
     ...(payload === undefined ? {} : { payload }),
     retryState: runtimeRetryState(ctx, job),
   };
@@ -438,7 +440,7 @@ function legacyJobDetailBody(
   payload?: AsyncPreparedPublishPayload | null,
 ): PersistedLiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
-    ...job,
+    ...publisherJobView(job),
     ...(payload === undefined ? {} : { payload }),
     retryState: runtimeRetryState(ctx, job),
   };
@@ -604,7 +606,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     if (!facts) return; // a 400 was already sent
     if (!(await requireContextGraphReadAuthority(ctx, facts.contextGraphId))) return;
     const lookup = await publisherControl.lookupKnowledgeAssetVmPublishJobByIntent(facts);
-    const { kind, ...rest } = lookup;
+    const { kind, ...rest } = publisherIntentLookupView(lookup);
     return jsonResponse(res, 200, { result: kind, ...rest });
   }
 
