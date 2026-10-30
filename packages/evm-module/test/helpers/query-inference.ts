@@ -8,9 +8,13 @@ import { ethers } from 'ethers';
 import hre from 'hardhat';
 
 import {
+  Chronos,
   ConvictionServiceStorage,
+  ConvictionStakingStorage,
   DKGPublishingConvictionNFT,
   DKGStakingConvictionNFT,
+  Hub,
+  ParametersStorage,
   Profile,
   QueryInferenceStorage,
   RandomSamplingStorage,
@@ -18,8 +22,39 @@ import {
   StakingV10,
   Token,
 } from '../../typechain';
-import { DAY, Domain, Terms, signTerms } from './conviction-service';
+import { ACCOUNT_STACK_TAGS, DAY, Domain, Terms, registerServiceContracts, signTerms } from './conviction-service';
 import { createProfile } from './profile-helpers';
+
+/**
+ * The account and staking stacks with every plan-period and settlement
+ * contract registered and the activation epoch set to the current epoch, as
+ * the development deploy leaves them. For `loadFixture`.
+ */
+export async function deploySettlementStack() {
+  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
+  const Hub = await hre.ethers.getContract<Hub>('Hub');
+  const { QIS, CSS, SS, SSW, QS } = await registerServiceContracts(Hub, { wallet: true, settlement: true });
+  return {
+    accounts: await hre.ethers.getSigners(),
+    Hub,
+    Token: await hre.ethers.getContract<Token>('Token'),
+    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
+    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
+    Profile: await hre.ethers.getContract<Profile>('Profile'),
+    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
+    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
+    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
+    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
+    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
+    QIS,
+    CSS,
+    SS,
+    SSW: SSW!,
+    QS: QS!,
+  };
+}
+
+export type SettlementStack = Awaited<ReturnType<typeof deploySettlementStack>>;
 
 export const SCALE18 = 10n ** 18n;
 export const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;

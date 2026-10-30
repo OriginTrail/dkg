@@ -143,6 +143,86 @@
     "inputs": [
       {
         "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum QueryInferenceSettlement.Skip",
+        "name": "reason",
+        "type": "uint8"
+      }
+    ],
+    "name": "ClaimSkipped",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "claimed",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "score",
+        "type": "uint96"
+      }
+    ],
+    "name": "ClaimsFinalized",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
         "internalType": "uint72",
         "name": "seller",
         "type": "uint72"
@@ -316,6 +396,66 @@
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "subscriptionId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "bucketIndex",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint72",
+            "name": "seller",
+            "type": "uint72"
+          }
+        ],
+        "internalType": "struct QueryInferenceSettlement.ClaimRef[]",
+        "name": "refs",
+        "type": "tuple[]"
+      }
+    ],
+    "name": "finalizeClaims",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "finalized",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      }
+    ],
+    "name": "fundedCap",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",

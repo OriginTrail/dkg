@@ -58,22 +58,35 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * value and the same weighted by the seller's stake factor, which is
  * captured once per batch and never revised.
  *
+ * Finalization (`finalizeClaims`). Every period of an epoch e shares one batch
+ * deadline, the epoch's end plus the grace of e, which falls in e + 1, the
+ * period's due epoch. A seller's claims in a bucket are finalized there and
+ * only there: after that deadline, during e + 1, and void once e + 1 has
+ * ended. Anyone may finalize, and the value goes to the seller the claim
+ * names, who must have a positive node score in e + 1. A bucket's claims
+ * above its funded cap all shrink by the same ratio, so the order of batches
+ * gives no priority, and the result counts as R and QueryInferenceScore in
+ * e + 1.
+ *
  * Architecture: stateless logic, as `ServiceSubscriptions`. Every byte of
  * settlement state lives in `QueryInferenceStorage`, and the periods in
  * `ConvictionServiceStorage`. The storages it reads or writes, and `Chronos`,
  * are wired at `initialize()`. It never calls the Token, moves no TRAC, and
  * accepts no ETH: no TRAC is ever sent to a seller.
  *
- * Gates: every batch is refused while `QueryInferenceStorage` is paused,
- * before its activation epoch and while that is unset.
+ * Gates: every batch and finalization is refused while
+ * `QueryInferenceStorage` is paused, before its activation epoch and while that
+ * is unset.
  */
 contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "QueryInferenceSettlement";
     // Version history:
-    //   1.0.0 — receipt batches of the query/inference pool (OT-RFC-27).
+    //   1.0.0 — receipt batches, and their finalization against the funded cap,
+    //           of the query/inference pool (OT-RFC-27).
     string private constant _VERSION = "1.0.0";
 
     uint256 internal constant _SCALE18 = 1e18;
+    uint256 internal constant _BPS = 10_000;
 
     // EIP-712, built by hand as ServiceSubscriptions builds its domain.
     bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
@@ -154,6 +167,25 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         ReceiptItem[] items;
     }
 
+    /// @notice A seller's claim in one bucket of one period.
+    struct ClaimRef {
+        bytes32 subscriptionId;
+        uint8 bucketIndex;
+        uint72 seller; // the seller's identity id
+    }
+
+    /// @notice Why a claim was not finalized. A skipped claim is untouched.
+    enum Skip {
+        None, // finalized
+        UnknownPeriod, // no period is recorded under the id
+        UnknownBucket, // the period has no bucket at the index
+        AlreadyFinalized,
+        TooEarly, // before the batch deadline of the period's epoch
+        Void, // the epoch after the period has ended: the claim never counts
+        NothingClaimed,
+        NoScore // the seller has no node score in the current epoch, yet
+    }
+
     /// @notice Why a batch is refused: a group's fault, or an item's.
     enum Fault {
         None,
@@ -212,6 +244,22 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         uint256 value,
         uint256 stakeFactor18
     );
+
+    /// @notice A seller's claim in a bucket was finalized: of `claimed`,
+    ///         `value` counts as its R and `score` as its QueryInferenceScore
+    ///         in `epoch`, the epoch after the period.
+    event ClaimsFinalized(
+        bytes32 indexed subscriptionId,
+        uint8 indexed bucketIndex,
+        uint72 indexed seller,
+        uint256 epoch,
+        uint96 claimed,
+        uint96 value,
+        uint96 score
+    );
+    /// @notice A claim named in `finalizeClaims` was not finalized, for
+    ///         `reason`.
+    event ClaimSkipped(bytes32 indexed subscriptionId, uint8 indexed bucketIndex, uint72 indexed seller, Skip reason);
 
     // ============================================================
     //                          Errors
@@ -355,6 +403,64 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     }
 
     // ============================================================
+    //                        Finalization
+    // ============================================================
+
+    /**
+     * @notice Finalize the claims of `refs`, each a seller's claim in one
+     *         bucket. Anyone may call; the value goes to the seller a ref
+     *         names.
+     * @dev    The call reverts only for what holds for every ref: the pause
+     *         and activation. A ref that cannot be finalized now is skipped,
+     *         untouched, with a `ClaimSkipped` event naming why, so a keeper
+     *         can finalize for many sellers in one call. In order of the
+     *         checks: the period and the bucket exist; the claim is not
+     *         finalized; for a period of epoch e, the current epoch is e + 1
+     *         and the time is after the batch deadline of e, the epoch's end
+     *         plus the grace of e (before it, `TooEarly`; from e + 2 on,
+     *         `Void`); something was claimed; and the seller has a positive
+     *         node score in the current epoch.
+     *
+     *         The window opens at the epoch's batch deadline even for a
+     *         Conviction Account period whose own deadline came sooner: a new
+     *         assignment of its buyer key clears a revocation, which could
+     *         otherwise let batches for it land again after some of its claims
+     *         were finalized. No period's deadline is later than its epoch's,
+     *         so no batch lands once the window is open, and a bucket needs no
+     *         close time.
+     *
+     *         With F the bucket's funded cap and C its claims over all
+     *         sellers, the seller's claim c and weighted claim w count as
+     *         c × min(1, F / C) and w × min(1, F / C), floored, in the current
+     *         epoch.
+     * @return finalized How many refs were finalized.
+     */
+    function finalizeClaims(ClaimRef[] calldata refs) external returns (uint256 finalized) {
+        QueryInferenceStorage qis = queryInferenceStorage;
+        (uint40 activation, bool isPaused) = qis.fundingState();
+        uint256 current = _requireLive(activation, isPaused);
+        uint256 graceEpoch = _NO_WORD;
+        uint256 grace;
+        for (uint256 i; i < refs.length; i++) {
+            ClaimRef calldata ref = refs[i];
+            ConvictionServiceStorage.Subscription memory s = convictionServiceStorage.getSubscription(
+                ref.subscriptionId
+            );
+            uint256 epoch = ServicePeriodLib.epochOf(s);
+            if (s.periodStart != 0 && epoch != graceEpoch) {
+                grace = qis.receiptGraceSecondsAt(epoch);
+                graceEpoch = epoch;
+            }
+            Skip reason = _finalize(qis, ref, s, current, grace);
+            if (reason == Skip.None) {
+                finalized++;
+            } else {
+                emit ClaimSkipped(ref.subscriptionId, ref.bucketIndex, ref.seller, reason);
+            }
+        }
+    }
+
+    // ============================================================
     //                           Views
     // ============================================================
 
@@ -450,9 +556,65 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         return end + queryInferenceStorage.receiptGraceSecondsAt(ServicePeriodLib.epochOf(s));
     }
 
+    /**
+     * @notice A bucket's funded cap: the most receipt value its claims
+     *         finalize to. The bucket's value, top-ups included, for a wallet
+     *         period; for a Conviction Account period, that value at the
+     *         account's discount, floored, so sellers absorb the discount. 0
+     *         for an unknown period or bucket.
+     */
+    function fundedCap(bytes32 subscriptionId, uint8 bucketIndex) external view returns (uint256) {
+        ConvictionServiceStorage css = convictionServiceStorage;
+        ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
+        if (s.periodStart == 0 || bucketIndex >= s.bucketCount) return 0;
+        return _fundedCap(s, css.getBucket(subscriptionId, bucketIndex).value);
+    }
+
     // ============================================================
     //                         Internal
     // ============================================================
+
+    /// @dev Finalize one claim, or say why not; see `finalizeClaims`. `s` is
+    ///      the ref's period record and `grace` the receipt grace of its epoch.
+    function _finalize(
+        QueryInferenceStorage qis,
+        ClaimRef calldata ref,
+        ConvictionServiceStorage.Subscription memory s,
+        uint256 current,
+        uint256 grace
+    ) internal returns (Skip) {
+        if (s.periodStart == 0) return Skip.UnknownPeriod;
+        if (ref.bucketIndex >= s.bucketCount) return Skip.UnknownBucket;
+        QueryInferenceStorage.SellerClaim memory c = qis.getSellerClaim(
+            ref.subscriptionId,
+            ref.bucketIndex,
+            ref.seller
+        );
+        if (c.finalized) return Skip.AlreadyFinalized;
+        uint256 epoch = ServicePeriodLib.epochOf(s);
+        if (current > epoch + 1) return Skip.Void;
+        if (current <= epoch || block.timestamp <= uint256(s.periodEnd) + grace) return Skip.TooEarly;
+        if (c.claimed == 0) return Skip.NothingClaimed;
+        if (randomSamplingStorage.getNodeEpochScore(current, ref.seller) == 0) return Skip.NoScore;
+
+        uint256 cap = _fundedCap(s, convictionServiceStorage.getBucket(ref.subscriptionId, ref.bucketIndex).value);
+        uint256 total = qis.bucketClaimed(ref.subscriptionId, ref.bucketIndex);
+        uint96 value = c.claimed;
+        uint96 score = c.weighted;
+        if (total > cap) {
+            value = uint96(Math.mulDiv(value, cap, total));
+            score = uint96(Math.mulDiv(score, cap, total));
+        }
+        qis.finalizeClaim(ref.subscriptionId, ref.bucketIndex, ref.seller, current, value, score);
+        emit ClaimsFinalized(ref.subscriptionId, ref.bucketIndex, ref.seller, current, c.claimed, value, score);
+        return Skip.None;
+    }
+
+    /// @dev The funded cap of a bucket of value `value` in period `s`.
+    function _fundedCap(ConvictionServiceStorage.Subscription memory s, uint256 value) internal pure returns (uint256) {
+        if (s.accountId == 0) return value;
+        return (value * (_BPS - uint256(s.discountBps))) / _BPS;
+    }
 
     /**
      * @dev Check one group and claim its value. Used nonces are kept per
