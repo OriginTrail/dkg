@@ -3,7 +3,7 @@ import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } fro
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { isCommittedSubscription, waitForSubscriptionActivation, type OwnedSubscriptionActivation } from './context-graph-subscription-activation-state.js';
-import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
+import type { DurableRecoverySlice } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -5072,7 +5072,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
-  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoveryRoundOutcome> {
+  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoverySlice> {
     const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
     return runGraphOwnedDurableRecovery({ ...request, host,
       authority: host.resolveOrdinaryAuthority(request.ctx, {}) });
@@ -6610,7 +6610,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }),
         executeSlice: async (peerId, recovery) => {
           if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
-            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } };
+            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' }, admission: 'not-started' };
           }
           return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
             recovery,
@@ -6623,7 +6623,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
             signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
           });
-          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found');
+          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found', exact.admission);
         },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
