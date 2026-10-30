@@ -8,7 +8,7 @@
  * Added to what the subject holds, an update leaves a union no reader can take
  * apart: the wallet maps to every peer it ever ran on, and nothing says which
  * of them is current. So the subject also holds one date per peer, in
- * `dkg:peerLastSeen` ("<peer id> <lastSeen>"), and readers take the newest:
+ * `dkg:datedPeer` ("<peer id> <lastSeen>"), and readers take the newest:
  *
  * - A profile of one peer sets that peer's date, and is ignored when it is no
  *   newer than the date held. `dkg:lastSeen` is the newest date the subject keeps.
@@ -19,11 +19,14 @@
  *   them when its peer is the only one the subject keeps. Beside another current
  *   peer it only adds its values, and those of the others go once one peer is left.
  * - A profile that lists several peers, from a node that still keeps the union,
- *   has no date for any of them. It only seeds a subject without a current peer.
- *   The peers of a stored union are dated by its newest `dkg:lastSeen` the first
- *   time the subject changes, and age out from there.
- * - Part of a profile, as when a fetch stops inside one, is kept until the next
- *   batch brings the rest. Until then it only fills fields the subject lacks.
+ *   has no date for any of them. Those the subject lacks are dated by its newest
+ *   `dkg:lastSeen`, and those it holds keep their date. The peers of a stored union
+ *   are dated the same way the first time the subject changes, and age out from there.
+ * - A sync serves a subject's rows in predicate order, and may stop inside a
+ *   subject. Only the last subject of a batch can go on in the next one, so its
+ *   rows are kept for a while and joined to a batch that goes on from them.
+ *   `dkg:datedPeer` sorts ahead of `dkg:lastSeen` and `dkg:peerId`, so a batch
+ *   that names a peer has its date, and where a batch ends makes no difference.
  * - A `dkg:lastSeen` ahead of this node's clock by more than the allowance says
  *   nothing about the profile's age, and is not stored.
  * - A heartbeat that changes nothing but its peer's date is written once per
@@ -61,8 +64,8 @@ const AGENTS_DATA_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS)
 const PEER_ID = DKG_ONTOLOGY.DKG_PEER_ID;
 const LAST_SEEN = `${DKG}lastSeen`;
 const MULTIADDR = `${DKG}multiaddr`;
-/** One date per peer: "<peer id> <lastSeen>". */
-export const AGENT_PEER_LAST_SEEN_PREDICATE = `${DKG}peerLastSeen`;
+/** One date per peer: "<peer id> <lastSeen>". Named to sort ahead of the fields a sync serves after it. */
+export const AGENT_DATED_PEER_PREDICATE = `${DKG}datedPeer`;
 /** They name no peer, so an update sets them only when its peer is the subject's one peer. */
 const UNATTRIBUTED_FIELDS: ReadonlySet<string> = new Set([
   DKG_ONTOLOGY.DKG_RELAY_ADDRESS,
@@ -74,7 +77,7 @@ const NODE_FIELDS: ReadonlySet<string> = new Set([
   ...UNATTRIBUTED_FIELDS,
   PEER_ID,
   LAST_SEEN,
-  AGENT_PEER_LAST_SEEN_PREDICATE,
+  AGENT_DATED_PEER_PREDICATE,
   MULTIADDR,
 ]);
 /** What an update of a known agent carries over gossip: what its node writes about itself, and its keys and their revocations. */
@@ -93,10 +96,10 @@ const STORED_FIELDS_SUBJECTS_PER_READ = 128;
 export const AGENT_LAST_SEEN_WRITE_INTERVAL_MS = 6 * 60 * 60_000;
 /** How far a peer's date must be behind a heartbeat for that peer to have stopped sending them: two heartbeats. */
 export const AGENT_PEER_SILENT_AFTER_MS = 40 * 60_000;
-/** How long part of a profile waits for the rest, how many wait, and how large one may be. */
-const PROFILE_PART_TTL_MS = 10 * 60_000;
-const PROFILE_PARTS_MAX = 64;
-const PROFILE_PART_MAX_QUADS = 256;
+/** How long a subject's rows wait for the next page of a sync, for how many subjects, and how many rows. */
+const SYNC_PAGE_TTL_MS = 10 * 60_000;
+const SYNC_PAGES_MAX = 64;
+const SYNC_PAGE_MAX_QUADS = 256;
 
 export interface AgentProfileWrites {
   readonly insert: readonly Quad[];
@@ -120,8 +123,8 @@ function newestLastSeen(quads: readonly Quad[], nowMs: number): Seen | undefined
   return newest;
 }
 
-/** The peer and date of a `dkg:peerLastSeen` literal; undefined when it holds no usable date. */
-export function parseAgentPeerLastSeen(term: string, nowMs: number): { readonly peerId: string; readonly seen: Seen } | undefined {
+/** The peer and date of a `dkg:datedPeer` literal; undefined when it holds no usable date. */
+export function parseAgentDatedPeer(term: string, nowMs: number): { readonly peerId: string; readonly seen: Seen } | undefined {
   const body = literalBody(term);
   const space = body.lastIndexOf(' ');
   if (space <= 0) return undefined;
@@ -133,8 +136,8 @@ export function parseAgentPeerLastSeen(term: string, nowMs: number): { readonly 
 function peerDates(quads: readonly Quad[], nowMs: number): Map<string, Seen> {
   const dates = new Map<string, Seen>();
   for (const quad of quads) {
-    if (quad.predicate !== AGENT_PEER_LAST_SEEN_PREDICATE) continue;
-    const parsed = parseAgentPeerLastSeen(quad.object, nowMs);
+    if (quad.predicate !== AGENT_DATED_PEER_PREDICATE) continue;
+    const parsed = parseAgentDatedPeer(quad.object, nowMs);
     const known = parsed === undefined ? undefined : dates.get(parsed.peerId);
     if (parsed !== undefined && (known === undefined || parsed.seen.ms > known.ms)) dates.set(parsed.peerId, parsed.seen);
   }
@@ -188,12 +191,17 @@ export function planAgentProfileWrites(
     if (!heldDates.has(peerId) && heldNewest !== undefined) heldDates.set(peerId, heldNewest);
   }
   const dates = new Map(heldDates);
-  // The dates the update brings: its own for a profile of one peer, and those a node that dates its peers holds.
-  const profilePeer = updatePeers.size === 1 && updateNewest !== undefined ? [...updatePeers.keys()][0] : undefined;
-  const brought = new Map(profilePeer !== undefined && updateNewest !== undefined ? [[profilePeer, updateNewest]] : []);
-  for (const [peerId, seen] of peerDates(update, nowMs)) {
-    const known = brought.get(peerId);
-    if (known === undefined || seen.ms > known.ms) brought.set(peerId, seen);
+  // The dates the update brings, for the peers it names: those of a node that
+  // dates its peers, or else its lastSeen for the peer of a profile of one, and
+  // for the peers the subject lacks of a profile of several.
+  const updateDates = peerDates(update, nowMs);
+  const brought = new Map([...updateDates].filter(([peerId]) => updatePeers.has(peerId)));
+  const undated = updateDates.size === 0 && updateNewest !== undefined;
+  const profilePeer = undated && updatePeers.size === 1 ? [...updatePeers.keys()][0] : undefined;
+  if (undated) {
+    for (const peerId of updatePeers.keys()) {
+      if (peerId === profilePeer || !heldPeers.has(peerId)) brought.set(peerId, updateNewest);
+    }
   }
   const advanced = new Set<string>();
   for (const [peerId, seen] of brought) {
@@ -222,17 +230,19 @@ export function planAgentProfileWrites(
 
   const keptDates = [...peers.keys()].flatMap((peerId) => dates.get(peerId) ?? []);
   const newestKept = keptDates.reduce<Seen | undefined>((best, seen) => (best === undefined || seen.ms > best.ms ? seen : best), undefined);
-  const seedsSubject = !anyCurrent && updateNewest !== undefined && (heldNewest === undefined || updateNewest.ms > heldNewest.ms);
+  const seedsSubject = !anyCurrent && undated && (updatePeers.size > 0 || heldPeers.size === 0)
+    && (heldNewest === undefined || updateNewest.ms > heldNewest.ms);
   // What names no peer: whether the update sets it, or adds to it.
   const onlyPeer = peers.size === 1 ? [...peers.keys()][0] : undefined;
-  const updateSets = seedsSubject || (onlyPeer !== undefined && advanced.has(onlyPeer));
-  const updateAdds = [...advanced].some((peerId) => peers.has(peerId));
+  const updateSets = seedsSubject
+    || (onlyPeer !== undefined && advanced.has(onlyPeer) && [...updateDates.keys()].every((peerId) => peerId === onlyPeer));
+  const updateAdds = [...brought].some(([peerId, seen]) => peers.has(peerId) && seen.ms >= (heldDates.get(peerId)?.ms ?? seen.ms));
 
   const desired: Quad[] = [...peers.values()].map((term) => fieldQuad(PEER_ID, term));
   for (const peerId of peers.keys()) {
     // Nothing dates this peer, not even a usable lastSeen, beside a current one: it starts to age with it.
     const seen = dates.get(peerId) ?? (anyCurrent ? newestKept : undefined);
-    if (seen !== undefined) desired.push(fieldQuad(AGENT_PEER_LAST_SEEN_PREDICATE, `"${peerId} ${seen.iso}"`));
+    if (seen !== undefined) desired.push(fieldQuad(AGENT_DATED_PEER_PREDICATE, `"${peerId} ${seen.iso}"`));
   }
   const lastSeen = seedsSubject ? updateNewest : newestKept ?? heldNewest;
   if (lastSeen !== undefined) desired.push(fieldQuad(LAST_SEEN, `"${lastSeen.iso}"`));
@@ -261,7 +271,7 @@ export function planAgentProfileWrites(
   const insert = absentFrom(desired, held);
   const remove = absentFrom(held, desired);
   // A heartbeat that moves nothing but its peer's date waits for its turn to be written.
-  const isDate = (quad: Quad): boolean => quad.predicate === LAST_SEEN || quad.predicate === AGENT_PEER_LAST_SEEN_PREDICATE;
+  const isDate = (quad: Quad): boolean => quad.predicate === LAST_SEEN || quad.predicate === AGENT_DATED_PEER_PREDICATE;
   const heldProfileDate = profilePeer === undefined ? undefined : heldDates.get(profilePeer);
   const profileDate = profilePeer === undefined ? undefined : dates.get(profilePeer);
   if (profilePeer !== undefined && advanced.has(profilePeer) && heldProfileDate !== undefined && profileDate !== undefined
@@ -309,7 +319,7 @@ async function readHeldNodeFields(
 
 interface StoreProfileState {
   tail: Promise<unknown>;
-  readonly parts: Map<string, { readonly at: number; readonly quads: readonly Quad[] }>;
+  readonly pages: Map<string, { readonly at: number; readonly quads: readonly Quad[] }>;
 }
 
 const stateByStore = new WeakMap<object, StoreProfileState>();
@@ -317,7 +327,7 @@ const stateByStore = new WeakMap<object, StoreProfileState>();
 function stateOf(store: object): StoreProfileState {
   let state = stateByStore.get(store);
   if (state === undefined) {
-    state = { tail: Promise.resolve(), parts: new Map() };
+    state = { tail: Promise.resolve(), pages: new Map() };
     stateByStore.set(store, state);
   }
   return state;
@@ -330,24 +340,22 @@ function oneAtATime<T>(state: StoreProfileState, work: () => Promise<T>): Promis
   return run;
 }
 
-function isProfilePart(quads: readonly Quad[], nowMs: number): boolean {
-  return peerTerms(quads).size === 0 || (newestLastSeen(quads, nowMs) === undefined && peerDates(quads, nowMs).size === 0);
+function inPredicateOrder(quads: readonly Quad[]): boolean {
+  return quads.every((quad, index) => index === 0 || quads[index - 1]!.predicate <= quad.predicate);
 }
 
 /**
- * The update, joined to the part of a profile an earlier batch ended on, unless
- * both name peers: that would make a union of them. A part that stays one waits
- * for the next batch.
+ * The update, joined to the rows an earlier page of a sync ended on for this
+ * subject. A batch that does not go on from where that page ended, in predicate
+ * order, is another delivery.
  */
-function joinProfileParts(state: StoreProfileState, subject: string, update: readonly Quad[], nowMs: number): readonly Quad[] {
-  const earlier = state.parts.get(subject);
-  state.parts.delete(subject);
-  const joined = earlier !== undefined && nowMs - earlier.at < PROFILE_PART_TTL_MS
-    && (peerTerms(earlier.quads).size === 0 || peerTerms(update).size === 0)
-    ? [...earlier.quads, ...update]
-    : update;
-  if (isProfilePart(joined, nowMs) && joined.length <= PROFILE_PART_MAX_QUADS) {
-    rememberBounded(state.parts, subject, { at: nowMs, quads: joined }, PROFILE_PARTS_MAX);
+function joinSyncPages(state: StoreProfileState, subject: string, update: readonly Quad[], nowMs: number, isLast: boolean): readonly Quad[] {
+  const earlier = state.pages.get(subject);
+  state.pages.delete(subject);
+  const both = earlier !== undefined && nowMs - earlier.at < SYNC_PAGE_TTL_MS ? [...earlier.quads, ...update] : update;
+  const joined = inPredicateOrder(both) ? both : update;
+  if (isLast && joined.length <= SYNC_PAGE_MAX_QUADS) {
+    rememberBounded(state.pages, subject, { at: nowMs, quads: joined }, SYNC_PAGES_MAX);
   }
   return joined;
 }
@@ -362,16 +370,17 @@ function isUpdateQuad(quad: Quad): boolean {
 /**
  * Store `quads` through `insert`, with the node fields of agent profiles among
  * them applied as this module describes. Quads of any other kind go to `insert`
- * unchanged. Resolves with what `insert` stored.
+ * unchanged. Resolves with what `insert` stored. `syncPage` says the quads are a
+ * page of a sync, which may stop inside a subject; a gossiped profile is whole.
  */
 export async function storeAgentProfileQuads(
   store: TripleStore,
   quads: readonly Quad[],
   insert: (quads: Quad[]) => Promise<Quad[]>,
-  options: QueryOptions & { readonly nowMs?: number } = {},
+  options: QueryOptions & { readonly nowMs?: number; readonly syncPage?: boolean } = {},
 ): Promise<Quad[]> {
   if (quads.length === 0) return [];
-  const { nowMs, ...storeOptions } = options;
+  const { nowMs, syncPage = false, ...storeOptions } = options;
   const updates = new Map<string, Quad[]>();
   const others: Quad[] = [];
   for (const quad of quads) {
@@ -389,8 +398,10 @@ export async function storeAgentProfileQuads(
     const held = await readHeldNodeFields(store, [...updates.keys()], storeOptions);
     const at = nowMs ?? Date.now();
     const removes: Quad[] = [];
+    const lastSubject = [...updates.keys()].at(-1);
     for (const [subject, update] of updates) {
-      const writes = planAgentProfileWrites(joinProfileParts(state, subject, update, at), held.get(subject) ?? [], at);
+      const whole = syncPage ? joinSyncPages(state, subject, update, at, subject === lastSubject) : update;
+      const writes = planAgentProfileWrites(whole, held.get(subject) ?? [], at);
       others.push(...writes.insert);
       removes.push(...writes.remove);
     }
@@ -422,7 +433,7 @@ export function gossipedAgentProfileQuads(
   const fromItsPeer = (root: string): boolean => fromPeerId === undefined
     || (!namesAnother.has(root) && (namesSender.has(root) || !root.startsWith(AGENT_SUBJECT_PREFIX)));
   return quads.filter((quad) => (
-    quad.predicate !== AGENT_PEER_LAST_SEEN_PREDICATE
+    quad.predicate !== AGENT_DATED_PEER_PREDICATE
     && fromItsPeer(rootOf(quad.subject))
     && (!knownAgent || (UPDATE_FIELDS.has(quad.predicate) && quad.subject.startsWith(AGENT_SUBJECT_PREFIX)))
   ));

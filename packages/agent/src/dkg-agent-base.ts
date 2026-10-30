@@ -1605,7 +1605,7 @@ export class DKGAgentBase {
       writes,
       { recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam) },
       'durable-sync',
-    ), options);
+    ), { ...options, syncPage: true });
     if (inserted.length > 0) {
       try { await compactSyncedPrivateRosterGenerations(this.store, inserted, options); }
       finally { this.invalidateListContextGraphsCache(); }

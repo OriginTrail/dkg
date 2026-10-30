@@ -12,10 +12,10 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { AGENT_LAST_SEEN_CLOCK_SKEW_MS, usableLastSeenMs } from '../src/agent-peer-discovery.js';
 import {
   AGENT_LAST_SEEN_WRITE_INTERVAL_MS,
-  AGENT_PEER_LAST_SEEN_PREDICATE,
+  AGENT_DATED_PEER_PREDICATE,
   AGENT_PEER_SILENT_AFTER_MS,
   gossipedAgentProfileQuads,
-  parseAgentPeerLastSeen,
+  parseAgentDatedPeer,
   planAgentProfileWrites,
   storeAgentProfileQuads,
 } from '../src/agent-profile-updates.js';
@@ -27,7 +27,7 @@ const SUBJECT = `did:dkg:agent:${WALLET}`;
 const DKG = 'https://dkg.network/ontology#';
 const PEER_ID = `${DKG}peerId`;
 const LAST_SEEN = `${DKG}lastSeen`;
-const PEER_LAST_SEEN = AGENT_PEER_LAST_SEEN_PREDICATE;
+const DATED_PEER = AGENT_DATED_PEER_PREDICATE;
 const RELAY = `${DKG}relayAddress`;
 const MULTIADDR = `${DKG}multiaddr`;
 const NODE_ROLE = `${DKG}nodeRole`;
@@ -65,12 +65,13 @@ describe('applying agent profile updates to the store', () => {
     stores.push(store);
     const insert = async (quads: Quad[]) => { await store.insert(quads); return quads; };
     const apply = (quads: Quad[], nowMs = NOW) => storeAgentProfileQuads(store, quads, insert, { nowMs });
+    const applyPage = (quads: Quad[], nowMs = NOW) => storeAgentProfileQuads(store, quads, insert, { nowMs, syncPage: true });
     const values = async (predicate: string, subject = SUBJECT): Promise<string[]> => {
       const result = await store.query(`SELECT ?o WHERE { GRAPH <${AGENT_REGISTRY_GRAPH}> { <${subject}> <${predicate}> ?o } } ORDER BY ?o`);
       return result.type === 'bindings' ? result.bindings.map((row) => row['o']!) : [];
     };
-    const datesHeld = async (subject = SUBJECT): Promise<string[]> => (await values(PEER_LAST_SEEN, subject)).map((term) => term.slice(1, -1));
-    return { store, insert, apply, values, datesHeld };
+    const datesHeld = async (subject = SUBJECT): Promise<string[]> => (await values(DATED_PEER, subject)).map((term) => term.slice(1, -1));
+    return { store, insert, apply, applyPage, values, datesHeld };
   }
   const date = (peer: string, minutes: number): string => `${peer} ${minutesAgo(minutes)}`;
 
@@ -154,7 +155,9 @@ describe('applying agent profile updates to the store', () => {
   it('does not bring back a peer past the staleness bound, beside a current one', async () => {
     const { apply, values } = fixture();
     await apply(profile('peer-new', minutesAgo(1)));
-    await apply(profile('peer-dead', new Date(NOW - AGENT_PROFILE_STALE_THRESHOLD_MS - 60_000).toISOString()));
+    const pastTheBound = new Date(NOW - AGENT_PROFILE_STALE_THRESHOLD_MS - 60_000).toISOString();
+    await apply(profile('peer-dead', pastTheBound));
+    await apply([quad(PEER_ID, literal('peer-dead')), quad(PEER_ID, literal('peer-dead-2')), quad(LAST_SEEN, literal(pastTheBound))]);
     expect(await values(PEER_ID)).toEqual([literal('peer-new')]);
     expect(await values(MULTIADDR)).toEqual([literal('/dns4/relay-of-peer-new/tcp/9090/p2p-circuit/p2p/peer-new')]);
   });
@@ -248,22 +251,25 @@ describe('applying agent profile updates to the store', () => {
     expect(await datesHeld(), 'the next heartbeat puts the live peer first').toEqual([date('peer-delayed', 60), date('peer-live', 5)]);
   });
 
-  it('adds nothing from a union to a subject with a current peer', async () => {
-    const { apply, values } = fixture();
+  it('adds the peers of a union that the subject lacks, dated by its newest lastSeen, and moves no date it holds', async () => {
+    const { apply, values, datesHeld } = fixture();
     await apply(profile('peer-new', minutesAgo(5)));
     await apply([
-      quad(PEER_ID, literal('peer-a')),
-      quad(PEER_ID, literal('peer-b')),
+      quad(PEER_ID, literal('peer-new')),
+      quad(PEER_ID, literal('peer-moved')),
       quad(LAST_SEEN, literal(minutesAgo(20))),
       quad(LAST_SEEN, literal(minutesAgo(1))),
-      quad(MULTIADDR, literal('/dns4/relay/tcp/1/p2p-circuit/p2p/peer-a')),
+      quad(MULTIADDR, literal('/dns4/relay/tcp/1/p2p-circuit/p2p/peer-moved')),
     ]);
-    expect(await values(PEER_ID)).toEqual([literal('peer-new')]);
-    expect(await values(LAST_SEEN)).toEqual([literal(minutesAgo(5))]);
-    expect(await values(MULTIADDR)).toEqual([literal('/dns4/relay-of-peer-new/tcp/9090/p2p-circuit/p2p/peer-new')]);
+    expect(await datesHeld()).toEqual([date('peer-moved', 1), date('peer-new', 5)]);
+    expect(await values(LAST_SEEN)).toEqual([literal(minutesAgo(1))]);
+    expect(await values(MULTIADDR)).toEqual([
+      literal('/dns4/relay-of-peer-new/tcp/9090/p2p-circuit/p2p/peer-new'),
+      literal('/dns4/relay/tcp/1/p2p-circuit/p2p/peer-moved'),
+    ]);
   });
 
-  it('seeds a subject without a current peer from a union, with its newest lastSeen and no dates', async () => {
+  it('dates the peers of a first union by its newest lastSeen', async () => {
     const { apply, values, datesHeld } = fixture();
     await apply([
       quad(PEER_ID, literal('peer-a')),
@@ -277,7 +283,7 @@ describe('applying agent profile updates to the store', () => {
     expect(await values(LAST_SEEN)).toEqual([literal(minutesAgo(10))]);
     expect(await values(RELAY)).toEqual([literal('/dns4/relay/tcp/1')]);
     expect(await values(MULTIADDR)).toEqual([literal('/dns4/relay/tcp/1/p2p-circuit/p2p/peer-a')]);
-    expect(await datesHeld()).toEqual([]);
+    expect(await datesHeld()).toEqual([date('peer-a', 10), date('peer-b', 10)]);
   });
 
   it('seeds a subject whose peers are all past the bound from a newer union, which sets what it names', async () => {
@@ -339,16 +345,26 @@ describe('applying agent profile updates to the store', () => {
     expect(await datesHeld()).toEqual([]);
   });
 
+  it('takes no date from a peer it does not name, and none from a lastSeen when it has dates of its own', async () => {
+    const { apply, datesHeld, values } = fixture();
+    await apply(profile('peer-a', minutesAgo(30)));
+    await apply([quad(DATED_PEER, literal(date('peer-a', 1))), quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    expect(await datesHeld()).toEqual([date('peer-a', 30)]);
+    await apply([quad(DATED_PEER, literal(date('peer-a', 20))), quad(LAST_SEEN, literal(minutesAgo(1))), quad(PEER_ID, literal('peer-a'))]);
+    expect(await datesHeld()).toEqual([date('peer-a', 20)]);
+    expect(await values(LAST_SEEN)).toEqual([literal(minutesAgo(20))]);
+  });
+
   it('takes the dates a node that keeps them holds, per peer, the newest of each', async () => {
     const { apply, datesHeld, values } = fixture();
     await apply(profile('peer-a', minutesAgo(30)));
     await apply([
       quad(PEER_ID, literal('peer-a')),
       quad(PEER_ID, literal('peer-b')),
-      quad(PEER_LAST_SEEN, literal(date('peer-a', 40))),
-      quad(PEER_LAST_SEEN, literal(date('peer-b', 2))),
-      quad(PEER_LAST_SEEN, literal(date('peer-unlisted', 1))),
-      quad(PEER_LAST_SEEN, literal('not-a-date')),
+      quad(DATED_PEER, literal(date('peer-a', 40))),
+      quad(DATED_PEER, literal(date('peer-b', 2))),
+      quad(DATED_PEER, literal(date('peer-unlisted', 1))),
+      quad(DATED_PEER, literal('not-a-date')),
       quad(LAST_SEEN, literal(minutesAgo(2))),
       quad(MULTIADDR, literal('/dns4/relay/tcp/1/p2p-circuit/p2p/peer-b')),
       quad(RELAY, literal('/dns4/relay-of-b/tcp/1')),
@@ -363,7 +379,7 @@ describe('applying agent profile updates to the store', () => {
     await apply(profile('peer-a', minutesAgo(30)));
     await apply([
       quad(PEER_ID, literal('peer-a')),
-      quad(PEER_LAST_SEEN, literal(date('peer-a', 3))),
+      quad(DATED_PEER, literal(date('peer-a', 3))),
       quad(MULTIADDR, literal('/dns4/moved/tcp/1/p2p-circuit/p2p/peer-a')),
       quad(RELAY, literal('/dns4/moved/tcp/1')),
     ]);
@@ -372,56 +388,130 @@ describe('applying agent profile updates to the store', () => {
     expect(await values(RELAY)).toEqual([literal('/dns4/moved/tcp/1')]);
   });
 
-  it('puts a profile together that a fetch delivered in two parts, on a subject it did not know', async () => {
-    const { apply, values, datesHeld } = fixture();
-    await apply([quad(LAST_SEEN, literal(minutesAgo(1))), quad(MULTIADDR, literal('/dns4/a/tcp/1'))]);
-    await apply([quad(PEER_ID, literal('peer-1')), quad(RELAY, literal('/dns4/a/tcp/1'))]);
+  it('puts a profile together that a sync delivered in two pages, on a subject it did not know', async () => {
+    const { applyPage, values, datesHeld } = fixture();
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1))), quad(MULTIADDR, literal('/dns4/a/tcp/1'))]);
+    await applyPage([quad(PEER_ID, literal('peer-1')), quad(RELAY, literal('/dns4/a/tcp/1'))]);
     expect(await values(PEER_ID)).toEqual([literal('peer-1')]);
     expect(await values(LAST_SEEN)).toEqual([literal(minutesAgo(1))]);
     expect(await datesHeld()).toEqual([date('peer-1', 1)]);
     expect(await values(RELAY)).toEqual([literal('/dns4/a/tcp/1')]);
   });
 
-  it('puts a newer profile of a known agent together across two batches, whichever part comes first', async () => {
-    for (const [firstPart, secondPart] of [
-      [[quad(LAST_SEEN, literal(minutesAgo(1)))], [quad(PEER_ID, literal('peer-new')), quad(RELAY, literal('/dns4/new/tcp/1'))]],
-      [[quad(PEER_ID, literal('peer-new')), quad(RELAY, literal('/dns4/new/tcp/1'))], [quad(LAST_SEEN, literal(minutesAgo(1)))]],
-    ] as const) {
-      const { apply, values, datesHeld } = fixture();
-      await apply(profile('peer-old', minutesAgo(30)));
-      await apply([...firstPart]);
-      expect(await values(PEER_ID), 'a part changes nothing the subject holds').toEqual([literal('peer-old')]);
-      await apply([...secondPart]);
-      expect(await datesHeld()).toEqual([date('peer-new', 1), date('peer-old', 30)]);
-      expect(await values(RELAY)).toEqual([literal('/dns4/new/tcp/1'), literal('/dns4/relay-of-peer-old/tcp/9090')]);
-    }
+  it('puts a newer profile of a known agent together across two pages', async () => {
+    const { apply, applyPage, values, datesHeld } = fixture();
+    await apply(profile('peer-old', minutesAgo(30)));
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    expect(await values(PEER_ID), 'a page without a peer changes nothing the subject holds').toEqual([literal('peer-old')]);
+    await applyPage([quad(PEER_ID, literal('peer-new')), quad(RELAY, literal('/dns4/new/tcp/1'))]);
+    expect(await datesHeld()).toEqual([date('peer-new', 1), date('peer-old', 30)]);
+    expect(await values(RELAY)).toEqual([literal('/dns4/new/tcp/1'), literal('/dns4/relay-of-peer-old/tcp/9090')]);
   });
 
   it('joins an address that came ahead of the rest of its profile', async () => {
-    const { apply, values } = fixture();
+    const { apply, applyPage, values } = fixture();
     await apply(profile('peer-old', minutesAgo(30)));
-    await apply([quad(MULTIADDR, literal('/dns4/new/tcp/1/p2p-circuit/p2p/peer-new'))]);
-    await apply([quad(PEER_ID, literal('peer-new')), quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1))), quad(MULTIADDR, literal('/dns4/new/tcp/1/p2p-circuit/p2p/peer-new'))]);
+    await applyPage([quad(PEER_ID, literal('peer-new'))]);
     expect(await values(MULTIADDR)).toEqual([
       literal('/dns4/new/tcp/1/p2p-circuit/p2p/peer-new'),
       literal('/dns4/relay-of-peer-old/tcp/9090/p2p-circuit/p2p/peer-old'),
     ]);
   });
 
-  it('does not join a part that names a peer to a profile that names another', async () => {
-    const { apply, datesHeld } = fixture();
+  it('adds the last rows of a page\'s profile to a peer that page already dated', async () => {
+    const { apply, applyPage, values, datesHeld } = fixture();
     await apply(profile('peer-old', minutesAgo(30)));
-    await apply([quad(PEER_ID, literal('peer-part'))]);
-    await apply([quad(PEER_ID, literal('peer-new')), quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1))), quad(PEER_ID, literal('peer-new'))]);
     expect(await datesHeld()).toEqual([date('peer-new', 1), date('peer-old', 30)]);
+    await applyPage([quad(PUBLIC_KEY, literal('key-of-peer-new')), quad(RELAY, literal('/dns4/new/tcp/1'))]);
+    expect(await values(PUBLIC_KEY)).toEqual([literal('key-of-peer-new'), literal('key-of-peer-old')]);
+    expect(await values(RELAY)).toEqual([literal('/dns4/new/tcp/1'), literal('/dns4/relay-of-peer-old/tcp/9090')]);
   });
 
-  it('forgets a part that the rest did not follow in time', async () => {
-    const { apply, values } = fixture();
+  it('takes a page that starts behind where the last one ended for another delivery', async () => {
+    const { applyPage, values } = fixture();
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(2))), quad(MULTIADDR, literal('/ip4/203.0.113.1/tcp/1/p2p/peer-x')), quad(PEER_ID, literal('peer-x'))]);
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1))), quad(PEER_ID, literal('peer-x'))]);
+    expect(await values(MULTIADDR), 'the newer profile has no address').toEqual([]);
+  });
+
+  it('joins a page only to the last subject of the page before it', async () => {
+    const { applyPage, values, datesHeld } = fixture();
+    const other = 'did:dkg:agent:0x00000000000000000000000000000000000000cd';
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1))), quad(LAST_SEEN, literal(minutesAgo(1)), other)]);
+    await applyPage([quad(PEER_ID, literal('peer-a')), quad(PEER_ID, literal('peer-b'), other)]);
+    expect(await values(PEER_ID)).toEqual([literal('peer-a')]);
+    expect(await datesHeld(), 'that subject ended with the page before').toEqual([]);
+    expect(await datesHeld(other)).toEqual([date('peer-b', 1)]);
+  });
+
+  it('leaves what a subject past the bound holds to a page that names no peer', async () => {
+    const { apply, applyPage, values } = fixture();
+    await apply(profile('peer-z', new Date(NOW - AGENT_PROFILE_STALE_THRESHOLD_MS - 60_000).toISOString()));
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    expect(await values(RELAY)).toEqual([literal('/dns4/relay-of-peer-z/tcp/9090')]);
+    expect(await values(PUBLIC_KEY)).toEqual([literal('key-of-peer-z')]);
+  });
+
+  it('does not join a gossiped profile, which is whole, to the page of a sync', async () => {
+    const { apply, applyPage, values } = fixture();
     await apply(profile('peer-old', minutesAgo(30)));
-    await apply([quad(LAST_SEEN, literal(minutesAgo(1)))]);
-    await apply([quad(PEER_ID, literal('peer-new'))], NOW + 10 * 60_000);
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    await apply([quad(PEER_ID, literal('peer-new'))]);
     expect(await values(PEER_ID)).toEqual([literal('peer-old')]);
+  });
+
+  it('forgets the rows of a page that the next one did not follow in time', async () => {
+    const { apply, applyPage, values } = fixture();
+    await apply(profile('peer-old', minutesAgo(30)));
+    await applyPage([quad(LAST_SEEN, literal(minutesAgo(1)))]);
+    await applyPage([quad(PEER_ID, literal('peer-new'))], NOW + 10 * 60_000);
+    expect(await values(PEER_ID)).toEqual([literal('peer-old')]);
+  });
+
+  it('ends the same whichever row a page of a sync ends on', async () => {
+    const stale = AGENT_PROFILE_STALE_THRESHOLD_MS / 60_000 + 60;
+    // A subject as a node that dates its peers serves it, in predicate order.
+    const served = (minutesOfA: number): Quad[] => [
+      quad(DATED_PEER, literal(`peer-a ${minutesAgo(minutesOfA)}`)),
+      quad(DATED_PEER, literal(`peer-b ${minutesAgo(1)}`)),
+      quad(LAST_SEEN, literal(minutesAgo(1))),
+      quad(MULTIADDR, literal('/ip4/203.0.113.1/tcp/1/p2p/peer-a')),
+      quad(MULTIADDR, literal('/ip4/203.0.113.2/tcp/2/p2p/peer-b')),
+      quad(MULTIADDR, literal('/ip4/203.0.113.3/tcp/3')),
+      quad(NODE_ROLE, literal('core')),
+      quad(PEER_ID, literal('peer-a')),
+      quad(PEER_ID, literal('peer-b')),
+      quad(PUBLIC_KEY, literal('key-served')),
+      quad(RELAY, literal('/dns4/relay-served/tcp/1')),
+    ];
+    const holdings: Record<string, Quad[][]> = {
+      nothing: [],
+      'another current peer': [profile('peer-c', minutesAgo(30))],
+      'an older profile of the newest peer': [profile('peer-b', minutesAgo(30))],
+      'an older profile of the other peer': [profile('peer-a', minutesAgo(30))],
+      'older profiles of both': [profile('peer-a', minutesAgo(40)), profile('peer-b', minutesAgo(30))],
+      'a peer past the bound': [profile('peer-z', minutesAgo(stale))],
+    };
+    const endState = async (held: Quad[][], pages: Quad[][]): Promise<string[]> => {
+      const { apply, applyPage, store } = fixture();
+      for (const update of held) await apply(update);
+      for (const page of pages) await applyPage(page);
+      const fields = [PEER_ID, LAST_SEEN, DATED_PEER, MULTIADDR, NODE_ROLE, PUBLIC_KEY, RELAY].map((field) => `<${field}>`).join(', ');
+      const result = await store.query(`SELECT ?p ?o WHERE { GRAPH <${AGENT_REGISTRY_GRAPH}> { <${SUBJECT}> ?p ?o } FILTER(?p IN (${fields})) } ORDER BY ?p ?o`);
+      return result.type === 'bindings' ? result.bindings.map((row) => `${row['p']} ${row['o']}`) : [];
+    };
+    for (const [holding, held] of Object.entries(holdings)) {
+      for (const minutesOfA of [20, stale]) {
+        const rows = served(minutesOfA);
+        const whole = await endState(held, [rows]);
+        for (let cut = 1; cut < rows.length; cut += 1) {
+          expect(await endState(held, [rows.slice(0, cut), rows.slice(cut)]), `holding ${holding}, peer-a ${minutesOfA} minutes old, cut after row ${cut}`)
+            .toEqual(whole);
+        }
+      }
+    }
   });
 
   it('fills what the subject lacks from part of a profile', async () => {
@@ -643,9 +733,9 @@ describe('the writes of one profile update', () => {
   });
 
   it('read a peer and its date from one literal, and nothing from one without a usable date', () => {
-    expect(parseAgentPeerLastSeen(literal(`peer-1 ${minutesAgo(1)}`), NOW)).toEqual({ peerId: 'peer-1', seen: { iso: minutesAgo(1), ms: NOW - 60_000 } });
-    expect(parseAgentPeerLastSeen(literal('peer-1'), NOW)).toBeUndefined();
-    expect(parseAgentPeerLastSeen(literal('peer-1 soon'), NOW)).toBeUndefined();
+    expect(parseAgentDatedPeer(literal(`peer-1 ${minutesAgo(1)}`), NOW)).toEqual({ peerId: 'peer-1', seen: { iso: minutesAgo(1), ms: NOW - 60_000 } });
+    expect(parseAgentDatedPeer(literal('peer-1'), NOW)).toBeUndefined();
+    expect(parseAgentDatedPeer(literal('peer-1 soon'), NOW)).toBeUndefined();
   });
 });
 
@@ -664,7 +754,7 @@ describe('the part of a gossiped profile a node stores', () => {
   });
 
   it('leaves out any date for a peer: that is this node\'s to set', () => {
-    const date = quad(PEER_LAST_SEEN, literal(`peer-other ${minutesAgo(1)}`));
+    const date = quad(DATED_PEER, literal(`peer-other ${minutesAgo(1)}`));
     expect(gossipedAgentProfileQuads([...update, date], { fromPeerId: FROM, knownAgent: false })).toEqual(update);
     expect(gossipedAgentProfileQuads([date], { fromPeerId: FROM, knownAgent: true })).toEqual([]);
   });

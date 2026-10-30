@@ -685,7 +685,7 @@ describe('GossipPublishHandler', () => {
 
       await handler.handlePublishMessage(profileMessage('peer-new', later), agentsCg, undefined, 'peer-new');
       expect(await values(store, 'peerId')).toEqual(['"peer-new"', '"peer-old"']);
-      expect(await values(store, 'peerLastSeen')).toEqual([`"peer-new ${later}"`, `"peer-old ${seen}"`]);
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-new ${later}"`, `"peer-old ${seen}"`]);
       expect(await values(store, 'lastSeen')).toEqual([`"${later}"`]);
       expect(await values(store, 'relayAddress')).toEqual(['"/dns4/relay-of-peer-new/tcp/9090"', '"/dns4/relay-of-peer-old/tcp/9090"']);
       expect(await store.countQuads(`${agentsGraph}/_meta`)).toBe(0);
@@ -701,7 +701,7 @@ describe('GossipPublishHandler', () => {
         await handler.handlePublishMessage(profileMessage('peer-1', seen), agentsCg, undefined, 'peer-1');
       }
       expect(await values(store, 'lastSeen')).toEqual([`"${latest}"`]);
-      expect(await values(store, 'peerLastSeen')).toEqual([`"peer-1 ${latest}"`]);
+      expect(await values(store, 'datedPeer')).toEqual([`"peer-1 ${latest}"`]);
       expect(await store.countQuads(agentsGraph)).toBe(first);
     });
 

@@ -8,7 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
-import { AGENT_PEER_LAST_SEEN_PREDICATE, parseAgentPeerLastSeen } from './agent-profile-updates.js';
+import { AGENT_DATED_PEER_PREDICATE, parseAgentDatedPeer } from './agent-profile-updates.js';
 import { AGENT_PROFILE_STALE_THRESHOLD_MS } from './dkg-agent-constants.js';
 import {
   MAX_AGENT_PEER_PAGE_SIZE,
@@ -340,8 +340,8 @@ export class DiscoveryClient implements AgentPeerDiscovery {
     `, queryOptions);
     options.signal?.throwIfAborted();
     const dateRows = await this.engine.query(`
-      SELECT DISTINCT (STR(?storedDate) AS ?peerLastSeen) WHERE {
-        ?agent <${AGENT_PEER_LAST_SEEN_PREDICATE}> ?storedDate .
+      SELECT DISTINCT (STR(?storedDate) AS ?datedPeer) WHERE {
+        ?agent <${AGENT_DATED_PEER_PREDICATE}> ?storedDate .
         ${addressMatch}
       }
       LIMIT ${MAX_AGENT_PEER_PAGE_SIZE}
@@ -349,7 +349,7 @@ export class DiscoveryClient implements AgentPeerDiscovery {
     options.signal?.throwIfAborted();
     const dated = new Map<string, number>();
     for (const row of dateRows.bindings) {
-      const parsed = parseAgentPeerLastSeen(row['peerLastSeen'] ?? '', nowMs);
+      const parsed = parseAgentDatedPeer(row['datedPeer'] ?? '', nowMs);
       if (parsed !== undefined) dated.set(parsed.peerId, Math.max(parsed.seen.ms, dated.get(parsed.peerId) ?? UNDATED));
     }
     const newestByPeer = new Map<string, number>();
