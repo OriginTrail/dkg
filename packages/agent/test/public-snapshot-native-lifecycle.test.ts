@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFile, readdir, statfs, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PublicCheckpointMethods } from '../src/dkg-agent-public-checkpoint.js';
-import { createFreshPublicCheckpointEdge } from '../src/snapshot-fresh-edge.js';
-import { resumePublicCheckpointEdge } from '../src/snapshot-resume-edge.js';
+import { createFreshPublicCheckpointEdge, openFreshPublicCheckpointEdge } from '../src/snapshot-fresh-edge.js';
+import { resumePublicCheckpointEdge, openResumablePublicCheckpointEdge } from '../src/snapshot-resume-edge.js';
+import { VmReconcileShutdownTimeoutError } from '../src/vm-reconcile-service.js';
 import { startSnapshotNativeProcess } from '../src/snapshot-native-process.js';
 import { handoffFixture } from './helpers/native-checkpoint-fixture.js';
 
@@ -37,6 +38,31 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('fresh checkpoint Edge and restart ownership', () => {
+  it.each(['fresh', 'resume'] as const)('preserves the %s store on retirement timeout and retries shutdown', async mode => {
+    const f = await handoffFixture();
+    if (mode === 'resume') {
+      const initial = await createFreshPublicCheckpointEdge(f.options);
+      await initial.agent.stop();
+    }
+    lifecycle.close.mockClear(); lifecycle.processStop.mockClear();
+    const session = await (mode === 'fresh' ? openFreshPublicCheckpointEdge : openResumablePublicCheckpointEdge)(f.options);
+    try {
+      await session.agent.start();
+      const timeout = new VmReconcileShutdownTimeoutError(30_000);
+      lifecycle.stop.mockRejectedValueOnce(timeout);
+      const first = session.close();
+      expect(session.close()).toBe(first);
+      await expect(first).rejects.toBe(timeout);
+      expect(lifecycle.close).not.toHaveBeenCalled();
+      expect(lifecycle.processStop).not.toHaveBeenCalled();
+      await expect(session.close()).resolves.toBeUndefined();
+      expect(lifecycle.stop).toHaveBeenCalledTimes(mode === 'resume' ? 3 : 2);
+      expect(lifecycle.close).toHaveBeenCalledTimes(1);
+      expect(lifecycle.processStop).toHaveBeenCalledTimes(1);
+      await session.close();
+      expect(lifecycle.stop).toHaveBeenCalledTimes(mode === 'resume' ? 3 : 2);
+    } finally { session.dispose(); }
+  });
   it.each(['fresh', 'resume'] as const)('closes the native store when the %s agent never starts', async mode => {
     const f = await handoffFixture();
     if (mode === 'resume') {

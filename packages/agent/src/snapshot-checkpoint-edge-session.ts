@@ -36,11 +36,12 @@ export async function openCheckpointEdgeSession(config: CheckpointEdgeConfig, ja
     const ownedAgent = agent;
     const ownedStore = store;
     let closing: Promise<void> | undefined;
-    // DKGAgent.stop() is a no-op until start() succeeds. The session owns the
-    // already-running store even when network startup fails before that point.
+    // A successful stop may be a no-op when start() never succeeded; the session
+    // still owns that store. A rejected stop must retain dependencies for retry.
     const close = () => closing ??= (async () => {
-      try { await ownedAgent.stop(); } finally { await ownedStore.close(); }
-    })();
+      await ownedAgent.stop();
+      await ownedStore.close();
+    })().catch(error => { closing = undefined; throw error; });
     return { agent: ownedAgent, dataDir: config.dataDir, close, async complete() {
       signal.throwIfAborted();
       await ownedAgent.waitForPublicCheckpointStartup(sync.contextGraphId, signal);
