@@ -37,6 +37,32 @@
         "internalType": "address",
         "name": "assignee",
         "type": "address"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAt",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "periodStart",
+        "type": "uint40"
+      }
+    ],
+    "name": "AssignmentEndsBeforePeriod",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
       }
     ],
     "name": "AssignmentExpired",

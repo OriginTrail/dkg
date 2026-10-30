@@ -102,7 +102,9 @@ contract ServiceSubscriptions is
     //           buyer key and epoch; an assignment holds one cost limit per
     //           period and an expiry; top-ups and upgrades within the period
     //           (`topUpFromConviction`); a non-zero session key; no funding
-    //           or top-up while `QueryInferenceStorage` is paused.
+    //           or top-up while `QueryInferenceStorage` is paused; no funding
+    //           or top-up of a period whose assignment expires before the
+    //           period starts.
     string private constant _VERSION = "1.1.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -213,6 +215,11 @@ contract ServiceSubscriptions is
     error NotAssigned(uint256 accountId, address assignee);
     error AssignmentRevoked(uint256 accountId, address assignee);
     error AssignmentExpired(uint256 accountId, address assignee);
+    /// @notice The assignment expires at or before the start of the period,
+    ///         which it could then never serve: no request issued in the
+    ///         period would be from a live assignment, and a period is
+    ///         non-refundable.
+    error AssignmentEndsBeforePeriod(uint256 accountId, address assignee, uint40 expiresAt, uint40 periodStart);
     error CapsUnchanged(uint256 accountId, address assignee);
     error CapExceeded(string cap, uint256 limit, uint256 attempted);
     error LabelCapacityExceeded(uint256 accountId, uint96 unplaced);
@@ -401,9 +408,12 @@ contract ServiceSubscriptions is
      *         reverts the whole transaction, so nothing is ever funded
      *         partially.
      * @dev The cheap, read-only refusals come first: the pause, the session
-     *      key, the period's epoch, the opt-in and the assignment, the
-     *      buckets, one period per buyer key and epoch, and the assignment's
-     *      limit as stored at this block. Then `coverServiceCost` draws the
+     *      key, the period's epoch, the opt-in and the assignment, which must
+     *      not expire before the period starts (a period funded ahead for the
+     *      next epoch would otherwise serve nothing), the buckets, one period
+     *      per buyer key and epoch, and the assignment's limit as stored at
+     *      this block. A revoked assignment funds nothing, so only the expiry
+     *      can be checked ahead. Then `coverServiceCost` draws the
      *      cost (window allowance first, then the top-up buffer) and the cost
      *      is labelled: the window part against the account's base schedule,
      *      nearest epochs first from the current epoch, the top-up part as the
@@ -433,9 +443,11 @@ contract ServiceSubscriptions is
             chronos.getCurrentEpoch()
         );
 
-        // 2. The opt-in and a live assignment.
+        // 2. The opt-in and a live assignment, still live when the period
+        //    starts.
         if (css.serviceSpendingEnabledAt(r.accountId) == 0) revert ServiceSpendingDisabled(r.accountId);
         ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, r.accountId, assignee);
+        _requireLiveAtStart(r.accountId, assignee, a, periodStart);
 
         // 3. The buckets and their value.
         (ConvictionServiceStorage.Bucket[] memory buckets, uint96 value) = ServicePeriodLib.fundingBuckets(
@@ -518,9 +530,9 @@ contract ServiceSubscriptions is
      *      account by `msg.sender` and has not ended. An addition to a stored
      *      bucket repeats its class and price cap, which never change within a
      *      period; a new bucket is appended under the funding rules. The
-     *      opt-in, a live assignment and its limit are checked as for a
-     *      funding, the limit against the period's cost with this top-up
-     *      added. The draw and the labels follow as for a funding, at the
+     *      opt-in, a live assignment that does not expire before the period
+     *      starts, and its limit are checked as for a funding, the limit
+     *      against the period's cost with this top-up added. The draw and the labels follow as for a funding, at the
      *      account's own tier; a top-up funds no new period, so the usage is
      *      unchanged.
      * @return cost The cost drawn from the allowance.
@@ -538,9 +550,11 @@ contract ServiceSubscriptions is
         ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
         ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
 
-        // 2. The opt-in and a live assignment.
+        // 2. The opt-in and a live assignment, still live when the period
+        //    starts.
         if (css.serviceSpendingEnabledAt(s.accountId) == 0) revert ServiceSpendingDisabled(s.accountId);
         ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee);
+        _requireLiveAtStart(s.accountId, assignee, a, s.periodStart);
 
         // 3. The additions, merged into the stored buckets.
         ServicePeriodLib.TopUp memory t = ServicePeriodLib.mergeTopUp(
@@ -908,6 +922,21 @@ contract ServiceSubscriptions is
         if (a.assignedAt == 0) revert NotAssigned(accountId, assignee);
         if (a.revokedAt != 0) revert AssignmentRevoked(accountId, assignee);
         if (block.timestamp >= uint256(a.expiresAt)) revert AssignmentExpired(accountId, assignee);
+    }
+
+    /// @dev The assignment does not expire at or before the period's start. A
+    ///      live assignment has not expired at the block time, so this only
+    ///      ever refuses a period that starts later: one funded ahead for the
+    ///      next epoch, or topped up before it starts.
+    function _requireLiveAtStart(
+        uint256 accountId,
+        address assignee,
+        ConvictionServiceStorage.Assignment memory a,
+        uint40 periodStart
+    ) internal pure {
+        if (a.expiresAt <= periodStart) {
+            revert AssignmentEndsBeforePeriod(accountId, assignee, a.expiresAt, periodStart);
+        }
     }
 
     /**
