@@ -13,6 +13,10 @@ void invalidPlan;
 // @ts-expect-error A round must state its decision, including when execution never started.
 const missingDecision: DurableRecoveryRoundOutcome = { result: createIncompleteDurableSyncResult() };
 void missingDecision;
+import type { DurableRecoverySlice } from '../src/sync/durable-recovery-round.js';
+// @ts-expect-error A slice must state whether local admission let it start.
+const missingAdmission: DurableRecoverySlice = { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } };
+void missingAdmission;
 
 import type { DetailedDurableSyncResult } from '../src/sync/requester/durable-sync-result.js';
 declare const physical: DetailedDurableSyncResult;

@@ -1,4 +1,4 @@
-import { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope } from '../src/graph-metadata-envelope.js';
+import { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope, GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES } from '../src/graph-metadata-envelope.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
@@ -133,5 +133,18 @@ describe('shared structural parsing policies', () => {
       expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input).state).toBe('confirmed');
       expect(parseStoredGraphKnowledgeAssetMetadataEnvelope(rows, input)).toEqual({ state: 'invalid' });
       expect(() => parseWireGraphKnowledgeAssetStructure(rows, input.ual)).toThrow();
+    });
+
+  it.each(['canonical', 'missing-context', 'wrong-context', 'wrong-meta-graph', 'rootEntity', 'partOf'])(
+    'decides a stored envelope on its exported projection alone (%s)', fault => {
+      let rows = fixture(2, 'documents');
+      if (fault === 'missing-context') rows = rows.filter(row => row.predicate !== `${DKG}contextGraph`);
+      else if (fault === 'wrong-context') rows.find(row => row.predicate === `${DKG}contextGraph`)!.object = 'did:dkg:context-graph:other';
+      else if (fault === 'wrong-meta-graph') rows = rows.map(row => ({ ...row, graph: 'urn:wrong' }));
+      else if (fault !== 'canonical') rows.push({ ...rows[0]!, predicate: `${DKG}${fault}`, object: 'urn:legacy' });
+      const projected = rows.filter(row => GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES.includes(row.predicate));
+      const parsed = parseStoredGraphKnowledgeAssetMetadataEnvelope(rows, input);
+      expect(parsed.state).toBe(fault === 'canonical' ? 'confirmed' : 'invalid');
+      expect(parseStoredGraphKnowledgeAssetMetadataEnvelope(projected, input)).toEqual(parsed);
     });
 });

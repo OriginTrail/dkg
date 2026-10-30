@@ -244,6 +244,15 @@ export function parseGraphKnowledgeAssetMetadataEnvelope(
     validateGraphStructure(decodeStoredGraphFields(rows).fields, input.ual, input.contextGraphId));
 }
 
+/**
+ * Canonical projection for bounded readers of a stored envelope (the parser
+ * below): the confirmed projection, the context binding it requires, and the
+ * legacy root bindings it refuses.
+ */
+export const GRAPH_KNOWLEDGE_ASSET_STORED_ENVELOPE_PREDICATES: readonly string[] = Object.freeze([
+  ...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `${DKG}${name}`),
+]);
+
 /** Held-content readers must bind stored rows to the requested context and named graph. */
 export function parseStoredGraphKnowledgeAssetMetadataEnvelope(
   rows: readonly RoutedMetadataRow[], input: { contextGraphId: string; ual: string },
