@@ -20,6 +20,9 @@ afterEach(() => vi.useRealTimers());
 const STATED = new Error('insufficient funds for gas * price + value: address 0x00000000000000000000000000000000000000a1 have 1907 want 2047');
 /** A refusal that states no cost (the adapter's own no-funded-wallet selection, for one). */
 const UNSTATED = new Error('insufficient funds for gas * price + value');
+/** The adapter's no-funded-wallet failure: it carries what it saw for each wallet when it decided. */
+const noFunded = (balances: readonly { address: unknown; nativeWei: unknown; tracWei: unknown }[]) =>
+  Object.assign(new Error('No operational wallet has enough funds to publish'), { code: 'NO_FUNDED_PUBLISHER_WALLET', balances });
 
 function gate(options: { reader?: AsyncLiftWalletBalanceReader | null } = {}) {
   let now = 1_000_000;
@@ -185,6 +188,92 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     g.funding.mayClaim('w1');
     await g.settle();
     expect(g.funding.mayClaim('w1')).toBe(true);
+  });
+
+  it('takes a top-up that lands before the first reading for a top-up when the refusal carries the balances it saw', async () => {
+    const g = gate();
+    // Refused on 0 TRAC. 500 arrive before the first reading answers, and nothing changes after that.
+    g.fund('w1', 10n, 500n);
+    g.funding.recordRefusal('w1', noFunded([{ address: 'w1', nativeWei: 10n, tracWei: 0n }]));
+    await g.settle();
+    g.advance(BASE);
+    expect(g.funding.mayClaim('w1')).toBe(false);
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(true);
+  });
+
+  it('keeps a wallet out while it holds what the refusal carried, and takes its account coverage from the first reading', async () => {
+    const g = gate();
+    g.fund('w1', 10n, 0n, 0n);
+    g.funding.recordRefusal('w1', noFunded([{ address: 'w1', nativeWei: 10n, tracWei: 0n }]));
+    await g.settle();
+    g.advance(BASE);
+    expect(g.funding.mayClaim('w1')).toBe(false);
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(false);
+
+    g.fund('w1', 10n, 0n, 5n);
+    g.advance(2 * BASE);
+    expect(g.funding.mayClaim('w1')).toBe(false);
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(true);
+  });
+
+  it('reads its own entry of a carried snapshot, in any letter case and through a wrapper', async () => {
+    const g = gate();
+    g.fund('0xabc', 7n, 500n);
+    g.funding.recordRefusal('0xabc', new Error('publish failed', {
+      cause: noFunded([
+        { address: '0xOTHER', nativeWei: 7n, tracWei: 500n },
+        { address: '0xABC', nativeWei: 7n, tracWei: 0n },
+      ]),
+    }));
+    await g.settle();
+    g.advance(BASE);
+    expect(g.funding.mayClaim('0xabc')).toBe(false);
+    await g.settle();
+    expect(g.funding.mayClaim('0xabc')).toBe(true);
+  });
+
+  it('falls back on the first reading for what a refusal does not carry', async () => {
+    const unreadable = gate();
+    unreadable.fund('w1', 7n, 0n);
+    // The adapter could not read the native balance: the first reading is the balance at the refusal.
+    unreadable.funding.recordRefusal('w1', noFunded([{ address: 'w1', nativeWei: null, tracWei: 0n }]));
+    await unreadable.settle();
+    unreadable.advance(BASE);
+    expect(unreadable.funding.mayClaim('w1')).toBe(false);
+    await unreadable.settle();
+    expect(unreadable.funding.mayClaim('w1')).toBe(false);
+
+    const notListed = gate();
+    notListed.fund('w1', 7n, 0n);
+    notListed.funding.recordRefusal('w1', noFunded([{ address: 'w2', nativeWei: 0n, tracWei: 0n }]));
+    await notListed.settle();
+    notListed.advance(BASE);
+    expect(notListed.funding.mayClaim('w1')).toBe(false);
+    await notListed.settle();
+    expect(notListed.funding.mayClaim('w1')).toBe(false);
+  });
+
+  it('never throws on a refusal whose carried balances cannot be read', async () => {
+    const throwing = Object.defineProperty(new Error('insufficient funds'), 'balances', {
+      get() { throw new Error('no access'); },
+    });
+    for (const refusal of [
+      throwing,
+      Object.assign(new Error('insufficient funds'), { balances: 'not a list' }),
+      noFunded([null as never, { address: 7, nativeWei: 1n, tracWei: 1n }, { address: 'w1', nativeWei: 'one', tracWei: -1n }]),
+    ]) {
+      const g = gate();
+      g.fund('w1', 7n, 0n);
+      expect(() => g.funding.recordRefusal('w1', refusal)).not.toThrow();
+      await g.settle();
+      g.advance(BASE);
+      expect(g.funding.mayClaim('w1')).toBe(false);
+      await g.settle();
+      expect(g.funding.mayClaim('w1')).toBe(false);
+    }
   });
 
   it('keeps only the refused wallet out: a stated cost never applies to another wallet', async () => {

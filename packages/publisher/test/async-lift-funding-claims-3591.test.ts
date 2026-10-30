@@ -199,6 +199,27 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
     expect(f.signed).toEqual(['agent', 'agent']);
   });
 
+  it('lets a wallet back when its top-up landed before the first reading, because the refusal says what it saw', async () => {
+    const f = fixture();
+    f.fund('raced', 10_000n);
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+
+    // Refused on nothing, with 10,000 on the wallet by the time the first reading answers. No reading
+    // changes after that, so only what the refusal carried can show the top-up.
+    f.beforeSigning.push(Object.assign(new Error('No operational wallet has enough funds to publish'), {
+      code: NO_FUNDED_PUBLISHER_WALLET_CODE,
+      balances: [{ address: 'raced', nativeWei: 0n, tracWei: null }],
+    }));
+    const { jobId } = await refuseOn(f, publisher, 'raced', 'raced');
+    await settle();
+
+    f.clock.now += WALLET_FUNDING_COOLDOWN_BASE_MS;
+    expect(await publisher.processNext('raced')).toBeNull();
+    await settle();
+    expect(await publisher.processNext('raced')).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'raced' } });
+  });
+
   it('after a top-up, the refused job proceeds while an ambiguous one keeps its wallet and its hold, across a restart', async () => {
     const f = fixture();
     f.fund('short', 1_907n);

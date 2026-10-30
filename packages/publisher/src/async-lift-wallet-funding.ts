@@ -10,7 +10,10 @@
  * decides: the wallet is back once it covers the cost the node stated for the refused transaction
  * (`have X want Y`, `balance X, tx cost Y`), or, when the node stated none, once its native
  * balance, its TRAC balance or the coverage of its Publishing Conviction Account grew since the
- * refusal (a top-up, a registered or funded account, a new epoch's allowance).
+ * refusal (a top-up, a registered or funded account, a new epoch's allowance). The balances at the
+ * refusal are the ones the refusal carries, when it does: a reading after it can already hold a
+ * top-up. A reading right after the refusal fills in the rest, so a top-up that lands before that
+ * reading goes unseen for what the refusal did not carry, until the attempt after an hour.
  *
  * A stated cost is the cost of one transaction, so it never applies to other wallets: costs vary
  * with the operation, the payload and the gas price, and another wallet may pay for a cheaper job.
@@ -58,7 +61,7 @@ interface WalletExclusion {
   until: number;
   /** The cost the node stated for the refused transaction. */
   readonly requiredNativeWei?: bigint;
-  /** Read right after the refusal: a later reading above it shows a top-up. */
+  /** Carried by the refusal or read right after it: a later reading above it shows a top-up. */
   balancesAtRefusal?: AsyncLiftWalletBalances;
 }
 
@@ -111,15 +114,23 @@ export class AsyncLiftWalletFunding {
     const prior = wallet.excluded;
     const cooldownMs = prior ? Math.min(WALLET_FUNDING_COOLDOWN_MAX_MS, prior.cooldownMs * 2) : WALLET_FUNDING_COOLDOWN_BASE_MS;
     const requiredNativeWei = refusedTransactionCostWei(error) ?? prior?.requiredNativeWei;
+    const carried = balancesCarriedByRefusal(error, walletId);
     const exclusion: WalletExclusion = {
       since: prior?.since ?? now,
       cooldownMs,
       until: now + cooldownMs,
       ...(requiredNativeWei !== undefined ? { requiredNativeWei } : {}),
+      ...(carried ? { balancesAtRefusal: carried } : {}),
     };
     wallet.excluded = exclusion;
     wallet.reading = undefined;
-    this.read(walletId, (balances) => { exclusion.balancesAtRefusal ??= balances; });
+    this.read(walletId, (balances) => {
+      exclusion.balancesAtRefusal = {
+        native: carried?.native ?? balances.native,
+        trac: carried?.trac ?? balances.trac,
+        pca: balances.pca ?? null,
+      };
+    });
   }
 
   /** Start one reading for this wallet unless one is pending; the claim waits for it (`false`). */
@@ -210,17 +221,42 @@ function weiOrNull(value: unknown): bigint | null {
  * its cause chain, since adapters wrap the provider's error. `undefined` when no cost is stated.
  */
 export function refusedTransactionCostWei(error: unknown): bigint | undefined {
-  let current = error;
-  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+  for (const current of errorChain(error)) {
     const text = errorText(current);
     const match = /\bhave (\d+) want (\d+)/i.exec(text) ?? /\bbalance (\d+), tx cost (\d+)/i.exec(text);
     if (match) {
       const cost = BigInt(match[2]!);
       if (cost > 0n) return cost;
     }
-    current = errorCause(current);
   }
   return undefined;
+}
+
+/**
+ * This wallet's entry in the balances a refusal carries: the adapter's no-funded-wallet failure
+ * lists what it saw for each wallet when it decided. `undefined` when the refusal carries none.
+ */
+function balancesCarriedByRefusal(error: unknown, walletId: string): AsyncLiftWalletBalances | undefined {
+  const wanted = walletId.toLowerCase();
+  for (const current of errorChain(error)) {
+    try {
+      const entries = (current as { balances?: unknown }).balances;
+      if (!Array.isArray(entries)) continue;
+      const own = entries.find((entry) => typeof entry?.address === 'string' && entry.address.toLowerCase() === wanted);
+      if (own) return { native: weiOrNull(own.nativeWei), trac: weiOrNull(own.tracWei) };
+    } catch {
+      // A refusal is recorded on the failure path: an unreadable one carries nothing.
+    }
+  }
+  return undefined;
+}
+
+function* errorChain(error: unknown): Generator<unknown> {
+  let current = error;
+  for (let depth = 0; depth < 5 && current !== undefined && current !== null; depth += 1) {
+    yield current;
+    current = errorCause(current);
+  }
 }
 
 function errorText(error: unknown): string {
