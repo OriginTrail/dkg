@@ -117,15 +117,16 @@ for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [fals
   });
 }
 
-test('promotion dry-run verifies default GitHub acquisition and complete candidate evidence before planning tags', async t => {
+for (const withNightly of [true, false]) test(`promotion dry-run verifies default GitHub acquisition and complete candidate evidence before planning tags${withNightly ? '' : ', with no nightly run'}`, async t => {
   const f = await cliFixture(t, 'promote');
   const { commit, version, sourceInputsDigest } = f.expected;
   const evidence = evidenceFixture(t, { expected: { commit, version, sourceInputsDigest }, manifest: f.manifest, tree: 'e'.repeat(40) });
+  if (!withNightly) delete evidence.decision.nightly;
   evidence.write('decision.json', evidence.decision);
   const gh = installGithubFixture(f.bin, {
     latestAttempt: 1, candidateCommit: commit,
-    artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': JSON.stringify(evidence.nightly) },
-    pages: [[{ id: 122, run_attempt: 1 }], [{ id: 123, run_attempt: 1 }]],
+    artifacts: withNightly ? { 'OriginTrail/dkg/123/nightly-profile-summary': JSON.stringify(evidence.nightly) } : {},
+    pages: withNightly ? [[{ id: 122, run_attempt: 1 }], [{ id: 123, run_attempt: 1 }]] : [[{ id: 122, run_attempt: 1 }]],
     runs: { '122/1': evidence.options.readRun(122, 1), '123/1': evidence.options.readRun(123, 1) },
   });
   const result = spawnSync(process.execPath, [path.join(f.source, 'scripts/release-packages.mjs'), 'promote',
@@ -142,5 +143,6 @@ test('promotion dry-run verifies default GitHub acquisition and complete candida
   assert.equal(calls.length, f.manifest.packages.length * 2);
   assert.ok(calls.every(args => args[0] === 'view' || (args[0] === 'dist-tag' && args[1] === 'ls')));
   const githubCalls = fs.readFileSync(gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.ok(githubCalls.some(args => args[0] === 'run' && args[1] === 'download'));
+  assert.equal(githubCalls.some(args => args[0] === 'run' && args[1] === 'download'), withNightly);
+  assert.equal(result.stdout.includes('Release evidence names no nightly run'), !withNightly, result.stdout);
 });

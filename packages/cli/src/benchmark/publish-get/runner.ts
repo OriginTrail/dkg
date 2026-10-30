@@ -72,6 +72,11 @@ async function runIteration(args: {
       syncPayload.quads,
       { clearAfter: false },
     );
+    if (result.catalogObligationPending) {
+      // Failure contexts are retained in both operation rows and summaries.
+      syncContext.confirmedPublicationRecovery = result;
+      throw new Error(result.error);
+    }
     if (!result.kaId) {
       throw new Error('Synchronous publish response did not include kaId');
     }

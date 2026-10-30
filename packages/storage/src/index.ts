@@ -122,11 +122,13 @@ export {
 } from './store-priority-scheduler.js';
 export type { StoreSchedulerPriority } from './store-scheduler-timeout-diagnostics.js';
 export {
+  STORE_CONTROL_DEFAULT_BACKENDS,
   STORE_CONTROL_MAX_SLOTS,
-  STORE_CONTROL_PATH_ON_BY_DEFAULT,
   STORE_CONTROL_QUEUES,
+  STORE_CONTROL_RESERVED_SLOTS_CONFIG_KEY,
   STORE_CONTROL_RESERVED_SLOTS_ENV,
   STORE_CONTROL_SCHEDULER_ID_PREFIX,
+  configureStoreControlPath,
   controlStoreOptions,
   defaultStoreControlSlots,
   describeStoreControlPath,
@@ -136,6 +138,8 @@ export {
   selectStoreScheduler,
   type StoreControlConfig,
   type StoreControlPath,
+  type StoreControlPathSettings,
+  type StoreControlResolveOptions,
   type StoreControlSlots,
 } from './store-control-path.js';
 /**
@@ -241,7 +245,11 @@ export {
   type BoundedGraphPayloadRefusalReason,
   type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
-export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+  type StoreResponseTooLargeErrorLike,
+} from './http-response-limit.js';
 export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,
@@ -304,6 +312,11 @@ export {
 } from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
+export {
+  OXIGRAPH_STORE_READ_ONLY_CODE,
+  OxigraphStoreReadOnlyError,
+  type OxigraphStoreOptions,
+} from './adapters/oxigraph-read-only.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export {
   BlazegraphStore,
@@ -374,3 +387,6 @@ export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSE
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
 
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
+
+export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+export { quadToBlazegraphNQuad } from './adapters/blazegraph-nquads.js';

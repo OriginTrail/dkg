@@ -217,8 +217,8 @@ describe('async_admission_usage line', () => {
     ]);
   });
 
-  it('documents every preflight figure the line prints, in the operator doc', () => {
-    const doc = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/use-dkg/backpressure-observability.md'), 'utf8');
+  it('documents every preflight figure the line prints, in the usage-line field reference', () => {
+    const doc = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../docs/async-admission-usage-line.md'), 'utf8');
     const printed = formatAsyncAdmissionUsageLine(busy).split(' ')
       .filter((token) => token.startsWith('preflight_'))
       .map((token) => token.slice(0, token.indexOf('=')));
@@ -404,8 +404,8 @@ describe('async_admission_usage line', () => {
       expect(windowP95).toBe(41);
     });
 
-    it('lists in the operator doc exactly the bounds it counts in, since a reader sums counts by bound', () => {
-      const doc = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/use-dkg/backpressure-observability.md'), 'utf8');
+    it('lists in the usage-line field reference exactly the bounds it counts in, since a reader sums counts by bound', () => {
+      const doc = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../docs/async-admission-usage-line.md'), 'utf8');
       const listed = /```text\n(1 2 3[\s\S]*?)```/.exec(doc)?.[1]?.trim().split(/\s+/).map(Number);
       expect(listed).toEqual([...STORE_QUEUE_WAIT_BUCKET_UPPER_MS]);
     });

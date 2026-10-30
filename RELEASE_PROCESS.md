@@ -221,8 +221,9 @@ update and maintainer branch-protection decision.
 ### 6a.1) Verify the complete release decision
 
 Package installation alone does not qualify promotion. Before changing a dist-tag,
-assemble a portable `decision.json` next to the downloaded nightly receipt and
-all harness `suite-state.json` attempts, then run:
+assemble a portable `decision.json` next to all harness `suite-state.json`
+attempts (and the downloaded nightly receipt, when the decision names a nightly
+run), then run:
 
 ```bash
 pnpm release:verify-evidence --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
@@ -255,6 +256,12 @@ are required; placeholders below are explanatory and cannot certify):
 }
 ```
 
+The `nightly` entry is optional. Leave it out (or set it to `null`) to release on
+the CI run and the harness profile alone: `release:verify-evidence` then reports
+`"nightly": null`, and promotion logs that the evidence names no nightly run. A
+decision that names a nightly run must name it completely, and that run is
+checked in full as described below.
+
 Use the integrated harness profile from OriginTrail/dkg-blackbox-harness #47.
 It requires eight registration/policy cells, eight functional scenarios and the
 overlap leg, all with verified builds and successful process/run identities.
@@ -264,9 +271,9 @@ operator/executor, like locally produced package certificates. It is not a
 cryptographic attestation that an arbitrary operator ran the tests.
 
 The helper queries GitHub using `gh` credentials: CI must be complete/successful
-on the final commit, and the nightly receipt must byte-match the authenticated
-`nightly-profile-summary` artifact of the latest run attempt. It recomputes the
-nightly completeness check (all seven browser shards, mandatory lifecycle cases
+on the final commit. When the decision names a nightly run, its receipt must
+byte-match the authenticated `nightly-profile-summary` artifact of the latest run
+attempt, and the helper recomputes the nightly completeness check (all seven browser shards, mandatory lifecycle cases
 and 1,000 property trials). Deleted/expired artifacts are a qualification gap;
 archive them before the workflow retention expires, and re-run if the online
 source required for verification is no longer available.
@@ -274,7 +281,8 @@ source required for verification is no longer available.
 Every failed CI attempt found for that commit must appear in `priorCiFailures`
 with `runId`, `attempt`, `classification` (`product`, `test`, `environment` or
 `unknown`), an owning GitHub `issue`, and a later successful
-`supersededBy: {runId, attempt}` matching the selected CI/nightly run. Keep every
+`supersededBy: {runId, attempt}` matching the selected CI run (or the nightly run,
+when the decision names one). Keep every
 local harness attempt in order. A failed attempt requires
 `resolution: {classification, issue, supersededBy}`; classification is `product`,
 `test`, `environment` or `unknown`, and supersededBy identifies a later complete

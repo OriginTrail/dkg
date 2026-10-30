@@ -1,3 +1,4 @@
+import type { ConfirmedCatalogTransactionEvidenceV1 } from '../../src/confirmed-catalog-obligation-error.js';
 /**
  * GH#3081 — one author whose confirmed private placements run through the real post-confirmation
  * observer, the real finalized-private supervisor and the real catalog repair, plus the real async
@@ -36,7 +37,6 @@ import {
   createOperationContext,
   knowledgeAssetLayerGraphUri,
   type AssertionSeal,
-  type CanonicalGraphScopedAuthorSealV1,
   type Logger,
   type OperationContext,
   type TimestampMsV1,
@@ -71,7 +71,7 @@ import type {
   Rfc64FinalizedPrivatePlacementRepairStoreV1,
   Rfc64FinalizedPrivatePlacementRepairV1,
 } from '../../src/rfc64/finalized-private-placement-repair-store-v1.js';
-import type { AppliedCatalogHeadSnapshotV1 } from '../../src/rfc64/inventory-v1/index.js';
+import type { ConfirmedCatalogObligationCompletionV1, Rfc64CatalogAuthoringLaneDecisionV1 } from '../../src/dkg-agent-rfc64-swm-catalog-projection.js';
 import {
   AUTHOR,
   AUTHOR_WALLET,
@@ -200,6 +200,7 @@ export interface PlacementAgentV1 {
   readonly clock: { now: number };
   /** Durable finalized-private placement markers, as the supervisor lists them. */
   readonly markers: () => readonly Rfc64FinalizedPrivatePlacementRepairV1[];
+  readonly completions: () => readonly ConfirmedCatalogObligationCompletionV1[];
   /** Rows in the author's applied catalog head, or null before the first placement. */
   readonly catalogRows: () => string | null;
   /** The finalized-private queue as `/api/status` reports it; undefined without supervisor state. */
@@ -252,6 +253,7 @@ interface StartPlacementAgentOptionsV1 {
 /** What the agent's completion tail takes; both completion paths build it from the queued request. */
 interface ConfirmedVmPublishTailInputV1 {
   readonly status: PublishResult['status'];
+  readonly confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1;
   readonly contextGraphId: string;
   readonly subGraphName?: string;
   readonly assertionCoordinate: string;
@@ -270,10 +272,10 @@ interface ConfirmedVmPublishTailInputV1 {
 interface PlacementAgentInternalsV1 {
   readonly log: Pick<Logger, 'info' | 'warn'>;
   readonly rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1 };
-  resolveRfc64CatalogAuthoringLaneV1(
+  resolveRfc64CatalogAuthoringLaneDecisionV1(
     contextGraphId: string,
     subGraphName: string | null | undefined,
-  ): Readonly<{ acceptsFinalizedVmRepair: boolean }> | null;
+  ): Rfc64CatalogAuthoringLaneDecisionV1<Readonly<{ acceptsFinalizedVmRepair: boolean }>>;
   repairObservedRfc64FinalizedPrivateCatalogPlacementV1(
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
@@ -281,16 +283,15 @@ interface PlacementAgentInternalsV1 {
   publishRfc64FinalizedPrivateCatalogPlacementV1(
     repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
     placement: CatalogPlacementAttemptV1,
-  ): Promise<AppliedCatalogHeadSnapshotV1 | null>;
-  requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1(
+  ): Promise<ConfirmedCatalogObligationCompletionV1>;
+  requestRfc64FinalizedPrivateCatalogPlacementRepairV1(
     params: Readonly<{
       repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
-      seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
       ctx: OperationContext;
     }>,
     observer: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1;
-  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<boolean>;
+  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<void>;
 }
 
 function internalsOf(agent: DKGAgent): PlacementAgentInternalsV1 {
@@ -308,6 +309,7 @@ export async function startPlacementAgentV1(
   const clock = { now: 0 };
   const counted = { repairs: 0, coverageChecks: 0, successors: 0, signatures: 0, announcements: 0 };
   const events: string[] = [];
+  const completions: ConfirmedCatalogObligationCompletionV1[] = [];
   const requests: Rfc64FinalizedPrivatePlacementRepairRequestV1[] = [];
   const lane: PlacementAgentV1['lane'] = { acceptsFinalizedVmRepair: true };
   const failPlacements: Error[] = [];
@@ -328,15 +330,15 @@ export async function startPlacementAgentV1(
       const internals = internalsOf(starting);
       vi.spyOn(starting, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
       vi.spyOn(starting, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-      const realLane = internals.resolveRfc64CatalogAuthoringLaneV1.bind(starting);
-      vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneV1').mockImplementation(
+      const realLane = internals.resolveRfc64CatalogAuthoringLaneDecisionV1.bind(starting);
+      vi.spyOn(internals, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation(
         (contextGraphId, subGraphName) => {
-          if (lane.unavailable !== undefined) throw lane.unavailable;
-          if (lane.inactive === true) return null;
-          const resolved = realLane(contextGraphId, subGraphName);
-          return resolved === null
-            ? null
-            : { ...resolved, acceptsFinalizedVmRepair: lane.acceptsFinalizedVmRepair };
+          if (lane.unavailable !== undefined) return { status: 'unavailable', error: lane.unavailable };
+          if (lane.inactive === true) return { status: 'inactive' };
+          const decision = realLane(contextGraphId, subGraphName);
+          return decision.status === 'active'
+            ? { ...decision, lane: { ...decision.lane, acceptsFinalizedVmRepair: lane.acceptsFinalizedVmRepair } }
+            : decision;
         },
       );
       installCatalogPlacementTimingV1(starting, new CatalogPlacementTimingV1({
@@ -355,7 +357,9 @@ export async function startPlacementAgentV1(
         async (marker, placement) => {
           const failure = failPlacements.shift();
           if (failure !== undefined) throw failure;
-          return placePrivate(marker, placement);
+          const completion = await placePrivate(marker, placement);
+          completions.push(completion);
+          return completion;
         },
       );
       const coverage = starting.rfc64CatalogCoversConfirmedSwmRowV1.bind(starting);
@@ -389,8 +393,8 @@ export async function startPlacementAgentV1(
         return handOff(input);
       });
       // The observer's own request: the one whose waiter is told about the attempt that releases it.
-      const requestRepair = internals.requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1.bind(starting);
-      vi.spyOn(internals, 'requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1').mockImplementation(
+      const requestRepair = internals.requestRfc64FinalizedPrivateCatalogPlacementRepairV1.bind(starting);
+      vi.spyOn(internals, 'requestRfc64FinalizedPrivateCatalogPlacementRepairV1').mockImplementation(
         (params, observer) => {
           const request = requestRepair(params, observer);
           requests.push(request);
@@ -412,9 +416,9 @@ export async function startPlacementAgentV1(
   const markerStore = persistence.finalizedPrivatePlacementRepairs;
   const watchedMarkerStore: Rfc64FinalizedPrivatePlacementRepairStoreV1 = Object.freeze({
     list: () => markerStore.list(),
-    readFailure: repair => markerStore.readFailure(repair),
-    writeFailure: (repair, state) => markerStore.writeFailure(repair, state),
-    writeFailures: entries => markerStore.writeFailures(entries),
+    readFailure: (repair: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['readFailure']>[0]) => markerStore.readFailure(repair),
+    writeFailure: (...[repair, state]: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailure']>) => markerStore.writeFailure(repair, state),
+    writeFailures: (entries: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailures']>[0]) => markerStore.writeFailures(entries),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       if (hooks.failMarkerWrite !== undefined) throw hooks.failMarkerWrite;
       await markerStore.put(repair);
@@ -435,6 +439,7 @@ export async function startPlacementAgentV1(
     lane,
     failPlacements,
     markers: () => markerStore.list(),
+    completions: () => [...completions],
     catalogRows: () => agent.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigestV1(),
       authorAddress: AUTHOR,
@@ -526,9 +531,12 @@ export async function observeConfirmedV1(
  * The tail a synchronous publish of `asset` awaits before it answers: `publishFromFinalizedAssertion`
  * ends in this call and returns its result right after it.
  */
-export async function confirmedSynchronousPublishTailV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+export async function confirmedSynchronousPublishTailV1(
+  agent: DKGAgent, asset: PlacementAssetV1, confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1,
+): Promise<void> {
   await internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
     status: 'confirmed',
+    confirmedTransaction,
     contextGraphId: CONTEXT_GRAPH_ID,
     assertionCoordinate: asset.assertionCoordinate,
     shareOperationId: asset.shareOperationId,
@@ -560,7 +568,9 @@ export async function reopenForEditingV1(agent: DKGAgent, asset: PlacementAssetV
  * active subject is empty. Written by hand, because the fixture's assets cannot be sealed and
  * shared again for real; call it after {@link reopenForEditingV1}.
  */
-export async function reopenNextVersionForEditingV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+export async function reopenNextVersionForEditingV1(
+  agent: DKGAgent, asset: PlacementAssetV1, nextVersion = BigInt(asset.seal.assertionVersion!) + 1n,
+): Promise<void> {
   const { seal } = asset;
   const assertionUri = contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, asset.assertionCoordinate);
   const archive = { graph: contextGraphPrivateUri(CONTEXT_GRAPH_ID), subject: `${assertionUri}/_recovery_seal` };
@@ -579,7 +589,7 @@ export async function reopenNextVersionForEditingV1(agent: DKGAgent, asset: Plac
     finalizedAtIso: seal.finalizedAtIso,
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal!,
-    assertionVersion: String(BigInt(seal.assertionVersion!) + 1n),
+    assertionVersion: String(nextVersion),
     publicTripleCount: seal.publicTripleCount!,
     privateTripleCount: seal.privateTripleCount!,
   }));
@@ -594,6 +604,7 @@ export function queuedPublishRequestV1(asset: PlacementAssetV1): KnowledgeAssetV
     name: asset.assertionCoordinate,
     agentAddress: AUTHOR,
     shareOperationId: asset.shareOperationId,
+    catalogObligationRequired: true,
     roots: [],
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal,

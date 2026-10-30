@@ -1,3 +1,5 @@
+import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { serializableQueryOptions } from './serializable-query-options.js';
 import { registerStoreRecoveryGeneration, storeWorkerExecutionFailure } from '../store-recovery-generation.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
 import { assertSubjectAndInsertPayload } from '../atomic-subject-insert.js';
@@ -7,10 +9,7 @@ import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import {
-  GraphWriteGenTracker,
-  type GraphWriteLifecycle,
-} from '../graph-write-gen.js';
+import { GraphWriteGenTracker, type GraphWriteLifecycle } from '../graph-write-gen.js';
 import {
   RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
   Rfc64ExactBindingsReadResultErrorV1,
@@ -29,6 +28,7 @@ import {
   type WorkerResponseV1,
 } from '../worker-error-protocol.js';
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
+import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -87,7 +87,7 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-export interface OxigraphWorkerStoreOptions {
+export interface OxigraphWorkerStoreOptions extends OxigraphStoreOptions {
   /**
    * Per-operation timeout in milliseconds for READ-ONLY ops. Default 120_000.
    * 0 disables it. Mutations are intentionally never bounded (see
@@ -186,6 +186,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -239,8 +240,9 @@ export class OxigraphWorkerStore implements TripleStore {
   private readonly operationTimeoutMs: number;
   /** Resolved path of the compiled worker impl; reused verbatim on respawn. */
   private readonly workerPath: string;
-  /** Persistence file handed to every spawned worker (undefined = in-memory). */
+  /** Persistence file handed to every spawned worker (undefined = in-memory), and whether it is opened read-only. */
   private readonly persistPath: string | undefined;
+  private readonly readOnly: boolean;
   /**
    * Single source of truth for the store's high-level POLICY state (see
    * WorkerLifecycle). It subsumes the former `respawnGaveUp` boolean (⇔ state
@@ -325,6 +327,7 @@ export class OxigraphWorkerStore implements TripleStore {
     }
     this.workerPath = workerPath;
     this.persistPath = persistPath;
+    this.readOnly = opts?.readOnly === true;
     this.spawnWorker();
     registerStoreRecoveryGeneration(this, () => ({ generation: this.recoveryGeneration,
       ready: this.lifecycle === 'live' && !this.workerExited && !this.replacementRevisionLifecycle }));
@@ -390,7 +393,7 @@ export class OxigraphWorkerStore implements TripleStore {
    */
   private spawnWorker(): void {
     const worker = new Worker(this.workerPath, {
-      workerData: { persistPath: this.persistPath },
+      workerData: { persistPath: this.persistPath, readOnly: this.readOnly },
     });
     this.worker = worker;
     this.workerExited = false;
@@ -829,8 +832,7 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    const withheld = options?.withheldGraphRoots?.length ? [{ withheldGraphRoots: [...options.withheldGraphRoots] }] : [];
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, ...withheld);
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, serializableQueryOptions(options));
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
@@ -843,7 +845,7 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
-    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs', serializableQueryOptions(options));
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
     return runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
@@ -911,10 +913,7 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 }
 
-registerTripleStoreAdapter('oxigraph-worker', async (opts) => {
-  const filePath = opts?.path as string | undefined;
-  return new OxigraphWorkerStore(filePath, {
-    operationTimeoutMs:
-      typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
-  });
-});
+registerTripleStoreAdapter('oxigraph-worker', async (opts) => new OxigraphWorkerStore(opts?.path as string | undefined, {
+  operationTimeoutMs: typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
+  readOnly: opts?.readOnly === true,
+}));

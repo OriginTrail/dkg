@@ -56,7 +56,7 @@ import {
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
-import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
+import { recordActivityAndNotify, recordPcaDiscount } from "./knowledge-asset-notifications.js";
 import {
   handleKaImportArtifactResolve,
   handleKaImportArtifactRead,
@@ -92,11 +92,14 @@ import { authenticatedAgentAddress } from '../../auth.js';
 import {
   respondAssertionError,
   respondAssertionCodeError,
+  respondCatalogPublicationAdmissionError,
   respondPromoteRecoveryError,
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
 } from './knowledge-assets-error-mapping.js';
+
+import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from './confirmed-catalog-obligation.js';
 
 const PREFIX = "/api/knowledge-assets";
 
@@ -120,52 +123,6 @@ function decodeAndValidateName(seg: string, res: RequestContext["res"]): string 
     return null;
   }
   return seg;
-}
-
-// Best-effort assertion-activity row + notification SSE for a lifecycle event.
-// Never throws — activity tracking must not break a write/publish path.
-function recordActivityAndNotify(
-  ctx: RequestContext,
-  input: {
-    contextGraphId: string;
-    kind: "created" | "promoted" | "published";
-    actorAgentAddress: string;
-    subGraphName?: string;
-    tripleCount?: number;
-  },
-): void {
-  try {
-    recordAssertionActivity(ctx.dashDb, {
-      contextGraphId: input.contextGraphId,
-      kind: input.kind,
-      actorAgentAddress: input.actorAgentAddress,
-      subGraphName: input.subGraphName,
-      ...(typeof input.tripleCount === "number" ? { tripleCount: input.tripleCount } : {}),
-    });
-    ctx.emitNotification?.({ contextGraphId: input.contextGraphId, type: "assertion_activity" });
-  } catch {
-    /* activity/notification is advisory — never block the lifecycle op */
-  }
-}
-function recordPcaDiscount(ctx: RequestContext, contextGraphId: string, onChain: any): void {
-  const cc = onChain?.convictionCostCovered;
-  const publisher = onChain?.publisherAddress;
-  if (!cc || !publisher) return;
-  try {
-    recordConvictionCostCovered(ctx.dashDb, {
-      contextGraphId,
-      publisherAddress: publisher,
-      accountId: cc.accountId,
-      epoch: cc.epoch,
-      baseCost: cc.baseCost,
-      discountedCost: cc.discountedCost,
-      drawnFromEpoch: cc.drawnFromEpoch,
-      drawnFromTopUp: cc.drawnFromTopUp,
-    });
-    ctx.emitNotification?.({ contextGraphId, type: "pca_cost_covered" });
-  } catch {
-    /* confirmed-discount notification is advisory */
-  }
 }
 
 const FINALIZE_ONLY_CREATE_FIELDS = [
@@ -1012,6 +969,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           }
           recordPcaDiscount(ctx, resolvedContextGraphId, pub?.onChainResult);
         } catch (e: any) {
+          const obligation = confirmedCatalogObligationResponse(e);
+          if (obligation !== null) return jsonResponse(res, 207, { created: true, ...result,
+            ...obligation, errors: [...errors, { phase: 'vm-publish', code: obligation.code, error: obligation.error }] });
           if (respondWithPartialStoreFailure(e, 'vm-publish')) return;
           errors.push({ phase: "vm-publish", error: sanitizeRpcMessage(e?.message ?? String(e)) });
         }
@@ -1168,6 +1128,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     writePreflightContextGraphOpts,
   );
   if (!contextGraphId) return;
+
+  if (layer === 'vm' && verb === 'observe-confirmed') {
+    return handleConfirmedCatalogObligationRecovery(ctx, contextGraphId, name, parsed);
+  }
 
   try {
     // ── WM verbs (the only writable layer) ──
@@ -1444,6 +1408,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ...(!enqueueStarted ? { jobCreated: false } : {}),
           }, undefined, { 'Retry-After': '1' });
         }
+        if (!enqueueStarted && respondCatalogPublicationAdmissionError(res, err)) return;
         if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
@@ -1475,7 +1440,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
-            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true}, as the agent that ENQUEUED that job (an agent's override covers only its own admission lane) or with the node-operator token. Without the flag the clear refuses this job.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
             // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
@@ -1598,6 +1563,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(reason ? { error: reason } : {}),
         });
       } catch (e: any) {
+        const obligation = confirmedCatalogObligationResponse(e);
+        if (obligation !== null) return jsonResponse(res, 207, obligation);
         const msg = e?.message ?? String(e);
         // A vm/publish on a KA that hasn't been finalized, or hasn't been
         // shared to SWM, is a caller precondition error (4xx), not a
@@ -1616,6 +1583,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // GH#1786 — must precede the precondition branch below, which would otherwise
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
+        if (respondCatalogPublicationAdmissionError(res, e)) return;
         if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;

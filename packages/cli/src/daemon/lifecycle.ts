@@ -1,3 +1,7 @@
+import { getBoundListenMultiaddrs } from './bound-listen-addresses.js';
+import { startCheckpointStartupStatus } from './public-checkpoint-status.js';
+import { checkDaemonCheckpointEligibility, bindCheckpointNetwork } from './public-checkpoint-config.js';
+import { openDaemonCheckpointAgent } from './public-checkpoint-agent.js';
 import { buildCoreChainCacheConfig } from './core-chain-cache-config.js';
 // daemon/lifecycle.ts
 //
@@ -84,7 +88,7 @@ import {
   type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
-import { isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
+import { configureStoreControlPath, isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
@@ -477,68 +481,6 @@ import {
   type PromoteWorkerConfig,
   type PromoteWorkerSupervisor,
 } from './worker/async-promote-worker.js';
-
-type MultiaddrLike = { toString: () => string };
-
-function stringifyMultiaddrList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((ma) => {
-      try {
-        return (ma as MultiaddrLike).toString();
-      } catch {
-        return '';
-      }
-    })
-    .filter((addr) => addr.length > 0);
-}
-
-function listenerMultiaddrs(listener: unknown): string[] {
-  const candidate = listener as {
-    getAddrs?: () => unknown;
-    getMultiaddrs?: () => unknown;
-    addrs?: unknown;
-    multiaddrs?: unknown;
-  };
-  if (typeof candidate?.getAddrs === 'function') {
-    const addrs = stringifyMultiaddrList(candidate.getAddrs());
-    if (addrs.length > 0) return addrs;
-  }
-  if (typeof candidate?.getMultiaddrs === 'function') {
-    const addrs = stringifyMultiaddrList(candidate.getMultiaddrs());
-    if (addrs.length > 0) return addrs;
-  }
-  const addrs = stringifyMultiaddrList(candidate?.addrs);
-  if (addrs.length > 0) return addrs;
-  return stringifyMultiaddrList(candidate?.multiaddrs);
-}
-
-function getBoundListenMultiaddrs(libp2p: unknown): string[] | null {
-  const node = libp2p as {
-    components?: { transportManager?: unknown };
-    services?: { transportManager?: unknown };
-    transportManager?: unknown;
-    getMultiaddrs?: () => unknown;
-  };
-  const managers = [
-    node.components?.transportManager,
-    node.services?.transportManager,
-    node.transportManager,
-  ];
-  for (const manager of managers) {
-    const getListeners = (manager as { getListeners?: () => unknown } | undefined)?.getListeners;
-    if (typeof getListeners !== 'function') continue;
-    const listeners = getListeners.call(manager);
-    if (!Array.isArray(listeners)) continue;
-    const addrs = listeners.flatMap((listener) => listenerMultiaddrs(listener));
-    if (addrs.length > 0) return Array.from(new Set(addrs));
-  }
-
-  // If this libp2p shape does not expose transport listeners, prefer an
-  // indeterminate result over treating advertised self-addresses as bound
-  // listener evidence.
-  return null;
-}
 
 /**
  * Resolve the WM agentAddress the daemon hands to `ChatMemoryManager`.
@@ -1212,6 +1154,17 @@ async function runDaemonInnerWithStartupOwnership(
   // trust before allocating startup resources; it always wins. Without it an
   // edge seeds from the network file's relays, planned below from the
   // finished agent config.
+  const checkpointMode = await checkDaemonCheckpointEligibility(dkgDir(), config);
+  let checkpointSession: Awaited<ReturnType<typeof openDaemonCheckpointAgent>> | undefined;
+  const checkpointAbort = new AbortController();
+  let checkpointApiPort: number | undefined;
+  let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
+  let closeCheckpointStatus: (() => Promise<void>) | undefined;
+  const cancelCheckpoint = () => checkpointAbort.abort(new Error('Checkpoint startup interrupted'));
+  const detachCheckpointSignals = () => {
+    process.removeListener('SIGTERM', cancelCheckpoint);
+    process.removeListener('SIGINT', cancelCheckpoint);
+  };
   assertAuthorityIndexConfigPlacement(config);
   const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
@@ -1276,6 +1229,13 @@ async function runDaemonInnerWithStartupOwnership(
   // Stops what would start catch-up jobs later; replaced once they exist.
   let stopCatchupTriggers = (): void => {};
   registerStartupFailureCleanup(async () => {
+    checkpointAbort.abort(new Error('Daemon startup failed'));
+    detachCheckpointSignals();
+    clearTimeout(checkpointTimer);
+    checkpointSession?.dispose();
+    // A failed native shutdown must not prevent the daemon writer from retiring.
+    const stopped = await Promise.allSettled([closeCheckpointStatus?.(), checkpointSession?.agent.stop()]);
+    for (const result of stopped) if (result.status === 'rejected') log(`[bootstrap] Cleanup failed: ${String(result.reason)}`);
     try {
       stopCatchupTriggers();
     } catch {
@@ -1311,6 +1271,9 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
+  // The store control path's default and config setting depend on the configured backend (OT-RFC-73 P14). This
+  // runs before any store call can build the path; a later configuration would be refused with a warning.
+  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, { warn: log });
   logStoreControlPathGeometry({ info: log, warn: log });
   const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
 
@@ -1517,7 +1480,7 @@ async function runDaemonInnerWithStartupOwnership(
   // silently would look like data loss to the operator.
   const backendSwitch = detectBackendSwitch({
     dataDir: dkgDir(),
-    currentBackend: config.store?.backend ?? 'oxigraph-worker',
+    currentBackend: checkpointMode ? 'public-checkpoint' : config.store?.backend ?? 'oxigraph-worker',
     acceptStoreReset: process.env.DKG_ACCEPT_STORE_RESET === '1',
     log,
   });
@@ -1610,7 +1573,12 @@ async function runDaemonInnerWithStartupOwnership(
       }
     : config;
 
-  await runPreAgentStoreBootSteps({
+  // Native journals are deployment-bound by the completion record and fresh authority.
+  // A chain reset must fail that binding, never wipe or reuse a checkpoint implicitly.
+  if (checkpointMode) await bindCheckpointNetwork(dkgDir(), checkpointMode, {
+    networkId, networkConfig: selectedNetworkConfig, chainResetMarker: network?.chainResetMarker,
+  });
+  if (!checkpointMode) await runPreAgentStoreBootSteps({
     managedOxigraph, runtimeStore, runtimeStoreConfig,
     dataDir: dkgDir(), chainResetMarker: network?.chainResetMarker,
     randomSamplingWalPath: config.randomSampling?.walPath,
@@ -2143,7 +2111,17 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const promoteQueuePolicy = resolveDaemonPromoteQueueConfig(config.promoteQueue);
-  const agent = await DKGAgent.create(agentConfig);
+  if (checkpointMode) {
+    checkpointTimer = setTimeout(() => checkpointAbort.abort(new Error('Checkpoint job deadline exceeded')), 3_600_000);
+    process.once('SIGTERM', cancelCheckpoint);
+    process.once('SIGINT', cancelCheckpoint);
+    const startupStatus = await startCheckpointStartupStatus(config.apiPort, config.apiHost);
+    closeCheckpointStatus = startupStatus.close; checkpointApiPort = startupStatus.port;
+    await writeApiPort(checkpointApiPort);
+    log(`[bootstrap] ${checkpointMode === 'fresh' ? 'Preparing verified public data' : 'Opening retained native journal'}`);
+    checkpointSession = await openDaemonCheckpointAgent(agentConfig, config.publicSnapshotBootstrap!, checkpointMode, checkpointAbort.signal);
+  }
+  const agent = checkpointSession?.agent ?? await DKGAgent.create(agentConfig);
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
@@ -2292,6 +2270,13 @@ async function runDaemonInnerWithStartupOwnership(
   registerJoinMetadataEmptyVmSettlement({ agent, dashboard: dashDb, log });
 
   await agent.start();
+  if (checkpointSession) {
+    const coverage = await checkpointSession.complete();
+    checkpointSession.dispose();
+    clearTimeout(checkpointTimer);
+    detachCheckpointSignals();
+    log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
+  }
 
   // Classify configured graphs before migrating legacy readiness. Explicit
   // local-bootstrap targets receive current provenance here; configured
@@ -2479,6 +2464,7 @@ async function runDaemonInnerWithStartupOwnership(
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
+          storageAckCopyCleanup: agent.storageAckCopyCleanup,
           publicSnapshotStore,
           log,
           startupSignal: publisherStartupController.signal,
@@ -3646,7 +3632,7 @@ async function runDaemonInnerWithStartupOwnership(
     headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
-  const apiPort = config.apiPort || 0;
+  const apiPort = checkpointApiPort ?? (config.apiPort || 0);
   const apiHost = config.apiHost || "127.0.0.1";
 
   // Route plugins: loaded before listen() so requests can't race the array; fail-soft per ADR 0001.
@@ -3664,6 +3650,7 @@ async function runDaemonInnerWithStartupOwnership(
     `route-plugins-loaded loaded=${routePlugins.length} configured=${configuredCount}`,
   );
 
+  await closeCheckpointStatus?.();
   await new Promise<void>((resolve) => {
     server.listen(apiPort, apiHost, () => resolve());
   });

@@ -1,3 +1,4 @@
+import { DURABLE_HOLDINGS_SCAN_BUDGET_MS } from '../src/sync/requester/durable-prefix-proof.js';
 import { readHeldGraphScopedAssets } from './_helpers/held-asset-membership.js';
 import * as contentVerifier from '../src/exact-graph-content-verifier.js';
 import { createAdmittedGraphHarness } from './_helpers/durable-recovery-admitted-graph.js';
@@ -364,4 +365,40 @@ it.each(['clean', 'during-verification'])('reuses one held-content proof in a re
     expect(checkpoints.get(key)?.terminal === true).toBe(change === 'clean');
     if (change !== 'clean') expect(next.result.failedPhases).toBeGreaterThan(0);
   } finally { verify.mockRestore(); }
+});
+
+
+it('a slow holdings scan leaves time for a bounded DATA round to advance its checkpoint', async () => {
+  const fixtures = generation();
+  const core = createRequesterHarness(servingPeer(fixtures));
+  const checkpoints = new MemorySyncCheckpointStore();
+  await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
+  const key = getSyncCheckpointKey(PEER, CG, false, 'data');
+  const priorOffset = checkpoints.get(key)!.offset;
+  expect(priorOffset).toBeGreaterThan(0);
+  const priorWrites = core.writes.length;
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const original = contentVerifier.verifyExactGraphContent;
+  let paused = false;
+  const verify = vi.spyOn(contentVerifier, 'verifyExactGraphContent').mockImplementation(async (store, request) => {
+    if (!paused && request.source === 'agent.durableSync.heldAssetContent') {
+      paused = true; entered(); await blocked;
+    }
+    return original(store, request);
+  });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const round = core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now(),
+      recovery: { meta: { requesterScope: 'durable-recovery-meta:budget-test' }, holdings: { ownerFetchesMissingAssets: true } } });
+    await Promise.race([started, round.then(() => { throw new Error('round completed without starting holdings preflight'); })]);
+    await vi.advanceTimersByTimeAsync(DURABLE_HOLDINGS_SCAN_BUDGET_MS);
+    const outcome = await round;
+    expect(outcome.result.complete).toBe(false);
+    expect(core.writes.length).toBeGreaterThan(priorWrites);
+    expect(checkpoints.get(key)?.offset).toBeGreaterThan(priorOffset);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+  } finally { release(); verify.mockRestore(); vi.useRealTimers(); }
 });

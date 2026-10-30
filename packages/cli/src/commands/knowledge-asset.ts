@@ -8,12 +8,11 @@ import {
   type KnowledgeAssetPublishResponse,
   type KnowledgeAssetShareJobState,
   type KnowledgeAssetShareResponse,
-  type KnowledgeAssetWritableQuad,
   type PreSignedAuthorAttestationPayload,
 } from '../api-client.js';
 import {
   formatQuadObject,
-  loadQuadsFromInput,
+  loadRdfFromInput,
   loadStructuredFile,
   type ActionOpts,
 } from '../cli-helpers.js';
@@ -55,20 +54,8 @@ function hasQuadInput(opts: ActionOpts): boolean {
   );
 }
 
-async function loadWritableQuads(opts: ActionOpts): Promise<KnowledgeAssetWritableQuad[]> {
-  const quads = await loadQuadsFromInput(
-    {
-      ...opts,
-      file: inputFilePath(opts),
-    },
-    '',
-  );
-  return quads.map((quad) => ({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph ?? '',
-  }));
+async function loadWritableInput(opts: ActionOpts) {
+  return loadRdfFromInput({ ...opts, file: inputFilePath(opts) }, '');
 }
 
 function parsePreSignedAuthorAttestation(raw: unknown): PreSignedAuthorAttestationPayload | undefined {
@@ -188,7 +175,11 @@ function assertOneShotShareComplete(result: KnowledgeAssetCreateResponse, name: 
   }
 }
 
-function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): void {
+function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): asserts result is Extract<KnowledgeAssetPublishResponse, { catalogObligationPending?: false }> {
+  if (result.catalogObligationPending === true) {
+    console.log(JSON.stringify(result, null, 2));
+    throw new Error('Publication is confirmed but catalog observation is pending. Retain this response and retry its observation; do not republish');
+  }
   assertNoLifecycleErrors(result, `Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}`);
   if (result.error) {
     throw new Error(`Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}: ${result.error}`);
@@ -254,7 +245,14 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   ))))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = hasQuadInput(opts) ? await loadWritableQuads(opts) : undefined;
+      const input = hasQuadInput(opts) ? await loadWritableInput(opts) : undefined;
+      const quads = input?.quads;
+      if (opts.finalize !== false && input?.sourceKind === 'jsonld' && quads?.some((quad) => quad.graph !== '')) {
+        throw new Error(
+          'JSON-LD named graphs cannot be finalized yet. Use ka create --no-finalize to keep them in Working Memory, '
+          + 'or rewrite the document into the default graph before finalizing or sharing.',
+        );
+      }
       if (opts.share === true && (!quads || quads.length === 0 || opts.finalize === false)) {
         throw new Error('--share requires non-empty payload quads and finalize enabled');
       }
@@ -291,7 +289,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
   )))
     .action(async (name: string, opts: ActionOpts) => runAction(async () => {
       const contextGraphId = requiredContextGraphId(opts);
-      const quads = await loadWritableQuads(opts);
+      const { quads } = await loadWritableInput(opts);
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetWrite(contextGraphId, name, quads, {
         ...(subGraphName(opts) ? { subGraphName: subGraphName(opts) } : {}),
@@ -469,7 +467,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
 
   kaCmd
     .command('cancel-share-job <job-id>')
-    .description('Cancel a queued or retrying async SWM share job')
+    .description('Cancel a queued async SWM share job')
     .action(async (jobId: string) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetCancelShareJob(jobId);

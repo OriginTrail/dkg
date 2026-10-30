@@ -1,6 +1,7 @@
 /** Child-process fixture: use real orchestration with a controlled launcher. */
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { bootstrapDevnet } from '../bootstrap-devnet-runtime.js';
 
@@ -13,7 +14,8 @@ await bootstrapDevnet({
     writeFileSync(join(devnetDir, 'marker-at-launch.json'), readFileSync(join(devnetDir, '.playwright-managed')));
     if (mode === 'launch-failure') throw new Error('controlled launch failure');
     const nodeDir = join(devnetDir, 'node2');
-    const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)',
+      fileURLToPath(new URL('../../../cli/dist/cli.js', import.meta.url)), 'daemon-worker'], {
       detached: true, stdio: 'ignore', env: { ...process.env, DKG_HOME: nodeDir },
     });
     writeFileSync(join(nodeDir, 'daemon.pid'), String(worker.pid));

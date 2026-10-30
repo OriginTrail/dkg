@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { relativeFile, hash } from './package-certification/bundle.mjs';
-import { validateReleaseDecision, qualifyReleaseEvidence } from './release-evidence-qualification.mjs';
+import { validateReleaseDecision, qualifyReleaseEvidence, hasNightly, selectedRuns } from './release-evidence-qualification.mjs';
 export { HARNESS_PROFILE, HARNESS_STEPS, HARNESS_SCENARIOS } from './release-evidence-qualification.mjs';
 export function githubRun(runId, attempt) {
   assert.match(String(runId), /^[1-9]\d*$/);
@@ -47,14 +47,14 @@ function artifactBytes(root, descriptor) {
 function acquireEvidence({ decision, root, expected, readRun, readRunAttempts, readNightly, decisionSha256 }) {
   const history = readRunAttempts(expected.commit);
   const runs = new Map(history.map(run => [`${run.id}/${run.run_attempt}`, run]));
-  const descriptors = [decision.ci, decision.nightly,
-    ...decision.priorCiFailures];
+  const descriptors = [...selectedRuns(decision), ...decision.priorCiFailures];
   for (const descriptor of descriptors) {
     const key = `${descriptor.runId}/${descriptor.attempt}`;
     if (!runs.has(key)) runs.set(key, readRun(descriptor.runId, descriptor.attempt));
   }
-  const nightly = JSON.parse(artifactBytes(root, decision.nightly.receipt).toString('utf8'));
-  const authenticatedNightlyDigest = hash(readNightly(decision.nightly.runId, decision.nightly.attempt));
+  // Without a nightly run there is no receipt to read and no Actions artifact to download.
+  const nightly = hasNightly(decision) ? JSON.parse(artifactBytes(root, decision.nightly.receipt).toString('utf8')) : null;
+  const authenticatedNightlyDigest = hasNightly(decision) ? hash(readNightly(decision.nightly.runId, decision.nightly.attempt)) : null;
   const harnessReceipts = decision.harness.attempts.map(attempt => JSON.parse(artifactBytes(root, attempt.receipt).toString('utf8')));
   return { decision, expected, history, runs, nightly, authenticatedNightlyDigest, harnessReceipts, decisionSha256 };
 }
@@ -73,7 +73,7 @@ export function prepareReleaseEvidence({ evidenceFile, expected, manifest, rootD
   // safe after OTP entry: all GitHub acquisition completed before the prompt.
   return { result, recheckLocalIntegrity() {
     assert.equal(hash(fs.readFileSync(evidenceFile)), snapshot.decisionSha256, 'release decision changed after qualification');
-    artifactBytes(path.dirname(evidenceFile), decision.nightly.receipt);
+    if (hasNightly(decision)) artifactBytes(path.dirname(evidenceFile), decision.nightly.receipt);
     for (const attempt of decision.harness.attempts) artifactBytes(path.dirname(evidenceFile), attempt.receipt);
   } };
 }

@@ -78,6 +78,7 @@ import {
   checkRollbackStores,
   inventoryUserVersionForRelease,
   readSlotVersion,
+  readsOnlyLegacyPlacementRepairs,
 } from '../src/update/rollback-stores.js';
 
 class ProcessExit extends Error {
@@ -105,6 +106,26 @@ function changeInventory(sql: string): void {
   const database = new DatabaseSync(inventoryPath());
   database.exec(sql);
   database.close();
+}
+
+const confirmedUal = `did:dkg:otp:20430/0x${'11'.repeat(20)}/7`;
+
+/** A confirmed catalog placement as 10.0.27 keeps it: a version 2 repair row. */
+function addConfirmedPlacement(): void {
+  changeInventory(
+    'INSERT INTO rfc64_finalized_private_placement_repairs_v1 (repair_digest, repair_json) '
+      + `VALUES (zeroblob(32), '${JSON.stringify({ version: 2, kaUal: confirmedUal, inventoryScope: null })}')`,
+  );
+}
+
+function confirmedPlacementCount(): number {
+  const database = new DatabaseSync(inventoryPath(), { readOnly: true });
+  try {
+    return (database.prepare('SELECT repair_json FROM rfc64_finalized_private_placement_repairs_v1').all() as
+      Array<{ repair_json: string }>).filter((row) => JSON.parse(row.repair_json).version === 2).length;
+  } finally {
+    database.close();
+  }
 }
 
 async function writeTargetSlot(version: string): Promise<void> {
@@ -291,6 +312,32 @@ describe('dkg rollback readies the local stores for the target version', () => {
     ]);
   });
 
+  it('removes the confirmed catalog placements 10.0.26 cannot read before switching to it, and says which', async () => {
+    await writeInventoryV6();
+    addConfirmedPlacement();
+    await writeTargetSlot('10.0.26');
+
+    expect(await rollback()).toBeUndefined();
+
+    expect(wiring.calls).toEqual(['stop', 'swap:b', 'lease held']);
+    expect(inventoryUserVersion()).toBe(6);
+    expect(confirmedPlacementCount()).toBe(0);
+    expect(output.log).toContain(
+      `Removed 1 confirmed catalog placement(s) that 10.0.26 cannot read (${confirmedUal}): these publications `
+        + 'are confirmed on chain, and 10.0.26 does not finish their catalog step.',
+    );
+  });
+
+  it('keeps the confirmed catalog placements when readying the stores for a release that reads them', async () => {
+    await writeInventoryV6();
+    addConfirmedPlacement();
+
+    expect(await rollback('--stores-for', '10.0.27')).toBeUndefined();
+
+    expect(confirmedPlacementCount()).toBe(1);
+    expect(output.log.join('\n')).not.toContain('confirmed catalog placement');
+  });
+
   it('readies the stores of a stopped node for a named version without switching versions', async () => {
     await writeInventoryV6();
 
@@ -341,6 +388,12 @@ describe('rollback store helpers', () => {
       '10.0.9', '10.0.10', 'v10.0.14', '10.0.16', '10.0.17', '10.0.25', '10.0.26-rc.1',
       '10.0.26', ' 10.0.27+build.5 ', '10.1.0', '11.0.0', 'latest', '10.0',
     ].map(inventoryUserVersionForRelease)).toEqual([0, 2, 3, 4, 5, 5, 5, 6, 6, 6, 6, null, null]);
+  });
+
+  it('treats releases before 10.0.27, and versions it cannot read, as reading only version 1 placement repairs', () => {
+    expect(['10.0.25', '10.0.26', '10.0.27-rc.1', '10.0.27', '10.0.28', '10.1.0', 'latest'].map(readsOnlyLegacyPlacementRepairs))
+      .toEqual([true, true, true, false, false, false, true]);
+    expect(readsOnlyLegacyPlacementRepairs(null)).toBe(true);
   });
 
   it('plans for the oldest schema it can write when the target version is unknown', async () => {

@@ -75,9 +75,27 @@ export interface Rfc64InventoryRollbackPreparationV1 {
   readonly toVersion: number | null;
   /** Where a restore kept the database it replaced. */
   readonly keptPath: string | null;
+  /** KA UALs of the confirmed catalog placements removed for a target that cannot read them. */
+  readonly removedConfirmedCatalogPlacements: readonly string[];
   /** Ends the inventory lease. Call it once the node runs the target version, or on failure. */
   release(): void;
 }
+
+export interface Rfc64InventoryRollbackOptionsV1 {
+  /**
+   * The target reads only version 1 placement repairs (releases before
+   * `RFC64_CONFIRMED_CATALOG_PLACEMENT_FIRST_RELEASE_V1`), so the confirmed
+   * catalog placements (version 2) are removed, with their failure diagnostics.
+   */
+  readonly removeConfirmedCatalogPlacements?: boolean;
+}
+
+/**
+ * The first release that keeps confirmed catalog placements (version 2 rows of
+ * `rfc64_finalized_private_placement_repairs_v1`). An earlier release refuses
+ * to start on a database holding one, although the schema version is the same.
+ */
+export const RFC64_CONFIRMED_CATALOG_PLACEMENT_FIRST_RELEASE_V1 = '10.0.27';
 
 function downgradeChain(fromVersion: number, maxUserVersion: number): InventorySchemaMigrationV1[] | null {
   const chain: InventorySchemaMigrationV1[] = [];
@@ -203,54 +221,108 @@ function readUserVersionFoldingLog(sqlite: SqliteModuleV1, databasePath: string)
   }
 }
 
-/** Lower the schema in one transaction; false when the database is not the exact source schema. */
-function downgradeExactSchema(
+function confirmedPlacementUal(repairJson: string): string | null {
+  try {
+    const repair = JSON.parse(repairJson) as { version?: unknown; kaUal?: unknown };
+    return repair.version === 2 ? String(repair.kaUal) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * In the caller's transaction, delete the confirmed catalog placements (version
+ * 2 repairs); the KA UALs of the deleted rows. Every other row stays.
+ */
+function deleteConfirmedCatalogPlacements(database: DatabaseSyncV1): string[] {
+  const table = database.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'rfc64_finalized_private_placement_repairs_v1'",
+  ).get();
+  if (table === undefined) return [];
+  const rows = database.prepare(
+    'SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1',
+  ).all() as Array<{ repair_digest: Uint8Array; repair_json: string }>;
+  // Each failure diagnostic goes with its repair (ON DELETE CASCADE).
+  const deleteRepair = database.prepare(
+    'DELETE FROM rfc64_finalized_private_placement_repairs_v1 WHERE repair_digest = ?',
+  );
+  return rows.flatMap((row) => {
+    const ual = confirmedPlacementUal(row.repair_json);
+    if (ual === null) return [];
+    deleteRepair.run(row.repair_digest);
+    return [ual];
+  });
+}
+
+/**
+ * Give the target a database it reads, in one transaction: remove the confirmed
+ * catalog placements when it cannot read them, then lower the schema along
+ * `chain`. The KA UALs of the removed placements, or null, changing nothing,
+ * when the database is not exactly the schema `chain` starts from.
+ */
+function changeForTarget(
   sqlite: SqliteModuleV1,
   databasePath: string,
   chain: readonly InventorySchemaMigrationV1[],
-): boolean {
-  const first = chain[0]!;
-  const last = chain[chain.length - 1]!;
+  removePlacements: boolean,
+): string[] | null {
+  const first = chain[0];
+  const last = chain.at(-1);
+  if (last === undefined && !removePlacements) return [];
   const database: DatabaseSyncV1 = new sqlite.DatabaseSync(databasePath);
   let transactionOpen = false;
   let committed = false;
+  let removed: string[] = [];
   try {
     database.exec('PRAGMA busy_timeout = 0');
-    const identity = readIdentity(database);
-    if (
-      identity.applicationId !== INVENTORY_V1_APPLICATION_ID
-      || identity.userVersion !== first.fromVersion
-      || !schemaMatches(identity.userObjects, first.fromObjects)
-      || database.prepare('PRAGMA foreign_key_check').all().length !== 0
-    ) return false;
+    if (first !== undefined) {
+      const identity = readIdentity(database);
+      if (
+        identity.applicationId !== INVENTORY_V1_APPLICATION_ID
+        || identity.userVersion !== first.fromVersion
+        || !schemaMatches(identity.userObjects, first.fromObjects)
+        || database.prepare('PRAGMA foreign_key_check').all().length !== 0
+      ) return null;
+    }
     database.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
+    if (removePlacements) removed = deleteConfirmedCatalogPlacements(database);
     for (const step of chain) database.exec(step.sql);
-    const lowered = readIdentity(database);
-    if (lowered.userVersion !== last.toVersion || !schemaMatches(lowered.userObjects, last.toObjects)) {
-      throw new InventoryV1OpenError('database-io', 'the down-migration did not leave the exact older schema');
+    if (last !== undefined) {
+      const lowered = readIdentity(database);
+      if (lowered.userVersion !== last.toVersion || !schemaMatches(lowered.userObjects, last.toObjects)) {
+        throw new InventoryV1OpenError('database-io', 'the down-migration did not leave the exact older schema');
+      }
     }
     database.exec('COMMIT');
     transactionOpen = false;
     committed = true;
   } catch (cause) {
     if (transactionOpen) {
-      try { database.exec('ROLLBACK'); } catch { /* keep the down-migration failure */ }
+      try { database.exec('ROLLBACK'); } catch { /* keep the failure that stopped the change */ }
     }
     throw cause;
   } finally {
     if (!committed) database.close();
   }
-  finishChange(databasePath, `lowered to schema v${last.toVersion}`, () => {
+  const changes = [
+    ...(removed.length === 0 ? [] : [`cleared of ${removed.length} confirmed catalog placement(s)`]),
+    ...(last === undefined ? [] : [`lowered to schema v${last.toVersion}`]),
+  ];
+  if (changes.length === 0) {
+    database.close();
+    return removed;
+  }
+  finishChange(databasePath, changes.join(' and '), () => {
     // Closing the last connection checkpoints the log into the main file,
     // whose header is what the target release reads first.
     database.close();
-    fsyncRegularFile(databasePath, 'lowered inventory database');
+    fsyncRegularFile(databasePath, 'inventory database readied for rollback');
     fsyncDirectory(dirname(databasePath));
     const header = readValidSqliteHeaderIdentity(databasePath);
-    if (header?.userVersion !== last.toVersion) throw new Error('its file header was not updated');
+    if (last !== undefined && header?.userVersion !== last.toVersion) throw new Error('its file header was not updated');
   });
-  return true;
+  return removed;
 }
 
 /** After the database changed, a failure is reported as such, never as a refusal. */
@@ -344,18 +416,22 @@ function refusalFrom(
  * With the node stopped, give the target release an inventory database it
  * opens: lower an exact newer schema, keeping every row the target reads, or
  * else restore the pre-migration copy. Refuses, changing nothing, when neither
- * applies. The inventory lease stays held until `release()`, so a node started
+ * applies. For a target before 10.0.27 it also removes the confirmed catalog
+ * placements that target cannot read, in the same transaction as lowering the
+ * schema. The inventory lease stays held until `release()`, so a node started
  * before the version switch cannot migrate the database forward again.
  */
 export async function prepareRfc64InventoryForRollbackV1(
   dataDir: string,
   maxUserVersion: number,
+  options: Rfc64InventoryRollbackOptionsV1 = {},
 ): Promise<Rfc64InventoryRollbackPreparationV1> {
   const resolvedDataDir = resolve(dataDir);
   const databasePath = resolveRfc64InventoryDatabasePathV1(resolvedDataDir);
   const unleased = (outcome: Rfc64InventoryRollbackOutcomeV1): Rfc64InventoryRollbackPreparationV1 =>
     Object.freeze({
-      outcome, databasePath, fromVersion: null, toVersion: null, keptPath: null, release: () => {},
+      outcome, databasePath, fromVersion: null, toVersion: null, keptPath: null,
+      removedConfirmedCatalogPlacements: [], release: () => {},
     });
   if (maxUserVersion <= 0) return unleased('compatible');
   if (!pathEntryExists(dirname(databasePath))) return unleased('absent');
@@ -367,14 +443,16 @@ export async function prepareRfc64InventoryForRollbackV1(
     const sqlite = await loadOwnedSqliteModuleV1('RFC-64 inventory rollback');
     lease = await acquireInventoryLease(sqlite, databasePath);
     const held = lease;
+    const removePlacements = options.removeConfirmedCatalogPlacements === true;
     const prepared = (
       outcome: Rfc64InventoryRollbackOutcomeV1,
       toVersion: number | null,
+      removedConfirmedCatalogPlacements: readonly string[] = [],
       keptPath: string | null = null,
     ): Rfc64InventoryRollbackPreparationV1 => {
       let released = false;
       return Object.freeze({
-        outcome, databasePath, fromVersion: userVersion, toVersion, keptPath,
+        outcome, databasePath, fromVersion: userVersion, toVersion, keptPath, removedConfirmedCatalogPlacements,
         release: () => {
           if (released) return;
           released = true;
@@ -409,17 +487,21 @@ export async function prepareRfc64InventoryForRollbackV1(
     if (readValidSqliteHeaderIdentity(databasePath)?.userVersion !== userVersion) {
       throw new InventoryV1OpenError('database-busy', 'its write-ahead log could not be folded into the database file');
     }
-    if (userVersion <= maxUserVersion) return prepared('compatible', userVersion);
+    if (userVersion <= maxUserVersion) {
+      return prepared('compatible', userVersion, changeForTarget(sqlite, databasePath, [], removePlacements) ?? []);
+    }
 
     const chain = downgradeChain(userVersion, maxUserVersion);
-    if (chain !== null && downgradeExactSchema(sqlite, databasePath, chain)) {
-      return prepared('downgraded', chain[chain.length - 1]!.toVersion);
+    const removed = chain === null ? null : changeForTarget(sqlite, databasePath, chain, removePlacements);
+    if (chain !== null && removed !== null) {
+      return prepared('downgraded', chain[chain.length - 1]!.toVersion, removed);
     }
     const copy = preMigrationCopyCandidates(databasePath, maxUserVersion)
       .find((candidate) => isRestorableCopy(sqlite, candidate));
     if (copy === undefined) throw unrecognizedSchema(databasePath, userVersion, maxUserVersion);
     const keptPath = restorePreMigrationCopy(databasePath, userVersion, copy);
-    return prepared('restored', copy.userVersion, keptPath);
+    const removedFromCopy = changeForTarget(sqlite, databasePath, [], removePlacements) ?? [];
+    return prepared('restored', copy.userVersion, removedFromCopy, keptPath);
   } catch (cause) {
     if (lease !== null) releaseInventoryLease(lease);
     throw refusalFrom(cause, databasePath, userVersion, maxUserVersion);

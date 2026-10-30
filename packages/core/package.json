@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-core",
-  "version": "10.0.26",
+  "version": "10.0.27",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,6 +39,11 @@
       "types": "./dist/query-result.d.ts",
       "import": "./dist/query-result.js",
       "default": "./dist/query-result.js"
+    },
+    "./coalescing-recurring-task": {
+      "types": "./dist/coalescing-recurring-task.d.ts",
+      "import": "./dist/coalescing-recurring-task.js",
+      "default": "./dist/coalescing-recurring-task.js"
     },
     "./sparql-safe": {
       "types": "./dist/sparql-safe.d.ts",

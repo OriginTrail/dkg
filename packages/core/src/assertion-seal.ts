@@ -631,6 +631,16 @@ export function parseGraphScopedAssertionSealCandidate(
   rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>,
   subject: string,
 ): GraphScopedAssertionSealCandidate | undefined {
+  const seal = parseGraphScopedAssertionSealStructure(rows, subject);
+  const coordinate = parseContextGraphAssertionUri(subject);
+  return seal && coordinate && coordinate.agentAddress.toLowerCase() === seal.authorAddress.toLowerCase()
+    ? { seal, coordinate } : undefined;
+}
+
+/** Validate seal structure and signing identity, without granting its physical lifecycle owner author authority. */
+export function parseGraphScopedAssertionSealStructure(
+  rows: ReadonlyArray<{ subject: string; predicate: string; object: string }>, subject: string,
+): AssertionSeal | undefined {
   try {
     const { fields } = collectSealFieldObjects(rows, subject);
     // Fail closed on ambiguity BEFORE the last-writer-wins full parse: any
@@ -651,15 +661,13 @@ export function parseGraphScopedAssertionSealCandidate(
       || !seal.kaUal) {
       return undefined;
     }
-    const coordinate = parseContextGraphAssertionUri(subject);
-    if (!coordinate) return undefined;
-    // Identity alignment: subject-coordinate author == seal author == kaUal author.
+    // Signing author and KA identity must agree independently of storage placement.
     const sealAuthor = seal.authorAddress.toLowerCase();
     const ualAuthor = parseDeterministicKnowledgeAssetUal(seal.kaUal).agentAddress.toLowerCase();
-    if (coordinate.agentAddress.toLowerCase() !== sealAuthor || ualAuthor !== sealAuthor) {
+    if (ualAuthor !== sealAuthor) {
       return undefined;
     }
-    return { seal, coordinate };
+    return seal;
   } catch {
     return undefined;
   }

@@ -12,6 +12,7 @@ import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
+import { readAssertionLifecycleSubjects } from './assertion-lifecycle-subjects.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
@@ -450,12 +451,8 @@ export interface DKGPublisherConfig {
   /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  /**
-   * OT-RFC-43 Option 1 — when present, the publisher allocates a deterministic
-   * packed reservedKaId for each V10 mint (and reconciles the per-author floor
-   * against the chain on first use). Omit for mock/no-chain or pre-Option-1
-   * flows; the real EVM adapter then throws on the missing reservedKaId.
-   */
+  /** Allocate packed mint IDs and reconcile the author floor on first use.
+   * Optional for mocks; real EVM publishing requires a reserved ID. */
   kaAllocator?: KaIdAllocator;
   /**
    * Synchronous root-only resolver for metadata that must share the SWM graph's
@@ -7731,10 +7728,10 @@ export class DKGPublisher implements Publisher {
   ): Promise<string> {
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
 
-    // Clear any stale lifecycle data from a previous create/discard cycle
-    // so re-using the same assertion name doesn't leave orphaned triples.
-    // This removes the assertion entity AND its prov:Activity event
-    // sub-entities (whose URIs are prefixed with the lifecycle URI).
+    // Clear supported lifecycle data from a previous create/discard cycle
+    // so re-using the same assertion name clears its previous event history.
+    // This removes the assertion entity AND provenance-linked event
+    // sub-entities within its URI prefix; unknown unlinked rows are preserved.
     //
     // OT-RFC-43 A2 — but PRESERVE the KA's persistent identity + per-layer
     // pointers (dkg:kaId / dkg:reservedUal / dkg:{wm,swm,vm}CurrentAssertion /
@@ -7809,9 +7806,7 @@ export class DKGPublisher implements Publisher {
       await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
     }
 
-    const staleEvents = await this.store.query(
-      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
-    );
+    const staleEvents = await readAssertionLifecycleSubjects(this.store, metaGraph, lifecycleSubject);
     if (staleEvents.type === 'bindings') {
       for (const row of staleEvents.bindings) {
         const subj = row['s'];

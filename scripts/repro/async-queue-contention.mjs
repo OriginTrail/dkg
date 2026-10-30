@@ -148,6 +148,10 @@
 //    path on (DKG_STORE_CONTROL_RESERVED_SLOTS at share:1,publisher:2: unset, 0, malformed or another geometry is
 //    non-conforming), and takes the median of the five repeats against the G0b medians: share P95 within 25 %, pick-up
 //    within 25 % or 0.5 s, whichever is larger. A missing, invalid or non-conforming repeat is INCOMPLETE.
+//    This process never configures the control path with a backend or a node config (only the daemon does, OT-RFC-73
+//    P14), so it honours DKG_STORE_CONTROL_RESERVED_SLOTS alone: unset runs the path OFF here, although a daemon on
+//    Blazegraph or managed oxigraph-server with more than 2 CPUs has it on by default. Set the variable explicitly in
+//    every arm (0 for off).
 //
 // Not modelled (see fixture.mjs, publisher.mjs): the preflight's O(catalog) list leg, the readiness wait and the chain
 // rescue, the real chain (the publisher waits a fixed hold), publisher retries.

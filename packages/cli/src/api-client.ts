@@ -1,3 +1,6 @@
+import { createPublicCheckpointClient } from './public-checkpoint-client.js';
+import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
+export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
 import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
 import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
@@ -53,10 +56,8 @@ import {
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
-
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
-
 /**
  * `/api/verify` collects signatures for up to 30 minutes when the request names
  * no `timeoutMs` (the agent default in packages/agent/src/dkg-agent-endorse.ts).
@@ -243,19 +244,6 @@ export interface KnowledgeAssetShareOptions extends KnowledgeAssetShareTargetOpt
 
 export type KnowledgeAssetShareAsyncOptions = KnowledgeAssetShareTargetOptions;
 
-export interface KnowledgeAssetPublishResponse {
-  kaId?: string;
-  ual?: string;
-  txHash?: string;
-  status?: string;
-  /** Core peers whose StorageACKs backed a confirmed VM publish. */
-  storageAckPeerIds?: string[];
-  error?: string;
-  errors?: KnowledgeAssetLifecycleError[];
-  contextGraphError?: unknown;
-  [key: string]: unknown;
-}
-
 export interface KnowledgeAssetLifecycleError {
   phase?: string;
   code?: string;
@@ -427,6 +415,18 @@ export interface RandomSamplingStatusResponse {
     submittedCount: number;
     lastSubmittedTxHash: string | null;
     lastSubmittedAt: string | null;
+    /**
+     * Distinct challenges (proof periods) first seen in the daemon's trailing
+     * 24-hour window; repeated ticks on one period count once. This and the
+     * three health fields below are optional because older daemons omit them;
+     * the CLI renders a missing counter as `n/a`, never as 0.
+     */
+    challengesReceived24h?: number;
+    /** Of those periods, how many this daemon submitted a proof for. */
+    proofsSubmitted24h?: number;
+    /** Kind of the most recent failed tick (for example `kc-not-synced`), or null. */
+    lastFailureClassification?: string | null;
+    lastFailureAt?: string | null;
   };
 }
 
@@ -669,6 +669,7 @@ interface ConfigFallbackContext {
 }
 
 export class ApiClient {
+  readonly checkpoints = createPublicCheckpointClient({ get: (path, opts) => this.get(path, opts), post: (path, body) => this.post(path, body) });
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;
@@ -1236,30 +1237,9 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    assertionUri: string;
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-    storageAckPeerIds?: string[];
-    contextGraphError?: string;
-  }> {
-    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
-      kaId: string;
-      status: 'tentative' | 'confirmed';
-      assertionUri: string;
-      authorAddress: string;
-      merkleRoot: string;
-      kas: Array<{ tokenId: string; rootEntity: string }>;
-      txHash?: string;
-      blockNumber?: number;
-      storageAckPeerIds?: string[];
-      contextGraphError?: string;
-    }>;
+  ): Promise<FinalizedAssertionPublishResponse> {
+    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<FinalizedAssertionPublishResponse>;
+
   }
 
   /**
@@ -1283,16 +1263,7 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    assertionUri: string;
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
+  ): Promise<FinalizedAssertionPublishResponse> {
     const created = await this.createAssertion(contextGraphId, name, {
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
       quads,
@@ -1327,6 +1298,7 @@ export class ApiClient {
           : {}),
       },
     );
+    if (published.catalogObligationPending) return published;
     return {
       assertionUri: created.assertionUri,
       kaId: published.kaId,
@@ -1600,7 +1572,7 @@ export class ApiClient {
 
   // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
   // status-scoped publisherClear). cleared / already_absent resolve normally (200);
-  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // rejected (nonterminal/pending_transaction/unknown → 409, malformed → 400) throws via the post() helper
   // carrying { outcome:'rejected', reason } in the response body.
   //
   // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose

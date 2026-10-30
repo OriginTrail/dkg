@@ -210,7 +210,8 @@ export async function handleKaShareJobStatus(ctx: RequestContext, jobId: string)
 // ── DELETE /api/knowledge-assets/swm/share-jobs/:jobId ────────────────────────
 //
 // Faithful port of DELETE /api/assertion/promote-async/:jobId — cancel a
-// queued/failed_retrying job. The caller passes the already url-decoded +
+// `queued` job (any other state, or a job that still owns a durable share
+// obligation, answers 409). The caller passes the already url-decoded +
 // validated `jobId`.
 export async function handleKaShareJobCancel(ctx: RequestContext, jobId: string): Promise<void> {
   const { res, agent } = ctx;

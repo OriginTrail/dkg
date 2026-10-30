@@ -1,5 +1,8 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
+import * as heldAssets from '../src/public-snapshot-held-assets.js';
 
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { fixtureRoot } from './verified-asset-root-fixture.js';
@@ -35,10 +38,12 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only', last:'missin
   const snapshot=sealPublicGraphSnapshot({version:1,chainId:'evm:31337',deploymentId:'test',contextGraphId:graph,onChainId:'1',nameHash:ethers.id(graph),contextGraphStorage:address,assetStorage:address,blockNumber:'10',blockHash:`0x${'a'.repeat(64)}`,finalityConfirmations:1,observedAt,expiresAt:observedAt+120000,accessPolicy:0,
     assets:Array.from({length:count},(_,i)=>({id:((BigInt(address)<<96n)|BigInt(i+1)).toString(),root,version:'1'}))});
   const assets=new Map(Array.from({length:11},(_,i)=>{const a=asset(i+1);return [a.ual,a];}));
-  const a:any={started:true,vmReconcileRotationClosed:false,workLifetime: new AgentWorkLifetime(),
+  const a:any={withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession,started:true,vmReconcileRotationClosed:false,workLifetime: new AgentWorkLifetime(),
     log:{info:vi.fn(),warn:vi.fn(),debug:vi.fn()},
 
     subscribedContextGraphs:new Map(),store,
+    contextGraphSubscriptionDormancyById: new Map(),
+    waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
     getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState:{capture:()=>generation,isGenerationCurrent:(_:string,g:number)=>g===generation},
     chain:{chainId:'evm:31337',deploymentId:'test',readPublicGraphSnapshot:async()=>snapshot},
@@ -47,6 +52,17 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only', last:'missin
   };
   // Stub only the already-verified transport boundary. The actual job owns the
   // trust marker, evidence authentication, waits, failure and real atomic store writes.
+  let firstBatchSaved!: () => void;
+  if (mode === 'core-cache' && last === 'missing') {
+    const saved = new Promise<void>(resolve => { firstBatchSaved = resolve; });
+    const createHeldCheck = heldAssets.createPublicSnapshotHeldAssetCheck;
+    // Establish partial persistence before the missing worker may fail. Worker
+    // discovery order is not part of the trust-marker contract under test.
+    vi.spyOn(heldAssets, 'createPublicSnapshotHeldAssetCheck').mockImplementation((...args) => {
+      const check = createHeldCheck(...args);
+      return async ual => { if (ual.endsWith('/11')) await saved; return check(ual); };
+    });
+  }
   let refusals=last==='refused-once'?1:0;
   a.recoverSnapshotExactAssets=vi.spyOn(exactRecovery, 'runExactRecovery').mockImplementation(async ({ host: _agent, remotePeerId: _peer, contextGraphId: _graph, policy, authority }) => {
     await expect(query(store,graph)).rejects.toThrow('core-trusted');
@@ -63,6 +79,7 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only', last:'missin
       expect(await materializeVerifiedGraphScopedAsset({store,asset:authenticated.asset})).toBe('applied');
       committed.push(ual);
     }
+    if (committed.length === 10) firstBatchSaved?.();
     return {admission:'work-started',result:empty(),disposition:committed.length===selection.length?'found':'incomplete',committedExactAssetUals:committed};
   });
   return a;
