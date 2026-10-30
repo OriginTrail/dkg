@@ -14,7 +14,7 @@ export interface StoreStatusProjection {
 
 export function projectStoreStatus(
   store: DkgConfig['store'],
-  monitor: { readonly stats: StoreMonitorStats } | null,
+  monitor: { readonly stats: Readonly<StoreMonitorStats> } | null,
 ): StoreStatusProjection {
   // External backend visibility (RFC 120 / plan PR 1 item 3). For
   // local backends the URL/count stay null and count status/age are omitted.

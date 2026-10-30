@@ -198,7 +198,7 @@ export interface StoreRuntimeMonitor {
   stop(): Promise<void>;
   /** One probe cycle; exposed so tests drive the state machine directly. */
   tick(): Promise<void>;
-  readonly stats: StoreMonitorStats;
+  readonly stats: Readonly<StoreMonitorStats>;
 }
 
 export function createStoreRuntimeMonitor(
