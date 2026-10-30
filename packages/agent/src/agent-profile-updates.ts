@@ -17,7 +17,8 @@
  *   another peer, or what another peer may have written.
  * - The relay address, the public key and the role name no peer. An update sets
  *   them when its peer is the only one the subject keeps. Beside another current
- *   peer it only adds its values, and those of the others go once one peer is left.
+ *   peer it only adds its values, up to a bound, and those of the others go once
+ *   one peer is left.
  * - A profile that lists several peers, from a node that still keeps the union,
  *   has no date for any of them. Those the subject lacks are dated by its newest
  *   `dkg:lastSeen`, and those it holds keep their date. The peers of a stored union
@@ -80,16 +81,8 @@ const NODE_FIELDS: ReadonlySet<string> = new Set([
   AGENT_DATED_PEER_PREDICATE,
   MULTIADDR,
 ]);
-/** What an update of a known agent carries over gossip: what its node writes about itself, and its keys and their revocations. */
-const UPDATE_FIELDS: ReadonlySet<string> = new Set([
-  ...NODE_FIELDS,
-  DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
-  DKG_ONTOLOGY.DKG_REVOKED_AT,
-  DKG_ONTOLOGY.DKG_REVOKED_BY,
-  DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF,
-]);
+/** How many values each of those fields holds while several peers are current. */
+const UNATTRIBUTED_VALUES_MAX = 8;
 /** Subjects one read of stored node fields asks for. */
 const STORED_FIELDS_SUBJECTS_PER_READ = 128;
 /** How far a heartbeat's date must have moved to be written on its own: a quarter of the staleness bound. */
@@ -247,9 +240,12 @@ export function planAgentProfileWrites(
   const lastSeen = seedsSubject ? updateNewest : newestKept ?? heldNewest;
   if (lastSeen !== undefined) desired.push(fieldQuad(LAST_SEEN, `"${lastSeen.iso}"`));
   for (const predicate of UNATTRIBUTED_FIELDS) {
-    const heldValues = heldOf(predicate);
-    if (!updateSets) desired.push(...heldValues);
-    if (updateSets || updateAdds || heldValues.length === 0) desired.push(...updateOf(predicate));
+    const heldValues = updateSets ? [] : heldOf(predicate);
+    desired.push(...heldValues);
+    if (updateSets || updateAdds || heldValues.length === 0) {
+      const room = Math.max(0, UNATTRIBUTED_VALUES_MAX - heldValues.length);
+      desired.push(...absentFrom(updateOf(predicate), heldValues).slice(0, room));
+    }
   }
   // An address goes with its peer: the update's replace what its peer held. One
   // that names no peer goes with the fields above.
@@ -257,7 +253,7 @@ export function planAgentProfileWrites(
     peerId === undefined ? updateSets : advanced.has(peerId) || (seedsSubject && updatePeers.has(peerId))
   );
   const heldAddresses = heldOf(MULTIADDR);
-  const addsAddress = (peerId: string | undefined): boolean => replacesAddresses(peerId) || (peerId === undefined && updateAdds)
+  const addsAddress = (peerId: string | undefined): boolean => replacesAddresses(peerId)
     || !heldAddresses.some((quad) => addressPeer(quad.object) === peerId);
   for (const quad of updateOf(MULTIADDR)) {
     const peerId = addressPeer(quad.object);
@@ -415,9 +411,9 @@ export async function storeAgentProfileQuads(
  * The part of a gossiped profile message this node stores. A node publishes its
  * own profile, whole, so an agent's quads count only when they name the message's
  * sender as their one peer, and the date of a peer is this node's to set. Of an
- * agent this node knows already, only the update's node fields, keys and
- * revocations count: the rest arrives with a sync, and taking it from every
- * heartbeat would grow the subject's triples without bound.
+ * agent this node knows already, only the update's node fields count: the rest
+ * arrives with a sync, and taking it from every heartbeat would grow the subject's
+ * triples without bound.
  */
 export function gossipedAgentProfileQuads(
   quads: readonly Quad[],
@@ -435,6 +431,6 @@ export function gossipedAgentProfileQuads(
   return quads.filter((quad) => (
     quad.predicate !== AGENT_DATED_PEER_PREDICATE
     && fromItsPeer(rootOf(quad.subject))
-    && (!knownAgent || (UPDATE_FIELDS.has(quad.predicate) && quad.subject.startsWith(AGENT_SUBJECT_PREFIX)))
+    && (!knownAgent || (NODE_FIELDS.has(quad.predicate) && quad.subject.startsWith(AGENT_SUBJECT_PREFIX)))
   ));
 }

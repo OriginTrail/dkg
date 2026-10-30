@@ -106,6 +106,28 @@ describe('applying agent profile updates to the store', () => {
     ]);
   });
 
+  it('holds a bounded number of values of what names no peer, however many profiles add to them', async () => {
+    const { apply, values } = fixture();
+    await apply(profile('peer-other', minutesAgo(1)));
+    for (let index = 0; index < 12; index += 1) {
+      await apply(profile('peer-1', minutesAgo(100 - index), { relayAddress: `/dns4/relay-${String(index).padStart(2, '0')}/tcp/1`, nodeRole: `role-${index}`, publicKey: `key-${index}` }));
+    }
+    expect(await values(RELAY)).toHaveLength(8);
+    expect(await values(NODE_ROLE)).toHaveLength(8);
+    expect(await values(PUBLIC_KEY)).toHaveLength(8);
+    expect(await values(RELAY), 'the first in stay').toContain(literal('/dns4/relay-of-peer-other/tcp/9090'));
+  });
+
+  it('takes a bounded number of values from a profile that sets them', async () => {
+    const { apply, values } = fixture();
+    await apply([
+      quad(PEER_ID, literal('peer-1')),
+      quad(LAST_SEEN, literal(minutesAgo(1))),
+      ...Array.from({ length: 12 }, (_, index) => quad(RELAY, literal(`/dns4/relay-${index}/tcp/1`))),
+    ]);
+    expect(await values(RELAY)).toHaveLength(8);
+  });
+
   it('takes what names no peer from a newer profile of the subject\'s only peer, and lets go of what it no longer has', async () => {
     const { apply, values } = fixture();
     await apply(profile('peer-1', minutesAgo(60), { multiaddrs: ['/ip4/203.0.113.1/tcp/1/p2p/peer-1', '/ip4/203.0.113.1/tcp/1'] }));
@@ -126,9 +148,8 @@ describe('applying agent profile updates to the store', () => {
     await apply(profile('peer-1', minutesAgo(60), { multiaddrs: ['/ip4/203.0.113.1/tcp/1/p2p/peer-1', '/ip4/203.0.113.1/tcp/1'] }));
     await apply(profile('peer-2', minutesAgo(50), { multiaddrs: ['/ip4/203.0.113.2/tcp/2/p2p/peer-2', '/ip4/203.0.113.2/tcp/2'] }));
     await apply(profile('peer-1', minutesAgo(40), { multiaddrs: ['/ip4/203.0.113.9/tcp/9/p2p/peer-1'] }));
-    expect(await values(MULTIADDR)).toEqual([
+    expect(await values(MULTIADDR), 'the one that names no peer stays, and another is not added').toEqual([
       literal('/ip4/203.0.113.1/tcp/1'),
-      literal('/ip4/203.0.113.2/tcp/2'),
       literal('/ip4/203.0.113.2/tcp/2/p2p/peer-2'),
       literal('/ip4/203.0.113.9/tcp/9/p2p/peer-1'),
     ]);
@@ -199,7 +220,7 @@ describe('applying agent profile updates to the store', () => {
   it('writes a heartbeat that changes only the date once per interval, and any other change at once', async () => {
     const { apply, store, values, datesHeld } = fixture();
     const minutes = AGENT_LAST_SEEN_WRITE_INTERVAL_MS / 60_000;
-    // As gossip hands it over for a known agent: its node fields, keys and revocations.
+    // As gossip hands it over for a known agent: its node fields.
     const heartbeat = (minutesBack: number, extra = {}) => gossipedAgentProfileQuads(
       profile('peer-1', minutesAgo(minutesBack), extra),
       { knownAgent: true },
@@ -773,8 +794,9 @@ describe('the part of a gossiped profile a node stores', () => {
 
   it('is nothing of a key\'s quads when the profile they come with names another peer', () => {
     const revocation = quad(DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF, literal('proof'), `${SUBJECT}#x25519-old`);
-    expect(gossipedAgentProfileQuads([...update, revocation], { fromPeerId: 'peer-other', knownAgent: true })).toEqual([]);
-    expect(gossipedAgentProfileQuads([revocation], { fromPeerId: FROM, knownAgent: true })).toEqual([]);
+    expect(gossipedAgentProfileQuads([...update, revocation], { fromPeerId: 'peer-other', knownAgent: false })).toEqual([]);
+    expect(gossipedAgentProfileQuads([revocation], { fromPeerId: FROM, knownAgent: false })).toEqual([]);
+    expect(gossipedAgentProfileQuads([...update, revocation], { fromPeerId: FROM, knownAgent: false })).toContain(revocation);
   });
 
   it('keeps other subjects of the same message', () => {
@@ -783,15 +805,13 @@ describe('the part of a gossiped profile a node stores', () => {
     expect(gossipedAgentProfileQuads([...update, other], { fromPeerId: FROM, knownAgent: false })).toHaveLength(update.length + 1);
   });
 
-  it('is the node fields, keys and revocations of an update of a known agent', () => {
+  it('is the node fields of an update of a known agent', () => {
     const revocation = quad(DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_REVOCATION_PROOF, literal('proof'), `${SUBJECT}#x25519-old`);
-    expect(gossipedAgentProfileQuads([...update, revocation], { fromPeerId: FROM, knownAgent: true })).toEqual([
-      update[0], update[1], update[3], revocation,
-    ]);
+    expect(gossipedAgentProfileQuads([...update, revocation], { fromPeerId: FROM, knownAgent: true })).toEqual([update[0], update[1]]);
   });
 
   it('is nothing of a subject that is no agent, in a message about a known one', () => {
-    const other = quad(DKG_ONTOLOGY.DKG_REVOKED_AT, literal(minutesAgo(1)), 'did:dkg:context-graph:other');
+    const other = quad(LAST_SEEN, literal(minutesAgo(1)), 'did:dkg:context-graph:other');
     expect(gossipedAgentProfileQuads([other], { knownAgent: true })).toEqual([]);
     expect(gossipedAgentProfileQuads([other], { knownAgent: false }), 'a new subject is stored whole, as before').toEqual([other]);
   });
