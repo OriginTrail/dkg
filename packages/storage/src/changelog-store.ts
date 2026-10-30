@@ -1,3 +1,9 @@
+import { filterGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
+import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
+import { parseIntTerm, stripIri, stripLiteral } from "./changelog-terms.js";
+import type { AtomicAssetReplacement } from './atomic-asset-group.js';
+import { ChangelogReservedGraphs } from './changelog-reserved-graphs.js';
+import { assertSubjectAndInsertPayload } from './atomic-subject-insert.js';
 import { randomUUID } from 'node:crypto';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
@@ -17,9 +23,6 @@ import type {
 import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
-import {
-  isAtomicGraphReplaceStagingGraph,
-} from './atomic-graph-replace.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
   Rfc64AuthorCommitCasResultV1,
@@ -235,6 +238,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   readonly innerStore: TripleStore;
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
+  private readonly reservedGuard: ChangelogReservedGraphs;
   private readonly onAppend?: (record: ChangeRecord) => void;
   private readonly eraGuard?: ChangelogEraGuard;
   private readonly visibleSortedGraphs: SortedGraphCatalogProjection;
@@ -256,13 +260,16 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
    */
   private reconcilePending = false;
 
+  readonly graphEnumerationVisibility;
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
     this.innerStore = inner;
+    this.graphEnumerationVisibility = composeGraphEnumerationVisibility(inner, graph => !this.reservedGuard.isReservedGraph(graph));
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
     this.reserved = reserved;
+    this.reservedGuard = new ChangelogReservedGraphs(reserved);
     this.visibleSortedGraphs = new SortedGraphCatalogProjection(
       (graph) => !this.reserved.has(graph),
     );
@@ -319,11 +326,11 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     if (!this.enabled) return this.inner.deleteByPattern(pattern, options);
     if (pattern.graph) {
       // A graph-scoped delete against the reserved plane would erase the log.
-      this.assertNotReserved(pattern.graph, 'deleteByPattern');
+      this.reservedGuard.assertNotReserved(pattern.graph, 'deleteByPattern');
     } else {
       // A no-graph delete by a reserved-namespaced subject/predicate would delete
       // markers cross-graph — the same log-erasure vector, so reject it too.
-      this.assertNoReservedTerm(pattern);
+      this.reservedGuard.assertNoReservedTerm(pattern);
     }
     return this.runAtomicMutation({
       operation: 'deleteByPattern', touchedGraphs: pattern.graph ? [pattern.graph] : [], options,
@@ -345,9 +352,9 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       return;
     }
     if (pattern.graph) {
-      this.assertNotReserved(pattern.graph, 'deleteByPatternWithoutCount');
+      this.reservedGuard.assertNotReserved(pattern.graph, 'deleteByPatternWithoutCount');
     } else {
-      this.assertNoReservedTerm(pattern);
+      this.reservedGuard.assertNoReservedTerm(pattern);
     }
     await this.runExclusiveMutation('deleteByPattern', options, async scoped => {
       await deleteByPatternWithoutCount(this.inner, pattern, scoped);
@@ -364,7 +371,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     if (!this.enabled) return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
-    this.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
+    this.reservedGuard.assertNotReserved(graphUri, 'deleteBySubjectPrefix');
     return this.runAtomicMutation({
       operation: 'deleteBySubjectPrefix', touchedGraphs: [graphUri], options,
       execute: scoped => this.inner.deleteBySubjectPrefix(graphUri, prefix, scoped),
@@ -377,7 +384,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // Dropping the reserved plane through the public API would delete the log
     // with no trace; only internal maintenance (chain-reset, which bypasses this
     // decorator) may wipe it.
-    this.assertNotReserved(graphUri, 'dropGraph');
+    this.reservedGuard.assertNotReserved(graphUri, 'dropGraph');
     await this.runExclusiveMutation('dropGraph', options, async scoped => {
       await this.inner.dropGraph(graphUri, scoped);
       await this.appendMarkers([{ graph: graphUri, op: 'drop' }], scoped);
@@ -393,13 +400,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
       throw new UnsupportedTripleStoreCapabilityError('replaceGraph', 'ChangelogStore');
     }
     if (!this.enabled) return this.inner.replaceGraph(graphUri, quads, options);
-    this.assertNotReserved(graphUri, 'replaceGraph');
+    this.reservedGuard.assertNotReserved(graphUri, 'replaceGraph');
     await this.runAtomicMutation({
       operation: 'replaceGraph',
       touchedGraphs: [graphUri],
       options,
       execute: options => this.inner.replaceGraph!(graphUri, quads, options),
     });
+  }
+
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    if (!this.inner.replaceAssetGroup) throw new UnsupportedTripleStoreCapabilityError('replaceAssetGroup', 'group-decorator');
+    if (!this.enabled) return this.inner.replaceAssetGroup(assets, options);
+    const touchedGraphs = [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))];
+    for (const graph of touchedGraphs) this.reservedGuard.assertNotReserved(graph, 'replaceAssetGroup');
+    await this.runAtomicMutation({ operation: 'replaceAssetGroup', touchedGraphs, options,
+      execute: options => this.inner.replaceAssetGroup!(assets, options) });
   }
 
   async replaceGraphAndSubject(
@@ -426,8 +442,8 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
         options,
       );
     }
-    this.assertNotReserved(graphUri, 'replaceGraphAndSubject');
-    this.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
+    this.reservedGuard.assertNotReserved(graphUri, 'replaceGraphAndSubject');
+    this.reservedGuard.assertNotReserved(metaGraphUri, 'replaceGraphAndSubject');
     await this.runAtomicMutation({
       operation: 'replaceGraphAndSubject',
       touchedGraphs: [graphUri, metaGraphUri],
@@ -458,12 +474,34 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // it), so a job term that merely REFERENCES a reserved IRI as a subject/
     // predicate/object is accepted, matching the insert() path (#1863 regression
     // the raw-update path reintroduced via assertNoReservedRef).
-    this.assertNotReserved(graphUri, 'replaceSubject');
+    this.reservedGuard.assertNotReserved(graphUri, 'replaceSubject');
     await this.runAtomicMutation({
       operation: 'replaceSubject',
       touchedGraphs: [graphUri],
       options,
       execute: options => this.inner.replaceSubject!(graphUri, subject, quads, options),
+    });
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    if (typeof this.inner.replaceSubjectAndInsert !== 'function') {
+      throw new UnsupportedTripleStoreCapabilityError('replaceSubjectAndInsert', 'ChangelogStore');
+    }
+    if (!this.enabled) {
+      return this.inner.replaceSubjectAndInsert(graphUri, subject, replacementQuads, insertQuads, options);
+    }
+    this.reservedGuard.assertNotReserved(graphUri, 'replaceSubjectAndInsert');
+    await this.runAtomicMutation({
+      operation: 'replaceSubjectAndInsert',
+      touchedGraphs: [graphUri],
+      options,
+      execute: options => this.inner.replaceSubjectAndInsert!(
+        graphUri, subject, replacementQuads, insertQuads, options,
+      ),
     });
   }
 
@@ -481,7 +519,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     const source = sourceFromNormalizedRfc64AuthorCommitCasV1(manifest);
     if (!this.enabled) return this.inner.rfc64AuthorCommitCasV1(source, options);
     for (const graph of manifest.referencedGraphs) {
-      this.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
+      this.reservedGuard.assertNotReserved(graph, 'rfc64AuthorCommitCasV1');
     }
     return this.runAtomicMutation({
       operation: 'rfc64AuthorCommitCasV1',
@@ -505,10 +543,10 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     }
     if (!this.enabled) return this.inner.update(sparql, options);
     // Reject BEFORE the mutation runs so it never touches the reserved plane.
-    this.assertNoReservedRef(sparql, 'update');
+    this.reservedGuard.assertNoReservedRef(sparql, 'update');
     await this.runExclusiveMutation('update', options, async scoped => {
       await this.inner.update!(sparql, { ...options, ...scoped });
-      const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.isReservedGraph(g));
+      const hinted = (options?.touchedGraphs ?? []).filter((g) => !this.reservedGuard.isReservedGraph(g));
       if (hinted.length > 0) {
         // Strip the update-only touchedGraphs hint before the read-path hasGraph
         // probes — it is meaningless there and must not leak past this boundary.
@@ -525,7 +563,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     // reconcile rather than silently dropping its changes from the log; and if it
     // targets the reserved plane, reject it before it executes.
     const isUpdate = this.enabled && isSparqlUpdateOperation(sparql);
-    if (isUpdate) this.assertNoReservedRef(sparql, 'query()-UPDATE');
+    if (isUpdate) this.reservedGuard.assertNoReservedRef(sparql, 'query()-UPDATE');
     const result = await this.inner.query(sparql, options);
     if (isUpdate) this.flagReconcile('query(update)');
     return result;
@@ -536,13 +574,12 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   // ------------------------------------------------------------------
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    if (this.isReservedGraph(graphUri)) return false; // reserved plane is invisible upward
+    if (this.reservedGuard.isReservedGraph(graphUri)) return false; // reserved plane is invisible upward
     return this.inner.hasGraph(graphUri, options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
-    const graphs = await this.inner.listGraphs(options);
-    return graphs.filter((g) => !this.isReservedGraph(g));
+    return [...(await this.readGraphInventory(undefined, options)).graphs];
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
@@ -551,10 +588,12 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
-    const graphs = this.inner.listGraphsByPrefix
-      ? await this.inner.listGraphsByPrefix(prefix, options)
-      : (await this.inner.listGraphs(options)).filter((g) => g.startsWith(prefix));
-    return graphs.filter((g) => !this.isReservedGraph(g));
+    return [...(await this.readGraphInventory(prefix, options)).graphs];
+  }
+
+  async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+    const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
+    return filterGraphInventory(inventory, g => !this.reservedGuard.isReservedGraph(g));
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
@@ -905,7 +944,7 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
 
   /** Emit `upsert`/`drop` markers for graphs after a mutation, op by probe. */
   private async markPostMutation(graphs: readonly string[], options?: QueryOptions): Promise<void> {
-    const distinct = [...new Set(graphs.filter((g) => g && !this.isReservedGraph(g)))];
+    const distinct = [...new Set(graphs.filter((g) => g && !this.reservedGuard.isReservedGraph(g)))];
     if (distinct.length === 0) return;
     // The presence probes are independent — run them concurrently (matching
     // GraphSetIndexStore) instead of serially inside the held write mutex, then
@@ -983,65 +1022,18 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
   private attributableGraphs(quads: readonly Quad[]): string[] {
     const set = new Set<string>();
     for (const q of quads) {
-      if (q.graph && !this.isReservedGraph(q.graph)) set.add(q.graph);
+      if (q.graph && !this.reservedGuard.isReservedGraph(q.graph)) set.add(q.graph);
     }
     return [...set];
   }
 
   /** Drop caller quads that target the reserved plane (marker forgery guard). */
   private stripReserved(quads: readonly Quad[]): Quad[] {
-    return quads.filter((q) => !(q.graph && this.isReservedGraph(q.graph)));
+    return quads.filter((q) => !(q.graph && this.reservedGuard.isReservedGraph(q.graph)));
   }
 
-  /** Reject a graph-targeted mutation aimed at the reserved plane. Safe as a
-   *  hard error: reserved graphs are never enumerated (listGraphs filters,
-   *  hasGraph returns false), so no legitimate iterate-and-drop loop can reach
-   *  one — only a hardcoded reserved IRI does. */
-  private assertNotReserved(graphUri: string, op: string): void {
-    if (this.isReservedGraph(graphUri)) {
-      throw new Error(
-        `ChangelogStore: ${op}(<${graphUri}>) targets the reserved changelog plane, ` +
-          `which is not writable through the public store API.`,
-      );
-    }
-  }
 
-  private isReservedGraph(graphUri: string): boolean {
-    return this.reserved.has(graphUri) || isAtomicGraphReplaceStagingGraph(graphUri);
-  }
 
-  /**
-   * Reject an opaque SPARQL UPDATE that references a reserved graph IRI. A
-   * best-effort guard against accidental mutation and the obvious hardcoded-IRI
-   * vector — NOT airtight against hostile opaque SPARQL (prefixed forms evade
-   * it). The structured paths (insert/delete/dropGraph) are the real guards; the
-   * reserved plane's integrity ultimately rests on it being reconcile-derived.
-   */
-  private assertNoReservedRef(sparql: string, op: string): void {
-    for (const g of this.reserved) {
-      if (sparql.includes(`<${g}>`)) {
-        throw new Error(
-          `ChangelogStore: ${op} references the reserved changelog graph <${g}>, ` +
-            `which is not writable through the public store API.`,
-        );
-      }
-    }
-  }
-
-  /** Reject a no-graph deleteByPattern whose subject/predicate is namespaced
-   *  under a reserved graph (marker terms like `urn:dkg:changelog#seq`) — that
-   *  would delete markers cross-graph. */
-  private assertNoReservedTerm(pattern: Partial<Quad>): void {
-    const terms = [pattern.subject, pattern.predicate];
-    for (const g of this.reserved) {
-      if (terms.some((t) => t != null && t.startsWith(g))) {
-        throw new Error(
-          `ChangelogStore: deleteByPattern by a term under the reserved graph <${g}> ` +
-            `would mutate the changelog plane, which is not writable through the public store API.`,
-        );
-      }
-    }
-  }
 }
 
 // ====================================================================
@@ -1092,28 +1084,6 @@ function collectChangeRecords(
     if (seq == null || !graph || (op !== 'upsert' && op !== 'drop')) continue;
     out.push({ seq, graph, op });
   }
-}
-
-/** Extract an integer from a binding term (`"42"^^<…integer>`, `42`, or `"42"`). */
-function parseIntTerm(term: string | undefined): number | null {
-  if (term == null) return null;
-  const m = term.match(/-?\d+/);
-  if (!m) return null;
-  const n = Number.parseInt(m[0], 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Bare IRI from a binding term (strip surrounding angle brackets if present). */
-function stripIri(term: string | undefined): string {
-  if (!term) return '';
-  return term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
-}
-
-/** Lexical value from a literal binding term (`"upsert"` → `upsert`). */
-function stripLiteral(term: string | undefined): string {
-  if (!term) return '';
-  const m = term.match(/^"((?:[^"\\]|\\.)*)"/);
-  return m ? m[1] : term;
 }
 
 /**

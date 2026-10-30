@@ -2,7 +2,7 @@ import type {
   ContextGraphAuthorityFailureSite,
   RegisteredContextGraphAuthorityUnavailableReason,
 } from '@origintrail-official/dkg-agent';
-import type { PromoteJob } from '@origintrail-official/dkg-publisher';
+import { jobFailureText, type PromoteJob } from '@origintrail-official/dkg-publisher';
 import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
 import {
@@ -25,8 +25,9 @@ const SAFE_PROMOTE_AUTHORITY_REASONS = Object.freeze({
   'chain-participant-authority-unavailable': true,
   'chain-participant-authority-invalid': true,
   'rfc64-private-read-roster-unavailable': true,
+  'approved-member-metadata-pending': true,
 } as const satisfies Record<RegisteredContextGraphAuthorityUnavailableReason
-  | 'rfc64-private-read-roster-unavailable', true>);
+  | 'rfc64-private-read-roster-unavailable' | 'approved-member-metadata-pending', true>);
 
 /**
  * Which check of the recipient stability loop raised an authority failure
@@ -100,6 +101,49 @@ function safePromoteAuthorityOrigin(cause: unknown): 'agent-gate-revision' | und
   }
 }
 
+/** The wrapped cause of a retryable prerequisite failure, the only one whose identity is read. */
+function retryablePromoteCause(err: unknown, classified: ClassifiedPromoteError): unknown {
+  return classified.diagnostic?.code === 'PROMOTE_RETRYABLE_FAILURE'
+    && (typeof err === 'object' || typeof err === 'function')
+    && err !== null
+    ? Reflect.get(err, 'cause')
+    : undefined;
+}
+
+/**
+ * The closed-set authority reason of a retryable prerequisite failure, for the
+ * attempt error the queue keeps, so the job view names what the attempt waited
+ * for (for example `approved-member-metadata-pending`, #3421).
+ */
+export function promoteAttemptAuthorityReason(
+  err: unknown,
+  classified: ClassifiedPromoteError,
+): { authorityReason?: string } {
+  try {
+    const authorityReason = safePromoteAuthorityToken(
+      retryablePromoteCause(err, classified),
+      'reason',
+      SAFE_PROMOTE_AUTHORITY_REASONS,
+    );
+    return authorityReason === undefined ? {} : { authorityReason };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The short reason the queue keeps for a failed attempt (`jobFailureText`). When the reason had to
+ * be cut, the full text, reduced the same way, goes to the local log first: no job view shows it.
+ */
+export function promoteFailureReason(job: PromoteJob, message: string, log: PromoteWorkerSyncLogger): string {
+  const { reason, detail } = jobFailureText(message);
+  if (reason !== detail) {
+    log(`[async-promote-worker] ${JSON.stringify({ event: 'async_promote_failure_detail', schemaVersion: 1,
+      jobId: job.jobId, attempt: job.attempt.count, detail })}`);
+  }
+  return reason;
+}
+
 /**
  * Emit privacy-bounded evidence before queue.fail() makes a terminal row
  * externally clearable. Diagnostics are best-effort and can never change the
@@ -119,11 +163,7 @@ export function logPromoteAttemptFailure(input: {
     // The queue marker hides arbitrary cause text. A typed authority reason or
     // retry cause code is a closed, privacy-bounded value that identifies which
     // prerequisite kept this pre-commit attempt from making progress.
-    const cause = input.classified.diagnostic?.code === 'PROMOTE_RETRYABLE_FAILURE'
-      && (typeof input.err === 'object' || typeof input.err === 'function')
-      && input.err !== null
-      ? Reflect.get(input.err, 'cause')
-      : undefined;
+    const cause = retryablePromoteCause(input.err, input.classified);
     const authorityReason = safePromoteAuthorityToken(cause, 'reason', SAFE_PROMOTE_AUTHORITY_REASONS);
     const authoritySite = safePromoteAuthorityToken(cause, 'site', SAFE_PROMOTE_AUTHORITY_SITES);
     const storeFailure = safePromoteStoreFailure(input.err) ?? safePromoteStoreFailure(cause);

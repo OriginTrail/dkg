@@ -27,6 +27,10 @@
  * the metrics report `null` (visible) instead of silently stale
  * data, and the regression tests in `relay-internal-shapes.test.ts`
  * fail loudly the next time libp2p restructures these fields.
+ *
+ * A third read serves relay selection rather than metrics: the client
+ * transport's reservation store (`readRelayClientReservationStore`),
+ * which `relay-client-transport.ts` guards.
  */
 
 /**
@@ -97,4 +101,33 @@ export function readConnectionStreams(conn: unknown): LibP2PStreamShape[] | null
   const streams = (conn as { streams?: unknown }).streams;
   if (!Array.isArray(streams)) return null;
   return streams as LibP2PStreamShape[];
+}
+
+/**
+ * Minimum surface we need from the reservation store of libp2p's
+ * circuit-relay CLIENT transport (`CircuitRelayTransport.reservationStore`
+ * in `@libp2p/circuit-relay-v2/dist/src/transport/index.d.ts`). Every
+ * reservation this node requests on a relay, whatever found the relay
+ * (identify, the peer-store pass, a renewal, an inbound stop request),
+ * goes through `addRelay`. Only its first argument, the relay's peer id,
+ * is ours to read; whatever follows belongs to libp2p.
+ */
+export interface RelayClientReservationStoreLike {
+  addRelay(peerId: { toString(): string }, ...rest: unknown[]): Promise<unknown>;
+}
+
+/**
+ * Read the client reservation store from a circuit-relay transport
+ * instance. Returns `null` when the transport no longer carries a
+ * `reservationStore` with an `addRelay` function, so the caller can
+ * say so instead of silently guarding nothing.
+ */
+export function readRelayClientReservationStore(
+  transport: unknown,
+): RelayClientReservationStoreLike | null {
+  if (!transport || typeof transport !== 'object') return null;
+  const store = (transport as { reservationStore?: unknown }).reservationStore;
+  if (!store || typeof store !== 'object') return null;
+  if (typeof (store as { addRelay?: unknown }).addRelay !== 'function') return null;
+  return store as RelayClientReservationStoreLike;
 }

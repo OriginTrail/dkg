@@ -591,6 +591,7 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
 
       const shutdownStarted = beginGracefulShutdown({
         state: daemonState,
+        stopCatchupTriggers: () => {},
         log: () => {},
         removeApiPort: async () => { enteredWindow(); await held; },
       });
@@ -617,6 +618,42 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
     // Nothing minted: a job created here would be queued against a runner whose
     // worker is about to be terminated.
     expect(metrics.jobs()).toHaveLength(0);
+  });
+
+  it('stops the triggers of later catch-up jobs after closing admission and ending the share waits, before that first await', async () => {
+    const order: string[] = [];
+    await beginGracefulShutdown({
+      state: daemonState,
+      endShareAdmissionWaits: () => {
+        order.push(`end share waits (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
+      stopCatchupTriggers: () => {
+        order.push(`stop catch-up triggers (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
+      log: (message) => order.push(`log: ${message}`),
+      removeApiPort: async () => { order.push('remove api.port'); },
+    });
+
+    expect(order).toEqual([
+      'end share waits (accepting jobs: false)',
+      'stop catch-up triggers (accepting jobs: false)',
+      'log: Shutting down...',
+      'remove api.port',
+    ]);
+  });
+
+  it('goes on when stopping the catch-up triggers throws', async () => {
+    const logs: string[] = [];
+    let removed = false;
+    await beginGracefulShutdown({
+      state: daemonState,
+      stopCatchupTriggers: () => { throw new Error('listener already detached'); },
+      log: (line) => logs.push(line),
+      removeApiPort: async () => { removed = true; },
+    });
+
+    expect(removed).toBe(true);
+    expect(logs).toEqual(['Catch-up trigger stop error: listener already detached', 'Shutting down...']);
   });
 
   it('…and that same subscribe SUCCEEDS when no shutdown is in flight', async () => {
@@ -1014,6 +1051,7 @@ describe('A11 — instrumentation never breaks the route or the drain', () => {
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
   'flushTelemetry',
@@ -1049,6 +1087,7 @@ describe('A24 — producer-quiescent teardown order', () => {
     await runProducerQuiescentTeardown({
       ...steps,
       closeServer: async () => { events.push('closeServer'); },
+      closeEntitySearch: async () => { events.push('closeEntitySearch'); },
       closeLocalLlm: async () => { events.push('closeLocalLlm'); },
       drainCatchupJobs: async () => { await sleep(1); events.push('drainCatchupJobs'); },
       flushTelemetry: async () => { await sleep(1); events.push('flushTelemetry'); },
@@ -1310,6 +1349,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
         closeHttpServer: async () => {
           calls.push('closeHttpServer');
         },
+        closeEntitySearch: async () => { calls.push('closeEntitySearch'); },
         closeLocalLlm: async () => {
           calls.push('closeLocalLlm');
         },
@@ -1371,6 +1411,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
     // the sequencer's per-step guard covers each of them individually.
     expect(dispatched).toEqual([
       ['closeServer', ['closeHttpServer']],
+      ['closeEntitySearch', ['closeEntitySearch']],
       ['closeLocalLlm', ['closeLocalLlm']],
       ['drainCatchupJobs', ['drainCatchupJobs']],
       ['flushTelemetry', ['flushTelemetry']],

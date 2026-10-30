@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  DKGEvent,
   contextGraphAppTopic,
   contextGraphFinalizationTopic,
   contextGraphPublishTopic,
@@ -9,7 +10,6 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
-  activatePersistedContextGraphSubscription,
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
   recoverDeferredContextGraphSubscriptionAuthorities,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
@@ -17,6 +17,8 @@ import {
   '../src/context-graph-subscription-authority-recovery.js';
 import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 
 const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
   vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
@@ -143,6 +145,8 @@ describe('Context Graph subscription authority retry', () => {
     const subscriptions = new Map<string, any>();
     const syncScope = new Set<string>();
     const gossipHandlers = new Set<string>();
+    const activations = createTestSubscriptionActivations({ subscribedContextGraphs: subscriptions,
+      contextGraphSubscriptionDormancyById: new Map() });
     let failSubscribe = true;
     const ports = {
       install: () => {
@@ -150,7 +154,6 @@ describe('Context Graph subscription authority retry', () => {
         subscriptions.set(contextGraphId, subscription);
         return subscription;
       },
-      current: (id: string) => subscriptions.get(id),
       remove: (id: string) => { subscriptions.delete(id); },
       rollbackNetworkEffects: (id: string) => {
         syncScope.delete(id);
@@ -160,21 +163,25 @@ describe('Context Graph subscription authority retry', () => {
       subscribe: (id: string) => {
         // Model the real activation replacing the installed record, then a
         // topic installed before a later topic subscription throws.
-        subscriptions.set(id, { ...subscriptions.get(id), subscribed: true });
+        const previous = subscriptions.get(id), next = { ...previous, subscribed: true };
+        continueContextGraphSubscriptionLine(previous, next);
+        subscriptions.set(id, next);
         gossipHandlers.add(id);
         if (failSubscribe) throw new Error('gossip topic install failed');
       },
       persistMembership: () => undefined,
+      persistBinding: async () => undefined,
+      commit: (id: string) => subscriptions.get(id),
     };
 
-    await expect(activatePersistedContextGraphSubscription(row, ports))
+    await expect(activations.activate(row, ports))
       .rejects.toThrow('gossip topic install failed');
     expect([...subscriptions]).toEqual([]);
     expect([...syncScope]).toEqual([]);
     expect([...gossipHandlers]).toEqual([]);
 
     failSubscribe = false;
-    await expect(activatePersistedContextGraphSubscription(row, ports))
+    await expect(activations.activate(row, ports))
       .resolves.toMatchObject({ id: contextGraphId, subscribed: true });
     expect(subscriptions.get(contextGraphId)).toMatchObject({ subscribed: true });
     expect([...syncScope]).toEqual([contextGraphId]);
@@ -289,6 +296,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         coldCursor,
@@ -300,13 +308,11 @@ describe('Context Graph subscription authority retry', () => {
         activate: async (row) => {
           activationOrder.push(row.id);
           await Promise.resolve();
+          status.activated += 1;
+          dormancyById.delete(row.id);
         },
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: (contextGraphId) => {
-          status.activated += 1;
-          dormancyById.delete(contextGraphId);
-        },
       },
     );
     await recovery;
@@ -358,6 +364,7 @@ describe('Context Graph subscription authority retry', () => {
         delete: async () => undefined,
       },
       dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
       persistRevisions: new Map(),
       subscriptions: new Map(),
       coldCursor,
@@ -381,7 +388,7 @@ describe('Context Graph subscription authority retry', () => {
       activate: vi.fn(async () => undefined),
       warn: vi.fn(),
       capped: vi.fn(),
-      activated: vi.fn(),
+
     };
     const runPass = () => recoverDeferredContextGraphSubscriptionAuthorities(
       new AbortController().signal,
@@ -444,6 +451,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         coldCursor,
@@ -460,7 +468,7 @@ describe('Context Graph subscription authority retry', () => {
         activate: vi.fn(async () => undefined),
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: vi.fn(),
+
       },
     );
 
@@ -516,6 +524,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         getStatus: () => ({
@@ -537,7 +546,7 @@ describe('Context Graph subscription authority retry', () => {
         activate: vi.fn(),
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: vi.fn(),
+
       },
     );
 
@@ -606,6 +615,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         getStatus: () => status,
@@ -613,10 +623,9 @@ describe('Context Graph subscription authority retry', () => {
         touchStatus: () => undefined,
         clearStatus: vi.fn(),
         resolveAuthority,
-        activate: async (row) => { activated.push(row.id); },
+        activate: async (row) => { activated.push(row.id); status.activated += 1; },
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: () => { status.activated += 1; },
       },
     );
 
@@ -687,6 +696,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         getStatus: () => status,
@@ -707,7 +717,6 @@ describe('Context Graph subscription authority retry', () => {
         activate,
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: () => { status.activated += 1; },
       },
     );
 
@@ -775,6 +784,10 @@ describe('Context Graph subscription authority retry', () => {
     });
     mockLivePolicy(agent, 0);
     const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
+    // The daemon catches up a subscription that comes back unsynced; it learns
+    // of every activation, whichever path made it, through this event.
+    const activations: unknown[] = [];
+    agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, (data) => activations.push(data));
 
     await agent.start();
     await vi.waitFor(() => expect(attempt).toBe(2));
@@ -797,6 +810,7 @@ describe('Context Graph subscription authority retry', () => {
     );
 
     expect(retry).toHaveBeenCalledOnce();
+    expect(activations).toEqual([{ contextGraphId }]);
     // Startup scans once; the serialized save also validates wire aliases.
     // Its exact-local hosting read follows the two recovery-owned point reads.
     expect(loadAll).toHaveBeenCalledTimes(2);
@@ -1170,7 +1184,7 @@ describe('Context Graph subscription authority retry', () => {
     });
   }, 15_000);
 
-  it('retries a transient startup policy failure through the same durable binding', async () => {
+  it.each([false, true])('retries a transient startup policy failure with inactive legacy rows=%s', async includeInactive => {
     const contextGraphId = 'persisted-authoritative-binding-retry';
     const chain = new MockChainAdapter();
     const rows = new Map<string, any>([[contextGraphId, {
@@ -1182,6 +1196,8 @@ describe('Context Graph subscription authority retry', () => {
       syncScoped: true,
       onChainId: '7',
     }]]);
+    const inactiveId = 'inactive-legacy-row';
+    if (includeInactive) rows.set(inactiveId, { id: inactiveId, subscribed: false, coreHosted: false, onChainId: '8' });
     agent = await DKGAgent.create({
       name: 'PersistedAuthoritativeBindingRetry',
       chainAdapter: chain,
@@ -1224,6 +1240,10 @@ describe('Context Graph subscription authority retry', () => {
       { timeout: 10_000 },
     );
 
+    if (includeInactive) {
+      expect(rows.get(inactiveId)).toMatchObject({ subscribed: false, coreHosted: false });
+      expect(agent.getSubscribedContextGraphs().get(inactiveId)?.subscribed).not.toBe(true);
+    }
     expect(targetPolicyAttempts).toBe(2);
     expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
@@ -1420,7 +1440,7 @@ describe('Context Graph subscription authority retry', () => {
             metadataBootstrap: 'forbidden',
           } as const;
     });
-    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
     vi.useFakeTimers();
 
@@ -1667,7 +1687,7 @@ describe('Context Graph subscription authority retry', () => {
           metadataBootstrap: 'eligible',
         } as const;
       });
-      const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+      const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
       vi.useFakeTimers();
 
       await agent.start();
@@ -1743,7 +1763,7 @@ describe('Context Graph subscription authority retry', () => {
         ));
       // Pass-through spy: every decision below comes from the real resolver.
       const lookups = vi.spyOn(node, 'resolveContextGraphSubscriptionBootstrapAuthority');
-      const subscribe = vi.spyOn(node, 'subscribeToContextGraph');
+      const subscribe = vi.spyOn(node, 'installContextGraphSubscription');
       vi.useFakeTimers();
       await node.start();
       return {
@@ -1999,7 +2019,7 @@ describe('Context Graph subscription authority retry', () => {
           onChainId: 7n,
         } as const;
       });
-    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
 
     await agent.start();
@@ -2361,6 +2381,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
         delete: async () => undefined,
       },
       dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
       persistRevisions: new Map(),
       subscriptions: new Map(),
       getStatus: () => status,
@@ -2370,7 +2391,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       resolveAuthority: async () => allowed('51'),
       activate,
       warn: vi.fn(),
-      activated: vi.fn(),
+
       capped,
     });
 
@@ -2410,6 +2431,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
         delete: async () => undefined,
       },
       dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
       persistRevisions: new Map(),
       subscriptions: new Map(),
       getStatus: () => ({
@@ -2433,7 +2455,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       },
       activate: vi.fn(),
       warn: vi.fn(),
-      activated: vi.fn(),
+
       capped: vi.fn(),
     });
 

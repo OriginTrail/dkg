@@ -5,6 +5,12 @@ import type {
 } from './public-catalog-reconciliation-outcome-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from
   './public-catalog-transport-v1.js';
+import { RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1 } from './catalog-head-lineage-v1.js';
+
+/** How many heads a jump may leave out after the durable head of its scope. */
+const RFC64_RECEIVER_MAX_HEAD_JUMP_V1 = BigInt(RFC64_CATALOG_HEAD_LINEAGE_WINDOW_V1);
+/** Scopes whose settled heads this scheduler remembers; the oldest is forgotten first. */
+const RFC64_RECEIVER_MAX_SETTLED_SCOPES_V1 = 4_096;
 
 export type Rfc64ReceiverSchedulingClassV1 =
   | 'ambient'
@@ -62,6 +68,10 @@ export interface Rfc64ReceiverLifecycleTaskV1 {
   completionWaiters?: Array<(result: Rfc64PublicCatalogReceiverCompletionV1) => void>;
   running?: boolean;
   settled?: boolean;
+  /** A newer head of its scope ran in its place once; it now runs in queue order. */
+  passedOver?: boolean;
+  /** Who delivered the head, by provider context key; a task without any never coalesces. */
+  readonly providers?: ReadonlyMap<string, unknown>;
 }
 
 /**
@@ -83,6 +93,11 @@ export class Rfc64ReceiverTaskLifecycleV1<
   /** One semantic writer per scope: the task currently holding that scope's lock. */
   readonly #activeByScopeKey = new Map<string, TTask>();
   readonly #deferredTimers = new Map<TTask, ReturnType<typeof setTimeout>>();
+  /**
+   * Per scope, the highest head a task settled as applied or already applied:
+   * the durable head is at least that one.
+   */
+  readonly #settledVersionByScopeKey = new Map<string, bigint>();
 
   constructor(
     private readonly onSettled: (
@@ -183,11 +198,75 @@ export class Rfc64ReceiverTaskLifecycleV1<
     return this.#deferred.delete(task);
   }
 
+  /**
+   * The first queued task whose scope has no writer, or the newest queued head
+   * of that scope in its place.
+   *
+   * Each head a receiver applies costs one receiver lease of its graph, and
+   * the leases of all graphs take one node-wide turn at a time. A scope whose
+   * writer waited for its turn has often had several newer heads delivered in
+   * the meantime. Run in queue order, each would wait for a turn of its own
+   * and apply a transition the next one replaces. The newest one applies the
+   * same end state in one turn: a head is a complete signed set, and the
+   * receiver proves its signed lineage back to the durable head. The heads it
+   * replaced stay queued and then settle as already applied, without a lease.
+   *
+   * Only ambient heads, delivered hints, take part. A caller-awaited head
+   * keeps its place: no head queued behind it runs ahead of it. A verified
+   * current head has its own placement and retirement rules. A delivered head
+   * is not verified yet, so the jump is bounded three times:
+   * - it reaches at most one signed lineage window past the durable head, the
+   *   furthest the receiver applies in one step. The scheduler knows the
+   *   durable head only as the newest head of the scope it saw settle as
+   *   applied, so a scope runs in order until one of its heads settled here;
+   * - one provider delivered the head it jumps to and every head it replaces.
+   *   The jump proves the lineage through the replaced heads; a provider that
+   *   announced each of them can serve it, as running them in order would
+   *   have needed. A head delivered only by a provider that lacks the older
+   *   ones runs after them, as a direct successor;
+   * - a head passed over once is never passed over again. When the newest
+   *   head cannot be applied, the older ones run in queue order, so later
+   *   hints for newer heads delay them by one attempt at most. The scope
+   *   lock already made every head of a scope wait for each one before it.
+   */
   takeNextRunnable(): TTask | undefined {
     const index = this.#queue.findIndex((task) => !this.#activeByScopeKey.has(task.scopeKey));
     if (index < 0) return undefined;
-    const [task] = this.#queue.splice(index, 1);
+    const [task] = this.#queue.splice(this.#newestAmbientHeadOfScopeAt(index), 1);
     return task;
+  }
+
+  /** The queue index of the task to run in place of the one at `index`. */
+  #newestAmbientHeadOfScopeAt(index: number): number {
+    const first = this.#queue[index]!;
+    const durable = this.#settledVersionByScopeKey.get(first.scopeKey);
+    if (!isCoalescibleAmbientHeadV1(first) || first.passedOver === true || durable === undefined) {
+      return index;
+    }
+    // The delivered heads of the scope, up to its first caller-awaited head.
+    const heads: TTask[] = [first];
+    for (let candidate = index + 1; candidate < this.#queue.length; candidate += 1) {
+      const task = this.#queue[candidate]!;
+      if (task.scopeKey !== first.scopeKey || task.cancellation.signal.aborted) continue;
+      if (task.schedulingPolicy.schedulingClass !== 'ambient') break;
+      heads.push(task);
+    }
+    const targets = heads
+      .filter((task) => (
+        task.catalogVersion > first.catalogVersion
+        && task.catalogVersion - durable - 1n <= RFC64_RECEIVER_MAX_HEAD_JUMP_V1
+      ))
+      // Newest first.
+      .sort((left, right) => (
+        left.catalogVersion === right.catalogVersion ? 0 : left.catalogVersion > right.catalogVersion ? -1 : 1
+      ));
+    for (const target of targets) {
+      const replaced = heads.filter((task) => task.catalogVersion < target.catalogVersion);
+      if (!sharesOneProviderV1(target, replaced)) continue;
+      for (const task of replaced) task.passedOver = true;
+      return this.#queue.indexOf(target);
+    }
+    return index;
   }
 
   begin(task: TTask): void {
@@ -294,6 +373,9 @@ export class Rfc64ReceiverTaskLifecycleV1<
   ): boolean {
     if (task.settled === true) return false;
     task.settled = true;
+    if (result.outcome === 'applied' || result.outcome === 'already-applied') {
+      this.#recordSettledHead(task);
+    }
     const queueIndex = this.#queue.indexOf(task);
     if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
     this.removeDeferred(task);
@@ -303,6 +385,32 @@ export class Rfc64ReceiverTaskLifecycleV1<
     for (const resolve of waiters) notify(() => resolve(result));
     return true;
   }
+
+  #recordSettledHead(task: TTask): void {
+    const settled = this.#settledVersionByScopeKey.get(task.scopeKey);
+    if (settled !== undefined && settled >= task.catalogVersion) return;
+    this.#settledVersionByScopeKey.delete(task.scopeKey);
+    if (this.#settledVersionByScopeKey.size >= RFC64_RECEIVER_MAX_SETTLED_SCOPES_V1) {
+      const oldest = this.#settledVersionByScopeKey.keys().next().value;
+      if (oldest !== undefined) this.#settledVersionByScopeKey.delete(oldest);
+    }
+    this.#settledVersionByScopeKey.set(task.scopeKey, task.catalogVersion);
+  }
+}
+
+/** Whether one provider delivered `target` and every task in `replaced`. */
+function sharesOneProviderV1(
+  target: Rfc64ReceiverLifecycleTaskV1,
+  replaced: readonly Rfc64ReceiverLifecycleTaskV1[],
+): boolean {
+  for (const provider of target.providers?.keys() ?? []) {
+    if (replaced.every((task) => task.providers?.has(provider) === true)) return true;
+  }
+  return false;
+}
+
+function isCoalescibleAmbientHeadV1(task: Rfc64ReceiverLifecycleTaskV1): boolean {
+  return task.schedulingPolicy.schedulingClass === 'ambient' && !task.cancellation.signal.aborted;
 }
 
 /** Exact-head deduplication key owned by the receiver scheduler. */

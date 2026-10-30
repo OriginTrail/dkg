@@ -1,0 +1,51 @@
+name: Nightly CI (testnet-canary)
+
+# GitHub schedules run on the default branch. Dispatching gives CI the canary
+# workflow, github.sha and ref together; changing checkout alone would not.
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: nightly-ci-dispatch-testnet-canary
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: Run full nightly CI on testnet-canary
+    if: github.repository == 'OriginTrail/dkg'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    # This job only calls GitHub's API; it never checks out or executes repo code.
+    # The dispatched CI retains its own contents: read permissions.
+    permissions:
+      actions: write
+      checks: read # gh run watch reads check annotations when a job fails.
+    steps:
+      - name: Dispatch the canary nightly profile
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_id="$(gh api --method POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/dispatches" \
+            -f ref=testnet-canary -f 'inputs[profile]=nightly-equivalent' \
+            --jq '.workflow_run_id')"
+          if [[ ! "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'Dispatch did not return a workflow run ID' >&2
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Full nightly CI: [testnet-canary run $run_id]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id)." >> "$GITHUB_STEP_SUMMARY"
+          echo 'The linked run owns the tested commit, CI gate, browser reports and property receipts. This dispatcher waits for its result.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require the canary CI result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_RUN_ID: ${{ steps.dispatch.outputs.run_id }}
+        run: gh run watch "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" --interval 60 --exit-status

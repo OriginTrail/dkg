@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
+import { contextGraphAssertionUri, parseAssertionSealQuads, createOperationContext } from '@origintrail-official/dkg-core';
+import { TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
+import { describe, expect, it, vi } from 'vitest';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -24,9 +27,10 @@ import {
 } from './_helpers/foreign-author-resolution-fixtures.js';
 
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
-  it('accepts an equivalent selected head alias for intent and queued preflight', async () => {
+  it.each([false, true])('persists admitted selection %s across rollout change with equivalent head aliases', async enabled => {
+    const assertionName = enabled ? NAME : '界'.repeat(100);
     const store = new OxigraphStore();
-    await store.insert(sealFor(MEMBER));
+    await store.insert(sealFor(MEMBER, assertionName));
     const graphManager = new GraphManager(store);
     const originalId = 'queued-original';
     const selectedAlias = 'storage-ack-alias';
@@ -87,7 +91,36 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       configurable: true,
     });
 
-    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME);
+    Object.assign(agent.config, confirmedPublicationCatalogConfigV1(enabled));
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, assertionName, { subGraphName: '' }))
+      .rejects.toMatchObject({ code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, assertionName);
+    expect(intent.catalogObligationRequired).toBe(enabled);
+    const queue = new TripleStoreAsyncLiftPublisher(store);
+    const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
+    const reloaded = await new TripleStoreAsyncLiftPublisher(store).getStatus(jobId);
+    if (reloaded?.request.jobType !== 'knowledge-asset-vm-publish') throw new Error('Missing persisted named request');
+    const persisted = reloaded.request.knowledgeAssetVmPublish;
+    expect(persisted.catalogObligationRequired).toBe(enabled);
+    Object.assign(agent.config, confirmedPublicationCatalogConfigV1(!enabled));
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(persisted)).resolves.toEqual({ action: 'execute' });
+    const put = vi.fn(async () => undefined);
+    agent.rfc64PersistenceV1 = { finalizedPrivatePlacementRepairs: { put } };
+    agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1 = () => ({ accepted: false });
+    await agent.observeRfc64ConfirmedVmV1({ contextGraphId: CG, assertionCoordinate: assertionName,
+      catalogObligationRequired: persisted.catalogObligationRequired, shareOperationId: persisted.shareOperationId,
+      seal: parseAssertionSealQuads(sealFor(MEMBER, assertionName), contextGraphAssertionUri(CG, MEMBER, assertionName))!,
+      assertionUri: contextGraphAssertionUri(CG, MEMBER, assertionName), ctx: createOperationContext('publish'), publicationLabel: 'queued publish' });
+    expect(put).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    if (enabled) {
+      put.mockRejectedValueOnce(new Error('durable obligation write refused'));
+      await expect(agent.observeRfc64ConfirmedVmV1({ contextGraphId: CG, assertionCoordinate: assertionName,
+        catalogObligationRequired: persisted.catalogObligationRequired, shareOperationId: persisted.shareOperationId,
+        seal: parseAssertionSealQuads(sealFor(MEMBER, assertionName), contextGraphAssertionUri(CG, MEMBER, assertionName))!,
+        assertionUri: contextGraphAssertionUri(CG, MEMBER, assertionName), ctx: createOperationContext('publish'), publicationLabel: 'queued publish' }))
+        .rejects.toThrow('not durably recorded');
+    }
+
     expect(intent.shareOperationId).toBe(originalId);
     await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
       .resolves.toEqual({ action: 'execute' });
@@ -215,8 +248,24 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       },
       configurable: true,
     });
+    // GH#3294 — the curator holds the member's seal (kept from the member's share)
+    // but not the member's lifecycle record, which the queued lane checks.
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
+      .rejects.toMatchObject({
+        code: 'ASYNC_PUBLISH_FOREIGN_AUTHOR',
+        message: expect.stringContaining(`/api/knowledge-assets/${NAME}/vm/publish`),
+      });
+    expect(historyAgent).toBe(MEMBER);
+  });
+
+  it('keeps the not-finalized answer when no seal is resident at the coordinate', async () => {
+    const store = new OxigraphStore();
+    const agent = stubAgent(store, CURATOR);
+    Object.defineProperty(agent, 'assertion', {
+      value: { history: async () => null },
+      configurable: true,
+    });
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
       .rejects.toThrow(/is not finalized or does not exist/);
-    expect(historyAgent).toBe(MEMBER);
   });
 });

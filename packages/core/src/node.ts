@@ -35,9 +35,8 @@ import { bootstrap } from '@libp2p/bootstrap';
 import { kadDHT, type KadDHT } from '@libp2p/kad-dht';
 import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
-import { identify } from '@libp2p/identify';
+import { identify, identifyPush } from '@libp2p/identify';
 import { ping, type Ping } from '@libp2p/ping';
-import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
 import { dcutr } from '@libp2p/dcutr';
 import { autoNAT } from '@libp2p/autonat';
@@ -50,12 +49,15 @@ import { DKG_GOSSIP_MAX_RPC_BYTES, dhtProtocolForNetwork } from './constants.js'
 import { POOLED_MESSAGE_PROTOCOL } from './message-stream-pool.js';
 import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapter.js';
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
+import { repairRelayReservationTimers } from './relay-reservation-timers.js';
+import { connectionMonitorOptions, connectionMonitorPingService } from './connection-monitor-policy.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
+import { buildRelayClientTransport } from './relay-client-transport.js';
 import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
 import { parseCircuitRelayPeerIds } from './relay-path.js';
-import { isPublicLikeAddress } from './network/address-policy.js';
+import { isPublicLikeAddress, isPublicOrCircuitAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
 export {
@@ -368,6 +370,16 @@ export function nodeHasDirectPublicAddress(selfAddrs: readonly string[]): boolea
       !a.startsWith('/dnsaddr/') &&
       isPublicLikeAddress(a),
   );
+}
+
+/**
+ * libp2p `announceFilter` of `announcePublicAddressesOnly`: the node's own
+ * addresses that a peer on a public network can dial. libp2p applies it to
+ * `getMultiaddrs()`, the self peer record and identify (push included), so
+ * the circuits the relay watchdog reads stay in.
+ */
+export function announcePublicAddresses<T extends { toString(): string }>(addresses: T[]): T[] {
+  return addresses.filter((address) => isPublicOrCircuitAddress(address.toString()));
 }
 
 export class DKGNode {
@@ -755,7 +767,6 @@ export class DKGNode {
       activeNetworkRelayPeerIds,
       { log: (message) => console.warn(`[${new Date().toISOString()}] ${message}`) },
     );
-    const activeRelayDiscoveryFilter = activeRelayNetworkPolicy?.discoveryFilter;
     // The relay-path policy above only gates `/p2p-circuit` paths. This one
     // refuses DIRECT dials to peers known to belong to another DKG network
     // (other bundled networks' relays, peers that failed the identity proof)
@@ -767,6 +778,8 @@ export class DKGNode {
       ? new NetworkPeerDialPolicy({
           selfPeerId: selfPeerIdEarly.toString(),
           configuredRelayPeerIds: activeNetworkRelayPeerIds,
+          staticDialExemptionPeerIds: (this.config.staticDialExemptions ?? [])
+            .map(peerIdFromRelayAddress).filter((peerId): peerId is string => peerId !== undefined),
           otherNetworkRelayPeerIds: (this.config.otherNetworkRelays ?? [])
             .map((address) => peerIdFromRelayAddress(address))
             .filter((peerId): peerId is string => peerId !== undefined),
@@ -780,36 +793,15 @@ export class DKGNode {
     const transports: any[] = [
       tcp({ dialOpts: { keepAlive: true } }),
       webSockets(),
-      // STOP stream caps default to 300 in libp2p; on a Core Node holding
-      // 1024+ reservations that's a lower ceiling than maxReservations
-      // implies. Bump the transport-side caps to match the server-side
-      // capacity. Edge nodes keep the upstream defaults (passing
-      // undefined here is the same as omitting the field).
-      //
-      // reservationConcurrency controls how many reservations libp2p will
-      // attempt in parallel on different relays. Default upstream is 1,
-      // which serializes our N pending /p2p-circuit slots and effectively
-      // collapses multi-reservation back to single-reservation. Set to
-      // relayReservationCount so all N slots are attempted concurrently
-      // at startup. Only set on EDGE nodes with relayPeers — core /
-      // relay-server nodes don't multi-reserve through other relays.
-      circuitRelayTransport(
-        relayCaps
-          ? {
-              maxInboundStopStreams: relayCaps.maxInboundStopStreams,
-              maxOutboundStopStreams: relayCaps.maxOutboundStopStreams,
-              ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
-              ...(isEdgeWithRelays
-                ? { reservationConcurrency: relayReservationCount }
-                : {}),
-            }
-          : isEdgeWithRelays
-            ? {
-                reservationConcurrency: relayReservationCount,
-                ...(activeRelayDiscoveryFilter ? { discoveryFilter: activeRelayDiscoveryFilter } : {}),
-              }
-            : undefined,
-      ),
+      // Stop-stream caps, parallel reservations (edges with relayPeers only)
+      // and the relay allowlist are applied in relay-client-transport.ts.
+      buildRelayClientTransport({
+        relayCaps,
+        reservationConcurrency: isEdgeWithRelays ? relayReservationCount : undefined,
+        networkPolicy: activeRelayNetworkPolicy,
+        log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+        warn: (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
+      }),
     ];
 
     // Nodes that already know their NAT status skip autoNAT probing:
@@ -827,7 +819,7 @@ export class DKGNode {
       !(usableRelayCandidates.length > 0 || enableRelay);
 
     const services: Record<string, any> = {
-      identify: identify(),
+      identify: identify(), identifyPush: identifyPush(),
       ping: ping(),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
@@ -880,6 +872,7 @@ export class DKGNode {
         //     above so the wiring decision is reviewable in-place.
       }),
       dcutr: dcutr(),
+      livenessPing: connectionMonitorPingService(),
     };
 
     if (useAutoNAT) {
@@ -1009,7 +1002,7 @@ export class DKGNode {
         listen: listenAddrs,
         ...(this.config.announceAddresses?.length
           ? { announce: this.config.announceAddresses }
-          : {}),
+          : this.config.announcePublicAddressesOnly ? { announceFilter: announcePublicAddresses } : {}),
       },
       transports: transports as any,
       connectionEncrypters: [noise()],
@@ -1028,6 +1021,7 @@ export class DKGNode {
         // pressure and wider headroom adds nothing.
         maxConnections: relayCaps?.maxConnections ?? EDGE_NODE_MAX_CONNECTIONS,
       },
+      connectionMonitor: connectionMonitorOptions(),
       // Inject the byte-counting Metrics adapter only on Core Nodes
       // (relay enabled). On edge nodes libp2p uses its built-in
       // no-op metrics; the adapter is purely additive.
@@ -1035,6 +1029,7 @@ export class DKGNode {
     } as any);
     this.stopAbortController = startStopAbortController;
     this.networkPeerDialPolicy = networkPeerDialPolicy;
+    if (services.relay) repairRelayReservationTimers(this.node.services.relay);
 
     this.setupConnectionObservability();
 

@@ -10,6 +10,7 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
@@ -142,7 +143,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     });
   });
 
-  it('still fails the Context Graph when the bounded worklist overflows', async () => {
+  it('reports spent transport budget as failed and unobserved', async () => {
     const churnPeer = 'peer-reconnect-churn';
     let runtime!: Rfc64CatalogReplayRecoveryRuntimeV1<Target>;
     const created = createRuntime({
@@ -161,7 +162,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)).toMatchObject({
       failed: true,
       unresolvedPeerCount: 0,
-      unverified: false,
+      unverified: true,
     });
   });
 
@@ -308,7 +309,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: HEALTHY_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, HEALTHY_PEER)!,
     });
     expect(runtime.status(CG, POLICY)?.failed).toBe(true);
   });
@@ -384,6 +385,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
 
     // A local fault neither attributes a new provider nor clears a retained one.
+    // With no fresh provider response, retained rows are no longer corroborated.
     localFault = true;
     await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
       .resolves.toEqual({ requested: 0, failed: 2 });
@@ -391,7 +393,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 1,
-      unverified: false,
+      unverified: true,
     });
   });
 
@@ -472,7 +474,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: FAILING_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, FAILING_PEER)!,
     });
     expect(requestedPeers(requestPeer)).toEqual([FAILING_PEER, FAILING_PEER]);
   });
@@ -1173,20 +1175,24 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       activation: activation('catalog'),
     });
     await applyConsistentGenesisHead(edge);
-    const acceptedPolicySnapshot = vi.spyOn(
-      (edge as any).rfc64PublicCatalogServiceV1,
-      'acceptedPolicySnapshot',
-    );
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const original = service.acceptedPolicySnapshot.bind(service);
+    const statusRequest = new AsyncLocalStorage<boolean>();
+    let reads = 0;
+    vi.spyOn(service, 'acceptedPolicySnapshot').mockImplementation((...args: unknown[]) => {
+      if (statusRequest.getStore() && args[1] === CONTEXT_GRAPH_ID) reads++;
+      return original(...args);
+    });
 
-    await readStatus(edge);
+    // Background replay also reads policy. Count this request's async chain,
+    // not unrelated supervisor work that can overlap on a busy CI runner.
+    await statusRequest.run(true, () => readStatus(edge));
 
     // The promised-target fence and the replay status must share one snapshot.
     // Reading it a second time spans the durable promised-row load, so an
     // accepted policy that rotates in that window pairs an old-digest promise
     // set with a null replay status, and the projection then publishes numbers
     // built from promises the runtime dropped at the rotation.
-    expect(acceptedPolicySnapshot.mock.calls.filter(
-      ([, contextGraphId]) => contextGraphId === CONTEXT_GRAPH_ID,
-    )).toHaveLength(1);
+    expect(reads).toBe(1);
   });
 });

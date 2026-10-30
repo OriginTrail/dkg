@@ -1,3 +1,8 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
+import { normalizePublicGraphSnapshot, sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
+import { ethers } from "ethers";
+import { PublicSnapshotEvidence } from "../src/public-snapshot-evidence.js";
+import { materializeVerifiedGraphScopedAsset } from "../src/sync/requester/graph-scoped-materialization.js";
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -37,6 +42,11 @@ import {
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import { FinalizationHandler } from '../src/finalization-handler.js';
+import { parseGraphScopedFinalization } from '../src/finalization-graph-envelope.js';
+import {
+  findExactVerifiedMemoryCopy,
+  reportUnmatchedGraphScopedSwmHead,
+} from '../src/finalization-verified-memory-copy.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import { verifyExactGraphContent } from '../src/exact-graph-content-verifier.js';
 import {
@@ -293,6 +303,32 @@ describe('graph-scoped finalization handler', () => {
       },
     };
   }
+
+  it.each([0,200])('preserves a snapshot-imported v2 against delayed v1 finalization (stamp %s)', async block => {
+    const {message,vmGraph} = await stageGraph();
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    const dataQuads = [{subject:'urn:newer-snapshot',predicate:'urn:value',object:'"v2"',graph:vmGraph}];
+    const root = computeFlatKCRootV10(dataQuads.map(q=>({...q,graph:''})), []);
+    const metadataQuads = generateGraphKnowledgeAssetMetadata({contextGraphId:CG,ual:UAL,
+      merkleRoot:root,publisherPeerId:'core',accessPolicy:'public',allowedPeers:[],timestamp:new Date(),
+      assertionVersion:2,authorAddress:AUTHOR,publicTripleCount:1,privateTripleCount:0,assertionGraph:vmGraph},
+      {status:'confirmed',confirmation:{kind:'finalized-materialization',provenance:{batchId:PACKED_KA_ID,materializedVersion:{blockNumber:block,txIndex:0}}}});
+    const snapshot = sealPublicGraphSnapshot({version:1,chainId:'otp:20430',deploymentId:'test',contextGraphId:CG,
+      onChainId:'42',nameHash:ethers.id(CG),contextGraphStorage:AUTHOR,assetStorage:AUTHOR,blockNumber:String(block),
+      blockHash:RECOVERY_BLOCK_HASH,finalityConfirmations:1,observedAt:Date.now(),expiresAt:Date.now()+10000,
+      accessPolicy:0,assets:[{id:PACKED_KA_ID.toString(),root:ethers.hexlify(root),version:'2'}]});
+    const imported = new PublicSnapshotEvidence({snapshot:normalizePublicGraphSnapshot(snapshot, snapshot),mode:'core-cache',sourceCore:'core'},()=>true).authenticate({
+      merkleRootHex: fixtureRoot(metadataQuads),
+      contextGraphId:CG,ual:UAL,assertionVersion:2n,assertionGraph:vmGraph,metaGraph,dataQuads,metadataQuads});
+    expect(await materializeVerifiedGraphScopedAsset({store,asset:imported.asset})).toBe('applied');
+    const query = `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`;
+    const metaQuery = `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${UAL}> ?p ?o } } ORDER BY ?p ?o`;
+    const before = await store.query(query), metaBefore = await store.query(metaQuery);
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message),CG);
+    expect(await store.query(query)).toEqual(before);
+    expect(await store.query(metaQuery)).toEqual(metaBefore);
+    await store.close();
+  });
 
   async function stageNewerWorkspaceAssertion(
     swmGraph: string,
@@ -1433,10 +1469,13 @@ describe('graph-scoped finalization handler', () => {
         attemptCount: 1,
         lastError: 'store scheduler remained busy',
       }]);
-      expect(await inbox.health()).toMatchObject({
-        ready: false,
-        degradedReason: 'capacity-exhausted',
+      // The full graph quota defers only that graph's next finalization.
+      const pressuredHealth = await inbox.health();
+      expect(pressuredHealth).toMatchObject({
+        ready: true,
+        fullQuotas: { sourcePeers: 0, contextGraphs: 1 },
       });
+      expect(pressuredHealth).not.toHaveProperty('degradedReason');
 
       store.query = query;
       await inbox.close();
@@ -1455,7 +1494,10 @@ describe('graph-scoped finalization handler', () => {
       }, { timeout: 7_000 });
       expect(await store.countQuads(vmGraph)).toBe(2);
       const health = await inbox.health();
-      expect(health.ready).toBe(true);
+      expect(health).toMatchObject({
+        ready: true,
+        fullQuotas: { sourcePeers: 0, contextGraphs: 0 },
+      });
       expect(health).not.toHaveProperty('degradedReason');
     } finally {
       store.query = query;
@@ -3787,6 +3829,290 @@ describe('graph-scoped finalization handler', () => {
       await closeInbox(inbox);
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  describe('a finalization that reaches a node without the SWM copy (#2351)', () => {
+    const HEAD_MISS = 'no matching graph-scoped SWM head';
+
+    function recoveryChain(message: FinalizationMessageMsg): ChainAdapter {
+      return {
+        chainId: 'base:84532',
+        getLatestMerkleRoot: async () => message.kcMerkleRoot,
+        getMerkleRootCount: async () => 1n,
+        getKAContextGraphId: async () => 42n,
+        resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      } as ChainAdapter;
+    }
+
+    async function dropWorkspaceCopy(swmGraph: string): Promise<void> {
+      await store.dropGraph(swmGraph);
+      await store.deleteByPattern({
+        graph: graphManager.sharedMemoryMetaUri(CG),
+        subject: `${UAL}#dkg-swm-head`,
+      });
+    }
+
+    /** The node holds only the copy chain reconciliation put in VM, without a receipt. */
+    async function holdReceiptlessVmCopyOnly() {
+      const staged = await stageGraph();
+      await expect(reconcileGraphScoped(makePublicReconcileHandler(staged.message), staged.message))
+        .resolves.toBe('promoted');
+      await dropWorkspaceCopy(staged.swmGraph);
+      await expectGraphScopedMetadata(
+        '<http://dkg.io/ontology/confirmationKind> "finalized-materialization"',
+      );
+      return staged;
+    }
+
+    async function receiveAndReconcile(message: FinalizationMessageMsg, directory: string) {
+      const entries: LogRecord[] = [];
+      const inbox = await openSqliteFinalizationRecoveryStore(directory, { maxPerPeer: 1 });
+      try {
+        const recoveryHandler = new FinalizationHandler(store, recoveryChain(message), recoveryOptions(inbox));
+        Logger.setSink((entry) => entries.push(entry));
+        try {
+          await recoveryHandler.handleFinalizationMessage(
+            encodeFinalizationMessage(message),
+            CG,
+            '12D3KooWPublisher',
+          );
+          const received = await inbox.list();
+          // The source's single slot is full, and the node stays ready.
+          const fullHealth = await inbox.health();
+          const outcome = await recoveryHandler.handleExactChainReconciledKC(
+            graphReconcileInput(message),
+            createOperationContext('system'),
+          );
+          return { inbox, entries, received, fullHealth, outcome };
+        } finally {
+          Logger.setSink(null);
+        }
+      } catch (error) {
+        await closeInbox(inbox);
+        throw error;
+      }
+    }
+
+    it('closes the entry at once when reconciliation already holds the exact assertion in VM', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-vm-held-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const { message, vmGraph } = await holdReceiptlessVmCopyOnly();
+        const run = await receiveAndReconcile(message, directory);
+        inbox = run.inbox;
+
+        expect(run.received).toMatchObject([{
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+        }]);
+        expect(run.fullHealth).toMatchObject({
+          ready: true,
+          fullQuotas: { sourcePeers: 1, contextGraphs: 0 },
+        });
+        expect(run.fullHealth).not.toHaveProperty('degradedReason');
+        expect(run.outcome).toBe('already-confirmed');
+        expect(await inbox.list()).toMatchObject([{
+          state: 'SUPERSEDED',
+          lastError: 'exact assertion is already confirmed in Verified Memory',
+        }]);
+        expect(await inbox.health()).toMatchObject({
+          ready: true,
+          fullQuotas: { sourcePeers: 0, contextGraphs: 0 },
+        });
+        expect(await store.countQuads(vmGraph)).toBe(2);
+        const messages = run.entries.map((entry) => entry.message);
+        expect(messages.filter((text) => text.includes(HEAD_MISS))).toEqual([]);
+        expect(messages).toContain(
+          `Finalization: ${UAL} is already in Verified Memory; it needs no graph-scoped SWM head`,
+        );
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the entry owed and the warning when VM does not hold the assertion', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-vm-missing-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const { message, swmGraph, vmGraph } = await stageGraph();
+        await dropWorkspaceCopy(swmGraph);
+        const run = await receiveAndReconcile(message, directory);
+        inbox = run.inbox;
+
+        expect(run.outcome).toBe('no-swm');
+        expect(await inbox.list()).toMatchObject([{
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+          attemptCount: 2,
+        }]);
+        expect(await store.countQuads(vmGraph)).toBe(1);
+        const warnings = run.entries
+          .filter((entry) => entry.level === 'warn' && entry.message.includes(HEAD_MISS))
+          .map((entry) => entry.message);
+        expect(warnings.length).toBeGreaterThan(0);
+        expect(warnings).toContain(`Finalization: ${HEAD_MISS} for ${UAL}`);
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+
+    function candidateFor(message: FinalizationMessageMsg) {
+      const parsed = parseGraphScopedFinalization(message, CG);
+      if (!parsed.ok) throw new Error(`unexpected admission failure: ${parsed.reason}`);
+      return parsed.value;
+    }
+
+    it.each([
+      ['the exact assertion', {}, undefined, 'receiptless'],
+      ['another transaction, which the receiptless copy does not record', { txHash: `0x${'ef'.repeat(32)}` }, undefined, 'receiptless'],
+      ['another assertion version', { assertionVersion: '2' }, undefined, undefined],
+      ['another public triple count', { publicTripleCount: 3 }, undefined, undefined],
+      ['another private triple count', { privateTripleCount: 2 }, undefined, undefined],
+      ['another private commitment', { privateMerkleRoot: new Uint8Array(32).fill(9) }, undefined, undefined],
+      ['another batch', { batchId: 42n }, undefined, undefined],
+      ['another namespace', { subGraphName: 'other-scope' }, undefined, undefined],
+      ['another root', {}, new Uint8Array(32).fill(7), undefined],
+    ] as const)('recognizes only the exact VM assertion: %s', async (_label, variant, merkleRoot, expected) => {
+      const { message } = await holdReceiptlessVmCopyOnly();
+      await expect(findExactVerifiedMemoryCopy(store, {
+        contextGraphId: CG,
+        candidate: candidateFor({ ...message, ...variant }),
+        merkleRoot: merkleRoot ?? message.kcMerkleRoot,
+      })).resolves.toBe(expected);
+    });
+
+    it('does not take a copy recorded under another transaction for this assertion', async () => {
+      const staged = await stageGraph({ accessPolicy: 'ownerOnly' });
+      const message = { ...staged.message, batchId: 42n };
+      await seedAuthenticatedLocalControls(message);
+      await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG, '12D3KooWPublisher');
+      await dropWorkspaceCopy(staged.swmGraph);
+      const query = { contextGraphId: CG, merkleRoot: message.kcMerkleRoot };
+
+      await expect(findExactVerifiedMemoryCopy(store, { ...query, candidate: candidateFor(message) }))
+        .resolves.toBe('receipt-backed');
+      await expect(findExactVerifiedMemoryCopy(store, {
+        ...query,
+        candidate: candidateFor({ ...message, txHash: `0x${'EF'.repeat(32)}` }),
+      })).resolves.toBeUndefined();
+      await expect(findExactVerifiedMemoryCopy(store, {
+        ...query,
+        candidate: candidateFor({ ...message, txHash: message.txHash.toUpperCase().replace('0X', '0x') }),
+      })).resolves.toBe('receipt-backed');
+    });
+
+    it('leaves a receipt-backed copy to evidence recovery until its pending receipt moves, then settles', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-vm-receipt-pending-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const staged = await stageGraph({ accessPolicy: 'ownerOnly' });
+        const message = { ...staged.message, batchId: 42n };
+        await seedAuthenticatedLocalControls(message);
+        await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG, '12D3KooWPublisher');
+        expect(await store.countQuads(staged.vmGraph)).toBe(2);
+        await store.deleteByPattern({
+          graph: graphManager.sharedMemoryMetaUri(CG),
+          subject: `${UAL}#dkg-swm-head`,
+        });
+
+        const moved = canonicalReceipt(message);
+        moved.receipt = {
+          ...moved.receipt,
+          blockNumber: 124,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 7,
+        };
+        let receiptPending = true;
+        const chain = {
+          ...recoveryChain(message),
+          resolveCanonicalFinalizationReceipt: async () => (
+            receiptPending ? { status: 'pending' as const } : moved
+          ),
+        } as ChainAdapter;
+        inbox = await openSqliteFinalizationRecoveryStore(directory);
+        const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(message),
+          CG,
+          '12D3KooWPublisher',
+        );
+        await recoveryHandler.handleExactChainReconciledKC(
+          graphReconcileInput(message),
+          createOperationContext('system'),
+        );
+        // The receipt is not recoverable yet: the entry stays owed for the next replay.
+        expect(await inbox.list()).toMatchObject([{
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+        }]);
+
+        receiptPending = false;
+        await expect(recoveryHandler.handleExactChainReconciledKC(
+          graphReconcileInput(message),
+          createOperationContext('system'),
+        )).resolves.toBe('already-confirmed');
+        expect(await inbox.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 1,
+          verifiedEvidence: {
+            transactionHash: message.txHash,
+            blockNumber: 124,
+            blockHash: `0x${'ef'.repeat(32)}`,
+            txIndex: 7,
+          },
+        }]);
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the warning when the Verified Memory read fails', async () => {
+      const { message } = await stageGraph();
+      const failing = {
+        query: async () => { throw new Error('store offline'); },
+      } as unknown as TripleStore;
+      const log = { info: vi.fn(), warn: vi.fn() };
+      const ctx = createOperationContext('gossip');
+
+      await reportUnmatchedGraphScopedSwmHead(failing, log, ctx, CG, candidateFor(message));
+
+      expect(log.warn).toHaveBeenCalledWith(ctx, `Finalization: ${HEAD_MISS} for ${UAL}`);
+      expect(log.info).not.toHaveBeenCalled();
+    });
+
+    it('keeps the entry owed when VM holds another version of the asset', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-vm-other-version-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const { message } = await holdReceiptlessVmCopyOnly();
+        const newer = { ...message, assertionVersion: '2', txHash: `0x${'ef'.repeat(32)}` };
+        const chain = {
+          ...recoveryChain(newer),
+          getMerkleRootCount: async () => 2n,
+        } as ChainAdapter;
+        inbox = await openSqliteFinalizationRecoveryStore(directory);
+        const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(newer),
+          CG,
+          '12D3KooWPublisher',
+        );
+        await recoveryHandler.handleExactChainReconciledKC(
+          graphReconcileInput(newer),
+          createOperationContext('system'),
+        );
+        expect(await inbox.list()).toMatchObject([{
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+        }]);
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
   });
 
   it('uses the confirmed VM namespace when a named workspace head is lost', async () => {

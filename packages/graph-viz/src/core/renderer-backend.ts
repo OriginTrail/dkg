@@ -20,7 +20,7 @@ import type { ColorPalette } from './palette.js';
  * by implementing this interface and passing it to RdfGraphViz.
  */
 export interface RendererBackend {
-  /** Initialize the rendering engine and attach to the container */
+  /** Initialize synchronously after the backend module has loaded. */
   init(): void;
 
   /**

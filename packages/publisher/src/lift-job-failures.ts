@@ -1,4 +1,6 @@
-import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
+import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import { jobFailureText } from './job-failure-reason.js';
+import type { LiftValidationDiagnostic } from './lift-validation-error.js';
 import type { LiftJobActiveState } from './lift-job-states.js';
 
 export const LIFT_JOB_FAILURE_PHASES = [
@@ -37,6 +39,7 @@ export const LIFT_JOB_FAILURE_CODES = [
   'workspace_slice_not_found',
   'publish_intent_stale',
   'canonicalization_failed',
+  'validation_unknown',
   'authority_unavailable',
   'authority_forbidden',
   'validation_timeout',
@@ -167,6 +170,7 @@ export interface LiftJobFailureMetadata {
   readonly rpcResponseRef?: string;
   readonly revertReasonRef?: string;
   readonly timeout?: LiftJobTimeoutMetadata;
+  readonly validationDiagnostic?: LiftValidationDiagnostic;
 }
 
 /**
@@ -189,6 +193,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
+  validation_unknown: { code: 'validation_unknown', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', provenIneffective: false, autoRetry: false },
   // The production producer structurally admits only the agent's closed set of
   // transient authority-unavailability reasons; terminal and unknown reasons
   // map to authority_forbidden. The existing bounded budget/backoff owns
@@ -231,6 +236,7 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   workspace_slice_not_found: ['accepted', 'claimed', 'validated'],
   publish_intent_stale: ['claimed', 'validated'],
   canonicalization_failed: ['claimed', 'validated'],
+  validation_unknown: ['claimed', 'validated'],
   authority_unavailable: ['claimed', 'validated'],
   // GH#1786 — also reachable from 'broadcast': the executor discovers mid-publish, before
   // any transaction is sent, that it cannot re-sign the UpdateAuthorAttestation for this
@@ -266,6 +272,8 @@ export function getLiftJobFailurePolicy(code: LiftJobFailureCode): BuiltInLiftJo
   return LIFT_JOB_FAILURE_POLICIES[code];
 }
 
+const failureLog = new Logger('AsyncLiftPublisher');
+
 export function createLiftJobFailureMetadata(
   params: Omit<LiftJobFailureMetadata, 'phase' | 'mode' | 'retryable' | 'resolution'>,
 ): LiftJobFailureMetadata {
@@ -294,12 +302,18 @@ export function createLiftJobFailureMetadata(
     throw new Error(`Timeout metadata is not allowed for non-timeout LiftJob failure code ${params.code}`);
   }
 
+  // Every persisted failure message is a short reason (`jobFailureText`): a provider's text carries the
+  // request URL (ethers embeds it, and a configured URL can carry an API key), the transaction and the
+  // JSON-RPC payload, and the failure record is echoed by the job routes. Callers classify on the raw
+  // text and pass it here; the reduction lives at the one writer. When the reason had to be cut, the
+  // rest of the text, reduced the same way, goes to the node's own log and nowhere else.
+  const { reason, detail } = jobFailureText(params.message);
+  if (reason !== detail) {
+    failureLog.warn(createOperationContext('publish'), `${params.errorPayloadRef} failed (${params.code}): ${detail}`);
+  }
   return {
     ...params,
-    // Every persisted failure message is host-only: a provider's text carries the request URL (ethers
-    // embeds it), a configured URL can carry an API key, and the failure record is echoed by the job
-    // routes. Callers classify on the raw text and pass it here; the reduction lives at the one writer.
-    message: hostOnlyRpcText(params.message),
+    message: reason,
     phase: policy.phase,
     mode: policy.mode,
     retryable: policy.retryable,

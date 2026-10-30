@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { currentApiToken } from '../lib/apiToken.js';
+import { invalidateQueryCache } from '../api.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -73,6 +74,10 @@ function connect() {
   const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
     let data: Record<string, unknown> = {};
     try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
+    if (type === 'memory_graph_changed' && typeof data.contextGraphId === 'string') {
+      invalidateQueryCache(data.contextGraphId);
+    }
+    if (type === 'connected' || type === 'join_rejected' || type === 'join_approved' || type === 'project_synced') invalidateQueryCache();
     const event: NodeEvent = { type, data };
     for (const fn of listeners) {
       try { fn(event); } catch { /* never crash listeners */ }
@@ -102,7 +107,7 @@ function disconnect() {
   source = null;
 }
 
-function subscribe(fn: Listener): () => void {
+export function subscribeNodeEvents(fn: Listener): () => void {
   listeners.add(fn);
   if (listeners.size === 1) connect();
   return () => {
@@ -121,7 +126,7 @@ export function useNodeEvents(handler: Listener) {
   handlerRef.current = handler;
 
   useEffect(() => {
-    return subscribe((event) => handlerRef.current(event));
+    return subscribeNodeEvents((event) => handlerRef.current(event));
   }, []);
 }
 

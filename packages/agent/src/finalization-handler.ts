@@ -29,6 +29,7 @@ import {
   type PublicFinalizedMaterializationVersionSnapshot,
 } from '@origintrail-official/dkg-chain';
 import {
+  readCurrentAssertionVersion,
   generateGraphKnowledgeAssetMetadata,
   compareMaterializedVersion, readMaterializedVersion,
   writeMaterializedVersion, materializedVersionQuad,
@@ -63,9 +64,8 @@ import {
   type FinalizationRecoveryPreparedMaterialization,
   type FinalizationRecoveryReplayOutcome,
 } from './finalization-recovery.js';
-import {
-  FinalizationRecoveryWorker,
-} from './finalization-recovery-worker.js';
+import { FinalizationRecoveryWorker } from './finalization-recovery-worker.js';
+import { findExactVerifiedMemoryCopy, reportUnmatchedGraphScopedSwmHead } from './finalization-verified-memory-copy.js';
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
@@ -94,7 +94,6 @@ import {
   createDurableFinalizationRecoveryEligibility,
   type FinalizationRecoveryEligibility,
 } from './finalization-recovery-eligibility.js';
-
 /**
  * Resolves a local context-graph id (the topic/CG name used in gossip) to
  * its on-chain numeric id. Returns `null`/`undefined` for CGs that aren't
@@ -105,9 +104,7 @@ import {
 export type ResolveContextGraphOnChainId = (
   contextGraphId: string,
 ) => Promise<string | null | undefined>;
-
 export type MarkContextGraphMetaDirtyFromQuads = (quads: readonly Quad[]) => void;
-
 function stripOptionalLiteral(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (value.startsWith('"')) {
@@ -401,6 +398,7 @@ export class FinalizationHandler {
         ? createOperationContext('sync', candidate.msg.operationId)
         : createOperationContext('sync')),
       invalidateVerified: (input) => this.invalidateVerifiedGraphScopedFinalization(input),
+      findExactVerifiedMemoryCopy: (query) => findExactVerifiedMemoryCopy(this.store, query),
       isRetryableError: (error) => error instanceof StoreSchedulerBusyError,
     };
     this.recovery = new FinalizationRecovery(
@@ -773,7 +771,7 @@ export class FinalizationHandler {
       || (head.privateMerkleRoot?.toLowerCase() ?? undefined)
         !== (privateMerkleRoot ? ethers.hexlify(privateMerkleRoot).toLowerCase() : undefined)
     ) {
-      this.log.warn(ctx, `Finalization: no matching graph-scoped SWM head for ${scope.ual}`);
+      await reportUnmatchedGraphScopedSwmHead(this.store, this.log, ctx, contextGraphId, parsed);
       return undefined;
     }
     const trustedWireAccess = wireAccessPolicy !== undefined
@@ -2028,6 +2026,8 @@ export class FinalizationHandler {
     const safeAccess = resolveGraphScopedAccessEnvelope(head, requestedAccess);
 
     const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
+      const currentAssertion = await readCurrentAssertionVersion(this.store, metaGraph, scope.ual);
+      if (currentAssertion !== undefined && currentAssertion > BigInt(scope.assertionVersion)) return 'stale' as const;
       const currentMaterializedVersion = await readMaterializedVersion(
         this.store,
         metaGraph,

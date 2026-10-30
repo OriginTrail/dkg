@@ -69,11 +69,9 @@ import {
   type VerifiedControlEnvelopeIssuerSignatureV1,
 } from '@origintrail-official/dkg-chain';
 import {
-  quadToNQuad,
   quadsToNQuads,
   readExactGraphPaged,
   tryReplaceGraphAndSubjectAtomically,
-  type Quad,
   type TripleStore,
   invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -124,6 +122,7 @@ import {
   failRfc64PublicCatalogNativeV1 as fail,
   Rfc64PublicCatalogNativeReceiverErrorV1,
 } from './public-catalog-native-errors-v1.js';
+import { projectionReadBackByteLimitV1, readBackHoldsProjectionV1 } from './projection-store-read-back-v1.js';
 import {
   deactivateRfc64CatalogOwnedProjectionV1 as deactivateExactOwnedPublicProjection,
   deriveRfc64PublicSwmGraphV1 as derivePublicSwmGraph,
@@ -226,9 +225,11 @@ export interface Rfc64PublicCatalogNativeReceiverOptionsV1<
   /**
    * Serialized boundary lease held from durable evidence through semantic
    * activation, applied-head finalization, and exact marker retirement.
+   * `replay` is true when the head is the durable applied head already.
    */
   readonly acquireLegacySwmBoundaryLease?: (
     scope: Readonly<AuthorCatalogScopeV1>,
+    request: Readonly<{ replay: boolean }>,
   ) => Promise<Readonly<{
     evidence: Readonly<{
       graphAllowlist: ReadonlySet<string>;
@@ -505,6 +506,9 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           throw new TypeError('catalog applied-head precommit returned an invalid lifecycle');
         }
       }
+      // Persist activated SWM and precommit VM writes before SQLite commits the head.
+      // Decorators forward flush; HTTP stores acknowledge writes at their backend.
+      await this.options.store.flush?.({ signal: precommitSignal });
       throwIfAborted(precommitSignal);
       return Object.freeze({ transaction, afterAppliedHead });
     } catch (cause) {
@@ -773,6 +777,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       this.options.acquireLegacySwmBoundaryLease,
       this.options.resolveLegacySwmBoundaryEvidence,
       this.options.resolveColdBootstrapLegacySwmGraphAllowlist,
+      replay,
     );
     try {
       await assertColdBootstrapHasNoOmittedSemanticStateV1(
@@ -1204,6 +1209,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       historyDisposition === 'cold-bootstrap'
         ? this.options.resolveColdBootstrapLegacySwmGraphAllowlist
         : undefined,
+      historyDisposition === 'replay',
     );
     try {
       const legacySwmBoundaryEvidence = legacySwmBoundaryLease.evidence;
@@ -2228,15 +2234,12 @@ async function resolveLegacySwmBoundaryEvidenceV1(
 
 async function acquireLegacySwmBoundaryReceiverLeaseV1(
   scope: Readonly<AuthorCatalogScopeV1>,
-  acquireLease: Rfc64PublicCatalogNativeReceiverOptionsV1[
-    'acquireLegacySwmBoundaryLease'
-  ],
-  resolveEvidence: Rfc64PublicCatalogNativeReceiverOptionsV1[
-    'resolveLegacySwmBoundaryEvidence'
-  ],
+  acquireLease: Rfc64PublicCatalogNativeReceiverOptionsV1['acquireLegacySwmBoundaryLease'],
+  resolveEvidence: Rfc64PublicCatalogNativeReceiverOptionsV1['resolveLegacySwmBoundaryEvidence'],
   resolveLegacySwmGraphAllowlist: Rfc64PublicCatalogNativeReceiverOptionsV1[
     'resolveColdBootstrapLegacySwmGraphAllowlist'
   ],
+  replay: boolean,
 ): Promise<Readonly<{
   evidence: Readonly<{
     graphAllowlist: ReadonlySet<string>;
@@ -2261,7 +2264,7 @@ async function acquireLegacySwmBoundaryReceiverLeaseV1(
   }
   let lease: Awaited<ReturnType<NonNullable<typeof acquireLease>>> | undefined;
   try {
-    lease = await acquireLease(scope);
+    lease = await acquireLease(scope, { replay });
     if (
       typeof lease?.retireAppliedAssets !== 'function'
       || typeof lease?.release !== 'function'
@@ -2426,34 +2429,34 @@ async function activateExactPublicProjection(
     readBack = await readExactGraphPaged(store, swmGraph, {
       expectedQuadCount: expectedTripleCount,
       maxQuadCount: expectedTripleCount,
-      maxNQuadsBytes: projectionBytes.byteLength,
+      // The store may return a term in a longer form than the canonical one.
+      maxNQuadsBytes: projectionReadBackByteLimitV1(projectionText, expectedTripleCount),
       outputGraph: '',
       queryOptions: { source: 'rfc64-public-catalog-native-post-read' },
     });
   } catch (cause) {
     fail('catalog-native-receiver-activation', 'exact SWM post-read failed', cause);
   }
-  const readBackText = `${quadsToNQuads(readBack)}\n`;
-  if (readBackText !== projectionText) {
+  if (!readBackHoldsProjectionV1(projectionBytes, readBack)) {
+    const readBackText = `${quadsToNQuads(readBack)}\n`;
     const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-    const setEqual = canonicalQuadSetV1(quads) === canonicalQuadSetV1(readBack);
-    if (!setEqual) {
-      fail(
-        'catalog-native-receiver-activation',
-        `exact SWM post-read differs from verified projection for ${kaUal}`
-          + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
-          + ` expectedBytes=${Buffer.byteLength(projectionText)}`
-          + ` actualBytes=${Buffer.byteLength(readBackText)}`
-          + ` expectedSha256=${digest(projectionText)}`
-          + ` actualSha256=${digest(readBackText)}`
-          + ` canonicalSetEqual=${setEqual}`,
-      );
-    }
+    fail(
+      'catalog-native-receiver-activation',
+      `exact SWM post-read differs from verified projection for ${kaUal}`
+        + ` expectedTriples=${expectedTripleCount} actualTriples=${readBack.length}`
+        + ` expectedBytes=${Buffer.byteLength(projectionText)}`
+        + ` actualBytes=${Buffer.byteLength(readBackText)}`
+        + ` expectedSha256=${digest(projectionText)}`
+        + ` actualSha256=${digest(readBackText)}`
+        + ' canonicalSetEqual=false',
+    );
   }
   await assertExactAuthorSealPostRead(store, sealBinding);
   return {
     swmGraph,
-    publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
+    // The digest of what the store holds, in the store's own spelling: later
+    // reads of this graph and of its verified copy are compared with it.
+    publicQuadsDigest: workspacePublicQuadsDigest(readBack),
     evidence: Object.freeze({
       kaId: row.kaId,
       catalogRowDigest: sealBinding.catalogRowDigest,
@@ -2517,11 +2520,6 @@ function compareQuads(
     || left.object.localeCompare(right.object)
     || left.subject.localeCompare(right.subject)
     || left.graph.localeCompare(right.graph);
-}
-
-/** RDF graph equality is set equality; triple insertion does not retain row order. */
-function canonicalQuadSetV1(quads: readonly Readonly<Quad>[]): string {
-  return [...new Set(quads.map(quadToNQuad))].sort().join('\n');
 }
 
 export function rfc64CatalogSignatureVariantDigestV1(

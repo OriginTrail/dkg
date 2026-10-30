@@ -1,3 +1,4 @@
+import { deleteSwmOperationMetadata } from '../swm-operation-published-at.js';
 /**
  * The store adapter behind public SWM catch-up snapshot materialization.
  *
@@ -31,6 +32,7 @@ import {
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
 import { createSwmMaterializationMemo } from './swm-materialization-memo.js';
+import { newerStoredHeadIsMaterialized } from './swm-stored-head-proof.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -250,14 +252,10 @@ export interface SharedMemorySnapshotMaterializer {
     | { outcome: 'replace' }
   >;
   /**
-   * The private curator-recovery lane's skip predicate. A head marker alone
-   * cannot prove materialization: the assertion graph can be cleared while
-   * its durable metadata survives. Reuse the same exact count+digest guard as
-   * ordinary catch-up so a marker-only, partial, or equal-count stale graph is
-   * repaired rather than reported as recovered. Living here (rather than as a
-   * caller-supplied closure) keeps skip and preserve as one capability over
-   * one store and lock map.
+   * True only when the stored head is newer than the descriptor and its own
+   * committed content is in the store. Keeping a newer head is not holding it.
    */
+  isNewerStoredHeadMaterialized(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
   /**
    * Canonical graph-asset meta replacement (delete head + kaUal-owned linked
    * operation subjects) over THIS materializer's store — the one cleanup
@@ -638,6 +636,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
 
     readStoredHead,
 
+    isNewerStoredHeadMaterialized: (contextGraphId, descriptor) => newerStoredHeadIsMaterialized(deps.store, contextGraphId, descriptor),
+
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
       if (!Number.isSafeInteger(expected) || expected < 0) return false;
@@ -828,9 +828,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
       );
       for (const operationSubject of operationSubjects) {
-        await deleteByPatternWithoutCount(
-          deps.store,
-          { graph: descriptor.metaGraph, subject: operationSubject },
+        await deleteSwmOperationMetadata(
+          deps.store, descriptor.metaGraph, operationSubject,
+          descriptor.equivalentOperationSubjects.includes(operationSubject),
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
       }
@@ -840,7 +840,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       for (const asset of assets) {
         // ONE deletion-set rule with the preserving repair: the kaUal-owned
         // operation subjects linked through the head's current id rows (no
-        // exclusion — full replacement), seeded with the descriptor's own.
+        // exclusion), retaining clocks only for incoming operation identities.
         const operationSubjects = await collectOwnedHeadOperationSubjects(
           asset,
           { seed: [asset.operationSubject] },
@@ -851,9 +851,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead' },
         );
         for (const operationSubject of operationSubjects) {
-          await deleteByPatternWithoutCount(
-            deps.store,
-            { graph: asset.metaGraph, subject: operationSubject },
+          await deleteSwmOperationMetadata(
+            deps.store, asset.metaGraph, operationSubject,
+            asset.equivalentOperationSubjects.includes(operationSubject),
             { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation' },
           );
         }

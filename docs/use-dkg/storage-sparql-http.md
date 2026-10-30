@@ -5,15 +5,25 @@ audience: human+agent
 doc_type: how-to
 ---
 
-# Using an external SPARQL store (Oxigraph server, etc.)
+# Storage Backends
 
-The DKG node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of its default daemon-managed local Oxigraph server (or the embedded `oxigraph-worker` fallback). That gives you:
+A DKG node keeps its knowledge in a triple store. The store you choose decides how large your graphs can grow, how the data is kept on disk, and whether you can reuse a store you already run. Most nodes keep the default.
+
+## Store defaults
+
+New installs use a **daemon-managed local Oxigraph server** (`store.backend: "oxigraph-server"`). `dkg init`, `dkg openclaw/hermes/mcp setup` and the wizard default all write this block. The daemon fetches the pinned `oxigraph` binary on first boot and runs it on loopback. It gives concurrent reads (MVCC) and incremental RocksDB persistence.
+
+A config with **no** `store` block falls back to the embedded, in-process **`oxigraph-worker`**. It is a single-writer store that rewrites its N-Quads dump under `dataDir` on every flush. It suits development and small nodes.
+
+The async share and publish queues can also get store slots of their own, called the store control path. It is on for Blazegraph and managed Oxigraph stores on hosts with more than 2 CPUs. It is off for other backends, including `sparql-http`, and on hosts with 2 CPUs or fewer. The embedded store never uses it. To change it, see [Async Queue Operations](async-queue-operations.md#store-control-path).
+
+## External SPARQL store: `sparql-http`
+
+The node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of the managed Oxigraph server. That gives you:
 
 - **Real on-disk persistence** (e.g. Oxigraph server with RocksDB)
 - **Larger graphs** without holding everything in the Node process
 - **Existing infrastructure** (GraphDB, Blazegraph, Jena Fuseki, Neptune, Stardog)
-
-## Backend: `sparql-http`
 
 Configure the node to use the **`sparql-http`** backend with a **query endpoint**. `updateEndpoint` is optional and defaults to `queryEndpoint`, which covers stores that use one URL for both query and update.
 
@@ -102,7 +112,6 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
       "location": "/var/lib/dkg/oxigraph-data",
       "cacheDir": "/var/lib/dkg/oxigraph-bin",
       "clientTimeoutMs": 30000,
-      "walRestartThresholdBytes": 4294967296,
       "memoryHighMiB": 2048,
       "memoryMaxMiB": 3072
     }
@@ -114,7 +123,17 @@ The daemon sizes the startup readiness wait automatically from the RocksDB write
 
 `readyTimeoutMs` **overrides** that automatic sizing with an explicit maximum, used verbatim and never extended. It must be a positive integer; invalid values are ignored. You normally should not set it — if you configured it as a workaround for a node that would not start, remove it. When an explicit value is lower than the automatic estimate the daemon logs a warning naming both numbers, because that combination is what keeps a recovering node down.
 
-Managed Oxigraph also checks retained RocksDB WAL once per minute. When it reaches 4 GiB the daemon immediately stops admitting store work: from that moment every new operation is refused with `Managed Oxigraph is recovering; <operation> was not started` and `outcome: "not_started"`, so publishes fail fast instead of being cut through mid-write. The daemon then waits for the already-admitted operations to drain and for 30 seconds with nothing admitted or queued, and only then performs an ownership-verified supervised reopen. Both the drain and the idle guard are evaluated on that once-per-minute sample, so expect one to two minutes of refused store work before the reopen is even requested, plus the reopen itself — a WAL that large replays slowly. A successful read-write open replays and truncates the retained WAL, which bounds growth across long daemon sessions without cutting through an active query or update. After a completed reopen the threshold check itself is suspended for one hour, so that a node whose WAL is still above the threshold once replay finishes does not reopen again every idle window; a WAL that crosses the threshold inside that hour pauses admission only once the cooldown has elapsed. Set `store.options.walRestartThresholdBytes` to a positive safe integer to choose a different threshold; the 4 GiB default sits just above the largest field retention observed when this policy was added. Note that lowering the threshold does not shorten the one-hour cooldown, so a small threshold bounds the WAL to roughly one reopen per hour rather than to the configured size at all times.
+Managed Oxigraph retains its RocksDB write-ahead log (WAL) for as long as the store process runs; any reopen of the store, such as a node restart, replays and truncates it. By default nothing else trims it. The daemon measures the retained WAL once per minute and reports it in the node log when it first reaches 4 GiB and again each time it has doubled since the last report (`... of write-ahead log is retained and it grows until the store is reopened; the maintenance reopen is off`). Plan a node restart, or turn on the maintenance reopen described next, before the log fills the disk or makes the next start slow: the startup wait above is sized from this log.
+
+**Maintenance reopen (opt-in).** Set `store.options.walRestartThresholdBytes` to a positive safe integer, a size in bytes, and the daemon reopens the store when the retained WAL reaches that size:
+
+```json
+{ "store": { "backend": "oxigraph-server", "options": { "walRestartThresholdBytes": 4294967296 } } }
+```
+
+It is off unless you set it, because a reopen is not free. When the threshold is reached the daemon immediately stops admitting store work: from that moment every new operation is refused with `Managed Oxigraph is recovering; <operation> was not started` and `outcome: "not_started"`, so publishes fail fast instead of being cut through mid-write. The daemon then waits for the already-admitted operations to drain and for 30 seconds with nothing admitted or queued, and only then performs an ownership-verified supervised reopen. Both the drain and the idle guard are evaluated on that once-per-minute sample, so expect one to two minutes of refused store work before the reopen is even requested, plus the reopen itself — a WAL that large replays slowly. A successful read-write open replays and truncates the retained WAL, which bounds growth across long daemon sessions without cutting through an active query or update. After a completed reopen the threshold check itself is suspended for one hour, so that a node whose WAL is still above the threshold once replay finishes does not reopen again every idle window; a WAL that crosses the threshold inside that hour pauses admission only once the cooldown has elapsed.
+
+Choose the size from how fast the node writes. A reopen comes about every *threshold ÷ WAL growth per hour* hours and never more often than once an hour, so a small threshold bounds the WAL to roughly one reopen per hour rather than to the configured size at all times. The size the daemon logs at each start, and the reports above, tell you the growth; a node that takes many writes can retain several GiB an hour. When the option is set the daemon says so at start (`WAL maintenance reopen is on: ...`). A value that is not a positive integer number of bytes (zero, negative, fractional, a string) is ignored with a line in the log, and the reopen stays off.
 
 `clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. Managed Oxigraph defaults to 30 seconds. Without an explicit native deadline, Oxigraph 0.5.x client deadlines are capped at 55 seconds, ahead of the server's implicit 60-second HTTP cutoff. A client deadline triggers a supervised database restart, since ending an HTTP request does not prove that the database stopped working on it. This applies to updates as well as queries: a timed-out `INSERT DATA` restarts the whole managed database and interrupts every concurrent write, so retry those with the existing indeterminate-outcome/idempotency handling.
 
@@ -145,6 +164,12 @@ Size the daemon service and Oxigraph scope independently, while keeping their co
 - **Apache Jena Fuseki:** Typically `http://host:3030/dataset/query` and `http://host:3030/dataset/update`.
 - **GraphDB, Neptune, Stardog:** Use the vendor’s SPARQL query and update URLs; add `auth` if required.
 
+### Store concurrency budget
+
+The node's shared store queue runs at most `DKG_STORE_MAX_CONCURRENT` operations at once (4 by default), capped at the host's CPU count (but at least 2). One slot stays reserved for storage acknowledgements and one for health checks. Where the [store control path](async-queue-operations.md#store-control-path) is on, the job queues get up to three more slots on top of that (one for sharing, two for publishing), so a 4-slot node can send the store up to 7 operations at once. To make the shared limit cover every store call, switch the control path off as well.
+
+A remote store that is slow because of request latency, not CPU, can sometimes do more at once. `DKG_STORE_CONCURRENCY_POLICY=configured` removes the CPU cap, so `DKG_STORE_MAX_CONCURRENT` becomes the exact size of the shared queue; the two reserved slots stay reserved. Raise it only after comparing queue waits, completed work and the store's own load before and after, on your store and workload. To roll back, remove the variables and restart.
+
 ### Blazegraph provisioned by `dkg init` (Docker)
 
 When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, the CLI offers to provision a container itself. For new containers, the provisioner uses the pinned multi-architecture image and data path declared in `blazegraph-image.json`, stores the journal in a named Docker volume, and uses `--restart unless-stopped`. Blazegraph output uses Docker's compressed `local` log driver with a 4 GB rotation budget (`200m` × 20 files), so an unattended container cannot fill the host disk. The provisioner auto-bumps the host port if 9999 is taken and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
@@ -171,8 +196,3 @@ const agent = await DKGAgent.create({
 await agent.start();
 ```
 
-## Store defaults
-
-New installs default to a **daemon-managed local Oxigraph server** (`store.backend: "oxigraph-server"`): `dkg init`, `dkg openclaw/hermes/mcp setup`, or accepting the wizard default writes this block. The daemon fetches the pinned `oxigraph` binary on first boot and runs it on loopback, giving MVCC concurrent reads and incremental RocksDB persistence.
-
-If a config has **no** `store` block at all, the runtime falls back to the embedded in-process **`oxigraph-worker`** (a single-writer store that rewrites its on-disk N-Quads dump under `dataDir` on every flush) — fine for development and small nodes. For very large graphs or existing infrastructure, use `sparql-http` with an external store.

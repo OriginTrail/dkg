@@ -1,3 +1,7 @@
+import { INVENTORY_SCHEMA_MIGRATIONS_V1, type InventorySchemaMigrationV1 } from './schema-migrations.js';
+import { finishInventoryV1PreMigrationCopy, keepInventoryV1PreMigrationCopy } from './pre-migration-copy.js';
+import { InventoryV1OpenError } from './open-error.js';
+export { InventoryV1OpenError, type InventoryV1OpenErrorCode } from './open-error.js';
 import type { Rfc64SwmAuthorInventoryOperationsV1 } from './swm-author-inventory-contracts.js';
 import {
   closeSync,
@@ -44,20 +48,8 @@ import {
   INVENTORY_V1_DDL,
   INVENTORY_V1_DIRECTORY_MODE,
   INVENTORY_V1_FILE_MODE,
-  INVENTORY_V1_LEGACY_USER_OBJECTS,
-  INVENTORY_V1_LEGACY_USER_VERSION,
-  INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
-  INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
-  INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
-  INVENTORY_V1_MIGRATE_V4_TO_V5_SQL,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
-  INVENTORY_V1_V2_USER_OBJECTS,
-  INVENTORY_V1_V2_USER_VERSION,
-  INVENTORY_V1_V3_USER_OBJECTS,
-  INVENTORY_V1_V3_USER_VERSION,
-  INVENTORY_V1_V4_USER_OBJECTS,
-  INVENTORY_V1_V4_USER_VERSION,
   normalizeInventoryV1SchemaSql,
 } from './sql.js';
 import {
@@ -102,8 +94,8 @@ import {
   type InventoryV1TargetCloseReason,
 } from './lifecycle-adapter.js';
 
-type SqliteModuleV1 = typeof import('node:sqlite');
-type DatabaseSyncV1 = InstanceType<SqliteModuleV1['DatabaseSync']>;
+export type SqliteModuleV1 = typeof import('node:sqlite');
+export type DatabaseSyncV1 = InstanceType<SqliteModuleV1['DatabaseSync']>;
 
 const RECOVERY_MARKER_SUFFIX = '.rebuild-required';
 const QUARANTINE_DIRECTORY = 'quarantine';
@@ -116,28 +108,6 @@ const LEASE_CREATION_RACE_TIMEOUT_MS = 1_000;
 const LEASE_CREATION_RACE_RETRY_MS = 10;
 const RECOVERY_MARKER_MAX_BYTES = 4_096;
 
-export type InventoryV1OpenErrorCode =
-  | 'sqlite-unavailable'
-  | 'foreign-database'
-  | 'newer-schema'
-  | 'ambiguous-database'
-  | 'unsafe-path'
-  | 'pragma-mismatch'
-  | 'database-busy'
-  | 'durability-unavailable'
-  | 'database-closed'
-  | 'database-io';
-
-export class InventoryV1OpenError extends Error {
-  constructor(
-    readonly code: InventoryV1OpenErrorCode,
-    message: string,
-    options: ErrorOptions = {},
-  ) {
-    super(`[${code}] ${message}`, options);
-    this.name = 'InventoryV1OpenError';
-  }
-}
 
 class InventoryV1TargetCloseError extends InventoryV1OpenError {
   constructor(
@@ -303,6 +273,7 @@ async function openInventoryV1WithLifecycleAdapter(
 
 class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   #database: DatabaseSyncV1 | null;
+  #unavailableCause: unknown;
   #candidate: CandidateInventoryV1;
   #lease: InventoryV1Lease | null;
   constructor(
@@ -365,6 +336,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   }
 
   close(): void {
+    this.#unavailableCause = undefined;
     this.#candidate.close();
     const database = this.#database;
     if (database !== null) {
@@ -530,6 +502,11 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
+  listSwmAuthorInventoryScopesV1(): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['listSwmAuthorInventoryScopesV1']> {
+    this.requireOpen();
+    return this.#candidate.listSwmAuthorInventoryScopesV1();
+  }
+
   readSwmAuthorInventoryHeadDigestV1(...input: Parameters<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']>): ReturnType<Rfc64SwmAuthorInventoryOperationsV1['readSwmAuthorInventoryHeadDigestV1']> {
     this.requireOpen();
     return this.#candidate.readSwmAuthorInventoryHeadDigestV1(...input);
@@ -583,6 +560,15 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     this.#candidate.deleteFinalizedPrivatePlacementRepair(repair);
   }
 
+  readFinalizedPrivatePlacementFailure(...input: Parameters<Rfc64InventoryV1CandidateApi['readFinalizedPrivatePlacementFailure']>) {
+    this.requireOpen();
+    return this.#candidate.readFinalizedPrivatePlacementFailure(...input);
+  }
+  writeFinalizedPrivatePlacementFailures(...input: Parameters<Rfc64InventoryV1CandidateApi['writeFinalizedPrivatePlacementFailures']>): void {
+    this.requireOpen();
+    this.#candidate.writeFinalizedPrivatePlacementFailures(...input);
+  }
+
   readUnregisteredAuthoritySeedV1(
     ...input: Parameters<Rfc64InventoryV1CandidateApi['readUnregisteredAuthoritySeedV1']>
   ) {
@@ -599,7 +585,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
 
   private requireOpen(): DatabaseSyncV1 {
     if (this.#database === null) {
-      throw new InventoryV1OpenError('database-closed', 'inventory database is closed');
+      throw new InventoryV1OpenError('database-closed', 'inventory database is closed', { cause: this.#unavailableCause });
     }
     return this.#database;
   }
@@ -629,8 +615,10 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
             this.lifecycle,
           );
           this.#database = reopened;
+          this.#unavailableCause = undefined;
           return reopened;
         } catch (cause) {
+          this.#unavailableCause = cause;
           if (cause instanceof InventoryV1TargetCloseError) this.retainFailStop(cause);
           // Never quarantine, rebuild, or manufacture a candidate outcome on the
           // latency/indeterminate-COMMIT path. The live foundation stays closed.
@@ -642,7 +630,8 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
         }
       },
       undefined,
-      (rejectedDatabase) => {
+      (rejectedDatabase, cause) => {
+        this.#unavailableCause = cause;
         // Candidate validation happens after the provider returns. Detach the
         // adopted replacement before closing it so `closed` and requireOpen()
         // cannot observe a stale closed DatabaseSync handle.
@@ -663,6 +652,7 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
 
   private retainFailStop(error: unknown): never {
     if (!(error instanceof InventoryV1TargetCloseError)) throw error;
+    this.#unavailableCause = error;
     if (this.#lease !== null) {
       retainInventoryFailStop(this.#lease, error);
       this.#lease = null;
@@ -729,7 +719,7 @@ async function loadSqliteModule(): Promise<SqliteModuleV1> {
   }
 }
 
-interface InventoryV1Lease {
+export interface InventoryV1Lease {
   readonly database: DatabaseSyncV1;
 }
 
@@ -768,7 +758,7 @@ function inventoryLeasePath(databasePath: string): string {
   return join(dirname(databasePath), LEASE_DATABASE_NAME);
 }
 
-async function acquireInventoryLease(
+export async function acquireInventoryLease(
   sqlite: SqliteModuleV1,
   databasePath: string,
 ): Promise<InventoryV1Lease> {
@@ -1002,7 +992,7 @@ function verifyLeasePragmas(database: DatabaseSyncV1): void {
   }
 }
 
-function releaseInventoryLease(lease: InventoryV1Lease | null): void {
+export function releaseInventoryLease(lease: InventoryV1Lease | null): void {
   if (lease === null) return;
   try {
     lease.database.exec('ROLLBACK');
@@ -1159,7 +1149,7 @@ function openOrRebuildOwnedDatabase(
   }
 }
 
-function assertTargetJournalModeCoherence(databasePath: string): void {
+export function assertTargetJournalModeCoherence(databasePath: string): void {
   if (
     pathEntryExists(`${databasePath}-journal`)
     && (
@@ -1215,13 +1205,13 @@ function assertCommittedTargetIdentity(identity: DatabaseIdentityV1): void {
   }
 }
 
-interface DatabaseIdentityV1 {
+export interface DatabaseIdentityV1 {
   applicationId: number;
   userVersion: number;
   userObjects: Array<{ name: string; sql: string | null }>;
 }
 
-function readIdentity(database: DatabaseSyncV1): DatabaseIdentityV1 {
+export function readIdentity(database: DatabaseSyncV1): DatabaseIdentityV1 {
   return {
     applicationId: readPragmaInteger(database, 'application_id'),
     userVersion: readPragmaInteger(database, 'user_version'),
@@ -1238,7 +1228,7 @@ function isFreshIdentity(identity: DatabaseIdentityV1): boolean {
   return identity.applicationId === 0 && identity.userVersion === 0;
 }
 
-function schemaMatches(
+export function schemaMatches(
   objects: DatabaseIdentityV1['userObjects'],
   expectedObjects: Readonly<Record<string, string>> = INVENTORY_V1_USER_OBJECTS,
 ): boolean {
@@ -1250,55 +1240,6 @@ function schemaMatches(
       && normalizeInventoryV1SchemaSql(object.sql) === expected;
   });
 }
-
-interface InventorySchemaMigrationV1 {
-  readonly fromVersion: number;
-  readonly toVersion: number;
-  readonly fromLabel: string;
-  readonly toLabel: string;
-  readonly fromObjects: Readonly<Record<string, string>>;
-  readonly toObjects: Readonly<Record<string, string>>;
-  readonly sql: string;
-}
-
-const INVENTORY_SCHEMA_MIGRATIONS_V1: readonly InventorySchemaMigrationV1[] = Object.freeze([
-  Object.freeze({
-    fromVersion: INVENTORY_V1_LEGACY_USER_VERSION,
-    toVersion: INVENTORY_V1_V2_USER_VERSION,
-    fromLabel: 'v1',
-    toLabel: 'v2',
-    fromObjects: INVENTORY_V1_LEGACY_USER_OBJECTS,
-    toObjects: INVENTORY_V1_V2_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V1_TO_V2_SQL,
-  }),
-  Object.freeze({
-    fromVersion: INVENTORY_V1_V2_USER_VERSION,
-    toVersion: INVENTORY_V1_V3_USER_VERSION,
-    fromLabel: 'v2',
-    toLabel: 'v3',
-    fromObjects: INVENTORY_V1_V2_USER_OBJECTS,
-    toObjects: INVENTORY_V1_V3_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V2_TO_V3_SQL,
-  }),
-  Object.freeze({
-    fromVersion: INVENTORY_V1_V3_USER_VERSION,
-    toVersion: INVENTORY_V1_V4_USER_VERSION,
-    fromLabel: 'v3',
-    toLabel: 'v4',
-    fromObjects: INVENTORY_V1_V3_USER_OBJECTS,
-    toObjects: INVENTORY_V1_V4_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V3_TO_V4_SQL,
-  }),
-  Object.freeze({
-    fromVersion: INVENTORY_V1_V4_USER_VERSION,
-    toVersion: INVENTORY_V1_USER_VERSION,
-    fromLabel: 'v4',
-    toLabel: 'v5',
-    fromObjects: INVENTORY_V1_V4_USER_OBJECTS,
-    toObjects: INVENTORY_V1_USER_OBJECTS,
-    sql: INVENTORY_V1_MIGRATE_V4_TO_V5_SQL,
-  }),
-]);
 
 type InventorySchemaVersionClassV1 =
   | 'current'
@@ -1323,9 +1264,10 @@ function migrateInventorySchemaToCurrent(
   database: DatabaseSyncV1,
   databasePath: string,
 ): void {
+  keepInventoryV1PreMigrationCopy(database, databasePath);
   while (true) {
     const identity = readIdentity(database);
-    if (identity.userVersion === INVENTORY_V1_USER_VERSION) return;
+    if (identity.userVersion === INVENTORY_V1_USER_VERSION) return finishInventoryV1PreMigrationCopy(databasePath);
     const migration = INVENTORY_SCHEMA_MIGRATIONS_V1.find(
       (candidate) => candidate.fromVersion === identity.userVersion,
     );
@@ -1591,7 +1533,7 @@ function readPragmaInteger(database: DatabaseSyncV1, pragma: string): number {
   return value;
 }
 
-function prepareSecureDirectory(dataDirectory: string, directoryPath: string): void {
+export function prepareSecureDirectory(dataDirectory: string, directoryPath: string): void {
   const relativeDirectory = relative(dataDirectory, directoryPath);
   if (
     relativeDirectory === '..'
@@ -1689,7 +1631,7 @@ function assertFilesystemOwner(path: string): void {
   }
 }
 
-function assertOwnedUnitOwners(databasePath: string): void {
+export function assertOwnedUnitOwners(databasePath: string): void {
   for (const suffix of OWNED_FILE_SUFFIXES) {
     const path = `${databasePath}${suffix}`;
     if (pathEntryExists(path)) {
@@ -1713,14 +1655,14 @@ function applySecurePermissions(
   }
 }
 
-function rejectOwnedFileSymlinks(databasePath: string): void {
+export function rejectOwnedFileSymlinks(databasePath: string): void {
   for (const suffix of OWNED_FILE_SUFFIXES) {
     const path = `${databasePath}${suffix}`;
     if (pathEntryExists(path)) rejectSymlink(path, `inventory database${suffix}`);
   }
 }
 
-function rejectOrphanedSqliteSidecars(mainPath: string, label: string): void {
+export function rejectOrphanedSqliteSidecars(mainPath: string, label: string): void {
   if (pathEntryExists(mainPath)) return;
   for (const suffix of ['-journal', '-wal', '-shm'] as const) {
     if (!pathEntryExists(`${mainPath}${suffix}`)) continue;
@@ -1737,7 +1679,7 @@ function rejectSymlink(path: string, label: string): void {
   }
 }
 
-function assertOwnedRegularFile(path: string, label: string): void {
+export function assertOwnedRegularFile(path: string, label: string): void {
   rejectSymlink(path, label);
   if (!lstatSync(path).isFile()) {
     throw new InventoryV1OpenError('unsafe-path', `${label} must be a regular file`);
@@ -1771,7 +1713,7 @@ function assertSameFilesystem(path: string, directoryPath: string, label: string
   }
 }
 
-function fsyncRegularFile(path: string, label: string): void {
+export function fsyncRegularFile(path: string, label: string): void {
   assertOwnedRegularFile(path, label);
   let descriptor: number | undefined;
   try {
@@ -1788,7 +1730,7 @@ function fsyncRegularFile(path: string, label: string): void {
   }
 }
 
-function pathEntryExists(path: string): boolean {
+export function pathEntryExists(path: string): boolean {
   try {
     lstatSync(path);
     return true;
@@ -2390,7 +2332,7 @@ function assertRecoveryMembers(value: readonly unknown[]): RecoveryMembersV1 {
   return [...value] as unknown as RecoveryMembersV1;
 }
 
-function recoveryMarkerPath(databasePath: string): string {
+export function recoveryMarkerPath(databasePath: string): string {
   return `${databasePath}${RECOVERY_MARKER_SUFFIX}`;
 }
 
@@ -2400,7 +2342,7 @@ function isCorruptSqliteError(error: unknown): boolean {
   return errcode === 11 || errcode === 26;
 }
 
-function isBusySqliteError(error: unknown): boolean {
+export function isBusySqliteError(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false;
   const errcode = (error as { errcode?: unknown }).errcode;
   return errcode === 5 || errcode === 6;
@@ -2408,7 +2350,7 @@ function isBusySqliteError(error: unknown): boolean {
 
 type CorruptDatabaseOwnershipV1 = 'owned' | 'ambiguous' | 'foreign' | 'newer';
 
-interface SqliteHeaderIdentityV1 {
+export interface SqliteHeaderIdentityV1 {
   applicationId: number;
   userVersion: number;
   writeVersion: number;
@@ -2425,7 +2367,7 @@ function classifyCorruptDatabaseOwnership(databasePath: string): CorruptDatabase
     ? 'owned' : 'ambiguous';
 }
 
-function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdentityV1 | null {
+export function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdentityV1 | null {
   let descriptor: number | undefined;
   try {
     descriptor = openSync(databasePath, 'r');
@@ -2451,7 +2393,7 @@ function readValidSqliteHeaderIdentity(databasePath: string): SqliteHeaderIdenti
   }
 }
 
-function fsyncDirectory(path: string): void {
+export function fsyncDirectory(path: string): void {
   fsyncRfc64DirectorySyncV1(path);
 }
 

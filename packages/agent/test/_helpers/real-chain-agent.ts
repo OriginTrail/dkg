@@ -99,6 +99,19 @@ export interface RealChainAgentOptions {
   readonly dataDir?: string;
   /** Left unset when omitted (the agent then keeps its subscriptions in memory only). */
   readonly contextGraphSubscriptionStore?: DKGAgentConfig['contextGraphSubscriptionStore'];
+  /** Left unset when omitted (the agent then reserves no relay circuit). */
+  readonly relayPeers?: DKGAgentConfig['relayPeers'];
+  /** Left unset when omitted (the agent then announces the addresses it listens on). */
+  readonly announceAddresses?: DKGAgentConfig['announceAddresses'];
+  /** Default: `'edge'`. A Core also runs the relay server and hosts public graphs. */
+  readonly nodeRole?: DKGAgentConfig['nodeRole'];
+  /**
+   * Left unset when omitted. An agent with bootstrap peers dials them at start
+   * and runs no mDNS, so it reaches only the peers a suite connects it to.
+   */
+  readonly bootstrapPeers?: DKGAgentConfig['bootstrapPeers'];
+  /** Left unset when omitted: what the daemon sets for an Edge whose relays are all public. */
+  readonly publicAddressesOnly?: DKGAgentConfig['publicAddressesOnly'];
 }
 
 /** What `startNode` returns: the started agent, its chain adapter and its default agent address. */
@@ -127,11 +140,15 @@ export class RealChainAgents {
       listenPort: 0,
       skills: [],
       chainAdapter,
-      nodeRole: 'edge',
+      nodeRole: options.nodeRole ?? 'edge',
       ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
       ...(options.contextGraphSubscriptionStore === undefined
         ? {}
         : { contextGraphSubscriptionStore: options.contextGraphSubscriptionStore }),
+      ...(options.relayPeers === undefined ? {} : { relayPeers: options.relayPeers }),
+      ...(options.announceAddresses === undefined ? {} : { announceAddresses: options.announceAddresses }),
+      ...(options.bootstrapPeers === undefined ? {} : { bootstrapPeers: options.bootstrapPeers }),
+      ...(options.publicAddressesOnly === undefined ? {} : { publicAddressesOnly: options.publicAddressesOnly }),
       chainConfig: realChainConfig(options.operationalKey),
     });
     this.agents.push(agent);

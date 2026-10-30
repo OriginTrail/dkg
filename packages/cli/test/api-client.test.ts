@@ -1,3 +1,4 @@
+import { confirmedCatalogPendingFixture } from './_helpers/confirmed-catalog-response-fixture.js';
 import * as configModule from '../src/config.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
@@ -777,12 +778,14 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
       await client.query('SELECT * { ?s ?p ?o }', 'my-contextGraph', {
         includeContextGraphPartitions: true,
+        includeSharedMemoryMeta: true,
       });
 
       const body = JSON.parse(calls[0].opts.body as string);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('my-contextGraph');
       expect(body.includeContextGraphPartitions).toBe(true);
+      expect(body.includeSharedMemoryMeta).toBe(true);
     });
 
     // LU-2 (SPEC_CG_MEMORY_MODEL): the legacy participantIdentityIds /
@@ -1098,6 +1101,24 @@ describe('ApiClient', () => {
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/operational-wallets`);
       expect(calls[0].opts.method).toBe('POST');
       expect(JSON.parse(calls[0].opts.body as string)).toEqual({ address: '0x' + '1'.repeat(40) });
+    });
+
+    it('requestJoin() POSTs the signed request, with reRequest only when asked for (#3421)', async () => {
+      const body = { ok: true, status: 'approved', joinState: 'approved-metadata-pending', delivered: 0 };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const delegation = { agentAddress: '0x' + '3'.repeat(40) };
+      await expect(client.requestJoin('owner/graph', delegation, '12D3KooWCurator')).resolves.toEqual(body);
+      await client.requestJoin('owner/graph', delegation, '12D3KooWCurator', 'joiner', { reRequest: true });
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/owner%2Fgraph/request-join`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ delegation, curatorPeerId: '12D3KooWCurator' });
+      expect(JSON.parse(calls[1].opts.body as string)).toEqual({
+        delegation,
+        curatorPeerId: '12D3KooWCurator',
+        agentName: 'joiner',
+        reRequest: true,
+      });
     });
 
     it('removeOperationalWallet() DELETEs the address route', async () => {
@@ -1626,6 +1647,18 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ contextGraphId: 'cg' });
   });
 
+  it.each(['publishAssertion', 'publishFromFinalizedAssertion'] as const)('%s retains the complete pending recovery response without republishing', async helper => {
+    const pending = confirmedCatalogPendingFixture();
+    const calls = track({ ...pending, assertionUri: pending.recovery.assertionUri });
+    const result = helper === 'publishAssertion'
+      ? await client.publishAssertion('cg', 'asset', [])
+      : await client.publishFromFinalizedAssertion('cg', 'asset');
+    expect(result).toEqual({ ...pending, assertionUri: pending.recovery.assertionUri });
+    expect(result.catalogObligationPending).toBe(true);
+    expect(calls).toHaveLength(helper === 'publishAssertion' ? 2 : 1);
+    expect(calls.filter(call => call.url.endsWith('/vm/publish'))).toHaveLength(1);
+  });
+
   it('publishAssertion runs the create → per-KA /vm/publish two-call sequence', async () => {
     const calls = track({ kaId: '1', status: 'confirmed', kas: [], assertionUri: 'urn:a' });
     await client.publishAssertion(
@@ -1713,6 +1746,29 @@ describe('ApiClient per-route timeout classes', () => {
     expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
     expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', method: 'POST', path: '/api/knowledge-assets/asset/vm/publish' });
     expect((err as Error).message).toContain('dkg ka history asset --context-graph-id cg --sub-graph-name sg');
+  });
+
+  // #3574: an async admission that gets no answer may still have stored a job, so it is outcome unknown too, and the
+  // hint names the job list rather than a re-run.
+  it.each([
+    ['share', (client: ApiClient) => client.knowledgeAssetShareAsync('cg', 'asset'),
+      '/api/knowledge-assets/asset/swm/share-async', 'dkg ka share-jobs --context-graph-id cg'],
+    ['publish', (client: ApiClient) => client.knowledgeAssetPublishAsync('cg', 'asset'),
+      '/api/knowledge-assets/asset/vm/publish-async', 'dkg publisher jobs --context-graph cg'],
+  ] as const)('an async %s admission past its deadline reports outcome unknown, pointing at the job list', async (kind, send, path, jobList) => {
+    slowDaemon(400);
+    const err = await send(timed(100)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', method: 'POST', path });
+    expect((err as Error).message).toContain(`A ${kind} job for "asset" may exist: look for it with \`${jobList}\` before retrying.`);
+  });
+
+  it('names the stored context graph ID in the job-list hint when the request used its URI', async () => {
+    // The share-job list compares its filter as given, and jobs are stored under the bare ID.
+    slowDaemon(400);
+    const err = await timed(100).knowledgeAssetShareAsync('did:dkg:context-graph:research', 'asset').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect((err as Error).message).toContain('`dkg ka share-jobs --context-graph-id research`');
   });
 
   it('other writes past the long deadline keep the plain timeout error', async () => {

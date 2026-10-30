@@ -1,3 +1,5 @@
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -66,6 +68,7 @@ function persistenceAgent(config: Record<string, unknown> = {}): any {
   Object.assign(agent, {
     config,
     contextGraphBindingState: new ContextGraphBindingState(),
+    contextGraphSubscriptionDormancyById: new Map(),
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
@@ -76,8 +79,9 @@ function persistenceAgent(config: Record<string, unknown> = {}): any {
     subscribedContextGraphs: new Map<string, ContextGraphSub>(),
     log: { warn: vi.fn(), info: vi.fn() },
     invalidateListContextGraphsCache: vi.fn(),
-    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
+    recordContextGraphSubscriptionPersistence: vi.fn(),
   });
+  agent.contextGraphSubscriptionActivations = createTestSubscriptionActivations(agent);
   return agent;
 }
 
@@ -217,7 +221,7 @@ describe('persistContextGraphSubscription revision semantics', () => {
     held.open();
     await Promise.all([newest, stale]);
     expect(saves).toHaveLength(2);
-    expect(agent.updateContextGraphSubscriptionRehydrationStatusAfterPersist).toHaveBeenCalledTimes(1);
+    expect(agent.recordContextGraphSubscriptionPersistence).toHaveBeenCalledTimes(1);
   });
 
   it('a cancel that lands before a write settles drops its callback but not the durable write', async () => {
@@ -228,7 +232,7 @@ describe('persistContextGraphSubscription revision semantics', () => {
     held.open();
     await write;
     expect(saves).toHaveLength(1);
-    expect(agent.updateContextGraphSubscriptionRehydrationStatusAfterPersist).not.toHaveBeenCalled();
+    expect(agent.recordContextGraphSubscriptionPersistence).not.toHaveBeenCalled();
   });
 
   it('a superseded row is cleared from revision state after its last write and pending revision', async () => {
@@ -316,6 +320,7 @@ describe('persistJoinApprovalStateStrict nesting', () => {
 function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
+  agent.workLifetime = new AgentWorkLifetime();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.gossipSession = new GossipSession();
   agent.lastSyncDisconnectedAt = new Map();
@@ -326,6 +331,7 @@ function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const closeStore = vi.fn(async () => {});
   Object.assign(agent, {
     started: true,
+    config: { coreChainCacheNetworks: [] },
     chainPoller: null,
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
@@ -439,7 +445,7 @@ describe('DKGAgent.stop() subscription persistence drain', () => {
       await runGate.promise;
       await agent.enqueueContextGraphSubscriptionPersistWrite('cg', async () => { saved.push('cursor'); });
     })().then(() => { runOutcome = 'written'; }, (error: unknown) => { runOutcome = error; });
-    agent.graphScopedStorePhysicalRuns = new Set([run]);
+    agent.workLifetime.track(run);
 
     const stopping = agent.stop();
     await flush();

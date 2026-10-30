@@ -3,7 +3,7 @@ import { ManagedWorkRecoveryCoordinatorV1 } from '../../storage/src/managed-work
 import { normalizeManagedSparqlRecoveryV1 } from '../../storage/src/adapters/managed-sparql-recovery.js';
 import { createOxigraphRecoveryProgress, OxigraphRecoveryProgressOwner } from '../src/daemon/oxigraph-recovery-progress.js';
 import {
-  DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
+  WAL_GROWTH_NOTICE_BYTES,
   createOxigraphWalMaintenanceCoordinator,
   resolveWalRestartThresholdBytes,
 } from '../src/daemon/oxigraph-wal-maintenance.js';
@@ -189,10 +189,10 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     notify('reopened'); tick(); expect(requestRecovery).toHaveBeenCalledTimes(requests);
   });
 
-  it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '100'])(
-    'resolves invalid threshold %s to the canonical 4 GiB default',
+  it.each([undefined, null, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '100', true])(
+    'leaves the maintenance reopen off for the threshold %s',
     (value) => {
-      expect(resolveWalRestartThresholdBytes(value)).toBe(DEFAULT_WAL_RESTART_THRESHOLD_BYTES);
+      expect(resolveWalRestartThresholdBytes(value)).toBeUndefined();
     },
   );
 
@@ -379,5 +379,184 @@ describe('Oxigraph WAL maintenance coordinator', () => {
 
     controlled.coordinator.stop();
     expect(controlled.cancel).toHaveBeenCalledWith(controlled.timer);
+  });
+});
+
+/** A coordinator with the maintenance reopen off, driven by hand. */
+function controlledObserver(overrides: {
+  measureRetainedWalBytes?: () => number;
+  checkIntervalMs?: number;
+} = {}) {
+  let tick = () => {};
+  let serverAvailable = true;
+  const lines: string[] = [];
+  const requestRecovery = vi.fn(() => undefined);
+  const cancel = vi.fn();
+  const timer = { unref: vi.fn() } as unknown as ReturnType<typeof setInterval>;
+  let scheduledEveryMs: number | undefined;
+  const coordinator = createOxigraphWalMaintenanceCoordinator({
+    location: '/tmp/oxigraph-test',
+    thresholdBytes: undefined,
+    checkIntervalMs: overrides.checkIntervalMs,
+    measureRetainedWalBytes: overrides.measureRetainedWalBytes ?? (() => 0),
+    requestRecovery,
+    serverAvailable: () => serverAvailable,
+    log: line => lines.push(line),
+    schedule: (callback, intervalMs) => {
+      scheduledEveryMs = intervalMs;
+      tick = callback;
+      return timer;
+    },
+    cancel,
+  });
+  return {
+    coordinator, lines, requestRecovery, cancel, timer,
+    tick: () => tick(),
+    scheduledEveryMs: () => scheduledEveryMs,
+    setServerAvailable: (value: boolean) => { serverAvailable = value; },
+  };
+}
+
+describe('Oxigraph WAL maintenance with the reopen off', () => {
+  const GIB = 1024 ** 3;
+
+  it('never pauses admission and never asks for a reopen, however large the log is', () => {
+    let walBytes = 100 * WAL_GROWTH_NOTICE_BYTES;
+    const { coordinator, tick, requestRecovery, lines } = controlledObserver({
+      measureRetainedWalBytes: () => walBytes,
+    });
+    try {
+      const lease = coordinator.registerActivity();
+      for (let sample = 0; sample < 5; sample += 1) {
+        lease.report(sample % 2 === 0);
+        tick();
+        walBytes += GIB;
+        expect(coordinator.admissionsPaused()).toBe(false);
+      }
+      coordinator.serverLifecycleChanged('confirmed-reopen');
+      lease.dispose();
+      expect(coordinator.admissionsPaused()).toBe(false);
+      expect(requestRecovery).not.toHaveBeenCalled();
+      // The size was reported once: it never doubled.
+      expect(lines).toHaveLength(1);
+    } finally { coordinator.stop(); }
+  });
+
+  it('reports the retained log at the notice size and again each time it has doubled', () => {
+    let walBytes = WAL_GROWTH_NOTICE_BYTES - 1;
+    const { coordinator, tick, lines } = controlledObserver({ measureRetainedWalBytes: () => walBytes });
+    try {
+      tick();
+      expect(lines).toEqual([]);
+
+      walBytes = WAL_GROWTH_NOTICE_BYTES;
+      tick();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('4.00 GiB of write-ahead log is retained');
+      expect(lines[0]).toContain('the maintenance reopen is off');
+      expect(lines[0]).toContain('store.options.walRestartThresholdBytes');
+
+      walBytes = 2 * WAL_GROWTH_NOTICE_BYTES - 1;
+      tick();
+      tick();
+      expect(lines).toHaveLength(1);
+
+      walBytes = 2 * WAL_GROWTH_NOTICE_BYTES;
+      tick();
+      expect(lines).toHaveLength(2);
+      expect(lines[1]).toContain('8.00 GiB of write-ahead log is retained');
+
+      // The next notice is measured from the size last reported, not from a fixed ladder.
+      walBytes = 3 * WAL_GROWTH_NOTICE_BYTES;
+      tick();
+      expect(lines).toHaveLength(2);
+      walBytes = 4 * WAL_GROWTH_NOTICE_BYTES;
+      tick();
+      expect(lines).toHaveLength(3);
+    } finally { coordinator.stop(); }
+  });
+
+  it('starts the notices over after a reopen has truncated the log', () => {
+    let walBytes = 3 * WAL_GROWTH_NOTICE_BYTES;
+    const { coordinator, tick, lines } = controlledObserver({ measureRetainedWalBytes: () => walBytes });
+    try {
+      tick();
+      expect(lines).toHaveLength(1);
+      walBytes = 1024;
+      tick();
+      expect(lines).toHaveLength(1);
+      // Without the reset this size would stay silent: it is below twice the last report.
+      walBytes = WAL_GROWTH_NOTICE_BYTES + 1;
+      tick();
+      expect(lines).toHaveLength(2);
+    } finally { coordinator.stop(); }
+  });
+
+  it('starts the notices over on a confirmed reopen, without a sample of the truncated log', () => {
+    let walBytes = 4 * WAL_GROWTH_NOTICE_BYTES;
+    const { coordinator, tick, lines } = controlledObserver({ measureRetainedWalBytes: () => walBytes });
+    try {
+      tick();
+      expect(lines).toHaveLength(1);
+      // The log was truncated and has grown past the notice size again before the next sample.
+      coordinator.serverLifecycleChanged('confirmed-reopen');
+      walBytes = WAL_GROWTH_NOTICE_BYTES + GIB;
+      tick();
+      expect(lines).toHaveLength(2);
+      expect(lines[1]).toContain('5.00 GiB of write-ahead log is retained');
+      // Any other lifecycle change leaves the last report standing.
+      coordinator.serverLifecycleChanged();
+      tick();
+      expect(lines).toHaveLength(2);
+    } finally { coordinator.stop(); }
+  });
+
+  it('does not measure while the server is not available', () => {
+    const measureRetainedWalBytes = vi.fn(() => 10 * WAL_GROWTH_NOTICE_BYTES);
+    const { coordinator, tick, lines, setServerAvailable } = controlledObserver({ measureRetainedWalBytes });
+    try {
+      setServerAvailable(false);
+      tick();
+      expect(measureRetainedWalBytes).not.toHaveBeenCalled();
+      expect(lines).toEqual([]);
+      setServerAvailable(true);
+      tick();
+      expect(measureRetainedWalBytes).toHaveBeenCalledOnce();
+      expect(lines).toHaveLength(1);
+    } finally { coordinator.stop(); }
+  });
+
+  it('logs a failing measurement once per run of failures', () => {
+    let fail = true;
+    const { coordinator, tick, lines } = controlledObserver({
+      measureRetainedWalBytes: () => {
+        if (fail) throw new Error('EACCES: permission denied, scandir');
+        return 0;
+      },
+    });
+    try {
+      tick(); tick(); tick();
+      expect(lines).toEqual(['[oxigraph] retained WAL measurement failed: EACCES: permission denied, scandir']);
+      fail = false;
+      tick();
+      fail = true;
+      tick(); tick();
+      expect(lines).toHaveLength(2);
+    } finally { coordinator.stop(); }
+  });
+
+  it('samples once a minute by default and stops its timer once', () => {
+    const { coordinator, scheduledEveryMs, timer, cancel, tick, lines } = controlledObserver({
+      measureRetainedWalBytes: () => 10 * WAL_GROWTH_NOTICE_BYTES,
+    });
+    expect(scheduledEveryMs()).toBe(60_000);
+    expect(timer.unref).toHaveBeenCalledOnce();
+    coordinator.stop();
+    coordinator.stop();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledWith(timer);
+    // A sample that was already queued when the node stopped reports nothing.
+    tick();
+    expect(lines).toEqual([]);
   });
 });

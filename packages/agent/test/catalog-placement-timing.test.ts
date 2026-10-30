@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog placement timing: how the time from one observer call to the end of its
  * placement attempt is split, that a wait hears exactly the attempt that released its own waiter
@@ -554,10 +555,13 @@ describe('catalog placement timing through the finalized-private supervisor', ()
     });
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+      listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      acceptsFinalizedPrivateLane: () => true,
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repairMarker()),
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
+      readPrivateFailure: () => null,
+      writePrivateFailures: () => {},
       listFinalizedPrivateRepairs: () => markers,
       repairFinalizedPrivatePlacement: repair,
       reconcile: async () => null,

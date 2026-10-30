@@ -14,7 +14,8 @@
  * - `publish`: the publish or update call returned, its own post-receipt work included;
  * - `receiptWrite`: the publish receipt was written;
  * - `publishedGraphClear`: the published asset's shared-memory graph was cleared;
- * - `legacySwmRetire`: the legacy shared-memory copy of the asset was retired;
+ * - `legacySwmRetire`: the retirement of the asset's legacy shared-memory marker ended, or the
+ *   executor stopped waiting for it (it waits a short time only, and the retirement goes on);
  * - `remainingSwmClear`: the rest of shared memory was cleared, when the request asked for it;
  * - `lifecycleStamp`: the lifecycle record was stamped (for an update, its provenance too);
  * - `graphIdRead`: the on-chain id of the context graph was read for the announcement;

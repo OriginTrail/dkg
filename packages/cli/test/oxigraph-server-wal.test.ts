@@ -306,6 +306,57 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
 }
 
 describe('managed WAL maintenance supervision (GH#2395)', () => {
+  it('leaves a server without a configured threshold alone and only reports its retained WAL', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let measurements = 0;
+    const handle = await startOxigraphServer(startOpts(port, {
+      log: (line: string) => logs.push(line),
+      // No walRestartThresholdBytes: the maintenance reopen is opt-in.
+      walMaintenanceCheckIntervalMs: 20,
+      walRestartIdleMs: 40,
+      walRestartCooldownMs: 60,
+      io: {
+        measureRetainedWalBytes: () => {
+          measurements += 1;
+          return 64 * 1024 ** 3;
+        },
+      },
+    }));
+    try {
+      const firstPid = await fetchPid(port);
+      const activity = handle.registerStoreActivity();
+      // Idle, then busy, then idle again: with a threshold of 100 bytes the test
+      // below reopens the server inside this window.
+      await sleep(120);
+      activity.report(true);
+      await sleep(60);
+      activity.report(false);
+      await sleep(240);
+      activity.dispose();
+      expect(measurements).toBeGreaterThanOrEqual(5);
+      expect(handle.getRecoveryState()).toEqual({
+        recovering: false,
+        admissionsPaused: false,
+        generation: 0,
+      });
+      expect(await fetchPid(port)).toBe(firstPid);
+      expect(logs.filter(line => line.includes('restart #'))).toEqual([]);
+      expect(logs.filter(line => line.includes('maintenance threshold'))).toEqual([]);
+      // The size is said once; it has not doubled since.
+      expect(logs.filter(line => line.includes('of write-ahead log is retained'))).toEqual([
+        '[oxigraph] 64.00 GiB of write-ahead log is retained and it grows until the store is reopened; '
+        + 'the maintenance reopen is off. A restart of the node reclaims it. '
+        + 'Set store.options.walRestartThresholdBytes to have the node reopen the store at a size you choose.',
+      ]);
+    } finally {
+      await handle.stop();
+    }
+    const measurementsAfterStop = measurements;
+    await sleep(100);
+    expect(measurements).toBe(measurementsAfterStop);
+  });
+
   it('measures retained WAL under load and reopens only after store work stays idle', async () => {
     const port = await freePort();
     const logs: string[] = [];

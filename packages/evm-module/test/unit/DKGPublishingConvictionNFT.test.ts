@@ -1811,24 +1811,25 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       ) => {
         const seen = new Set<string>();
         for (const log of receipt.logs) {
+          let parsed: ReturnType<typeof logicAbi.parseLog>;
           try {
-            const parsed = logicAbi.parseLog({
+            parsed = logicAbi.parseLog({
               topics: [...log.topics],
               data: log.data,
             });
-            if (parsed && pcaEventNames.includes(parsed.name)) {
-              expect(
-                log.address.toLowerCase(),
-                `${parsed.name} must be emitted by the logic contract, not the wrapper`,
-              ).to.equal(logicAddr);
-              expect(
-                log.address.toLowerCase(),
-                `${parsed.name} must NOT be emitted by the NFT wrapper`,
-              ).to.not.equal(wrapperAddr);
-              seen.add(parsed.name);
-            }
           } catch {
-            // Not a logic-contract event — skip.
+            continue; // Unrelated ABI; assertion failures must propagate.
+          }
+          if (parsed && pcaEventNames.includes(parsed.name)) {
+            expect(
+              log.address.toLowerCase(),
+              `${parsed.name} must be emitted by the logic contract, not the wrapper`,
+            ).to.equal(logicAddr);
+            expect(
+              log.address.toLowerCase(),
+              `${parsed.name} must NOT be emitted by the NFT wrapper`,
+            ).to.not.equal(wrapperAddr);
+            seen.add(parsed.name);
           }
         }
         for (const expected of expectedEventNames) {

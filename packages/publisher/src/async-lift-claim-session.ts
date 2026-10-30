@@ -1,8 +1,11 @@
+import type { AsyncLiftJournalCompletion, JournalOperation, JournalSection } from './async-lift-journal-completion.js';
+import { AsyncLiftWalletPersistence, walletLockJobIdFromRef, type WalletLockRecord, type WalletLockSnapshot } from './async-lift-wallet-persistence.js';
+import { completionTrace } from './async-lift-completion-trace.js';
+import type { ClaimLockQueue } from './async-lift-claim-lock.js';
+import { claimTrace, withObservedClaimLock, type ClaimLockKind, type ClaimLockTrace } from './async-lift-claim-trace.js';
 import type { PublishResult } from './publisher.js';
-import {
-  deleteByPatternWithoutCount,
-  type TripleStore,
-} from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, type TripleStore } from '@origintrail-official/dkg-storage';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import type {
   JournalKind,
   LiftJob,
@@ -20,7 +23,6 @@ import type {
 import { StaleLiftJobClaimError } from './async-lift-publisher-types.js';
 import { isHeldForChainProof } from './async-lift-retry-disposition.js';
 import { assertLiftJobTransition } from './lift-job-states.js';
-import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import { withKeyedLocks } from './keyed-lock.js';
 import { requireActiveLiftJobClaim, type CommittedLiftJob } from './lift-job-committed.js';
 import {
@@ -33,9 +35,7 @@ import {
   isFailedJob,
   liftJobCheckedSigner,
   literal,
-  parseIntegerLiteral,
   parseLiteral,
-  serializeWalletLock,
   walletLockSubject,
 } from './async-lift-publisher-utils.js';
 import {
@@ -44,38 +44,8 @@ import {
   type StructurallyValidLiftJobPayload,
 } from './lift-job-payload-codec.js';
 
-export interface ActiveLiftJobClaimTransitionBoundary {
-  run<T>(transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>): Promise<T>;
-}
-
-export interface LiftJobRecoveryTransitionScope {
-  commitRecoveryReset(reset: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitProofFailure(failed: LiftJob): Promise<LiftJob>;
-  commitProofFinalization(
-    finalize: () => Promise<LiftJob | null>,
-  ): Promise<LiftJob | null>;
-  commitReaccept(accepted: LiftJobAccepted): Promise<LiftJobAccepted>;
-  commitRemoval(): Promise<void>;
-}
-
-export interface LiftJobTransitionScope extends LiftJobRecoveryTransitionScope {
-  commit(next: LiftJob, kind: JournalKind): Promise<LiftJob>;
-  commitProofInclusion(included: LiftJob): Promise<LiftJob>;
-}
-
-/** One atomic per-job read under the lock that owns its transition scope. */
-export type LiftJobTransaction =
-  | { readonly kind: 'missing' }
-  | {
-    readonly kind: 'present';
-    readonly current: LiftJob;
-    readonly scope: LiftJobTransitionScope;
-  }
-  | {
-    readonly kind: 'compatibility';
-    readonly current: LiftJobCompatibility;
-    readonly scope: LiftJobRecoveryTransitionScope;
-  };
+import type { ActiveLiftJobCheckpoint, WorkerLiftJobClaimSession, ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
+export type { ActiveLiftJobCheckpoint, ActiveLiftJobClaimTransitionBoundary, LiftJobRecoveryTransitionScope, LiftJobTransitionScope, LiftJobTransaction } from './lift-job-transition-scope.js';
 
 /** Diagnostic read variants exposed only to the targeted terminal-clear operation. */
 export type ClassifiedLiftJobClearTransaction =
@@ -108,21 +78,6 @@ type DecodedLiftJobTransaction =
   };
 
 type LiftJobTransactionLockMode = 'job' | 'claim-job';
-
-/**
- * A worker checkpoint may observe proof advancing its exact claim before the callback runs.
- * Advanced records are deliberately read-only: only a still-owned record receives commit scope.
- */
-export type ActiveLiftJobCheckpoint =
-  | {
-    readonly kind: 'advanced';
-    readonly current: Extract<LiftJob, { readonly status: 'included' | 'finalized' }>;
-  }
-  | {
-    readonly kind: 'owned';
-    readonly current: LiftJob;
-    readonly scope: LiftJobTransitionScope;
-  };
 
 export interface ActiveLiftJobClaimMutations {
   update(
@@ -185,14 +140,6 @@ export class DefaultActiveLiftJobClaimSession implements ActiveLiftJobClaimSessi
   }
 }
 
-interface WalletLockSnapshot {
-  readonly walletId: string;
-  readonly jobId: string;
-  readonly claimToken?: string;
-  readonly status: string;
-  readonly expiresAt?: number;
-}
-
 export type AsyncLiftClaimProcessingRelease =
   | { readonly kind: 'processed'; readonly job: LiftJob }
   | { readonly kind: 'replaced'; readonly job: PersistedLiftJob }
@@ -204,6 +151,10 @@ export type AsyncLiftClaimProcessingOutcome =
   | { readonly kind: 'processed'; readonly job: LiftJob }
   | { readonly kind: 'replaced'; readonly job: PersistedLiftJob }
   | { readonly kind: 'recovered'; readonly job: PersistedLiftJob | null };
+
+type AsyncLiftClaimProcessingDecision =
+  | Exclude<AsyncLiftClaimProcessingOutcome, { readonly kind: 'recovered' }>
+  | { readonly kind: 'recover'; readonly claim: ActiveLiftJobClaim };
 
 export type LiftJobOwnershipMode = 'released' | 'lease-bound' | 'proof-bound';
 
@@ -233,13 +184,14 @@ export function classifyLiftJobOwnershipMode(job: PersistedLiftJob): LiftJobOwne
 }
 
 export interface AsyncLiftClaimCoordinatorDependencies {
+  readonly journalCompletion: AsyncLiftJournalCompletion;
   readonly ensureGraph: () => Promise<void>;
   readonly isPaused: () => boolean;
   readonly readStatus: (jobId: string) => Promise<LiftJobPayloadDecodeResult>;
-  readonly nextAccepted: () => Promise<LiftJobAccepted | undefined>;
-  readonly reacceptDueFailedJobs: (now: number) => Promise<unknown>;
+  readonly nextClaimCandidate: (section: JournalSection, now: number) => Promise<LiftJobAccepted | undefined>;
   readonly toClaimed: (current: LiftJobAccepted, walletId: string) => LiftJobClaimed;
   readonly writeJob: <T extends LiftJob>(
+    section: JournalSection,
     job: T,
     kind: JournalKind,
   ) => Promise<CommittedLiftJob<T>>;
@@ -267,12 +219,13 @@ export interface AsyncLiftClaimCoordinatorConfig {
  * coordinator.
  */
 export class AsyncLiftClaimCoordinator {
-  private static readonly claimQueues = new Map<string, Promise<void>>();
+  private static readonly claimQueues = new Map<string, ClaimLockQueue>();
   private static readonly jobTransitionQueues = new Map<string, Promise<void>>();
 
   /** Latest in-process claim epoch for each job; stale epochs may overlap while unwinding. */
   private readonly activeProcessClaimTokens = new Map<string, string>();
   private readonly lockLeaseMs: number;
+  private readonly walletLocks: AsyncLiftWalletPersistence;
 
   constructor(
     private readonly store: TripleStore,
@@ -280,26 +233,38 @@ export class AsyncLiftClaimCoordinator {
     private readonly dependencies: AsyncLiftClaimCoordinatorDependencies,
   ) {
     this.lockLeaseMs = config.lockLeaseMs ?? 5 * 60 * 1000;
+    this.walletLocks = new AsyncLiftWalletPersistence(store, config.graphUri, config.walletLockGraphUri);
   }
 
   async claimNext(
     walletId: string,
   ): Promise<ActiveLiftJobClaim | null> {
-    return await this.claimNextInternal(walletId, false);
+    const claim = await this.dependencies.journalCompletion.runPublicOperation((owner) => this.claimNextInternal(owner, walletId, false));
+    if (!claim) return null;
+    // Journal settlement no longer retains canonical ownership. Never hand an expired or
+    // replaced claim to a direct caller after that auxiliary wait.
+    return this.withClaimLock(() => this.withJobTransitionLock(claim.jobId, async () => {
+      const decoded = await this.dependencies.readStatus(claim.jobId);
+      decodedLiftJobOrThrow(decoded); // Preserve fail-closed exact-read errors.
+      if (decoded.kind !== 'canonical' || decoded.job.status !== 'claimed') return null;
+      if (!this.claimFenceMatches(decoded.job, claim) || !await this.isJobOwnershipActive(decoded.job)) return null;
+      return requireActiveLiftJobClaim(decoded.job);
+    }), 'transition', walletId);
   }
 
   private async claimNextInternal(
+    owner: JournalOperation,
     walletId: string,
     markProcessing: boolean,
   ): Promise<ActiveLiftJobClaim | null> {
-    return await this.withClaimLock(async () => {
+    return await owner.runCanonical((section) => this.withClaimLock(async (trace) => {
       await this.dependencies.ensureGraph();
-      if (this.dependencies.isPaused()) return null;
-      if (await this.hasActiveWalletLock(walletId)) return null;
+      const idle = (result: 'paused' | 'wallet-active' | 'no-candidate' | 'stale-candidate'): null => { trace.emit('claim_outcome', { result }); return null; };
+      if (this.dependencies.isPaused()) return idle('paused');
+      if (await this.hasActiveWalletLock(walletId, trace)) return idle('wallet-active');
 
-      await this.dependencies.reacceptDueFailedJobs(this.config.now());
-      const next = await this.dependencies.nextAccepted();
-      if (!next) return null;
+      const next = await this.dependencies.nextClaimCandidate(section, this.config.now());
+      if (!next) return idle('no-candidate');
       const claimedJob = await this.withJobTransitionLock(next.jobId, async () => {
         const current = await this.getStatus(next.jobId);
         if (!current || current.status !== 'accepted') return null;
@@ -320,7 +285,7 @@ export class AsyncLiftClaimCoordinator {
         );
 
         this.dependencies.assertJobMatchesStatus(owned);
-        const committed = requireActiveLiftJobClaim(await this.dependencies.writeJob(owned, 'claimed'));
+        const committed = requireActiveLiftJobClaim(await this.dependencies.writeJob(section, owned, 'claimed'));
         await this.writeWalletLock({
           walletId,
           jobId: owned.jobId,
@@ -330,75 +295,85 @@ export class AsyncLiftClaimCoordinator {
           claimToken,
           lastHeartbeatAt: now,
         });
+        asyncAdmissionUsage.recordLiftClaim(Math.max(current.timestamps.acceptedAt, current.timestamps.lastRetriedAt ?? 0, current.timestamps.lastRecoveredAt ?? 0), now);
         return committed;
       });
-      if (!claimedJob) return null;
+      if (!claimedJob) return idle('stale-candidate');
       if (markProcessing) {
         this.activeProcessClaimTokens.set(claimedJob.jobId, claimedJob.claim.claimToken);
       }
+      trace.emit('claim_outcome', { result: 'claimed', jobId: claimedJob.jobId }, claimedJob.claim.claimToken);
       return claimedJob;
-    });
+    }, 'claim', walletId));
   }
 
   /** Claim, process, classify stale ownership, recover unchanged claims, and always clear marker. */
   async processClaim(
     walletId: string,
-    handler: (session: ActiveLiftJobClaimSession) => Promise<LiftJob>,
+    handler: (session: WorkerLiftJobClaimSession) => Promise<LiftJob>,
     onProcessingReleased?: (release: AsyncLiftClaimProcessingRelease) => void,
   ): Promise<AsyncLiftClaimProcessingOutcome> {
-    const claim = await this.claimNextInternal(walletId, true);
-    if (!claim) return { kind: 'idle' };
-
-    let outcome: AsyncLiftClaimProcessingOutcome | undefined;
-    let release: AsyncLiftClaimProcessingRelease = { kind: 'faulted' };
-    let recoverUnreplacedClaim = false;
+    let cleanup = (): void => {};
+    let decision: AsyncLiftClaimProcessingDecision;
     try {
-      try {
-        const job = await handler(this.openSession(claim));
-        outcome = { kind: 'processed', job };
-        release = outcome;
-      } catch (error) {
-        if (!(error instanceof StaleLiftJobClaimError)) throw error;
-        const current = await this.getStatus(claim.jobId);
-        if (current && !this.claimFenceMatches(current, claim)) {
-          outcome = { kind: 'replaced', job: current };
-          release = outcome;
-        } else {
-          recoverUnreplacedClaim = true;
+      decision = await this.dependencies.journalCompletion.runPublicOperation(async (owner): Promise<AsyncLiftClaimProcessingDecision> => {
+        const claim = await this.claimNextInternal(owner, walletId, true);
+        if (!claim) return { kind: 'idle' };
+        let release: AsyncLiftClaimProcessingRelease = { kind: 'faulted' };
+        // Capture this exact epoch now; invoke only after the operation's journals settle.
+        cleanup = () => {
+          if (this.activeProcessClaimTokens.get(claim.jobId) === claim.claim.claimToken) {
+            this.activeProcessClaimTokens.delete(claim.jobId);
+          }
+          try { onProcessingReleased?.(release); } catch { /* Scheduling cannot change cleanup or outcomes. */ }
+        };
+        try {
+          const job = await handler(this.openWorkerSession(owner, claim));
+          release = { kind: 'processed', job };
+          return release;
+        } catch (error) {
+          if (!(error instanceof StaleLiftJobClaimError)) throw error;
+          asyncAdmissionUsage.recordLiftStaleClaim();
+          const current = await this.getStatus(claim.jobId);
+          if (current && !this.claimFenceMatches(current, claim)) {
+            release = { kind: 'replaced', job: current };
+            return release;
+          }
           release = { kind: 'stale' };
+          return { kind: 'recover', claim };
         }
-      }
+      });
     } finally {
-      if (this.activeProcessClaimTokens.get(claim.jobId) === claim.claim.claimToken) {
-        this.activeProcessClaimTokens.delete(claim.jobId);
-      }
-      try {
-        onProcessingReleased?.(release);
-      } catch {
-        // Scheduling observers cannot change claim cleanup or business outcomes.
-      }
+      cleanup();
     }
-
-    if (recoverUnreplacedClaim) {
-      return {
-        kind: 'recovered',
-        job: await this.recoverUnreplacedExpiredClaim(claim),
-      };
+    if (decision.kind === 'recover') {
+      return { kind: 'recovered', job: await this.dependencies.journalCompletion.runPublicOperation(
+        (owner) => this.recoverUnreplacedExpiredClaim(owner, decision.claim),
+      ) };
     }
-    if (!outcome) {
-      throw new Error(`Claim processing for ${claim.jobId} completed without an outcome`);
-    }
-    return outcome;
+    return decision;
   }
 
   openSession(claim: ActiveLiftJobClaim): ActiveLiftJobClaimSession {
     return new DefaultActiveLiftJobClaimSession(
       claim,
       {
-        run: async (transition) => await this.transitionOwned(claim, transition),
+        run: (transition) => this.dependencies.journalCompletion.runPublicOperation((owner) => this.transitionOwned(owner, claim, transition)),
       },
       this.dependencies.mutations,
     );
+  }
+
+  private openWorkerSession(owner: JournalOperation, claim: ActiveLiftJobClaim): WorkerLiftJobClaimSession {
+    const transition: WorkerLiftJobClaimSession['transition'] = (run) => this.transitionOwned(owner, claim, run);
+    const specialized: Pick<WorkerLiftJobClaimSession, 'transition' | 'preSend' | 'checkpoint'> = {
+      transition,
+      preSend: (run) => this.runPreSendTransaction(owner, claim, run),
+      checkpoint: (run) => this.runOwnedCheckpointTransaction(owner, claim, run),
+    };
+    return Object.assign(new DefaultActiveLiftJobClaimSession(claim, {
+      run: transition,
+    }, this.dependencies.mutations), specialized);
   }
 
   isProcessing(jobId: string): boolean {
@@ -410,9 +385,9 @@ export class AsyncLiftClaimCoordinator {
       && job.claim.claimToken === expected.claim.claimToken;
   }
 
-  private async recoverUnreplacedExpiredClaim(claim: ActiveLiftJobClaim): Promise<PersistedLiftJob | null> {
+  private async recoverUnreplacedExpiredClaim(owner: JournalOperation, claim: ActiveLiftJobClaim): Promise<PersistedLiftJob | null> {
     await this.dependencies.ensureGraph();
-    return await this.withClaimLock(() => this.withJobTransitionLock(claim.jobId, async () => {
+    return await owner.runCanonical((section) => this.withClaimLock(() => this.withJobTransitionLock(claim.jobId, async () => {
       const current = await this.getStatus(claim.jobId);
       if (!current) return null;
       if (!this.claimFenceMatches(current, claim)) return current;
@@ -420,8 +395,8 @@ export class AsyncLiftClaimCoordinator {
       if (await this.isJobOwnershipActive(current)) return current;
 
       const reset = this.dependencies.resetInterruptedClaim(current);
-      return await this.createTransitionScope(current).commitRecoveryReset(reset);
-    }));
+      return await this.createTransitionScope(section, current).commitRecoveryReset(reset);
+    }), 'recovery', claim.claim.walletId));
   }
 
   /**
@@ -429,6 +404,7 @@ export class AsyncLiftClaimCoordinator {
    * through one coordinator-owned boundary.
    */
   private async commitTransition(
+    section: JournalSection,
     current: LiftJob,
     candidate: LiftJob,
     kind: JournalKind,
@@ -439,7 +415,13 @@ export class AsyncLiftClaimCoordinator {
     }
     const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
-    const committed = await this.dependencies.writeJob(next, kind);
+    const committed = await this.dependencies.writeJob(section, next, kind);
+    // A finish is the entry into a terminal state; repeating an update of a finalized or failed job is not one.
+    // It is counted as soon as the write commits: the wallet cleanup below can still reject, and the retry
+    // that follows finds the status unchanged and counts nothing.
+    if (current.status !== committed.status) {
+      asyncAdmissionUsage.recordLiftFinish(committed.status, committed.timestamps.claimedAt, committed.timestamps.finalizedAt ?? committed.timestamps.failedAt ?? this.config.now());
+    }
     await this.persistOwnershipState(committed);
     return committed;
   }
@@ -466,7 +448,7 @@ export class AsyncLiftClaimCoordinator {
     if (classifyLiftJobOwnershipMode(job) === 'released') return;
     const walletId = job.claim?.walletId;
     if (!walletId) throw this.createStaleClaimError(job, 'missing claim wallet');
-    const currentLock = await this.readWalletLock(walletId);
+    const currentLock = await this.walletLocks.readMetadata(walletId);
     if (!currentLock) {
       throw this.createStaleClaimError(job, `missing active wallet lock for ${walletId}`);
     }
@@ -478,28 +460,29 @@ export class AsyncLiftClaimCoordinator {
   async isJobOwnershipActive(job: PersistedLiftJob): Promise<boolean> {
     const walletId = job.claim?.walletId;
     if (!walletId) return false;
-    const currentLock = await this.readWalletLock(walletId);
+    const currentLock = await this.walletLocks.readMetadata(walletId);
     return currentLock !== null && this.isUsableActiveLock(currentLock, job);
   }
 
   private async releaseJobOwnership(job: PersistedLiftJob): Promise<void> {
     const walletId = job.claim?.walletId;
     if (!walletId) return;
-    const currentLock = await this.readWalletLock(walletId);
+    const currentLock = await this.walletLocks.readMetadata(walletId);
     if (!currentLock) {
       // A stale sweep can release before the job reset becomes visible. Re-invite after the
       // caller's write so the now-claimable job is not parked until an idle sweep.
+      claimTrace.emit('wallet_lock_absent_observed', {}, walletId);
       this.dependencies.notifyWalletRelease(walletId);
       return;
     }
     if (!this.lockMatchesJob(currentLock, job)) return;
-    await this.deleteWalletLock(walletId);
+    await this.deleteWalletLock(walletId, currentLock);
   }
 
   private async persistOwnershipState(job: LiftJob): Promise<void> {
     const walletId = job.claim?.walletId;
     if (!walletId) return;
-    const currentLock = await this.readWalletLock(walletId);
+    const currentLock = await this.walletLocks.readMetadata(walletId);
 
     if (classifyLiftJobOwnershipMode(job) !== 'released') {
       if (!currentLock) {
@@ -523,7 +506,7 @@ export class AsyncLiftClaimCoordinator {
     }
 
     if (currentLock && this.lockMatchesJob(currentLock, job)) {
-      await this.deleteWalletLock(walletId);
+      await this.deleteWalletLock(walletId, currentLock);
     }
   }
 
@@ -531,53 +514,61 @@ export class AsyncLiftClaimCoordinator {
     const now = this.config.now();
     const result = await this.store.query(
       `SELECT ?wallet ?job ?expiresAt ?claimToken WHERE { GRAPH <${this.config.walletLockGraphUri}> { ?lock <${CONTROL_WALLET_ID}> ?wallet ; <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . OPTIONAL { ?lock <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
-      { source: 'publisher.asyncLift.walletLock.sweep' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.sweep'),
     );
     const expiredWallets: string[] = [];
     for (const row of expectBindings(result)) {
       const walletId = parseLiteral(row['wallet'] ?? '""');
       if (typeof walletId !== 'string' || walletId.length === 0) continue;
-      const jobId = this.jobIdFromRef(row['job'] ?? '');
+      const jobId = walletLockJobIdFromRef(row['job'] ?? '');
       if (!jobId) {
         await this.withClaimLock(async () => {
-          if (await this.readWalletLock(walletId)) return;
+          if (await this.walletLocks.readMetadata(walletId)) return;
           expiredWallets.push(walletId);
           await this.deleteWalletLock(walletId);
-        });
+        }, 'sweep', walletId);
         continue;
       }
       await this.withClaimLock(() => this.withJobTransitionLock(jobId, async () => {
-        const currentLock = await this.readWalletLock(walletId);
+        const currentLock = await this.walletLocks.readMetadata(walletId);
         if (!currentLock || currentLock.jobId !== jobId) return;
         const job = await this.getStatus(jobId);
         const stale = !job || !this.isUsableActiveLock(currentLock, job, now);
         if (!stale) return;
         expiredWallets.push(walletId);
-        await this.deleteWalletLock(walletId);
-      }));
+        await this.deleteWalletLock(walletId, currentLock);
+      }), 'sweep', walletId);
     }
     return expiredWallets;
   }
 
   /** Serialize a control-plane operation in canonical global-claim lock order. */
-  async runClaimTransaction<T>(operation: () => Promise<T>): Promise<T> {
-    return await this.withClaimLock(operation);
+  async runClaimTransaction<T>(owner: JournalOperation, operation: (section: JournalSection) => Promise<T>, kind: 'admission' | 'admin' = 'admin'): Promise<T> {
+    return await owner.runCanonical((section) => this.withClaimLock(() => operation(section), kind));
   }
 
   /** Lock, re-read, and bind one job to a scope that cannot release or commit another job. */
   async runJobTransaction<T>(
+    owner: JournalOperation,
     jobId: string,
     operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
-    return await this.runLifecycleJobTransaction(jobId, 'job', operation);
+    return await owner.runCanonical((section) => this.runLifecycleJobTransaction(section, jobId, 'job', operation));
+  }
+
+  /** A job nested under an already-owned claim section must share its outer release gate. */
+  async runNestedJobTransaction<T>(section: JournalSection, jobId: string, operation: (transaction: LiftJobTransaction) => Promise<T>): Promise<T> {
+    section.assertOpen();
+    return this.runLifecycleJobTransaction(section, jobId, 'job', operation);
   }
 
   /** Canonical global-claim -> per-job transaction, with the same bound re-read. */
   async runClaimJobTransaction<T>(
+    owner: JournalOperation,
     jobId: string,
     operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
-    return await this.runLifecycleJobTransaction(jobId, 'claim-job', operation);
+    return await owner.runCanonical((section) => this.runLifecycleJobTransaction(section, jobId, 'claim-job', operation));
   }
 
   /**
@@ -586,10 +577,11 @@ export class AsyncLiftClaimCoordinator {
    * bounded outcomes. Ordinary lifecycle transactions deliberately use the fail-closed boundary.
    */
   async runClassifiedClearTransaction<T>(
+    owner: JournalOperation,
     jobId: string,
     operation: (transaction: ClassifiedLiftJobClearTransaction) => Promise<T>,
   ): Promise<T> {
-    return await this.runDecodedJobTransaction(jobId, 'claim-job', async (transaction) => {
+    return await owner.runCanonical((section) => this.runDecodedJobTransaction(section, jobId, 'claim-job', async (transaction) => {
       switch (transaction.kind) {
         case 'missing':
         case 'malformed':
@@ -603,36 +595,63 @@ export class AsyncLiftClaimCoordinator {
             scope: transaction.scope,
           });
       }
-    });
+    }));
   }
 
   /** Canonical administrative transition boundary: lock, re-read, and validate live ownership. */
   async transitionAdministrative<T>(
+    owner: JournalOperation,
     jobId: string,
     transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>,
   ): Promise<T> {
-    await this.dependencies.ensureGraph();
-    return await this.withJobTransitionLock(jobId, async () => {
-      const current = await this.getRequiredJob(jobId);
-      await this.assertActiveClaimLock(current);
-      return await transition(current, this.createTransitionScope(current));
+    return await owner.runCanonical(async (section) => {
+      await this.dependencies.ensureGraph();
+      return this.withJobTransitionLock(jobId, async () => {
+        const current = await this.getRequiredJob(jobId);
+        await this.assertActiveClaimLock(current);
+        return await transition(current, this.createTransitionScope(section, current));
+      });
     });
   }
 
   /** Canonical worker transition boundary: lock, re-read, fence, and reject ended authority. */
-  async transitionOwned<T>(
+  private transitionOwned<T>(
+    owner: JournalOperation,
     claim: ActiveLiftJobClaim,
     transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>,
   ): Promise<T> {
+    return owner.runCanonical((section) => this.withOwnedTransition(section, claim, transition));
+  }
+
+  /** Only pre-send work can restore its exact captured validated record after a durability failure. */
+  private runPreSendTransaction<T>(
+    owner: JournalOperation,
+    claim: ActiveLiftJobClaim,
+    transition: (current: LiftJob, scope: LiftJobTransitionScope, restoreValidated: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    return owner.runCanonical((section) => this.withOwnedTransition(section, claim, (current, scope) =>
+      transition(current, scope, async () => {
+        section.assertOpen();
+        if (current.status !== 'validated') throw new Error('Pre-send rollback requires captured validated state');
+        await this.dependencies.writeJob(section, current, 'rollback-noop');
+      })));
+  }
+
+  private async withOwnedTransition<T>(
+    section: JournalSection,
+    claim: ActiveLiftJobClaim,
+    transition: (current: LiftJob, scope: LiftJobTransitionScope) => Promise<T>,
+  ): Promise<T> {
+    section.assertOpen();
     await this.dependencies.ensureGraph();
-    return await this.withJobTransitionLock(claim.jobId, async () => {
+    return this.withJobTransitionLock(claim.jobId, async () => {
       const current = await this.getRequiredJob(claim.jobId);
       this.assertClaimFence(current, claim);
       if (current.status === 'failed' || current.status === 'finalized') {
         throw this.createStaleClaimError(current, `claim authority ended in ${current.status}`);
       }
       await this.assertActiveClaimLock(current);
-      return await transition(current, this.createTransitionScope(current));
+      return transition(current, this.createTransitionScope(section, current));
     });
   }
 
@@ -640,30 +659,33 @@ export class AsyncLiftClaimCoordinator {
    * Worker checkpoint boundary for a callback that can be made obsolete by chain proof. The exact
    * claim fence is checked in both branches, while only a still-active owner receives write access.
    */
-  async runOwnedCheckpointTransaction<T>(
+  private async runOwnedCheckpointTransaction<T>(
+    owner: JournalOperation,
     claim: ActiveLiftJobClaim,
     operation: (checkpoint: ActiveLiftJobCheckpoint) => Promise<T>,
   ): Promise<T> {
-    await this.dependencies.ensureGraph();
-    return await this.withJobTransitionLock(claim.jobId, async () => {
-      const current = await this.getRequiredJob(claim.jobId);
-      this.assertClaimFence(current, claim);
-      if (current.status === 'included' || current.status === 'finalized') {
-        return await operation({ kind: 'advanced', current });
-      }
-      if (current.status === 'failed') {
-        throw this.createStaleClaimError(current, `claim authority ended in ${current.status}`);
-      }
-      await this.assertActiveClaimLock(current);
-      return await operation({
-        kind: 'owned',
-        current,
-        scope: this.createTransitionScope(current),
+    return await owner.runCanonical(async (section) => {
+      await this.dependencies.ensureGraph();
+      return this.withJobTransitionLock(claim.jobId, async () => {
+        const current = await this.getRequiredJob(claim.jobId);
+        this.assertClaimFence(current, claim);
+        if (current.status === 'included' || current.status === 'finalized') {
+          return await operation({ kind: 'advanced', current });
+        }
+        if (current.status === 'failed') {
+          throw this.createStaleClaimError(current, `claim authority ended in ${current.status}`);
+        }
+        await this.assertActiveClaimLock(current);
+        return await operation({
+          kind: 'owned',
+          current,
+          scope: this.createTransitionScope(section, current),
+        });
       });
     });
   }
 
-  private createScopeState<TJob extends PersistedLiftJob>(initial: TJob): {
+  private createScopeState<TJob extends PersistedLiftJob>(section: JournalSection, initial: TJob): {
     transition<TResult>(
       operation: (before: TJob) => Promise<TResult>,
       nextState: (result: TResult) => TJob | null,
@@ -675,6 +697,7 @@ export class AsyncLiftClaimCoordinator {
       operation: (before: TJob) => Promise<T>,
       nextState: (result: T) => TJob | null,
     ): Promise<T> => {
+      section.assertOpen();
       if (current === null) {
         throw new Error(`LiftJob transition scope for ${initial.jobId} is closed`);
       }
@@ -689,15 +712,17 @@ export class AsyncLiftClaimCoordinator {
 
   /** Base authority for any readable row: recovery, reacceptance, or explicit removal only. */
   private createRecoveryTransitionScope<TJob extends PersistedLiftJob>(
+    section: JournalSection,
     initial: TJob,
-    state = this.createScopeState(initial),
+    state = this.createScopeState(section, initial),
   ): LiftJobRecoveryTransitionScope {
     const { close } = state;
     return {
       commitRecoveryReset: async (reset) => await close(async (before) => {
         this.assertLifecycleTransition(before, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
-        const committed = await this.dependencies.writeJob(reset, 'recover-reset');
+        const committed = await this.dependencies.writeJob(section, reset, 'recover-reset');
+        asyncAdmissionUsage.recordLiftReclaim();
         await this.releaseJobOwnership(before);
         return committed;
       }),
@@ -705,7 +730,7 @@ export class AsyncLiftClaimCoordinator {
         this.assertLifecycleTransition(before, failed, 'failed');
         // Canonical chain proof ends nonce ownership even if the local failure write must retry.
         await this.releaseJobOwnership(before);
-        return await this.dependencies.writeJob(failed, 'failed');
+        return await this.dependencies.writeJob(section, failed, 'failed');
       }),
       commitProofFinalization: async (finalize) => await close(async (before) => {
         // Proof authorizes immediate wallet reuse. Local repair and terminal persistence may then
@@ -714,12 +739,12 @@ export class AsyncLiftClaimCoordinator {
         const finalized = await finalize();
         if (finalized === null) return null;
         this.assertLifecycleTransition(before, finalized, 'finalized');
-        return await this.dependencies.writeJob(finalized, 'recovered-finalize');
+        return await this.dependencies.writeJob(section, finalized, 'recovered-finalize');
       }),
       commitReaccept: async (accepted) => await close(async (before) => {
         this.assertLifecycleTransition(before, accepted, 'accepted');
         await this.releaseJobOwnership(before);
-        return await this.dependencies.writeJob(accepted, 'reaccept');
+        return await this.dependencies.writeJob(section, accepted, 'reaccept');
       }),
       commitRemoval: async () => await close(async (before) => {
         await this.releaseJobOwnership(before);
@@ -729,9 +754,9 @@ export class AsyncLiftClaimCoordinator {
   }
 
   /** Canonical authority extends the recovery base with normal and proof-inclusion transitions. */
-  private createTransitionScope(initial: LiftJob): LiftJobTransitionScope {
-    const state = this.createScopeState<LiftJob>(initial);
-    const recoveryScope = this.createRecoveryTransitionScope(initial, state);
+  private createTransitionScope(section: JournalSection, initial: LiftJob): LiftJobTransitionScope {
+    const state = this.createScopeState<LiftJob>(section, initial);
+    const recoveryScope = this.createRecoveryTransitionScope(section, initial, state);
     const advance = async (
       operation: (before: LiftJob) => Promise<LiftJob>,
     ): Promise<LiftJob> => await state.transition(operation, (next) =>
@@ -741,14 +766,14 @@ export class AsyncLiftClaimCoordinator {
     return {
       ...recoveryScope,
       commit: async (next, kind) => await advance(
-        async (before) => await this.commitTransition(before, next, kind),
+        async (before) => await this.commitTransition(section, before, next, kind),
       ),
       commitProofInclusion: async (included) => await state.close(async (before) => {
         this.assertLifecycleTransition(before, included, 'included');
         // Inclusion becomes visible before release so a woken worker never observes an active
         // transaction as claimable. An already-included retry only repeats the release.
         if (before.status !== 'included') {
-          included = await this.dependencies.writeJob(included, 'included');
+          included = await this.dependencies.writeJob(section, included, 'included');
         }
         await this.releaseJobOwnership(before);
         return included;
@@ -780,11 +805,12 @@ export class AsyncLiftClaimCoordinator {
 
   /** Thin fail-closed adapter over the one decoded transaction primitive. */
   private async runLifecycleJobTransaction<T>(
+    section: JournalSection,
     jobId: string,
     lockMode: LiftJobTransactionLockMode,
     operation: (transaction: LiftJobTransaction) => Promise<T>,
   ): Promise<T> {
-    return await this.runDecodedJobTransaction(jobId, lockMode, async (transaction) => {
+    return await this.runDecodedJobTransaction(section, jobId, lockMode, async (transaction) => {
       switch (transaction.kind) {
         case 'missing':
           return await operation(transaction);
@@ -811,10 +837,12 @@ export class AsyncLiftClaimCoordinator {
    * decode once, and construct state-appropriate capabilities once while still under the lock.
    */
   private async runDecodedJobTransaction<T>(
+    section: JournalSection,
     jobId: string,
     lockMode: LiftJobTransactionLockMode,
     operation: (transaction: DecodedLiftJobTransaction) => Promise<T>,
   ): Promise<T> {
+    section.assertOpen();
     await this.dependencies.ensureGraph();
     const underJobLock = async (): Promise<T> => await this.withJobTransitionLock(jobId, async () => {
       const decoded = await this.dependencies.readStatus(jobId);
@@ -829,13 +857,13 @@ export class AsyncLiftClaimCoordinator {
           return await operation({
             kind: 'canonical',
             current: decoded.job,
-            scope: this.createTransitionScope(decoded.job),
+            scope: this.createTransitionScope(section, decoded.job),
           });
         case 'compatibility':
           return await operation({
             kind: 'compatibility',
             current: decoded.job,
-            scope: this.createRecoveryTransitionScope(decoded.job),
+            scope: this.createRecoveryTransitionScope(section, decoded.job),
           });
       }
     });
@@ -844,28 +872,17 @@ export class AsyncLiftClaimCoordinator {
       : await underJobLock();
   }
 
-  private async withClaimLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = AsyncLiftClaimCoordinator.claimQueues.get(this.config.graphUri)
-      ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    AsyncLiftClaimCoordinator.claimQueues.set(this.config.graphUri, next);
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (AsyncLiftClaimCoordinator.claimQueues.get(this.config.graphUri) === next) {
-        AsyncLiftClaimCoordinator.claimQueues.delete(this.config.graphUri);
-      }
-    }
+  private withClaimLock<T>(
+    fn: (trace: ClaimLockTrace) => Promise<T>,
+    kind: ClaimLockKind = 'transition',
+    walletId?: string,
+  ): Promise<T> {
+    return withObservedClaimLock(AsyncLiftClaimCoordinator.claimQueues, this.config.graphUri, fn, kind, walletId);
   }
 
   private async withJobTransitionLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
     const key = `${this.config.graphUri}\u0000${jobId}`;
-    return await withKeyedLocks(AsyncLiftClaimCoordinator.jobTransitionQueues, [key], fn);
+    return withKeyedLocks(AsyncLiftClaimCoordinator.jobTransitionQueues, [key], fn);
   }
 
   private buildActiveClaim(
@@ -927,59 +944,32 @@ export class AsyncLiftClaimCoordinator {
     return decodedLiftJobOrThrow(await this.dependencies.readStatus(jobId));
   }
 
-  private async writeWalletLock(lock: {
-    walletId: string;
-    jobId: string;
-    acquiredAt: number;
-    expiresAt: number;
-    status: 'active' | 'expired' | 'released';
-    claimToken?: string;
-    lastHeartbeatAt?: number;
-  }): Promise<void> {
-    const lockRef = walletLockSubject(lock.walletId);
-    await replaceSubjectAtomicallyOrFallback(
-      this.store,
-      this.config.walletLockGraphUri,
-      lockRef,
-      serializeWalletLock(lock, this.config.walletLockGraphUri),
-      'publisher.asyncLift.walletLock.write',
-    );
+  private async writeWalletLock(lock: WalletLockRecord): Promise<void> {
+    await this.walletLocks.write(lock);
+    if (lock.status === 'active') asyncAdmissionUsage.liftWalletBusy(lock.walletId, this.config.now());
+    claimTrace.emit('wallet_lock_written', { jobId: lock.jobId, expiresAt: lock.expiresAt, lockStatus: lock.status }, lock.walletId);
   }
 
-  private async deleteWalletLock(walletId: string): Promise<void> {
-    await deleteByPatternWithoutCount(this.store, {
-      subject: walletLockSubject(walletId),
-      graph: this.config.walletLockGraphUri,
-    });
+  private async deleteWalletLock(walletId: string, ownership?: WalletLockSnapshot): Promise<void> {
+    await this.walletLocks.delete(walletId);
+    asyncAdmissionUsage.liftWalletFree(walletId, this.config.now());
+    claimTrace.emit('wallet_lock_deleted', {}, walletId);
+    if (ownership) completionTrace.walletOwnershipReleased(ownership.jobId, walletId, ownership.claimToken);
     this.dependencies.notifyWalletRelease(walletId);
   }
 
-  private async readWalletLock(walletId: string): Promise<WalletLockSnapshot | null> {
-    const result = await this.store.query(
-      `SELECT ?job ?status ?expiresAt ?claimToken WHERE { GRAPH <${this.config.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
-      { source: 'publisher.asyncLift.walletLock.read' },
-    );
-    const rows = expectBindings(result);
-    if (rows.length === 0) return null;
-    const row = rows[0] ?? {};
-    const jobId = this.jobIdFromRef(row['job'] ?? '');
-    const status = parseLiteral(row['status'] ?? '""');
-    if (!jobId || typeof status !== 'string') return null;
-    const claimToken = row['claimToken'] ? parseLiteral(row['claimToken']) : undefined;
-    return {
-      walletId,
-      jobId,
-      claimToken: typeof claimToken === 'string' ? claimToken : undefined,
-      status,
-      expiresAt: row['expiresAt'] ? parseIntegerLiteral(row['expiresAt']) : undefined,
-    };
-  }
-
-  private async hasActiveWalletLock(walletId: string): Promise<boolean> {
-    const lock = await this.readWalletLock(walletId);
-    if (!lock || lock.status !== 'active') return false;
-    const job = await this.getStatus(lock.jobId);
-    return job !== null && this.isUsableActiveLock(lock, job);
+  private async hasActiveWalletLock(walletId: string, trace: ClaimLockTrace): Promise<boolean> {
+    const ownership = await this.walletLocks.readOwnership(walletId);
+    const lock = ownership?.lock ?? null;
+    const job = ownership?.job ?? null;
+    const usableActiveLock = job !== null && lock !== null && this.isUsableActiveLock(lock, job);
+    asyncAdmissionUsage.liftWalletObserved(walletId, usableActiveLock, this.config.now());
+    trace.emit('wallet_checked', {
+      usableActiveLock, matching: job !== null && lock !== null && this.lockMatchesJob(lock, job),
+      ownershipMode: job === null ? 'absent' : classifyLiftJobOwnershipMode(job),
+      jobId: lock?.jobId, expiresAt: lock?.expiresAt, lockStatus: lock?.status,
+    });
+    return usableActiveLock;
   }
 
   private isUsableActiveLock(
@@ -1011,11 +1001,6 @@ export class AsyncLiftClaimCoordinator {
     if (job.claim?.walletId && lock.walletId !== job.claim.walletId) return false;
     if (job.claim?.claimToken) return lock.claimToken === job.claim.claimToken;
     return !lock.claimToken;
-  }
-
-  private jobIdFromRef(jobRef: string): string | null {
-    const prefix = 'urn:dkg:publisher:lift-job:';
-    return jobRef.startsWith(prefix) ? jobRef.slice(prefix.length) : null;
   }
 
   private createStaleClaimError(job: LiftJob, reason: string): StaleLiftJobClaimError {
