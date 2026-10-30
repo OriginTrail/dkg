@@ -61,13 +61,18 @@ it.each(['public', 'private'] as const)('requires positive root evidence for unm
   const publicGraph = contextGraphDataUri(CG);
   const graph = visibility === 'private' ? contextGraphPrivateUri(CG) : publicGraph;
   const metaGraph = contextGraphMetaUri(CG);
-  const subjects = ['member', 'legacy-root', 'nested-standard', 'orphan-standard'];
+  const standardSubjects = ['member', 'legacy-root', 'nested-standard', 'orphan-standard'];
+  const subjects = [...standardSubjects, 'nested-extension'];
   try {
     await store.insert([
-      ...subjects.flatMap((id) => eventRows(id, `${EPCIS}ObjectEvent`, '2024-03-01T08:00:00Z', '+00:00')
+      ...standardSubjects.flatMap((id) => eventRows(id, `${EPCIS}ObjectEvent`, '2024-03-01T08:00:00Z', '+00:00')
         .map((quad) => ({ ...quad, graph }))),
+      // Both timing fields do not make a nested extension resource an event.
+      ...eventRows('nested-extension', 'https://example.org/Observation', '2024-03-01T08:00:00Z', '+00:00')
+        .map((quad) => ({ ...quad, graph })),
       { subject: 'urn:document', predicate: `${EPCIS}eventList`, object: 'urn:event:member', graph },
       { subject: 'urn:event:member', predicate: 'https://example.org/detail', object: 'urn:event:nested-standard', graph },
+      { subject: 'urn:event:member', predicate: 'https://example.org/detail', object: 'urn:event:nested-extension', graph },
       { subject: 'urn:publication:legacy', predicate: `${DKG}rootEntity`, object: 'urn:event:legacy-root', graph: metaGraph },
       ...(visibility === 'private' ? subjects.map((id) => ({
         subject: `urn:event:${id}`, predicate: `${DKG}privateDataAnchor`, object: '"true"', graph: publicGraph,
