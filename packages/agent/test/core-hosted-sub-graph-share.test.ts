@@ -11,6 +11,7 @@
  * member's share. The root scope stays with the catalog, and every check of
  * the share handler still runs.
  */
+import { directSwmMetadataSession } from './_helpers/swm-metadata-session.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphDataUri, createOperationContext } from '@origintrail-official/dkg-core';
@@ -229,6 +230,7 @@ describe('a Core that hosts a catalog-owned public graph', () => {
         remainingContextGraphs: 1,
         includeRootScope: false,
         mode: { kind: 'ordinary' },
+        metadataFetcher: directSwmMetadataSession(ports.fetchSyncPages),
       } as PublicSwmTargetV1);
 
       expect(summary.failedPhases).toBe(0);

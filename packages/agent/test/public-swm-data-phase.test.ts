@@ -90,6 +90,17 @@ describe('the data phase of a public shared-memory round (#3421)', () => {
     expect(phase.legacyQuads(phase.result.quads)).toEqual([legacy]);
   });
 
+  it('is fetched for a legacy root named only by the historical member alias', async () => {
+    const meta = legacyMeta('urn:root:alias')
+      .map((row) => (row.predicate === `${DKG}rootEntity` ? { ...row, predicate: `${DKG}entity` } : row));
+    const served = [{ subject: 'urn:root:alias', predicate: 'urn:p', object: '"o"', graph: DATA_GRAPH }];
+
+    const { phase, fetch } = await gate(meta, { served });
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(phase.result.quads).toEqual(served);
+  });
+
   it('is fetched for a legacy root whose operation names no creator, which the verifier still admits rows for', async () => {
     const withoutCreator = legacyMeta('urn:legacy:root').filter((row) => row.predicate !== `${DKG}publisherPeerId`);
     expect(processSharedMemoryBatch([], withoutCreator, CG, [], []).entityCreators).toEqual([]);

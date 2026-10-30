@@ -20,6 +20,7 @@
  * sync responder, the real public sync lane (`SwmTargetExecutorV1`) and the
  * real pull verifier (`processSharedMemoryBatch`).
  */
+import { directSwmMetadataSession } from './_helpers/swm-metadata-session.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -195,6 +196,7 @@ function memberOf(responder: CapturedSyncHandler, options: {
     remotePeerId: AUTHOR_PEER,
     contextGraphId: CG,
     remainingContextGraphs: 1,
+    metadataFetcher: directSwmMetadataSession(ports.fetchSyncPages),
     ...lane,
   } as PublicSwmTargetV1);
   return { store, pull };

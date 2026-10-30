@@ -435,7 +435,8 @@ describe('selected SWM metadata retention contention', () => {
     expect(waiter.asked).toEqual([]);
     expect(outcome.continuationYielded).toBe(true);
     expect(outcome.result.completed).toBe(false);
-    expect(outcome.result.timedOut).toBe(true);
+    expect(outcome.result.timedOut).toBe(false);
+    expect(outcome.result.localYield).toBe(true);
     await holding;
   });
 
@@ -525,7 +526,8 @@ describe('selected SWM metadata retention contention', () => {
     const outcome = await waiting;
     expect(waiter.asked).toEqual([]);
     expect(outcome.continuationYielded).toBe(true);
-    expect(outcome.result.timedOut).toBe(true);
+    expect(outcome.result.timedOut).toBe(false);
+    expect(outcome.result.localYield).toBe(true);
 
     const nextPass = holder.pass();
     expect(holder.asked).toEqual([ALLOWANCE, ALLOWANCE - 1]);
@@ -747,7 +749,8 @@ describe('selected SWM metadata retention contention', () => {
       expect(Date.now() - startedAt).toBeLessThan(35);
       expect(waiter.asked).toEqual([]);
       expect(outcome.continuationYielded).toBe(true);
-      expect(outcome.result.timedOut).toBe(true);
+      expect(outcome.result.timedOut).toBe(false);
+      expect(outcome.result.localYield).toBe(true);
     }
     holder.answer();
     await holding;
@@ -844,7 +847,8 @@ describe('selected SWM metadata retention contention', () => {
     expect(waiter.asked).toEqual([ALLOWANCE]);
     expect(outcome.continuationYielded).toBe(true);
     expect(outcome.result.resumedFromOffset).toBe(1);
-    expect(outcome.result.timedOut).toBe(true);
+    expect(outcome.result.timedOut).toBe(false);
+    expect(outcome.result.localYield).toBe(true);
     holder.answer();
     await holding;
   });

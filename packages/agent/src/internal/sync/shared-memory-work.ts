@@ -53,14 +53,23 @@ export function createSharedMemoryWorkRunner(ports: SharedMemoryWorkPorts) {
           result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
           result.droppedDataTriples = recovered.droppedDataTriples;
           result.alreadyHeldAssets = recovered.alreadyHeldGraphs ?? 0;
-          // An incomplete recovery can retain whole verified KAs, but must
-          // remain retryable. A local admission yield is not a peer failure.
+          // A deadline-bounded recovery can retain materialized assets while
+          // returning `completed=false`. Keep its progress and retry signal
+          // so every requester lane shares the same orchestration loop.
           if (recovered.completed) {
             result.completedPhases = 1;
             ports.onCompleted(target);
           } else {
-            recordSharedMemoryPhaseFailure(result, recovered.phaseFailureCause);
-            if (!recovered.localYield) result.backoffWorthyFailures = 1;
+            // A recovery job can yield because this process exhausted its
+            // admission window. Preserve that local outcome through the
+            // lifecycle aggregation instead of treating it as a peer
+            // failure that should trigger backoff.
+            const failureCause = recovered.phaseFailureCause ?? 'transport';
+            const failureCount = failureCause === 'local-budget'
+              ? Math.max(1, recovered.localYieldFailedPhases ?? 1)
+              : 1;
+            recordSharedMemoryPhaseFailure(result, failureCause, failureCount);
+            if (failureCause !== 'local-budget') result.backoffWorthyFailures = 1;
           }
           return result;
         } catch (error) {

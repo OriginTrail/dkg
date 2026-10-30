@@ -278,7 +278,7 @@ describe('selected SWM metadata transfer ownership', () => {
     const baseNow = Date.now();
     let elapsedMs = 0;
     const clock = () => baseNow + elapsedMs;
-    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    const coordinator = new SwmMetaTransferCoordinator({ now: clock });
     const manifest = [
       { ref: 'ref-a', digest: 'digest-a', count: 1 },
       { ref: 'ref-b', digest: 'digest-b', count: 1 },
@@ -292,7 +292,7 @@ describe('selected SWM metadata transfer ownership', () => {
       completed: true,
       timedOut: false,
     }));
-    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+    const createFetcher = vi.fn(() => createSwmMetaFetcher({
       remotePeerId: peerId,
       requesterScope: 'selected-swm-meta:retained:snapshot-expiry',
       retentionBudget: retentionBudget(),
@@ -310,13 +310,13 @@ describe('selected SWM metadata transfer ownership', () => {
     });
 
     try {
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request());
         fetcher.strategy.snapshotWalk!(contextGraphId, manifest).markResolved('ref-a');
       });
 
       elapsedMs = 10_001;
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         const refreshed = await fetcher.strategy.fetch(request());
         expect(refreshed.result.bytesReceived).toBe(1);
         expect(fetcher.strategy.snapshotWalk!(contextGraphId, manifest).resolvedRefsSnapshot()).toEqual([]);
