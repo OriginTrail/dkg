@@ -1,5 +1,5 @@
 import type { ethers } from 'ethers';
-import { priceTransactionRequest, type ChainFeeFloor } from './evm-fee-policy.js';
+import { priceEip1559Fees, readSuggestedPriorityFee, type ChainFeeFloor } from './evm-fee-policy.js';
 import { applyTransactionFeeCap } from './evm-fee-cap.js';
 import type { PreparedTransaction } from './rpc-failover-client.js';
 
@@ -36,14 +36,19 @@ export class PublisherGasFunding {
   }
 
   private async readFeePerGas(provider: ethers.Provider, floor?: ChainFeeFloor, cap?: bigint): Promise<bigint> {
-    const priced = await priceTransactionRequest(provider, {}, floor);
-    let request = priced.transaction;
-    if (request.maxFeePerGas == null) {
+    const [block, suggestedPriorityFeePerGas] = await Promise.all([
+      provider.getBlock('latest'), readSuggestedPriorityFee(provider),
+    ]);
+    const baseFeePerGas = block?.baseFeePerGas ?? null;
+    let request: ethers.TransactionRequest;
+    if (baseFeePerGas) {
+      request = { type: 2, ...priceEip1559Fees({ baseFeePerGas, suggestedPriorityFeePerGas, floor }) };
+    } else {
       const feeData = await provider.getFeeData();
       if (feeData.gasPrice == null) throw new Error('Publisher gas price unavailable');
       request = { gasPrice: feeData.gasPrice };
     }
-    if (cap !== undefined) request = applyTransactionFeeCap(request, cap, priced.baseFeePerGas);
+    if (cap !== undefined) request = applyTransactionFeeCap(request, cap, baseFeePerGas);
     return BigInt(request.maxFeePerGas ?? request.gasPrice!);
   }
 

@@ -29,6 +29,7 @@ export class AsyncLiftWalletFunding implements AsyncLiftWalletEligibility {
   prepare(walletId: string): Promise<boolean> {
     const status = this.statuses.get(walletId);
     if (status && this.now() < status.retryAt) return Promise.resolve(false);
+    if (this.isEligible(walletId)) return Promise.resolve(true);
     const pending = this.reads.get(walletId);
     if (pending) return pending;
     const read = this.observe(walletId).finally(() => {

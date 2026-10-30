@@ -8,7 +8,7 @@ is recorded: up to all configured wallets can execute concurrently. A busy walle
 wallets with different service times are not expected to finish equal numbers of jobs.
 
 The EVM publisher runtime checks current native balance and the current fee policy before a
-new claim, overlapping independent fee and pending-balance reads. Its initial advisory gas budget is 1,000,000 gas; preparation replaces that estimate
+new claim, overlapping independent block, priority-fee and pending-balance reads. Eligible observations are reused within their five-second freshness bound; a funding failure revokes them immediately. Its initial advisory gas budget is 1,000,000 gas; preparation replaces that estimate
 with the actual buffered gas limit. The estimate includes configured fee floors and fee caps.
 It is a routing hint, not an affordability guarantee, and can conservatively defer a wallet
 that could afford a smaller transaction. Immediately before signing a publish or update, the

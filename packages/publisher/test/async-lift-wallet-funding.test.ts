@@ -190,6 +190,7 @@ describe('async publisher gas eligibility (#3591)', () => {
     expect(await f.funding.prepare('a')).toBe(false);
     expect(await f.funding.prepare('b')).toBe(true);
     f.balances.set('b', 0n);
+    f.advance(5_001);
     expect(await f.funding.prepare('b')).toBe(false);
     f.balances.set('a', 10n);
     expect(await f.funding.prepare('a')).toBe(false);
@@ -197,6 +198,21 @@ describe('async publisher gas eligibility (#3591)', () => {
     f.advance(30_000);
     expect(await f.funding.prepare('a')).toBe(true);
     expect(f.funding.snapshot().find((s) => s.walletId === 'a')?.reason).toBe('eligible');
+  });
+
+  it('reuses fresh advisory eligibility but expires it and lets a funding failure revoke it immediately', async () => {
+    const f = fundingFixture(), reader = f.readers.get('a')!;
+    expect(await f.funding.prepare('a')).toBe(true);
+    f.advance(5_000);
+    expect(await f.funding.prepare('a')).toBe(true);
+    expect(reader).toHaveBeenCalledTimes(1);
+    f.advance(1);
+    expect(await f.funding.prepare('a')).toBe(true);
+    expect(reader).toHaveBeenCalledTimes(2);
+    f.funding.defer('a');
+    expect(f.funding.isEligible('a')).toBe(false);
+    expect(await f.funding.prepare('a')).toBe(false);
+    expect(reader).toHaveBeenCalledTimes(2);
   });
 
   it('rejects stale observations and RPC errors without calling them insufficient funds', async () => {

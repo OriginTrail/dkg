@@ -36,23 +36,26 @@ describe('publisher gas funding observations', () => {
     expect(f.getBalance.mock.calls).toEqual([['wallet', 'pending'], ['wallet', 'pending']]);
   });
 
-  it('starts fee and pending balance reads independently before either completes', async () => {
+  it('starts block, priority-fee and pending-balance reads independently before any completes', async () => {
     const f = fixture();
-    let releaseFee!: () => void, releaseBalance!: () => void;
+    let releaseFee!: () => void, releaseBalance!: () => void, releaseTip!: () => void;
     const fee = new Promise<void>(resolve => { releaseFee = resolve; });
     const balance = new Promise<void>(resolve => { releaseBalance = resolve; });
+    const tip = new Promise<void>(resolve => { releaseTip = resolve; });
     vi.mocked(f.provider.getBlock).mockImplementationOnce(async () => { await fee; return { baseFeePerGas: 100n } as ethers.Block; });
     f.getBalance.mockImplementationOnce(async () => { await balance; return 10n ** 18n; });
+    vi.mocked(f.provider as ethers.JsonRpcProvider).send.mockImplementationOnce(async () => { await tip; return '0x1'; });
     const start = Date.now();
     const reading = f.funding.read(f.provider, 'wallet');
     try {
       expect(f.provider.getBlock).toHaveBeenCalledOnce();
       expect(f.getBalance).toHaveBeenCalledWith('wallet', 'pending');
-      releaseFee(); releaseBalance();
+      expect((f.provider as ethers.JsonRpcProvider).send).toHaveBeenCalledWith('eth_maxPriorityFeePerGas', []);
+      releaseFee(); releaseBalance(); releaseTip();
       const observation = await reading;
       expect(observation.observedAt).toBeGreaterThanOrEqual(start);
       expect(observation.observedAt).toBeLessThanOrEqual(Date.now());
-    } finally { releaseFee(); releaseBalance(); await reading; }
+    } finally { releaseFee(); releaseBalance(); releaseTip(); await reading; }
   });
 
   it('checks exact prepared maximum cost including value before the caller can sign', async () => {
@@ -66,6 +69,12 @@ describe('publisher gas funding observations', () => {
     expect(await f.funding.assertPrepared(prepared)).toBe(prepared);
     const learned = await f.funding.read(f.provider, 'wallet');
     expect(learned.gasLimit).toBe(100_000n);
+  });
+
+  it('retains legacy gas-price fallback and its configured cap without a base fee', async () => {
+    const f = fixture(); f.baseFee(0n);
+    expect((await f.funding.read(f.provider, 'wallet')).feePerGasWei).toBe(9n);
+    expect((await f.funding.read(f.provider, 'wallet', undefined, 8n)).feePerGasWei).toBe(8n);
   });
 
   it('does not treat an earlier eligibility estimate as funding proof at signing', async () => {
