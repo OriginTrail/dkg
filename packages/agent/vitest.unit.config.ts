@@ -129,6 +129,7 @@ export default defineConfig({
       "test/storage-ack-ledger-timestamp-writer.test.ts",
       "test/storage-ack-admission.test.ts",
       "test/storage-ack-admission-live.test.ts",
+      "test/storage-ack-round-retirement.test.ts",
       "test/named-ka-vm-lifecycle-construction.test.ts",
       "test/observed-store-mutation.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",

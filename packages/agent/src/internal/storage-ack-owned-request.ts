@@ -7,7 +7,7 @@ interface ACKReliableMessenger {
     peerId: string,
     protocol: string,
     data: Uint8Array,
-    opts: { timeoutMs: number },
+    opts: { timeoutMs: number; signal?: AbortSignal },
   ): Promise<{ delivered: boolean; error?: unknown; response?: Uint8Array }>;
 }
 
@@ -15,9 +15,9 @@ export function createACKSendP2P(input: {
   messenger: ACKReliableMessenger;
   timeoutMs: number;
 }): ACKCollectorDeps['sendP2P'] {
-  return async (peerId: string, protocol: string, data: Uint8Array) => {
+  return async (peerId: string, protocol: string, data: Uint8Array, options) => {
     const sendResult = await input.messenger.sendRequestOwned(peerId, protocol, data, {
-      timeoutMs: input.timeoutMs,
+      timeoutMs: input.timeoutMs, signal: options?.signal,
     });
     if (!sendResult.delivered) {
       throw new Error(`substrate send already in flight (transport): ${sendResult.error}`);

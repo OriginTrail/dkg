@@ -3320,7 +3320,7 @@ export class DKGAgent extends DKGAgentBase {
       timeoutMs,
     });
     const sendLocal = this.storageACKRegistrationRuntime.createLocalSender();
-    return async (peerId: string, protocol: string, data: Uint8Array) => {
+    return async (peerId: string, protocol: string, data: Uint8Array, options) => {
       if (peerId === this.peerId) {
         if (!this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
@@ -3328,12 +3328,12 @@ export class DKGAgent extends DKGAgentBase {
         if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
         return sendLocal(timeoutMs, (endpoint, signal) => endpoint.dispatch({
           protocol, data, peerId: this.peerId, signal, context: expectedHead,
-        }));
+        }), options?.signal);
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }
-      return send(peerId, protocol, data);
+      return send(peerId, protocol, data, options);
     };
   }
 
@@ -3460,7 +3460,7 @@ export class DKGAgent extends DKGAgentBase {
 
       const result = await admit(onDiagnostic => {
         return collector.collect({
-          onDiagnostic,
+          onDiagnostic, signal: this.workLifetime.signal,
           merkleRoot: params.merkleRoot,
           contextGraphId: cgIdBigInt,
           contextGraphIdStr: params.contextGraphId,
@@ -3619,7 +3619,7 @@ export class DKGAgent extends DKGAgentBase {
 
       const result = await admit(onDiagnostic => {
         return collector.collectUpdate({
-          onDiagnostic,
+          onDiagnostic, signal: this.workLifetime.signal,
           kaId: params.kaId,
           contextGraphId: cgIdBigInt,
           preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,

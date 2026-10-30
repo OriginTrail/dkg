@@ -19,9 +19,13 @@ export class LocalStorageACKTransport {
   async send(
     work: LocalStorageACKWork,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     if (this.closed) throw new Error('Local StorageACK transport is closed');
+    signal?.throwIfAborted();
     const controller = new AbortController();
+    const onAbort = () => controller.abort(signal!.reason);
+    signal?.addEventListener('abort', onAbort, { once: true });
     this.controllers.add(controller);
     const predecessor = this.tail;
     let execution: LocalStorageACKExecution | undefined;
@@ -39,7 +43,7 @@ export class LocalStorageACKTransport {
     }).finally(() => {
       this.controllers.delete(controller);
     });
-    return result;
+    return result.finally(() => signal?.removeEventListener('abort', onAbort));
   }
 
   /** Fence new sends and abort active or queued requests immediately. */
