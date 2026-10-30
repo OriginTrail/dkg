@@ -237,6 +237,7 @@ export default defineConfig({
       "test/durable-sync-authority-boundary.test.ts",
       "test/durable-recovery-owner.test.ts",
       "test/durable-recovery-owned-round.test.ts",
+      "test/durable-recovery-turns.test.ts",
       "test/remove-sub-graph-index-hint.test.ts",
       "test/store-content-fence.test.ts",
       "test/durable-recovery-missing-assets.test.ts",
@@ -468,6 +469,8 @@ export default defineConfig({
       "test/rootless-update-error.test.ts",
       "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
+      // #3044 — a publish repeats its recipient read within the share's bound.
+      "test/publish-recipient-authority-repeat.test.ts",
       // #3081 — the steps the queued executor reports after the confirmation (observation only).
       "test/queued-publish-tail-steps.test.ts",
       // #3081 — a publication does not wait for the retirement of its shared copy's marker.
@@ -487,6 +490,8 @@ export default defineConfig({
       "test/messenger-substrate.test.ts",
       "test/messenger-outbox-budget.test.ts",
       "test/context-graph-join-policy.test.ts",
+      // #3366 — a busy store is no verdict on a joining agent's key.
+      "test/join-admission-store-busy.test.ts",
       "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/store-admission-retry.test.ts",

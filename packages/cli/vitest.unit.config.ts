@@ -111,6 +111,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/knowledge-assets-publish-authority-route.test.ts',
           'test/promote-admission-route.test.ts',
           'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
@@ -122,6 +123,13 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          // Operator-only CPU profile: route, recorder and command with a fake
+          // inspector session; real profiles in a child process and in one
+          // live daemon on the mock chain.
+          'test/cpu-profile.test.ts',
+          'test/cpu-profile-command.test.ts',
+          'test/cpu-profile-real.test.ts',
+          'test/cpu-profile-live.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
@@ -346,6 +354,7 @@ export default defineConfig({
           'test/vector-store-extra.test.ts',
           'test/memory-vector-tenant-isolation.test.ts',
           'test/snapshot-page-index-store.test.ts',
+          'test/join-policy-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
