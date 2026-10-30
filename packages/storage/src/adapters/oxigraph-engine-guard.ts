@@ -23,19 +23,39 @@ const FIRST_NODE_MAJOR_WITH_THE_ENGINE_FIX = 24;
 
 interface EngineGuardEnvironment {
   nodeVersion: string;
+  execArgv: readonly string[];
   setEngineFlag(flag: string): void;
   say(line: string): void;
 }
 
-export function applyEngineGuard({ nodeVersion, setEngineFlag, say }: EngineGuardEnvironment): 'applied' | 'not-needed' | 'failed' {
+/**
+ * Setting a flag with `--freeze-flags-after-init` stops the process in a way no
+ * catch can see, so it must not be tried. Node.js refuses that option in
+ * NODE_OPTIONS and a worker thread inherits its parent's, so `execArgv` shows it.
+ * The last one given wins, as it does for the engine.
+ */
+function flagsAreFrozen(execArgv: readonly string[]): boolean {
+  let frozen = false;
+  for (const arg of execArgv) {
+    const freeze = /^--(no-?)?freeze[-_]flags[-_]after[-_]init$/.exec(arg);
+    if (freeze) frozen = freeze[1] === undefined;
+  }
+  return frozen;
+}
+
+export function applyEngineGuard({ nodeVersion, execArgv, setEngineFlag, say }: EngineGuardEnvironment): 'applied' | 'not-needed' | 'failed' {
   if (!(Number.parseInt(nodeVersion, 10) < FIRST_NODE_MAJOR_WITH_THE_ENGINE_FIX)) return 'not-needed';
   const inlining = `V8's inlining of calls into WebAssembly (${ENGINE_FLAG})`;
+  const warn = (reason: string): 'failed' => {
+    say(`[oxigraph] WARNING: could not turn off ${inlining}: ${reason}. `
+      + `The embedded store still runs, but on Node.js ${nodeVersion} it is exposed to a rare fatal engine error unless the process starts with that flag`);
+    return 'failed';
+  };
+  if (flagsAreFrozen(execArgv)) return warn('this process started with --freeze-flags-after-init');
   try {
     setEngineFlag(ENGINE_FLAG);
   } catch (error) {
-    say(`[oxigraph] WARNING: could not turn off ${inlining}: ${error instanceof Error ? error.message : String(error)}. `
-      + `The embedded store still runs, but on Node.js ${nodeVersion} it is exposed to a rare fatal engine error`);
-    return 'failed';
+    return warn(error instanceof Error ? error.message : String(error));
   }
   say(`[oxigraph] Turned off ${inlining} for this process, to avoid a rare fatal engine error in the embedded store on Node.js ${nodeVersion}`);
   return 'applied';
@@ -50,6 +70,7 @@ export function guardEngineForEmbeddedStore(): void {
   const stderr = new Console(process.stderr);
   applyEngineGuard({
     nodeVersion: process.versions.node,
+    execArgv: process.execArgv,
     setEngineFlag: (flag) => v8.setFlagsFromString(flag),
     say: (line) => stderr.warn(line),
   });

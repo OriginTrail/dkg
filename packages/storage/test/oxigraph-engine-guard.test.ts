@@ -14,18 +14,18 @@ type ChildOptions = {
   call: 'externref' | 'i32' | 'quad-getter';
   store: 'none' | 'loaded' | 'before-optimizing' | 'after-optimizing' | 'store-thread';
   thread?: boolean;
+  inliningOff?: boolean;
 };
 
-function runChild(options: ChildOptions, nodeFlags: string[] = []) {
+function runChild(options: ChildOptions, { frozenFlags = false } = {}) {
   const env = { ...process.env };
   // Coverage and preloads change what the compiler does; this is about what it does by itself.
   delete env.NODE_OPTIONS;
   delete env.NODE_V8_COVERAGE;
-  const run = spawnSync(
-    process.execPath,
-    ['--allow-natives-syntax', '--no-maglev', '--no-lazy-feedback-allocation', ...nodeFlags, CHILD, JSON.stringify(options)],
-    { encoding: 'utf8', timeout: 60_000, env },
-  );
+  const childCommand = frozenFlags
+    ? ['--freeze-flags-after-init', '--allow-natives-syntax', '--no-maglev', '--no-lazy-feedback-allocation', CHILD, JSON.stringify(options)]
+    : ['--allow-natives-syntax', '--no-maglev', '--no-lazy-feedback-allocation', CHILD, JSON.stringify(options)];
+  const run = spawnSync(process.execPath, childCommand, { encoding: 'utf8', timeout: 60_000, env });
   const report = run.stdout.split('\n').find((line) => line.startsWith('{'));
   return { run, report: report ? JSON.parse(report) as { optimized: boolean; deoptimized: boolean; value: number; logged: string[] } : null };
 }
@@ -66,8 +66,8 @@ describe('the engine error this guards against', () => {
   });
 
   it('turning the inlining off avoids it: the code still deoptimizes, and the result is right', () => {
-    expectRanOn(runChild({ call: 'externref', store: 'none' }, [FLAG]), 2);
-    expectRanOn(runChild({ call: 'quad-getter', store: 'none' }, [FLAG]), 2);
+    expectRanOn(runChild({ call: 'externref', store: 'none', inliningOff: true }), 2);
+    expectRanOn(runChild({ call: 'quad-getter', store: 'none', inliningOff: true }), 2);
   });
 });
 
@@ -110,6 +110,17 @@ describe('an embedded store avoids it for its whole process', () => {
     if (AFFECTED) expect(child.run.stderr).toContain('[oxigraph] Turned off');
   });
 
+  it('flags frozen on the command line leave a working store and a warning, on any thread: setting one then would stop the process', () => {
+    for (const child of [
+      runChild({ call: 'i32', store: 'before-optimizing' }, { frozenFlags: true }),
+      runChild({ call: 'i32', store: 'store-thread' }, { frozenFlags: true }),
+    ]) {
+      expectRanOn(child, 9);
+      expect(child.report!.logged).toEqual(AFFECTED ? [expect.stringContaining('[oxigraph] WARNING: could not turn off')] : []);
+      if (AFFECTED) expect(child.report!.logged[0]).toContain('--freeze-flags-after-init');
+    }
+  });
+
   it('loading this package with no embedded store open changes nothing, as on any other backend', () => {
     const child = runChild({ call: 'externref', store: 'loaded' });
     expectStoppedIfAffected(child, 2);
@@ -118,11 +129,12 @@ describe('an embedded store avoids it for its whole process', () => {
 });
 
 describe('applyEngineGuard', () => {
-  function apply(nodeVersion: string, setEngineFlag: (flag: string) => void = () => {}) {
+  function apply(nodeVersion: string, setEngineFlag: (flag: string) => void = () => {}, execArgv: string[] = []) {
     const flags: string[] = [];
     const lines: string[] = [];
     const outcome = applyEngineGuard({
       nodeVersion,
+      execArgv,
       setEngineFlag: (flag) => {
         flags.push(flag);
         setEngineFlag(flag);
@@ -152,6 +164,33 @@ describe('applyEngineGuard', () => {
     expect(lines).toEqual([expect.stringContaining('[oxigraph] WARNING: could not turn off')]);
     expect(lines[0]).toContain('flags are frozen');
     expect(lines[0]).toContain('The embedded store still runs');
+  });
+
+  it.each([
+    [['--freeze-flags-after-init']],
+    [['--freeze_flags_after_init']],
+    [['--no-freeze-flags-after-init', '--freeze-flags-after-init']],
+    [['--expose-gc', '--freeze-flags-after-init', '--max-old-space-size=4096']],
+  ])('does not try to set a flag when %j froze them', (execArgv) => {
+    const { outcome, flags, lines } = apply('22.23.4', () => {}, execArgv);
+    expect(outcome).toBe('failed');
+    expect(flags).toEqual([]);
+    expect(lines).toEqual([expect.stringContaining('[oxigraph] WARNING: could not turn off')]);
+    expect(lines[0]).toContain('--freeze-flags-after-init');
+    expect(lines[0]).toContain('unless the process starts with that flag');
+  });
+
+  it.each([
+    [['--no-freeze-flags-after-init']],
+    [['--nofreeze_flags_after_init']],
+    [['--freeze-flags-after-init', '--no-freeze-flags-after-init']],
+    [['--freeze-flags-after-init-not-this-one']],
+  ])('sets it when %j did not', (execArgv) => {
+    expect(apply('22.23.4', () => {}, execArgv)).toMatchObject({ outcome: 'applied', flags: [FLAG] });
+  });
+
+  it('frozen flags are not its concern on a fixed Node.js', () => {
+    expect(apply('24.5.0', () => {}, ['--freeze-flags-after-init'])).toEqual({ outcome: 'not-needed', flags: [], lines: [] });
   });
 
   it('says what was thrown, whatever it was', () => {
@@ -218,6 +257,20 @@ describe('OxigraphStore and the guard', () => {
     new OxigraphStore();
     expect(order).toEqual(AFFECTED ? [`flag ${FLAG}`, 'store', 'store'] : ['store', 'store']);
     expect(stderr.filter((line) => line.includes('[oxigraph]'))).toEqual(AFFECTED ? [turnedOff] : []);
+  });
+
+  it("reads the process's real arguments, so flags frozen there are never tried", async () => {
+    const { OxigraphStore, order, stderr } = await loadAdapter();
+    const execArgv = process.execArgv;
+    process.execArgv = [...execArgv, '--freeze-flags-after-init'];
+    try {
+      new OxigraphStore();
+    } finally {
+      process.execArgv = execArgv;
+    }
+    expect(order).toEqual(['store']);
+    expect(stderr.filter((line) => line.includes('[oxigraph]')))
+      .toEqual(AFFECTED ? [expect.stringContaining('this process started with --freeze-flags-after-init')] : []);
   });
 
   it('a flag that cannot be set leaves a working store, and a warning', async () => {

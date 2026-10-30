@@ -18,10 +18,12 @@
 //          'after-optimizing'  it opens only after that
 //          'store-thread'      a store worker thread opens one before that, as in a daemon
 //   thread: true               all of it runs on a worker thread, as the store does
+//   inliningOff: true          the inlining is turned off directly first, with no store involved
 //
 // It prints one JSON line. A process the engine stopped prints none.
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import v8 from 'node:v8';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 
 const TURBOFANNED = 1 << 6;
@@ -78,7 +80,8 @@ function callQuadGetter() {
   };
 }
 
-async function scenario({ call, store }) {
+async function scenario({ call, store, inliningOff }) {
+  if (inliningOff) v8.setFlagsFromString('--no-turbo-inline-js-wasm-calls');
   const storage = store === 'none' ? null : await import(new URL('../../dist/index.js', import.meta.url).href);
   let storeThread = null;
   if (store === 'store-thread') {
@@ -116,7 +119,7 @@ if (isMainThread) {
   };
   const result = options.thread
     ? await new Promise((resolve, reject) => {
-      const worker = new Worker(fileURLToPath(import.meta.url), { workerData: options });
+      const worker = new Worker(new URL('./engine-guard-child.mjs', import.meta.url), { workerData: options });
       worker.once('message', resolve);
       worker.once('error', reject);
     })
