@@ -34,6 +34,7 @@ export default defineConfig({
           'test/mcp-config-metadata.test.ts',
           'test/rdf-parser.test.ts',
           'test/api-client.test.ts',
+          'test/api-client-authority-retry.test.ts',
           'test/context-graph-read-model.test.ts',
           'test/finalized-publish-options.test.ts',
           'test/confirmed-catalog-obligation-response.test.ts',
