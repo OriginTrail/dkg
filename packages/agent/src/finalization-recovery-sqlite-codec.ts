@@ -73,6 +73,15 @@ export function finalizationRecoveryRowToEntry(
     : VerifiedGraphScopedFinalizationEvidenceCodec.parse(
       JSON.parse(String(row.verified_evidence_json)),
     );
+  const evidenceState = state === 'VERIFIED' || state === 'SETTLED';
+  if (evidenceState && !verifiedEvidence) {
+    throw new Error(
+      'Finalization inbox verified row has no evidence',
+    );
+  }
+  if (state === 'RECEIVED' && verifiedEvidence) {
+    throw new Error('Finalization inbox unverified row has verified evidence');
+  }
   const evidenceColumns = [
     row.block_number,
     row.block_hash,
@@ -112,9 +121,8 @@ export function finalizationRecoveryRowToEntry(
       throw new Error('Finalization inbox row has inconsistent verified provenance');
     }
   }
-  return {
+  const base = {
     key: String(row.key),
-    state,
     chainId: String(row.chain_id),
     contextGraphId: String(row.context_graph_id),
     ...(optionalString(row.source_peer_id)
@@ -135,7 +143,6 @@ export function finalizationRecoveryRowToEntry(
       : {}),
     envelopeSha256,
     rawMessage: new Uint8Array(raw),
-    ...(verifiedEvidence ? { verifiedEvidence } : {}),
     generation: asSafeInteger(row.generation, 'generation'),
     attemptCount: asSafeInteger(row.attempt_count, 'attempt_count'),
     ...(optionalString(row.failure_signature)
@@ -149,4 +156,24 @@ export function finalizationRecoveryRowToEntry(
     createdAt: asSafeInteger(row.created_at, 'created_at'),
     updatedAt: asSafeInteger(row.updated_at, 'updated_at'),
   };
+  if (evidenceState) {
+    return {
+      ...base,
+      state: state as 'VERIFIED' | 'SETTLED',
+      verifiedEvidence: verifiedEvidence!,
+    };
+  }
+  if (state === 'SUPERSEDED' || state === 'REJECTED' || state === 'UNSUPPORTED') {
+    // UNSUPPORTED is terminal and evidence-bearing: `transition()` admits it
+    // from VERIFIED and clears only `publisher_upgrade_pending`, so the row
+    // keeps whatever evidence it had. Carry it through instead of dropping it,
+    // or the audit trail the retained column exists for is invisible to every
+    // reader.
+    return {
+      ...base,
+      state,
+      ...(verifiedEvidence ? { verifiedEvidence } : {}),
+    };
+  }
+  return { ...base, state };
 }
