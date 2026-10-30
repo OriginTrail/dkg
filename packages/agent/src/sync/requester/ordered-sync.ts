@@ -1,5 +1,5 @@
 import { type SyncOperationLane } from '../attempt-telemetry.js';
-import { getSyncBackpressureBusyError } from '../backpressure.js';
+import { getSyncBackpressureBusyError, type SyncBackpressureBusyError } from '../backpressure.js';
 import {
   contextGraphPriority,
   type SyncContextGraphPriorityConfig,
@@ -63,7 +63,7 @@ export interface OrderedContextGraphSyncOptions<Result> {
    * ({@link MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES}).
    */
   isPeerTransportFailure?: (part: Result) => boolean;
-  onDeferred?: (item: ContextGraphSyncWork<Result>, error: Error) => void;
+  onDeferred?: (item: ContextGraphSyncWork<Result>, error: SyncBackpressureBusyError) => void;
 }
 
 function orderWork<Result>(
