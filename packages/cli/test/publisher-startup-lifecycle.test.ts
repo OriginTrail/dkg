@@ -59,6 +59,9 @@ describe('publisher startup ownership and cancellation', () => {
         chains.add(this);
         return 11n;
       });
+    const funding = vi.spyOn(EVMChainAdapter.prototype, 'getPublisherGasFunding').mockImplementation(async () => ({
+      observedAt: Date.now(), balanceWei: 10n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n,
+    }));
     const destroy = vi.spyOn(EVMChainAdapter.prototype, 'destroy');
     const start = vi.spyOn(AsyncLiftRunner.prototype, 'start');
     const stop = vi.spyOn(AsyncLiftRunner.prototype, 'stop');
@@ -88,7 +91,7 @@ describe('publisher startup ownership and cancellation', () => {
       log: vi.fn(),
     };
     return {
-      store, identity, destroy, start, stop, prepareWallet, closeStore, controller,
+      store, identity, funding, destroy, start, stop, prepareWallet, closeStore, controller,
       begin() {
         const startup = startPublisherRuntimeIfEnabled(args);
         startups.push(startup);
@@ -133,6 +136,30 @@ describe('publisher startup ownership and cancellation', () => {
     expect(f.start).toHaveBeenCalledTimes(1);
     expect(f.stop).toHaveBeenCalledTimes(2);
     expect(f.prepareWallet).not.toHaveBeenCalled();
+    expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
+    await expectBorrowedStoreOpen(f);
+  });
+
+  it('drains every startup funding probe and never starts a runner after cancellation', async () => {
+    const f = await fixture(2), entered = deferred<void>();
+    const reads = [deferred<void>(), deferred<void>()];
+    let calls = 0;
+    for (const read of reads) releasePending.push(() => read.resolve());
+    f.funding.mockImplementation(async () => {
+      const index = calls++;
+      if (calls === 2) entered.resolve();
+      await reads[index].promise;
+      return { observedAt: Date.now(), balanceWei: 10n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n };
+    });
+    const startup = f.begin(); await entered.promise;
+    expect(f.start).not.toHaveBeenCalled();
+    const reason = new Error('shutdown during funding bootstrap');
+    f.controller.abort(reason); reads[0].resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.destroy).not.toHaveBeenCalled();
+    reads[1].resolve();
+    await expect(startup.then(() => undefined)).rejects.toBe(reason);
+    expect(f.start).not.toHaveBeenCalled();
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     await expectBorrowedStoreOpen(f);
   });

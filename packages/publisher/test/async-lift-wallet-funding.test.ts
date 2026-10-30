@@ -9,13 +9,13 @@ import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, serializeJob } from '../src/asyn
 import { completeResult, gate } from './_helpers/journal-completion.js';
 import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 
-function fundingFixture() {
+function fundingFixture(mode: 'before-claim' | 'after-failure' = 'before-claim') {
   let now = Date.now();
   const balances = new Map([['a', 10n], ['b', 10n]]);
   const readers = new Map([...balances.keys()].map((id) => [id, vi.fn(async () => ({
     observedAt: now, balanceWei: balances.get(id)!, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n,
   }))]));
-  const funding = new AsyncLiftWalletFunding(readers, () => now);
+  const funding = new AsyncLiftWalletFunding(readers, () => now, mode);
   return { funding, balances, readers, now: () => now, advance: (ms: number) => { now += ms; } };
 }
 
@@ -227,8 +227,39 @@ describe('async publisher gas eligibility (#3591)', () => {
     expect(await f.funding.prepare('b')).toBe(true);
   });
 
-  it('coalesces concurrent observations and never lets an older read undo a cooldown', async () => {
-    const f = fundingFixture();
+  it('native startup probing avoids repeated healthy reads but a real gas failure reopens funding checks', async () => {
+    const f = fundingFixture('after-failure'), reader = f.readers.get('a')!;
+    expect(f.funding.isEligible('a')).toBe(false);
+    expect(await f.funding.prepare('a')).toBe(true);
+    f.advance(60_000); f.balances.set('a', 0n);
+    expect(await f.funding.prepare('a')).toBe(true);
+    expect(reader).toHaveBeenCalledTimes(1);
+    const store = new OxigraphStore(); await stageKnowledgeAssetShareSnapshot({ store });
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      walletEligibility: f.funding, fundingRecoveryPolicy: 'proof-first',
+      knowledgeAssetVmPublishHandler: { execute: async () => { throw new PublisherGasFundingError({
+        observedAt: f.now(), balanceWei: 0n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n,
+      }); } },
+    });
+    try {
+      const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      expect((await publisher.processNext('a'))?.status).toBe('accepted');
+      expect(f.funding.isEligible('a')).toBe(false);
+      expect(await publisher.processNext('a')).toBeNull();
+      expect(reader).toHaveBeenCalledTimes(1);
+      expect((await publisher.claimNext('b'))?.jobId).toBe(id);
+      f.advance(30_000);
+      expect(await f.funding.prepare('a')).toBe(false);
+      expect(reader).toHaveBeenCalledTimes(2);
+      f.balances.set('a', 10n); f.advance(30_000);
+      expect(await f.funding.prepare('a')).toBe(true);
+      f.advance(60_000); expect(await f.funding.prepare('a')).toBe(true);
+      expect(reader).toHaveBeenCalledTimes(3);
+    } finally { await store.close(); }
+  });
+
+  it.each(['before-claim', 'after-failure'] as const)('coalesces observations without undoing a newer cooldown: %s', async (mode) => {
+    const f = fundingFixture(mode);
     let finish!: () => void;
     const wait = new Promise<void>((resolve) => { finish = resolve; });
     const read = f.readers.get('a')!.getMockImplementation()!;
@@ -288,7 +319,7 @@ describe('async publisher gas eligibility (#3591)', () => {
   });
 
   it('preserves and holds an inherited hash when a later pre-dispatch attempt lacks funds', async () => {
-    const f = fundingFixture();
+    const f = fundingFixture('after-failure');
     const store = new OxigraphStore();
     await stageKnowledgeAssetShareSnapshot({ store });
     const publisher = new TripleStoreAsyncLiftPublisher(store, {

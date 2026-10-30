@@ -24,6 +24,7 @@ export class AsyncLiftWalletFunding implements AsyncLiftWalletEligibility {
   constructor(
     private readonly readers: ReadonlyMap<string, (() => Promise<PublisherGasFundingObservation>) | undefined>,
     private readonly now: () => number = Date.now,
+    private readonly mode: 'before-claim' | 'after-failure' = 'before-claim',
   ) {}
 
   prepare(walletId: string): Promise<boolean> {
@@ -43,6 +44,9 @@ export class AsyncLiftWalletFunding implements AsyncLiftWalletEligibility {
     const status = this.statuses.get(walletId);
     if (!status || this.now() < status.retryAt) return false;
     const age = this.now() - status.observedAt;
+    // Native workers still check the exact cost before signing. After a successful
+    // startup/recovery probe, avoid duplicating those reads until a real failure.
+    if (this.mode === 'after-failure' && status.reason === 'eligible' && age >= 0) return true;
     return (status.reason === 'eligible' || status.reason === 'unsupported') && age >= 0 && age <= 5_000;
   }
 
