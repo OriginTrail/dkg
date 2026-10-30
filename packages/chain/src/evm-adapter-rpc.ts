@@ -80,7 +80,9 @@ export async function retryBroadcastEndpointSet(broadcast: () => Promise<void>):
 /**
  * #3591 — may a failed `eth_sendRawTransaction` attempt have left the transaction with the endpoint?
  * A throttled request did not, and neither did a connection that never opened. Anything else, such
- * as a timeout, an abort, a reset or a 5xx, can follow an acceptance whose answer was lost.
+ * as a timeout, an abort, a reset or a 5xx, can follow an acceptance whose answer was lost. This
+ * reads the error as being about the send itself, which holds because the adapter's providers send
+ * nothing else in `broadcastTransaction` (see `createRpcRequestProvider`).
  */
 export function broadcastAttemptMayHaveBeenAccepted(err: unknown): boolean {
   if (isThrottleRpcError(err)) return false;
