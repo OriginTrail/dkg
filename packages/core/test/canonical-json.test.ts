@@ -11,6 +11,38 @@ import {
 } from '../src/canonical-json.js';
 
 describe('RFC 8785 canonical JSON', () => {
+  it.each([
+    '', 'plain ASCII', '\u007f\u0080\u07ff\u0800\uffff', '😀𐀀',
+    'quotes" and slash\\ and controls\u0000\b\t\n\f\r',
+    'a'.repeat(4095) + '😀' + 'é€',
+    'é'.repeat(4096) + '\n' + '€'.repeat(4097),
+    '😀'.repeat(4096) + '\u0000',
+  ])('preserves canonical UTF-8 byte limits across raw segments (%#)', value => {
+    for (const input of [value, { [value]: value }]) {
+      const expected = JSON.stringify(input);
+      const bytes = new TextEncoder().encode(expected).byteLength;
+      expect(canonicalizeJson(input, { maxBytes: bytes })).toBe(expected);
+      expect(() => canonicalizeJson(input, { maxBytes: bytes - 1 })).toThrow(CanonicalJsonError);
+      expect(parseCanonicalJson(expected, { maxBytes: bytes })).toEqual(input);
+    }
+  });
+
+  it('matches primitive JSON serialization and exact byte limits for generated Unicode scalars', () => {
+    let seed = 0x61c05;
+    const random = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return seed >>> 0; };
+    for (let sample = 0; sample < 250; sample++) {
+      const points = Array.from({ length: 1 + random() % 200 }, () => {
+        const point = random() % 0x110000;
+        return point >= 0xd800 && point <= 0xdfff ? 0x20 : point;
+      });
+      const value = String.fromCodePoint(...points);
+      const expected = JSON.stringify(value);
+      const bytes = new TextEncoder().encode(expected).byteLength;
+      expect(canonicalizeJson(value, { maxBytes: bytes })).toBe(expected);
+      expect(() => canonicalizeJson(value, { maxBytes: bytes - 1 })).toThrow(CanonicalJsonError);
+    }
+  });
+
   it('matches the RFC 8785 section 3.2.2 canonicalization sample', () => {
     const value = {
       numbers: [333333333.33333329, 1e30, 4.5, 2e-3, 1e-27],

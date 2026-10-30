@@ -227,7 +227,7 @@ describe('LiftJob failure classification', () => {
     rpc_unavailable: { autoRetry: false, provenIneffective: false },
     tx_submit_timeout: { autoRetry: false, provenIneffective: false },
     tx_reverted: { autoRetry: false, provenIneffective: true },
-    insufficient_funds: { autoRetry: false, provenIneffective: true },
+    insufficient_funds: { autoRetry: true, provenIneffective: true },
     nonce_conflict: { autoRetry: false, provenIneffective: false },
     inclusion_timeout: { autoRetry: false, provenIneffective: false },
     finality_timeout: { autoRetry: false, provenIneffective: false },

@@ -43,6 +43,8 @@ type LegacyProof = (
 /** Adapt concise proof scenarios to the production prepare-then-finalize shape. */
 function preparedProofAgent(proof: LegacyProof) {
   return {
+    // Not subscribed: these scenarios end at their one settlement, with no repeat.
+    getSubscribedContextGraphs: () => new Map(),
     prepareContextGraphReadinessWithPrivateEmptyVmV1: async (input: {
       contextGraphId: string; callerAgentAddress?: string; signal?: AbortSignal;
     }): Promise<PreparedPrivateEmptyVmReadinessV1> => {
@@ -440,13 +442,13 @@ describe('private empty-VM settlement after join metadata', () => {
     let readiness: Record<string, unknown> | null = null;
     const proof = vi.fn(options.proof ?? provenProof);
     const agent = {
+      ...preparedProofAgent(proof),
       eventBus,
       node: { stopSignal: options.stopSignal },
       getSubscribedContextGraphs: () => subscriptions,
       markContextGraphSubscriptionState: (id: string, patch: Record<string, unknown>) => {
         subscriptions.set(id, { ...subscriptions.get(id), ...patch });
       },
-      ...preparedProofAgent(proof),
     } as unknown as DKGAgent;
     const dashboard = {
       getContextGraphReadinessProvenance: () => readiness,

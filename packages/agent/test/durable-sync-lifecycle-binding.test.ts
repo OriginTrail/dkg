@@ -2518,21 +2518,21 @@ describe('durable sync lifecycle chain binding', () => {
 
 describe('agent composition of the owner exact request', () => {
   afterEach(() => vi.restoreAllMocks());
-  async function request(disposition: 'found' | 'incomplete', complete: boolean) {
+  async function request(disposition: 'found' | 'incomplete', complete: boolean, admission = 'work-started') {
     let execute!: NonNullable<DurableRecoveryRunnerDependencies['executeExactSlice']>;
     vi.spyOn(DurableRecoveryRunner.prototype, 'run').mockImplementation(async ({ dependencies }) => {
       execute = dependencies.executeExactSlice!;
       return { outcome: 'terminal', result: createIncompleteDurableSyncResult(), peerResults: [], slices: 0, safeOffset: 0 };
     });
     const node = { stopSignal: new AbortController().signal };
-    const exact = vi.fn(async () => ({ disposition, result: { ...createIncompleteDurableSyncResult(), complete } }));
+    const exact = vi.fn(async () => ({ disposition, admission, result: { ...createIncompleteDurableSyncResult(), complete } }));
     const agentLike: any = { node, syncExactKnowledgeAssetsFromPeerDetailed: exact };
     await LifecycleSyncMethods.prototype.syncDurableRecoveryContextGraph.call(agentLike, contextGraphId);
     return { execute, exact, node };
   }
   it('forwards the current shutdown signal and timeout on each call', async () => {
     const h = await request('found', true);
-    expect(await h.execute('peer', ['ual-1'])).toEqual({ selection: 'complete',
+    expect(await h.execute('peer', ['ual-1'])).toEqual({ selection: 'complete', admission: 'work-started',
       diagnostics: expect.not.objectContaining({ complete: expect.anything() }) });
     expect(h.exact).toHaveBeenLastCalledWith('peer', contextGraphId, ['ual-1'],
       { signal: h.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS });
@@ -2544,6 +2544,10 @@ describe('agent composition of the owner exact request', () => {
   it.each([['incomplete', true], ['found', false]] as const)('does not complete %s / stored=%s', async (disposition, complete) => {
     const h = await request(disposition, complete);
     expect((await h.execute('peer', ['ual-1'])).selection).toBe('incomplete');
+  });
+  it('hands the runner the admission of the exact request, a local deferral included', async () => {
+    const h = await request('incomplete', false, 'local-admission-deferred');
+    expect(await h.execute('peer', ['ual-1'])).toMatchObject({ selection: 'incomplete', admission: 'local-admission-deferred' });
   });
   it('preserves a failed exact request', async () => {
     const h = await request('found', true);

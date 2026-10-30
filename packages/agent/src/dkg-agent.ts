@@ -1065,6 +1065,7 @@ export class DKGAgent extends DKGAgentBase {
             headRevision: headDigest,
           };
         },
+        listFinalizedPrivateRepairsAsync: async signal => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.listAsync(signal) ?? [],
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
         writePrivateFailures: entries => {

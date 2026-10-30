@@ -8,6 +8,14 @@ import {
 } from '@origintrail-official/dkg-chain';
 
 /**
+ * `proven`: every condition holds. `not-empty`: the graph has Knowledge Assets,
+ * so this proof can never hold for it. `unproven`: another condition does not
+ * hold at this anchor, which a later finalized anchor can change for a graph
+ * registered or joined moments ago.
+ */
+export type RegisteredPrivateEmptyVmProofV1 = 'proven' | 'not-empty' | 'unproven';
+
+/**
  * A fresh registered private graph has no VM catalog genesis to download. A
  * local join, an empty peer response, and an accepted catalog snapshot cannot
  * establish that VM is empty. Instead bind the caller's chain membership,
@@ -25,7 +33,7 @@ export async function proveRegisteredPrivateEmptyVmV1(input: {
   governanceContractAddress: EvmAddressV1;
   snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
   signal: AbortSignal;
-}): Promise<boolean> {
+}): Promise<RegisteredPrivateEmptyVmProofV1> {
   return input.snapshot({ chainId: input.chainId, signal: input.signal }, async (session) => {
     const facts = await readFinalizedContextGraphEmptyVmFactsInSnapshotV1({
       contextGraphId: input.onChainContextGraphId,
@@ -33,10 +41,12 @@ export async function proveRegisteredPrivateEmptyVmV1(input: {
       hubAddress: input.hubAddress,
       session,
     });
-    return facts !== null && facts.active && facts.accessPolicy === 1
-      && facts.nameHash === ethers.keccak256(ethers.toUtf8Bytes(input.contextGraphId)).toLowerCase()
-      && facts.contextGraphStorageAddress === input.governanceContractAddress
-      && facts.participantAgents.includes(input.callerAgentAddress)
-      && facts.kaCount === 0n;
+    if (facts === null
+      || facts.nameHash !== ethers.keccak256(ethers.toUtf8Bytes(input.contextGraphId)).toLowerCase()
+      || facts.contextGraphStorageAddress !== input.governanceContractAddress) return 'unproven';
+    // The count is this graph's only once its name and storage binding hold.
+    if (facts.kaCount !== 0n) return 'not-empty';
+    return facts.active && facts.accessPolicy === 1 && facts.participantAgents.includes(input.callerAgentAddress)
+      ? 'proven' : 'unproven';
   });
 }
