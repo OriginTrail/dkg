@@ -41,6 +41,11 @@ const BPS = 10_000n;
 
 type Seller = { identityId: bigint; operational: SignerWithAddress };
 
+/** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
+async function deployFixture(): Promise<SettlementStack> {
+  return deploySettlementStack();
+}
+
 describe('@integration The epoch close of the query/inference pool', function () {
   let f: SettlementStack;
   let QIS: QueryInferenceStorage;
@@ -50,7 +55,7 @@ describe('@integration The epoch close of the query/inference pool', function ()
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    f = await loadFixture(deploySettlementStack);
+    f = await loadFixture(deployFixture);
     QIS = f.QIS;
     domain = await queryInferenceDomain(QIS);
     nextAccount = 40;

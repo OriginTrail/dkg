@@ -28,7 +28,10 @@ import { createProfile } from './profile-helpers';
 /**
  * The account and staking stacks with every plan-period and settlement
  * contract registered and the activation epoch set to the current epoch, as
- * the development deploy leaves them. For `loadFixture`.
+ * the development deploy leaves them. Each suite wraps it in a fixture of its
+ * own for `loadFixture`, which keeps one snapshot per fixture function: one
+ * function shared by suites would be restored to a snapshot that another
+ * suite's fixture has since invalidated.
  */
 export async function deploySettlementStack() {
   await hre.deployments.fixture(ACCOUNT_STACK_TAGS);

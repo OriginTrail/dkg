@@ -68,6 +68,11 @@ const PRICE_CAP = 10n ** 15n;
 
 type Seller = { identityId: bigint; operational: SignerWithAddress };
 
+/** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
+async function deployFixture(): Promise<SettlementStack> {
+  return deploySettlementStack();
+}
+
 describe('@integration Finalization of receipt claims against the funded cap', function () {
   let f: SettlementStack;
   let domain: Domain;
@@ -81,7 +86,7 @@ describe('@integration Finalization of receipt claims against the funded cap', f
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    f = await loadFixture(deploySettlementStack);
+    f = await loadFixture(deployFixture);
     domain = await queryInferenceDomain(f.QIS);
     owner = f.accounts[20];
     buyer = f.accounts[21];
