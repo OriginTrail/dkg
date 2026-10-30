@@ -58,7 +58,7 @@ async function signerRefusingTransactions(options: Partial<FakeSignerOptions> = 
 }
 
 /** The adapter with its protected transaction seams exposed to the test. */
-async function adapterFor(fake: FakeSigner): Promise<any> {
+async function adapterFor(fake: FakeSigner, publisherFundingAwareClaims = false): Promise<any> {
   const { operational } = await connectRemoteSigners({ url: fake.url, authToken: TOKEN });
   const adapter = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
@@ -66,6 +66,7 @@ async function adapterFor(fake: FakeSigner): Promise<any> {
     chainId: 'evm:31337',
     signers: operational,
     allowNoAdminSigner: true,
+    publisherFundingAwareClaims,
   });
   cleanups.push(() => adapter.destroy());
   return adapter;
@@ -105,8 +106,8 @@ describe('contract recovery never re-signs after a signer refusal', () => {
    * succeeds, and its approvals, broadcast and receipt wait are recorded. Its signing and its
    * serialized dispatch, which checkpoints and then broadcasts, are the adapter's own.
    */
-  async function v10WriteAdapter(fake: FakeSigner, staleAllowanceReads: number) {
-    const adapter = await adapterFor(fake);
+  async function v10WriteAdapter(fake: FakeSigner, staleAllowanceReads: number, publisherFundingAwareClaims = false) {
+    const adapter = await adapterFor(fake, publisherFundingAwareClaims);
     adapter.initialized = true;
     const payer = adapter.signer;
     const lifecycle = connectable({ getAddress: async () => KAV });
@@ -175,6 +176,39 @@ describe('contract recovery never re-signs after a signer refusal', () => {
       onBroadcast,
     });
   }
+
+  it.each([
+    ['publish', 0], ['publish', 1], ['update', 0], ['update', 1],
+  ] as const)('enforces exact funding before %s signing/WAL/send after %i allowance recoveries', async (write, staleAllowanceReads) => {
+    const fake = await signerRefusingTransactions();
+    const { adapter, payer, preparations, broadcast, receiptWait } = await v10WriteAdapter(fake, staleAllowanceReads, true);
+    let balance = 10n ** 18n;
+    const getBalance = vi.fn(async () => balance);
+    const provider = { getBlock: async () => ({ baseFeePerGas: 100n }), send: async () => '0x1', getBalance };
+    adapter.readProvider = async (_label: string, read: (p: unknown) => Promise<unknown>) => read(provider);
+    const initiallyEligible = await adapter.getPublisherGasFunding();
+    expect(initiallyEligible.balanceWei).toBeGreaterThan(initiallyEligible.requiredWei);
+    const exactCost = BigInt(TX.gasLimit!) * BigInt(TX.maxFeePerGas!);
+    balance = exactCost - 1n;
+    const sign = vi.spyOn(adapter, 'signPreparedTransaction'), onBroadcast = vi.fn();
+    await expect(v10Write(adapter, write, payer, onBroadcast))
+      .rejects.toMatchObject({ code: 'PUBLISHER_GAS_FUNDING_UNAVAILABLE' });
+    expect(preparations()).toBe(staleAllowanceReads + 1);
+    expect(sign).not.toHaveBeenCalled();
+    expect(fake.calls('eth_signTransaction')).toHaveLength(0);
+    expect(onBroadcast).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(receiptWait).not.toHaveBeenCalled();
+
+    // At the exact boundary the same real entry point reaches the external signer.
+    balance = exactCost;
+    await expect(v10Write(adapter, write, payer, onBroadcast)).rejects.toMatchObject({ code: 'REMOTE_SIGNER_REJECTED' });
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(fake.calls('eth_signTransaction')).toHaveLength(1);
+    expect(getBalance.mock.calls).toEqual([[payer, 'pending'], [payer, 'pending'], [payer, 'pending']]);
+    expect(onBroadcast).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
 
   it.each([
     ['publish', 0],
