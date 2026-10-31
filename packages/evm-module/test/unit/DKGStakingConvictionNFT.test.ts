@@ -2613,15 +2613,15 @@ describe('@unit DKGStakingConvictionNFT', () => {
   });
 
   describe('version()', () => {
-    it('wrapper reverts to 10.0.3 (no redeploy); StakingV10 is at 10.0.6', async () => {
+    it('wrapper reverts to 10.0.3 (no redeploy); StakingV10 is at 10.1.0', async () => {
       // Permissionless claim now lives on StakingV10.claimFor, so the ERC-721
       // wrapper is unchanged from 10.0.0 (10.0.3) — it does NOT get redeployed
       // and existing position NFTs are never orphaned. StakingV10 carries the
-      // new entry point (+ the #1297 boost-expiry fix) from 10.0.5, and runs
-      // its operator-fee withdrawal and V8 drains in StakingV10Ledger from
-      // 10.0.6.
+      // new entry point (+ the #1297 boost-expiry fix) from 10.0.5, runs its
+      // operator-fee withdrawal and V8 drains in StakingV10Ledger from 10.0.6,
+      // and pays the query/inference pool (OT-RFC-27) from 10.1.0.
       expect(await NFT.version()).to.equal('10.0.3');
-      expect(await StakingV10Contract.version()).to.equal('10.0.6');
+      expect(await StakingV10Contract.version()).to.equal('10.1.0');
     });
   });
 

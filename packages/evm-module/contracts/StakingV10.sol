@@ -5,6 +5,7 @@ pragma solidity ^0.8.20;
 import {ShardingTable} from "./ShardingTable.sol";
 import {Ask} from "./Ask.sol";
 import {StakingV10Ledger} from "./StakingV10Ledger.sol";
+import {QueryInferenceSettlement} from "./QueryInferenceSettlement.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
@@ -14,6 +15,7 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
+import {QueryInferenceStorage} from "./storage/QueryInferenceStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -58,6 +60,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *     UI/indexer consumption.
  *   - There is no separate `rewards` bucket, no `increaseRewards` /
  *     `decreaseRewards`.
+ *   - A node's reward for an epoch is its score share of the epoch's
+ *     publishing pool in `EpochStorage` plus, from the activation epoch of
+ *     the query/inference pool (OT-RFC-27, 10.1.0), its gross from that pool,
+ *     `QueryInferenceSettlement.queryInferenceGross`. The operator fee comes
+ *     off the sum, and the delegators split the rest by score. A claim first
+ *     makes sure the pool has closed through the last epoch it reads.
  *
  * Withdraw model (D14 — atomic):
  *   - `withdraw()` is a single transaction. Pre-expiry is disallowed (lock
@@ -154,7 +162,24 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             check instead of inlining it.
     //           Behaviour, the ABI, the events, the errors and the storage
     //           reads and writes are unchanged.
-    string private constant _VERSION = "10.0.6";
+    //   10.1.0 — The query/inference pool (OT-RFC-27):
+    //           * A node's gross reward for epoch e is the publishing pool's
+    //             score share, as before, plus
+    //             `QueryInferenceSettlement.queryInferenceGross(e, node)` for
+    //             every e from the pool's activation epoch. The operator fee
+    //             and the delegator split apply to the sum, and the reward
+    //             compounds into `raw` as before; reward carries take it too.
+    //           * Before it reads an epoch at or after activation, a claim
+    //             (and so a withdraw) calls `ensureClosed` for the last epoch
+    //             of its window, which closes the pool's epochs up to it, at
+    //             most `maxCloseStepsPerClaim` of them, or reverts
+    //             `QueryInferenceCloseBehind`; the permissionless
+    //             `closeEpochs` clears that.
+    //           * `initialize()` wires `QueryInferenceSettlement` and
+    //             `QueryInferenceStorage` where the Hub holds the settlement,
+    //             and leaves both 0 where it does not, as on a network without
+    //             the pool, whose rewards are those of 10.0.6.
+    string private constant _VERSION = "10.1.0";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
     /// stake / redelegate / claim but the sharding table is full, so its
@@ -199,6 +224,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /// @dev Runs the operator-fee withdrawal and the V8 drains (10.0.6).
     ///      Internal, so the ABI is unchanged.
     StakingV10Ledger internal ledger;
+    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
+    ///         close and each node's gross from it. 0 where the Hub holds no
+    ///         settlement.
+    QueryInferenceSettlement public queryInferenceSettlement;
+    /// @notice The query/inference pool's storage, for its activation epoch.
+    ///         0 where the Hub holds no settlement.
+    QueryInferenceStorage public queryInferenceStorage;
 
     // ========================================================================
     // Events
@@ -243,6 +275,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error AmountExceedsOperatorFeeBalance(uint96 feeBalance, uint96 amount);
     error WithdrawalWasntInitiated();
     error WithdrawalPeriodPending(uint256 nowTimestamp, uint256 endTimestamp);
+    /// @notice A claim (or a withdraw) reads up to `epoch`, which the
+    ///         query/inference pool has not closed within
+    ///         `maxCloseStepsPerClaim` steps from `closedThrough`; the
+    ///         permissionless `QueryInferenceSettlement.closeEpochs` clears it.
+    ///         Raised by `QueryInferenceSettlement.ensureClosed` and declared
+    ///         here so it stays in this contract's ABI (10.1.0).
+    error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
 
     // ========================================================================
     // Constructor + initialize
@@ -272,6 +311,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         token = IERC20(hub.getContractAddress("Token"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
+        // 10.1.0 — the query/inference pool is not deployed on every network.
+        if (hub.isContract("QueryInferenceSettlement")) {
+            queryInferenceSettlement = QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
+            queryInferenceStorage = QueryInferenceStorage(hub.getContractAddress("QueryInferenceStorage"));
+        } else {
+            queryInferenceSettlement = QueryInferenceSettlement(address(0));
+            queryInferenceStorage = QueryInferenceStorage(address(0));
+        }
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -837,6 +884,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         _prepareForStakeChangeV10(currentEpoch, tokenId, pos.identityId);
 
+        // 10.1.0 — the query/inference pool closes through the window before
+        // any epoch of it is read; the epochs from `qiFromEpoch` on take it.
+        uint256 qiFromEpoch = _closeQueryInference(claimToEpoch);
+
         // Local cache.
         uint256 rawU = uint256(pos.raw);
         uint256 mult18 = uint256(pos.multiplier18);
@@ -884,7 +935,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
-            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18);
+            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18, qiFromEpoch);
         }
 
         // v10.0.3 — integrate matured reward carries (pointers to RSS score
@@ -912,7 +963,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 rewardTotal += _nodeEpochReward(
                     uint256(carries[i].epoch),
                     carries[i].identityId,
-                    carryScore18
+                    carryScore18,
+                    qiFromEpoch
                 );
             }
             if (carriesMatured) {
@@ -1093,11 +1145,18 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      production (score-per-stake can only be advanced by submitProof,
      *      which also adds to node score), but defensive: there is no fee
      *      to collect and no reward.
+     *
+     *      10.1.0 — for `e >= qiFromEpoch` the node's gross from the
+     *      query/inference pool joins the publishing pool's share before the
+     *      operator fee and the delegator split. A node finalizes receipt
+     *      value in an epoch only with a positive node score in it, so a node
+     *      with such a gross never takes the early return above.
      */
     function _nodeEpochReward(
         uint256 e,
         uint72 identityId,
-        uint256 delegatorScore18
+        uint256 delegatorScore18,
+        uint256 qiFromEpoch
     ) internal returns (uint256 epochReward) {
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
         if (nodeScore18 == 0) return 0;
@@ -1108,6 +1167,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             if (allNodesScore18 > 0) {
                 uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
                     * nodeScore18) / allNodesScore18;
+                if (e >= qiFromEpoch) {
+                    grossNodeRewards += queryInferenceSettlement.queryInferenceGross(e, identityId);
+                }
                 uint96 operatorFeeAmount = uint96(
                     (grossNodeRewards
                         * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
@@ -1126,6 +1188,27 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (delegatorScore18 > 0) {
             epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
         }
+    }
+
+    /**
+     * @dev 10.1.0 — make sure the query/inference pool (OT-RFC-27) has closed
+     *      through `throughEpoch`, the last epoch a claim reads, and return
+     *      the first epoch whose rewards take it: its activation epoch. With
+     *      no settlement wired, the activation epoch unset, or a window that
+     *      ends before it, no epoch of the window takes the pool: it returns
+     *      `type(uint256).max` and calls nothing. Otherwise `ensureClosed`
+     *      closes the pool's epochs up to `throughEpoch`, at most
+     *      `maxCloseStepsPerClaim` of them, or reverts
+     *      `QueryInferenceCloseBehind` while it cannot, which the
+     *      permissionless `closeEpochs` clears. Epochs before activation never
+     *      close and take nothing from the pool.
+     */
+    function _closeQueryInference(uint256 throughEpoch) internal returns (uint256 qiFromEpoch) {
+        QueryInferenceStorage qis = queryInferenceStorage;
+        if (address(qis) == address(0)) return type(uint256).max;
+        qiFromEpoch = qis.activationEpoch();
+        if (qiFromEpoch == 0 || throughEpoch < qiFromEpoch) return type(uint256).max;
+        queryInferenceSettlement.ensureClosed(throughEpoch);
     }
 
     /**

@@ -1,5 +1,5 @@
 // StakingV10Ledger 1.0.0 runs the operator-fee withdrawal and the V8 drains
-// into migration credit for StakingV10 10.0.6, which keeps those entry
+// into migration credit for StakingV10 (from 10.0.6), which keeps those entry
 // points, their signatures and their caller gates, and forwards.
 //
 // Covered here: the ledger admits only the contract the Hub holds as
@@ -81,10 +81,9 @@ describe('@unit StakingV10Ledger', () => {
     await f.Token.mint(await f.Vault.getAddress(), FEE);
   });
 
-  it('is named StakingV10Ledger at 1.0.0, and StakingV10 at 10.0.6 wires it', async () => {
+  it('is named StakingV10Ledger at 1.0.0, and StakingV10 wires it', async () => {
     expect(await f.Ledger.name()).to.equal('StakingV10Ledger');
     expect(await f.Ledger.version()).to.equal('1.0.0');
-    expect(await f.StakingV10.version()).to.equal('10.0.6');
     expect(await f.Ledger.stakingStorage()).to.equal(await f.Hub.getContractAddress('StakingStorage'));
     expect(await f.Ledger.convictionStorage()).to.equal(await f.Vault.getAddress());
     expect(await f.Ledger.identityStorage()).to.equal(await f.Hub.getContractAddress('IdentityStorage'));

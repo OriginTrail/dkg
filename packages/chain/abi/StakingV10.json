@@ -95,6 +95,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "closedThrough",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "QueryInferenceCloseBehind",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "RewardOverflow",
     "type": "error"
@@ -651,6 +667,32 @@
     "outputs": [
       {
         "internalType": "contract ProfileStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "queryInferenceSettlement",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceSettlement",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "queryInferenceStorage",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceStorage",
         "name": "",
         "type": "address"
       }
