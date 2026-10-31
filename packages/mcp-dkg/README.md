@@ -320,7 +320,7 @@ Per-turn state is kept in `~/.cache/dkg-mcp/sessions/*.json`; safe to delete at 
 
 ## Historical recovery
 
-Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`. Design rationale and reintroduction-pointers for each drop are in [`agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md`](../../agent-docs/dkg-v10-mcp-consolidation/v9-design-archive.md).
+Ten V9-era and coding-project tools were dropped from the V10 surface during consolidation. The annotated git tag `pre-v10-tool-drop` preserves them — recover any individual handler with `git show pre-v10-tool-drop:packages/mcp-dkg/src/tools/<file>`.
 
 ### Large tool responses
 
