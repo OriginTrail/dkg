@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 
 import {ShardingTable} from "./ShardingTable.sol";
 import {Ask} from "./Ask.sol";
+import {StakingV10Ledger} from "./StakingV10Ledger.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
@@ -140,7 +141,20 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           not ship to mainnet without orphaning existing position NFTs.
     //           Also carries the #1297 boost-expiry reward-boundary fix (which
     //           had landed under the unchanged 10.0.4 string).
-    string private constant _VERSION = "10.0.5";
+    //   10.0.6 — Size (24,524 bytes at 10.0.5, 52 under the EIP-170 limit):
+    //           * The bodies of the operator-fee withdrawal
+    //             (`requestOperatorFeeWithdrawal`,
+    //             `finalizeOperatorFeeWithdrawal`, `cancelOperatorFeeWithdrawal`)
+    //             and of the V8 drains (`drainV8ToCredit`,
+    //             `drainOperatorFeeToCredit`) run in the Hub-registered
+    //             `StakingV10Ledger` 1.0.0, which `initialize()` wires. Every
+    //             entry point keeps its signature and its caller gate here, and
+    //             forwards.
+    //           * `onlyConvictionNFT` and `onlyAdmin` each call one internal
+    //             check instead of inlining it.
+    //           Behaviour, the ABI, the events, the errors and the storage
+    //           reads and writes are unchanged.
+    string private constant _VERSION = "10.0.6";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
     /// stake / redelegate / claim but the sharding table is full, so its
@@ -182,6 +196,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     IdentityStorage public identityStorage;
     IERC20 public token;
     EpochStorage public epochStorage;
+    /// @dev Runs the operator-fee withdrawal and the V8 drains (10.0.6).
+    ///      Internal, so the ABI is unchanged.
+    StakingV10Ledger internal ledger;
 
     // ========================================================================
     // Events
@@ -219,6 +236,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error V8StakingStillLive();
     error NodeAlreadyInShardingTable(uint72 identityId);
     error NodeBelowMinimumStake(uint72 identityId);
+    // The operator-fee withdrawal raises these from `StakingV10Ledger` (the
+    // `TokenLib` and `StakingLib` errors of the same signatures); they are
+    // declared here so they stay in this contract's ABI.
+    error ZeroTokenAmount();
+    error AmountExceedsOperatorFeeBalance(uint96 feeBalance, uint96 amount);
+    error WithdrawalWasntInitiated();
+    error WithdrawalPeriodPending(uint256 nowTimestamp, uint256 endTimestamp);
 
     // ========================================================================
     // Constructor + initialize
@@ -247,6 +271,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         token = IERC20(hub.getContractAddress("Token"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
+        ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -261,10 +286,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // Caller gate
     // ========================================================================
 
+    // 10.0.6 — each gate runs one internal check rather than its body inlined
+    // into every function it guards: the same check, in the same place, in
+    // fewer bytes.
     modifier onlyConvictionNFT() {
-        if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
-            revert StakingLib.OnlyConvictionNFT();
-        }
+        _checkConvictionNFT();
         _;
     }
 
@@ -272,6 +298,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         the caller's address (hashed) must hold ADMIN_KEY purpose
     ///         on `identityId` per `IdentityStorage`.
     modifier onlyAdmin(uint72 identityId) {
+        _checkAdmin(identityId);
+        _;
+    }
+
+    function _checkConvictionNFT() internal view {
+        if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
+            revert StakingLib.OnlyConvictionNFT();
+        }
+    }
+
+    function _checkAdmin(uint72 identityId) internal view {
         if (
             !identityStorage.keyHasPurpose(
                 identityId,
@@ -281,7 +318,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ) {
             revert Permissions.OnlyProfileAdminFunction(msg.sender);
         }
-        _;
     }
 
     // ========================================================================
@@ -621,6 +657,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // exactly. The cooldown reuses `parametersStorage.stakeWithdrawalDelay`
     // (no separate operator-fee delay parameter).
     //
+    // 10.0.6 — the admin-key gate stays here; the bodies run in
+    // `StakingV10Ledger`, which pays the finalized amount to the caller.
+    //
     // Restake-fee-as-stake is handled by the existing 2-step path
     // (`finalizeOperatorFeeWithdrawal` → `DKGStakingConvictionNFT.createConviction`)
     // — no dedicated `restakeOperatorFee` primitive exists in V10 because
@@ -646,57 +685,19 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         on `identityId`. Subsequent calls before finalize/cancel
     ///         augment the existing request (combined amount = old + new).
     function requestOperatorFeeWithdrawal(uint72 identityId, uint96 withdrawalAmount) external onlyAdmin(identityId) {
-        if (withdrawalAmount == 0) revert TokenLib.ZeroTokenAmount();
-
-        ConvictionStakingStorage cs = convictionStorage;
-
-        uint96 existingRequestAmount = cs.getOperatorFeeWithdrawalRequestAmount(identityId);
-        uint96 currentOperatorFeeBalance = cs.getOperatorFeeBalance(identityId);
-
-        // If a request already exists, the requested funds were already
-        // moved out of the balance into the queue — restore them before we
-        // re-check the cap so the totalRequestAmount comparison is honest.
-        if (existingRequestAmount > 0) {
-            currentOperatorFeeBalance += existingRequestAmount;
-        }
-
-        uint96 totalRequestAmount = existingRequestAmount + withdrawalAmount;
-        if (totalRequestAmount > currentOperatorFeeBalance) {
-            revert StakingLib.AmountExceedsOperatorFeeBalance(currentOperatorFeeBalance, totalRequestAmount);
-        }
-
-        uint256 withdrawalReleaseTimestamp = block.timestamp + parametersStorage.stakeWithdrawalDelay();
-        cs.setOperatorFeeBalance(identityId, currentOperatorFeeBalance - totalRequestAmount);
-        cs.createOperatorFeeWithdrawalRequest(identityId, totalRequestAmount, /*indexed*/ 0, withdrawalReleaseTimestamp);
+        ledger.requestOperatorFeeWithdrawal(identityId, withdrawalAmount);
     }
 
     /// @notice Complete an operator-fee withdrawal after the cooldown has
     ///         elapsed. Pays out from the CSS TRAC vault.
     function finalizeOperatorFeeWithdrawal(uint72 identityId) external onlyAdmin(identityId) {
-        ConvictionStakingStorage cs = convictionStorage;
-
-        (uint96 operatorFeeWithdrawalAmount, , uint256 withdrawalReleaseTimestamp) = cs.getOperatorFeeWithdrawalRequest(
-            identityId
-        );
-        if (operatorFeeWithdrawalAmount == 0) revert StakingLib.WithdrawalWasntInitiated();
-        if (block.timestamp < withdrawalReleaseTimestamp) {
-            revert StakingLib.WithdrawalPeriodPending(block.timestamp, withdrawalReleaseTimestamp);
-        }
-
-        cs.deleteOperatorFeeWithdrawalRequest(identityId);
-        cs.transferStake(msg.sender, operatorFeeWithdrawalAmount);
+        ledger.finalizeOperatorFeeWithdrawal(identityId, msg.sender);
     }
 
     /// @notice Cancel a pending operator-fee withdrawal and return the queued
     ///         amount to the operator-fee balance. No cooldown applies.
     function cancelOperatorFeeWithdrawal(uint72 identityId) external onlyAdmin(identityId) {
-        ConvictionStakingStorage cs = convictionStorage;
-
-        uint96 operatorFeeWithdrawalAmount = cs.getOperatorFeeWithdrawalRequestAmount(identityId);
-        if (operatorFeeWithdrawalAmount == 0) revert StakingLib.WithdrawalWasntInitiated();
-
-        cs.deleteOperatorFeeWithdrawalRequest(identityId);
-        cs.increaseOperatorFeeBalance(identityId, operatorFeeWithdrawalAmount);
+        ledger.cancelOperatorFeeWithdrawal(identityId);
     }
 
     /**
@@ -964,105 +965,36 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // mutations. `drainV8ToCredit` is the drain half of the old `_convertToNFT`
     // (now per-node, mints nothing, credits CSS); `allocateFromCredit` is the
     // V10-seed half (now funded from migration credit, not a fresh transfer).
+    // 10.0.6 — the two drains run in `StakingV10Ledger`, behind the wrapper
+    // gate here.
 
     /// @notice Drain ALL of `delegator`'s V8 stake on `identityId` (active
-    ///         stakeBase + any pending withdrawal, D8) into their migration
+    ///         stakeBase + any pending withdrawal) into their migration
     ///         credit on CSS. Returns the drained `total` so the wrapper can
     ///         aggregate across nodes and revert if the grand total is zero;
     ///         a node with no V8 stake contributes 0 (no revert here).
-    /// @dev    no per-source eligibility: the full drained amount is
-    ///         credited to the delegator; the tier-6/12 lock-credit is decided
-    ///         later in `allocateFromCredit` from the chosen tier.
+    ///         Reverts `V8StakingStillLive` while the V8 `Staking` logic is
+    ///         still registered.
     function drainV8ToCredit(
         address delegator,
         uint72 identityId
     ) external onlyConvictionNFT returns (uint96 total) {
-        // Freeze-first invariant (on-chain): the V8 `Staking` logic must be
-        // unregistered before ANY drain (admin sweep OR self-migrate). A drain
-        // zeroes stakeBase without settling the reward cursor; if V8 `Staking`
-        // is still live it keeps computing rewards/sharding off StakingStorage,
-        // so draining against live state corrupts it. Gating here covers every
-        // drain path through one chokepoint; selfMigrate auto-opens at freeze.
-        if (hub.isContract("Staking")) revert V8StakingStillLive();
-        bytes32 v8Key = keccak256(abi.encodePacked(delegator));
-        StakingStorage ss = stakingStorage;
-        uint96 stakeBase = ss.getDelegatorStakeBase(identityId, v8Key);
-        uint96 pending = ss.getDelegatorWithdrawalRequestAmount(identityId, v8Key);
-        total = stakeBase + pending;
-        if (total == 0) return 0;
-
-        // V8 drain. Pending was already excluded from node/total stake at
-        // request time, so only the active base is decremented.
-        if (stakeBase > 0) {
-            ss.setDelegatorStakeBase(identityId, v8Key, 0);
-            ss.decreaseNodeStake(identityId, stakeBase);
-            ss.decreaseTotalStake(stakeBase);
-        }
-        if (pending > 0) {
-            ss.deleteDelegatorWithdrawalRequest(identityId, v8Key);
-        }
-        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
-        ss.transferStake(address(convictionStorage), total);
-
-        convictionStorage.addMigrationCredit(delegator, total);
+        return ledger.drainV8ToCredit(delegator, identityId);
     }
 
     /// @notice Drain node `identityId`'s V8 operator fee (the resting
     ///         `operatorFeeBalance` PLUS any open fee-withdrawal request) into
     ///         `operator`'s migration credit on CSS. Returns the drained
     ///         `total`; a node with no fee contributes 0 (no revert here), so
-    ///         the wrapper can sweep in bulk.
-    /// @dev    "one credit": the operator fee folds
-    ///         into the SAME `migrationCredit` bucket as delegator stake, so
-    ///         the operator recovers it exactly like a delegator — `allocate`
-    ///         at tier 0 (immediately withdrawable) or 6/12 (conviction).
-    ///
-    ///         Operator addresses are NOT recoverable on-chain — IdentityStorage
-    ///         holds key *hashes*, not addresses — so the off-chain sweep
-    ///         supplies `operator` and this function validates it currently
-    ///         holds ADMIN_KEY on the node (mirroring who V8
-    ///         `finalizeOperatorFeeWithdrawal` would have paid). A stale/wrong
-    ///         address REVERTS rather than crediting silently, so a
-    ///         mis-resolved operator can never be paid; the sweep hard-fails
-    ///         and re-resolves. The check is skipped only when there is nothing
-    ///         to drain (`total == 0`), keeping re-runs idempotent and cheap.
+    ///         the wrapper can sweep in bulk. Reverts `OnlyProfileAdminFunction`
+    ///         unless `operator` holds ADMIN_KEY on the node, when there is a
+    ///         fee to drain, and `V8StakingStillLive` while the V8 `Staking`
+    ///         logic is still registered.
     function drainOperatorFeeToCredit(
         uint72 identityId,
         address operator
     ) external onlyConvictionNFT returns (uint96 total) {
-        // Freeze-first invariant (see drainV8ToCredit) — no fee drain while V8
-        // Staking is still live and could finalize/restake the same balance.
-        if (hub.isContract("Staking")) revert V8StakingStillLive();
-        StakingStorage ss = stakingStorage;
-        uint96 feeBalance = ss.getOperatorFeeBalance(identityId);
-        uint96 feeRequest = ss.getOperatorFeeWithdrawalRequestAmount(identityId);
-        total = feeBalance + feeRequest;
-        if (total == 0) return 0;
-
-        // Credit only an address that currently controls the node.
-        if (
-            !identityStorage.keyHasPurpose(
-                identityId,
-                keccak256(abi.encodePacked(operator)),
-                IdentityLib.ADMIN_KEY
-            )
-        ) {
-            revert Permissions.OnlyProfileAdminFunction(operator);
-        }
-
-        // Zero the V8 fee slots (idempotent: a re-drain reads 0, returns 0).
-        // The open-request amount stayed in the SS vault at request time (no
-        // token moved), so deleting it here releases it for the SS->CSS move.
-        if (feeBalance > 0) {
-            ss.setOperatorFeeBalance(identityId, 0);
-        }
-        if (feeRequest > 0) {
-            ss.deleteOperatorFeeWithdrawalRequest(identityId);
-        }
-        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
-        ss.transferStake(address(convictionStorage), total);
-
-        convictionStorage.addMigrationCredit(operator, total);
+        return ledger.drainOperatorFeeToCredit(identityId, operator);
     }
 
     /// @notice Spend `amount` of `staker`'s migration credit into a fresh V10
