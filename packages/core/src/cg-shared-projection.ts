@@ -380,7 +380,6 @@ const VERIFIED_CG_SHARED_PROJECTIONS_V1 = new WeakMap<
   VerifiedCgSharedProjectionStateV1
 >();
 
-/** Verify canonical bytes, private commitment, counts, and structured V10 root. */
 export function verifyCgSharedProjectionV1(
   transferredBundle: VerifiedTransferredCatalogBundleV1,
   signedHead: SignedAuthorCatalogHeadEnvelopeV1,
@@ -451,7 +450,7 @@ export function verifyCgSharedProjectionV1(
     fail('projection-digest', 'catalog and transfer projection digests differ');
   }
 
-  const semantic = verifyCanonicalProjectionBytes(
+  const semantic = verifyCanonicalCgSharedProjectionBytesV1(
     projectionBytes,
     sealBinding.seal,
     projectionDigest,
@@ -587,7 +586,8 @@ export function readVerifiedCgSharedProjectionBytesV1(
   );
 }
 
-function verifyCanonicalProjectionBytes(
+/** Raw-byte semantics shared by catalog preflight and transferred-bundle verification. */
+export function verifyCanonicalCgSharedProjectionBytesV1(
   projectionBytes: Uint8Array,
   seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
   projectionDigest: Digest32V1,

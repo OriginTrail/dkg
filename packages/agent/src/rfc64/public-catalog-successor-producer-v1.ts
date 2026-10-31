@@ -16,6 +16,8 @@ import {
   KA_TRANSFER_PROJECTION_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   MIN_KA_BUNDLE_BYTES_V1,
+  assertAuthorCatalogBucketV1, computeAuthorCatalogScopeDigestV1,
+  type AuthorCatalogScopeV1,
   ZERO_DIGEST32_V1,
   assertAuthorCatalogHeadScopeBindingV1,
   calculateOpaqueKaBundleByteLengthV1,
@@ -560,7 +562,8 @@ function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
  * set and the scope and deployment every row binds to. Synchronous, so the
  * caller's objects are read once and never across a row boundary.
  */
-function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
+function snapshotExactSet(input: Pick<ProduceAndStagePublicOpenExactSetSuccessorInputV1, 'assets' | 'deployment'>
+  & ({ previousHead: SignedAuthorCatalogHeadEnvelopeV1 } | { scope: AuthorCatalogScopeV1 })) {
   let assets: readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[];
   try {
     assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
@@ -614,10 +617,9 @@ function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInput
   let binding: Rfc64PublicCatalogSuccessorRowBindingV1 | null = null;
   if (snapshots.length > 0) {
     try {
-      binding = snapshotRfc64PublicCatalogSuccessorRowBindingV1(
-        input.previousHead,
-        input.deployment,
-      );
+      binding = 'previousHead' in input
+        ? snapshotRfc64PublicCatalogSuccessorRowBindingV1(input.previousHead, input.deployment)
+        : Object.freeze({ scope: Object.freeze({ ...input.scope }), deployment: Object.freeze({ ...input.deployment }) });
     } catch (cause) {
       fail(
         'catalog-successor-producer-input',
@@ -627,6 +629,26 @@ function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInput
     }
   }
   return Object.freeze({ snapshots: Object.freeze(snapshots), binding });
+}
+
+/** Validate the complete target without signing or staging any catalog object. */
+export async function validateRfc64CatalogTargetAssetsV1(
+  assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[], scope: AuthorCatalogScopeV1,
+  deployment: CatalogSealDeploymentProfileV1, signal?: AbortSignal, verifiedRows?: Rfc64VerifiedCatalogRowsV1,
+): Promise<void> {
+  const exact = snapshotExactSet({ assets, scope, deployment });
+  const rows = new Rfc64SuccessorRowVerificationV1(verifiedRows);
+  const slice = createMainThreadTimeSlice();
+  const targetRows: AuthorCatalogRowV1[] = [];
+  for (const asset of exact.snapshots) {
+    await slice();
+    throwIfRfc64AbortedV1(signal);
+    const prepared = prepareRowAndBundle(asset, exact.binding!);
+    rows.assertAssetBinds(prepared, asset.projectionBytes, asset.seal);
+    targetRows.push(prepared.row);
+  }
+  if (targetRows.length) assertAuthorCatalogBucketV1({ catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+    era: scope.era, bucketCount: scope.bucketCount, bucketId: '0' as DecimalU64V1, rows: targetRows });
 }
 
 async function prepareExactSet(

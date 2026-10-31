@@ -10,6 +10,8 @@ import {
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedTransferredCatalogBundleMetadataV1,
   verifyCatalogSealBindingV1,
+  verifyCanonicalCgSharedProjectionBytesV1, DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
+  type CanonicalGraphScopedAuthorSealV1,
   verifyCgSharedProjectionV1,
   verifyTransferredCatalogBundleV1,
   type AuthorCatalogRowV1,
@@ -181,6 +183,18 @@ export class Rfc64SuccessorRowVerificationV1 {
       prepared.deployment,
     );
     assertRecoverableAuthorAttestationCapabilityV1(readVerifiedCatalogSealBindingV1(sealBinding));
+  }
+
+  /** A complete target is safe to withdraw toward only when its replacement content is valid. */
+  assertAssetBinds(prepared: PreparedSuccessorRowV1, projectionBytes: Uint8Array,
+    seal: Readonly<CanonicalGraphScopedAuthorSealV1>): void {
+    if (this.#remembered !== undefined) {
+      const canonicalRow = canonicalizeAuthorCatalogRowV1(prepared.row);
+      if (this.#remembered.find(this.#bindingOfPrepared(prepared), canonicalRow) !== undefined) return;
+    }
+    this.assertSealBinds(prepared);
+    verifyCanonicalCgSharedProjectionBytesV1(projectionBytes, seal, prepared.row.projectionDigest,
+      DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1);
   }
 
   /** After signing: exact verification of one produced row under the head that names it. */

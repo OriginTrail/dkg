@@ -27,8 +27,9 @@ import {
 } from './internal/catalog-mutation-memory.js';
 import type { Rfc64VerifiedCatalogRowsV1 } from './internal/verified-catalog-rows.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
+import { validateRfc64CatalogTargetAssetsV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
-  assertCatalogAssetVmBoundaryV1, assertCatalogTargetRevisionsV1, sameRfc64SuccessorAssetV1,
+  assertCatalogTargetRevisionsV1, sameRfc64SuccessorAssetV1, withCatalogTransitionVmAuthorizationV1,
 } from './internal/catalog-asset-revision.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
@@ -257,9 +258,6 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
             'RFC-64 confirmed upsert cannot skip assertion versions');
         }
       }
-      if (existingIndex >= 0 && asset.seal.assertionVersion === assets[existingIndex]!.seal.assertionVersion) {
-        await assertCatalogAssetVmBoundaryV1(this.store, params.scope, asset, true);
-      }
       if (existingIndex >= 0) assets[existingIndex] = asset;
       else assets.push(asset);
       assets.sort(compareRfc64PublicCatalogSuccessorAssetsByKaIdV1);
@@ -360,8 +358,6 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         requestedAssets,
         options.targetPolicy,
       );
-      await assertCatalogTargetRevisionsV1(this.store, params.scope, state.assets, targetAssets,
-        options.source, params.signal);
       if (sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
         // Nothing to sign: the catalog that answer rests on, every row's bundle included, is read
         // back from the durable store.
@@ -396,6 +392,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       signal?: AbortSignal; observer?: Rfc64CatalogMutationObserverV1;
     }>,
   ): Promise<ReconcileRfc64SwmInventoryCatalogResultV1> {
+    await validateRfc64CatalogTargetAssetsV1(targetAssets, params.scope, params.deployment, options.signal,
+      this.rfc64VerifiedCatalogRowsV1(params.scope));
+    await assertCatalogTargetRevisionsV1(this.store, params.scope, state.assets, targetAssets,
+      options.source, options.signal);
     let successorsApplied = 0;
     const hardLimit = MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 * 2;
     while (!sameRfc64SuccessorAssetSetsV1(state.assets, targetAssets)) {
@@ -404,18 +404,11 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
         throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
       }
       const nextAssets = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
-      // VM confirmation can land while a prior successor is committing. In particular,
-      // an empty row after withdrawal must not let a now-stale draft be reinserted.
-      await assertCatalogTargetRevisionsV1(this.store, params.scope, state.assets, nextAssets,
-        options.source, options.signal);
-      const committed = await this.applyRfc64CatalogSuccessorV1(
-        persistence,
-        state,
-        params,
-        nextAssets,
-        peers,
-        options.stageOnly,
-        { signal: options.signal, commitAppliedHead: options.commitAppliedHead, mutation: options.mutation, observer: options.observer },
+      const committed = await withCatalogTransitionVmAuthorizationV1(
+        this.store, params.scope, state.assets, nextAssets, targetAssets, options.source,
+        () => this.applyRfc64CatalogSuccessorV1(persistence, state, params, nextAssets, peers, options.stageOnly,
+          { signal: options.signal, commitAppliedHead: options.commitAppliedHead,
+            mutation: options.mutation, observer: options.observer }), options.signal,
       );
       successorsApplied += 1;
       state = committed.next;

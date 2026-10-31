@@ -1,3 +1,4 @@
+import { assertSafeGraphIriForSparql } from './metadata-iri.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, parseGraphKnowledgeAssetMetadataEnvelope,
@@ -50,10 +51,4 @@ export async function readGraphKnowledgeAssetMetadataEnvelope(
 ): Promise<GraphKnowledgeAssetMetadataRead> {
   const rows = await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual);
   return parseGraphKnowledgeAssetMetadataEnvelope(rows, input);
-}
-function assertSafeGraphIriForSparql(graphIri: string): void {
-  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
-  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
-    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
-  }
 }

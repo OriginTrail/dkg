@@ -1,3 +1,4 @@
+import { assertSafeGraphIriForSparql } from './metadata-iri.js';
 import { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES } from './graph-knowledge-asset-controls.js';
 import { rdfLiteralLexicalValue } from './graph-metadata-envelope.js';
 export { readConfirmedGraphKnowledgeAssetMetadataEnvelope, readGraphKnowledgeAssetMetadataEnvelope } from './graph-metadata-reader.js';
@@ -209,12 +210,6 @@ function assertSafeSubGraphNameForSparql(subGraphName: string): void {
   if (!v.valid) throw new Error(`Unsafe sub-graph name for SPARQL: ${v.reason}`);
 }
 
-function assertSafeGraphIriForSparql(graphIri: string): void {
-  // GRAPH <...> must not allow delimiter/control chars that can alter query structure.
-  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
-    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
-  }
-}
 
 /**
  * Generate RDF metadata triples for a Knowledge Collection.

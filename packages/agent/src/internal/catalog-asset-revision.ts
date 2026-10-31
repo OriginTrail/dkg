@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
+  MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, contextGraphMetaUri,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   type AuthorCatalogScopeV1,
 } from '@origintrail-official/dkg-core';
-import { readGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
+import { withMaterializationLocks, readGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
@@ -86,6 +86,31 @@ export async function assertCatalogTargetRevisionsV1(
     await assertCatalogAssetVmBoundaryV1(store, scope, targetAsset,
       source === 'confirmed' && targetVersion === currentVersion, signal);
   }
+}
+
+/** Linearize each catalog delta with the node's existing VM writers through signing and CAS. */
+export function withCatalogTransitionVmAuthorizationV1<T>(
+  store: TripleStore, scope: AuthorCatalogScopeV1,
+  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  next: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  source: 'confirmed' | 'inventory', work: () => Promise<T>, signal?: AbortSignal,
+): Promise<T> {
+  const currentByKa = new Map(current.map(a => [a.seal.reservedKaId, a]));
+  const nextByKa = new Map(next.map(a => [a.seal.reservedKaId, a]));
+  const changed = new Map([...current, ...next].filter(asset => {
+    const before = currentByKa.get(asset.seal.reservedKaId), after = nextByKa.get(asset.seal.reservedKaId);
+    return before === undefined || after === undefined || !sameRfc64SuccessorAssetV1(before, after);
+  }).map(asset => [asset.seal.reservedKaId, asset]));
+  const desired = target.filter(asset => changed.has(asset.seal.reservedKaId));
+  return withMaterializationLocks([...changed.values()].map(asset => ({
+    metaGraph: contextGraphMetaUri(scope.contextGraphId), ual: asset.seal.kaUal,
+  })), async () => {
+    // For a withdrawal this checks its intended replacement as well. No VM writer can
+    // change this authorization until the signed successor's applied-head CAS completes.
+    await assertCatalogTargetRevisionsV1(store, scope, current, desired, source, signal);
+    return work();
+  }, { signal });
 }
 
 export function sameRfc64SuccessorAssetV1(

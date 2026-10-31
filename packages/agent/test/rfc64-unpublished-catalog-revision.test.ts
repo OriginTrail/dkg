@@ -29,7 +29,9 @@ import { readVerifiedRfc64CatalogMutationStateV1 } from '../src/internal/catalog
 import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { Rfc64PublicCatalogNativeReceiverV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
-import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { generateGraphKnowledgeAssetMetadata, withMaterializationLock } from '@origintrail-official/dkg-publisher';
+import type { Quad } from '@origintrail-official/dkg-storage';
+import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import { ethers } from 'ethers';
 import {
   AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, PROJECTION_QUADS, NETWORK_ID, NATIVE_DEPLOYMENT,
@@ -42,25 +44,31 @@ const SCOPE = Object.freeze({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRA
   subGraphName: null, authorAddress: AUTHOR, era: '0', bucketCount: '1',
 }) as AuthorCatalogScopeV1;
 
-async function confirmedRevision(agent: DKGAgent, metadataState: 'confirmed' | 'tentative' | 'absent' = 'confirmed'): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
-  const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
-    predicate: 'https://schema.org/description', object: '"Confirmed revised content"', graph: '' }];
-  const seal = await authorSealV1(1n, '1', quads);
+async function storeVmMetadata(agent: DKGAgent, asset: Rfc64PublicCatalogSuccessorAssetInputV1,
+  quads: readonly Quad[], status: 'confirmed' | 'tentative' = 'confirmed') {
+  const { seal } = asset;
   const graph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
     createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion));
-  if (metadataState !== 'absent') await agent.store.insert([
+  await agent.store.insert([
     ...quads.map(quad => ({ ...quad, graph })),
     ...generateGraphKnowledgeAssetMetadata({ contextGraphId: CONTEXT_GRAPH_ID,
       ual: seal.kaUal, merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
       publisherPeerId: 'confirmed-fixture', accessPolicy: 'public', allowedPeers: [],
-      timestamp: new Date(seal.assertionFinalizedAt), assertionVersion: '1', authorAddress: AUTHOR,
+      timestamp: new Date(seal.assertionFinalizedAt), assertionVersion: seal.assertionVersion, authorAddress: AUTHOR,
       publicTripleCount: quads.length, privateTripleCount: 0, assertionGraph: graph,
-    }, metadataState === 'confirmed' ? { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+    }, status === 'confirmed' ? { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
       batchId: BigInt(seal.reservedKaId), materializedVersion: { blockNumber: 124, txIndex: 0 },
     } } } : { status: 'tentative' }),
   ]);
-  return { assertionCoordinate: 'repair-revision' as AssertionCoordinateV1, seal,
-    projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(quads) };
+}
+
+async function confirmedRevision(agent: DKGAgent, metadataState: 'confirmed' | 'tentative' | 'absent' = 'confirmed'): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
+  const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
+    predicate: 'https://schema.org/description', object: '"Confirmed revised content"', graph: '' }];
+  const asset = { assertionCoordinate: 'repair-revision' as AssertionCoordinateV1,
+    seal: await authorSealV1(1n, '1', quads), projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(quads) };
+  if (metadataState !== 'absent') await storeVmMetadata(agent, asset, quads, metadataState);
+  return asset;
 }
 
 function mutationParams() {
@@ -248,6 +256,102 @@ describe('catalog revisions of an unpublished assertion number', () => {
       assertionVersion: '3' as typeof revised.seal.assertionVersion } }))
       .rejects.toMatchObject({ kind: 'version_conflict' });
     expect((await catalog(agent)).assets[0]!.seal).toEqual(revised.seal);
+  });
+
+  it.each(['malformed', 'wrong-root', 'bad-attestation', 'oversize'] as const)(
+    'refuses a %s replacement before withdrawing the valid row', async fault => {
+      const { agent, project } = await author();
+      const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+      await record(agent, first); await project();
+      const revised = await confirmedRevision(agent); await upsert(agent, revised);
+      const before = (await catalog(agent)).current;
+      const asset = { ...revised };
+      if (fault === 'malformed') asset.projectionBytes = new Uint8Array([0]);
+      if (fault === 'wrong-root') asset.projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1([
+        ...PROJECTION_QUADS, { subject: 'https://example.org/alice', predicate: 'https://schema.org/description',
+          object: '"Different root"', graph: '' },
+      ]);
+      if (fault === 'bad-attestation') asset.seal = { ...asset.seal,
+        authorAttestationR: `0x${'00'.repeat(32)}` as typeof asset.seal.authorAttestationR };
+      if (fault === 'oversize') asset.projectionBytes = new Uint8Array(RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 + 1);
+      await expect(upsert(agent, asset)).rejects.toThrow();
+      expect((await catalog(agent)).current).toEqual(before);
+      expect((await catalog(agent)).assets[0]!.seal).toEqual(revised.seal);
+    });
+
+  it('rejects a draft when VM materialization wins before the guarded withdrawal', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first); await project();
+    const before = await catalog(agent), original = before.assets[0]!;
+    await agent.store.deleteByPattern({ graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate) });
+    const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
+      predicate: 'https://schema.org/description', object: '"Draft revision"', graph: '' }];
+    const draft = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n, 'public', {
+      seal: await authorSealV1(1n, '1', quads), quads, shareOperationId: 'draft-after-first',
+    });
+    await record(agent, draft);
+    const query = agent.store.query.bind(agent.store);
+    let writer: Promise<void> | undefined, started = false;
+    vi.spyOn(agent.store, 'query').mockImplementation(async (...args) => {
+      const result = await query(...args);
+      if (!started && args[0].includes('SELECT ?predicate ?object') && args[0].includes(original.seal.kaUal)) {
+        started = true;
+        writer = withMaterializationLock(contextGraphMetaUri(CONTEXT_GRAPH_ID), original.seal.kaUal,
+          () => storeVmMetadata(agent, original, PROJECTION_QUADS));
+        await writer;
+      }
+      return result;
+    });
+    await expect(project()).rejects.toMatchObject({ kind: 'version_conflict' });
+    expect(writer).toBeDefined();
+    expect((await catalog(agent)).current).toEqual(before.current);
+  });
+
+  it('holds the VM lock from the insertion check through signing and applied-head commit', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first); await project();
+    const original = (await catalog(agent)).assets[0]!;
+    await agent.store.deleteByPattern({ graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate) });
+    const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
+      predicate: 'https://schema.org/description', object: '"Draft revision"', graph: '' }];
+    const draft = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n, 'public', {
+      seal: await authorSealV1(1n, '1', quads), quads, shareOperationId: 'draft-during-sign',
+    });
+    await record(agent, draft);
+    const produce = agent.publishAuthorCatalogExactSetSuccessorV1.bind(agent);
+    let writer: Promise<void> | undefined, writerEntered = false, calls = 0;
+    vi.spyOn(agent, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(async input => {
+      const produced = await produce(input);
+      if (++calls === 2) {
+        writer = withMaterializationLock(contextGraphMetaUri(CONTEXT_GRAPH_ID), original.seal.kaUal, async () => {
+          writerEntered = true; await storeVmMetadata(agent, original, PROJECTION_QUADS);
+        });
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(writerEntered).toBe(false);
+      }
+      return produced;
+    });
+    const internal = agent as unknown as Record<string, (...args: any[]) => any>;
+    const apply = internal.applyRfc64CatalogSuccessorV1!.bind(agent);
+    vi.spyOn(internal, 'applyRfc64CatalogSuccessorV1').mockImplementation(async (...args) => {
+      const result = await apply(...args);
+      if (calls === 2) expect(writerEntered).toBe(false);
+      return result;
+    });
+    await project();
+    expect(writer).toBeDefined(); await writer;
+    expect(writerEntered).toBe(true);
+    // The VM writer linearizes after the catalog. Its ordinary confirmation repair restores A.
+    await agent.observeRfc64ConfirmedVmV1({ contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: first.assertionCoordinate, shareOperationId: first.shareOperationId, seal: first.seal,
+      assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate),
+      ctx: createOperationContext('publish'), publicationLabel: 'queued publish' });
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect((await catalog(agent)).assets[0]!.seal).toEqual(original.seal);
   });
 
   it('allows authenticated draft projection with valid tentative metadata', async () => {
