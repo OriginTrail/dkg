@@ -233,19 +233,17 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     expect(await NFT.agentToAccountId(agent.address)).to.equal(0n);
     expect((await NFT.getAccountInfo(accountId)).agentCount).to.equal(0n);
 
-    // ---- settle (10.0.8): the emission schedule is written at creation —
-    // lastSettledWindow doubles as the "schedule written" marker and already
-    // equals lockDurationEpochs; a pre-expiry settle is a pure no-op ----
+    // ---- settle (10.2.0): nothing is booked at creation; lastSettledWindow
+    // is the cursor of the closed windows booked so far, below the lock while
+    // the account is live; a permissionless settle books the closed ones ----
     const epochLength = await Chronos.epochLength();
-    const lockEpochs = (await NFT.accounts(accountId))[5];
-    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(
-      lockEpochs,
-    );
+    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(0n);
     await time.increase(Number(epochLength));
-    await NFT.connect(stranger).settle(accountId); // permissionless no-op
-    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(
-      lockEpochs,
+    await expect(NFT.connect(stranger).settle(accountId)).to.emit(
+      LogicContract,
+      'EmissionScheduled',
     );
+    expect((await NFT.getAccountInfo(accountId)).lastSettledWindow).to.equal(1n);
 
     // ---- settle: post-expiry final sweep marks the account fully swept ----
     const acct = await NFT.accounts(accountId);
@@ -392,19 +390,19 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     });
 
     // Escrow (100) is drawn first; the 900 remainder flows through the PCA
-    // discount branch. 10.0.8: the escrow consume still funds the pool on
-    // THIS tx, but the PCA remainder only DRAWS THE BUDGET (windowSpent) —
-    // its staker-pool emission was scheduled at createAccount. So the pool
-    // events here total exactly the escrow gross (100), and the discounted
-    // remainder (720) is asserted on windowSpent below. (A consume-but-
-    // still-charge-full regression would draw 900 from the budget.)
+    // discount branch. 10.2.0: the escrow consume funds the pool on THIS tx,
+    // and so does the PCA remainder, booked at its discounted cost (720) as a
+    // wallet publish books its payment. So the pool events here total the
+    // escrow gross plus the discounted remainder, and the remainder is also
+    // asserted on windowSpent below. (A consume-but-still-charge-full
+    // regression would draw 900 from the budget.)
     const tx = await KAV10.connect(creator).publish(p);
     const receipt = await tx.wait();
     await expect(tx).to.emit(KAV10, 'RegistrationEscrowConsumed').withArgs(cgId, deposit);
 
     const remainder = tokenAmount - deposit; // 900
     const discountedRemainder = (remainder * (10_000n - EXPECTED_DISCOUNT_BPS)) / 10_000n; // 720
-    const expectedPool = deposit; // 10.0.8: escrow gross only — the PCA draw emits nothing here
+    const expectedPool = deposit + discountedRemainder; // escrow gross + the PCA draw, booked at use time
     const epochStorageAddr = (await EpochStorageContract.getAddress()).toLowerCase();
     let poolSum = 0n;
     for (const log of receipt!.logs) {
@@ -424,7 +422,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     expect(poolSum).to.equal(expectedPool);
 
     // The PCA discount branch drew exactly the discounted remainder from
-    // the paying account's first billing window (10.0.8 budget gate).
+    // the paying account's first billing window.
     const PCSx = await hre.ethers.getContract<PublishingConvictionStorage>(
       'PublishingConvictionStorage',
     );
@@ -997,12 +995,12 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
     const receipt = await tx.wait();
     expect(receipt!.status).to.equal(1);
 
-    // 10.0.8: the conviction branch draws the DISCOUNTED cost from the
-    // window budget and emits NOTHING to the pool at publish time (the base
-    // commitment's emission was scheduled at createAccount). A direct-spend
-    // fallthrough would still emit the full amount on this tx — so ZERO pool
-    // events here + the discounted windowSpent below is the on-chain proof
-    // the discount branch (not direct spend) executed.
+    // 10.2.0: the conviction branch draws the DISCOUNTED cost from the
+    // window budget and books exactly that to the pool, over the KA's
+    // epochs, as a wallet publish would book its payment. A direct-spend
+    // fallthrough would book the full amount on this tx — so pool events
+    // summing to the discounted cost, plus the discounted windowSpent below,
+    // are the on-chain proof the discount branch (not direct spend) executed.
     const epochStorageAddr = (
       await EpochStorageContract.getAddress()
     ).toLowerCase();
@@ -1026,7 +1024,7 @@ describe('@integration V10 PCA lifecycle (DKGPublishingConvictionNFT)', function
         // not the event we're after
       }
     }
-    expect(activeSinkSum).to.equal(0n);
+    expect(activeSinkSum).to.equal(expectedDiscounted);
     const PCSy = await hre.ethers.getContract<PublishingConvictionStorage>(
       'PublishingConvictionStorage',
     );

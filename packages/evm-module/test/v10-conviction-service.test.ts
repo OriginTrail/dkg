@@ -1,10 +1,13 @@
 // Conviction Account service spending (OT-RFC-27) end to end: ServiceSubscriptions
 // and ConvictionServiceStorage registered in the Hub, drawing through the real
-// PublishingConviction 10.1.0 on the real account stack.
+// PublishingConviction 10.2.0 on the real account stack. A funding pays as a
+// wallet does: its whole cost is booked as due in QueryInferenceStorage, in the
+// epoch after the period, and nothing reaches the staker pool.
 //
 // Groups:
-//   - opt-in: owner only, the cut-over, an expired account, a wired treasury, a
-//     repeated switch, and the schedule an older account gets at opt-in;
+//   - opt-in: owner only, an account that 10.0.8 or 10.1.0 scheduled, an
+//     expired account, a wired treasury, a repeated switch, and an account a
+//     build older than 10.0.8 created;
 //   - assign: consent by sending or by signature (EOA and ERC-1271), the nonce,
 //     replay, the domain, every invalid term, a transferred NFT, high-s and
 //     compact signatures, and the separation from publishing agents;
@@ -12,18 +15,19 @@
 //   - caps update: owner only, live assignments only, a valid and changed limit
 //     and expiry, usage and nonces kept, applied from the next funding in both
 //     directions, a paused account, and terms signed before an update;
-//   - fund, happy path: every discount tier, the 1-wei floor, the top-up branch;
+//   - fund, happy path: every discount tier, the 1-wei floor, the top-up branch,
+//     each with its cost due after the period;
 //   - fund, refusals: the period limit, the period's epoch, the buckets, the
 //     assignment, the allowance, an expired account, a wired treasury, the gate
-//     on coverServiceCost, a mismatched draw and a full label basis, each
-//     without partial effect;
+//     on coverServiceCost, a mismatched draw and an account scheduled in full,
+//     each without partial effect;
 //   - period records: the record is always visible, and a buyer key funds one
 //     period per epoch;
 //   - shared allowance with publishing through KnowledgeAssetsLifecycle;
-//   - no TRAC moves: no Token log, an unchanged vault, an unchanged pool for a
-//     base-only funding and exactly the overflow's ranges for a top-up funding;
-//   - views: previewCost, currentWindowAllowance against getRemainingAllowance,
-//     scheduledEmission, emissionSpan and baseLabelCapacity.
+//   - no TRAC moves: no Token log, an unchanged vault, and an unchanged staker
+//     pool, for a base-only funding and a top-up funding alike;
+//   - views: previewCost, and currentWindowAllowance against
+//     getRemainingAllowance.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -48,6 +52,7 @@ import {
   Profile,
   PublishingConviction,
   PublishingConvictionStorage,
+  QueryInferenceStorage,
   ServiceSubscriptions,
   StakingV10,
   Token,
@@ -62,22 +67,19 @@ import {
   SESSION_KEY,
   TRAC,
   Terms,
-  basisAmounts,
   bucket,
   capsOf,
   compact,
   costOf,
   domainOf,
-  emissionOfWindows,
   highS,
   registerServiceContracts,
   requestOf,
-  setExactScheduleFrom,
   signTerms,
   valueFor,
   writeLegacyAccount,
 } from './helpers/conviction-service';
-import { PoolModel, prorateActiveSink, scheduleModel } from './helpers/emission-model';
+import { deployScheduleHarness } from './helpers/scheduled-accounts';
 import { createProfile, createProfiles } from './helpers/profile-helpers';
 import { getDefaultKACreator, getDefaultPublishingNode, getDefaultReceivingNodes } from './helpers/setup-helpers';
 import { DEFAULT_CHAIN_ID, buildPublishParams, packReservedKaId } from './helpers/v10-ka-helpers';
@@ -113,6 +115,7 @@ type Fixture = {
   NFT: DKGPublishingConvictionNFT;
   PC: PublishingConviction;
   PCS: PublishingConvictionStorage;
+  QIS: QueryInferenceStorage;
   CSS: ConvictionServiceStorage;
   SS: ServiceSubscriptions;
   KAL: KnowledgeAssetsLifecycle;
@@ -127,7 +130,7 @@ async function deployFixture(): Promise<Fixture> {
   await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
   const accounts = await hre.ethers.getSigners();
   const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { CSS, SS } = await registerServiceContracts(Hub);
+  const { QIS, CSS, SS } = await registerServiceContracts(Hub);
   return {
     accounts,
     Hub,
@@ -139,6 +142,7 @@ async function deployFixture(): Promise<Fixture> {
     NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
     PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
     PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
+    QIS,
     CSS,
     SS,
     KAL: await hre.ethers.getContract<KnowledgeAssetsLifecycle>('KnowledgeAssetsLifecycle'),
@@ -161,6 +165,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   let NFT: DKGPublishingConvictionNFT;
   let PC: PublishingConviction;
   let PCS: PublishingConvictionStorage;
+  let QIS: QueryInferenceStorage;
   let CSS: ConvictionServiceStorage;
   let SS: ServiceSubscriptions;
   let KAL: KnowledgeAssetsLifecycle;
@@ -193,6 +198,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       NFT,
       PC,
       PCS,
+      QIS,
       CSS,
       SS,
       KAL,
@@ -217,7 +223,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // Helpers
   // -------------------------------------------------------------------------
 
-  const cutOver = async (ts?: bigint) => setExactScheduleFrom(HubContract, CSS, ts);
   const latest = async () => BigInt(await time.latest());
   const blockTime = async (receipt: ContractTransactionReceipt): Promise<bigint> =>
     BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
@@ -303,13 +308,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       .filter((a) => a.shardId === STAKER_SHARD_ID)
       .map((a) => [a.startEpoch, a.endEpoch, a.tokenAmount]);
 
-  /** S(e) of an account scheduled at creation, from the shared emission model. */
-  const scheduleOf = async (committed: bigint, createdAt: bigint, spent?: Map<bigint, bigint>) => {
-    const model = new PoolModel(0n);
-    await scheduleModel({ chronos: ChronosContract, model, committed, createdAtTimestamp: createdAt, lock, epLen, spent });
-    return model.perEpoch;
-  };
-
+  /** The epochs a scheduled account's emission spans, from its first window's close. */
   const spanOf = async (createdAt: bigint) => {
     const first = await ChronosContract.epochAtTimestamp(createdAt + epLen);
     return { first, last: first + 2n * lock - 1n };
@@ -321,27 +320,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     return out;
   };
 
-  const sumBaseLabels = async (accountId: bigint, from: bigint, to: bigint) => {
-    let sum = 0n;
-    for (let e = from; e <= to; e++) sum += await CSS.baseLabel(accountId, e);
-    return sum;
-  };
-
-  /** Time left in the current epoch at a block time, as Chronos computes it. */
-  const timeLeftAt = async (ts: bigint) => {
-    const start = await ChronosContract.startTime();
-    return epLen - ((ts - start) % epLen);
-  };
-
   /** Everything a refused funding must leave as it was. */
   const fundingState = async (accountId: bigint, assignee: string, window: bigint) => {
     const u = await CSS.getUsage(accountId, assignee);
+    const now = await ChronosContract.getCurrentEpoch();
     return {
       windowSpent: await PCS.windowSpent(accountId, window),
       topUpBalance: await PCS.topUpBalance(accountId),
-      serviceSpent: await CSS.serviceSpent(accountId, window),
-      labelTotal: await CSS.accountServiceLabelTotal(accountId),
-      cursor: await CSS.labelCursor(accountId),
+      due: [await QIS.convictionDue(now + 1n), await QIS.convictionDue(now + 2n)],
       usage: [u.periods],
       periods: await CSS.accountSubscriptionCount(accountId),
     };
@@ -352,28 +338,23 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   describe('opt-in', () => {
-    it('reverts ExactScheduleFromUnset while the cut-over is unset, and the label views are undefined until then', async () => {
-      const { accountId } = await createAccountFor();
-      await expect(SS.connect(owner).setServiceSpending(accountId, true)).to.be.revertedWithCustomError(
-        SS,
-        'ExactScheduleFromUnset',
-      );
-      await expect(SS.scheduledEmission(accountId, 1n)).to.be.revertedWithCustomError(SS, 'ExactScheduleFromUnset');
-      await expect(SS.baseLabelCapacity(accountId)).to.be.revertedWithCustomError(SS, 'ExactScheduleFromUnset');
-      const [first, last] = await SS.emissionSpan(accountId);
-      expect(last - first + 1n).to.equal(2n * lock);
+    it('an account that 10.0.8 or 10.1.0 scheduled reverts EmissionAlreadyScheduled; a use-time account switches on', async () => {
+      const harness = await deployScheduleHarness(HubContract);
+      const scheduled = await createAccountFor();
+      await harness.scheduleInFull(scheduled.accountId);
+      await expect(SS.connect(owner).setServiceSpending(scheduled.accountId, true))
+        .to.be.revertedWithCustomError(SS, 'EmissionAlreadyScheduled')
+        .withArgs(scheduled.accountId);
+      expect(await CSS.serviceSpendingEnabledAt(scheduled.accountId)).to.equal(0n);
 
-      await cutOver();
+      const { accountId } = await createAccountFor();
+      expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(0n);
       await expect(SS.connect(owner).setServiceSpending(accountId, true))
         .to.emit(SS, 'ServiceSpendingSet')
         .withArgs(accountId, true);
     });
 
-    describe('with the cut-over set', () => {
-      beforeEach(async () => {
-        await cutOver();
-      });
-
+    describe('a use-time account', () => {
       it('is owner only, in both directions', async () => {
         const { accountId } = await createAccountFor();
         for (const caller of [stranger, buyer, accounts[0]]) {
@@ -453,7 +434,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           .withArgs(accountId, true);
       });
 
-      it('on an account scheduled at creation, the opt-in writes no schedule and leaves the staker pool unchanged', async () => {
+      it('the opt-in books nothing and leaves the staker pool unchanged', async () => {
         const { accountId, createdAt } = await createAccountFor();
         const { first, last } = await spanOf(createdAt);
         const before = await poolSnapshot(first - 1n, last + 1n);
@@ -464,15 +445,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       });
     });
 
-    it('an account from before the cut-over gets its schedule written by the opt-in, exactly as settle writes it', async () => {
-      // Created by an older build: no up-front schedule, a third of an epoch
-      // ago, with 111 TRAC of window 0 already spent (and emitted) under the
-      // older rules. The cut-over follows its creation.
+    it('an account a build older than 10.0.8 created opts in as a use-time account; the opt-in books nothing, and its funding books only closed windows', async () => {
+      // Created by an older build a window and a third ago, with 111 TRAC of
+      // window 0 already spent (and booked) under the older rules.
+      await time.increase(2n * epLen);
       const synthId = 909n;
       const committed = 12_000n * TRAC + 5n;
-      const createdAt = (await latest()) - epLen / 3n;
+      const createdAt = (await latest()) - epLen - epLen / 3n;
       const spent0 = 111n * TRAC;
-      const spent = new Map<bigint, bigint>([[0n, spent0]]);
       await writeLegacyAccount({
         pcs: PCS,
         nft: NFT,
@@ -483,52 +463,24 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         createdAt,
         lock,
         epLen,
-        spent,
+        spent: new Map<bigint, bigint>([[0n, spent0]]),
       });
-      await cutOver();
       expect(await NFT.ownerOf(synthId)).to.equal(owner.address);
       expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(0n);
 
-      const { first, last } = await spanOf(createdAt);
-      const before = await poolSnapshot(first - 1n, last + 1n);
-      const remBefore = await ES.accumulatedRemainder(STAKER_SHARD_ID);
+      const optIn = (await (await SS.connect(owner).setServiceSpending(synthId, true)).wait())!;
+      expect(await eventsOf(optIn, PC, 'EmissionScheduled')).to.have.length(0);
+      expect(await creditedRanges(optIn)).to.have.length(0);
+      expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(0n);
 
-      const tx = await SS.connect(owner).setServiceSpending(synthId, true);
-      await expect(tx).to.emit(PC, 'EmissionScheduled').withArgs(synthId, 0n, lock, committed - spent0, 0n);
-      await expect(tx).to.emit(SS, 'ServiceSpendingSet').withArgs(synthId, true);
-      expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(lock);
-
-      // The pool received exactly the remaining schedule: B − spent per window, plus the dust.
-      const model = new PoolModel(remBefore);
-      await scheduleModel({ chronos: ChronosContract, model, committed, createdAtTimestamp: createdAt, lock, epLen, spent });
-      const after = await poolSnapshot(first - 1n, last + 1n);
-      for (const [e, v] of after) {
-        expect(v - before.get(e)!, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
-      }
-
-      // The label basis of an older account is the lower bound: the budget less
-      // what publishing drew, per window, rounded down to a multiple of the
-      // lock. It is never above the schedule the opt-in wrote, epoch by epoch.
-      const scheduled = await scheduleOf(committed, createdAt, spent);
-      const basis = await emissionOfWindows({
-        chronos: ChronosContract,
-        amounts: basisAmounts({
-          committed,
-          lock,
-          epLen,
-          createdAt,
-          cutOver: await CSS.exactScheduleFrom(),
-          published: (w) => spent.get(w) ?? 0n,
-        }),
-        createdAt,
-        lock,
-        epLen,
-      });
-      for (let e = first - 1n; e <= last + 1n; e++) {
-        const s = await SS.scheduledEmission(synthId, e);
-        expect(s, `epoch ${e}`).to.equal(basis.get(e) ?? 0n);
-        expect(s, `epoch ${e}`).to.be.at.most(scheduled.get(e) ?? 0n);
-      }
+      // Its first funding books window 0, which has closed, and draws window 1.
+      await assignAs(await termsFor(synthId, buyer.address, WIDE), buyer);
+      const { cost, receipt } = await fund(await inference(synthId, 10n * TRAC));
+      const B = committed / lock;
+      await expect(receipt).to.emit(PC, 'EmissionScheduled').withArgs(synthId, 0n, 1n, B - spent0, 0n);
+      expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(1n);
+      expect(await PCS.windowSpent(synthId, 1n)).to.equal(cost);
+      expect(await QIS.convictionDue((await epochNow()) + 1n)).to.equal(cost);
     });
   });
 
@@ -540,7 +492,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     let accountId: bigint;
 
     beforeEach(async () => {
-      await cutOver();
       ({ accountId } = await createAccountFor());
       await SS.connect(owner).setServiceSpending(accountId, true);
     });
@@ -808,7 +759,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     let accountId: bigint;
 
     beforeEach(async () => {
-      await cutOver();
       ({ accountId } = await openAccount());
     });
 
@@ -899,7 +849,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     const CAPS: Partial<Terms> = { maxCostPerPeriod: 50n * TRAC };
 
     beforeEach(async () => {
-      await cutOver();
       ({ accountId, terms } = await openAccount({ committed: SMALL, caps: CAPS }));
     });
 
@@ -1040,10 +989,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   describe('fund, happy path', () => {
-    beforeEach(async () => {
-      await cutOver();
-    });
-
     for (const [committed, bps] of TIERS) {
       it(`at the ${Number(bps) / 100} % tier: the cost, the events, the record, the buckets and the usage`, async () => {
         const { accountId, createdAt } = await openAccount({ committed: committed + 11n, caps: WIDE });
@@ -1098,14 +1043,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           bs.map((b) => [b.bucketId, b.serviceClass, b.value, b.maxAskWeiPerUnit]);
         expect(asTuples(pf.buckets)).to.deep.equal(asTuples(r.buckets));
 
-        const [label] = await eventsOf(receipt, SS, 'ServiceEmissionLabelled');
-        expect([label.accountId, label.amount, label.subscriptionId, label.fromTopUp]).to.deep.equal([
-          accountId,
-          cost,
-          subscriptionId,
-          false,
-        ]);
-
         const s = await CSS.getSubscription(subscriptionId);
         expect(plain(s)).to.deep.equal({
           accountId,
@@ -1130,16 +1067,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
         expect(plain(await CSS.getUsage(accountId, buyer.address))).to.deep.equal({ periods: 1n });
         expect(await PCS.windowSpent(accountId, window)).to.equal(cost);
-        expect(await CSS.serviceSpent(accountId, window)).to.equal(cost);
 
-        // The cost is labelled against the account's own schedule, from the nearest epoch on.
-        const { first, last } = await spanOf(createdAt);
-        expect(label.fromEpoch).to.be.at.least(epoch > first ? epoch : first);
-        expect(await sumBaseLabels(accountId, first, last)).to.equal(cost);
-        expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(cost);
-        for (let e = label.fromEpoch; e <= label.toEpoch; e++) {
-          expect(await CSS.baseLabel(accountId, e)).to.be.at.most(await SS.scheduledEmission(accountId, e));
-        }
+        // The whole cost is due in the epoch after the period, as a wallet
+        // period's value is, and nothing in any other epoch or ledger.
+        expect(await QIS.convictionDue(epoch + 1n)).to.equal(cost);
+        expect(await QIS.convictionDue(epoch)).to.equal(0n);
+        expect(await QIS.convictionDue(epoch + 2n)).to.equal(0n);
+        expect(await QIS.walletDue(epoch + 1n)).to.equal(0n);
+        expect(await creditedRanges(receipt)).to.have.length(0);
       });
     }
 
@@ -1149,68 +1084,50 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(cost).to.equal(1n);
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.value, covered.cost, covered.drawnFromWindow]).to.deep.equal([3n, 1n, 1n]);
-      expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(1n);
+      expect(await QIS.convictionDue((await epochNow()) + 1n)).to.equal(1n);
       expect((await CSS.getSubscription(await SS.subscriptionIdOf(buyer.address, await epochNow()))).cost).to.equal(1n);
     });
 
-    it('once the window is spent, the cost comes from the top-up buffer and is labelled as exactly the emission it makes', async () => {
-      const { accountId } = await openAccount({ caps: WIDE });
+    it('once the window is spent, the cost comes from the top-up buffer, is due after the period, and reaches no staker pool', async () => {
+      const { accountId, createdAt } = await openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
       const spend = await fund(await inference(accountId, valueFor(B, 3_000n)));
       expect(spend.cost).to.equal(B);
       await topUp(accountId, 2_000n * TRAC);
+      const { first, last } = await spanOf(createdAt);
+      const pool = await poolSnapshot(first - 1n, last + 1n);
 
-      const r = await inference(accountId, 1_000n * TRAC, { epoch: await epochNext() });
+      const next = await epochNext();
+      const r = await inference(accountId, 1_000n * TRAC, { epoch: next });
       const { subscriptionId, cost, receipt } = await fund(r);
       expect(cost).to.equal(700n * TRAC);
-      const ts = await blockTime(receipt);
-      const epoch = await ChronosContract.epochAtTimestamp(ts);
 
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([0n, cost]);
+      expect(await creditedRanges(receipt)).to.have.length(0);
+      expect(await poolSnapshot(first - 1n, last + 1n)).to.deep.equal(pool);
 
-      // The emission of the overflow: prorateActiveSink over the lock from the
-      // current epoch, which is what publishing's overflow credits.
-      const model = prorateActiveSink(cost, epoch, lock, epLen, await timeLeftAt(ts)).map((x) => [x.start, x.end, x.amount]);
-      expect(await creditedRanges(receipt)).to.deep.equal(model);
-
-      const labels = await eventsOf(receipt, SS, 'ServiceEmissionLabelled');
-      expect(labels).to.have.length(1);
-      expect([labels[0].fromEpoch, labels[0].toEpoch, labels[0].amount, labels[0].subscriptionId, labels[0].fromTopUp])
-        .to.deep.equal([model[0][0], model[model.length - 1][1], cost, subscriptionId, true]);
-      let sum = 0n;
-      for (const [start, end, amount] of model) {
-        for (let e = start; e <= end; e++) {
-          const top = await CSS.topUpLabel(accountId, e);
-          expect(top, `epoch ${e}`).to.equal(amount / (end - start + 1n));
-          sum += top;
-        }
-      }
-      expect(sum).to.equal(cost);
+      // The period funded ahead is due after its own epoch; the first one after the current.
+      expect(await QIS.convictionDue(next + 1n)).to.equal(cost);
+      expect(await QIS.convictionDue(next)).to.equal(B);
       expect(await PCS.topUpBalance(accountId)).to.equal(2_000n * TRAC - cost);
       const s = await CSS.getSubscription(subscriptionId);
       expect([s.drawnFromWindow, s.drawnFromTopUp]).to.deep.equal([0n, cost]);
     });
 
-    it('a draw split between the window and the top-up buffer labels each part its own way', async () => {
-      const { accountId, createdAt } = await openAccount({ caps: WIDE });
+    it('a draw split between the window and the top-up buffer is due in full after the period', async () => {
+      const { accountId } = await openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
       await fund(await inference(accountId, valueFor(B - 100n * TRAC, 3_000n)));
       await topUp(accountId, 1_000n * TRAC);
-      const { cost, receipt } = await fund(
-        await inference(accountId, valueFor(300n * TRAC, 3_000n), { epoch: await epochNext() }),
-      );
+      const next = await epochNext();
+      const { cost, receipt } = await fund(await inference(accountId, valueFor(300n * TRAC, 3_000n), { epoch: next }));
       expect(cost).to.equal(300n * TRAC);
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([100n * TRAC, 200n * TRAC]);
-      const labels = await eventsOf(receipt, SS, 'ServiceEmissionLabelled');
-      expect(labels.map((l) => [l.amount, l.fromTopUp])).to.deep.equal([
-        [100n * TRAC, false],
-        [200n * TRAC, true],
-      ]);
-      const { first, last } = await spanOf(createdAt);
-      expect(await sumBaseLabels(accountId, first, last)).to.equal(B);
-      expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(B + 200n * TRAC);
+      expect(await creditedRanges(receipt)).to.have.length(0);
+      expect(await QIS.convictionDue(next + 1n)).to.equal(300n * TRAC);
+      expect(await QIS.convictionDue(next)).to.equal(B - 100n * TRAC);
     });
   });
 
@@ -1219,10 +1136,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   describe('fund, refusals', () => {
-    beforeEach(async () => {
-      await cutOver();
-    });
-
     describe('the limit', () => {
       let accountId: bigint;
 
@@ -1406,31 +1319,17 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         .withArgs(10n * TRAC, 10n * TRAC, 0n, 5n);
     });
 
-    it('a cost the base schedule cannot label reverts LabelCapacityExceeded, with no partial effect', async () => {
-      const { accountId, createdAt } = await openAccount({ committed: SMALL, caps: WIDE });
-      const S = await scheduleOf(SMALL, createdAt);
-      const { first, last } = await spanOf(createdAt);
-      const current = await ChronosContract.getCurrentEpoch();
-      // Leave 5 TRAC of capacity, in the epoch with the most emission, and fill
-      // every other epoch the funding could reach. A Hub owner write: the
-      // storage trusts Hub contracts and governance, as the account storage does.
-      let widest = first;
-      for (let e = first; e <= last; e++) if (S.get(e)! > S.get(widest)!) widest = e;
-      for (let e = current > first ? current : first; e <= last; e++) {
-        const fill = S.get(e)! - (e === widest ? 5n * TRAC : 0n);
-        if (fill > 0n) await CSS.addBaseLabel(accountId, e, fill);
-      }
-      expect(await SS.baseLabelCapacity(accountId)).to.equal(5n * TRAC);
-
+    it('an account scheduled in full after it opted in is refused with EmissionAlreadyScheduled, with no partial effect', async () => {
+      // Only a 10.0.8 or 10.1.0 build could schedule an account in full; the
+      // harness does it to one that opted in at use time.
+      const { accountId } = await openAccount({ committed: SMALL, caps: WIDE });
+      const harness = await deployScheduleHarness(HubContract);
+      await harness.scheduleInFull(accountId);
       const before = await fundingState(accountId, buyer.address, 0n);
-      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 8n * TRAC)))
-        .to.be.revertedWithCustomError(SS, 'LabelCapacityExceeded')
-        .withArgs(accountId, 3n * TRAC);
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
+        .to.be.revertedWithCustomError(SS, 'EmissionAlreadyScheduled')
+        .withArgs(accountId);
       expect(await fundingState(accountId, buyer.address, 0n)).to.deep.equal(before);
-
-      await fund(await inference(accountId, 5n * TRAC));
-      expect(await SS.baseLabelCapacity(accountId)).to.equal(0n);
-      expect(await CSS.baseLabel(accountId, widest)).to.equal(S.get(widest)!);
     });
   });
 
@@ -1439,10 +1338,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   describe('period records', () => {
-    beforeEach(async () => {
-      await cutOver();
-    });
-
     it('every period starts at the block time during its epoch, or at its epoch start ahead of it, so its record reads as existing', async () => {
       const { accountId } = await openAccount({ committed: SMALL });
       const ids: string[] = [];
@@ -1557,7 +1452,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     };
 
     it('publishing and services draw one window allowance, first come first served; a publish that finds it spent pays directly', async () => {
-      await cutOver();
       const nodes = await standUpNodes();
       const agent = getDefaultKACreator(accounts);
       const { accountId } = await openAccount({ committed: SMALL, caps: WIDE });
@@ -1597,14 +1491,15 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
       await fund(await inference(accountId, 300n * TRAC));
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(400n * TRAC);
-      expect(await CSS.serviceSpent(accountId, 0n)).to.equal(300n * TRAC);
+      const now = await epochNow();
+      expect(await QIS.convictionDue(now + 1n)).to.equal(300n * TRAC);
 
       await publish(200n * TRAC);
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(600n * TRAC);
 
       await fund(await inference(accountId, B - 600n * TRAC, { epoch: await epochNext() }));
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(B);
-      expect(await CSS.serviceSpent(accountId, 0n)).to.equal(B - 300n * TRAC);
+      expect(await QIS.convictionDue(now + 2n)).to.equal(B - 600n * TRAC);
 
       // The window is spent and there is no top-up buffer: the publish falls
       // through to direct spend from the agent's wallet, and a funding is refused.
@@ -1625,10 +1520,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   describe('no TRAC moves', () => {
-    beforeEach(async () => {
-      await cutOver();
-    });
-
     const tokenLogs = async (receipt: ContractTransactionReceipt) => {
       const address = (await Token.getAddress()).toLowerCase();
       return receipt.logs.filter((l) => l.address.toLowerCase() === address);
@@ -1647,39 +1538,25 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await Token.balanceOf(await Vault.getAddress())).to.equal(vault);
       expect(await poolSnapshot(first - 1n, last + 1n)).to.deep.equal(pool);
       expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(remainder);
-
-      // Every labelled epoch stays within the pool it labels.
-      for (let e = first; e <= last; e++) {
-        expect(await CSS.serviceLabel(e)).to.be.at.most(await ES.getEpochPool(STAKER_SHARD_ID, e));
-      }
     });
 
-    it("a top-up funding moves no token and adds to the pool exactly the overflow's ranges", async () => {
+    it('a top-up funding moves no token and leaves the staker pool unchanged too', async () => {
       const { accountId, createdAt } = await openAccount({ caps: WIDE });
       await fund(await inference(accountId, valueFor(COMMITTED / lock, 3_000n)));
       await topUp(accountId, 1_000n * TRAC);
-      // The shard's division remainder carry is 0, so each epoch gets its range's exact share.
-      expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(0n);
       const { first, last } = await spanOf(createdAt);
       const pool = await poolSnapshot(first - 1n, last + 1n);
+      const remainder = await ES.accumulatedRemainder(STAKER_SHARD_ID);
       const vault = await Token.balanceOf(await Vault.getAddress());
 
-      const { cost, receipt } = await fund(await inference(accountId, 1_000n * TRAC, { epoch: await epochNext() }));
+      const { receipt } = await fund(await inference(accountId, 1_000n * TRAC, { epoch: await epochNext() }));
+      const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
+      expect(covered.drawnFromTopUp).to.equal(700n * TRAC);
       expect(await tokenLogs(receipt)).to.have.length(0);
+      expect(await creditedRanges(receipt)).to.have.length(0);
       expect(await Token.balanceOf(await Vault.getAddress())).to.equal(vault);
-
-      const ts = await blockTime(receipt);
-      const model = new PoolModel(0n);
-      for (const r of prorateActiveSink(cost, await ChronosContract.epochAtTimestamp(ts), lock, epLen, await timeLeftAt(ts))) {
-        model.add(r);
-      }
-      const after = await poolSnapshot(first - 1n, last + 1n);
-      for (const [e, v] of after) {
-        expect(v - pool.get(e)!, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
-      }
-      for (let e = first; e <= last; e++) {
-        expect(await CSS.serviceLabel(e)).to.be.at.most(await ES.getEpochPool(STAKER_SHARD_ID, e));
-      }
+      expect(await poolSnapshot(first - 1n, last + 1n)).to.deep.equal(pool);
+      expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(remainder);
     });
   });
 
@@ -1688,10 +1565,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   describe('views', () => {
-    beforeEach(async () => {
-      await cutOver();
-    });
-
     it('previewCost: every tier, the floor, a zero value, and an unknown account', async () => {
       for (const [committed, bps] of TIERS) {
         const { accountId } = await createAccountFor(owner, committed);
@@ -1730,35 +1603,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       // After expiry the window is capped at the lock, and nothing is left of the base allowance.
       await time.increaseTo((await PCS.getAccount(accountId)).expiresAtTimestamp + 1n);
       expect(await SS.currentWindowAllowance(accountId)).to.deep.equal([lock, 0n, 70n * TRAC, true]);
-    });
-
-    it('scheduledEmission is the account schedule, emissionSpan its epochs, and baseLabelCapacity what is left to label', async () => {
-      const { accountId, createdAt } = await openAccount({ caps: WIDE });
-      const S = await scheduleOf(COMMITTED, createdAt);
-      const { first, last } = await spanOf(createdAt);
-      expect(await SS.emissionSpan(accountId)).to.deep.equal([first, last]);
-      let total = 0n;
-      for (let e = first - 2n; e <= last + 2n; e++) {
-        expect(await SS.scheduledEmission(accountId, e), `epoch ${e}`).to.equal(S.get(e) ?? 0n);
-        total += S.get(e) ?? 0n;
-      }
-      expect(total).to.equal(COMMITTED);
-
-      // Nothing is labelled yet, and the span starts after the current epoch.
-      expect(await ChronosContract.getCurrentEpoch()).to.be.lessThan(first);
-      expect(await SS.baseLabelCapacity(accountId)).to.equal(COMMITTED);
-      const { cost } = await fund(await inference(accountId, 2_000n * TRAC));
-      expect(await SS.baseLabelCapacity(accountId)).to.equal(COMMITTED - cost);
-
-      // Later, the epochs before the current one no longer count.
-      await time.increase(3n * epLen);
-      const current = await ChronosContract.getCurrentEpoch();
-      let left = 0n;
-      for (let e = current; e <= last; e++) {
-        const free = (S.get(e) ?? 0n) - (await CSS.baseLabel(accountId, e));
-        if (free > 0n) left += free;
-      }
-      expect(await SS.baseLabelCapacity(accountId)).to.equal(left);
     });
   });
 });

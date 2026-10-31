@@ -1,10 +1,12 @@
 // Unit tests for the deploy steps of service plan periods (OT-RFC-27) and for
 // the Hub transaction step they end in:
-//   - deploy/active/052c_deploy_conviction_service_storage.ts, which checks the
-//     preconditions of the schedule cut-over before it is forwarded;
+//   - deploy/active/052c_deploy_conviction_service_storage.ts, which deploys
+//     ConvictionServiceStorage and sets its parameters everywhere but on
+//     mainnet;
 //   - deploy/active/052d_deploy_service_subscriptions.ts, which deploys
 //     ServiceSubscriptions and ServiceSubscriptionsWallet, and refuses to run
-//     against a PublishingConviction without coverServiceCost;
+//     against PublishingConviction 10.1.x, which would count an account
+//     funding twice;
 //   - deploy/active/052e_deploy_query_inference_storage.ts, which sets the
 //     activation epoch to the deployment epoch on development only;
 //   - deploy/active/052f_deploy_query_inference_settlement.ts, which deploys
@@ -32,19 +34,13 @@ const abiOf = (name: string) =>
   JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'abi', `${name}.json`), 'utf-8'));
 
 const HUB = '0x1000000000000000000000000000000000000001';
-const PARAMETERS_STORAGE = '0x1000000000000000000000000000000000000002';
 const PUBLISHING_CONVICTION = '0x1000000000000000000000000000000000000003';
-const PUBLISHING_CONVICTION_AFTER_RUN = '0x1000000000000000000000000000000000000006';
 const CSS = '0x1000000000000000000000000000000000000004';
 const SS = '0x1000000000000000000000000000000000000005';
 const QIS = '0x1000000000000000000000000000000000000007';
 const CHRONOS = '0x1000000000000000000000000000000000000008';
 const DEPLOYER = '0x2000000000000000000000000000000000000001';
 const HUB_OWNER = '0x2000000000000000000000000000000000000002';
-const TREASURY = '0x3000000000000000000000000000000000000001';
-
-const CUT_OVER = 1_783_530_141n;
-const LATEST = 1_790_000_000;
 
 /** Run `fn` with console.log captured. */
 async function captured(fn: () => Promise<unknown>): Promise<string[]> {
@@ -68,83 +64,33 @@ async function failureOf(fn: () => Promise<unknown>): Promise<Error | undefined>
   return undefined;
 }
 
-function storageHre(opts: {
-  network?: string;
-  environment?: string;
-  configured?: string;
-  onChain?: bigint;
-  treasury?: string;
-  publishingConvictionVersion?: string;
-  afterRunVersion?: string;
-}) {
-  const network = opts.network ?? 'base_sepolia_v10';
+function storageHre(opts: { network?: string; environment?: string }) {
   const deployed: string[] = [];
   const updates: string[] = [];
-  const contracts: Record<string, { evmAddress: string }> = {
-    Hub: { evmAddress: HUB },
-    ParametersStorage: { evmAddress: PARAMETERS_STORAGE },
-    // What 052b leaves in the deployments file: the build this run registers.
-    PublishingConviction: { evmAddress: PUBLISHING_CONVICTION_AFTER_RUN },
-  };
-  if (opts.onChain !== undefined) contracts.ConvictionServiceStorage = { evmAddress: CSS };
   const hre = {
-    network: { name: network, config: { environment: opts.environment ?? 'testnet' } },
+    network: { name: opts.network ?? 'base_sepolia_v10', config: { environment: opts.environment ?? 'testnet' } },
     ethers: {
-      ZeroAddress: ethers.ZeroAddress,
-      provider: { getBlock: async () => ({ timestamp: LATEST }) },
       getContractAt: async (name: string, address: string) => {
-        if (name === 'ParametersStorage') {
-          return { protocolTreasury: async () => opts.treasury ?? ethers.ZeroAddress };
-        }
-        if (name === 'Hub') return { getContractAddress: async () => PUBLISHING_CONVICTION };
-        if (name === 'PublishingConviction') {
-          const version =
-            address === PUBLISHING_CONVICTION
-              ? (opts.publishingConvictionVersion ?? '10.0.8')
-              : (opts.afterRunVersion ?? '10.1.0');
-          return { version: async () => version };
-        }
-        if (name === 'ConvictionServiceStorage' && address === CSS) {
-          return { exactScheduleFrom: async () => opts.onChain ?? 0n };
-        }
         throw new Error(`unexpected getContractAt(${name}, ${address})`);
       },
     },
     helpers: {
-      isDeployed: (name: string) => name in contracts,
       deploy: async ({ newContractName }: { newContractName: string }) => {
         deployed.push(newContractName);
-        return { exactScheduleFrom: async () => opts.onChain ?? 0n };
+        return {};
       },
       updateContractParameters: async (name: string) => {
         updates.push(name);
       },
-      parametersConfig: {
-        testnet: {
-          ConvictionServiceStorage: { maxBucketsPerPeriod: '16' },
-          overrides:
-            opts.configured === undefined
-              ? {}
-              : { base_sepolia_v10: { ConvictionServiceStorage: { exactScheduleFrom: opts.configured } } },
-        },
-        mainnet: { overrides: {} },
-      },
-      contractDeployments: { contracts },
     },
   };
   return { hre, deployed, updates };
 }
 
-describe('@unit deploy/052c — ConvictionServiceStorage and the schedule cut-over', () => {
-  it('on a mainnet network, deploys nothing, sets no parameters and runs no checks', async () => {
+describe('@unit deploy/052c — ConvictionServiceStorage', () => {
+  it('on a mainnet network, deploys nothing and sets no parameters', async () => {
     for (const network of ['base_mainnet', 'gnosis_mainnet']) {
-      const { hre, deployed, updates } = storageHre({
-        network,
-        environment: 'mainnet',
-        treasury: TREASURY,
-        publishingConvictionVersion: '10.0.7',
-        afterRunVersion: '10.0.7',
-      });
+      const { hre, deployed, updates } = storageHre({ network, environment: 'mainnet' });
       const lines = await captured(() => deployStorage(hre as never));
       expect(deployed).to.have.length(0);
       expect(updates).to.have.length(0);
@@ -154,77 +100,31 @@ describe('@unit deploy/052c — ConvictionServiceStorage and the schedule cut-ov
     }
   });
 
-  it('without a configured cut-over, deploys and sets the parameters with no checks', async () => {
-    const { hre, deployed, updates } = storageHre({
-      treasury: TREASURY,
-      publishingConvictionVersion: '10.0.7',
-      afterRunVersion: '10.0.7',
-    });
-    const lines = await captured(() => deployStorage(hre as never));
-    expect(deployed).to.deep.equal(['ConvictionServiceStorage']);
-    expect(updates).to.deep.equal(['ConvictionServiceStorage']);
-    expect(lines.join('\n')).to.match(/no exactScheduleFrom is configured for base_sepolia_v10/);
-  });
-
-  it('with the cut-over configured and unset, checks the treasury, the Hub, the build this run leaves and the time, then deploys', async () => {
-    const { hre, deployed, updates } = storageHre({ configured: String(CUT_OVER) });
-    const lines = await captured(() => deployStorage(hre as never));
-    expect(deployed).to.deep.equal(['ConvictionServiceStorage']);
-    expect(updates).to.deep.equal(['ConvictionServiceStorage']);
-    expect(lines.join('\n')).to.match(/exactScheduleFrom 1783530141 will be set.*this run leaves 10\.1\.0/);
-  });
-
-  // Every refusal comes before anything is deployed, so a refused run leaves
-  // nothing a later run would take as deployed but unregistered.
-  it('refuses while a protocol treasury is wired, before deploying anything', async () => {
-    const { hre, deployed, updates } = storageHre({ configured: String(CUT_OVER), treasury: TREASURY });
-    const error = await failureOf(() => deployStorage(hre as never));
-    expect(error?.message).to.match(/protocolTreasury\(\) is 0x3000/);
-    expect(deployed).to.have.length(0);
-    expect(updates).to.have.length(0);
-  });
-
-  it('refuses while the Hub names a PublishingConviction older than 10.0.8, before deploying anything', async () => {
-    for (const version of ['10.0.7', '1.0.0']) {
-      const { hre, deployed } = storageHre({ configured: String(CUT_OVER), publishingConvictionVersion: version });
-      const error = await failureOf(() => deployStorage(hre as never));
-      expect(error?.message).to.match(new RegExp(`names PublishingConviction ${version.replace(/\./g, '\\.')} .*older than 10\\.0\\.8`));
-      expect(deployed).to.have.length(0);
+  it('elsewhere, deploys and sets the parameters, with no reads of any other contract', async () => {
+    for (const where of [
+      { network: 'base_sepolia_v10', environment: 'testnet' },
+      { network: 'hardhat', environment: 'development' },
+    ]) {
+      const { hre, deployed, updates } = storageHre(where);
+      const lines = await captured(() => deployStorage(hre as never));
+      expect(deployed).to.deep.equal(['ConvictionServiceStorage']);
+      expect(updates).to.deep.equal(['ConvictionServiceStorage']);
+      expect(lines).to.have.length(0);
     }
   });
 
-  it('refuses a run that would leave a PublishingConviction older than 10.1.0, before deploying anything, and names the redeploy flag', async () => {
-    for (const version of ['10.0.8', '10.0.10']) {
-      const { hre, deployed } = storageHre({ configured: String(CUT_OVER), afterRunVersion: version });
-      const error = await failureOf(() => deployStorage(hre as never));
-      expect(error?.message).to.match(new RegExp(`would leave PublishingConviction ${version.replace(/\./g, '\\.')} .*older than 10\\.1\\.0`));
-      expect(error?.message).to.match(/contracts\.PublishingConviction\.deployed to false/);
-      expect(deployed).to.have.length(0);
-    }
-  });
-
-  it('refuses a cut-over after the latest block time, before deploying anything', async () => {
-    const { hre, deployed } = storageHre({ configured: String(LATEST + 1) });
-    const error = await failureOf(() => deployStorage(hre as never));
-    expect(error?.message).to.match(/after the latest block time/);
-    expect(deployed).to.have.length(0);
-  });
-
-  it('skips the checks once the storage holds the same value, and refuses a different one', async () => {
-    const same = storageHre({ configured: String(CUT_OVER), onChain: CUT_OVER, treasury: TREASURY, afterRunVersion: '10.0.8' });
-    await captured(() => deployStorage(same.hre as never));
-    expect(same.deployed).to.deep.equal(['ConvictionServiceStorage']);
-    expect(same.updates).to.deep.equal(['ConvictionServiceStorage']);
-
-    const other = storageHre({ configured: String(CUT_OVER), onChain: CUT_OVER - 1n });
-    const error = await failureOf(() => deployStorage(other.hre as never));
-    expect(error?.message).to.match(/already 1783530140; it is set once/);
-    expect(other.deployed).to.have.length(0);
+  it('needs only the Hub, and the parameters hold no schedule cut-over any more', () => {
+    expect(deployStorage.dependencies).to.deep.equal(['Hub']);
+    const parameters = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'deployments', 'parameters.json'), 'utf-8'),
+    ) as Record<string, unknown>;
+    expect(JSON.stringify(parameters)).to.not.match(/exactScheduleFrom/);
+    expect(new Interface(abiOf('ConvictionServiceStorage')).getFunction('exactScheduleFrom')).to.equal(null);
   });
 });
 
-describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10.1.0', () => {
-  const ssHre = (version: string, opts: { network?: string; environment?: string; configured?: boolean } = {}) => {
+describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10.2.0', () => {
+  const ssHre = (version: string, opts: { network?: string; environment?: string } = {}) => {
     const deployed: string[] = [];
     const network = opts.network ?? 'base_sepolia_v10';
     const hre = {
@@ -234,23 +134,14 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
         deploy: async ({ newContractName }: { newContractName: string }) => {
           deployed.push(newContractName);
         },
-        parametersConfig: {
-          testnet: {
-            overrides:
-              opts.configured === false
-                ? {}
-                : { base_sepolia_v10: { ConvictionServiceStorage: { exactScheduleFrom: String(CUT_OVER) } } },
-          },
-          mainnet: { overrides: {} },
-        },
         contractDeployments: { contracts: { PublishingConviction: { evmAddress: PUBLISHING_CONVICTION } } },
       },
     };
     return { hre, deployed };
   };
 
-  it('deploys ServiceSubscriptions, then ServiceSubscriptionsWallet, against 10.1.0 or later', async () => {
-    for (const version of ['10.1.0', '10.1.3', '11.0.0']) {
+  it('deploys ServiceSubscriptions, then ServiceSubscriptionsWallet, against 10.2.0 or later', async () => {
+    for (const version of ['10.2.0', '10.2.3', '10.10.0', '11.0.0']) {
       const { hre, deployed } = ssHre(version);
       const lines = await captured(() => deployServiceSubscriptions(hre as never));
       expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
@@ -258,18 +149,19 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
     }
   });
 
-  it('on a network that sets the cut-over, refuses an older build and names the redeploy flag', async () => {
-    for (const version of ['10.0.8', '10.0.10', '1.0.0']) {
+  it('refuses a run that would leave 10.1.x, which would count an account funding twice, and names the redeploy flag', async () => {
+    for (const version of ['10.1.0', '10.1.3']) {
       const { hre, deployed } = ssHre(version);
       const error = await failureOf(() => deployServiceSubscriptions(hre as never));
-      expect(error?.message).to.match(/needs PublishingConviction 10\.1\.0 or later on base_sepolia_v10/);
+      expect(error?.message).to.match(/needs PublishingConviction 10\.2\.0 or later on base_sepolia_v10/);
+      expect(error?.message).to.match(/counted twice/);
       expect(error?.message).to.match(/contracts\.PublishingConviction\.deployed to false/);
       expect(deployed).to.have.length(0);
     }
   });
 
   it('on a mainnet network, deploys nothing, whatever build the run leaves', async () => {
-    for (const version of ['10.0.7', '10.1.0']) {
+    for (const version of ['10.0.7', '10.1.0', '10.2.0']) {
       for (const network of ['base_mainnet', 'gnosis_mainnet']) {
         const { hre, deployed } = ssHre(version, { network, environment: 'mainnet' });
         const lines = await captured(() => deployServiceSubscriptions(hre as never));
@@ -281,15 +173,16 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
     }
   });
 
-  it('on a network without the cut-over, deploys against an older build with a note, so other deploys go on', async () => {
-    for (const where of [
-      { network: 'gnosis_chiado_test', environment: 'testnet' },
-      { network: 'base_sepolia_v10', environment: 'testnet', configured: false },
-    ]) {
-      const { hre, deployed } = ssHre('10.0.7', where);
-      const lines = await captured(() => deployServiceSubscriptions(hre as never));
-      expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
-      expect(lines.join('\n')).to.match(new RegExp(`${where.network} keeps PublishingConviction 10\\.0\\.7.*stays off`));
+  it('against a build with no coverServiceCost, deploys with a note, so other deploys go on', async () => {
+    for (const version of ['10.0.7', '10.0.8', '1.0.0']) {
+      for (const network of ['gnosis_chiado_test', 'base_sepolia_v10']) {
+        const { hre, deployed } = ssHre(version, { network, environment: 'testnet' });
+        const lines = await captured(() => deployServiceSubscriptions(hre as never));
+        expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
+        expect(lines.join('\n')).to.match(
+          new RegExp(`${network} keeps PublishingConviction ${version.replace(/\./g, '\\.')}.*stay off`),
+        );
+      }
     }
   });
 });
@@ -439,7 +332,7 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
     setParametersEncodedData: [
       {
         contractName: 'ConvictionServiceStorage',
-        encodedData: [cssInterface.encodeFunctionData('setExactScheduleFrom', [CUT_OVER])],
+        encodedData: [cssInterface.encodeFunctionData('setMaxBucketsPerPeriod', [12n])],
       },
     ],
   });
@@ -516,7 +409,7 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
       expect(out).to.contain(`to:    ${HUB}`);
       expect(out).to.contain('ConvictionServiceStorage -> ' + CSS);
       expect(out).to.contain(`1. ${CSS} (ConvictionServiceStorage)`);
-      expect(out).to.contain(`ConvictionServiceStorage.setExactScheduleFrom(${CUT_OVER})`);
+      expect(out).to.contain('ConvictionServiceStorage.setMaxBucketsPerPeriod(12)');
       expect(out).to.match(/Send it before any further deploy run on this network/);
 
       const json = lines.find((x) => x.includes('Hub owner transaction (JSON): '))!;

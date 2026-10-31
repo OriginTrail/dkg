@@ -14,21 +14,22 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *         Marketplace"). The owner of a Conviction Account opts it in and
  *         assigns bounded plan-funding authority to buyer keys, and each buyer
  *         key funds plan periods from the account's existing allowance. A
- *         period funded from an account moves no TRAC: its cost is recorded
- *         as service-labelled emission against the account's own scheduled
- *         staker emission. A buyer key may also fund periods from its wallet;
- *         those are recorded here too, under account 0, which no account has.
- *         A plan period is one chain epoch.
+ *         period funded from an account moves no TRAC: its cost is drawn from
+ *         the account's allowance and booked as due in the query/inference
+ *         pool (`QueryInferenceStorage`), as a wallet period's value is. A
+ *         buyer key may also fund periods from its wallet; those are recorded
+ *         here too, under account 0, which no account has. A plan period is
+ *         one chain epoch.
  *
  * Architecture (the pattern of `PublishingConvictionStorage`):
  *   - This contract holds every byte of service-spending state: the opt-in
  *     switch per account, the assignments and the periods counted under
- *     them, the labels per account and epoch, and the period records with
- *     their buckets, which top-ups grow. It never holds or moves TRAC.
+ *     them, and the period records with their buckets, which top-ups grow.
+ *     It never holds or moves TRAC; the money due is in
+ *     `QueryInferenceStorage`.
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
  *     contract, and the Hub owner), and the logic contracts enforce every
- *     business rule (ownership, consent, the cost limit, label capacity) before they
- *     write. The one rule it keeps itself is the integrity of its period
+ *     business rule (ownership, consent, the cost limit) before they write. The one rule it keeps itself is the integrity of its period
  *     records: each id is written once, a written record always reads as
  *     existing (`createSubscription`), and only a written record is topped
  *     up, at the indexes of its buckets (`applyTopUp`). Business events come
@@ -40,8 +41,10 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * Fresh state: the contract ships empty and is never upgraded in place. A
  * replacement starts empty, so the storage layout matters to audits and
  * indexers rather than to migrations. The declaration order of the state
- * below IS the layout: slot 0 packs the inherited `hub` with the two scalar
- * parameters (26 of 32 bytes), and slots 1 to 15 hold the mappings in order.
+ * below IS the layout: slot 0 packs the inherited `hub` with
+ * `maxBucketsPerPeriod` (21 of 32 bytes); slots 1 to 6 and 13 to 15 hold the
+ * mappings in order, at the slots 1.0.0 and 1.1.0 gave them; slots 7 to 12,
+ * where 1.1.0 kept the service labels, stay empty.
  */
 contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "ConvictionServiceStorage";
@@ -53,7 +56,16 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //           only; `maxPeriodSeconds` is gone; top-ups of a recorded period
     //           (`applyTopUp`); one bucket read by index (`getBucket`). The
     //           mapping slots are unchanged.
-    string private constant _VERSION = "1.1.0";
+    //   1.2.0 — no service labels: a Conviction Account period's cost is booked
+    //           as due in `QueryInferenceStorage`. Removed with the labels are
+    //           their state and views (`serviceSpent`, `baseLabel`,
+    //           `topUpLabel`, `labelCursor`, `epochServiceLabel`,
+    //           `accountServiceLabelTotal`, `serviceLabel`, `accountLabel`),
+    //           their mutators, and the schedule cut-over `exactScheduleFrom`,
+    //           which only the labels read. Slots 7 to 12 stay empty
+    //           (`_retiredLabelSlots`), so every remaining mapping keeps its
+    //           slot; `maxBucketsPerPeriod` moves to offset 20 of slot 0.
+    string private constant _VERSION = "1.2.0";
 
     uint8 internal constant _DEFAULT_MAX_BUCKETS_PER_PERIOD = 16;
     uint8 internal constant _BUCKETS_PER_PERIOD_UPPER_BOUND = 32;
@@ -131,14 +143,12 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //                    Events (parameters only)
     // ============================================================
 
-    event ExactScheduleFromSet(uint40 timestamp);
     event MaxBucketsPerPeriodSet(uint8 oldValue, uint8 newValue);
 
     // ============================================================
     //                          Errors
     // ============================================================
 
-    error ExactScheduleFromAlreadySet(uint40 current);
     error InvalidParameter(string name);
     /// @notice The id already holds a period record or buckets.
     error SubscriptionExists(bytes32 subscriptionId);
@@ -154,14 +164,6 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //          State (the declaration order is the layout)
     // ============================================================
 
-    /// @notice The schedule cut-over. An account created at or after this time
-    ///         had its whole staker emission schedule written at creation
-    ///         (PublishingConviction 10.0.8 and later), so its emission per
-    ///         epoch is exactly reproducible from its stored terms; an older
-    ///         account only has a conservative lower bound. Set once, never to
-    ///         a future time. 0 means unset, and the logic contracts refuse to
-    ///         switch service spending on until it is set.
-    uint40 public exactScheduleFrom;
     /// @notice The most buckets one funded period may carry, its top-ups
     ///         included.
     uint8 public maxBucketsPerPeriod;
@@ -178,23 +180,10 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     mapping(uint256 => address[]) internal _assignees;
     /// @dev accountId => assignee => membership index for `_assignees`.
     mapping(uint256 => mapping(address => bool)) internal _listed;
-    /// @notice accountId => billing window => the window-allowance part of
-    ///         service draws in that window.
-    mapping(uint256 => mapping(uint40 => uint96)) public serviceSpent;
-    /// @notice accountId => epoch => labels placed against the account's base
-    ///         emission schedule.
-    mapping(uint256 => mapping(uint256 => uint96)) public baseLabel;
-    /// @notice accountId => epoch => labels equal to the top-up overflow that
-    ///         service draws emitted.
-    mapping(uint256 => mapping(uint256 => uint96)) public topUpLabel;
-    /// @notice accountId => the first epoch that may still have base label
-    ///         capacity.
-    mapping(uint256 => uint256) public labelCursor;
-    /// @notice epoch => the service-funded component of that epoch's staker
-    ///         emission, over all accounts.
-    mapping(uint256 => uint96) public epochServiceLabel;
-    /// @notice accountId => all labels of the account.
-    mapping(uint256 => uint96) public accountServiceLabelTotal;
+    /// @dev Slots 7 to 12: where 1.1.0 kept the service labels and the window
+    ///      draws they were based on. Never written since 1.2.0; held empty so
+    ///      the period records keep slots 13 to 15.
+    uint256[6] private _retiredLabelSlots;
     /// @dev subscriptionId => funded period record.
     mapping(bytes32 => Subscription) internal _subscriptions;
     /// @dev subscriptionId => the period's buckets, in funding order.
@@ -224,18 +213,6 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     // ============================================================
     //               Parameters (onlyHub: Hub.forwardCall)
     // ============================================================
-
-    /// @notice Set the schedule cut-over, once. `timestamp` must be in
-    ///         (0, block.timestamp]: the cut-over follows a Hub switch that has
-    ///         already happened, and a future value could precede that switch
-    ///         and treat accounts an older build still creates as exact.
-    function setExactScheduleFrom(uint40 timestamp) external onlyHub {
-        uint40 current = exactScheduleFrom;
-        if (current != 0) revert ExactScheduleFromAlreadySet(current);
-        if (timestamp == 0 || timestamp > block.timestamp) revert InvalidParameter("exactScheduleFrom");
-        exactScheduleFrom = timestamp;
-        emit ExactScheduleFromSet(timestamp);
-    }
 
     /// @notice Set the most buckets per period, from 1 to 32.
     function setMaxBucketsPerPeriod(uint8 value) external onlyHub {
@@ -293,30 +270,6 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @notice Count a funded period against its assignee.
     function recordUsage(uint256 accountId, address assignee) external onlyContracts {
         _usage[accountId][assignee].periods += 1;
-    }
-
-    /// @notice Add the window-allowance part of a service draw to its window.
-    function increaseServiceSpent(uint256 accountId, uint40 window, uint96 amount) external onlyContracts {
-        serviceSpent[accountId][window] += amount;
-    }
-
-    /// @notice Label `amount` of the account's base emission in `epoch`.
-    function addBaseLabel(uint256 accountId, uint256 epoch, uint96 amount) external onlyContracts {
-        baseLabel[accountId][epoch] += amount;
-        epochServiceLabel[epoch] += amount;
-        accountServiceLabelTotal[accountId] += amount;
-    }
-
-    /// @notice Label `amount` of top-up overflow emission in `epoch`.
-    function addTopUpLabel(uint256 accountId, uint256 epoch, uint96 amount) external onlyContracts {
-        topUpLabel[accountId][epoch] += amount;
-        epochServiceLabel[epoch] += amount;
-        accountServiceLabelTotal[accountId] += amount;
-    }
-
-    /// @notice Move the account's base label cursor.
-    function setLabelCursor(uint256 accountId, uint256 epoch) external onlyContracts {
-        labelCursor[accountId] = epoch;
     }
 
     /// @notice Record a funded period and its buckets, in the given order, and
@@ -390,16 +343,6 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     // ============================================================
     //                           Views
     // ============================================================
-
-    /// @notice The service-funded component of `epoch`'s staker emission.
-    function serviceLabel(uint256 epoch) external view returns (uint96) {
-        return epochServiceLabel[epoch];
-    }
-
-    /// @notice The account's base and top-up labels in `epoch`.
-    function accountLabel(uint256 accountId, uint256 epoch) external view returns (uint96 base, uint96 topUp) {
-        return (baseLabel[accountId][epoch], topUpLabel[accountId][epoch]);
-    }
 
     function getAssignment(uint256 accountId, address assignee) external view returns (Assignment memory) {
         return _assignments[accountId][assignee];

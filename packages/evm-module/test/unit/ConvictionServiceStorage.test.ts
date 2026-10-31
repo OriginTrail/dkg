@@ -6,13 +6,14 @@
 //     the Hub owner), every parameter setter is onlyHub (the Hub, through
 //     forwardCall, or the Hub owner), and the two never admit each other's
 //     callers;
-//   - the parameters: defaults, bounds, and a cut-over set once and never in
-//     the future;
+//   - the parameters: defaults and bounds;
 //   - the mutators' semantics: assignment listing and usage reset, cap
 //     updates that keep everything but the two limits, the period count,
-//     label totals, period records, each written once and never with a start
-//     of 0, and top-ups of a recorded period at its bucket indexes;
-//   - the compiler's storage layout against the documented one.
+//     period records, each written once and never with a start of 0, and
+//     top-ups of a recorded period at its bucket indexes;
+//   - the compiler's storage layout against the documented one: the mapping
+//     slots of 1.1.0, with the label slots held empty;
+//   - no label state, label view or schedule cut-over is left (1.2.0).
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -121,17 +122,39 @@ describe('@unit ConvictionServiceStorage', () => {
   });
 
   describe('metadata and initialization', () => {
-    it('is named ConvictionServiceStorage, version 1.1.0, with the two service classes', async () => {
+    it('is named ConvictionServiceStorage, version 1.2.0, with the two service classes', async () => {
       expect(await CSS.name()).to.equal('ConvictionServiceStorage');
-      expect(await CSS.version()).to.equal('1.1.0');
+      expect(await CSS.version()).to.equal('1.2.0');
       expect(await CSS.CLASS_INFERENCE()).to.equal(1n);
       expect(await CSS.CLASS_QUERY()).to.equal(2n);
       expect(await CSS.hub()).to.equal(await Hub.getAddress());
     });
 
-    it('initialize seeds the default and leaves the cut-over unset', async () => {
+    it('initialize seeds the default', async () => {
       expect(await CSS.maxBucketsPerPeriod()).to.equal(16n);
-      expect(await CSS.exactScheduleFrom()).to.equal(0n);
+    });
+
+    it('holds no label state, no label view and no schedule cut-over', () => {
+      for (const gone of [
+        'exactScheduleFrom',
+        'setExactScheduleFrom',
+        'serviceSpent',
+        'increaseServiceSpent',
+        'baseLabel',
+        'topUpLabel',
+        'labelCursor',
+        'epochServiceLabel',
+        'accountServiceLabelTotal',
+        'addBaseLabel',
+        'addTopUpLabel',
+        'setLabelCursor',
+        'serviceLabel',
+        'accountLabel',
+      ]) {
+        expect(CSS.interface.getFunction(gone), gone).to.equal(null);
+      }
+      for (const gone of ['ExactScheduleFromSet']) expect(CSS.interface.getEvent(gone), gone).to.equal(null);
+      for (const gone of ['ExactScheduleFromAlreadySet']) expect(CSS.interface.getError(gone), gone).to.equal(null);
     });
 
     it('initialize is idempotent: a tuned parameter survives a re-initialization', async () => {
@@ -150,10 +173,7 @@ describe('@unit ConvictionServiceStorage', () => {
   });
 
   describe('parameter setters (onlyHub)', () => {
-    const setters: Array<[string, unknown[]]> = [
-      ['setMaxBucketsPerPeriod', [8n]],
-      ['setExactScheduleFrom', [1n]],
-    ];
+    const setters: Array<[string, unknown[]]> = [['setMaxBucketsPerPeriod', [8n]]];
 
     for (const [setter, args] of setters) {
       it(`${setter} refuses a Hub contract and a stranger, and admits the Hub owner and Hub.forwardCall`, async () => {
@@ -168,9 +188,7 @@ describe('@unit ConvictionServiceStorage', () => {
         await (CSS.connect(owner) as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[setter](
           ...args,
         );
-        if (setter !== 'setExactScheduleFrom') {
-          await Hub.forwardCall(await CSS.getAddress(), CSS.interface.encodeFunctionData(setter, args));
-        }
+        await Hub.forwardCall(await CSS.getAddress(), CSS.interface.encodeFunctionData(setter, args));
       });
     }
 
@@ -201,38 +219,6 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(await CSS.maxBucketsPerPeriod()).to.equal(32n);
     });
 
-    it('setExactScheduleFrom refuses 0 and a future time, accepts the block time, and is set once', async () => {
-      await expect(CSS.setExactScheduleFrom(0n))
-        .to.be.revertedWithCustomError(CSS, 'InvalidParameter')
-        .withArgs('exactScheduleFrom');
-
-      const now = BigInt(await time.latest());
-      await time.setNextBlockTimestamp(now + 10n);
-      await expect(CSS.setExactScheduleFrom(now + 11n))
-        .to.be.revertedWithCustomError(CSS, 'InvalidParameter')
-        .withArgs('exactScheduleFrom');
-
-      await time.setNextBlockTimestamp(now + 20n);
-      await expect(CSS.setExactScheduleFrom(now + 20n)).to.emit(CSS, 'ExactScheduleFromSet').withArgs(now + 20n);
-      expect(await CSS.exactScheduleFrom()).to.equal(now + 20n);
-
-      // Set once: neither an earlier nor a later valid time replaces it.
-      for (const again of [now, now + 20n]) {
-        await expect(CSS.setExactScheduleFrom(again))
-          .to.be.revertedWithCustomError(CSS, 'ExactScheduleFromAlreadySet')
-          .withArgs(now + 20n);
-      }
-    });
-
-    it('setExactScheduleFrom through Hub.forwardCall sets a past cut-over', async () => {
-      const past = BigInt(await time.latest()) - 3_600n;
-      await expect(
-        Hub.forwardCall(await CSS.getAddress(), CSS.interface.encodeFunctionData('setExactScheduleFrom', [past])),
-      )
-        .to.emit(CSS, 'ExactScheduleFromSet')
-        .withArgs(past);
-      expect(await CSS.exactScheduleFrom()).to.equal(past);
-    });
   });
 
   describe('mutator gates (onlyContracts)', () => {
@@ -245,10 +231,6 @@ describe('@unit ConvictionServiceStorage', () => {
       ['setAssignmentRevokedAt', (c, s) => c.setAssignmentRevokedAt(s, assignee, 2_000n)],
       ['setAssignmentCaps', (c, s) => c.setAssignmentCaps(s, assignee, capsOf())],
       ['recordUsage', (c, s) => c.recordUsage(s, assignee)],
-      ['increaseServiceSpent', (c, s) => c.increaseServiceSpent(s, 0n, 5n)],
-      ['addBaseLabel', (c, s) => c.addBaseLabel(s, 10n, 5n)],
-      ['addTopUpLabel', (c, s) => c.addTopUpLabel(s, 10n, 5n)],
-      ['setLabelCursor', (c, s) => c.setLabelCursor(s, 10n)],
       [
         'createSubscription',
         (c, s) =>
@@ -267,7 +249,7 @@ describe('@unit ConvictionServiceStorage', () => {
     ];
 
     it('the list below covers every state-changing function except initialize and the parameter setters', () => {
-      const parameterFunctions = ['initialize', 'setExactScheduleFrom', 'setMaxBucketsPerPeriod'];
+      const parameterFunctions = ['initialize', 'setMaxBucketsPerPeriod'];
       const stateChanging: string[] = [];
       CSS.interface.forEachFunction((f) => {
         if (f.stateMutability === 'nonpayable' && !parameterFunctions.includes(f.name)) stateChanging.push(f.name);
@@ -399,54 +381,6 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(await CSS.isAssignmentActive(accountId, a)).to.equal(true);
       await CSS.connect(logic).setAssignmentRevokedAt(accountId, a, later + 1n);
       expect(await CSS.isAssignmentActive(accountId, a)).to.equal(false);
-    });
-  });
-
-  describe('service spend and labels', () => {
-    it('increaseServiceSpent accumulates per account and window', async () => {
-      await CSS.connect(logic).increaseServiceSpent(1n, 2n, 5n);
-      await CSS.connect(logic).increaseServiceSpent(1n, 2n, 6n);
-      await CSS.connect(logic).increaseServiceSpent(1n, 3n, 7n);
-      expect(await CSS.serviceSpent(1n, 2n)).to.equal(11n);
-      expect(await CSS.serviceSpent(1n, 3n)).to.equal(7n);
-      expect(await CSS.serviceSpent(2n, 2n)).to.equal(0n);
-    });
-
-    it('label adds update their own mapping, the epoch total and the account total', async () => {
-      await CSS.connect(logic).addBaseLabel(1n, 10n, 5n);
-      await CSS.connect(logic).addTopUpLabel(1n, 10n, 3n);
-      await CSS.connect(logic).addBaseLabel(2n, 10n, 7n);
-      await CSS.connect(logic).addTopUpLabel(1n, 11n, 4n);
-      await CSS.connect(logic).addBaseLabel(1n, 10n, 1n);
-
-      expect(await CSS.baseLabel(1n, 10n)).to.equal(6n);
-      expect(await CSS.topUpLabel(1n, 10n)).to.equal(3n);
-      expect(await CSS.accountLabel(1n, 10n)).to.deep.equal([6n, 3n]);
-      expect(await CSS.accountLabel(1n, 11n)).to.deep.equal([0n, 4n]);
-      expect(await CSS.accountLabel(2n, 10n)).to.deep.equal([7n, 0n]);
-
-      expect(await CSS.serviceLabel(10n)).to.equal(16n);
-      expect(await CSS.epochServiceLabel(10n)).to.equal(16n);
-      expect(await CSS.serviceLabel(11n)).to.equal(4n);
-      expect(await CSS.serviceLabel(12n)).to.equal(0n);
-
-      expect(await CSS.accountServiceLabelTotal(1n)).to.equal(13n);
-      expect(await CSS.accountServiceLabelTotal(2n)).to.equal(7n);
-    });
-
-    it('label adds revert on overflow instead of wrapping', async () => {
-      await CSS.connect(logic).addBaseLabel(1n, 20n, MAX_UINT96);
-      // A second account's label in the same epoch overflows the epoch total.
-      await expect(CSS.connect(logic).addTopUpLabel(2n, 20n, 1n)).to.be.revertedWithPanic(0x11);
-      // The same account's total overflows too, in another epoch.
-      await expect(CSS.connect(logic).addBaseLabel(1n, 21n, 1n)).to.be.revertedWithPanic(0x11);
-      expect(await CSS.serviceLabel(20n)).to.equal(MAX_UINT96);
-    });
-
-    it('setLabelCursor records the cursor per account', async () => {
-      await CSS.connect(logic).setLabelCursor(1n, 33n);
-      expect(await CSS.labelCursor(1n)).to.equal(33n);
-      expect(await CSS.labelCursor(2n)).to.equal(0n);
     });
   });
 
@@ -626,7 +560,7 @@ describe('@unit ConvictionServiceStorage', () => {
     type LayoutType = { label: string; numberOfBytes: string; members?: LayoutEntry[] };
     type StorageLayout = { storage: LayoutEntry[]; types: Record<string, LayoutType> };
 
-    it('matches the documented layout: slot 0 packs the hub with the two parameters, slots 1 to 15 the mappings', async () => {
+    it('matches the documented layout: slot 0 packs the hub with the bucket bound, the mappings keep slots 1 to 6 and 13 to 15', async () => {
       const sourceName = 'contracts/storage/ConvictionServiceStorage.sol';
       const buildInfo = await hre.artifacts.getBuildInfo(`${sourceName}:ConvictionServiceStorage`);
       const output = buildInfo?.output.contracts[sourceName]?.ConvictionServiceStorage as
@@ -641,8 +575,7 @@ describe('@unit ConvictionServiceStorage', () => {
       const rows = layout!.storage.map((s) => [s.slot, s.offset, s.label, layout!.types[s.type].label]);
       expect(rows).to.deep.equal([
         ['0', 0, 'hub', 'contract Hub'],
-        ['0', 20, 'exactScheduleFrom', 'uint40'],
-        ['0', 25, 'maxBucketsPerPeriod', 'uint8'],
+        ['0', 20, 'maxBucketsPerPeriod', 'uint8'],
         ['1', 0, 'serviceSpendingEnabledAt', 'mapping(uint256 => uint40)'],
         ['2', 0, 'assignmentNonce', 'mapping(uint256 => uint64)'],
         [
@@ -654,20 +587,18 @@ describe('@unit ConvictionServiceStorage', () => {
         ['4', 0, '_usage', 'mapping(uint256 => mapping(address => struct ConvictionServiceStorage.Usage))'],
         ['5', 0, '_assignees', 'mapping(uint256 => address[])'],
         ['6', 0, '_listed', 'mapping(uint256 => mapping(address => bool))'],
-        ['7', 0, 'serviceSpent', 'mapping(uint256 => mapping(uint40 => uint96))'],
-        ['8', 0, 'baseLabel', 'mapping(uint256 => mapping(uint256 => uint96))'],
-        ['9', 0, 'topUpLabel', 'mapping(uint256 => mapping(uint256 => uint96))'],
-        ['10', 0, 'labelCursor', 'mapping(uint256 => uint256)'],
-        ['11', 0, 'epochServiceLabel', 'mapping(uint256 => uint96)'],
-        ['12', 0, 'accountServiceLabelTotal', 'mapping(uint256 => uint96)'],
+        // Slots 7 to 12 held the 1.1.0 labels; they stay empty.
+        ['7', 0, '_retiredLabelSlots', 'uint256[6]'],
         ['13', 0, '_subscriptions', 'mapping(bytes32 => struct ConvictionServiceStorage.Subscription)'],
         ['14', 0, '_buckets', 'mapping(bytes32 => struct ConvictionServiceStorage.Bucket[])'],
         ['15', 0, '_accountSubscriptions', 'mapping(uint256 => bytes32[])'],
       ]);
 
-      // Slot 0 uses 26 of its 32 bytes.
+      // Slot 0 uses 21 of its 32 bytes, and the retired slots are 6 words.
       const maxBuckets = layout!.storage.find((s) => s.label === 'maxBucketsPerPeriod')!;
-      expect(maxBuckets.offset + Number(layout!.types[maxBuckets.type].numberOfBytes)).to.equal(26);
+      expect(maxBuckets.offset + Number(layout!.types[maxBuckets.type].numberOfBytes)).to.equal(21);
+      const retired = layout!.storage.find((s) => s.label === '_retiredLabelSlots')!;
+      expect(layout!.types[retired.type].numberOfBytes).to.equal(String(6 * 32));
 
       // An Assignment takes 2 slots and a Usage 1.
       const structBytes = (label: string) =>

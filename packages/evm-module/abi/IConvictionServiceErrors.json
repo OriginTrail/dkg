@@ -2,6 +2,17 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "EmissionAlreadyScheduled",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
         "name": "treasury",
         "type": "address"

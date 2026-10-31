@@ -17,8 +17,6 @@ contract MockSkewedServiceDraw {
         window = w;
     }
 
-    function settle(uint256) external {}
-
     function coverServiceCost(
         uint256,
         address,

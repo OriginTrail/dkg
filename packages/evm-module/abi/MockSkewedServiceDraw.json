@@ -55,28 +55,6 @@
             "internalType": "uint16",
             "name": "discountBps",
             "type": "uint16"
-          },
-          {
-            "components": [
-              {
-                "internalType": "uint40",
-                "name": "startEpoch",
-                "type": "uint40"
-              },
-              {
-                "internalType": "uint40",
-                "name": "endEpoch",
-                "type": "uint40"
-              },
-              {
-                "internalType": "uint96",
-                "name": "tokenAmount",
-                "type": "uint96"
-              }
-            ],
-            "internalType": "struct PublishingMathLib.ActiveSinkRange[3]",
-            "name": "topUpRanges",
-            "type": "tuple[3]"
           }
         ],
         "internalType": "struct PublishingConviction.ServiceDraw",
@@ -96,19 +74,6 @@
       }
     ],
     "name": "setWindow",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "settle",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

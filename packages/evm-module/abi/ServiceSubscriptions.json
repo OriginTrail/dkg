@@ -170,8 +170,14 @@
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ExactScheduleFromUnset",
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "EmissionAlreadyScheduled",
     "type": "error"
   },
   {
@@ -252,38 +258,6 @@
       }
     ],
     "name": "InvalidFundingRequest",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "timeRemaining",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "epochLength",
-        "type": "uint256"
-      }
-    ],
-    "name": "InvalidTimeRemaining",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "unplaced",
-        "type": "uint96"
-      }
-    ],
-    "name": "LabelCapacityExceeded",
     "type": "error"
   },
   {
@@ -461,22 +435,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "lock",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "length",
-        "type": "uint256"
-      }
-    ],
-    "name": "WindowAmountsLengthMismatch",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
@@ -493,11 +451,6 @@
   {
     "inputs": [],
     "name": "ZeroAddressHub",
-    "type": "error"
-  },
-  {
-    "inputs": [],
-    "name": "ZeroLock",
     "type": "error"
   },
   {
@@ -785,49 +738,6 @@
         "type": "uint256"
       },
       {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "fromEpoch",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "toEpoch",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "fromTopUp",
-        "type": "bool"
-      }
-    ],
-    "name": "ServiceEmissionLabelled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
         "indexed": true,
         "internalType": "address",
         "name": "assignee",
@@ -946,25 +856,6 @@
     "type": "function"
   },
   {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      }
-    ],
-    "name": "baseLabelCapacity",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [],
     "name": "chronos",
     "outputs": [
@@ -1032,30 +923,6 @@
         "internalType": "bytes32",
         "name": "",
         "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      }
-    ],
-    "name": "emissionSpan",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "firstEpoch",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lastEpoch",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1297,30 +1164,6 @@
     "name": "revoke",
     "outputs": [],
     "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "scheduledEmission",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
     "type": "function"
   },
   {

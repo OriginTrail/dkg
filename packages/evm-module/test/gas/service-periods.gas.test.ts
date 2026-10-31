@@ -33,7 +33,6 @@ import {
   bucket,
   registerServiceContracts,
   requestOf,
-  setExactScheduleFrom,
   signTerms,
   subscriptionIdOf,
   walletRequestOf,
@@ -46,7 +45,6 @@ async function deployFixture() {
   const { CSS, SS, SSW } = await registerServiceContracts(Hub, { wallet: true });
   return {
     accounts,
-    Hub,
     Token: await hre.ethers.getContract<Token>('Token'),
     Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
     NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
@@ -65,7 +63,6 @@ describe('@gas Plan-period funding', () => {
   });
 
   let accounts: SignerWithAddress[];
-  let HubContract: Hub;
   let Token: Token;
   let ChronosContract: Chronos;
   let NFT: DKGPublishingConvictionNFT;
@@ -76,9 +73,7 @@ describe('@gas Plan-period funding', () => {
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Hub: HubContract, Token, Chronos: ChronosContract, NFT, CSS, SS, SSW } = await loadFixture(
-      deployFixture,
-    ));
+    ({ accounts, Token, Chronos: ChronosContract, NFT, CSS, SS, SSW } = await loadFixture(deployFixture));
   });
 
   after(() => {
@@ -125,7 +120,6 @@ describe('@gas Plan-period funding', () => {
   it('topUpFromConviction, one stored bucket, base only', async () => {
     const owner = accounts[20];
     const buyer = accounts[21];
-    await setExactScheduleFrom(HubContract, CSS);
     const committed = 100_000n * TRAC + 11n;
     await Token.mint(owner.address, committed);
     await Token.connect(owner).approve(await NFT.getAddress(), committed);

@@ -1,4 +1,4 @@
-// PublishingConviction 10.1.0 — coverServiceCost, the allowance draw behind
+// PublishingConviction 10.2.0 — coverServiceCost, the allowance draw behind
 // Conviction Account service spending (OT-RFC-27).
 //
 // Every call goes through MockServiceSubscriptions, a stub registered in the
@@ -9,15 +9,17 @@
 //   - the gate: only the contract the Hub names ServiceSubscriptions, looked up
 //     on every call;
 //   - the refusals and their order: a zero value, a wired treasury, an unknown
-//     or expired account, and an allowance short of the cost, with no partial
-//     effect;
+//     or expired account, an account that 10.0.8 or 10.1.0 scheduled, and an
+//     allowance short of the cost, with no partial effect;
 //   - the draw, exactly as publishing draws: every discount tier, the 1-wei
 //     floor, the window allowance first and then the top-up buffer, a window
 //     shared with publishing, and a later window's own allowance;
-//   - no TRAC moves: no Token log, an unchanged vault balance, an unchanged
-//     staker pool for a base-only draw, and for an overflow exactly the ranges
-//     publishing's overflow credits in the same block;
-//   - the schedule of a pre-10.0.8 account is written before the draw.
+//   - nothing is booked to the staker pool and no TRAC moves, whether the draw
+//     comes from the window or the top-up buffer: the whole cost is returned
+//     for ServiceSubscriptions to book, while a publish of the same cost books
+//     it over the Knowledge Asset's epochs;
+//   - the closed windows of an account that a build older than 10.0.8
+//     created are booked before the draw, and no window more.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -37,7 +39,8 @@ import {
   PublishingConvictionStorage,
   Token,
 } from '../typechain';
-import { PoolModel, prorateActiveSink } from './helpers/emission-model';
+import { prorateActiveSink } from './helpers/emission-model';
+import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
 const STAKER_SHARD_ID = 1n;
 const BPS = 10_000n;
@@ -101,7 +104,7 @@ async function deployFixture(): Promise<Fixture> {
   };
 }
 
-describe('@integration PublishingConviction 10.1.0 coverServiceCost', function () {
+describe('@integration PublishingConviction 10.2.0 coverServiceCost', function () {
   let accounts: SignerWithAddress[];
   let HubContract: Hub;
   let Token: Token;
@@ -219,9 +222,6 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
   const valueFor = (cost: bigint, bps: bigint = 2_000n): bigint =>
     (cost * BPS + (BPS - bps) - 1n) / (BPS - bps);
 
-  const ZERO_RANGE = [0n, 0n, 0n];
-  const rangesOf = (draw: { topUpRanges: Array<{ startEpoch: bigint; endEpoch: bigint; tokenAmount: bigint }> }) =>
-    draw.topUpRanges.map((r) => [r.startEpoch, r.endEpoch, r.tokenAmount]);
 
   // -------------------------------------------------------------------------
   // The gate
@@ -307,6 +307,28 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
         .withArgs(accountId, acct.expiresAtEpoch);
     });
 
+    it('an account that 10.0.8 or 10.1.0 scheduled reverts EmissionAlreadyScheduled, after the expiry check, with no partial effect', async () => {
+      const harness = await deployScheduleHarness(HubContract);
+      const { accountId } = await createAccountFor(owner);
+      await harness.scheduleInFull(accountId);
+      expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(lock);
+      await topUp(owner, accountId, 100n * TRAC);
+
+      await expect(coverCall(accountId, TRAC))
+        .to.be.revertedWithCustomError(Logic, 'EmissionAlreadyScheduled')
+        .withArgs(accountId);
+      expect(await PCS.windowSpent(accountId, 0n)).to.equal(0n);
+      expect(await PCS.topUpBalance(accountId)).to.equal(100n * TRAC);
+
+      // The zero value and the treasury come first; an expired account reports its expiry.
+      await expect(coverCall(accountId, 0n)).to.be.revertedWithCustomError(Logic, 'ZeroServiceValue');
+      const acct = await PCS.getAccount(accountId);
+      await time.increaseTo(acct.expiresAtTimestamp);
+      await expect(coverCall(accountId, TRAC))
+        .to.be.revertedWithCustomError(Logic, 'AccountExpired')
+        .withArgs(accountId, acct.expiresAtEpoch);
+    });
+
     it('a cost above the window allowance plus the top-up buffer reverts InsufficientAllowance, with no partial effect', async () => {
       const { accountId } = await createAccountFor(owner);
       const buffer = 100n * TRAC;
@@ -370,7 +392,6 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
         expect(draw.window).to.equal(0n);
         expect(draw.epoch).to.equal(epoch);
         expect(draw.discountBps).to.equal(bps);
-        expect(rangesOf(draw)).to.deep.equal([ZERO_RANGE, ZERO_RANGE, ZERO_RANGE]);
 
         await expect(receipt)
           .to.emit(Logic, 'ServiceCostCovered')
@@ -425,7 +446,7 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
       expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(carryBefore);
     });
 
-    it('an overflow beyond the window draws the top-up buffer and emits it forward over the lock from the current epoch', async () => {
+    it('an overflow beyond the window draws the top-up buffer and books nothing to the staker pool: the whole cost is the draw', async () => {
       const { accountId } = await createAccountFor(owner);
       const buffer = 1_000n * TRAC;
       await topUp(owner, accountId, buffer);
@@ -437,7 +458,7 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
 
       const e0 = await ChronosContract.getCurrentEpoch();
       const from = e0;
-      const to = e0 + lock + 2n;
+      const to = e0 + 2n * lock + 2n;
       const before = await poolSnapshot(from, to);
       const carryBefore = await ES.accumulatedRemainder(STAKER_SHARD_ID);
       const vaultBefore = await Token.balanceOf(await Vault.getAddress());
@@ -447,27 +468,17 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
       expect(draw.cost).to.equal(cost);
       expect(draw.drawnFromWindow).to.equal(B);
       expect(draw.drawnFromTopUp).to.equal(overflow);
+      expect(draw.drawnFromWindow + draw.drawnFromTopUp).to.equal(draw.cost);
       expect(draw.epoch).to.equal(e0);
       await expect(receipt)
         .to.emit(Logic, 'ServiceCostCovered')
         .withArgs(accountId, assignee.address, SUBSCRIPTION_ID, value, cost, e0, 0n, B, overflow);
 
-      // The ranges are prorateActiveSink's from the current epoch, with the
-      // time left in it at the transaction.
-      const timeRemaining = (await ChronosContract.timestampForEpoch(e0 + 1n)) - (await blockTimestamp(receipt));
-      const expected = prorateActiveSink(overflow, e0, lock, epLen, timeRemaining);
-      const nonEmpty = rangesOf(draw).filter((r) => r[2] > 0n);
-      expect(nonEmpty).to.deep.equal(expected.map((r) => [r.start, r.end, r.amount]));
-      // Every slot the overflow did not use stays zero.
-      for (const r of rangesOf(draw)) if (r[2] === 0n) expect(r).to.deep.equal(ZERO_RANGE);
-      // The receipt credited exactly those ranges, and the pool moved by them.
-      expect(await creditedRanges(receipt)).to.deep.equal(nonEmpty);
-      const model = new PoolModel(carryBefore);
-      for (const r of expected) model.add(r);
+      // Neither part reaches the staker pool: the caller books the whole cost.
+      expect(await creditedRanges(receipt)).to.deep.equal([]);
       const after = await poolSnapshot(from, to);
-      for (let e = from; e <= to; e++) {
-        expect((after.get(e) ?? 0n) - (before.get(e) ?? 0n), `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
-      }
+      for (let e = from; e <= to; e++) expect(after.get(e), `epoch ${e}`).to.equal(before.get(e));
+      expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(carryBefore);
 
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(B);
       expect(await PCS.topUpBalance(accountId)).to.equal(buffer - overflow);
@@ -478,10 +489,12 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
       const next = await cover(accountId, 100n * TRAC, ethers.id('subscription-2'));
       expect(next.draw.drawnFromWindow).to.equal(0n);
       expect(next.draw.drawnFromTopUp).to.equal(80n * TRAC);
+      expect(next.draw.cost).to.equal(80n * TRAC);
+      expect(await creditedRanges(next.receipt)).to.deep.equal([]);
       expect(await PCS.topUpBalance(accountId)).to.equal(buffer - overflow - 80n * TRAC);
     });
 
-    it('in one block, a service draw and a publishing draw of the same overflow credit identical ranges', async () => {
+    it('in one block, a service draw and a publish of the same cost draw the same split; only the publish books it, over the Knowledge Asset epochs', async () => {
       const agent = accounts[8];
       const { accountId: publishingId } = await createAccountFor(owner);
       const { accountId: serviceId } = await createAccountFor(owner);
@@ -491,6 +504,7 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
 
       const B = COMMITTED_TRAC / lock;
       const value = ((B + 500n * TRAC) * BPS) / 8_000n;
+      const kaEpochs = 5n;
       const nft = await impersonatedNFT();
       const e0 = await ChronosContract.getCurrentEpoch();
 
@@ -498,7 +512,7 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
       let publishTx;
       let serviceTx;
       try {
-        publishTx = await Logic.connect(nft).coverPublishingCost(agent.address, value, e0, lock, {
+        publishTx = await Logic.connect(nft).coverPublishingCost(agent.address, value, e0, kaEpochs, {
           gasLimit: 5_000_000,
         });
         serviceTx = await Stub.cover(await Logic.getAddress(), serviceId, assignee.address, SUBSCRIPTION_ID, value, {
@@ -527,14 +541,16 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
       expect(draw.drawnFromWindow).to.equal(covered!.args.drawnFromEpoch);
       expect(draw.drawnFromTopUp).to.equal(covered!.args.drawnFromTopUp);
       expect(draw.drawnFromTopUp).to.be.greaterThan(0n);
-
-      // The same staker-pool credits, range by range.
-      const serviceRanges = await creditedRanges(serviceRc);
-      expect(serviceRanges.length).to.be.greaterThan(0);
-      expect(serviceRanges).to.deep.equal(await creditedRanges(publishRc));
-      expect(rangesOf(draw).filter((r) => r[2] > 0n)).to.deep.equal(serviceRanges);
       expect(await PCS.windowSpent(serviceId, 0n)).to.equal(await PCS.windowSpent(publishingId, 0n));
       expect(await PCS.topUpBalance(serviceId)).to.equal(await PCS.topUpBalance(publishingId));
+
+      // The publish books the whole cost over the KA's epochs from the current
+      // epoch, as a wallet publish spreads its payment; the service draw none.
+      const timeRemaining = (await ChronosContract.timestampForEpoch(e0 + 1n)) - (await blockTimestamp(publishRc));
+      expect(await creditedRanges(publishRc)).to.deep.equal(
+        prorateActiveSink(draw.cost, e0, kaEpochs, epLen, timeRemaining).map((r) => [r.start, r.end, r.amount]),
+      );
+      expect(await creditedRanges(serviceRc)).to.deep.equal([]);
     });
 
     it('publishing and service draws share one window allowance, first come first served', async () => {
@@ -578,12 +594,15 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
         .withArgs(accountId, assignee.address, ethers.id('subscription-2'), 100n * TRAC, 80n * TRAC, draw.epoch, 1n, 80n * TRAC, 0n);
     });
 
-    it('writes the schedule of an account created before 10.0.8 before it draws', async () => {
+    it('books the closed windows of an account created before 10.0.8 before it draws, and no window more', async () => {
       // A synthetic pre-10.0.8 account, planted in storage by the Hub owner:
-      // nothing scheduled yet, and a window-0 spend made under the old rules.
+      // created two and a third windows ago, nothing booked yet, and a
+      // window-0 spend made (and booked) under the old rules.
       const synthId = 777n;
       const committed = ethers.parseEther('12000') + 5n;
-      const createdAt = BigInt(await time.latest()) - epLen / 3n;
+      // Chronos starts at the fixture's deploy, so move past it first.
+      await time.increase(3n * epLen);
+      const createdAt = BigInt(await time.latest()) - 2n * epLen - epLen / 3n;
       const createdEpoch = await ChronosContract.epochAtTimestamp(createdAt);
       const expiresAt = createdAt + lock * epLen;
       const expiresEpoch = (await ChronosContract.epochAtTimestamp(expiresAt - 1n)) + 1n;
@@ -602,14 +621,21 @@ describe('@integration PublishingConviction 10.1.0 coverServiceCost', function (
       });
       const spent0 = ethers.parseEther('111');
       await PCS.increaseWindowSpent(synthId, 0n, spent0);
+      const B = committed / lock;
 
       const { receipt, draw } = await cover(synthId, 10n * TRAC);
+      // Windows 0 and 1 have closed: B − spent each, to the staker pool.
       await expect(receipt)
         .to.emit(Logic, 'EmissionScheduled')
-        .withArgs(synthId, 0n, lock, committed - spent0, 0n);
-      expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(lock);
+        .withArgs(synthId, 0n, 2n, B - spent0 + B, 0n);
+      const credited = (await creditedRanges(receipt)).reduce((sum, r) => sum + r[2], 0n);
+      expect(credited).to.equal(B - spent0 + B);
+      // The cursor stops at the current window: the account still pays at use time.
+      expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(2n);
+      expect(draw.window).to.equal(2n);
       expect(draw.cost).to.equal(10n * TRAC);
-      expect(await PCS.windowSpent(synthId, 0n)).to.equal(spent0 + 10n * TRAC);
+      expect(await PCS.windowSpent(synthId, 2n)).to.equal(10n * TRAC);
+      expect(await PCS.windowSpent(synthId, 0n)).to.equal(spent0);
     });
   });
 });

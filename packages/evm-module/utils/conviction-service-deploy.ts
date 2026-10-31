@@ -1,29 +1,8 @@
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
-// Shared by the deploy steps of Conviction Account service spending (OT-RFC-27):
-// 052c (ConvictionServiceStorage) and 052d (ServiceSubscriptions).
-
-type ParameterValue = string | { setterArgs: unknown[] };
-
-/**
- * The value configured for one parameter on the network being deployed to,
- * merged as `Helpers.updateContractParameters` merges it: the environment's
- * parameters, then the network's overrides. Undefined when none is configured.
- */
-export function configuredParameter(
-  hre: HardhatRuntimeEnvironment,
-  contractName: string,
-  parameter: string,
-): bigint | undefined {
-  const environment = hre.helpers.parametersConfig[hre.network.config.environment];
-  const merged = {
-    ...environment?.[contractName],
-    ...environment?.overrides?.[hre.network.name]?.[contractName],
-  } as Record<string, ParameterValue>;
-  const value = merged[parameter];
-  if (value === undefined) return undefined;
-  return BigInt(typeof value === 'object' ? String(value.setterArgs[0]) : value);
-}
+// Shared by the deploy steps of Conviction Account service spending
+// (OT-RFC-27): 052d (ServiceSubscriptions) reads the PublishingConviction
+// build a run leaves.
 
 /** Whether a `major.minor.patch` version is at least `minimum`. */
 export function versionAtLeast(version: string, minimum: [number, number, number]): boolean {

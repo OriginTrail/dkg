@@ -77,13 +77,7 @@
         }
     },
     "testnet": {
-        "overrides": {
-            "base_sepolia_v10": {
-                "ConvictionServiceStorage": {
-                    "exactScheduleFrom": "1783530141"
-                }
-            }
-        },
+        "overrides": {},
         "ParametersStorage": {
             "maximumStake": "10000000000000000000000000",
             "minimumStake": "50000000000000000000000",
