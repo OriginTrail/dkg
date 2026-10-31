@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  createSelectedSwmMetaRetentionBudget,
-} from '../src/sync/selected-swm-meta-budget.js';
+  createSwmMetaRetentionBudget,
+} from '../src/sync/swm-meta-budget.js';
 
 describe('selected SWM metadata retention budget', () => {
   it('accounts retained prefixes across Context Graphs and overlapping invocations', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 3,
       maxBytesEstimate: 300,
       maxPrefixRows: 2,
@@ -46,7 +46,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('atomically replaces a restarted generation instead of double-counting it', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 10,
       maxBytesEstimate: 1_000,
       maxPrefixRows: 10,
@@ -74,7 +74,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('reserves global capacity before overlapping fetches start', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 3,
       maxBytesEstimate: 300,
       maxPrefixRows: 3,
@@ -107,7 +107,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   it('separates a lease-own prefix ceiling from shared-pool contention', () => {
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 4,
       maxBytesEstimate: 400,
       maxPrefixRows: 1,
@@ -133,7 +133,7 @@ describe('selected SWM metadata retention budget', () => {
 
     // Below its own ceiling but blocked by rows the pool already handed to a
     // sibling: transient, and therefore reported as a different exhaustion.
-    const shared = createSelectedSwmMetaRetentionBudget({
+    const shared = createSwmMetaRetentionBudget({
       maxRows: 1,
       maxBytesEstimate: 400,
       maxPrefixRows: 4,
@@ -161,7 +161,7 @@ describe('selected SWM metadata retention budget', () => {
   // The cases below are about a lease that has to wait for the pool. Every
   // fetch reserves a whole prefix allowance before it starts, so a pool of
   // three allowances admits three fetches at once however little they retain.
-  const pool = (allowances: number) => createSelectedSwmMetaRetentionBudget({
+  const pool = (allowances: number) => createSwmMetaRetentionBudget({
     maxRows: 2 * allowances,
     maxBytesEstimate: 200 * allowances,
     maxPrefixRows: 2,
@@ -253,7 +253,7 @@ describe('selected SWM metadata retention budget', () => {
 
   it('keeps no room for a prefix whose round has ended', async () => {
     // Two allowances and one row more.
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 5,
       maxBytesEstimate: 500,
       maxPrefixRows: 2,
@@ -416,7 +416,7 @@ describe('selected SWM metadata retention budget', () => {
   });
 
   // Rows to spare and bytes for two allowances: here the bytes decide.
-  const byteBound = () => createSelectedSwmMetaRetentionBudget({
+  const byteBound = () => createSwmMetaRetentionBudget({
     maxRows: 10,
     maxBytesEstimate: 400,
     maxPrefixRows: 2,
@@ -625,7 +625,7 @@ describe('selected SWM metadata retention budget', () => {
     // Rows and bytes are pooled separately: with the rows taken a plain
     // reservation would still be handed bytes. A lease that waits takes
     // neither, and ends its wait with the last fetch in flight.
-    const budget = createSelectedSwmMetaRetentionBudget({
+    const budget = createSwmMetaRetentionBudget({
       maxRows: 2,
       maxBytesEstimate: 400,
       maxPrefixRows: 2,

@@ -32,9 +32,9 @@ import type { SwmTargetExecutorV1 } from
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
 import {
-  type SelectedSwmMetaContinuation,
-} from '../src/sync/selected-swm-meta-fetcher.js';
-import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
+  type SwmMetaContinuation,
+} from '../src/sync/swm-meta-fetcher.js';
+import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
   SyncPageAccumulationLimitError,
@@ -243,11 +243,11 @@ export function selectedUnit(
   initialResult: SharedMemorySyncResult,
   run: () => Promise<SharedMemorySyncResult>,
   metadata: {
-    readonly initial?: SelectedSwmMetaContinuation;
-    readonly afterRun?: () => SelectedSwmMetaContinuation;
+    readonly initial?: SwmMetaContinuation;
+    readonly afterRun?: () => SwmMetaContinuation;
   } = {},
 ) {
-  const completeMetadata: SelectedSwmMetaContinuation = {
+  const completeMetadata: SwmMetaContinuation = {
     progress: undefined,
     generation: 0,
     completed: true,
@@ -333,8 +333,8 @@ export interface SelectedProviderSelectionAgent {
     },
   ) => Promise<SelectedSharedMemorySyncResult>;
   log: { info: () => void; warn: () => void; debug: () => void };
-  getSelectedSwmMetaTransfers: () => SelectedSwmMetaTransferCoordinator;
-  closeSelectedSwmMetaTransfers: () => Promise<void>;
+  getSwmMetaTransfers: () => SwmMetaTransferCoordinator;
+  closeSwmMetaTransfers: () => Promise<void>;
 }
 
 export async function callTrySyncFromPeer(
@@ -358,6 +358,10 @@ export async function callTrySyncFromPeer(
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
     rfc64LegacySwmGossipAllowedForContextGraph: () => boolean;
     recordSyncReconcilerFailure: (peerId: string) => void;
+    applySyncOnConnectAccounting?: (
+      peerId: string,
+      outcome: Parameters<NonNullable<typeof onSyncAccounting>>[0],
+    ) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
   agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
@@ -474,6 +478,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
 }
 
 export interface SelectedSwmLifecycleAgentFixture {
+  acquireRfc64SwmRecoveryTargetLeaseV1: (
+    target: Readonly<Rfc64SwmRecoveryTargetV1>,
+  ) => Rfc64SwmRecoveryTargetLeaseV1;
+  getSwmMetaTransfers: () => SwmMetaTransferCoordinator;
+  closeSwmMetaTransfers: () => Promise<void>;
   config: {
     syncContextGraphPriorities: Readonly<Record<string, number>>;
     syncResponderSnapshotLimits?: {
@@ -651,6 +660,7 @@ export const callSyncSharedMemoryFromPeerDetailed = async (
   agent: SelectedSwmLifecycleAgentFixture,
   contextGraphIds: string[],
   options: SyncSharedMemoryOptions,
+  remotePeerId = PEER,
 ): Promise<SharedMemorySyncResult> => {
   const method = LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as unknown as (
     this: SelectedSwmLifecycleAgentFixture,
@@ -658,7 +668,7 @@ export const callSyncSharedMemoryFromPeerDetailed = async (
     ids: string[],
     syncOptions: NonNullable<ProductionSyncSharedMemoryOptions>,
   ) => Promise<SharedMemorySyncResult>;
-  return method.call(agent, PEER, contextGraphIds, options);
+  return method.call(agent, remotePeerId, contextGraphIds, options);
 };
 
 export function createSelectedSwmLifecycleHarness(
@@ -678,7 +688,7 @@ export function createSelectedSwmLifecycleHarness(
   const metaReturnAcceptedPrefixOnRetryableTransportFailure: boolean[] = [];
   const processedMetaBatches: Quad[][] = [];
   const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
-  let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
+  let swmMetaTransfers: SwmMetaTransferCoordinator | undefined;
   let createTargetExecutorSession: (() => SwmTargetExecutorV1) | undefined;
 
   const agent: SelectedSwmLifecycleAgentFixture = {
@@ -905,15 +915,15 @@ export function createSelectedSwmLifecycleHarness(
     },
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
-    getSelectedSwmMetaTransfers: () => {
-      selectedSwmMetaTransfers ??= new SelectedSwmMetaTransferCoordinator();
-      return selectedSwmMetaTransfers;
+    getSwmMetaTransfers: () => {
+      swmMetaTransfers ??= new SwmMetaTransferCoordinator();
+      return swmMetaTransfers;
     },
-    closeSelectedSwmMetaTransfers: async () => {
-      const transfers = selectedSwmMetaTransfers;
+    closeSwmMetaTransfers: async () => {
+      const transfers = swmMetaTransfers;
       if (!transfers) return;
       await transfers.close();
-      if (selectedSwmMetaTransfers === transfers) selectedSwmMetaTransfers = undefined;
+      if (swmMetaTransfers === transfers) swmMetaTransfers = undefined;
     },
   };
   return {
@@ -933,7 +943,7 @@ export function createSelectedSwmLifecycleHarness(
     },
     close: async () => {
       dateNow.mockRestore();
-      await agent.closeSelectedSwmMetaTransfers();
+      await agent.closeSwmMetaTransfers();
       await store.close();
     },
   };

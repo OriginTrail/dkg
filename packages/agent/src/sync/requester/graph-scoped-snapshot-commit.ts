@@ -25,6 +25,7 @@ export class GraphScopedSnapshotCommitCoordinator {
   readonly #verifiedKeys: ReadonlySet<string>;
   readonly #writtenKeys = new Set<string>();
   readonly #suppressedKeys = new Set<string>();
+  readonly #settledEarlierKeys = new Set<string>();
   readonly #reconcileFinalizedTwin: FinalizedTwinReconciler | undefined;
   readonly #heldAsRetiredFinalizedTwin: HeldFinalizedTwinCheck | undefined;
 
@@ -49,6 +50,16 @@ export class GraphScopedSnapshotCommitCoordinator {
 
   recordWritten(rows: readonly Quad[]): void {
     for (const quad of rows) this.#writtenKeys.add(canonicalQuadKey(quad));
+  }
+
+  /**
+   * Rows of a ref an earlier round of this transfer resolved. That round
+   * committed or withheld them under the asset's lock and the store may have
+   * moved on since, so the bulk append leaves them alone. The asset's own commit
+   * still writes them when this round has to materialize the ref again.
+   */
+  recordSettledEarlier(rows: readonly Quad[]): void {
+    for (const quad of rows) this.#settledEarlierKeys.add(canonicalQuadKey(quad));
   }
 
   /**
@@ -126,7 +137,7 @@ export class GraphScopedSnapshotCommitCoordinator {
     // append; even byte-identical replay would then resurrect a torn head.
     return rows.filter((quad) => {
       const key = canonicalQuadKey(quad);
-      return !this.#writtenKeys.has(key) && !this.#suppressedKeys.has(key);
+      return !this.#writtenKeys.has(key) && !this.#suppressedKeys.has(key) && !this.#settledEarlierKeys.has(key);
     });
   }
 

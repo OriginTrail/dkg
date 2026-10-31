@@ -171,17 +171,12 @@ function harness(overrides: HarnessOverrides = {}) {
     if (overrides.preseedSnapshot !== false) {
       await snapshotStore.putSnapshot({ digest: fx.digest, quads: fx.payload });
     }
-    const selectedMode = overrides.metadataFetcher !== undefined
-      || overrides.recoveryGuard !== undefined;
     return runSharedMemorySync({
-      mode: selectedMode
+      metadataFetcher: overrides.metadataFetcher,
+      mode: overrides.recoveryGuard
         ? {
           kind: 'selected-recovery',
-          recoveryGuard: overrides.recoveryGuard ?? {
-            signal: new AbortController().signal,
-            assertCurrent: () => undefined,
-          },
-          metadataFetcher: overrides.metadataFetcher,
+          recoveryGuard: overrides.recoveryGuard,
           snapshotRecoveryOrder: 'recent-balanced',
         }
         : { kind: 'ordinary' },
@@ -473,7 +468,10 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
   });
 
-  it('captures first-round suppression and reapplies it before a resumed bulk metadata insert', async () => {
+  it.each(['ordinary', 'selected-recovery'] as const)('captures suppression and reapplies it on resume with a %s metadata session', async kind => {
+    const recoveryGuard = kind === 'selected-recovery'
+      ? { signal: new AbortController().signal, assertCurrent: () => undefined }
+      : undefined;
     const fx = fixture();
     const manifest = [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }];
     const resolved = new Set<string>();
@@ -495,6 +493,7 @@ describe('public SWM snapshot materialization', () => {
     const first = harness({
       reconcileDisposition: 'suppress-metadata',
       metadataFetcher,
+      recoveryGuard,
     });
 
     const firstSummary = await first.run();
@@ -511,6 +510,7 @@ describe('public SWM snapshot materialization', () => {
       .toBeGreaterThan(0);
 
     const resumed = harness({
+      recoveryGuard,
       metadataFetcher: {
         ...metadataFetcher,
       },
@@ -821,8 +821,10 @@ it.each([false, true])('leases a reused public ref until metadata commits (colle
       resolvedRefsSnapshot: () => [fx.digest],
       suppressedMetadataRows: () => [], markResolved: () => {},
     };
+    // The reused asset's own rows stay out of this round's append; this row is what the round still commits.
+    const appended: Quad = { subject: 'urn:round:appended', predicate: 'http://schema.org/name', object: '"appended"', graph: fx.meta[0].graph };
     const h = harness({ snapshotStore: snapshots, preseedSnapshot: false,
-      metadataFetcher: { fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+      metadataFetcher: { fetch: async () => ({ result: page([...fx.meta, appended]), continuationYielded: false }),
         release: () => {}, snapshotWalk: () => walk },
       onStoreInsert: async () => { inserted.resolve(); await commit.promise; referenced = true; },
     });

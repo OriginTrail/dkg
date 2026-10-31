@@ -12,6 +12,7 @@ import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
 import {
   runSharedMemorySync,
   type SharedMemorySyncSummary,
+  type SharedMemorySyncContext,
 } from '../../src/sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from '../../src/sync/requester/swm-snapshot-materializer.js';
 import { MemoryWorkspaceSnapshotStore } from './memory-workspace-snapshot-store.js';
@@ -42,6 +43,8 @@ interface SwmSyncHarnessBaseOptions {
   readonly materialization?: 'real' | 'disabled';
   /** Override verifier output while retaining the raw data-phase transport. */
   readonly verifiedDataOverride?: readonly Quad[];
+  /** Replace the pass-through verifier, for rounds that need the real admission. */
+  readonly processSharedMemoryBatch?: SharedMemorySyncContext['processSharedMemoryBatch'];
   /** Runs before real graph replacement; throwing models a write failure. */
   /** Runs after the real per-KA lock releases, before the final bulk append. */
   readonly afterKaWriteLock?: () => Promise<void>;
@@ -129,7 +132,7 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
           snapshotRef: fetchOptions?.snapshotRef,
         }, fallback) ?? fallback;
       },
-      processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
+      processSharedMemoryBatch: options.processSharedMemoryBatch ?? (async (wsDataQuads, wsMetaQuads) => ({
         verifiedData: options.verifiedDataOverride
           ? [...options.verifiedDataOverride]
           : wsDataQuads,
@@ -139,7 +142,7 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
         droppedDataTriples: 0,
         emptyResponses: 0,
         entityCreators: [],
-      }),
+      })),
       ensureContextGraph: async () => {},
       storeInsert: async (quads) => { await options.store.insert(quads); },
       snapshotMaterializer: materializer,

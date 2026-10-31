@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createOperationContext, contextGraphSharedMemoryMetaUri, contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
+import { generateShareMetadata } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -34,12 +35,15 @@ function page(quads: Quad[], phase: SyncPhase): SyncPageResult {
 }
 
 function workspaceOperationMeta(graph: string, op: string, root: string, publisherPeerId: string): Quad[] {
-  return [
-    { graph, subject: op, predicate: RDF_TYPE, object: `${DKG}WorkspaceOperation` },
-    { graph, subject: op, predicate: `${DKG}publishedAt`, object: '"2030-01-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
-    { graph, subject: op, predicate: `${DKG}rootEntity`, object: root },
-    { graph, subject: op, predicate: `${DKG}publisherPeerId`, object: `"${publisherPeerId}"` },
-  ];
+  const subGraphName = graph === ROOT_META_GRAPH ? undefined
+    : graph.startsWith(`did:dkg:context-graph:${CG_ID}/`)
+      ? graph.slice(`did:dkg:context-graph:${CG_ID}/`.length, -'/_shared_memory_meta'.length)
+      : undefined;
+  return generateShareMetadata({
+    contextGraphId: CG_ID, shareOperationId: op.replace('urn:dkg:share:', ''),
+    rootEntities: [root], publisherPeerId, timestamp: new Date('2030-01-01T00:00:00.000Z'),
+    subGraphName,
+  }, graph);
 }
 
 function subGraphRegistrationMeta(name: string): Quad[] {

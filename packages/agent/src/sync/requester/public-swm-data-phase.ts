@@ -23,13 +23,12 @@
  * changes on the wire: a responder is asked for less, never differently.
  */
 
+import { DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../graph-scoped-swm-recovery.js';
 import { sharedMemoryCompletionFields } from '../shared-memory-completion.js';
 import type { SyncPageResult } from './page-fetch.js';
-
-const DKG_ROOT_ENTITY = 'http://dkg.io/ontology/rootEntity';
 
 export interface PublicSwmMetadata {
   readonly contextGraphId: string;
@@ -65,7 +64,7 @@ export function planPublicSwmDataPhase(metadata: PublicSwmMetadata): PublicSwmDa
     return fetchAll;
   }
   return {
-    fetch: metadata.metaQuads.some((quad) => quad.predicate === DKG_ROOT_ENTITY)
+    fetch: metadata.metaQuads.some((quad) => quad.predicate === DKG_ROOT_ENTITY_LEGACY || quad.predicate === DKG_ENTITY)
       || descriptors.some(({ snapshotSource }) => snapshotSource.locator.kind === 'graph'),
     transportGraphs: new Set(descriptors.flatMap(({ assertionGraph, snapshotSource: { locator } }) => (
       locator.kind === 'graph' ? [assertionGraph, locator.graph] : [assertionGraph]

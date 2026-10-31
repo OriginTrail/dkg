@@ -48,6 +48,7 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './page-fetch.js';
+import { completeSharedMemoryMetadataFetcher, normalizeSharedMemoryFetcherContext, type CanonicalSharedMemoryFetcherContext } from './shared-memory-metadata-fetcher.js';
 import {
   materializeGraphScopedSwmRecoveryAsset,
   type GraphScopedSwmRecoveryDescriptor,
@@ -217,8 +218,8 @@ type PublicSnapshotWalkSource =
 /**
  * Strategy boundary for metadata retrieval.
  *
- * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
- * injects a strategy that owns its exceptional retained-prefix/session state;
+ * The agent injects a strategy that owns bounded retained-prefix/session state
+ * for both ordinary and selected RFC-64 SWM;
  * the canonical SWM pipeline only consumes the resulting page and yield bit.
  */
 export interface SharedMemoryMetadataFetcher {
@@ -244,6 +245,7 @@ export type SharedMemorySyncMode = Readonly<
   | {
     kind: 'selected-recovery';
     recoveryGuard: RecoveryExecutionGuard;
+    /** @deprecated Put metadataFetcher on SharedMemorySyncContext. */
     metadataFetcher?: SharedMemoryMetadataFetcher;
     snapshotEvidencePolicy?: SharedMemorySyncSnapshotEvidencePolicy;
     snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
@@ -253,6 +255,8 @@ export type SharedMemorySyncMode = Readonly<
 export interface SharedMemorySyncContext {
   /** One discriminant owns every selected-recovery-only capability. */
   mode: SharedMemorySyncMode;
+  /** Lifecycle callers supply a retained session; low-level callers may use the default page fetch. */
+  metadataFetcher?: SharedMemoryMetadataFetcher;
   /** Read the peer's state at the call: the round joins no page fetch of another round. */
   freshSnapshot?: boolean;
   ctx: OperationContext;
@@ -275,15 +279,7 @@ export interface SharedMemorySyncContext {
     contextGraphId: string,
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
-  ) => Promise<{
-    verifiedData: Quad[];
-    verifiedMeta: Quad[];
-    totalFetchedDataQuads: number;
-    totalFetchedMetaQuads: number;
-    droppedDataTriples: number;
-    emptyResponses: number;
-    entityCreators: Array<{ dataGraph: string; entity: string; creator: string }>;
-  }>;
+  ) => Promise<import('../../sync-verify-worker.js').SharedMemoryBatchProcessResult>;
   ensureContextGraph: (contextGraphId: string) => Promise<void>;
   storeInsert: (quads: Quad[]) => Promise<void>;
   /**
@@ -340,7 +336,13 @@ export interface SharedMemorySyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(async context => {
+export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, SharedMemorySyncSummary>(context => runSharedMemorySyncCore(normalizeSharedMemoryFetcherContext(context)));
+
+async function runSharedMemorySyncCore(
+  context: CanonicalSharedMemoryFetcherContext<Omit<SharedMemorySyncContext, 'publicSnapshotStore'> & {
+    publicSnapshotStore: WorkspaceSnapshotScope | undefined;
+  }>,
+): Promise<SharedMemorySyncSummary> {
   const {
     ctx,
     remotePeerId,
@@ -370,9 +372,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   } = context;
   const snapshotEvidencePolicy = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotEvidencePolicy
-    : undefined;
-  const metadataFetcher = context.mode.kind === 'selected-recovery'
-    ? context.mode.metadataFetcher
     : undefined;
   const snapshotRecoveryOrder = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotRecoveryOrder ?? 'manifest'
@@ -406,6 +405,16 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       ...(recoveryBoundary.signal === undefined ? {} : { signal: recoveryBoundary.signal }),
     });
   };
+  const metadataFetcher = completeSharedMemoryMetadataFetcher(
+    context.metadataFetcher,
+    request => fetchRecoveryPages(
+      request.contextGraphId,
+      'meta',
+      request.graphUri,
+      request.deadline,
+      request.workAdmission,
+    ),
+  );
 
   const summary = emptySharedMemorySyncResult();
 
@@ -528,8 +537,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
       const fetchStartedAt = Date.now();
-      const metadataOutcome = metadataFetcher
-        ? await recoveryBoundary.read(() => metadataFetcher.fetch({
+      const metadataOutcome = await recoveryBoundary.read(() => metadataFetcher.fetch({
           ctx,
           remotePeerId,
           contextGraphId: pid,
@@ -537,17 +545,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           deadline,
           workAdmission,
           ...(recoveryBoundary.signal === undefined ? {} : { signal: recoveryBoundary.signal }),
-        }))
-        : {
-          result: await recoveryBoundary.read(() => fetchRecoveryPages(
-            pid,
-            'meta',
-            wsMetaGraph,
-            deadline,
-            workAdmission,
-          )),
-          continuationYielded: false,
-        };
+        }));
       const wsMetaResult = metadataOutcome.result;
       manifestComplete = wsMetaResult.completed;
       peerRespondedForContextGraph = true;
@@ -557,6 +555,10 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         summary.bytesReceived += wsMetaResult.bytesReceived;
         summary.replayPhaseBytesReceived += wsMetaResult.bytesReceived;
         summary.metadataContinuationYields += 1;
+        if (wsMetaResult.localYield) {
+          summary.localYield = true;
+          summary.deferredBackpressure += 1;
+        }
         recordPhaseOutcome(wsMetaResult);
         break;
       }
@@ -645,9 +647,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
           && wsDataResult.completed
           && !wsDataResult.timedOut
         ) {
-          if (metadataFetcher) {
-            recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
-          }
+          recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -686,6 +686,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const recoveryPlan = createGraphScopedRecoveryPlan({
         contextGraphId: pid,
         metaQuads: processed.verifiedMeta,
+        ...(processed.rejectedHeads ? { rejectedHeads: processed.rejectedHeads } : {}),
         ...(verificationSubGraphNames ? { registeredSubGraphNames: verificationSubGraphNames } : {}),
         ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
       }, Boolean(snapshotMaterializer && wsMetaResult.completed));
@@ -724,7 +725,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
         ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
         : manifestSnapshots;
-      const snapshotWalk = metadataFetcher?.snapshotWalk?.(pid, orderedManifestSnapshots);
+      const snapshotWalk = metadataFetcher.snapshotWalk(pid, orderedManifestSnapshots);
       const materializedKeys = new Set<string>();
       /** Snapshot refs whose every descriptor is locally present. */
       const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefsSnapshot() ?? []);
@@ -750,14 +751,14 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         reconcileFinalizedTwin,
         heldAsRetiredFinalizedTwin,
       );
-      // A selected continuation skips blob and assertion-graph work for its
-      // verified prefix, but the final bulk metadata append is owned by this
-      // round. Reapply the exact suppression decisions captured with each
-      // resolved ref so a later successful suffix cannot resurrect metadata
-      // that the prefix deliberately withheld.
+      // A continuation skips blob and assertion-graph work for its verified
+      // prefix. An earlier round committed or withheld each resolved ref's rows
+      // under its asset's lock, and the store may have moved on since, so this
+      // round's bulk append must not write them again.
       if (snapshotWalk) {
         for (const resolvedRef of snapshotWalk.resolvedRefsSnapshot()) {
           snapshotCommit.suppressRows(snapshotWalk.suppressedMetadataRows(resolvedRef));
+          for (const descriptor of snapshotDescriptorsByRef.get(resolvedRef) ?? []) snapshotCommit.recordSettledEarlier(descriptor.metadataQuads);
         }
       }
       let contextGraphEnsured = false;
@@ -1493,9 +1494,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       }
 
       if (entityRecovery.recordMetaPhase) recordPhaseOutcome(wsMetaResult);
-      if (metadataFetcher) {
-        recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
-      }
+      recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -1565,7 +1564,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   }
 
   return summary;
-});
+}
 
 
 /** Compatibility boundary for callers that only fetch/verify snapshots. Metadata
