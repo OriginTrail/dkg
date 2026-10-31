@@ -306,3 +306,10 @@ test('an actually idle assigned partition starts its empty-poll budget after del
   expect(journal.db.prepare('SELECT lastPartition FROM scheduling').get().lastPartition).toBe(2);
   expect(broker.commit).not.toHaveBeenCalled();
 });
+
+test('startup timeout is separate from empty-poll timeout and never commits', async () => {
+  broker.joinDelayMs = 40;
+  await expect(read({ ...source, startupTimeoutMs: 5 })).rejects.toThrow('KAFKA_STARTUP_TIMEOUT');
+  expect(broker.commit).not.toHaveBeenCalled();
+  await new Promise(resolve => setTimeout(resolve, 50));
+});

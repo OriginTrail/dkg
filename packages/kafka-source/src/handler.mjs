@@ -5,11 +5,12 @@ import { buildAsset, assetIdentity, hash } from './asset.mjs';
 import { readKafka } from './kafka.mjs';
 import { createDkgSink } from './dkg-sink.mjs';
 import { validateRegisteredSource } from './registry.mjs';
+import { validateHandoff, evidenceRef, drainHandoffs } from './handoff.mjs';
 
 /** DKG SourceWorkerHandlerModule; loaded by the native `dkg source-worker` CLI.
  * It deliberately does NOT use createAndShare/publishAsync: this PoC seals only
  * private Working Memory and never promotes or submits chain publication. */
-export function createHandler({ read = readKafka, sinkFactory = createDkgSink } = {}) {
+export function createHandler({ read = readKafka, sinkFactory = createDkgSink, handoffFetch = fetch } = {}) {
   return {
     async createSourceWorkerDeps({ config }) {
       const deliveries = new Map();
@@ -17,6 +18,7 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
         throw new Error('KAFKA_SOURCE_ID_REUSED');
       for (const source of config.sources) {
         validateRegisteredSource(source);
+        validateHandoff(source);
         if (source.kind !== 'kafka') throw new Error('KAFKA_SOURCE_KIND_REQUIRED');
         if (!source.clusterId || !source.groupId || !source.topic || !source.brokers?.length)
           throw new Error('KAFKA_SOURCE_CONFIG_REQUIRED');
@@ -35,7 +37,7 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             if (error.code === 'ENOENT') return { sources: {} }; throw error;
           });
           const previous = state.sources[source.id];
-          if (previous?.manualReviewRequired || (previous?.attemptCount ?? 0) >= (source.maxRetries ?? 3))
+          if (!source.handoff && (previous?.manualReviewRequired || (previous?.attemptCount ?? 0) >= (source.maxRetries ?? 3)))
             return previous.fingerprint;
           const prefix = resolve(dirname(config.stateFile), `kafka-${hash(source.id).slice(0, 16)}`);
           // Reject concurrent writers; stale locks need explicit operator review.
@@ -45,13 +47,23 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             lock = await open(prefix + '.lock', 'wx', 0o600);
             await lock.writeFile(String(process.pid));
             journal = new Journal(prefix + '.sqlite', hash(source));
-            delivery = await read(source, journal);
+            if (source.handoff) {
+              await drainHandoffs(source, journal, handoffFetch);
+              if (previous?.manualReviewRequired || (previous?.attemptCount ?? 0) >= (source.maxRetries ?? 3)) {
+                journal.close(); await lock.close(); await unlink(prefix + '.lock');
+                return previous.fingerprint;
+              }
+            }
+            const held = source.handoff && (journal.handoffBlocked() ? 'handoff-review-required' : journal.backpressure() ? 'handoff-backpressure' : undefined);
+            // Reserve room for the entire delivery, never overshoot the outbox high watermark.
+            const bounded = source.handoff ? { ...source, maxMessages: Math.min(source.maxMessages ?? 10, 1000 - journal.handoffBacklog()) } : source;
+            delivery = held ? { records: [], commit: async () => {}, close: async () => {} } : await read(bounded, journal);
             const records = delivery.records.map(envelope => {
               const { fetchedAt: _fetchedAt, ...original } = envelope;
               return journal.stage(envelope, hash(original), `kafka-record-${assetIdentity(source, envelope)}`);
             });
             const fingerprint = hash(records.map(record => [record.position, record.digest]));
-            deliveries.set(source.id, { delivery, journal, lock, prefix, records, fingerprint });
+            deliveries.set(source.id, { delivery, journal, lock, prefix, records, fingerprint, held });
             return fingerprint;
           } catch (error) {
             await delivery?.close().catch(() => {});
@@ -77,14 +89,14 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             deliveries.delete(source.id);
             throw current.failure;
           }
-          const { records, journal, delivery, lock, prefix } = current;
+          const { records, journal, delivery, lock, prefix, held } = current;
           let created = 0, reused = 0;
           const receipts = [];
           try {
             for (const record of records) {
               const asset = buildAsset(source, record.envelope);
               const receipt = await sink.ensure(source, asset, record, journal);
-              journal.verified(record.position, receipt);
+              journal.verified(record.position, receipt, source.handoff ? evidenceRef(source, record.envelope, receipt) : undefined);
               // Offset acknowledgement ALWAYS follows sealed, exact DKG readback.
               await delivery.commit(record.envelope);
               journal.checkpoint(record.envelope.topic, record.envelope.partition,
@@ -93,13 +105,15 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
               else created++;
               receipts.push(receipt);
             }
+            if (source.handoff) await drainHandoffs(source, journal, handoffFetch);
             return { sourceId: source.id, skipped: !records.length,
-              reason: records.length ? undefined : 'no-matching-rows',
-              status: records.length ? 'completed' : 'no-matching-rows',
+              reason: records.length ? undefined : held || 'no-matching-rows',
+              status: records.length ? 'completed' : held || 'no-matching-rows',
               nextState: { fingerprint, lastRunAt: new Date().toISOString(),
-                lastStatus: records.length ? 'completed' : 'no-matching-rows',
+                lastStatus: records.length ? 'completed' : held || 'no-matching-rows',
                 lastError: undefined, manualReviewRequired: false,
-                kafka: { processed: records.length, created, reused, receipts } } };
+                kafka: { processed: records.length, created, reused, receipts,
+                  ...(source.handoff ? { handoffPending: journal.handoffBacklog(), handoffReviewRequired: journal.handoffBlocked() } : {}) } } };
           } catch (error) {
             if (error.message !== 'DKG_RETRY_LATER') throw error;
             return { sourceId: source.id, skipped: true, reason: 'retry-after',
