@@ -279,6 +279,24 @@ describe('catalog revisions of an unpublished assertion number', () => {
       expect((await catalog(agent)).assets[0]!.seal).toEqual(revised.seal);
     });
 
+  it('refuses a valid projection over the triple ceiling before withdrawing the valid row', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first); await project();
+    const before = await catalog(agent);
+    const quads: Quad[] = Array.from({ length: 262_145 }, (_, index) => ({
+      subject: 'urn:s', predicate: 'urn:p', object: `"${String(index).padStart(6, '0')}"`, graph: '',
+    }));
+    const asset = { assertionCoordinate: before.assets[0]!.assertionCoordinate,
+      seal: await authorSealV1(1n, '1', quads), projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(quads) };
+    expect(asset.projectionBytes.byteLength).toBeLessThan(8 * 1024 * 1024);
+    await storeVmMetadata(agent, asset, quads);
+    const refusal = await upsert(agent, asset).then(() => undefined, error => error);
+    expect((await catalog(agent)).current).toEqual(before.current);
+    expect((await catalog(agent)).assets).toEqual(before.assets);
+    expect(refusal).toMatchObject({ code: 'projection-resource-refused' });
+  }, 120_000);
+
   it('rejects a draft when VM materialization wins before the guarded withdrawal', async () => {
     const { agent, project } = await author();
     const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);

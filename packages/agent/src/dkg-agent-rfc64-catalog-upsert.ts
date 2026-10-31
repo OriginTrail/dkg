@@ -27,6 +27,8 @@ import {
 } from './internal/catalog-mutation-memory.js';
 import type { Rfc64VerifiedCatalogRowsV1 } from './internal/verified-catalog-rows.js';
 import { yieldMainThread } from './main-thread-time-slice.js';
+import { planNextRfc64CatalogExactSetV1 } from './internal/catalog-exact-set-plan.js';
+export { planNextRfc64CatalogExactSetV1 } from './internal/catalog-exact-set-plan.js';
 import { validateRfc64CatalogTargetAssetsV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
   assertCatalogTargetRevisionsV1, sameRfc64SuccessorAssetV1, withCatalogTransitionVmAuthorizationV1,
@@ -403,10 +405,10 @@ export class Rfc64CatalogUpsertMethods extends DKGAgentBase {
       if (successorsApplied >= hardLimit) {
         throw new Error('RFC-64 exact-set reconciliation exceeded its bounded successor limit');
       }
-      const nextAssets = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
+      const transition = planNextRfc64CatalogExactSetV1(state.assets, targetAssets);
       const committed = await withCatalogTransitionVmAuthorizationV1(
-        this.store, params.scope, state.assets, nextAssets, targetAssets, options.source,
-        () => this.applyRfc64CatalogSuccessorV1(persistence, state, params, nextAssets, peers, options.stageOnly,
+        this.store, params.scope, transition, options.source,
+        () => this.applyRfc64CatalogSuccessorV1(persistence, state, params, transition.nextAssets, peers, options.stageOnly,
           { signal: options.signal, commitAppliedHead: options.commitAppliedHead,
             mutation: options.mutation, observer: options.observer }), options.signal,
       );
@@ -689,80 +691,6 @@ export function planRfc64CatalogProjectionTargetV1(
     [...retained, ...requested],
     'RFC-64 monotonic-union target assets',
   );
-}
-
-export function planNextRfc64CatalogExactSetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  let currentIndex = 0;
-  let targetIndex = 0;
-  while (currentIndex < current.length || targetIndex < target.length) {
-    const currentAsset = current[currentIndex];
-    const targetAsset = target[targetIndex];
-    if (currentAsset === undefined) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset!);
-    }
-    if (targetAsset === undefined) {
-      return current.filter((_, index) => index !== currentIndex);
-    }
-    const comparison = compareRfc64CatalogAssetsByKaIdV1(currentAsset, targetAsset);
-    if (comparison < 0) return current.filter((_, index) => index !== currentIndex);
-    if (comparison > 0) {
-      return insertOrFreeRfc64CatalogCapacityV1(current, target, targetAsset);
-    }
-    if (!sameRfc64SuccessorAssetV1(currentAsset, targetAsset)) {
-      if (
-        BigInt(targetAsset.seal.assertionVersion) === BigInt(currentAsset.seal.assertionVersion)
-        ||
-        BigInt(targetAsset.seal.assertionVersion)
-          > BigInt(currentAsset.seal.assertionVersion) + 1n
-      ) {
-        // A revised unpublished draft reuses its number; an inventory may also skip versions.
-        // After target authorization, remove first and insert on the following successor.
-        return current.filter((_, index) => index !== currentIndex);
-      }
-      const next = [...current];
-      next[currentIndex] = targetAsset;
-      return next;
-    }
-    currentIndex += 1;
-    targetIndex += 1;
-  }
-  throw new Error('RFC-64 exact-set planner was called for an already-converged target');
-}
-
-function insertOrFreeRfc64CatalogCapacityV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  asset: Rfc64CatalogSuccessorAssetInputV1,
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  if (current.length < MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
-    return insertRfc64CatalogAssetV1(current, asset);
-  }
-  const targetKaIds = new Set(target.map((targetAsset) => targetAsset.seal.reservedKaId));
-  for (let index = current.length - 1; index >= 0; index -= 1) {
-    if (!targetKaIds.has(current[index]!.seal.reservedKaId)) {
-      return current.filter((_currentAsset, currentIndex) => currentIndex !== index);
-    }
-  }
-  throw new AuthorCatalogFullErrorV1(current, 1);
-}
-
-function insertRfc64CatalogAssetV1(
-  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
-  asset: Rfc64CatalogSuccessorAssetInputV1,
-): Rfc64CatalogSuccessorAssetInputV1[] {
-  const next = [...current, asset];
-  next.sort((left, right) => compareRfc64CatalogAssetsByKaIdV1(left, right));
-  return next;
-}
-
-function compareRfc64CatalogAssetsByKaIdV1(
-  left: Rfc64CatalogSuccessorAssetInputV1,
-  right: Rfc64CatalogSuccessorAssetInputV1,
-): -1 | 0 | 1 {
-  return compareRfc64PublicCatalogSuccessorAssetsByKaIdV1(left, right);
 }
 
 function sameRfc64SuccessorAssetSetsV1(

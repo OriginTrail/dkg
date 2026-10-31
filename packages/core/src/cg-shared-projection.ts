@@ -438,12 +438,6 @@ export function verifyCgSharedProjectionV1(
       cause,
     );
   }
-  if (projectionBytes.byteLength > verificationLimits.maxProjectionBytes) {
-    fail(
-      'projection-resource-refused',
-      'projection exceeds the local in-memory byte limit',
-    );
-  }
 
   const projectionDigest = metadata.projectionDigest;
   if (projectionDigest !== metadata.transfer.projectionDigest) {
@@ -586,7 +580,7 @@ export function readVerifiedCgSharedProjectionBytesV1(
   );
 }
 
-/** Raw-byte semantics shared by catalog preflight and transferred-bundle verification. */
+/** Canonical semantics and local limits shared by preflight and transferred bundles. */
 export function verifyCanonicalCgSharedProjectionBytesV1(
   projectionBytes: Uint8Array,
   seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
@@ -597,6 +591,9 @@ export function verifyCanonicalCgSharedProjectionBytesV1(
   readonly privateDataHash: Digest32V1;
   readonly assertionMerkleRoot: Digest32V1;
 } {
+  limits = normalizeVerificationLimits(limits);
+  assertProjectionWithinLocalLimits(String(projectionBytes.byteLength) as ByteLengthV1,
+    seal.publicTripleCount, limits);
   if (projectionBytes.byteLength === 0) {
     fail('projection-empty', 'cg-shared-v1 projection must not be empty');
   }
