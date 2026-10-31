@@ -13,8 +13,8 @@
 //   - the receipt grace schedule: a change applies to the next epoch's periods,
 //     at once while no epoch from activation on has started, and is refused in
 //     the epoch where a scheduled value took effect;
-//   - the due ledger: bookings accumulate per epoch and never land in a closed
-//     epoch;
+//   - the due ledgers, wallet and Conviction Account: bookings accumulate per
+//     epoch, each in its own ledger, and never land in a closed epoch;
 //   - the settlement mutators: nonce bits are only ever set, a claim takes no
 //     value once finalized and is finalized once, never into a closed epoch,
 //     and epochs close one at a time, in order, from activation on;
@@ -373,7 +373,7 @@ describe('@unit QueryInferenceStorage', () => {
         }
       });
       expect(stateChanging.sort()).to.deep.equal(
-        ['addClaim', 'addWalletDue', 'closeEpoch', 'finalizeClaim', 'useNonces'].sort(),
+        ['addClaim', 'addConvictionDue', 'addWalletDue', 'closeEpoch', 'finalizeClaim', 'useNonces'].sort(),
       );
     });
 
@@ -407,6 +407,52 @@ describe('@unit QueryInferenceStorage', () => {
         .withArgs(now - 1n, now - 1n);
       await QIS.connect(logic).addWalletDue(now, 1n);
       await QIS.connect(logic).addWalletDue(now + 1n, 1n);
+    });
+
+    it('addConvictionDue refuses a caller outside the Hub, and admits a Hub contract and the Hub owner', async () => {
+      await expect(QIS.connect(stranger).addConvictionDue(5n, 1n))
+        .to.be.revertedWithCustomError(QIS, 'UnauthorizedAccess')
+        .withArgs('Only Contracts in Hub');
+      await QIS.connect(logic).addConvictionDue(5n, 1n);
+      await QIS.connect(owner).addConvictionDue(5n, 2n);
+      expect(await QIS.convictionDue(5n)).to.equal(3n);
+    });
+
+    it('the Conviction Account ledger accumulates per epoch apart from the wallet one, and reverts on overflow', async () => {
+      await QIS.connect(logic).addConvictionDue(7n, 10n);
+      await QIS.connect(logic).addWalletDue(7n, 3n);
+      await QIS.connect(logic).addConvictionDue(8n, 4n);
+      await QIS.connect(logic).addConvictionDue(7n, 5n);
+      expect(await QIS.convictionDue(7n)).to.equal(15n);
+      expect(await QIS.walletDue(7n)).to.equal(3n);
+      expect(await QIS.convictionDue(8n)).to.equal(4n);
+      expect(await QIS.walletDue(8n)).to.equal(0n);
+      expect(await QIS.convictionDue(9n)).to.equal(0n);
+      expect(await QIS.dueIn(7n)).to.deep.equal([3n, 15n]);
+      expect(await QIS.dueIn(8n)).to.deep.equal([0n, 4n]);
+      expect(await QIS.dueIn(9n)).to.deep.equal([0n, 0n]);
+
+      await QIS.connect(logic).addConvictionDue(20n, MAX_UINT96);
+      await expect(QIS.connect(logic).addConvictionDue(20n, 1n)).to.be.revertedWithPanic(0x11);
+      // The two ledgers are separate words, so a full one leaves the other open.
+      await QIS.connect(logic).addWalletDue(20n, MAX_UINT96);
+      expect(await QIS.dueIn(20n)).to.deep.equal([MAX_UINT96, MAX_UINT96]);
+    });
+
+    it('never books Conviction Account cost into a closed epoch', async () => {
+      await time.increase(2n * epLen);
+      const now = await currentEpoch();
+      await activateAt(now);
+      await expect(QIS.connect(logic).addConvictionDue(now - 1n, 1n))
+        .to.be.revertedWithCustomError(QIS, 'EpochClosed')
+        .withArgs(now - 1n, now - 1n);
+      await QIS.connect(logic).addConvictionDue(now, 1n);
+      await QIS.connect(logic).addConvictionDue(now + 1n, 1n);
+      await QIS.connect(logic).closeEpoch(now, 0n, 0n, 0n);
+      await expect(QIS.connect(logic).addConvictionDue(now, 1n))
+        .to.be.revertedWithCustomError(QIS, 'EpochClosed')
+        .withArgs(now, now);
+      expect(await QIS.dueIn(now)).to.deep.equal([0n, 1n]);
     });
   });
 
@@ -553,6 +599,13 @@ describe('@unit QueryInferenceStorage', () => {
       // Slot 5 epochClose: pool, label, lambdaBps and closed in one word.
       await plant(at('uint256', 3n, 5n), (1n << 208n) | (5_000n << 192n) | (2n << 96n) | 3n);
       expect(await QIS.getEpochClose(3n)).to.deep.equal([3n, 2n, 5_000n, true]);
+
+      // Slot 4 walletDue and slot 11 convictionDue, read alone and together.
+      await plant(at('uint256', 3n, 4n), 23n);
+      await plant(at('uint256', 3n, 11n), 29n);
+      expect(await QIS.walletDue(3n)).to.equal(23n);
+      expect(await QIS.convictionDue(3n)).to.equal(29n);
+      expect(await QIS.dueIn(3n)).to.deep.equal([23n, 29n]);
     });
   });
 
@@ -604,6 +657,7 @@ describe('@unit QueryInferenceStorage', () => {
           'mapping(bytes32 => mapping(uint8 => mapping(uint72 => struct QueryInferenceStorage.SellerClaim)))',
         ],
         ['10', 0, '_nonceBitmap', 'mapping(bytes32 => mapping(uint72 => mapping(uint64 => uint256)))'],
+        ['11', 0, 'convictionDue', 'mapping(uint256 => uint96)'],
       ]);
 
       // Each record fits one slot.

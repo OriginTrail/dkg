@@ -337,6 +337,24 @@
         "type": "uint96"
       }
     ],
+    "name": "addConvictionDue",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint96",
+        "name": "amount",
+        "type": "uint96"
+      }
+    ],
     "name": "addWalletDue",
     "outputs": [],
     "stateMutability": "nonpayable",
@@ -471,6 +489,49 @@
         "internalType": "uint256",
         "name": "",
         "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "convictionDue",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "dueIn",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "wallet",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "conviction",
+        "type": "uint96"
       }
     ],
     "stateMutability": "view",

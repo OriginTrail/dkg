@@ -24,7 +24,10 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *     period's epoch, because the grace is kept below the epoch length, and
  *     its claims are finalized in it, so it is the epoch in which the
  *     period's receipt value counts. `walletDue(e)` is the value of
- *     wallet-funded periods and their top-ups due in `e`.
+ *     wallet-funded periods and their top-ups due in `e`, and
+ *     `convictionDue(e)` the cost that Conviction Account periods and their
+ *     top-ups drew from the accounts' allowances, due in `e`. Both are booked
+ *     when the period is paid for: a Conviction Account pays as a wallet does.
  *   - The pool carried forward from epochs with no finalized value
  *     (`carry`), and `closedThrough`, the last epoch whose inputs are frozen.
  *   - Each closed epoch's frozen inputs, the QIF inputs per epoch and per
@@ -71,7 +74,8 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *   - slot 1 the item bound, the λ schedule and the scheduled receipt grace
  *     (20 of 32 bytes);
  *   - slot 2 `closedThrough`, slot 3 `carry`;
- *   - slots 4 to 10 the mappings, in order.
+ *   - slots 4 to 11 the mappings, in order; `convictionDue` came last, so
+ *     that no earlier slot moved.
  */
 contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "QueryInferenceStorage";
@@ -96,7 +100,7 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     ///         closed.
     struct EpochClose {
         uint96 pool; // the query/inference pool the epoch's nodes share
-        uint96 label; // what the publishing pool gave up to Conviction Account labels; no close writes it yet
+        uint96 label; // 0: no close writes it, since Conviction Account money reaches the pool as convictionDue
         uint16 lambdaBps; // λ in force in the epoch
         bool closed;
     }
@@ -208,7 +212,7 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     ///         finalized receipt value.
     uint96 public carry;
 
-    // Slots 4 to 10.
+    // Slots 4 to 11.
     /// @notice epoch => wallet-funded value due in that epoch.
     mapping(uint256 => uint96) public walletDue;
     /// @dev epoch => the inputs frozen at its close.
@@ -226,6 +230,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     mapping(bytes32 => mapping(uint8 => mapping(uint72 => SellerClaim))) internal _sellerClaim;
     /// @dev subscriptionId => seller identityId => nonce >> 8 => 256 used-nonce bits.
     mapping(bytes32 => mapping(uint72 => mapping(uint64 => uint256))) internal _nonceBitmap;
+    /// @notice epoch => Conviction Account cost due in that epoch: what plan
+    ///         periods and their top-ups drew from the accounts' allowances.
+    ///         `ServiceSubscriptions` books it; no other contract does.
+    mapping(uint256 => uint96) public convictionDue;
 
     constructor(address hubAddress) HubDependent(hubAddress) {}
 
@@ -396,6 +404,13 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         walletDue[epoch] += amount;
     }
 
+    /// @notice Book `amount` of Conviction Account cost as due in `epoch`, as
+    ///         `addWalletDue` books wallet-funded value.
+    function addConvictionDue(uint256 epoch, uint96 amount) external onlyContracts {
+        _requireOpen(epoch);
+        convictionDue[epoch] += amount;
+    }
+
     /// @notice Mark the nonces of `bits` used, in word `word` of `seller`'s
     ///         requests in a period: bit i is nonce `word × 256 + i`. A bit,
     ///         once set, is never cleared.
@@ -467,6 +482,12 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     // ============================================================
     //                           Views
     // ============================================================
+
+    /// @notice The money due in `epoch`: the wallet-funded value and the
+    ///         Conviction Account cost, which its close adds to the carry.
+    function dueIn(uint256 epoch) external view returns (uint96 wallet, uint96 conviction) {
+        return (walletDue[epoch], convictionDue[epoch]);
+    }
 
     /// @notice What a funding or a top-up checks, in one call: the activation
     ///         epoch and the pause switch.
