@@ -24,6 +24,8 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../src/index.js';
+import type { Rfc64CatalogUpsertMethods } from '../src/dkg-agent-rfc64-catalog-upsert.js';
+import type { Rfc64SwmCatalogProjectionMethods, Rfc64CatalogAuthoringLaneDecisionV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection.js';
 import type { Rfc64PublicCatalogSuccessorAssetInputV1 } from '../src/rfc64/public-catalog-successor-asset-v1.js';
 import { readVerifiedRfc64CatalogMutationStateV1 } from '../src/internal/catalog-mutation-memory.js';
 import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
@@ -38,6 +40,24 @@ import {
   authorSealV1, bootstrapConfigV1, catalogScopeDigestV1,
   agents, tempDirs, seedDurableWorkspaceAssetV1, startRepairAgentV1,
 } from './support/rfc64-local-catalog-repair-fixture.js';
+
+type ResolveLaneV1 = OmitThisParameter<Rfc64SwmCatalogProjectionMethods['resolveRfc64CatalogAuthoringLaneDecisionV1']>;
+type ActiveLaneV1 = Extract<ReturnType<ResolveLaneV1>, { status: 'active' }>['lane'];
+// This existing fixture enables confirmed repair and union projection on its open bootstrap.
+// Keep every other lane field and the decision variants typed while allowing only those overrides.
+type FixtureLaneV1 = Omit<ActiveLaneV1, 'acceptsFinalizedVmRepair' | 'projectionTargetPolicy'> & {
+  readonly acceptsFinalizedVmRepair: boolean;
+  readonly projectionTargetPolicy: ActiveLaneV1['projectionTargetPolicy'];
+};
+interface RevisionAgentInternalsV1 {
+  readonly rfc64PersistenceV1: Rfc64PersistenceV1;
+  resolveRfc64CatalogAuthoringLaneDecisionV1(...args: Parameters<ResolveLaneV1>):
+    Rfc64CatalogAuthoringLaneDecisionV1<FixtureLaneV1>;
+  applyRfc64CatalogSuccessorV1: OmitThisParameter<Rfc64CatalogUpsertMethods['applyRfc64CatalogSuccessorV1']>;
+}
+function internalsOf(agent: DKGAgent): RevisionAgentInternalsV1 {
+  return agent as unknown as RevisionAgentInternalsV1;
+}
 
 const SCOPE = Object.freeze({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
   governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
@@ -94,8 +114,8 @@ async function author(persisted: { dataDir?: string; storePath?: string } = {}) 
       vi.spyOn(starting, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
       project = starting.reconcileRfc64PublicCatalogFromSwmInventoryV1.bind(starting);
       vi.spyOn(starting, 'reconcileRfc64PublicCatalogFromSwmInventoryV1').mockResolvedValue(null);
-      const internal = starting as unknown as Record<string, (...args: any[]) => any>;
-      const lane = internal.resolveRfc64CatalogAuthoringLaneDecisionV1!.bind(starting);
+      const internal = internalsOf(starting);
+      const lane = internal.resolveRfc64CatalogAuthoringLaneDecisionV1.bind(starting);
       vi.spyOn(internal, 'resolveRfc64CatalogAuthoringLaneDecisionV1').mockImplementation((...args) => {
         const decision = lane(...args);
         return decision.status === 'active' ? {
@@ -112,9 +132,7 @@ async function author(persisted: { dataDir?: string; storePath?: string } = {}) 
   };
 }
 
-const persistenceOf = (agent: DKGAgent) => (
-  agent as unknown as { rfc64PersistenceV1: Rfc64PersistenceV1 }
-).rfc64PersistenceV1;
+const persistenceOf = (agent: DKGAgent) => internalsOf(agent).rfc64PersistenceV1;
 
 /** Transport reads are in-process; signatures, bundle validation and SWM/CAS are production. */
 async function receivingCatalog(author: DKGAgent) {
@@ -154,7 +172,7 @@ async function catalog(agent: DKGAgent) {
     catalogScopeDigest: catalogScopeDigestV1(), authorAddress: AUTHOR,
   });
   expect(head).not.toBeNull();
-  const persistence = (agent as unknown as { rfc64PersistenceV1: Rfc64PersistenceV1 }).rfc64PersistenceV1;
+  const persistence = persistenceOf(agent);
   return readVerifiedRfc64CatalogMutationStateV1(persistence, head!);
 }
 
@@ -218,7 +236,7 @@ describe('catalog revisions of an unpublished assertion number', () => {
       ctx: createOperationContext('publish'), publicationLabel: 'queued publish',
     });
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-    const persistence = (agent as unknown as { rfc64PersistenceV1: Rfc64PersistenceV1 }).rfc64PersistenceV1;
+    const persistence = persistenceOf(agent);
     expect(persistence.finalizedPrivatePlacementRepairs.list()).toEqual([]);
     expect((await catalog(agent)).assets[0]!.seal).toEqual(seal);
   });
@@ -236,8 +254,8 @@ describe('catalog revisions of an unpublished assertion number', () => {
 
     const revised = await confirmedRevision(agent);
     const input = { ...revised, seal: { ...revised.seal }, projectionBytes: new Uint8Array(revised.projectionBytes) };
-    const internal = agent as unknown as Record<string, (...args: any[]) => any>;
-    const apply = internal.applyRfc64CatalogSuccessorV1!.bind(agent);
+    const internal = internalsOf(agent);
+    const apply = internal.applyRfc64CatalogSuccessorV1.bind(agent);
     const mutation = vi.spyOn(internal, 'applyRfc64CatalogSuccessorV1').mockImplementationOnce(async (...args) => {
       // The caller changes its bytes after the proof but before withdrawal commits.
       input.seal.assertionMerkleRoot = initial.seal.assertionMerkleRoot;
@@ -353,8 +371,8 @@ describe('catalog revisions of an unpublished assertion number', () => {
       }
       return produced;
     });
-    const internal = agent as unknown as Record<string, (...args: any[]) => any>;
-    const apply = internal.applyRfc64CatalogSuccessorV1!.bind(agent);
+    const internal = internalsOf(agent);
+    const apply = internal.applyRfc64CatalogSuccessorV1.bind(agent);
     vi.spyOn(internal, 'applyRfc64CatalogSuccessorV1').mockImplementation(async (...args) => {
       const result = await apply(...args);
       if (calls === 2) expect(writerEntered).toBe(false);
@@ -412,8 +430,8 @@ describe('catalog revisions of an unpublished assertion number', () => {
       quads, seal: await authorSealV1(1n, '1', quads), shareOperationId: 'later-draft',
     });
     await record(agent, draft);
-    const internal = agent as unknown as Record<string, (...args: any[]) => any>;
-    const apply = internal.applyRfc64CatalogSuccessorV1!.bind(agent);
+    const internal = internalsOf(agent);
+    const apply = internal.applyRfc64CatalogSuccessorV1.bind(agent);
     let confirmed!: Awaited<ReturnType<typeof confirmedRevision>>;
     const mutation = vi.spyOn(internal, 'applyRfc64CatalogSuccessorV1').mockImplementationOnce(async (...args) => {
       const removed = await apply(...args);
@@ -436,8 +454,8 @@ describe('catalog revisions of an unpublished assertion number', () => {
     await record(agent, first);
     await project();
     const revised = await confirmedRevision(agent);
-    const internal = agent as unknown as Record<string, (...args: any[]) => any>;
-    const apply = internal.applyRfc64CatalogSuccessorV1!.bind(agent);
+    const internal = internalsOf(agent);
+    const apply = internal.applyRfc64CatalogSuccessorV1.bind(agent);
     let calls = 0;
     vi.spyOn(internal, 'applyRfc64CatalogSuccessorV1').mockImplementation(async (...args) => {
       if (++calls > 1) throw new Error('injected interruption before insertion');
@@ -455,7 +473,7 @@ describe('catalog revisions of an unpublished assertion number', () => {
     };
     await agent.observeRfc64ConfirmedVmV1(confirmation);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
-    const persistence = (agent as unknown as { rfc64PersistenceV1: Rfc64PersistenceV1 }).rfc64PersistenceV1;
+    const persistence = persistenceOf(agent);
     expect((await catalog(agent)).assets).toEqual([]);
     expect(persistence.finalizedPrivatePlacementRepairs.list()).toHaveLength(1);
     await expect(project()).rejects.toMatchObject({ kind: 'version_conflict' });
