@@ -5,7 +5,8 @@
 // Against an anvil fork of a V8-stake-holding chain, this impersonates the Hub
 // owner and performs the cutover-deploy steps so the sweep driver can then run
 // against REAL forked state:
-//   1. deploy + register + initialize CSS / StakingV10 / DKGStakingConvictionNFT
+//   1. deploy + register + initialize CSS / StakingV10Ledger / StakingV10 /
+//      DKGStakingConvictionNFT
 //      onto the EXISTING forked Hub (shared StakingStorage / IdentityStorage);
 //   2. set convictionCreditSeconds;
 //   3. FREEZE-FIRST: removeContractByName('Staking') so the live V8 Staking can
@@ -69,16 +70,21 @@ async function main() {
 
   console.log('\nDeploying migration contracts onto the forked Hub:');
   const cssAddr = await ensure('ConvictionStakingStorage');
+  // StakingV10 forwards its operator-fee withdrawal and V8 drains here, and
+  // resolves it at initialize().
+  const ledgerAddr = await ensure('StakingV10Ledger');
   const stakingV10Addr = await ensure('StakingV10');
   const wrapperAddr = await ensure('DKGStakingConvictionNFT');
 
   // ---- 2. initialize (idempotent: skip if already initialized) ----
   console.log('\nInitializing (skips if already done):');
   const css = await ethers.getContractAt('ConvictionStakingStorage', cssAddr);
+  const ledger = await ethers.getContractAt('StakingV10Ledger', ledgerAddr);
   const stakingV10 = await ethers.getContractAt('StakingV10', stakingV10Addr);
   const wrapper = await ethers.getContractAt('DKGStakingConvictionNFT', wrapperAddr);
   for (const [n, c] of [
     ['ConvictionStakingStorage', css],
+    ['StakingV10Ledger', ledger],
     ['StakingV10', stakingV10],
     ['DKGStakingConvictionNFT', wrapper],
   ] as const) {

@@ -108,9 +108,12 @@ async function main() {
   console.log(`  node ${SOURCE_NODE} stake = ${fmt(nodeBefore)} | total = ${fmt(totalBefore)} TRAC`);
   if (baseBefore + pendingBefore === 0n) throw new Error('Delegator has no V8 stake on the fork — wrong block/address?');
 
-  // ---- 2. deploy the 3 new contracts onto the REAL Hub ----
+  // ---- 2. deploy the new contracts onto the REAL Hub ----
   console.log('\nDeploying migration contracts onto the forked Hub:');
   const cssAddr = await deploy('ConvictionStakingStorage', funder);
+  // StakingV10 forwards its operator-fee withdrawal and V8 drains here, and
+  // resolves it at initialize().
+  const ledgerAddr = await deploy('StakingV10Ledger', funder);
   const stakingV10Addr = await deploy('StakingV10', funder);
   const wrapperAddr = await deploy('DKGStakingConvictionNFT', funder);
 
@@ -118,6 +121,7 @@ async function main() {
   console.log('\nRegistering in Hub (as owner):');
   for (const [n, a] of [
     ['ConvictionStakingStorage', cssAddr],
+    ['StakingV10Ledger', ledgerAddr],
     ['StakingV10', stakingV10Addr],
     ['DKGStakingConvictionNFT', wrapperAddr],
   ] as const) {
@@ -132,8 +136,11 @@ async function main() {
   const wrapper = await ethers.getContractAt('DKGStakingConvictionNFT', wrapperAddr);
   await (await (css as any).connect(owner).initialize()).wait();
   console.log('  CSS.initialize ✓ (tiers seeded)');
+  const ledger = await ethers.getContractAt('StakingV10Ledger', ledgerAddr);
+  await (await (ledger as any).connect(owner).initialize()).wait();
+  console.log('  StakingV10Ledger.initialize ✓');
   await (await (stakingV10 as any).connect(owner).initialize()).wait();
-  console.log('  StakingV10.initialize ✓ (12 deps resolved)');
+  console.log('  StakingV10.initialize ✓ (13 deps resolved)');
   await (await (wrapper as any).connect(owner).initialize()).wait();
   console.log('  wrapper.initialize ✓');
 

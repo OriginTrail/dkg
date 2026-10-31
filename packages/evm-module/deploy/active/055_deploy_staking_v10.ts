@@ -46,4 +46,7 @@ func.dependencies = [
   'IdentityStorage',
   'Token',
   'EpochStorage',
+  // 10.0.6 — `StakingV10.initialize()` resolves `StakingV10Ledger`, which
+  // runs the operator-fee withdrawal and the V8 drains.
+  'StakingV10Ledger',
 ];
