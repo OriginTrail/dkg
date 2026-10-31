@@ -20,6 +20,7 @@ import {
   V10ProofRootMismatchError,
   V10ProofLeafCountMismatchError,
   V10ProofChunkOutOfRangeError,
+  workerThreadEnv,
   type V10ProofMaterial,
 } from '@origintrail-official/dkg-core';
 import type { ProofBuilder, ProofBuilderRequest } from './proof-builder.js';
@@ -101,7 +102,7 @@ export class WorkerThreadProofBuilder implements ProofBuilder {
 
   private ensureWorker(): Worker {
     if (this.worker) return this.worker;
-    const w = new Worker(this.entryPath);
+    const w = new Worker(this.entryPath, { env: workerThreadEnv() });
     w.on('message', (msg: WorkerResponse) => {
       const task = this.pending.get(msg.taskId);
       if (!task) return; // stale: already cancelled / errored out

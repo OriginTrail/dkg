@@ -20,9 +20,11 @@ const workerControl = vi.hoisted(() => {
     listeners: new Map<string, Listener[]>(),
     posted: [] as unknown[],
     terminated: false,
+    options: undefined as { env?: NodeJS.ProcessEnv } | undefined,
   };
   class FakeWorker {
-    constructor(_path: string) {
+    constructor(_path: string, options?: { env?: NodeJS.ProcessEnv }) {
+      state.options = options;
       state.listeners.clear();
       state.posted.length = 0;
       state.terminated = false;
@@ -84,6 +86,12 @@ function withinTick<T>(promise: Promise<T>): Promise<T | 'still-pending'> {
 }
 
 describe('WorkerCatchupRunner lifecycle', () => {
+  it('starts the worker with the environment that keeps the native addon out of the thread', async () => {
+    const runner = createCatchupRunner(stubAgent);
+    expect(workerControl.state.options?.env?.WS_NO_BUFFER_UTIL).toBe('1');
+    await runner.close();
+  });
+
   it('rejects an in-flight run when the worker exits instead of leaving it pending forever', async () => {
     const runner = createCatchupRunner(stubAgent);
     const run = runner.run({ contextGraphId: 'cg-hang', includeSharedMemory: false });
