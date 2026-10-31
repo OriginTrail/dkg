@@ -1141,11 +1141,13 @@ contract PublishingConviction is
      * @dev  `toEpoch < currentEpoch` is required: the treasury collects an
      *       epoch only once it has fully elapsed, mirroring when stakers
      *       can claim that epoch's rewards — the treasury is never paid
-     *       ahead of the stakers it is scheduled alongside. Solvency: every
-     *       amount on the treasury shard was scheduled inside a completed
-     *       mint (the wrapper funds the vault in the same transaction,
-     *       right after the scheduling call), so by the time an epoch has
-     *       elapsed the vault holds the backing TRAC. Effects before
+     *       ahead of the stakers it is booked alongside. Solvency: every
+     *       amount on the treasury shard was booked out of an account's
+     *       escrow, which the vault already holds — by `_bookWindows` once a
+     *       window has closed (10.2.0), or by a 10.0.8 / 10.1.0 schedule
+     *       inside a completed mint, whose wrapper funded the vault in the
+     *       same transaction — so by the time an epoch has elapsed the vault
+     *       holds the backing TRAC. Effects before
      *       interactions: `payOutEpochTokens` persists `distributed` per
      *       epoch BEFORE the single `transferStake` at the end.
      */
