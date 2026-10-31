@@ -14,22 +14,21 @@ export interface VerifiedSnapshotCheckpointAsset {
   publicQuads: number; dataSha256: string; metadataSha256: string;
 }
 
+/** Entries are durable on acquisition and retain their staging allowance until consumed. */
+export interface SnapshotCheckpointEntrySource {
+  next(signal: AbortSignal): Promise<SnapshotCheckpointEntry | undefined>;
+  consumed(entry: SnapshotCheckpointEntry): void;
+}
+
 /** The result is an isolated import candidate; it confers no live Edge coverage. */
 export async function verifySnapshotCheckpoint(options: {
-  directory: string; entries: readonly SnapshotCheckpointEntry[]; evidence: PublicSnapshotEvidence;
+  directory: string; source: SnapshotCheckpointEntrySource; evidence: PublicSnapshotEvidence;
   signal: AbortSignal; assertCurrent(): void; maxWorkers?: number;
-  /** Pipeline entries are available only after their body and metadata are durable. */
-  nextEntry?(signal: AbortSignal): Promise<SnapshotCheckpointEntry | undefined>;
-  consumed?(entry: SnapshotCheckpointEntry): void;
 }): Promise<VerifiedSnapshotCheckpointAsset[]> {
-  const { directory, entries, evidence, signal } = options;
+  const { directory, source, evidence, signal } = options;
   signal.throwIfAborted(); options.assertCurrent();
   const expected = evidence.snapshot.assets.map(a => buildKnowledgeAssetUalFromOnChainIdV1(
     evidence.snapshot.chainId, evidence.snapshot.assetStorage, BigInt(a.id)));
-  if (!options.nextEntry && (entries.length !== expected.length || entries.some((e, i) => e.ual !== expected[i])))
-    throw new Error('Incomplete checkpoint inventory');
-  const unique = new Set(entries.map(e => e.ual));
-  if (unique.size !== entries.length || entries.some((e, i) => e.index !== i)) throw new Error('Invalid checkpoint selection');
   const loadDirectory = join(directory, 'load');
   await mkdir(loadDirectory, { mode: 0o700 });
   let next = 0;
@@ -39,7 +38,7 @@ export async function verifySnapshotCheckpoint(options: {
     run: async lane => {
       for (;;) {
         lane.signal.throwIfAborted(); options.assertCurrent();
-        const entry = options.nextEntry ? await options.nextEntry(lane.signal) : entries[next];
+        const entry = await source.next(lane.signal);
         if (!entry) return;
         const index = next++;
         if (entry.index !== index || entry.ual !== expected[index]) throw new Error('Invalid checkpoint selection');
@@ -67,7 +66,7 @@ export async function verifySnapshotCheckpoint(options: {
           verified[index] = { index, ual: asset.ual, graph: asset.assertionGraph, metaGraph: asset.metaGraph,
             root: asset.merkleRootHex, version: asset.assertionVersion.toString(), publicQuads: asset.dataQuads.length,
             dataSha256: checkpointSha256(compressed), metadataSha256: checkpointSha256(safeMeta) };
-        } finally { options.consumed?.(entry); }
+        } finally { source.consumed(entry); }
       }
     },
   });

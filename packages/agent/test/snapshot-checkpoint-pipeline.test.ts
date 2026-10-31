@@ -72,3 +72,65 @@ it.each([false, true])('verifies the first durable asset before the next asset a
     for (const result of close.mock.results) if (result.type === 'return') await expect(result.value).resolves.toBeUndefined();
   } finally { worker.mockRestore(); close.mockRestore(); }
 }, 15_000);
+
+it('holds reception at 32 durable assets until actual verification releases capacity', async () => {
+  let releaseVerification!: () => void, reachedCapacity!: () => void;
+  const held = new Promise<void>(resolve => { releaseVerification = resolve; });
+  const saturated = new Promise<void>(resolve => { reachedCapacity = resolve; });
+  let completed = 0, consumed = 0, reservations = 0, resumed = false;
+  const process = SyncVerifyWorker.prototype.processDurableBatch;
+  const worker = vi.spyOn(SyncVerifyWorker.prototype, 'processDurableBatch').mockImplementation(async function (...args) {
+    await held;
+    const result = await process.apply(this, args);
+    completed++;
+    return result;
+  });
+  const reserve = SnapshotCheckpointQueue.prototype.reserve;
+  const reservation = vi.spyOn(SnapshotCheckpointQueue.prototype, 'reserve').mockImplementation(async function (...args) {
+    const atCapacity = ++reservations === BULK_STAGING_ASSETS + 1;
+    if (atCapacity) reachedCapacity();
+    await reserve.apply(this, args);
+    if (atCapacity) resumed = true;
+  });
+  const acknowledge = SnapshotCheckpointQueue.prototype.consumed;
+  const consumption = vi.spyOn(SnapshotCheckpointQueue.prototype, 'consumed').mockImplementation(function (asset) {
+    expect(completed).toBeGreaterThan(consumed); // Acquisition alone must not release staging.
+    consumed++;
+    acknowledge.call(this, asset);
+  });
+  const f = await checkpointFixture({}, 'core-cache', BULK_STAGING_ASSETS + 1);
+  const result = f.run();
+  void result.catch(() => {});
+  try {
+    await Promise.race([saturated, result.then(() => { throw new Error('Pipeline completed before saturation'); })]);
+    const [attempt] = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
+    const durable = await readdir(join(f.directory, 'public-snapshot-checkpoints', attempt!));
+    expect(durable.filter(name => name.endsWith('.body'))).toHaveLength(BULK_STAGING_ASSETS);
+    expect(durable).not.toContain('000032.body');
+    expect(consumed).toBe(0);
+    expect(resumed).toBe(false);
+    releaseVerification();
+    expect((await result).manifest.assets.map(asset => asset.ual)).toEqual(f.uals);
+    expect(resumed).toBe(true);
+    const finished = await readdir(join(f.directory, 'public-snapshot-checkpoints', attempt!));
+    expect(finished.filter(name => name.endsWith('.body'))).toHaveLength(BULK_STAGING_ASSETS + 1);
+    expect(consumed).toBe(BULK_STAGING_ASSETS + 1);
+  } finally {
+    releaseVerification(); f.abort.abort(); await result.catch(() => {});
+    worker.mockRestore(); reservation.mockRestore(); consumption.mockRestore();
+  }
+}, 15_000);
+
+it('rejects a source that ends before the entire selected inventory was verified', async () => {
+  const acquire = SnapshotCheckpointQueue.prototype.next;
+  const source = vi.spyOn(SnapshotCheckpointQueue.prototype, 'next').mockImplementation(async function (signal) {
+    const asset = await acquire.call(this, signal);
+    return asset?.index === 2 ? undefined : asset;
+  });
+  const f = await checkpointFixture();
+  try {
+    await expect(f.run()).rejects.toThrow('Incomplete checkpoint verification');
+    const [attempt] = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
+    expect(await readdir(join(f.directory, 'public-snapshot-checkpoints', attempt!))).not.toContain('manifest.json');
+  } finally { source.mockRestore(); }
+}, 15_000);

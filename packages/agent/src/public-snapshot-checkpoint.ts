@@ -63,8 +63,7 @@ export async function preparePublicSnapshotCheckpoint(host: PublicSnapshotSuppli
     queue.complete();
   })().catch(error => { queue.fail(error); throw error; });
   const evidence = new PublicSnapshotEvidence(initial, () => { try { assertLive(); return true; } catch { return false; } });
-  const verifying = verifySnapshotCheckpoint({ directory, entries: [], evidence, signal, assertCurrent: assertLive,
-    nextEntry: lifetime => queue.next(lifetime), consumed: entry => queue.consumed(entry),
+  const verifying = verifySnapshotCheckpoint({ directory, source: queue, evidence, signal, assertCurrent: assertLive,
   }).catch(error => { queue.fail(error); throw error; });
   // Drain both sides before returning ownership. Failed chunk integrity can leave
   // isolated verified files, but never a sealed manifest or an installed journal.
