@@ -11,6 +11,8 @@ import {
 
 const graphs = ['urn:graph:one', 'urn:graph:two', 'urn:graph:three'];
 const type = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const integer = 'http://www.w3.org/2001/XMLSchema#integer';
+const boolean = 'http://www.w3.org/2001/XMLSchema#boolean';
 const quad = (subject: string, predicate: string, object: string, graph: string): Quad => (
   { subject, predicate, object, graph }
 );
@@ -27,6 +29,15 @@ const data = [
   quad('_:first', 'urn:p:value', '"blank"', graphs[0]),
   quad('_:second', 'urn:p:value', '"blank"', graphs[1]),
   quad('urn:forbidden', 'urn:p:value', '"hidden"', 'urn:outside'),
+  // One mapping reached two ways in the first graph and one way in the next.
+  quad('urn:s:hop', 'urn:p:link', 'urn:m:1', graphs[0]), quad('urn:m:1', 'urn:p:to', '"end"', graphs[0]),
+  quad('urn:s:hop', 'urn:p:link', 'urn:m:2', graphs[0]), quad('urn:m:2', 'urn:p:to', '"end"', graphs[0]),
+  quad('urn:s:hop', 'urn:p:link', 'urn:m:3', graphs[1]), quad('urn:m:3', 'urn:p:to', '"end"', graphs[1]),
+  ...graphs.slice(0, 2).flatMap((graph) => [
+    quad('urn:s:typed', 'urn:p:tagged', '"tagged"@en-GB', graph),
+    quad('urn:s:typed', 'urn:p:count', `"7"^^<${integer}>`, graph),
+    quad('urn:s:typed', 'urn:p:flag', `"true"^^<${boolean}>`, graph),
+  ]),
 ];
 
 function scope(source: string) {
@@ -47,7 +58,25 @@ function bag(rows: Record<string, string>[]) {
   )).sort();
 }
 
-describe('single-triple graph deduplication', () => {
+/** Each graph on its own, keeping a mapping's rows from the lowest-IRI graph that holds it. */
+async function lowestGraphRows(store: OxigraphStore, source: string) {
+  const parsed = scope(source);
+  const inner = parsed.source.slice(parsed.where!.openEnd, parsed.where!.close);
+  const variables = parsed.whereVariables.map((variable) => variable.source).join(' ');
+  const seen = new Set<string>();
+  const rows: Record<string, string>[] = [];
+  for (const graph of [...graphs].sort()) {
+    const result = await store.query(materializePreparedSparql(
+      scope(`SELECT ${variables} WHERE { GRAPH <${graph}> { ${inner} } }`).prepared,
+    ));
+    const matched = result.bindings.map((row) => ({ row, key: bag([row])[0] }));
+    rows.push(...matched.filter(({ key }) => !seen.has(key)).map(({ row }) => row));
+    for (const { key } of matched) seen.add(key);
+  }
+  return rows;
+}
+
+describe('graph-set deduplication routes', () => {
   it.each([
     'SELECT (COUNT(?s) AS ?count) WHERE { ?s <urn:p:value> ?value }',
     'SELECT (COUNT(*) AS ?count) WHERE { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "urn:s:")) }',
@@ -120,31 +149,135 @@ describe('single-triple graph deduplication', () => {
   });
 
   it.each([
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o ; <urn:p:other> ?other }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o . ?s <urn:p:other> ?other }',
-    'SELECT ?s WHERE { ?s <urn:p:value>/<urn:p:other> ?o }',
-    'SELECT ?s WHERE { ?s <urn:p:value>* ?o }',
-    'SELECT ?s WHERE { ?s ^<urn:p:value> ?o }',
+    '?s <urn:p:value> ?o ; <urn:p:other> ?other',
+    '?s <urn:p:value> ?o . ?s <urn:p:other> ?other',
+    '?s <urn:p:value> ?o FILTER(?o = "one") . ?s <urn:p:other> ?other',
+    '?s ?p ?o . ?s ?p ?o FILTER(STRSTARTS(STR(?s), "urn:s:"))',
+    '<urn:s:1> <urn:p:value> ?value',
+    '?s <urn:p:value> "one"',
+    '?s <urn:p:tagged> "tagged"@en-GB',
+    `?s <urn:p:count> "7"^^<${integer}>`,
+    '?s <urn:p:count> 7',
+    '?s <urn:p:flag> true',
+    '?s a <urn:Thing> ; <urn:p:value> ?value , "one"',
+    '?s <urn:p:value> ?o FILTER(REGEX(STR(?o), "^o"))',
+    '?s <urn:p:tagged> ?o FILTER(LANG(?o) = "en-gb" || LANGMATCHES(LANG(?o), "en"))',
+    '?s <urn:p:tagged> ?o FILTER(?o = "tagged"@en-GB)',
+    `?s <urn:p:count> ?o FILTER(?o = "7"^^<${integer}>)`,
+    `?s <urn:p:count> ?o FILTER(DATATYPE(?o) = <${integer}>)`,
+    '?s ?p ?o FILTER(ISLITERAL(?o) && !ISBLANK(?s) && !ISNUMERIC(?o))',
+    '?s ?p ?o FILTER(SAMETERM(?s, ?o) || ISIRI(?o) || ISURI(?o))',
+    String.raw`?s <urn:p:value> ?\u006F . ?s <urn:p:other> $other`,
+  ])('takes the DISTINCT route when a graph matches a mapping once: %s', async (pattern) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const query = `SELECT * WHERE { ${pattern} }`;
+      const rewritten = rewrite(query);
+      expect(rewritten.source).toContain('{ SELECT DISTINCT');
+      expect(rewritten.source).not.toContain('__dkgDedupMatchGraph');
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(bag(actual.bindings)).toEqual(bag(await lowestGraphRows(store, query)));
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    '?s <urn:p:link>/<urn:p:to> ?o',
+    '?s <urn:p:link> [ <urn:p:to> ?o ]',
+    '[] <urn:p:link> ?m . ?m <urn:p:to> ?o',
+    '?s <urn:p:value>|<urn:p:other> ?o',
+    '?o ^<urn:p:value> ?s',
+    '?s !<urn:p:value> ?o',
+    '?s <urn:p:link>* ?o',
+    '?s <urn:p:link>+ ?o',
+    '?s <urn:p:link>? ?o',
+    '?s (<urn:p:link>) ?o',
+    '?s <urn:p:value> ?o FILTER(RAND() < 2)',
+    '?s <urn:p:value> ?o FILTER(STR(UUID()) != "")',
+    '?s <urn:p:value> ?o FILTER(STRUUID() != "")',
+    '?s <urn:p:value> ?o FILTER(NOW() = NOW())',
+    String.raw`?s <urn:p:link>/<urn:p:to> ?\u006F`,
+    '$s <urn:p:link>/<urn:p:to> ?o FILTER(!BOUND(?missing))',
+    '?s <urn:p:value> ?o FILTER STRSTARTS(STR(?s), "urn:s:")',
+  ])('reads one graph on the aggregate route when a mapping can repeat: %s', async (pattern) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const query = `SELECT * WHERE { ${pattern} }`;
+      const rewritten = rewrite(query);
+      expect(rewritten.source).toContain('MIN(?__dkgDedupMatchGraph)');
+      expect(rewritten.source).toContain('OPTIONAL { GRAPH ?__dkgDedupGraph');
+      expect(rewritten.source).not.toContain('FILTER NOT EXISTS');
+      expect(rewritten.source).not.toContain('SELECT DISTINCT');
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(bag(actual.bindings)).toEqual(bag(await lowestGraphRows(store, query)));
+      expect(actual.bindings.every((row) => !Object.keys(row).some((name) => name.startsWith('__dkg'))))
+        .toBe(true);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('reads the same graph whatever the order of the graph list', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const query = 'SELECT ?s ?o WHERE { ?s <urn:p:link>/<urn:p:to> ?o }';
+      const row = { s: 'urn:s:hop', o: '"end"' };
+      const read = async (selected: readonly string[]) => (
+        await store.query(materializePreparedSparql(rewrite(query, selected).prepared))
+      ).bindings;
+      // The mapping matches twice in urn:graph:one, which sorts before urn:graph:two's single match.
+      expect(await read(graphs)).toEqual([row, row]);
+      expect(await read([graphs[1], graphs[2], graphs[0]])).toEqual([row, row]);
+      expect(await read([graphs[1], graphs[2]])).toEqual([row]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
     'SELECT ?s WHERE { _:x <urn:p:value> ?s }',
-    'SELECT ?s WHERE { <urn:s:1> <urn:p:value> ?s }',
-    'SELECT ?s WHERE { ?s <urn:p:value> "one" }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(RAND() < 0.5) }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(STR(UUID()) != "") }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(STRUUID() != "") }',
     'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(BOUND(BNODE())) }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(NOW() = NOW()) }',
     'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(<urn:custom:function>(?s)) }',
     'PREFIX f: <urn:custom:> SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(f:test(?s)) }',
     String.raw`SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(R\u0041ND() < 0.5) }`,
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER STRSTARTS(STR(?s), "urn:s:") }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(?o = "one") . ?s <urn:p:other> ?other }',
-    'ASK WHERE { ?s <urn:p:value> ?o }',
-    'CONSTRUCT { ?s <urn:p:value> ?o } WHERE { ?s <urn:p:value> ?o }',
-    'DESCRIBE ?s WHERE { ?s <urn:p:value> ?o }',
-  ])('retains the graph-rank strategy for unproven shapes: %s', (query) => {
+    'CONSTRUCT { ?s <urn:p:seen> ?o } WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
+    'DESCRIBE ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
+  ])('takes the aggregate route for: %s', (query) => {
     const rewritten = rewrite(query);
-    expect(rewritten.source).toContain('FILTER NOT EXISTS');
-    expect(rewritten.source).not.toContain('{ SELECT DISTINCT');
+    expect(rewritten.source).toContain('MIN(?__dkgDedupMatchGraph)');
+    expect(rewritten.source).not.toContain('SELECT DISTINCT');
+  });
+
+  it.each([
+    'ASK WHERE { ?s <urn:p:value> ?o }',
+    'ASK WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
+    'ASK WHERE { ?s <urn:p:value> ?o FILTER(RAND() < 2) }',
+    'CONSTRUCT { ?s <urn:p:value> ?o } WHERE { ?s <urn:p:value> ?o }',
+    'DESCRIBE ?s WHERE { ?s <urn:p:value> ?o . ?s <urn:p:other> ?other }',
+    `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> SELECT ?s WHERE { ?s <urn:p:count> "7"^^xsd:integer }`,
+  ])('takes the DISTINCT route for: %s', (query) => {
+    const rewritten = rewrite(query);
+    expect(rewritten.source).toContain('{ SELECT DISTINCT');
+    expect(rewritten.source).not.toContain('__dkgDedupMatchGraph');
+  });
+
+  it.each([
+    ['ASK WHERE { ?s <urn:p:link>/<urn:p:to> ?o }', true],
+    ['ASK WHERE { _:x <urn:p:link> ?o }', true],
+    ['ASK WHERE { ?s <urn:p:to>/<urn:p:link> ?o }', false],
+  ])('answers %s', async (query, expected) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      await expect(store.query(materializePreparedSparql(rewrite(query).prepared)))
+        .resolves.toMatchObject({ type: 'boolean', value: expected });
+    } finally {
+      await store.close();
+    }
   });
 
   it.each([
@@ -156,8 +289,8 @@ describe('single-triple graph deduplication', () => {
   });
 
   it.each([
-    '?__dkgDedupGraph', '$__dkgDedupRank', '?__dkgDedupPriorGraph',
-    String.raw`?\u005F_dkgDedupPriorRank`,
+    '?__dkgDedupGraph', '$__dkgDedupGraph', '?__dkgDedupMatchGraph',
+    String.raw`?\u005F_dkgDedupMatchGraph`,
   ])('preserves logical helper-variable collision checks: %s', (variable) => {
     expect(wrapWithDeduplicatedGraphValues(
       scope(`SELECT ${variable} WHERE { ?s <urn:p:value> ?o }`), graphs,

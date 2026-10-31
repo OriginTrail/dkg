@@ -198,9 +198,7 @@ export function wrapWithGraphUnion(
 
 const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
-const DEDUP_RANK_SENTINEL = '?__dkgDedupRank';
-const DEDUP_PRIOR_GRAPH_SENTINEL = '?__dkgDedupPriorGraph';
-const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
+const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
 
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
@@ -254,22 +252,63 @@ function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
 }
 
 // These FILTER expressions only test an existing mapping. Keep volatile and
-// extension functions on the old route: mirrored triples could pass them
+// extension functions on the aggregate route: mirrored triples could pass them
 // differently, invalidating the DISTINCT equivalence used below.
 const DEDUP_PURE_FILTER_WORDS = new Set([
   'STR', 'STRSTARTS', 'STRENDS', 'CONTAINS', 'STRLEN', 'LCASE', 'UCASE',
   'BOUND', 'TRUE', 'FALSE', 'IN', 'NOT',
+  'REGEX', 'LANG', 'LANGMATCHES', 'DATATYPE', 'SAMETERM',
+  'ISIRI', 'ISURI', 'ISBLANK', 'ISLITERAL', 'ISNUMERIC',
 ]);
 
-function isSingleTripleSelect(scope: PreparedGraphScope): boolean {
-  if (scope.operation !== 'SELECT' || !scope.where) return false;
-  const tokens: SparqlLexicalToken[] = [];
+function isVisibleTripleToken(token: SparqlLexicalToken): boolean {
+  switch (token.kind) {
+    case 'variable':
+    case 'iri':
+    case 'prefixed-name':
+    case 'number':
+      return true;
+    case 'word':
+      return token.logicalValue === 'a' || token.upper === 'TRUE' || token.upper === 'FALSE';
+    case 'symbol':
+      return token.logicalValue === '.' || token.logicalValue === ';' || token.logicalValue === ',';
+    default:
+      return false;
+  }
+}
+
+/** Tokens after a string that belong to its literal: `@tag` or `^^datatype`. */
+function literalSuffixLength(tokens: readonly SparqlLexicalToken[], index: number): number {
+  const isSymbol = (at: number, value: string) => {
+    const token = tokens[at];
+    return token?.kind === 'symbol' && token.logicalValue === value;
+  };
+  if (isSymbol(index, '@')) return tokens[index + 1]?.kind === 'word' ? 2 : 0;
+  if (!isSymbol(index, '^') || !isSymbol(index + 1, '^')) return 0;
+  const datatype = tokens[index + 2]?.kind;
+  return datatype === 'iri' || datatype === 'prefixed-name' ? 3 : 0;
+}
+
+/**
+ * True when every term of every triple is visible and all FILTERs are pure, so
+ * one graph matches a mapping at most once. A path or blank node can match the
+ * same mapping several ways, and those repeats are part of the caller's results.
+ */
+function matchesEachMappingOncePerGraph(scope: PreparedGraphScope): boolean {
+  if (!scope.where) return false;
   const source = scope.prepared.tokens;
   const end = scope.where.closingTokenIndex;
+  let hasTriple = false;
   for (let index = scope.where.openingTokenIndex + 1; index < end; index++) {
     const token = source[index];
+    if (token.kind === 'string') {
+      hasTriple = true;
+      index += literalSuffixLength(source, index + 1);
+      continue;
+    }
     if (token.kind !== 'word' || token.upper !== 'FILTER') {
-      tokens.push(token);
+      if (!isVisibleTripleToken(token)) return false;
+      hasTriple = true;
       continue;
     }
     const opening = source[index + 1];
@@ -278,6 +317,10 @@ function isSingleTripleSelect(scope: PreparedGraphScope): boolean {
     if (closing <= index + 1 || closing >= end) return false;
     for (let inner = index + 2; inner < closing; inner++) {
       const expression = source[inner];
+      if (expression.kind === 'string') {
+        inner += literalSuffixLength(source, inner + 1);
+        continue;
+      }
       if (expression.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(expression.upper)) {
         return false;
       }
@@ -287,53 +330,39 @@ function isSingleTripleSelect(scope: PreparedGraphScope): boolean {
     }
     index = closing;
   }
-  const last = tokens.at(-1);
-  if (last?.kind === 'symbol' && last.logicalValue === '.') {
-    tokens.pop();
-  }
-  if (tokens.length !== 3) return false;
-  const [subject, predicate, object] = tokens;
-  return subject.kind === 'variable' && object.kind === 'variable'
-    && (predicate.kind === 'variable' || predicate.kind === 'iri'
-      || predicate.kind === 'prefixed-name'
-      || (predicate.kind === 'word' && predicate.logicalValue === 'a'));
+  return hasTriple;
 }
 
-/** Scope a graph set while suppressing mappings already emitted by an earlier graph. */
+/** Scope a graph set, reading each mapping from one graph even when several hold it. */
 export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  // For one triple with optional pure filters, DISTINCT over every matched
-  // variable removes graph mirrors
-  // without changing multiplicity after the caller's projection or aggregation.
-  // More complex patterns retain the existing graph-rank anti-join.
-  const distinctMappings = isSingleTripleSelect(input);
+  // When each graph matches a mapping once, DISTINCT over every matched variable
+  // removes graph mirrors without changing multiplicity after the caller's
+  // projection or aggregation. ASK only needs one match, so it takes the same route.
+  const distinctMappings = input.operation === 'ASK' || matchesEachMappingOncePerGraph(input);
   return wrapWithProjectedGraphSubselect(
     input,
     graphUris,
-    [
-      DEDUP_GRAPH_SENTINEL,
-      DEDUP_RANK_SENTINEL,
-      DEDUP_PRIOR_GRAPH_SENTINEL,
-      DEDUP_PRIOR_RANK_SENTINEL,
-    ],
+    [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL],
     (inner, graphs) => {
+      const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
       if (distinctMappings) {
-        const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
         return `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`;
       }
-      const rows = graphs
-        .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
-        .join(' ');
+      // Keep each mapping's rows from the lowest-IRI graph that holds it. Comparing
+      // graphs inside FILTER NOT EXISTS would not work: within a subquery Blazegraph
+      // treats the outer variable as out of scope there, so the anti-join removes nothing.
+      // Each aggregated row matches in its own graph, so OPTIONAL acts as a join here;
+      // a plain join with this subquery is about 100 times slower on Oxigraph at 1,000 graphs.
+      const variables = input.whereVariables.map((variable) => variable.source).join(' ');
       return [
-        `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
-        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
-        'FILTER NOT EXISTS {',
-        `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
-        `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
-        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
-        '}',
+        `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE {`,
+        `  VALUES ${DEDUP_MATCH_GRAPH_SENTINEL} { ${values} }`,
+        `  GRAPH ${DEDUP_MATCH_GRAPH_SENTINEL} { ${inner} }`,
+        `} GROUP BY ${variables} }`,
+        `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} } }`,
       ].join(' ');
     },
     isDedupSafeBasicGraphPattern,
