@@ -15,25 +15,35 @@
 //     receives every wallet payment and holds every TRAC a claim credits;
 //   - StakingKPI.getNetNodeRewards equals what the claims pay, previewed for
 //     an ended epoch before its close;
-//   - with the pool's activation epoch unset, claims read nothing from it.
+//   - with the pool's activation epoch unset, claims read nothing from it;
+//   - a Conviction Account's money (PublishingConviction 10.2.0,
+//     ServiceSubscriptions 1.2.0) through claims over its whole lock: a plan
+//     period's cost due beside a wallet period, a period's cost alone rolled
+//     over, a publishing draw and the closed windows' unused budget in the
+//     publishing pool; the commitment is booked exactly once, and the vault
+//     keeps only the floors once everything is withdrawn.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract } from 'ethers';
+import { BaseContract, ContractTransactionReceipt, ContractTransactionResponse } from 'ethers';
 import hre from 'hardhat';
 
 import {
   Chronos,
   ConvictionServiceStorage,
   ConvictionStakingStorage,
+  DKGPublishingConvictionNFT,
   DKGStakingConvictionNFT,
   EpochStorage,
   Hub,
+  ParametersStorage,
   Profile,
+  PublishingConvictionStorage,
   QueryInferenceSettlement,
   QueryInferenceStorage,
   RandomSamplingStorage,
+  ServiceSubscriptions,
   ServiceSubscriptionsWallet,
   StakingKPI,
   StakingV10,
@@ -44,9 +54,14 @@ import {
   ACCOUNT_STACK_TAGS,
   BPS,
   CLASS_INFERENCE,
+  DAY,
   Domain,
   TRAC,
+  Terms,
   bucket,
+  costOf,
+  requestOf,
+  signTerms,
   subscriptionIdOf,
   walletRequestOf,
 } from './helpers/conviction-service';
@@ -54,6 +69,8 @@ import { SCALE18, hardhatWallet, queryInferenceDomain, signedItems } from './hel
 
 const UNIT_ASK = 10n ** 15n;
 const TIER_12 = 12n; // 366 days at 6x: no boost expiry within these runs
+const STAKER_SHARD_ID = 1n;
+const TREASURY_SHARD_ID = 2n;
 
 async function deployFixture() {
   await hre.deployments.fixture([
@@ -82,6 +99,10 @@ async function deployFixture() {
     CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
     QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
+    SS: await at<ServiceSubscriptions>('ServiceSubscriptions'),
+    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
+    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
+    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
   };
 }
 
@@ -528,5 +549,216 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const paid = await claim(d1, t1);
     expect(paid).to.equal((score * s.net) / s.nodeScore);
     expect(await fresh.closedThrough()).to.equal(0n);
+  });
+
+  it("pays a Conviction Account's money through claims over its whole lock: the commitment is booked once, and the vault keeps only the floors", async () => {
+    // A lock of three windows, so the account's whole life and every booking
+    // it makes fall inside the run, and a stand-in for KnowledgeAssetsLifecycle,
+    // the only caller the publishing NFT's coverPublishingCost admits. With no
+    // treasury wired, nothing is booked to it.
+    await f.Params.setPublishingConvictionEpochs(3n);
+    const kal = f.accounts[5];
+    await f.Hub.setContractAddress('KnowledgeAssetsLifecycle', kal.address);
+    expect(await f.Params.protocolTreasury()).to.equal(hre.ethers.ZeroAddress);
+
+    const a = await epochNow();
+    const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
+    const n2 = await createSeller(800_000n * TRAC, 2_000n);
+    const nodes = [n1, n2];
+    const [d1, d2] = [f.accounts[10], f.accounts[11]];
+    const positions: Array<[SignerWithAddress, bigint]> = [
+      [d1, await delegate(d1, n1.identityId, 300_000n * TRAC)],
+      [d2, await delegate(d2, n2.identityId, 150_000n * TRAC)],
+      [n1.operational, n1.tokenId],
+      [n2.operational, n2.tokenId],
+    ];
+    const slack = async () => (await balanceOf(await vault())) - (await owed(nodes));
+    const start = await slack();
+
+    // Both nodes prove in every epoch of the run, once each.
+    const scored = new Set<bigint>();
+    const scoreAll = async (epoch: bigint) => {
+      if (scored.has(epoch)) return;
+      scored.add(epoch);
+      await scoreEpoch(epoch, n1, 200n * TRAC);
+      await scoreEpoch(epoch, n2, 100n * TRAC);
+    };
+    /** Into `epoch + 1` past the batch deadline of `epoch`'s periods; both nodes prove there, and `sellers`' claims on `periods` are finalized. */
+    const finalizeAfter = async (epoch: bigint, periods: string[], sellers: Seller[]) => {
+      const deadline = (await f.Chronos.timestampForEpoch(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
+      if ((await latest()) <= deadline) await time.increaseTo(deadline + 1n);
+      await scoreAll(epoch + 1n);
+      await f.QS.finalizeClaims(
+        periods.flatMap((p) => sellers.map((s) => ({ subscriptionId: p, bucketIndex: 0n, seller: s.identityId }))),
+      );
+    };
+
+    // Every transaction of the account, and what each booked in EpochStorage.
+    const accountTxs: ContractTransactionReceipt[] = [];
+    const send = async (tx: Promise<ContractTransactionResponse>) => {
+      const receipt = (await (await tx).wait())!;
+      accountTxs.push(receipt);
+      return receipt;
+    };
+    const esAddress = (await f.EpochStorage.getAddress()).toLowerCase();
+    const credits = (receipts: ContractTransactionReceipt[], shardId: bigint) =>
+      receipts
+        .flatMap((r) => r.logs)
+        .filter((log) => log.address.toLowerCase() === esAddress)
+        .map((log) => f.EpochStorage.interface.parseLog({ topics: [...log.topics], data: log.data }))
+        .filter((ev) => ev?.name === 'TokensAddedToEpochRange' && ev.args.shardId === shardId)
+        .map((ev) => ({ end: ev!.args.endEpoch as bigint, amount: ev!.args.tokenAmount as bigint }));
+    const booked = (receipts: ContractTransactionReceipt[], shardId = STAKER_SHARD_ID) =>
+      credits(receipts, shardId).reduce((sum, c) => sum + c.amount, 0n);
+
+    // The account, committed with `committed mod lock` dust; its TRAC moves
+    // into the vault now, and nothing is booked yet.
+    const [owner, agent, buyer, walletBuyer] = [f.accounts[22], f.accounts[23], f.accounts[24], f.accounts[25]];
+    const committed = 30_000n * TRAC + 7n;
+    await f.Token.mint(owner.address, committed);
+    await f.Token.connect(owner).approve(await f.NFT.getAddress(), committed);
+    const vaultBefore = await balanceOf(await vault());
+    const created = await send(f.NFT.connect(owner).createAccount(committed, 0));
+    expect((await balanceOf(await vault())) - vaultBefore).to.equal(committed);
+    expect(booked([created])).to.equal(0n);
+    const accountId = await f.NFT.totalSupply();
+    const account = await f.PCS.getAccount(accountId);
+    expect(account.lockDurationEpochs).to.equal(3n);
+    const bps = account.discountBps;
+    const B = committed / 3n;
+    await f.NFT.connect(owner).registerAgent(accountId, agent.address);
+    await f.SS.connect(owner).setServiceSpending(accountId, true);
+    const terms: Terms = {
+      accountId,
+      assignee: buyer.address,
+      maxCostPerPeriod: 1_000n * TRAC,
+      expiresAt: BigInt(await time.latest()) + 400n * DAY,
+      nonce: await f.CSS.assignmentNonce(accountId),
+    };
+    await f.SS.connect(owner).assign(terms, '0x', await signTerms(buyer, f.SS, terms));
+    const accountPeriod = async (epoch: bigint, value: bigint) => {
+      await send(
+        f.SS.connect(buyer).fundFromConviction(
+          requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
+        ),
+      );
+      return subscriptionIdOf(buyer.address, epoch);
+    };
+    const settle = async () => send(f.NFT.settle(accountId));
+    /** Move time to at least `ts`. */
+    const notBefore = async (ts: bigint) => {
+      if ((await latest()) < ts) await time.increaseTo(ts);
+    };
+
+    // Epoch a, the account's first window: a plan period from the account, a
+    // wallet period beside it, and a publish over 2 epochs. The period's cost
+    // is due in a + 1 and moves no TRAC; the publish books its draw into the
+    // publishing pool.
+    const vaultNow = await balanceOf(await vault());
+    const pA = await accountPeriod(a, 20n * TRAC);
+    const costA = costOf(20n * TRAC, bps);
+    expect(await f.QIS.convictionDue(a + 1n)).to.equal(costA);
+    expect(await balanceOf(await vault())).to.equal(vaultNow);
+    expect(booked(accountTxs.slice(-1))).to.equal(0n);
+    const pW = await walletFund(walletBuyer, a, 5n * TRAC);
+    const publishCost = costOf(900n * TRAC, bps);
+    const published = await send(f.NFT.connect(kal).coverPublishingCost(agent.address, 900n * TRAC, a, 2n));
+    expect(booked([published])).to.equal(publishCost);
+    expect(await f.QIS.convictionDue(a + 1n)).to.equal(costA);
+    await claimReceipts(n1, pA, 6n * TRAC);
+    await claimReceipts(n2, pA, 3n * TRAC);
+    await claimReceipts(n2, pW, 5n * TRAC);
+    await scoreAll(a);
+
+    // Epoch a + 1: a's claims are finalized. Window 0 has closed: what it did
+    // not spend reaches the publishing pool. The account funds a period of
+    // a + 1 that sells nothing, so its cost rolls over alone.
+    await finalizeAfter(a, [pA, pW], [n1, n2]);
+    expect(BigInt(await time.latest())).to.be.greaterThan(account.createdAtTimestamp + (await f.Chronos.epochLength()));
+    const window0 = await settle();
+    expect(booked([window0])).to.equal(B - costA - publishCost);
+    expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(costA + publishCost);
+    const pB = await accountPeriod(a + 1n, 8n * TRAC);
+    const costB = costOf(8n * TRAC, bps);
+    expect(pB).to.equal(subscriptionIdOf(buyer.address, a + 1n));
+    expect(await f.QIS.convictionDue(a + 2n)).to.equal(costB);
+
+    // Epoch a + 2: window 1 closes with only the period's cost spent; a wallet
+    // period of a + 2 sells, so a + 3 pays the rolled-over account cost too.
+    await toEpoch(a + 2n);
+    await scoreAll(a + 2n);
+    const pW2 = await walletFund(walletBuyer, a + 2n, 4n * TRAC);
+    await claimReceipts(n1, pW2, 2n * TRAC);
+    await notBefore(account.createdAtTimestamp + 2n * (await f.Chronos.epochLength()) + 1n);
+    const window1 = await settle();
+    expect(booked([window1])).to.equal(B - costB);
+
+    // Epoch a + 3: the claims of a + 2 are finalized, the lock ends, and its
+    // last window, which carries the dust, is booked with the final sweep.
+    await finalizeAfter(a + 2n, [pW2], [n1]);
+    await notBefore(account.expiresAtTimestamp + 1n);
+    const window2 = await settle();
+    expect(booked([window2])).to.equal(committed - 2n * B);
+    expect((await f.PCS.getAccount(accountId)).fullySwept).to.equal(true);
+
+    // The commitment is booked exactly once: as query/inference cost due, into
+    // the publishing pool, or to the treasury (nothing, with none wired).
+    const due = (await f.QIS.convictionDue(a + 1n)) + (await f.QIS.convictionDue(a + 2n));
+    expect(due).to.equal(costA + costB);
+    expect(booked(accountTxs, TREASURY_SHARD_ID)).to.equal(0n);
+    expect(booked(accountTxs) + due).to.equal(committed);
+
+    // Both nodes prove in every epoch the bookings reach, then every position claims.
+    const lastEpoch = credits(accountTxs, STAKER_SHARD_ID).reduce((m, c) => (c.end > m ? c.end : m), a);
+    expect(lastEpoch).to.be.greaterThan(a + 4n);
+    for (let e = (await epochNow()) + 1n; e <= lastEpoch; e++) {
+      await toEpoch(e);
+      await scoreAll(e);
+    }
+    await scoreAll(await epochNow());
+    await toEpoch(lastEpoch + 1n);
+
+    // The KPI previews what the claims then pay: the account cost beside a
+    // wallet's in a + 1, the rolled-over account cost in a + 3, and the
+    // windows' budget in the publishing pool after the lock.
+    const kpiCases: Array<[Seller, bigint]> = [
+      [n1, a + 1n],
+      [n2, a + 1n],
+      [n1, a + 3n],
+      [n2, lastEpoch],
+    ];
+    const previewed: bigint[] = [];
+    for (const [n, e] of kpiCases) previewed.push(await f.KPI.getNetNodeRewards(n.identityId, e));
+    expect((await f.QIS.getEpochClose(a + 1n)).closed).to.equal(false);
+
+    const vaultBeforeClaims = await balanceOf(await vault());
+    for (const [owner_, tokenId] of positions) await claim(owner_, tokenId);
+    expect(await balanceOf(await vault())).to.equal(vaultBeforeClaims);
+    expect(await f.QIS.closedThrough()).to.equal(lastEpoch);
+    expect(await f.QS.epochPool(a + 1n)).to.equal(costA + 5n * TRAC);
+    expect(await f.QS.epochPool(a + 2n)).to.equal(0n);
+    expect(await f.QS.epochPool(a + 3n)).to.equal(costB + 4n * TRAC);
+    for (const [i, [n, e]] of kpiCases.entries()) {
+      expect(await f.Vault.getNetNodeEpochRewards(n.identityId, e), `node ${n.identityId}, epoch ${e}`).to.equal(previewed[i]);
+      expect((await split(n, e)).net, `node ${n.identityId}, epoch ${e}`).to.equal(previewed[i]);
+    }
+
+    // Every credit is paid from the vault: positions withdraw, operators take
+    // their fees. The account's commitment and the wallet payments are all
+    // paid out but the floors of the splits, which stay in the vault.
+    for (const [owner_, tokenId] of positions) await f.StakingNFT.connect(owner_).withdraw(tokenId);
+    for (const n of nodes) {
+      const fee = await f.Vault.getOperatorFeeBalance(n.identityId);
+      await f.StakingV10.connect(n.admin).requestOperatorFeeWithdrawal(n.identityId, fee);
+    }
+    await time.increase(3_600n);
+    for (const n of nodes) await f.StakingV10.connect(n.admin).finalizeOperatorFeeWithdrawal(n.identityId);
+    expect(await owed(nodes)).to.equal(0n);
+    const left = (await slack()) - start;
+    expect(left >= 0n, `left ${left}`).to.equal(true);
+    expect(left < 10n ** 10n, `left ${left}`).to.equal(true);
+    for (const c of [f.SSW, f.SS, f.QS, f.QIS, f.StakingV10, f.Ledger, f.StakingNFT, f.NFT]) {
+      expect(await balanceOf(c), await c.getAddress()).to.equal(0n);
+    }
   });
 });
