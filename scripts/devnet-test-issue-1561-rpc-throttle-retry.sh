@@ -3,6 +3,21 @@
 # endpoints behind a fault proxy. The first eth_getBlockByNumber on each endpoint
 # returns 429 (one complete throttled pool); the next pool pass forwards and the
 # publish must confirm.
+#
+# A block read is tip-sensitive: it tries the endpoints in their configured
+# order every time (endpoint-stickiness.ts, `transparentRead`). So the pass
+# after the throttled one is answered by the first endpoint and the second one
+# is not asked for a block again. The proxy must therefore have seen the block
+# read on BOTH endpoints (the throttled pass covered the whole pool) and at
+# least twice on the first (the pass after it was forwarded).
+#
+# The temporary node gets the devnet's LOCAL chain-request budget whatever the
+# run uses (DEVNET_RPC_BUDGET, scripts/devnet.sh): what is under test is the
+# node's answer to a provider that throttles, not the node's own request
+# budget. The steps before the publish are checked one by one and their answers
+# printed: on the shipped budget one run ended with the share not completed and
+# the publish refused for that reason, and the script had thrown the share's
+# answer away. THROTTLE_TEST_NODE_BUDGET=shipped runs it that way again.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -56,7 +71,7 @@ proxy_pid=$!
 sleep 1
 curl -fsS "http://127.0.0.1:$PROXY_PORT/stats" >/dev/null || fail "fault proxy did not start"
 
-"$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
+DEVNET_RPC_BUDGET="${THROTTLE_TEST_NODE_BUDGET:-local}" "$ROOT/scripts/devnet.sh" addnode "$NODE" edge >/dev/null
 "$ROOT/scripts/devnet.sh" stop-node "$NODE" >/dev/null
 NODE_DIR="$NODE_DIR" PROXY_PORT="$PROXY_PORT" node --input-type=module <<'NODE'
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -82,11 +97,33 @@ exhaustions_before="$(field "$(body_of "$status_before")" chain.rpcExhaustions)"
 api "$NODE" POST /api/identity/ensure '{}' >/dev/null || true
 
 name="issue-1561-$(date +%s)-$$"; subject="urn:issue:1561:$name"
-api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
-  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"429 recovery probe\\\"\",\"graph\":\"\"}]}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}" >/dev/null
-api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}" >/dev/null
+# A setup step that does not answer as expected ends the script here, with the
+# node's own answer, instead of later as a misleading failure of the publish.
+step() { # <what> <response> <accepted codes...>
+  local what="$1" response="$2" code; shift 2
+  for code in "$@"; do [[ "$(code_of "$response")" == "$code" ]] && return 0; done
+  fail "$what answered HTTP $(code_of "$response"): $(body_of "$response" | head -c 400)"
+}
+# Each answer goes into a variable first. As a command argument,
+# "$(api ... "{\"a\":1,\"b\":2}")" is brace-expanded by bash 3.2 before the
+# substitution is read, and the node gets half a body.
+response="$(api "$NODE" POST /api/knowledge-assets "{\"contextGraphId\":\"$CG\",\"name\":\"$name\"}")"
+step "create" "$response" 200 201
+response="$(api "$NODE" POST "/api/knowledge-assets/$name/wm/write" \
+  "{\"contextGraphId\":\"$CG\",\"quads\":[{\"subject\":\"$subject\",\"predicate\":\"http://schema.org/name\",\"object\":\"\\\"429 recovery probe\\\"\",\"graph\":\"\"}]}")"
+step "write" "$response" 200
+response="$(api "$NODE" POST "/api/knowledge-assets/$name/wm/finalize" "{\"contextGraphId\":\"$CG\"}")"
+step "finalize" "$response" 200
+# The node started seconds ago. A share it refuses for now (its view of the
+# chain or of the graph is not ready) is asked again, and each refusal printed.
+shared=''
+for attempt in $(seq 1 18); do
+  shared="$(api "$NODE" POST "/api/knowledge-assets/$name/swm/share" "{\"contextGraphId\":\"$CG\"}")"
+  [[ "$(code_of "$shared")" == 200 ]] && break
+  echo "[#1561] share answered HTTP $(code_of "$shared") (attempt $attempt): $(body_of "$shared" | head -c 300)"
+  sleep 5
+done
+step "share" "$shared" 200
 result="$(api "$NODE" POST "/api/knowledge-assets/$name/vm/publish" "{\"contextGraphId\":\"$CG\"}")"
 [[ "$(code_of "$result")" == 200 ]] || fail "publish failed: $(body_of "$result")"
 [[ "$(field "$(body_of "$result")" status)" == confirmed ]] || fail "publish not confirmed"
@@ -98,6 +135,10 @@ exhaustions_after="$(field "$(body_of "$status_after")" chain.rpcExhaustions)"
   || fail "recovered throttle pass was reported as terminal exhaustion ($exhaustions_before -> $exhaustions_after)"
 
 stats="$(curl -fsS "http://127.0.0.1:$PROXY_PORT/stats")"
-STATS="$stats" node -e 'const s=JSON.parse(process.env.STATS); for (const p of ["/a","/b"]) { const n=s[`${p}:eth_getBlockByNumber`]||0; if(n<2) throw new Error(`${p} getBlock calls=${n}, expected throttle plus recovery`); }' \
-  || fail "proxy did not observe a full throttled pass plus recovery: $stats"
+STATS="$stats" node -e '
+  const stats = JSON.parse(process.env.STATS);
+  const blockReads = (endpoint) => stats[`${endpoint}:eth_getBlockByNumber`] || 0;
+  if (blockReads("/b") < 1) throw new Error(`/b getBlock calls=${blockReads("/b")}: the throttled pass did not reach the second endpoint`);
+  if (blockReads("/a") < 2) throw new Error(`/a getBlock calls=${blockReads("/a")}: no block read was forwarded after the throttled pass`);
+' || fail "proxy did not observe a full throttled pass plus recovery: $stats"
 echo "[#1561] PASS: publish recovered after both RPC endpoints returned 429"
