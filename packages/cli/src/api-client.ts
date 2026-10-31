@@ -25,11 +25,17 @@ import type {
 } from '@origintrail-official/dkg-publisher';
 import { isSafeJobId, SAFE_JOB_ID_ERROR } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
-import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import type { ContextGraphJoinResult } from './context-graph-join-result.js';
 import {
+  CONTEXT_GRAPH_LIST_DEFAULT_LIMIT,
   serializeAgentListOptions,
   type AgentListPageOptions,
+  serializeContextGraphListOptions,
+  type ContextGraphListLegacyResponse,
+  type ContextGraphListPageOptions,
+  type ContextGraphListPageResponse,
+  type ContextGraphListFullRow,
+  type ContextGraphListSummaryRow,
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
 import type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
@@ -2164,28 +2170,23 @@ export class ApiClient {
     return this.get('/api/agent/identity');
   }
 
-  async listContextGraphs(): Promise<{
-    contextGraphs: Array<{
-      id: string;
-      uri: string;
-      name: string;
-      description?: string;
-      creator?: string;
-      createdAt?: string;
-      isSystem: boolean;
-      subscribed?: boolean;
-      synced?: boolean;
-      curator?: string;
-      accessPolicy?: string;
-      callerInvolved?: boolean;
-      onChainId?: string;
-      /** `false` when the node knows the graph only by its on-chain name hash. */
-      nameKnown?: boolean;
-      /** Chain-public ContextGraphStorage facts (additive; absent on older daemons). */
-      onChain?: ContextGraphListOnChainView;
-    }>;
-  }> {
-    return this.get('/api/context-graph/list');
+  async listContextGraphs(): Promise<ContextGraphListLegacyResponse>;
+  async listContextGraphs(
+    options: ContextGraphListPageOptions & { projection: 'summary' },
+  ): Promise<ContextGraphListPageResponse<ContextGraphListSummaryRow>>;
+  async listContextGraphs(
+    options: Omit<ContextGraphListPageOptions, 'projection'> & { projection?: 'full' },
+  ): Promise<ContextGraphListPageResponse<ContextGraphListFullRow>>;
+  async listContextGraphs(
+    options?: ContextGraphListPageOptions,
+  ): Promise<ContextGraphListLegacyResponse | ContextGraphListPageResponse> {
+    if (options === undefined) return this.get('/api/context-graph/list');
+    const encoded = serializeContextGraphListOptions({
+      limit: CONTEXT_GRAPH_LIST_DEFAULT_LIMIT,
+      projection: 'full',
+      ...options,
+    });
+    return this.get(`/api/context-graph/list?${encoded}`);
   }
 
   async contextGraphExists(id: string): Promise<{ id: string; exists: boolean }> {

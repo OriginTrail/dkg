@@ -211,6 +211,7 @@ import  {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
+import type { ContextGraphListFullRow } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter,
@@ -1532,9 +1533,10 @@ export class DKGAgentBase {
   protected readonly contextGraphSubscriptionPersistPendingRevisions = new Map<string, Set<number>>();
   protected readonly listContextGraphsCache = new Map<string, {
     expiresAt: number;
-    rows: Array<Record<string, unknown>>;
+    rows: ContextGraphListFullRow[];
   }>();
-  protected readonly listContextGraphsInFlight = new Map<string, Promise<Array<Record<string, unknown>>>>();
+  protected readonly listContextGraphsInFlight =
+    new Map<string, Promise<ContextGraphListFullRow[]>>();
   protected listContextGraphsCacheGeneration = 0;
 
   /**

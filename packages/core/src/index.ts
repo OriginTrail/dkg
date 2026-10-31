@@ -8,6 +8,7 @@ export * from './context-graph-on-chain-binding.js';
 export * from './context-graph-metadata-placement.js';
 export * from './agent-identity.js';
 export * from './agents-list-wire.js';
+export * from './context-graph-list-wire.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';
