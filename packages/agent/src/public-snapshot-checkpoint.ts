@@ -13,6 +13,7 @@ import { reserveSnapshotCheckpoint, syncCheckpointDirectory, writeCheckpointFile
   type SnapshotCheckpointEntry } from './snapshot-checkpoint-files.js';
 import { verifySnapshotCheckpoint } from './snapshot-checkpoint-verify.js';
 import { publicSnapshotSuppliers, type PublicSnapshotSupplierHost } from './public-snapshot-suppliers.js';
+import { SnapshotCheckpointQueue } from './snapshot-checkpoint-queue.js';
 
 /** A prepared checkpoint is not installed, current, or permission to replace a store. */
 export async function preparePublicSnapshotCheckpoint(host: PublicSnapshotSupplierHost & {
@@ -22,7 +23,9 @@ export async function preparePublicSnapshotCheckpoint(host: PublicSnapshotSuppli
   peerBatches(): AsyncIterable<readonly string[]>; dataDir: string;
   signal: AbortSignal; deadline: number; assertCurrent(): void;
 }): Promise<PreparedSnapshotCheckpoint> {
-  const { initial, signal, assertCurrent, deadline } = options;
+  const { initial, assertCurrent, deadline } = options;
+  const queue = new SnapshotCheckpointQueue(options.signal);
+  const signal = queue.signal;
   const assertLive = () => {
     signal.throwIfAborted(); assertCurrent();
     if (Date.now() >= deadline) throw new Error('Checkpoint job deadline exceeded');
@@ -44,18 +47,31 @@ export async function preparePublicSnapshotCheckpoint(host: PublicSnapshotSuppli
   if (!selected) throw new Error('No compatible public checkpoint core; use incremental recovery');
   // Once bytes arrive a failure is terminal; partial attempts never become a
   // mixed-supplier checkpoint or quietly restart a deadline.
-  while (entries.length < uals.length) {
-    assertLive();
-    const request: BulkGraphRequest = { version: 1, contextGraphId: snapshot.contextGraphId,
-      snapshotDigest: snapshot.snapshotDigest, assetUals: uals.slice(entries.length, entries.length + BULK_GRAPH_MAX_ASSETS) };
-    const chunk = await exchangePublicCheckpoint(host.router, selected, bulkJson(request),
-      bulkGraphTransportOptions(deadline - Date.now(), signal), session => receiveSnapshotCheckpointChunk(session, request,
-        { directory, startIndex: entries.length, budget, assertCurrent: assertLive }));
-    if (!chunk.length) throw new Error('Checkpoint made no progress');
-    entries.push(...chunk);
-  }
+  const receiving = (async () => {
+    while (entries.length < uals.length) {
+      assertLive();
+      const request: BulkGraphRequest = { version: 1, contextGraphId: snapshot.contextGraphId,
+        snapshotDigest: snapshot.snapshotDigest, assetUals: uals.slice(entries.length, entries.length + BULK_GRAPH_MAX_ASSETS) };
+      const chunk = await exchangePublicCheckpoint(host.router, selected, bulkJson(request),
+        bulkGraphTransportOptions(deadline - Date.now(), signal), session => receiveSnapshotCheckpointChunk(session, request,
+          { directory, startIndex: entries.length, budget, assertCurrent: assertLive,
+            reserveVerification: (bytes, lifetime) => queue.reserve(bytes, lifetime),
+            onPersisted: entry => queue.publish(entry) }));
+      if (!chunk.length) throw new Error('Checkpoint made no progress');
+      entries.push(...chunk);
+    }
+    queue.complete();
+  })().catch(error => { queue.fail(error); throw error; });
   const evidence = new PublicSnapshotEvidence(initial, () => { try { assertLive(); return true; } catch { return false; } });
-  const assets = await verifySnapshotCheckpoint({ directory, entries, evidence, signal, assertCurrent: assertLive });
+  const verifying = verifySnapshotCheckpoint({ directory, entries: [], evidence, signal, assertCurrent: assertLive,
+    nextEntry: lifetime => queue.next(lifetime), consumed: entry => queue.consumed(entry),
+  }).catch(error => { queue.fail(error); throw error; });
+  // Drain both sides before returning ownership. Failed chunk integrity can leave
+  // isolated verified files, but never a sealed manifest or an installed journal.
+  const [, verification] = await Promise.allSettled([receiving, verifying]);
+  signal.throwIfAborted();
+  if (verification.status === 'rejected') throw verification.reason;
+  const assets = verification.value;
   const fresh = await options.readFresh();
   assertLive();
   assertCheckpointInventoryUnchanged(initial, fresh);

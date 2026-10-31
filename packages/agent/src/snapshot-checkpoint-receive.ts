@@ -15,7 +15,8 @@ export interface SnapshotCheckpointBudget {
 export async function receiveSnapshotCheckpointChunk(
   session: Pick<BulkGraphSession, 'next' | 'send' | 'signal'>,
   request: BulkGraphRequest,
-  options: { directory: string; startIndex: number; budget: SnapshotCheckpointBudget; assertCurrent(): void },
+  options: { directory: string; startIndex: number; budget: SnapshotCheckpointBudget; assertCurrent(): void;
+    reserveVerification?(bytes: number, signal: AbortSignal): Promise<void>; onPersisted?(entry: SnapshotCheckpointEntry): void },
 ): Promise<SnapshotCheckpointEntry[]> {
   const entries: SnapshotCheckpointEntry[] = [];
   await receiveBulkChunk(session, request, {
@@ -25,6 +26,8 @@ export async function receiveSnapshotCheckpointChunk(
       if (header.encodedBytes > budget.maxEncodedBytes - budget.encodedBytes
         || header.plainBytes > budget.maxPlainBytes - budget.plainBytes)
         throw new RangeError('Checkpoint job allowance exceeded');
+      await options.reserveVerification?.(header.encodedBytes, session.signal);
+      session.signal.throwIfAborted(); options.assertCurrent();
       const disk = await statfs(options.directory);
       if (disk.bavail * disk.bsize < budget.minFreeBytes + header.encodedBytes + header.plainBytes)
         throw new Error('Checkpoint disk reserve unavailable');
@@ -42,6 +45,7 @@ export async function receiveSnapshotCheckpointChunk(
       session.signal.throwIfAborted(); options.assertCurrent();
       entries.push({ index, ual: request.assetUals[assetIndex]!, encodedBytes: bytes,
         plainBytes: header.plainBytes, bodySha256: header.digest, metadataSha256: checkpointSha256(metadata) });
+      options.onPersisted?.(entries[entries.length - 1]!);
       await session.send({ kind: K.CREDIT, index: assetIndex, sequence: bytes, payload: new Uint8Array() });
       await session.send({ kind: K.PERSISTED, index: assetIndex, sequence: bytes, payload: new Uint8Array() });
     },

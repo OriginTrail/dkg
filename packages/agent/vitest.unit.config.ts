@@ -19,6 +19,12 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       "test/public-snapshot-checkpoint.test.ts",
+      "test/snapshot-checkpoint-pipeline.test.ts",
+      "test/checkpoint-export-lookahead.test.ts",
+      "test/bulk-graph-boundaries.test.ts",
+      "test/bulk-graph-contract.test.ts",
+      "test/bulk-graph-property-order.test.ts",
+      "test/bulk-graph-stream.test.ts",
       "test/public-snapshot-suppliers.test.ts",
       "test/public-checkpoint-active-store.test.ts",
       "test/public-snapshot-bootstrap-record.test.ts",
