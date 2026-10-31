@@ -3,6 +3,7 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   isSafeIri,
+  isSafeResultIri,
   sparqlIri,
   escapeSparqlLiteral,
   sparqlString,
@@ -86,6 +87,19 @@ describe('isSafeIri', () => {
     expect(isSafeIri('http://x"y')).toBe(false);
     expect(isSafeIri('http://x>y')).toBe(false);
     expect(isSafeIri('http://x y')).toBe(false);
+  });
+});
+
+describe('isSafeResultIri', () => {
+  it.each(['https://example.org/event', 'urn:event:1', 'a:', 'x+scheme.v1:'])(
+    'accepts stored result IRI %s', value => expect(isSafeResultIri(value)).toBe(true),
+  );
+  it.each(['', '_:blank', 'relative', '1bad:', 'urn:has space', 'urn:unsafe>', 'a:\n'])(
+    'rejects invalid result IRI %j', value => expect(isSafeResultIri(value)).toBe(false),
+  );
+  it('preserves the stricter general IRI predicate', () => {
+    expect(isSafeIri('a:')).toBe(false);
+    expect(isSafeResultIri('a:')).toBe(true);
   });
 });
 
