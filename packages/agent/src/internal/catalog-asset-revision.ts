@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, contextGraphMetaUri,
-  canonicalizeCanonicalGraphScopedAuthorSealV1,
   type AuthorCatalogScopeV1,
 } from '@origintrail-official/dkg-core';
 import { withMaterializationLocks, readGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
 import type { Rfc64CatalogTransitionV1 } from './catalog-exact-set-plan.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { sameRfc64SuccessorAssetV1 } from '../rfc64/public-catalog-successor-asset-v1.js';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
 import { CatalogRepairConditionErrorV1, CatalogRepairIntegrityErrorV1 } from '../rfc64/catalog-repair-diagnostics-v1.js';
 import { throwIfRfc64AbortedV1 } from '../rfc64/abort-v1.js';
@@ -107,19 +107,4 @@ export function withCatalogTransitionVmAuthorizationV1<T>(
       targetAsset ? [targetAsset] : [], source, signal);
     return work();
   }, { signal });
-}
-
-export function sameRfc64SuccessorAssetV1(
-  left: Rfc64CatalogSuccessorAssetInputV1,
-  right: Rfc64CatalogSuccessorAssetInputV1,
-): boolean {
-  return left.assertionCoordinate === right.assertionCoordinate
-    && canonicalizeCanonicalGraphScopedAuthorSealV1(left.seal)
-      === canonicalizeCanonicalGraphScopedAuthorSealV1(right.seal)
-    && equalBytes(left.projectionBytes, right.projectionBytes);
-}
-
-function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength
-    && left.every((byte, index) => byte === right[index]);
 }

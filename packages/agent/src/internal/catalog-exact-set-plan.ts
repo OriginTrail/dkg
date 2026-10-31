@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 } from '@origintrail-official/dkg-core';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
-import { compareRfc64PublicCatalogSuccessorAssetsByKaIdV1 } from '../rfc64/public-catalog-successor-asset-v1.js';
+import { compareRfc64PublicCatalogSuccessorAssetsByKaIdV1, sameRfc64SuccessorAssetV1 } from '../rfc64/public-catalog-successor-asset-v1.js';
 import { AuthorCatalogFullErrorV1 } from './author-catalog-capacity.js';
-import { sameRfc64SuccessorAssetV1 } from './catalog-asset-revision.js';
 
 /** One planned KA delta, including the final replacement omitted by a withdrawal. */
 export interface Rfc64CatalogTransitionV1 {

@@ -31,11 +31,11 @@ import { planNextRfc64CatalogExactSetV1 } from './internal/catalog-exact-set-pla
 export { planNextRfc64CatalogExactSetV1 } from './internal/catalog-exact-set-plan.js';
 import { validateRfc64CatalogTargetAssetsV1 } from './rfc64/public-catalog-successor-producer-v1.js';
 import {
-  assertCatalogTargetRevisionsV1, sameRfc64SuccessorAssetV1, withCatalogTransitionVmAuthorizationV1,
+  assertCatalogTargetRevisionsV1, withCatalogTransitionVmAuthorizationV1,
 } from './internal/catalog-asset-revision.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
-  compareRfc64PublicCatalogSuccessorAssetsByKaIdV1,
+  compareRfc64PublicCatalogSuccessorAssetsByKaIdV1, sameRfc64SuccessorAssetV1,
   snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1,
   snapshotRfc64PublicCatalogSuccessorAssetV1,
 } from './rfc64/public-catalog-successor-asset-v1.js';
