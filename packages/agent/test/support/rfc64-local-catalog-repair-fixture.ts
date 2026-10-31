@@ -241,10 +241,11 @@ export function bootstrapConfigV1(
 export async function authorSealV1(
   kaNumber: bigint,
   assertionVersion = '1',
+  quads: readonly Quad[] = PROJECTION_QUADS,
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const assertionMerkleRoot = ethers.hexlify(
-    computeFlatKCRootV10([...PROJECTION_QUADS], []),
+    computeFlatKCRootV10([...quads], []),
   ) as Digest32V1;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(NATIVE_DEPLOYMENT.assertedAtChainId),
@@ -271,7 +272,7 @@ export async function authorSealV1(
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
     assertionVersion,
-    publicTripleCount: String(PROJECTION_QUADS.length),
+    publicTripleCount: String(quads.length),
     privateTripleCount: '0',
     privateMerkleRoot: null,
   } as unknown as CanonicalGraphScopedAuthorSealV1;
@@ -322,6 +323,11 @@ export async function seedDurableWorkspaceAssetV1(
   suffix: string,
   reservedKaId: bigint,
   accessPolicy: 'public' | 'ownerOnly' = 'public',
+  options: Readonly<{
+    seal?: CanonicalGraphScopedAuthorSealV1;
+    quads?: readonly Quad[];
+    shareOperationId?: string;
+  }> = {},
 ): Promise<Readonly<{
   seal: AssertionSeal;
   scopeDigest: Digest32V1;
@@ -329,8 +335,8 @@ export async function seedDurableWorkspaceAssetV1(
   shareOperationId: string;
 }>> {
   const assertionCoordinate = `repair-${suffix}`;
-  const shareOperationId = `repair-operation-${suffix}`;
-  const canonicalSeal = await authorSealV1(reservedKaId);
+  const shareOperationId = options.shareOperationId ?? `repair-operation-${suffix}`;
+  const canonicalSeal = options.seal ?? await authorSealV1(reservedKaId);
   const seal = assertionSealV1(canonicalSeal);
   const assertionUri = contextGraphAssertionUri(
     CONTEXT_GRAPH_ID,
@@ -363,7 +369,7 @@ export async function seedDurableWorkspaceAssetV1(
     shareOperationId,
     kaUal: canonicalSeal.kaUal,
     assertionVersion: canonicalSeal.assertionVersion,
-    quads: PROJECTION_QUADS,
+    quads: options.quads ?? PROJECTION_QUADS,
     privateTripleCount: 0,
     publisherPeerId: agent.peerId,
     accessPolicy,
