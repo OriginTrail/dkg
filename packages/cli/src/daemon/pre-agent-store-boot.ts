@@ -5,14 +5,12 @@ import type { OxigraphServerHandle } from './oxigraph-server.js';
 import {
   chainResetWipe, formatChainResetWipeOutcome, skipChainResetWipe,
 } from './chain-reset-wipe.js';
-import {
-  checkExternalStoreReachable, checkOrSetStoreIdentity,
-  formatHealthCheckFailure, formatIdentityTagMismatch,
-} from './store-health-check.js';
+import { checkOrSetStoreIdentity, formatIdentityTagMismatch } from './store-health-check.js';
+import { ensureStoreReachableAtBoot } from './store-monitor-wiring.js';
 
 interface PreAgentStoreBootOptions {
   managedOxigraph: Pick<OxigraphServerHandle, 'registerStoreActivity'> | null;
-  runtimeStore: Parameters<typeof checkExternalStoreReachable>[0]['storeConfig'];
+  runtimeStore: Parameters<typeof checkOrSetStoreIdentity>[0]['storeConfig'];
   runtimeStoreConfig: DkgConfig;
   dataDir: string;
   chainResetMarker?: string;
@@ -44,16 +42,7 @@ export async function runPreAgentStoreBootSteps(options: PreAgentStoreBootOption
     // wiped local files but stale remote data; we'd rather not start at
     // all and let them fix the URL.
     if (isExternalBackend(options.runtimeStore?.backend)) {
-      const health = await checkExternalStoreReachable({
-        storeConfig: options.runtimeStore,
-      });
-      if (!health.ok) {
-        log(formatHealthCheckFailure(health));
-        process.exit(1);
-      }
-      log(
-        `External triple-store reachable: ${health.backend} ${health.endpoint}`,
-      );
+      await ensureStoreReachableAtBoot(options.runtimeStore, options.dataDir, log);
 
       // Namespace identity check (RFC 120, plan PR 3 item 3). Refuses to
       // start if another DKG node has already booted against this same
