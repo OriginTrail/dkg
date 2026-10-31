@@ -611,11 +611,6 @@
             "type": "uint96"
           },
           {
-            "internalType": "uint96",
-            "name": "label",
-            "type": "uint96"
-          },
-          {
             "internalType": "uint16",
             "name": "lambdaBps",
             "type": "uint16"

@@ -100,7 +100,6 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     ///         closed.
     struct EpochClose {
         uint96 pool; // the query/inference pool the epoch's nodes share
-        uint96 label; // 0: no close writes it, since Conviction Account money reaches the pool as convictionDue
         uint16 lambdaBps; // λ in force in the epoch
         bool closed;
     }
@@ -469,12 +468,11 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     ///         closed epoch, and set the carry to `carryOut`.
     /// @dev    Epochs close one at a time, in order from the activation epoch,
     ///         so `epoch` is the one after `closedThrough`, and nothing closes
-    ///         while the activation epoch is unset (`CloseOutOfOrder`). The
-    ///         record's `label` stays 0.
+    ///         while the activation epoch is unset (`CloseOutOfOrder`).
     function closeEpoch(uint256 epoch, uint96 pool, uint16 lambda, uint96 carryOut) external onlyContracts {
         uint256 closed = closedThrough;
         if (activationEpoch == 0 || epoch != closed + 1) revert CloseOutOfOrder(epoch, closed);
-        _epochClose[epoch] = EpochClose({pool: pool, label: 0, lambdaBps: lambda, closed: true});
+        _epochClose[epoch] = EpochClose({pool: pool, lambdaBps: lambda, closed: true});
         closedThrough = epoch;
         carry = carryOut;
     }

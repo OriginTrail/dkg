@@ -536,10 +536,10 @@ describe('@unit QueryInferenceStorage', () => {
           .withArgs(e, now - 1n);
       }
       await QIS.connect(logic).closeEpoch(now, 0n, 5_000n, 77n);
-      expect(await QIS.getEpochClose(now)).to.deep.equal([0n, 0n, 5_000n, true]);
+      expect(await QIS.getEpochClose(now)).to.deep.equal([0n, 5_000n, true]);
       expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([now, 77n]);
       await QIS.connect(owner).closeEpoch(now + 1n, 77n, 2_500n, 0n);
-      expect(await QIS.getEpochClose(now + 1n)).to.deep.equal([77n, 0n, 2_500n, true]);
+      expect(await QIS.getEpochClose(now + 1n)).to.deep.equal([77n, 2_500n, true]);
       expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([now + 1n, 0n]);
       await expect(QIS.connect(logic).closeEpoch(now + 1n, 0n, 0n, 0n))
         .to.be.revertedWithCustomError(QIS, 'CloseOutOfOrder')
@@ -596,9 +596,9 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.getSellerClaim(id, 2n, 5n)).to.deep.equal([19n, 17n, true]);
       expect(await QIS.nonceWord(id, 5n, 4n)).to.equal(0xf0n);
 
-      // Slot 5 epochClose: pool, label, lambdaBps and closed in one word.
-      await plant(at('uint256', 3n, 5n), (1n << 208n) | (5_000n << 192n) | (2n << 96n) | 3n);
-      expect(await QIS.getEpochClose(3n)).to.deep.equal([3n, 2n, 5_000n, true]);
+      // Slot 5 epochClose: pool, lambdaBps and closed in one word.
+      await plant(at('uint256', 3n, 5n), (1n << 112n) | (5_000n << 96n) | 3n);
+      expect(await QIS.getEpochClose(3n)).to.deep.equal([3n, 5_000n, true]);
 
       // Slot 4 walletDue and slot 11 convictionDue, read alone and together.
       await plant(at('uint256', 3n, 4n), 23n);
@@ -611,7 +611,7 @@ describe('@unit QueryInferenceStorage', () => {
 
   describe('storage layout', () => {
     type LayoutEntry = { label: string; slot: string; offset: number; type: string };
-    type LayoutType = { label: string; numberOfBytes: string };
+    type LayoutType = { label: string; numberOfBytes: string; members?: LayoutEntry[] };
     type StorageLayout = { storage: LayoutEntry[]; types: Record<string, LayoutType> };
 
     it('matches the documented layout: two packed parameter slots, closedThrough, carry, then the mappings', async () => {
@@ -665,6 +665,13 @@ describe('@unit QueryInferenceStorage', () => {
         const t = Object.values(layout!.types).find((x) => x.label === `struct QueryInferenceStorage.${name}`)!;
         expect(t.numberOfBytes, name).to.equal('32');
       }
+      // The close record packs its pool, λ and flag into 15 bytes of one word.
+      const close = Object.values(layout!.types).find((x) => x.label === 'struct QueryInferenceStorage.EpochClose')!;
+      expect(close.members!.map((m) => [m.label, m.slot, m.offset])).to.deep.equal([
+        ['pool', '0', 0],
+        ['lambdaBps', '0', 12],
+        ['closed', '0', 14],
+      ]);
     });
   });
 });

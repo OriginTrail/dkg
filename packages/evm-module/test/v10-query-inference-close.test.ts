@@ -146,7 +146,7 @@ describe('@integration The epoch close of the query/inference pool', function ()
 
   const record = async (e: bigint) => {
     const c = await QIS.getEpochClose(e);
-    return [c.pool, c.label, c.lambdaBps, c.closed];
+    return [c.pool, c.lambdaBps, c.closed];
   };
 
   // -------------------------------------------------------------------------
@@ -175,15 +175,15 @@ describe('@integration The epoch close of the query/inference pool', function ()
         [e, 0n, 0n, 0n, 0n, 0n, 0n, 0n],
         [e + 1n, 10n * TRAC, 0n, 0n, 10n * TRAC, 6n * TRAC, score, 5_000n],
       ]);
-      expect(await record(e)).to.deep.equal([0n, 0n, 0n, true]);
-      expect(await record(e + 1n)).to.deep.equal([10n * TRAC, 0n, 5_000n, true]);
+      expect(await record(e)).to.deep.equal([0n, 0n, true]);
+      expect(await record(e + 1n)).to.deep.equal([10n * TRAC, 5_000n, true]);
       expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 1n, 0n]);
       expect(await f.QS.epochPool(e + 1n)).to.equal(10n * TRAC);
       const gross = [await f.QS.queryInferenceGross(e + 1n, s1.identityId), await f.QS.queryInferenceGross(e + 1n, s2.identityId)];
 
       // λ moves for later epochs only; the closed epoch takes no booking and no credit.
       await forward(QIS, 'setLambdaBps', [10_000n]);
-      expect(await record(e + 1n)).to.deep.equal([10n * TRAC, 0n, 5_000n, true]);
+      expect(await record(e + 1n)).to.deep.equal([10n * TRAC, 5_000n, true]);
       await expect(QIS.addWalletDue(e + 1n, 1n)).to.be.revertedWithCustomError(QIS, 'EpochClosed');
       await expect(QIS.finalizeClaim(p, 0n, s1.identityId, e + 1n, 1n, 1n)).to.be.revertedWithCustomError(
         QIS,
