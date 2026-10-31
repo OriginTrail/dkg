@@ -13,6 +13,7 @@
 //     refused services;
 //   - a publish and a service spend in one window share its budget, and the
 //     window books only what neither drew;
+//   - a top-up books the windows that have closed, as every touch does;
 //   - top-up overflow on both paths, and the 1-wei floor on both paths;
 //   - a use-time account never reaches the scheduled-account marker while its
 //     lock is live, window by window to its last second.
@@ -368,6 +369,27 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     // Window 0 is fully paid for: the staker pool took the publish and the
     // rest, the query/inference pool the service, and nothing twice.
     expect(800n * TRAC + (B - 1_200n * TRAC) + 400n * TRAC).to.equal(B);
+  });
+
+  it('a top-up books the windows that have closed before it adds to the buffer', async () => {
+    const { accountId, createdAt } = await createAccount();
+    const B = COMMITTED / lock;
+    await publish(1_000n * TRAC, lock); // 800 TRAC of window 0
+
+    await time.increaseTo(createdAt + epLen);
+    await Token.mint(owner.address, 100n * TRAC);
+    await Token.connect(owner).approve(await NFT.getAddress(), 100n * TRAC);
+    const receipt = (await (await NFT.connect(owner).topUp(accountId, 100n * TRAC)).wait())!;
+    const [booked] = await eventsOf(receipt, PC, 'EmissionScheduled');
+    expect([booked.fromWindow, booked.toWindow, booked.scheduled, booked.treasuryFee]).to.deep.equal([
+      0n,
+      1n,
+      B - 800n * TRAC,
+      0n,
+    ]);
+    expect(sumOf(await credits(receipt))).to.equal(B - 800n * TRAC);
+    expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(1n);
+    expect(await PCS.topUpBalance(accountId)).to.equal(100n * TRAC);
   });
 
   it('top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service draw has both due', async () => {
