@@ -34,7 +34,8 @@ import {
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
 } from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
-import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
+import { createAssertionNameMatcher } from './durable-meta-admission.js';
+import { buildDurableMetaPlan, readDurableMetaPlanWindow, type DurableMetaPlanMemo } from './durable-meta-plan.js';
 import { isIriTerm } from '../iri-term.js';
 import { compareCodePoint } from '@origintrail-official/dkg-core';
 import { isLegacySyncGraphCandidateV1 } from '../legacy-sync-graph-candidate.js';
@@ -572,20 +573,16 @@ export class DurableMetaPageFrameError extends Error {
  * boundary — so a normal small-subject page stays ~`rowLimit` rows (extended to
  * complete the straddling subject) instead of ballooning to the full byte budget.
  *
- * Subjects are grouped by {@link metaSubjectKey} over `rows`, which is ONE query's
- * result (a cached snapshot or a single store-paged window), so a blank-node
- * subject's rows are self-consistently labelled and stay grouped (same
- * single-query invariant as the #1788 fix). `trailingComplete` says whether the
- * LAST subject in `rows` is fully present; when false that trailing subject is
- * treated as incomplete and the function returns -1 ("need more rows") so the
- * caller grows the window to complete it.
+ * Subjects are grouped by {@link metaSubjectKey} over `rows`, in which every
+ * subject is whole: a cached page is extended to a subject boundary, and a plan
+ * window reads whole subjects (the non-IRI tail from one query, so its labels
+ * are self-consistent and its subjects stay grouped).
  */
 function subjectAtomicBudgetEnd(
   rows: readonly SyncRow[],
   start: number,
   maxBytes: number,
   rowLimit: number,
-  trailingComplete: boolean,
   oversizedPolicy: MetaOversizedSubjectPolicy = 'byte-fit',
   contextGraphId = '',
 ): number {
@@ -604,9 +601,6 @@ function subjectAtomicBudgetEnd(
       runBytes += serializedResponderRowByteLength(rows[j]) + (i === start && j === i ? 0 : 1);
       j += 1;
     }
-    // The subject is fully present iff a later subject follows it in `rows`, or
-    // the caller says the tail is complete.
-    const complete = j < n || trailingComplete;
     if (bytes + runBytes > safeMax) {
       // This whole subject won't fit within the budget. `bytes + runBytes` is the
       // frame size of every prior (whole) subject plus this one — the smallest
@@ -638,13 +632,6 @@ function subjectAtomicBudgetEnd(
         k += 1;
       }
       return k;
-    }
-    if (!complete) {
-      // Trailing subject fits SO FAR but may continue beyond `rows`. It is not
-      // over budget, so it should be INCLUDED whole once fully read — signal
-      // "need more rows" so the caller grows the window to complete it (rather
-      // than deferring a subject that would fit).
-      return -1;
     }
     bytes += runBytes;
     lastBoundary = j;
@@ -871,6 +858,10 @@ export async function readDurableMetaPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   assetUals?: readonly string[];
+  /** Session plans of metadata graphs too large for a snapshot; absent rebuilds the plan per request. */
+  metaPlanMemo?: DurableMetaPlanMemo;
+  /** Told when a session plan's build fails, also after the request that started it has left. */
+  onSessionPlanFailure?: (error: unknown) => void;
   /**
    * Serialized-response byte budget the store-paged subject extend must not
    * blow (#1916): a single admitted subject larger than this cannot be a valid
@@ -930,18 +921,55 @@ export async function readDurableMetaPage(params: {
       releaseOnShortPage: false,
     }
     : undefined;
+  // A session's plan is built once and kept for its later requests, so its
+  // build does not end with the request that started it: a requester that
+  // stops waiting finds the plan on its retry instead of starting it again.
+  const sessionPlan = params.metaPlanMemo !== undefined && params.rowListCacheKey !== undefined;
+  let startedBuild: Promise<unknown> | undefined;
+  const loadSessionPlan = createSessionPlanGetter(
+    params.metaPlanMemo,
+    params.rowListCacheKey,
+    params.refreshRowList === true,
+    (signal) => {
+      const build = buildDurableMetaPlan({
+        store: params.store,
+        contextGraphId: params.contextGraphId,
+        registeredSubGraphNames: params.registeredSubGraphNames,
+        budgetKey: cache?.key ?? `durable-meta:${params.contextGraphId}`,
+        signal: sessionPlan ? undefined : signal,
+      }).catch((error: unknown) => {
+        if (sessionPlan) params.onSessionPlanFailure?.(error);
+        throw error;
+      });
+      if (sessionPlan) startedBuild = build;
+      return build;
+    },
+    'Durable meta sync session plan expired before page completion',
+    params.refreshGeneration,
+  );
+  // The request that started a build stays until that build has settled, also
+  // when its requester has left: the build is this request's work, so it keeps
+  // the request's place in the responder's limits instead of running beside them.
+  const getPlan: typeof loadSessionPlan = async (pageOffset, pageSignal) => {
+    try {
+      return await loadSessionPlan(pageOffset, pageSignal);
+    } catch (error) {
+      await startedBuild?.catch(() => {});
+      throw error;
+    }
+  };
   const page = await readResponderRowsPage(
     cache,
-    (offset, limit, signal) => readDurableMetaRowsPageSubjectAtomic(
-      params.store,
-      params.contextGraphId,
-      params.registeredSubGraphNames,
-      offset,
-      limit,
-      maxResponseBytes,
-      oversizedSubjectPolicy,
-      signal,
-    ),
+    // Store-paged lane (no session, or a metadata graph too large for a
+    // snapshot): whole subjects are read by exact lookup from the session plan
+    // and the page is cut on a subject boundary within the byte budget, so its
+    // cost follows the page, never the graph.
+    async (offset, limit, signal) => {
+      const window = await readDurableMetaPlanWindow(params.store, await getPlan(offset, signal), offset, limit, signal);
+      return window.slice(0, subjectAtomicBudgetEnd(
+        window, 0, maxResponseBytes, limit, oversizedSubjectPolicy, params.contextGraphId,
+      ));
+    },
     params.offset,
     params.limit,
     params.signal,
@@ -980,7 +1008,6 @@ export async function readDurableMetaPage(params: {
     0,
     maxResponseBytes,
     Number.MAX_SAFE_INTEGER,
-    true,
     oversizedSubjectPolicy,
     params.contextGraphId,
   ));
@@ -2325,7 +2352,7 @@ async function readBoundedFreshSwmMetaSnapshot(
 }
 
 // NOTE: keep in sync with its page-safe twin {@link readFreshSwmDataRowsPage} —
-// both MUST return the same SET of rows (see readDurableMetaRows note).
+// both MUST return the same SET of rows.
 async function readFreshSwmDataRows(
   store: TripleStore,
   dataGraphs: readonly string[],
@@ -2652,119 +2679,6 @@ async function readFreshSwmRoots(
   return new Set(res.bindings.map((row) => row['root']).filter(Boolean));
 }
 
-function buildDurableMetaRowsQuery(
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[],
-  window?:
-    | { kind: 'page'; offset: number; limit: number }
-    | { kind: 'snapshot'; limit: number },
-): string {
-  const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-  const cgEntity = contextGraphDataGraphUri(contextGraphId);
-  const activeDelegationSubjectExpression =
-    durableMetaDelegationSubjectAdmissionExpression(contextGraphId);
-  const notWorking = `FILTER(?ml != ${sparqlString(MemoryLayer.WorkingMemory)})`;
-  const registeredSubGraphSubjects = dedupeStrings(registeredSubGraphNames)
-    .filter((name) => validateSubGraphName(name).valid)
-    .map((name) => `<${assertSafeIri(`${cgEntity}/${name}`)}>`);
-  const registeredSubGraphClause = registeredSubGraphSubjects.length
-    ? `|| ?s IN (${registeredSubGraphSubjects.join(', ')})`
-    : '';
-  const pagination = window?.kind === 'page'
-    ? `\n    ORDER BY ?g ?s ?p ?o\n    OFFSET ${Math.max(0, Math.floor(window.offset))}` +
-      `\n    LIMIT ${Math.max(0, Math.floor(window.limit))}`
-    : window?.kind === 'snapshot'
-      ? `\n    LIMIT ${Math.max(0, Math.floor(window.limit))}`
-      : '';
-  return `
-    SELECT ?g ?s ?p ?o WHERE {
-      VALUES ?g { <${assertSafeIri(metaGraph)}> }
-      GRAPH ?g { ?s ?p ?o }
-      FILTER(!isIRI(?s) || !STRSTARTS(STR(?s), ${sparqlString(DKG_JOIN_REQUEST_SUBJECT_PREFIX)}))
-      FILTER(
-        ?s = <${assertSafeIri(cgEntity)}>
-        || ${activeDelegationSubjectExpression}
-        ${registeredSubGraphClause}
-        || STRSTARTS(STR(?s), "did:dkg:activity:")
-        || EXISTS {
-             GRAPH ?g {
-               ?s <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion ;
-                  <${DKG_STATUS}> ${sparqlString('confirmed')} .
-             }
-             FILTER(STR(?scopeVersion) = ${sparqlString(String(GRAPH_KA_CONTENT_SCOPE_VERSION))})
-             FILTER(REGEX(STR(?s), "^did:dkg:[^/]+/0x[0-9A-Fa-f]{40}/[0-9]+$"))
-           }
-        || EXISTS { GRAPH ?g { ?s <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
-        || EXISTS { GRAPH ?g { ?agLifecycle <${DKG_ASSERTION_GRAPH}> ?s ; <${DKG_MEMORY_LAYER}> ?ml } ${notWorking} }
-        || EXISTS {
-             GRAPH ?g { ?s (<${PROV_GENERATED}>|<${PROV_USED}>) ?evLifecycle . ?evLifecycle <${DKG_MEMORY_LAYER}> ?ml }
-             ${notWorking}
-           }
-        || (
-             CONTAINS(STR(?s), "/assertion/") &&
-             EXISTS {
-               GRAPH ?g { ?anLifecycle <${DKG_ASSERTION_NAME}> ?an ; <${DKG_MEMORY_LAYER}> ?ml }
-               ${notWorking}
-               FILTER(STR(?an) != "")
-               FILTER(STRENDS(STR(?s), CONCAT("/", STR(?an))))
-             }
-           )
-      )
-    }
-    ${pagination}
-  `;
-}
-
-async function queryDurableMetaRows(
-  store: TripleStore,
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[],
-  window:
-    | { kind: 'page'; offset: number; limit: number }
-    | { kind: 'snapshot'; limit: number; maxResponseBytes: number }
-    | undefined,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  if (window && Math.max(0, Math.floor(window.limit)) === 0) return [];
-  const res = await store.query(
-    buildDurableMetaRowsQuery(contextGraphId, registeredSubGraphNames, window),
-    {
-      ...syncResponderStoreOptions(
-        signal,
-        window?.kind === 'page'
-          ? 'sync.responder.readDurableMetaRowsPage'
-          : 'sync.responder.readDurableMetaRowsSnapshot',
-      ),
-      ...(window?.kind === 'snapshot' ? { maxResponseBytes: window.maxResponseBytes } : {}),
-    },
-  );
-  if (res.type !== 'bindings') return [];
-  const rows = res.bindings
-    .map((row) => ({ s: row['s'], p: row['p'], o: row['o'], g: row['g'] }))
-    .filter((row) => row.s && row.p && row.o && row.g);
-  return window?.kind === 'page' ? rows : rows.sort(compareRows);
-}
-
-/**
- * Read admitted durable metadata from one store snapshot. The delegation
- * credential and its allow/revoke facts are evaluated in the same query, so
- * an ACL mutation cannot race a separately materialized JavaScript subject set.
- */
-async function readDurableMetaRows(
-  store: TripleStore,
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[],
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  return queryDurableMetaRows(
-    store,
-    contextGraphId,
-    registeredSubGraphNames,
-    undefined,
-    signal,
-  );
-}
-
 async function readBoundedDurableMetaSnapshot(
   store: TripleStore,
   contextGraphId: string,
@@ -2840,13 +2754,12 @@ async function readBoundedDurableMetaSnapshot(
 /**
  * Canonical durable-meta admission over one already-bounded exact graph.
  *
- * This is deliberately the in-process twin of buildDurableMetaRowsQuery's
- * oversized fallback predicate. Executing the nested EXISTS expression in the
- * store caused both Oxigraph and Blazegraph planners to rescan/sort the same
- * metadata graph for every frame. Reading that one graph once and building
+ * This is deliberately the in-process twin of the store-side admission in
+ * durable-meta-admission.ts, which the session plan of an oversized metadata
+ * graph evaluates once per subject. Reading the one graph once and building
  * subject indexes is O(meta rows), backend-neutral, and retains the exact
  * privacy boundary. sync-responder-oversized-fallback.test.ts proves set
- * equivalence between this path and the SPARQL fallback across every branch.
+ * equivalence between this path and the plan-paged path across every branch.
  */
 function filterDurableMetaSnapshotRows(
   rows: readonly SyncRow[],
@@ -2923,24 +2836,13 @@ function filterDurableMetaSnapshotRows(
       if (name) assertionNames.add(name);
     }
   }
-  const assertionNamesByTail = new Map<string, string[]>();
-  for (const name of assertionNames) {
-    const tail = name.slice(name.lastIndexOf('/') + 1);
-    const names = assertionNamesByTail.get(tail) ?? [];
-    names.push(name);
-    assertionNamesByTail.set(tail, names);
-  }
+  const namedByAssertion = createAssertionNameMatcher(assertionNames);
 
   for (const [subject, subjectRows] of bySubject) {
     if (subjectRows.some((row) =>
       (row.p === PROV_GENERATED || row.p === PROV_USED) && nonWorkingSubjects.has(row.o),
     )) admitted.add(subject);
-    if (subject.includes('/assertion/')) {
-      const tail = subject.slice(subject.lastIndexOf('/') + 1);
-      if ((assertionNamesByTail.get(tail) ?? []).some(
-        (name) => subject.endsWith(`/${name}`),
-      )) admitted.add(subject);
-    }
+    if (namedByAssertion(subject) !== undefined) admitted.add(subject);
   }
 
   return rows
@@ -2949,123 +2851,6 @@ function filterDurableMetaSnapshotRows(
       !(isIriTerm(row.s) && row.s.startsWith(DKG_JOIN_REQUEST_SUBJECT_PREFIX)),
     )
     .sort(compareRows);
-}
-
-/**
- * Store-bounded, page-safe equivalent of {@link readDurableMetaRows} used as the
- * oversized-snapshot fallback. It pushes the entire subject-membership predicate
- * into the store (the graph-scaling non-working-lifecycle / event-subject sets
- * are expressed as `EXISTS`, never materialized in Node) and pages with
- * `OFFSET`/`LIMIT`, so an intrinsically-oversized durable-meta snapshot syncs
- * without buffering the complete filtered set in heap.
- *
- * INVARIANT: this MUST return the same SET of rows as {@link readDurableMetaRows}.
- * The two encode the same filter and MUST be edited together. Row ORDER may
- * differ (SPARQL term order vs `compareRows` code-point order diverge on the
- * object tiebreaker); that is safe because only one path runs within a single
- * paginated session and SPARQL `ORDER BY` is internally deterministic, so pages
- * never skip or duplicate.
- */
-async function readDurableMetaRowsPage(
-  store: TripleStore,
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[],
-  offset: number,
-  limit: number,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  return queryDurableMetaRows(
-    store,
-    contextGraphId,
-    registeredSubGraphNames,
-    { kind: 'page', offset: safeOffset, limit: safeLimit },
-    signal,
-  );
-}
-
-/**
- * Subject-atomic wrapper over {@link readDurableMetaRowsPage} for the
- * store-paged durable-meta lane (the no-session path and the oversized-snapshot
- * fallback). Guarantees the returned page ENDS on a `(g, s)` subject boundary:
- * a subject straddling `limit` is emitted in full, so a graph-scoped seal's
- * rows (incl. `dkg:assertionVersion`) are never split across a page — and
- * therefore never across a sync round (#1788). This mirrors the cached path's
- * in-memory extend for the non-snapshot lane, and holds for ANY admitted
- * subject term, not only IRIs.
- *
- * The trailing subject is completed by RE-READING a GROWING window from the
- * same offset (`limit + extra`, `extra` doubling) until that subject is fully
- * contained — a later subject appears in the window, or the store is exhausted
- * — then cutting at the subject boundary. Each attempt is a SINGLE ordered
- * query, which is what makes this correct for a blank-node subject: Oxigraph
- * relabels a blank node per query (observed `_:x` → `_:<hash>`), so a
- * subject-bound re-read or a multi-query paged loop could not re-identify one,
- * but within a single self-contained window its label — and therefore the
- * `(g, s)` boundary comparison — is consistent. Conforming writers only emit
- * IRI `_meta` subjects (metadata generators build deterministic IRIs; the
- * publisher rejects blank nodes). NEW unverified peer ingest now enforces this
- * IRI invariant at the durable-meta selection (#1921), so it no longer admits a
- * blank-node subject — but that guard operates on incoming quads only and does
- * NOT sweep already-persisted data, so a blank-node `_meta` subject written by a
- * pre-fix peer may still reside in the store. Subject atomicity must therefore
- * still cover it, and this per-query relabel accommodation stays as
- * defense-in-depth.
- *
- * `_meta` subjects are small (a seal is 14 quads ≈ a few KB), so this converges
- * in about one read. The returned page is BOTH subject-atomic AND ≤
- * `maxResponseBytes` via {@link subjectAtomicBudgetEnd}: whole subjects are
- * accumulated up to the budget and a subject that would not fit is deferred whole
- * to the next page — so a small seal that sits AFTER large-literal rows is never
- * cut by the byte cap (the #1916 hole). Only a FIRST subject that alone exceeds
- * the budget is emitted and split by the serializer (provably not a valid seal at
- * that size; safe and forward-progressing). The window grows only while its
- * trailing subject is still incomplete AND the budget has not been reached, so
- * memory stays bounded (~one budget) and the loop terminates at EOF. When
- * `oversizedPolicy` is `'fail-loud'` (a non-negotiated legacy requester) the
- * page is NOT byte-fit — an oversized or cumulative-over-budget page throws
- * {@link DurableMetaPageFrameError} instead (see {@link MetaOversizedSubjectPolicy}).
- */
-async function readDurableMetaRowsPageSubjectAtomic(
-  store: TripleStore,
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[],
-  offset: number,
-  limit: number,
-  maxResponseBytes: number,
-  oversizedPolicy: MetaOversizedSubjectPolicy,
-  signal?: AbortSignal,
-): Promise<SyncRow[]> {
-  const safeOffset = Math.max(0, Math.floor(offset));
-  const safeLimit = Math.max(0, Math.floor(limit));
-  if (safeLimit === 0) return [];
-  const safeMaxBytes = Math.max(1, Math.floor(maxResponseBytes));
-  let extra = 1;
-  // Bounded by construction: `extra` at least doubles each attempt and the store
-  // is finite, so a short (exhausted) window always terminates the loop; the
-  // iteration cap is a defensive ceiling a real `_meta` graph never nears.
-  for (let attempt = 0; attempt < 48; attempt += 1) {
-    const window = await readDurableMetaRowsPage(
-      store,
-      contextGraphId,
-      registeredSubGraphNames,
-      safeOffset,
-      safeLimit + extra,
-      signal,
-    );
-    const windowExhausted = window.length < safeLimit + extra;
-    const end = subjectAtomicBudgetEnd(window, 0, safeMaxBytes, safeLimit, windowExhausted, oversizedPolicy, contextGraphId);
-    // -1 ⇒ the first subject is still incomplete and fits so far: fetch more to
-    // decide whether it completes within budget or is oversized. Otherwise `end`
-    // is the subject-atomic, byte-fitting boundary.
-    if (end !== -1) return window.slice(0, end);
-    extra = extra === 1 ? safeLimit + 1 : extra * 2;
-  }
-  throw new Error(
-    `durable-meta subject-atomic paging did not converge for "${contextGraphId}" at offset ${safeOffset} `
-    + '(first subject exceeded the bounded window budget)',
-  );
 }
 
 /**
@@ -3248,3 +3033,4 @@ function stripLiteral(value: string | undefined): string {
   const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[\w-]+|\^\^<[^>]+>)?$/);
   return match ? match[1].replace(/\\"/g, '"').replace(/\\\\/g, '\\') : value;
 }
+

@@ -56,6 +56,8 @@ import {
 } from '../priority-admission-queue.js';
 import { resolveSyncResponderRequestProfile } from './page-framing-policy.js';
 import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
+import { createResponderDurableMetaPlanMemo } from './durable-meta-plan.js';
+import { createSyncResponderCooling } from './serve-cooling.js';
 import { encodeResolvedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
@@ -480,6 +482,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
     { phase: 'shared_memory', budget: responderSnapshotBudget },
   );
+  const durableMetaPlanMemo = createResponderDurableMetaPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS, SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT, responderSnapshotBudget,
+  );
   const freshSwmDataGraphPlanMemo = createResponderFreshSwmDataGraphPlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -517,6 +522,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
   const subGraphRegistrationMemo = createResponderSubGraphRegistrationMemo(store);
   const swmAdmissionMemo = createResponderSwmAdmissionMemo(store);
   const limiter = createSyncResponderLimiter();
+  const cooling = createSyncResponderCooling({
+    busyError: (message) => new SyncResponderBusyError(message),
+    logWarn: (message) => logWarn(createOperationContext('sync'), message),
+  });
   // Preserve the original one-admission auth+serve path unless an operator
   // actually configures a non-zero priority. An empty/all-zero map is a true
   // compatibility no-op for responder scheduling.
@@ -726,7 +735,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
       return { kind: 'authorized', authDurationMs };
     };
 
-    const serveAuthorizedStage = async (authDurationMs: number): Promise<Uint8Array> => {
+    const serveAuthorizedStage = async (
+      authDurationMs: number, reportDetachedFailure?: (error: unknown) => void,
+    ): Promise<Uint8Array> => {
       throwIfAborted(signal);
 
       if (store.queryCancellation === 'pre-dispatch' && !warnedPreDispatchCancellation) {
@@ -887,6 +898,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
+            metaPlanMemo: durableMetaPlanMemo,
+            onSessionPlanFailure: reportDetachedFailure,
             assetUals,
             maxResponseBytes: pageFraming.maxPageBytes,
             // NON-NEGOTIATED legacy requesters (no wire `pageMode`) must fail
@@ -988,6 +1001,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
     };
 
     const plane: SyncResponderPlane = isWorkspace ? 'shared-memory' : 'durable';
+    const serveCooled = (authDurationMs: number) => cooling.run({
+      contextGraphId, plane, phase,
+      selection: assetUals !== undefined ? `exact:${assetSelectionKey}` : sinceBatchId == null ? 'full' : 'delta',
+      stage: offset > 0 && request.syncSessionId ? 'continuation' : 'start',
+    }, (reportDetachedFailure) => serveAuthorizedStage(authDurationMs, reportDetachedFailure));
     const preAuthorizationScheduling: SyncResponderScheduling = {
       plane,
       lane: 'pre_authorization',
@@ -1011,7 +1029,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
                 priority,
                 priorityClass: syncPriorityClass(priority),
               },
-              work: () => serveAuthorizedStage(prepared.authDurationMs),
+              work: () => serveCooled(prepared.authDurationMs),
             };
           },
         ).then((result) => {
@@ -1027,7 +1045,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): { closeA
             const prepared = await prepareResponderStage();
             return prepared.kind === 'respond'
               ? prepared.bytes
-              : serveAuthorizedStage(prepared.authDurationMs);
+              : serveCooled(prepared.authDurationMs);
           },
         );
 
