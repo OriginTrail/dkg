@@ -70,9 +70,9 @@ describe('@unit ServiceSubscriptions', () => {
   });
 
   describe('metadata and EIP-712 constants', () => {
-    it('is named ServiceSubscriptions, version 1.1.0, with a 10,000 bps denominator', async () => {
+    it('is named ServiceSubscriptions, version 1.2.0, with a 10,000 bps denominator', async () => {
       expect(await SS.name()).to.equal('ServiceSubscriptions');
-      expect(await SS.version()).to.equal('1.1.0');
+      expect(await SS.version()).to.equal('1.2.0');
       expect(await SS.BPS_DENOMINATOR()).to.equal(10_000n);
       expect(await SS.hub()).to.equal(await HubContract.getAddress());
     });

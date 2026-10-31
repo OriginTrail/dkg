@@ -49,7 +49,6 @@ import {
   bucket,
   registerServiceContracts,
   requestOf,
-  setExactScheduleFrom,
   signTerms,
   subscriptionIdOf,
   walletRequestOf,
@@ -516,7 +515,6 @@ describe('@integration Receipt batches of the query/inference pool', function ()
     });
 
     it('F3, an inactive Conviction Account assignment: a request issued at or after its revocation, or its expiry', async () => {
-      await setExactScheduleFrom(f.Hub, CSS);
       const expiresAt = (await epochStart(epoch + 1n)) - 1_000n;
       const { accountId } = await openConvictionAccount({
         ...f,
@@ -667,7 +665,6 @@ describe('@integration Receipt batches of the query/inference pool', function ()
     });
 
     it("a Conviction Account period revoked mid-epoch takes the revocation plus the grace, and an expiry the same", async () => {
-      await setExactScheduleFrom(f.Hub, CSS);
       const { accountId } = await openConvictionAccount({
         ...f,
         owner,

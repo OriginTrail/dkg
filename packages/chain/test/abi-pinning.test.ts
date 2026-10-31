@@ -313,7 +313,16 @@ const PINNED_DIGESTS: Record<string, string> = {
   // `ServiceFundingPausedTreasuryWired(address)` and `ZeroServiceValue()`.
   // `coverPublishingCost` and every other entry are unchanged. Additive
   // surface change → new digest.
-  PublishingConviction:         '1e34631abf48b35fc1080e08717469dfb54ac0ced2c0a6273d8fd33ac0147b6c',
+  // Repinned (Conviction Accounts pay at use time, OT-RFC-27, 10.2.0): added
+  // the permissionless batch `settleMany(uint256[])` (a name of its own, so
+  // `settle` keeps one signature and a bare `settle(id)` call stays
+  // unambiguous in ethers v6) and the error
+  // `EmissionAlreadyScheduled(uint256)`; removed the Hub-owner batch
+  // `migrateEmissionSchedule(uint256[])`; `coverServiceCost` returns the
+  // draw split without the top-up emission ranges. `settle(uint256)`,
+  // `coverPublishingCost`, and every event signature are unchanged
+  // (`EmissionScheduled` now reports each booking of closed windows).
+  PublishingConviction:         'fba9333eb367239151010b93ac0572d37f12fc39e4cecd466cc4e904b8744b3a',
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',

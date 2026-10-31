@@ -1,46 +1,58 @@
 /**
- * V10 PCA deterministic emission (bell) — devnet validation (OT-RFC-58, 10.0.8).
+ * V10 PCA emission (bell) — devnet validation (OT-RFC-27, PublishingConviction 10.2.0).
  *
- * The SUCCESSOR to devnet/conviction-lazy-settle: 10.0.8 replaces the lazy
- * active/passive sink with an eager, deterministic emission schedule written
- * up front at account creation. This suite asserts the new invariants against
- * a live 6-node devnet, using PER-TX EpochStorage events (not shared
+ * Since 10.2.0 a Conviction Account pays at use time, as a wallet does: a
+ * publish books its draw when it is made, and each billing window's unused
+ * budget is booked once the window has closed, spread over the
+ * `lockDurationEpochs` epoch-lengths after its close. That per-window spread is
+ * the 10.0.8 schedule's own math, so an account whose windows are settled on
+ * time still emits the 10.0.8 bell, window by window. This suite asserts that
+ * against a live 6-node devnet, using PER-TX EpochStorage events (not shared
  * getEpochPool deltas) so unrelated daemon publishes in the same epoch range
  * can neither mask a regression nor cause a flake.
  *
- *   step 2  createAccount writes the FULL schedule: `EmissionScheduled` with
- *           `scheduled == committedTRAC` (treasury unset on devnet ⇒
- *           `treasuryFee == 0`), and the tx credits EpochStorage's staker
- *           shard forward of the creation epoch, summing to `committedTRAC`.
- *           (Inverts lazy-settle step 2, which asserted createAccount emits
- *           NOTHING.)
- *   step 3  `coverPublishingCost` (driven against the DEPLOYED logic by
- *           impersonating the NFT wrapper's onlyConvictionNFT gate) draws the
- *           per-window budget (`windowSpent` grows; `CostCovered` shows a base
- *           draw, no topUp) but emits NOTHING further to the pool — the base
- *           TRAC is already scheduled, so there is no double emission.
- *   step 4  `settle()` before expiry is a pure no-op.
- *   step 5  THE MAINNET MIGRATION PATH: a synthetic PRE-10.0.8 account
+ *   step 2  createAccount books NOTHING to the pool: no `EmissionScheduled`,
+ *           no EpochStorage credit in the tx, and the booking cursor
+ *           (`lastSettledWindow`) starts at window 0.
+ *   step 3  A publish — `coverPublishingCost`, driven against the DEPLOYED
+ *           logic by impersonating the NFT wrapper's onlyConvictionNFT gate —
+ *           draws the window budget and books its whole discounted draw to the
+ *           staker shard over the Knowledge Asset's epochs from the current
+ *           epoch, exactly as a wallet publish spreads its payment.
+ *   step 4  `settle()` before the first window closes books nothing.
+ *   step 5  THE BELL: as each window closes, a `settle()` in the same epoch
+ *           books B − spent (the `committed mod lock` dust with the last
+ *           window) over the lock's epoch-lengths after that window's close —
+ *           range for range the 10.0.8 bell's own credits for that window. The
+ *           last window closes at expiry, where the same settle is the final
+ *           sweep. Publish + windows == committedTRAC.
+ *   step 6  THE MAINNET PATH for accounts created before 10.0.8 (it replaces
+ *           the retired `migrateEmissionSchedule`): synthetic legacy accounts
  *           (planted in PublishingConvictionStorage with lastSettledWindow==0
- *           and a prior windowSpent) is back-filled by `migrateEmissionSchedule`
- *           to exactly `committed − spent`, forward-spread; re-migrating is a
- *           no-op.
- *   step 6  `migrateEmissionSchedule([id])` on a 10.0.8-CREATED account is
- *           idempotent (the `lastSettledWindow == lock` marker skips it).
+ *           and a prior windowSpent) are booked by the permissionless batch
+ *           `settleMany([...])` in exactly the same way, window by window;
+ *           an unknown id reverts the batch; a repeat is a no-op.
+ *   step 7  An account as 10.0.8 left it (its whole schedule written up front,
+ *           `lastSettledWindow == lockDurationEpochs` while live) is left
+ *           untouched by `settle()` and `settleMany()`.
  *
- * Coverage: steps 2-4 exercise REGULAR activity on fresh 10.0.8 accounts;
- * step 5 exercises the one-time MIGRATION of legacy accounts (the exact
- * mainnet `migrateEmissionSchedule([1,2,3,…])` operation); step 6 the
- * migration's idempotence guard.
+ * Coverage: steps 2-5 exercise REGULAR activity on a fresh account through its
+ * whole lock; step 6 the booking of LEGACY accounts (the mainnet keeper path);
+ * step 7 the accounts 10.0.8 scheduled.
+ *
+ * Windows close by moving the Hardhat clock (`evm_setNextBlockTimestamp`), as
+ * the retired conviction-lazy-settle suite did: each window is settled seconds
+ * after its close, in the epoch it closes in, so no share of its spread falls
+ * on an epoch that has ended and the credits are exactly the bell's.
  *
  * All assertions run against the LIVE devnet-deployed contracts (real Hub, NFT
  * wrapper, PublishingConviction logic, EpochStorage) — validating the actual
- * deployed 10.0.8 bytecode, not a fresh unit-test deploy. The suite is
+ * deployed 10.2.0 bytecode, not a fresh unit-test deploy. The suite is
  * chain-driven (no node-daemon dependency): step 3 exercises the publish-cost
  * path by impersonating the NFT rather than driving the multi-step KA-lifecycle
  * publish flow, which keeps it robust. (An end-to-end node-publish variant is a
  * possible future addition once the KA-lifecycle CLI harness is updated — the
- * same update conviction-lazy-settle needs.)
+ * same update conviction-lazy-settle needed.)
  *
  * Preconditions:
  *   ./scripts/devnet.sh clean
@@ -108,8 +120,8 @@ async function loadContracts(): Promise<Contracts> {
     ],
     provider,
   );
-  // Logic contract — events + owner-gated migration live here (post-PR-#650
-  // split). Signatures MUST mirror PublishingConviction.sol (10.0.8); a drift
+  // Logic contract, not the NFT wrapper — events + the batch settle live
+  // here. Signatures MUST mirror PublishingConviction.sol (10.2.0); a drift
   // silently turns a parseLog into a miss and the assertions pass vacuously.
   const logicAddress = c('PublishingConviction');
   const logic = new ethers.Contract(
@@ -117,14 +129,18 @@ async function loadContracts(): Promise<Contracts> {
     [
       'event AccountCreated(uint256 indexed accountId, address indexed owner, uint96 committedTRAC, uint16 discountBps, uint40 createdAtEpoch, uint40 expiresAtEpoch)',
       'event CostCovered(uint256 indexed accountId, uint40 indexed epoch, uint96 baseCost, uint96 discountedCost, uint96 drawnFromEpoch, uint96 drawnFromTopUp)',
-      // 10.0.8: fires once per account when its schedule is written. `scheduled`
-      // = staker-shard total, `treasuryFee` = treasury-shard total (0 while the
-      // protocol treasury is unset — the devnet default).
+      // 10.2.0: fires for each booking of closed windows `fromWindow`..`toWindow-1`.
+      // `scheduled` = staker-shard total, `treasuryFee` = treasury-shard total
+      // (0 while the protocol treasury is unset — the devnet default).
       'event EmissionScheduled(uint256 indexed accountId, uint40 fromWindow, uint40 toWindow, uint96 scheduled, uint96 treasuryFee)',
+      'event AccountFinalSwept(uint256 indexed accountId, uint96 topUpSwept, uint96 dustSwept)',
       'event AgentRegistered(uint256 indexed accountId, address indexed agent)',
-      'function migrateEmissionSchedule(uint256[]) external',
+      'error UnknownAccount(uint256 accountId)',
+      // The permissionless batch settle — the keeper path that books the
+      // closed windows of many accounts in one transaction.
+      'function settleMany(uint256[] accountIds) external',
       // Driven directly (via the onlyConvictionNFT gate, by impersonating the
-      // NFT) in step 3 to exercise the deployed budget-gate.
+      // NFT) in step 3 to exercise the deployed publish booking.
       'function coverPublishingCost(address publishingAgent, uint96 baseCost, uint40 kaStartEpoch, uint40 kaEpochs) external returns (uint96 discountedCost)',
     ],
     provider,
@@ -148,10 +164,10 @@ async function loadContracts(): Promise<Contracts> {
     ],
     provider,
   );
-  // Application-state store — used to PLANT a synthetic pre-10.0.8 account for
-  // the migration test (step 5). `onlyContracts` admits the Hub owner, so the
-  // deployer EOA can write a legacy-shaped account directly, exactly as the
-  // hardhat P4/P5b property tests do.
+  // Application-state store — used to PLANT synthetic accounts (steps 6 and
+  // 7). `onlyContracts` admits the Hub owner, so the deployer EOA can write a
+  // legacy-shaped or 10.0.8-shaped account directly, exactly as the hardhat
+  // property tests do.
   const pcs = new ethers.Contract(
     c('PublishingConvictionStorage'),
     [
@@ -216,6 +232,8 @@ async function rawTxNonce(provider: ethers.JsonRpcProvider, addr: string): Promi
   return parseInt(raw, 16);
 }
 
+type Range = { start: bigint; end: bigint; amount: bigint };
+
 // Sum the `tokenAmount` of every TokensAddedToEpochRange(shardId) emitted in a
 // specific tx, and collect the (startEpoch,endEpoch) ranges. Per-tx scoping
 // makes this immune to unrelated daemon publishes in the same block/epoch.
@@ -223,10 +241,10 @@ function epsCreditsInTx(
   s: Contracts,
   receipt: ethers.TransactionReceipt,
   shardId: bigint,
-): { total: bigint; ranges: Array<{ start: bigint; end: bigint; amount: bigint }> } {
+): { total: bigint; ranges: Range[] } {
   const epsAddr = s.epsAddress.toLowerCase();
   let total = 0n;
-  const ranges: Array<{ start: bigint; end: bigint; amount: bigint }> = [];
+  const ranges: Range[] = [];
   for (const log of receipt.logs) {
     if ((log.address ?? '').toLowerCase() !== epsAddr) continue;
     let parsed: ethers.LogDescription | null = null;
@@ -245,11 +263,124 @@ function epsCreditsInTx(
   return { total, ranges };
 }
 
+// The Logic-contract events `name` a tx emitted, for `accountId` when given.
+function logicEventsInTx(
+  s: Contracts,
+  receipt: ethers.TransactionReceipt,
+  name: string,
+  accountId?: bigint,
+): ethers.LogDescription[] {
+  const logicAddr = s.logicAddress.toLowerCase();
+  const out: ethers.LogDescription[] = [];
+  for (const log of receipt.logs) {
+    if ((log.address ?? '').toLowerCase() !== logicAddr) continue;
+    let parsed: ethers.LogDescription | null = null;
+    try {
+      parsed = s.logic.interface.parseLog({ topics: log.topics as string[], data: log.data });
+    } catch { continue; }
+    if (parsed?.name !== name) continue;
+    if (accountId !== undefined && (parsed.args.accountId as bigint) !== accountId) continue;
+    out.push(parsed);
+  }
+  return out;
+}
+
+// Byte-exact mirror of PublishingMathLib.prorateActiveSink: a partial first
+// epoch, the full middle epochs, and a dust-corrected final epoch. Zero-amount
+// ranges are not credited, so they are left out.
+function prorateActiveSink(
+  amount: bigint,
+  anchorEpoch: bigint,
+  epochs: bigint,
+  epochLength: bigint,
+  timeRemaining: bigint,
+): Range[] {
+  const base = amount / epochs;
+  const cur = (base * timeRemaining) / epochLength;
+  let fin = base - cur;
+  const fulls = epochs - 1n;
+  const totFull = base * fulls;
+  const allocated = cur + totFull + fin;
+  if (allocated < amount) fin += amount - allocated;
+  const out: Range[] = [];
+  if (cur > 0n) out.push({ start: anchorEpoch, end: anchorEpoch, amount: cur });
+  if (fulls > 0n && totFull > 0n) out.push({ start: anchorEpoch + 1n, end: anchorEpoch + fulls, amount: totFull });
+  if (fin > 0n) out.push({ start: anchorEpoch + epochs, end: anchorEpoch + epochs, amount: fin });
+  return out;
+}
+
+// THE BELL, one window at a time: the credits the 10.0.8 schedule wrote for
+// billing window `w` of an account created at `createdAt` — `amount` spread
+// over `lock` epoch-lengths from the window's close, anchored on stored fields.
+async function windowBell(
+  s: Contracts,
+  createdAt: bigint,
+  w: bigint,
+  amount: bigint,
+  lock: bigint,
+): Promise<{ close: bigint; anchor: bigint; ranges: Range[] }> {
+  const epochLength: bigint = await s.chronos.epochLength();
+  const close = createdAt + (w + 1n) * epochLength;
+  const anchor: bigint = await s.chronos.epochAtTimestamp(close);
+  const nextBoundary: bigint = await s.chronos.timestampForEpoch(anchor + 1n);
+  const timeRemaining = nextBoundary > close ? nextBoundary - close : 0n;
+  return { close, anchor, ranges: prorateActiveSink(amount, anchor, lock, epochLength, timeRemaining) };
+}
+
+// Move the Hardhat clock to `ts` (if it is not there yet) and mine a block at
+// it. `evm_setNextBlockTimestamp` (not `evm_increaseTime`) so the destination
+// is exact; the 1s interval miner picks up from there.
+async function advanceTo(s: Contracts, ts: bigint): Promise<void> {
+  const latest = await s.provider.getBlock('latest');
+  if (BigInt(latest!.timestamp) >= ts) return;
+  await s.provider.send('evm_setNextBlockTimestamp', [Number(ts)]);
+  await s.provider.send('evm_mine', []);
+}
+
+async function epochOfReceipt(s: Contracts, receipt: ethers.TransactionReceipt): Promise<bigint> {
+  const block = await s.provider.getBlock(receipt.blockNumber);
+  return s.chronos.epochAtTimestamp(BigInt(block!.timestamp));
+}
+
+// Plant an account record directly in PublishingConvictionStorage (the Hub
+// owner passes `onlyContracts`), created at `createdAt`, with `spent0` drawn
+// from window 0 and its booking cursor at `lastSettledWindow`.
+async function plantAccount(
+  s: Contracts,
+  opts: { id: bigint; committed: bigint; createdAt: bigint; spent0: bigint; lastSettledWindow: bigint },
+): Promise<void> {
+  const epochLength: bigint = await s.chronos.epochLength();
+  const createdEpoch: bigint = await s.chronos.epochAtTimestamp(opts.createdAt);
+  const expiresAt = opts.createdAt + TEST_LOCK * epochLength;
+  const expiresEpoch: bigint = (await s.chronos.epochAtTimestamp(expiresAt - 1n)) + 1n;
+  const pcsRw = s.pcs.connect(s.hubOwner) as ethers.Contract;
+  let nonce = await rawTxNonce(s.provider, s.hubOwner.address);
+  await (await pcsRw.createAccount(opts.id, {
+    committedTRAC: opts.committed,
+    createdAtEpoch: createdEpoch,
+    expiresAtEpoch: expiresEpoch,
+    createdAtTimestamp: opts.createdAt,
+    expiresAtTimestamp: expiresAt,
+    lockDurationEpochs: TEST_LOCK,
+    discountBps: 0,
+    lastSettledWindow: opts.lastSettledWindow,
+    fullySwept: false,
+    primaryNode: 0,
+    lastPrimaryNodeChangeEpoch: createdEpoch,
+  }, { nonce: nonce++ })).wait();
+  if (opts.spent0 > 0n) {
+    await (await pcsRw.increaseWindowSpent(opts.id, 0n, opts.spent0, { nonce })).wait();
+  }
+  expect(await s.pcs.accountExists(opts.id)).toBe(true);
+}
+
 const state: {
   s: Contracts | null;
   admin: ethers.HDNodeWallet | null;
   accountId: bigint;
   committed: bigint;
+  createdAt: bigint;
+  published: bigint;
   agent: string | null;
   originalPublishingConvictionEpochs: bigint;
 } = {
@@ -257,11 +388,13 @@ const state: {
   admin: null,
   accountId: 0n,
   committed: 0n,
+  createdAt: 0n,
+  published: 0n,
   agent: null,
   originalPublishingConvictionEpochs: 0n,
 };
 
-describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
+describe('V10 PCA emission (bell) — devnet validation', () => {
   beforeAll(async () => {
     state.s = await loadContracts();
   }, 60_000);
@@ -308,9 +441,11 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     expect(await s.parameters.publishingConvictionEpochs()).toBe(TEST_LOCK);
   }, 60_000);
 
-  it('step 2: createAccount writes the FULL eager schedule (scheduled == committed; forward of the creation epoch)', async () => {
+  it('step 2: createAccount books NOTHING to the pool — the account pays at use time', async () => {
     const s = state.s!;
-    const committed = ethers.parseEther('600000'); // tier above 500k → 50% discount
+    // Tier above 500k → 50% discount; + 2 wei so the `committed mod lock` dust
+    // is live (it rides the last window, step 5).
+    const committed = ethers.parseEther('600000') + 2n;
     state.committed = committed;
     const admin = await ensureAdminWallet(s, committed);
     state.admin = admin;
@@ -320,7 +455,6 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     const nftRw = s.nft.connect(admin) as ethers.Contract;
 
     const cssBalBefore: bigint = await s.token.balanceOf(s.cssAddress);
-    const currentEpoch: bigint = await s.chronos.getCurrentEpoch();
 
     await (await tokenRw.approve(nftAddr, committed, {
       nonce: await rawTxNonce(s.provider, admin.address),
@@ -334,51 +468,30 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     })).wait();
 
     // AccountCreated → capture accountId.
-    let accountId = 0n;
-    let scheduledEvent: ethers.LogDescription | null = null;
-    for (const log of receipt!.logs) {
-      try {
-        const parsed = s.logic.interface.parseLog({ topics: log.topics as string[], data: log.data });
-        if (parsed?.name === 'AccountCreated') accountId = parsed.args.accountId as bigint;
-        if (parsed?.name === 'EmissionScheduled') scheduledEvent = parsed;
-      } catch { /* not a Logic-contract event */ }
-    }
+    const [created] = logicEventsInTx(s, receipt!, 'AccountCreated');
+    expect(created, 'createAccount must emit AccountCreated').toBeDefined();
+    const accountId = created.args.accountId as bigint;
     expect(accountId).toBeGreaterThan(0n);
     state.accountId = accountId;
 
     // Escrow moved (committed TRAC into the CSS vault).
     expect((await s.token.balanceOf(s.cssAddress)) - cssBalBefore).toBe(committed);
 
-    // 10.0.8 INVARIANT — the full commitment is scheduled at creation.
-    // EmissionScheduled(accountId, fromWindow=0, toWindow=lock, scheduled=committed, treasuryFee=0).
-    expect(scheduledEvent, 'createAccount must emit EmissionScheduled (eager schedule)').not.toBeNull();
-    expect(scheduledEvent!.args.accountId as bigint).toBe(accountId);
-    expect(scheduledEvent!.args.fromWindow as bigint).toBe(0n);
-    expect(scheduledEvent!.args.toWindow as bigint).toBe(TEST_LOCK);
-    // Devnet has no protocol treasury wired ⇒ the whole commitment is staker-bound.
-    expect(scheduledEvent!.args.treasuryFee as bigint).toBe(0n);
-    expect(scheduledEvent!.args.scheduled as bigint).toBe(committed);
+    // 10.2.0 INVARIANT — nothing is booked at creation: no EmissionScheduled,
+    // and the tx credits neither shard.
+    expect(logicEventsInTx(s, receipt!, 'EmissionScheduled', accountId), 'createAccount must not book').toHaveLength(0);
+    expect(epsCreditsInTx(s, receipt!, STAKER_SHARD_ID).total, 'no staker-shard credit at creation').toBe(0n);
+    expect(epsCreditsInTx(s, receipt!, TREASURY_SHARD_ID).total, 'no treasury-shard credit at creation').toBe(0n);
 
-    // The createAccount tx credits the STAKER shard for the whole commitment,
-    // forward of the creation epoch (never in or before it). Per-tx scoping
-    // isolates this from daemon publishes.
-    const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
-    expect(staker.total, 'Σ staker-shard credits in createAccount == committedTRAC').toBe(committed);
-    expect(staker.ranges.length, 'createAccount forward-spreads the schedule').toBeGreaterThan(0);
-    for (const r of staker.ranges) {
-      expect(r.start, `emission must be forward of the creation epoch ${currentEpoch}`).toBeGreaterThan(currentEpoch);
-    }
-    // Treasury shard receives nothing while the treasury is unset.
-    const treasury = epsCreditsInTx(s, receipt!, TREASURY_SHARD_ID);
-    expect(treasury.total, 'treasury shard stays empty (treasury unset)').toBe(0n);
-
-    // Marker set: the schedule is written in one shot.
+    // The booking cursor starts at window 0: a use-time account.
     const acct = await s.nft.accounts(accountId);
-    expect(acct.lastSettledWindow as bigint).toBe(TEST_LOCK);
+    expect(acct.lastSettledWindow as bigint).toBe(0n);
     expect(acct.fullySwept as boolean).toBe(false);
+    expect(acct.lockDurationEpochs as bigint).toBe(TEST_LOCK);
+    state.createdAt = acct.createdAtTimestamp as bigint;
   }, 120_000);
 
-  it('step 3: coverPublishingCost draws the window budget but emits NOTHING to the pool (budget gate)', async () => {
+  it('step 3: a publish books its whole discounted draw over the Knowledge Asset epochs', async () => {
     const s = state.s!;
     const admin = state.admin!;
     const accountId = state.accountId;
@@ -395,10 +508,11 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     const window0Before: bigint = await s.nft.windowSpent(accountId, 0n);
 
     // Drive coverPublishingCost against the DEPLOYED logic by impersonating the
-    // NFT wrapper (its onlyConvictionNFT gate) — this exercises the 10.0.8
-    // budget-gate on the real deployed contract without depending on the
+    // NFT wrapper (its onlyConvictionNFT gate) — this exercises the 10.2.0
+    // publish booking on the real deployed contract without depending on the
     // multi-step KA-lifecycle publish flow. baseCost sits well within the
-    // window budget; kaStartEpoch is deliberately off (10.0.8 ignores it).
+    // window budget; kaStartEpoch is deliberately off (the booking anchors at
+    // the current epoch and ignores it).
     const currentEpoch: bigint = await s.chronos.getCurrentEpoch();
     const nftAddr = await s.nft.getAddress();
     await s.provider.send('hardhat_impersonateAccount', [nftAddr]);
@@ -406,8 +520,9 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     // Send via raw eth_sendTransaction (hardhat accepts `from` = an impersonated
     // account; ethers' getSigner would reject an address not in eth_accounts).
     const baseCost = ethers.parseEther('100');
+    const kaEpochs = TEST_LOCK;
     const data = s.logic.interface.encodeFunctionData('coverPublishingCost', [
-      agent.address, baseCost, currentEpoch + 5n, TEST_LOCK,
+      agent.address, baseCost, currentEpoch + 5n, kaEpochs,
     ]);
     const sentHash: string = await s.provider.send('eth_sendTransaction', [
       { from: nftAddr, to: s.logicAddress, data, gas: '0x2DC6C0' },
@@ -417,155 +532,220 @@ describe('V10 PCA deterministic emission (bell) — devnet validation', () => {
     expect(receipt, 'coverPublishingCost tx receipt').not.toBeNull();
 
     // CostCovered: a base-budget draw, no topUp overflow.
-    let cost: ethers.LogDescription | null = null;
-    for (const log of receipt!.logs) {
-      try {
-        const parsed = s.logic.interface.parseLog({ topics: log.topics as string[], data: log.data });
-        if (parsed?.name === 'CostCovered' && (parsed.args.accountId as bigint) === accountId) cost = parsed;
-      } catch { /* not a Logic event */ }
-    }
-    expect(cost, 'coverPublishingCost must emit CostCovered on this PCA').not.toBeNull();
-    expect(cost!.args.drawnFromEpoch as bigint, 'base budget drawn').toBeGreaterThan(0n);
-    expect(cost!.args.drawnFromTopUp as bigint, 'no topUp overflow for a within-budget spend').toBe(0n);
+    const [cost] = logicEventsInTx(s, receipt!, 'CostCovered', accountId);
+    expect(cost, 'coverPublishingCost must emit CostCovered on this PCA').toBeDefined();
+    const discounted = cost.args.discountedCost as bigint;
+    expect(cost.args.drawnFromEpoch as bigint, 'base budget drawn').toBe(discounted);
+    expect(cost.args.drawnFromTopUp as bigint, 'no topUp overflow for a within-budget spend').toBe(0n);
+    state.published = discounted;
 
-    // THE 10.0.8 INVARIANT: the base draw emits NOTHING further to the pool —
-    // that TRAC was already scheduled at createAccount. `windowSpent` is a pure
-    // budget gate now. So the spend tx adds ZERO staker-shard credits.
+    // THE 10.2.0 INVARIANT: the draw is booked to the staker shard when it is
+    // made, over the KA's epochs from the tx's epoch, with the time left in
+    // that epoch — prorateActiveSink, as a wallet publish spreads its payment.
+    const block = await s.provider.getBlock(receipt!.blockNumber);
+    const txTs = BigInt(block!.timestamp);
+    const txEpoch: bigint = await s.chronos.epochAtTimestamp(txTs);
+    const epochLength: bigint = await s.chronos.epochLength();
+    const timeLeft = (await s.chronos.timestampForEpoch(txEpoch + 1n)) - txTs;
     const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
-    expect(staker.total, 'a within-budget spend must NOT re-emit to the staker pool (no double emission)').toBe(0n);
+    expect(staker.total, 'the publish books its whole discounted draw').toBe(discounted);
+    expect(staker.ranges, 'the KA-epoch spread of a wallet publish').toEqual(
+      prorateActiveSink(discounted, txEpoch, kaEpochs, epochLength, timeLeft),
+    );
+    // A publish books no window.
+    expect(logicEventsInTx(s, receipt!, 'EmissionScheduled', accountId)).toHaveLength(0);
 
-    // Budget gate advanced by exactly the discounted cost.
+    // The window budget advanced by exactly the discounted cost.
     const window0After: bigint = await s.nft.windowSpent(accountId, 0n);
-    expect(window0After - window0Before).toBe(cost!.args.discountedCost as bigint);
+    expect(window0After - window0Before).toBe(discounted);
   }, 120_000);
 
-  it('step 4: settle() before expiry is a pure no-op (the schedule is already written)', async () => {
+  it('step 4: settle() before the first window closes books nothing', async () => {
     const s = state.s!;
     const admin = state.admin!;
     const accountId = state.accountId;
     const nftRw = s.nft.connect(admin) as ethers.Contract;
+    expect(BigInt(await s.nft.getCurrentBillingWindow(accountId))).toBe(0n);
 
     const receipt = await (await nftRw.settle(accountId, {
       nonce: await rawTxNonce(s.provider, admin.address),
     })).wait();
 
-    // Nothing to sweep: the base budget is scheduled and there is no topUp tail.
-    const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
-    expect(staker.total, 'pre-expiry settle must not move the pool').toBe(0n);
-    // Marker unchanged.
+    // No window has closed: nothing to book, and no topUp tail before expiry.
+    expect(logicEventsInTx(s, receipt!, 'EmissionScheduled', accountId)).toHaveLength(0);
+    expect(epsCreditsInTx(s, receipt!, STAKER_SHARD_ID).total, 'settle before a close must not move the pool').toBe(0n);
     const acct = await s.nft.accounts(accountId);
-    expect(acct.lastSettledWindow as bigint).toBe(TEST_LOCK);
+    expect(acct.lastSettledWindow as bigint).toBe(0n);
     expect(acct.fullySwept as boolean).toBe(false);
   }, 120_000);
 
-  it('step 5: migrateEmissionSchedule back-fills a synthetic pre-10.0.8 account (THE mainnet upgrade path)', async () => {
-    // This is the exact operation run on mainnet at upgrade: an account created
-    // BEFORE 10.0.8 (lastSettledWindow == 0, with some windowSpent already
-    // emitted under the old active sink) gets its remaining schedule
-    // (committed − spent, forward-spread) written by the owner-gated batch.
-    // The devnet deploys 10.0.8 from the start, so there are no genuine legacy
-    // accounts — we PLANT one directly in PublishingConvictionStorage (the Hub
-    // owner passes `onlyContracts`), mirroring the hardhat P4/P5b property tests.
-    const s = state.s!;
-    // Unique per run so a re-run against a persistent devnet chain doesn't
-    // collide with a previously-planted account (AccountAlreadyExists).
-    const synthId = 900_000_000n + BigInt(await s.provider.getBlockNumber());
-    const committed = ethers.parseEther('12000') + 5n; // NOT divisible by lock → dust path live
-    const spent0 = ethers.parseEther('111');
-    const epLen: bigint = await s.chronos.epochLength();
-    const nowBlock = await s.provider.getBlock('latest');
-    const nowTs = BigInt(nowBlock!.timestamp);
-    const createdAt = nowTs - epLen / 3n; // mid-window-0, mid-epoch → windows close in the FUTURE (no clamp)
-    const createdEpoch: bigint = await s.chronos.epochAtTimestamp(createdAt);
-    const expiresAt = createdAt + TEST_LOCK * epLen;
-    const expiresEpoch: bigint = (await s.chronos.epochAtTimestamp(expiresAt - 1n)) + 1n;
-
-    const pcsRw = s.pcs.connect(s.hubOwner) as ethers.Contract;
-    let nonce = await rawTxNonce(s.provider, s.hubOwner.address);
-    await (await pcsRw.createAccount(synthId, {
-      committedTRAC: committed,
-      createdAtEpoch: createdEpoch,
-      expiresAtEpoch: expiresEpoch,
-      createdAtTimestamp: createdAt,
-      expiresAtTimestamp: expiresAt,
-      lockDurationEpochs: TEST_LOCK,
-      discountBps: 0,
-      lastSettledWindow: 0, // ← the pre-10.0.8 marker: schedule NOT yet written
-      fullySwept: false,
-      primaryNode: 0,
-      lastPrimaryNodeChangeEpoch: createdEpoch,
-    }, { nonce: nonce++ })).wait();
-    // Some window-0 spend "already emitted under the old rules".
-    await (await pcsRw.increaseWindowSpent(synthId, 0n, spent0, { nonce: nonce++ })).wait();
-    expect(await s.pcs.accountExists(synthId)).toBe(true);
-
-    const currentEpoch: bigint = await s.chronos.getCurrentEpoch();
-
-    // Batch-migrate the legacy account (owner-gated).
-    const logicRw = s.logic.connect(s.hubOwner) as ethers.Contract;
-    const receipt = await (await logicRw.migrateEmissionSchedule([synthId], {
-      nonce: await rawTxNonce(s.provider, s.hubOwner.address),
-    })).wait();
-
-    // Migration schedules exactly committed − spent0 (the spent portion was
-    // already emitted under 10.0.7, so it is NOT re-emitted — conservation).
-    let scheduled: ethers.LogDescription | null = null;
-    for (const log of receipt!.logs) {
-      try {
-        const parsed = s.logic.interface.parseLog({ topics: log.topics as string[], data: log.data });
-        if (parsed?.name === 'EmissionScheduled' && (parsed.args.accountId as bigint) === synthId) scheduled = parsed;
-      } catch { /* not a Logic event */ }
-    }
-    expect(scheduled, 'migration must emit EmissionScheduled for the legacy account').not.toBeNull();
-    expect(scheduled!.args.fromWindow as bigint).toBe(0n);
-    expect(scheduled!.args.toWindow as bigint).toBe(TEST_LOCK);
-    expect(scheduled!.args.treasuryFee as bigint).toBe(0n);
-    expect(scheduled!.args.scheduled as bigint, 'schedule == committed − alreadySpent').toBe(committed - spent0);
-
-    // The migrate tx credits the staker shard by exactly committed − spent0,
-    // forward of the current epoch (createdAt chosen so no window has elapsed).
-    const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
-    expect(staker.total, 'Σ staker-shard credits from migration == committed − spent0').toBe(committed - spent0);
-    for (const r of staker.ranges) {
-      // Never retroactively credits an already-elapsed epoch. For a
-      // freshly-created legacy account no window has closed, so emission lands
-      // at or after the current epoch (a window closing right at the boundary
-      // legitimately anchors AT the current epoch).
-      expect(r.start, 'migration never credits an epoch before the current one').toBeGreaterThanOrEqual(currentEpoch);
-    }
-    expect(epsCreditsInTx(s, receipt!, TREASURY_SHARD_ID).total, 'treasury shard empty').toBe(0n);
-
-    // Marker advanced → the account is now fully scheduled.
-    const acct = await s.pcs.getAccount(synthId);
-    expect(acct.lastSettledWindow as bigint).toBe(TEST_LOCK);
-
-    // Idempotent: a second migrate of the SAME legacy account is a pure no-op.
-    const again = await (await logicRw.migrateEmissionSchedule([synthId], {
-      nonce: await rawTxNonce(s.provider, s.hubOwner.address),
-    })).wait();
-    expect(epsCreditsInTx(s, again!, STAKER_SHARD_ID).total, 're-migrating must not double-credit').toBe(0n);
-  }, 180_000);
-
-  it('step 6: migrateEmissionSchedule on a 10.0.8-created account is idempotent (marker skips it)', async () => {
+  it('step 5: THE BELL — each window, settled on time once it closes, books B − spent as the 10.0.8 bell did', async () => {
     const s = state.s!;
     const accountId = state.accountId;
-    const logicRw = s.logic.connect(s.hubOwner) as ethers.Contract;
+    const committed = state.committed;
+    const createdAt = state.createdAt;
+    expect(createdAt).toBeGreaterThan(0n);
+    const nftRw = s.nft.connect(s.hubOwner) as ethers.Contract; // anyone may settle
 
-    const receipt = await (await logicRw.migrateEmissionSchedule([accountId], {
+    const B = committed / TEST_LOCK;
+    const dust = committed - B * TEST_LOCK;
+    let booked = 0n;
+
+    for (let w = 0n; w < TEST_LOCK; w++) {
+      const spent: bigint = await s.nft.windowSpent(accountId, w);
+      const remainder = (spent < B ? B - spent : 0n) + (w === TEST_LOCK - 1n ? dust : 0n);
+      const bell = await windowBell(s, createdAt, w, remainder, TEST_LOCK);
+
+      // The window closes; settle it in the epoch it closes in (on time).
+      await advanceTo(s, bell.close);
+      const receipt = await (await nftRw.settle(accountId, {
+        nonce: await rawTxNonce(s.provider, s.hubOwner.address),
+      })).wait();
+      expect(await epochOfReceipt(s, receipt!), `window ${w} settled in the epoch it closes in`).toBe(bell.anchor);
+
+      const [ev] = logicEventsInTx(s, receipt!, 'EmissionScheduled', accountId);
+      expect(ev, `window ${w} must be booked`).toBeDefined();
+      expect(ev.args.fromWindow as bigint).toBe(w);
+      expect(ev.args.toWindow as bigint).toBe(w + 1n);
+      expect(ev.args.scheduled as bigint, `window ${w}: B − spent`).toBe(remainder);
+      expect(ev.args.treasuryFee as bigint, 'no treasury fee (treasury unset)').toBe(0n);
+
+      // Range for range, the 10.0.8 bell's credits for this window — the
+      // window's own epoch first, then the full epochs, then the final one.
+      const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
+      expect(staker.ranges, `window ${w}: the bell's own ranges`).toEqual(bell.ranges);
+      expect(staker.total).toBe(remainder);
+      expect(epsCreditsInTx(s, receipt!, TREASURY_SHARD_ID).total).toBe(0n);
+      for (const r of staker.ranges) expect(r.start, 'never before the window closes').toBeGreaterThanOrEqual(bell.anchor);
+      booked += staker.total;
+
+      if (w === TEST_LOCK - 1n) {
+        // The last window closes at expiry: the same settle is the final
+        // sweep, with no topUp tail to sweep.
+        const [swept] = logicEventsInTx(s, receipt!, 'AccountFinalSwept', accountId);
+        expect(swept, 'the expiry settle is the final sweep').toBeDefined();
+        expect(swept.args.topUpSwept as bigint).toBe(0n);
+      } else {
+        expect((await s.nft.accounts(accountId)).lastSettledWindow as bigint, 'cursor below the lock while live').toBe(w + 1n);
+      }
+    }
+
+    // Every wei of the commitment is booked once: the publish at use time,
+    // the rest window by window.
+    expect(state.published + booked, 'publish + windows == committedTRAC').toBe(committed);
+    const acct = await s.nft.accounts(accountId);
+    expect(acct.lastSettledWindow as bigint).toBe(TEST_LOCK);
+    expect(acct.fullySwept as boolean).toBe(true);
+  }, 300_000);
+
+  it('step 6: settleMany([...]) books synthetic pre-10.0.8 accounts the same way (THE mainnet path)', async () => {
+    // An account created BEFORE 10.0.8 has lastSettledWindow == 0 and some
+    // windowSpent already booked under the old active sink. Since 10.2.0 it
+    // pays at use time: its closed windows are booked as any account's are,
+    // by any touch or by the permissionless batch — the keeper operation that
+    // replaces the retired `migrateEmissionSchedule`. The devnet deploys the
+    // current build from the start, so there are no genuine legacy accounts —
+    // we PLANT them directly in PublishingConvictionStorage, mirroring the
+    // hardhat property tests.
+    const s = state.s!;
+    const epochLength: bigint = await s.chronos.epochLength();
+    // Unique per run so a re-run against a persistent devnet chain doesn't
+    // collide with a previously-planted account (AccountAlreadyExists).
+    const base = 900_000_000n + BigInt(await s.provider.getBlockNumber()) * 10n;
+    const legacy = [
+      { id: base, committed: ethers.parseEther('12000') + 5n, spent0: ethers.parseEther('111') },
+      { id: base + 1n, committed: ethers.parseEther('30000') + 1n, spent0: 0n },
+    ];
+    // Window 0 of both closes a minute from now, so the batch books it on time.
+    const nowTs = BigInt((await s.provider.getBlock('latest'))!.timestamp);
+    const createdAt = nowTs + 60n - epochLength;
+    for (const a of legacy) {
+      await plantAccount(s, { id: a.id, committed: a.committed, createdAt, spent0: a.spent0, lastSettledWindow: 0n });
+    }
+    const bells = [];
+    for (const a of legacy) {
+      const B = a.committed / TEST_LOCK;
+      bells.push({ ...a, remainder: B - a.spent0, ...(await windowBell(s, createdAt, 0n, B - a.spent0, TEST_LOCK)) });
+    }
+
+    // An id no account has reverts the whole batch, loudly.
+    const keeper = s.logic.connect(state.admin ?? s.hubOwner) as ethers.Contract;
+    const unknown = base + 9n;
+    let refused: unknown = null;
+    try {
+      await keeper.settleMany.staticCall([legacy[0].id, unknown]);
+    } catch (e) {
+      refused = e;
+    }
+    expect(refused, 'settleMany with an unknown id must revert').not.toBeNull();
+    expect((refused as { revert?: { name?: string } }).revert?.name).toBe('UnknownAccount');
+
+    // The window closes; one batch books both accounts, on time.
+    await advanceTo(s, bells[0].close);
+    const receipt = await (await keeper.settleMany(legacy.map((a) => a.id), {
+      nonce: await rawTxNonce(s.provider, (state.admin ?? s.hubOwner).address),
+    })).wait();
+    expect(await epochOfReceipt(s, receipt!), 'booked in the epoch window 0 closes in').toBe(bells[0].anchor);
+
+    const expectedRanges: Range[] = [];
+    for (const b of bells) {
+      const [ev] = logicEventsInTx(s, receipt!, 'EmissionScheduled', b.id);
+      expect(ev, `legacy account ${b.id} must be booked`).toBeDefined();
+      expect(ev.args.fromWindow as bigint).toBe(0n);
+      expect(ev.args.toWindow as bigint).toBe(1n);
+      // B − alreadySpent: the spent portion was booked under the older build.
+      expect(ev.args.scheduled as bigint, 'B − spent').toBe(b.remainder);
+      expect(ev.args.treasuryFee as bigint).toBe(0n);
+      expectedRanges.push(...b.ranges);
+      // The cursor stops at the current window: the account pays at use time.
+      expect((await s.pcs.getAccount(b.id)).lastSettledWindow as bigint).toBe(1n);
+    }
+    // In batch order, each account's window 0 is the bell's own window 0.
+    expect(epsCreditsInTx(s, receipt!, STAKER_SHARD_ID).ranges).toEqual(expectedRanges);
+    expect(epsCreditsInTx(s, receipt!, TREASURY_SHARD_ID).total, 'treasury shard empty').toBe(0n);
+
+    // A repeat within the window is a pure no-op.
+    const again = await (await keeper.settleMany(legacy.map((a) => a.id), {
+      nonce: await rawTxNonce(s.provider, (state.admin ?? s.hubOwner).address),
+    })).wait();
+    expect(epsCreditsInTx(s, again!, STAKER_SHARD_ID).total, 're-settling must not double-credit').toBe(0n);
+    expect(logicEventsInTx(s, again!, 'EmissionScheduled')).toHaveLength(0);
+  }, 180_000);
+
+  it('step 7: an account as 10.0.8 left it (scheduled up front) is left untouched by settle() and settleMany()', async () => {
+    // 10.0.8 wrote an account's whole schedule at creation and left its
+    // cursor at the lock. The schedule itself is already in EpochStorage; we
+    // plant only the record, which is all settle reads — live, with a window
+    // already closed.
+    const s = state.s!;
+    const epochLength: bigint = await s.chronos.epochLength();
+    const id = 910_000_000n + BigInt(await s.provider.getBlockNumber()) * 10n;
+    const nowTs = BigInt((await s.provider.getBlock('latest'))!.timestamp);
+    await plantAccount(s, {
+      id,
+      committed: ethers.parseEther('20000'),
+      createdAt: nowTs - epochLength - epochLength / 2n,
+      spent0: 0n,
+      lastSettledWindow: TEST_LOCK,
+    });
+    const before = await s.pcs.getAccount(id);
+    expect(BigInt(nowTs) < (before.expiresAtTimestamp as bigint), 'the account is live').toBe(true);
+
+    const nftRw = s.nft.connect(s.hubOwner) as ethers.Contract;
+    const single = await (await nftRw.settle(id, {
+      nonce: await rawTxNonce(s.provider, s.hubOwner.address),
+    })).wait();
+    const keeper = s.logic.connect(s.hubOwner) as ethers.Contract;
+    const batch = await (await keeper.settleMany([id], {
       nonce: await rawTxNonce(s.provider, s.hubOwner.address),
     })).wait();
 
-    // Already scheduled at createAccount ⇒ _scheduleRemaining returns early:
-    // no EmissionScheduled re-fire, no EpochStorage credit.
-    let reScheduled = false;
-    for (const log of receipt!.logs) {
-      try {
-        const parsed = s.logic.interface.parseLog({ topics: log.topics as string[], data: log.data });
-        if (parsed?.name === 'EmissionScheduled' && (parsed.args.accountId as bigint) === accountId) reScheduled = true;
-      } catch { /* not a Logic event */ }
+    for (const receipt of [single!, batch!]) {
+      expect(logicEventsInTx(s, receipt, 'EmissionScheduled', id), 'a scheduled account books nothing').toHaveLength(0);
+      expect(epsCreditsInTx(s, receipt, STAKER_SHARD_ID).total, 'no double emission').toBe(0n);
     }
-    expect(reScheduled, 'migrating an already-scheduled account must not re-emit EmissionScheduled').toBe(false);
-    const staker = epsCreditsInTx(s, receipt!, STAKER_SHARD_ID);
-    expect(staker.total, 'idempotent migration must not double-credit the pool').toBe(0n);
+    const after = await s.pcs.getAccount(id);
+    expect(after.lastSettledWindow as bigint).toBe(TEST_LOCK);
+    expect(after.fullySwept as boolean).toBe(false);
   }, 120_000);
 });

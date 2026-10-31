@@ -15,8 +15,6 @@ import {PublishingConvictionStorage} from "./storage/PublishingConvictionStorage
 import {ConvictionServiceStorage} from "./storage/ConvictionServiceStorage.sol";
 import {QueryInferenceStorage} from "./storage/QueryInferenceStorage.sol";
 import {PublishingConviction} from "./PublishingConviction.sol";
-import {ConvictionScheduleLib} from "./libraries/ConvictionScheduleLib.sol";
-import {PublishingMathLib} from "./libraries/PublishingMathLib.sol";
 import {ServicePeriodLib} from "./libraries/ServicePeriodLib.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
@@ -37,18 +35,15 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * `ServiceSubscriptionsWallet`, from its wallet; both share one id per buyer
  * key and epoch.
  *
- * A funded period moves no TRAC. `PublishingConviction.coverServiceCost`
- * draws the cost from the account's allowance exactly as a publish does (the
+ * A Conviction Account pays for a period as a wallet does (since 1.2.0). A
+ * funded period moves no TRAC: `PublishingConviction.coverServiceCost` draws
+ * the cost from the account's allowance exactly as a publish does (the
  * current billing window first, then the top-up buffer, at the account's
- * discount tier), and this contract records the cost as service-labelled
- * emission against the account's own scheduled staker emission:
- *   - the part drawn from the window allowance is labelled against the base
- *     schedule written at account creation, nearest epochs first from the
- *     current epoch, and never above what the account emits in an epoch;
- *   - the part drawn from the top-up buffer is labelled as exactly the
- *     forward emission that draw credited.
- * The labels say which part of each epoch's staker emission services funded.
- * They change no payout by themselves.
+ * discount tier), and this contract books the whole cost in
+ * `QueryInferenceStorage` as due in the epoch after the period, as
+ * `ServiceSubscriptionsWallet` books a wallet period's value: the epoch in
+ * which the period's receipt value counts. The draw itself books nothing to
+ * the staker pool, so the cost is counted once, in the query/inference pool.
  *
  * Architecture (the pattern of `PublishingConviction`):
  *   - Stateless logic. Every byte of service-spending state lives in
@@ -62,6 +57,8 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     storages, `QueryInferenceStorage`, `Chronos`, `ParametersStorage`, the
  *     NFT's `ownerOf` and, as a staticcall before any state write, ERC-1271
  *     wallets. It never calls the Token or the vault, and accepts no ETH.
+ *     A funding needs `PublishingConviction` 10.2.0 or later, whose
+ *     `coverServiceCost` books nothing to the staker pool.
  *
  * Gates:
  *   - Only the current NFT owner switches service spending, revokes, updates
@@ -77,11 +74,16 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     publishing agent registration never grants service spending, and an
  *     assignment never grants publishing.
  *   - Every funding and top-up is refused while `QueryInferenceStorage` is
- *     paused, and every funding needs a non-zero session key.
+ *     paused, before its activation epoch and while that is unset, as wallet
+ *     fundings are: epochs close from activation on, so a cost due in an
+ *     earlier epoch would never reach a pool. Every funding needs a non-zero
+ *     session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
- *     protocol treasury is wired: an account scheduled while a treasury is
- *     wired emits to stakers net of a fee no storage records, which the label
- *     basis could not rebuild.
+ *     protocol treasury is wired: a service draw carries no treasury fee.
+ *   - An account that `PublishingConviction` 10.0.8 or 10.1.0 scheduled in
+ *     full cannot switch service spending on, and its draws are refused
+ *     (`EmissionAlreadyScheduled`): its base allowance is already the staker
+ *     pool's.
  */
 contract ServiceSubscriptions is
     INamed,
@@ -105,7 +107,17 @@ contract ServiceSubscriptions is
     //           or top-up while `QueryInferenceStorage` is paused; no funding
     //           or top-up of a period whose assignment expires before the
     //           period starts.
-    string private constant _VERSION = "1.1.0";
+    //   1.2.0 — a Conviction Account pays as a wallet does: each funding and
+    //           top-up books its cost as due in the epoch after the period
+    //           (`QueryInferenceStorage.addConvictionDue`), and both are
+    //           refused before the activation epoch. The labels are gone
+    //           (`_labelBase`, `_labelTopUp`, their basis and cursor, the
+    //           `ServiceEmissionLabelled` event, `LabelCapacityExceeded`, and
+    //           the views `scheduledEmission`, `emissionSpan` and
+    //           `baseLabelCapacity`), and with them the schedule cut-over the
+    //           opt-in needed (`ExactScheduleFromUnset`). The opt-in refuses an
+    //           account scheduled in full (`EmissionAlreadyScheduled`).
+    string private constant _VERSION = "1.2.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
 
@@ -187,18 +199,6 @@ contract ServiceSubscriptions is
     ///         carry `nextNonce`, so terms signed at an older nonce no longer
     ///         assign.
     event AssignmentNonceAdvanced(uint256 indexed accountId, uint64 nextNonce);
-    /// @notice `amount` of a period's cost was labelled as service-funded
-    ///         emission in epochs `fromEpoch` to `toEpoch`: against the base
-    ///         schedule, or, when `fromTopUp`, as the top-up overflow's own
-    ///         emission.
-    event ServiceEmissionLabelled(
-        uint256 indexed accountId,
-        uint40 fromEpoch,
-        uint40 toEpoch,
-        uint96 amount,
-        bytes32 indexed subscriptionId,
-        bool fromTopUp
-    );
 
     // ============================================================
     //                          Errors
@@ -207,7 +207,6 @@ contract ServiceSubscriptions is
     error NotAccountOwner(uint256 accountId, address caller);
     error ServiceSpendingDisabled(uint256 accountId);
     error ServiceSpendingUnchanged(uint256 accountId, bool enabled);
-    error ExactScheduleFromUnset();
     error InvalidAssignmentTerms(string reason);
     error InvalidAssignmentNonce(uint256 accountId, uint64 expected, uint64 provided);
     error ConsentMissing(address party);
@@ -222,7 +221,6 @@ contract ServiceSubscriptions is
     error AssignmentEndsBeforePeriod(uint256 accountId, address assignee, uint40 expiresAt, uint40 periodStart);
     error CapsUnchanged(uint256 accountId, address assignee);
     error CapExceeded(string cap, uint256 limit, uint256 attempted);
-    error LabelCapacityExceeded(uint256 accountId, uint96 unplaced);
     error DrawMismatch(uint96 expectedCost, uint96 cost, uint40 expectedWindow, uint40 window);
 
     // solhint-disable-next-line no-empty-blocks
@@ -254,15 +252,11 @@ contract ServiceSubscriptions is
 
     /**
      * @notice Switch service spending on or off for `accountId`. Owner only.
-     * @dev Switching on needs the schedule cut-over to be set, no protocol
-     *      treasury wired and an unexpired account. It first brings the
-     *      account's emission schedule current through the permissionless
-     *      `PublishingConviction.settle`, which writes the schedule of an
-     *      account created before scheduling at creation existed, so a
-     *      schedule always exists before a service draw. For an unexpired
-     *      account whose schedule is written (`lastSettledWindow` at the lock,
-     *      the marker `settle` itself checks), `settle` changes nothing, and
-     *      the call is skipped.
+     * @dev Switching on needs no protocol treasury wired, an unexpired
+     *      account, and one that pays at use time: an account that
+     *      `PublishingConviction` 10.0.8 or 10.1.0 scheduled in full
+     *      (`lastSettledWindow` at the lock while it is live) reverts
+     *      `EmissionAlreadyScheduled`, as each of its draws would.
      *      Switching off is a pause: assignments are kept, and funded periods
      *      run to their end.
      */
@@ -272,15 +266,14 @@ contract ServiceSubscriptions is
         bool isOn = css.serviceSpendingEnabledAt(accountId) != 0;
 
         if (enabled) {
-            if (css.exactScheduleFrom() == 0) revert ExactScheduleFromUnset();
             _requireNoTreasury();
             PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(accountId);
             if (block.timestamp >= uint256(acct.expiresAtTimestamp)) {
                 revert AccountExpired(accountId, acct.expiresAtEpoch);
             }
+            if (acct.lastSettledWindow >= acct.lockDurationEpochs) revert EmissionAlreadyScheduled(accountId);
             if (isOn) revert ServiceSpendingUnchanged(accountId, true);
 
-            if (acct.lastSettledWindow < acct.lockDurationEpochs) _publishingConviction().settle(accountId);
             css.setServiceSpendingEnabledAt(accountId, SafeCast.toUint40(block.timestamp));
         } else {
             if (!isOn) revert ServiceSpendingUnchanged(accountId, false);
@@ -407,19 +400,17 @@ contract ServiceSubscriptions is
      *         allowance, as the assignee (`msg.sender`). Atomic: every refusal
      *         reverts the whole transaction, so nothing is ever funded
      *         partially.
-     * @dev The cheap, read-only refusals come first: the pause, the session
-     *      key, the period's epoch, the opt-in and the assignment, which must
-     *      not expire before the period starts (a period funded ahead for the
-     *      next epoch would otherwise serve nothing), the buckets, one period
-     *      per buyer key and epoch, and the assignment's limit as stored at
-     *      this block. A revoked assignment funds nothing, so only the expiry
-     *      can be checked ahead. Then `coverServiceCost` draws the
-     *      cost (window allowance first, then the top-up buffer) and the cost
-     *      is labelled: the window part against the account's base schedule,
-     *      nearest epochs first from the current epoch, the top-up part as the
-     *      emission its draw made. A period funded ahead draws and labels from
-     *      the window and the epoch the funding runs in. Last, the usage and
-     *      the period record are written.
+     * @dev The cheap, read-only refusals come first: the pause and the
+     *      activation, the session key, the period's epoch, the opt-in and the
+     *      assignment, which must not expire before the period starts (a
+     *      period funded ahead for the next epoch would otherwise serve
+     *      nothing), the buckets, one period per buyer key and epoch, and the
+     *      assignment's limit as stored at this block. A revoked assignment
+     *      funds nothing, so only the expiry can be checked ahead. Then
+     *      `coverServiceCost` draws the cost (window allowance first, then the
+     *      top-up buffer); a period funded ahead draws from the window the
+     *      funding runs in. Last, the usage, the cost due in the epoch after
+     *      the period and the period record are written.
      *
      *      The period runs to the start of the next epoch, from the later of
      *      the block time and its epoch's start, which is never 0, and an id
@@ -431,17 +422,14 @@ contract ServiceSubscriptions is
      */
     function fundFromConviction(FundingRequest calldata r) external returns (bytes32 subscriptionId, uint96 cost) {
         ConvictionServiceStorage css = convictionServiceStorage;
+        QueryInferenceStorage qis = queryInferenceStorage;
         address assignee = msg.sender;
 
-        // 1. Not paused, a session key, and the period of the current epoch or
-        //    the next one.
-        ServicePeriodLib.requireNotPaused(queryInferenceStorage);
+        // 1. Funding is live, a session key, and the period of the current
+        //    epoch or the next one.
+        uint256 currentEpoch = ServicePeriodLib.requireLive(qis, chronos);
         if (r.sessionKey == address(0)) revert ZeroSessionKey();
-        (uint40 periodStart, uint40 periodEnd) = ServicePeriodLib.periodOf(
-            chronos,
-            r.epoch,
-            chronos.getCurrentEpoch()
-        );
+        (uint40 periodStart, uint40 periodEnd) = ServicePeriodLib.periodOf(chronos, r.epoch, currentEpoch);
 
         // 2. The opt-in and a live assignment, still live when the period
         //    starts.
@@ -465,22 +453,20 @@ contract ServiceSubscriptions is
         cost = _discounted(value, acct.discountBps);
         if (cost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, cost);
 
-        // 6. The draw and its labels.
-        uint256 epLen = chronos.epochLength();
-        PublishingConviction.ServiceDraw memory d = _drawAndLabel(
-            css,
+        // 6. The draw.
+        PublishingConviction.ServiceDraw memory d = _draw(
             r.accountId,
             assignee,
             subscriptionId,
             value,
             cost,
-            _currentBillingWindow(acct, epLen),
-            acct,
-            epLen
+            _currentBillingWindow(acct, chronos.epochLength())
         );
 
-        // 7. The usage.
+        // 7. The usage, and the cost due in the epoch after the period, as a
+        //    wallet funding books its value.
         css.recordUsage(r.accountId, assignee);
+        qis.addConvictionDue(r.epoch + 1, d.cost);
 
         // 8. The record. The period id is the period's epoch.
         css.createSubscription(
@@ -526,15 +512,16 @@ contract ServiceSubscriptions is
      * @notice Top up or upgrade a period funded from a Conviction Account, as
      *         the buyer key that funded it: add value to its buckets, or add
      *         buckets. Atomic, as a funding is.
-     * @dev Refused while paused, and unless the period was funded from an
-     *      account by `msg.sender` and has not ended. An addition to a stored
-     *      bucket repeats its class and price cap, which never change within a
-     *      period; a new bucket is appended under the funding rules. The
-     *      opt-in, a live assignment that does not expire before the period
-     *      starts, and its limit are checked as for a funding, the limit
-     *      against the period's cost with this top-up added. The draw and the labels follow as for a funding, at the
-     *      account's own tier; a top-up funds no new period, so the usage is
-     *      unchanged.
+     * @dev Refused while paused or before the activation epoch, and unless the
+     *      period was funded from an account by `msg.sender` and has not
+     *      ended. An addition to a stored bucket repeats its class and price
+     *      cap, which never change within a period; a new bucket is appended
+     *      under the funding rules. The opt-in, a live assignment that does not
+     *      expire before the period starts, and its limit are checked as for a
+     *      funding, the limit against the period's cost with this top-up added.
+     *      The draw and the cost due in the epoch after the period follow as
+     *      for a funding, at the account's own tier; a top-up funds no new
+     *      period, so the usage is unchanged.
      * @return cost The cost drawn from the allowance.
      */
     function topUpFromConviction(
@@ -543,10 +530,11 @@ contract ServiceSubscriptions is
         bytes32 planDigest
     ) external returns (uint96 cost) {
         ConvictionServiceStorage css = convictionServiceStorage;
+        QueryInferenceStorage qis = queryInferenceStorage;
         address assignee = msg.sender;
 
-        // 1. Not paused, and the period is open to this top-up.
-        ServicePeriodLib.requireNotPaused(queryInferenceStorage);
+        // 1. Funding is live, and the period is open to this top-up.
+        ServicePeriodLib.requireLive(qis, chronos);
         ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
         ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
 
@@ -571,21 +559,18 @@ contract ServiceSubscriptions is
         uint256 periodCost = uint256(s.cost) + cost;
         if (periodCost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, periodCost);
 
-        // 5. The draw and its labels.
-        uint256 epLen = chronos.epochLength();
-        PublishingConviction.ServiceDraw memory d = _drawAndLabel(
-            css,
+        // 5. The draw.
+        PublishingConviction.ServiceDraw memory d = _draw(
             s.accountId,
             assignee,
             subscriptionId,
             t.value,
             cost,
-            _currentBillingWindow(acct, epLen),
-            acct,
-            epLen
+            _currentBillingWindow(acct, chronos.epochLength())
         );
 
-        // 6. The record.
+        // 6. The cost due in the epoch after the period, and the record.
+        qis.addConvictionDue(ServicePeriodLib.epochOf(s) + 1, d.cost);
         css.applyTopUp(
             subscriptionId,
             ConvictionServiceStorage.TopUpAmounts({
@@ -676,232 +661,6 @@ contract ServiceSubscriptions is
         topUpBuffer = pcs.topUpBalance(accountId);
     }
 
-    /// @notice S(epoch): the account's scheduled staker emission in `epoch`,
-    ///         as the labels count it (exact for an account created at or after
-    ///         the cut-over, a lower bound for an older one). Reverts
-    ///         `ExactScheduleFromUnset` until the cut-over is set.
-    function scheduledEmission(uint256 accountId, uint256 epoch) external view returns (uint96) {
-        PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(accountId);
-        return ConvictionScheduleLib.emissionAt(
-            _basis(convictionServiceStorage, accountId, acct, chronos.epochLength()),
-            epoch
-        );
-    }
-
-    /// @notice The epochs the account's base schedule emits in:
-    ///         [anchor, anchor + 2·lock − 1], where the anchor is the epoch in
-    ///         which its first billing window closes.
-    function emissionSpan(uint256 accountId) external view returns (uint256 firstEpoch, uint256 lastEpoch) {
-        PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(accountId);
-        (firstEpoch, ) = _anchor(acct, chronos.epochLength());
-        lastEpoch = firstEpoch + 2 * uint256(acct.lockDurationEpochs) - 1;
-    }
-
-    /// @notice The base label capacity left from the current epoch to the end
-    ///         of the span: what the account's base schedule can still label.
-    ///         Reverts `ExactScheduleFromUnset` until the cut-over is set.
-    function baseLabelCapacity(uint256 accountId) external view returns (uint96) {
-        ConvictionServiceStorage css = convictionServiceStorage;
-        PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(accountId);
-        ConvictionScheduleLib.Basis memory b = _basis(css, accountId, acct, chronos.epochLength());
-        uint256 last = ConvictionScheduleLib.lastEpoch(b);
-        uint256 capacity;
-        for (
-            uint256 e = _max(
-                _max(css.labelCursor(accountId), chronos.getCurrentEpoch()),
-                ConvictionScheduleLib.firstEpoch(b)
-            );
-            e <= last;
-            e++
-        ) {
-            uint96 s = ConvictionScheduleLib.emissionAt(b, e);
-            uint96 labelled = css.baseLabel(accountId, e);
-            if (s > labelled) capacity += s - labelled;
-        }
-        return SafeCast.toUint96(capacity);
-    }
-
-    // ============================================================
-    //                          Labels
-    // ============================================================
-
-    /**
-     * @dev Label `amount`, the window-allowance part of a draw, against the
-     *      account's base schedule: from the first epoch that may still have
-     *      capacity (the cursor), the current epoch or the first epoch of the
-     *      span, whichever is latest, each epoch taking at most what the
-     *      account emits there less what is already labelled. The cursor moves
-     *      to the first epoch that still has capacity, or past the last one
-     *      scanned; epochs before it are past or full, and their capacity
-     *      cannot grow, so the loop runs at most 2·lock times. Not enough
-     *      capacity reverts `LabelCapacityExceeded`, and with it the funding.
-     */
-    function _labelBase(
-        ConvictionServiceStorage css,
-        uint256 accountId,
-        PublishingConvictionStorage.Account memory acct,
-        uint256 epLen,
-        uint96 amount,
-        uint40 epoch,
-        bytes32 subscriptionId
-    ) internal {
-        if (amount == 0) return;
-
-        ConvictionScheduleLib.Basis memory b = _basis(css, accountId, acct, epLen);
-        uint256 last = ConvictionScheduleLib.lastEpoch(b);
-        uint256 oldCursor = css.labelCursor(accountId);
-        uint256 e = _max(_max(oldCursor, epoch), ConvictionScheduleLib.firstEpoch(b));
-
-        uint96 remaining = amount;
-        uint256 firstLabelled;
-        uint256 lastLabelled;
-        bool partlyFilled;
-        while (remaining > 0 && e <= last) {
-            uint96 s = ConvictionScheduleLib.emissionAt(b, e);
-            uint96 labelled = css.baseLabel(accountId, e);
-            if (s > labelled) {
-                uint96 capacity = s - labelled;
-                uint96 take = capacity < remaining ? capacity : remaining;
-                css.addBaseLabel(accountId, e, take);
-                remaining -= take;
-                if (firstLabelled == 0) firstLabelled = e;
-                lastLabelled = e;
-                // Only the epoch that absorbs the end of `amount` can keep
-                // capacity: every earlier one gave all it had.
-                partlyFilled = take < capacity;
-            }
-            e++;
-        }
-        if (remaining > 0) revert LabelCapacityExceeded(accountId, remaining);
-
-        uint256 cursor = partlyFilled ? lastLabelled : e;
-        if (cursor != oldCursor) css.setLabelCursor(accountId, cursor);
-
-        emit ServiceEmissionLabelled(
-            accountId,
-            uint40(firstLabelled),
-            uint40(lastLabelled),
-            amount,
-            subscriptionId,
-            false
-        );
-    }
-
-    /**
-     * @dev Label the top-up part of a draw as exactly the emission it made:
-     *      each of the draw's staker-pool ranges, spread evenly over its
-     *      epochs. The division is exact: the full-epoch range holds
-     *      `base × (lock − 1)` over `lock − 1` epochs, and the other two are
-     *      single epochs. EpochStorage adds its shard-wide division remainder
-     *      on top, so every epoch's credit is at least its label.
-     */
-    function _labelTopUp(
-        ConvictionServiceStorage css,
-        uint256 accountId,
-        PublishingConviction.ServiceDraw memory d,
-        bytes32 subscriptionId
-    ) internal {
-        if (d.drawnFromTopUp == 0) return;
-
-        uint256 fromEpoch = type(uint256).max;
-        uint256 toEpoch;
-        for (uint256 i; i < 3; i++) {
-            PublishingMathLib.ActiveSinkRange memory range = d.topUpRanges[i];
-            if (range.tokenAmount == 0) continue;
-            uint256 start = range.startEpoch;
-            uint256 end = range.endEpoch;
-            uint96 perEpoch = uint96(uint256(range.tokenAmount) / (end - start + 1));
-            for (uint256 e = start; e <= end; e++) {
-                css.addTopUpLabel(accountId, e, perEpoch);
-            }
-            if (start < fromEpoch) fromEpoch = start;
-            if (end > toEpoch) toEpoch = end;
-        }
-
-        emit ServiceEmissionLabelled(
-            accountId,
-            uint40(fromEpoch),
-            uint40(toEpoch),
-            d.drawnFromTopUp,
-            subscriptionId,
-            true
-        );
-    }
-
-    /**
-     * @dev The labels' basis: the account's scheduled emission per epoch,
-     *      rebuilt from its stored terms. Each billing window w carries an
-     *      amount R_w that the schedule spreads over the `lock` epoch lengths
-     *      after the window closes:
-     *        - created at or after the cut-over, the whole schedule was
-     *          written at creation and R_w is the window budget B, exactly;
-     *        - created earlier, a window that closed by the cut-over may have
-     *          been swept as a single-epoch credit and gets 0, and any other
-     *          window gets B less what publishing drew from it, a lower bound
-     *          of the amount its schedule spreads;
-     *        - the last window also carries the `committed mod lock` dust.
-     *
-     *      For an older account each R_w is then rounded down to a multiple
-     *      of the lock, so that S is a lower bound in every epoch and not only
-     *      in total. A window's credits are cur = floor(q·tr/E) in its first
-     *      epoch, q = floor(R/L) in each full epoch, and q − cur + (R mod L) in
-     *      its last. The first two never exceed those of a larger amount, but
-     *      the last does when a smaller amount has the larger remainder: a
-     *      window scheduled with 12 wei over a lock of 12, which publishing
-     *      later lowers to 11, would otherwise count 11 wei in a last epoch
-     *      that holds 1. With R mod L = 0 the last credit, q − cur, grows
-     *      with q, so it never exceeds the scheduled one. The rounding gives
-     *      up fewer than `lock` wei per window.
-     */
-    function _basis(
-        ConvictionServiceStorage css,
-        uint256 accountId,
-        PublishingConvictionStorage.Account memory acct,
-        uint256 epLen
-    ) internal view returns (ConvictionScheduleLib.Basis memory) {
-        uint256 cutOver = css.exactScheduleFrom();
-        if (cutOver == 0) revert ExactScheduleFromUnset();
-
-        uint256 lock = uint256(acct.lockDurationEpochs);
-        (uint256 anchor, uint256 timeRemaining) = _anchor(acct, epLen);
-
-        uint96 windowBudget = acct.committedTRAC / uint96(lock);
-        uint96 dust = acct.committedTRAC - windowBudget * uint96(lock);
-        uint256 createdAt = uint256(acct.createdAtTimestamp);
-        bool exact = createdAt >= cutOver;
-
-        uint96[] memory amounts = new uint96[](lock);
-        for (uint256 w; w < lock; w++) {
-            uint96 amount;
-            if (exact) {
-                amount = windowBudget;
-            } else if (createdAt + (w + 1) * epLen > cutOver) {
-                uint96 spent = publishingConvictionStorage.windowSpent(accountId, uint40(w));
-                uint96 serviced = css.serviceSpent(accountId, uint40(w));
-                uint96 published = spent > serviced ? spent - serviced : 0;
-                amount = windowBudget > published ? windowBudget - published : 0;
-            }
-            if (w == lock - 1) amount += dust;
-            if (!exact) amount -= amount % uint96(lock);
-            amounts[w] = amount;
-        }
-
-        return ConvictionScheduleLib.build(anchor, lock, epLen, timeRemaining, amounts);
-    }
-
-    /// @dev The epoch in which the account's first billing window closes, and
-    ///      the time left in that epoch after the close. Chronos epochs have a
-    ///      fixed length, so every later window closes `w` epochs on with the
-    ///      same time left.
-    function _anchor(
-        PublishingConvictionStorage.Account memory acct,
-        uint256 epLen
-    ) internal view returns (uint256 anchor, uint256 timeRemaining) {
-        uint256 firstClose = uint256(acct.createdAtTimestamp) + epLen;
-        anchor = chronos.epochAtTimestamp(firstClose);
-        timeRemaining = chronos.timestampForEpoch(anchor + 1) - firstClose;
-    }
-
     // ============================================================
     //                         Internal
     // ============================================================
@@ -941,30 +700,19 @@ contract ServiceSubscriptions is
 
     /**
      * @dev Draw `value` through `coverServiceCost`, which must return the cost
-     *      and the window computed here, then record the window part of the
-     *      draw and label the cost. The window part is recorded before the
-     *      labels: the label basis of an account from before the cut-over
-     *      reads it.
+     *      and the window computed here, or the funding reverts
+     *      `DrawMismatch`. The caller books `d.cost`, the whole draw.
      */
-    function _drawAndLabel(
-        ConvictionServiceStorage css,
+    function _draw(
         uint256 accountId,
         address assignee,
         bytes32 subscriptionId,
         uint96 value,
         uint96 cost,
-        uint40 window,
-        PublishingConvictionStorage.Account memory acct,
-        uint256 epLen
+        uint40 window
     ) internal returns (PublishingConviction.ServiceDraw memory d) {
         d = _publishingConviction().coverServiceCost(accountId, assignee, subscriptionId, value);
         if (d.cost != cost || d.window != window) revert DrawMismatch(cost, d.cost, window, d.window);
-
-        if (d.drawnFromWindow > 0) {
-            css.increaseServiceSpent(accountId, d.window, d.drawnFromWindow);
-        }
-        _labelBase(css, accountId, acct, epLen, d.drawnFromWindow, d.epoch, subscriptionId);
-        _labelTopUp(css, accountId, d, subscriptionId);
     }
 
     /**
@@ -1042,9 +790,5 @@ contract ServiceSubscriptions is
 
     function _publishingConviction() internal view returns (PublishingConviction) {
         return PublishingConviction(hub.getContractAddress("PublishingConviction"));
-    }
-
-    function _max(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a > b ? a : b;
     }
 }

@@ -47,8 +47,8 @@ describe('@integration The development deploy of the plan-period contracts', () 
   it('registers and wires every contract, at the versions of this release', async () => {
     const { Hub, Token, QIS, CSS, SS, SSW, QS } = await loadFixture(deployFixture);
     expect(await QIS.version()).to.equal('1.0.0');
-    expect(await CSS.version()).to.equal('1.1.0');
-    expect(await SS.version()).to.equal('1.1.0');
+    expect(await CSS.version()).to.equal('1.2.0');
+    expect(await SS.version()).to.equal('1.2.0');
     expect(await SSW.version()).to.equal('1.0.0');
     expect(await QS.version()).to.equal('1.0.0');
     expect(await QS.name()).to.equal('QueryInferenceSettlement');

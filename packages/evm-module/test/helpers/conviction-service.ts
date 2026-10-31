@@ -2,8 +2,8 @@
 // registration of QueryInferenceStorage, ConvictionServiceStorage,
 // ServiceSubscriptions, ServiceSubscriptionsWallet and
 // QueryInferenceSettlement, the EIP-712 ServiceAssignment consent, funding
-// requests for one-epoch periods, a model of the label basis, and synthetic
-// accounts from before the schedule cut-over.
+// requests for one-epoch periods, and synthetic accounts that an older build
+// created.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { ethers } from 'ethers';
@@ -20,7 +20,6 @@ import {
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
 } from '../../typechain';
-import { PoolModel, prorateActiveSink } from './emission-model';
 
 export const TRAC = 10n ** 18n;
 export const DAY = 86_400n;
@@ -100,17 +99,6 @@ export async function activateQueryInference(hub: Hub, qis: QueryInferenceStorag
   const e = epoch ?? (await chronos.getCurrentEpoch());
   await hub.forwardCall(await qis.getAddress(), qis.interface.encodeFunctionData('setActivationEpoch', [e]));
   return e;
-}
-
-/** Set the schedule cut-over through Hub.forwardCall; defaults to the latest block time. */
-export async function setExactScheduleFrom(
-  hub: Hub,
-  css: ConvictionServiceStorage,
-  timestamp?: bigint,
-): Promise<bigint> {
-  const ts = timestamp ?? BigInt((await hre.ethers.provider.getBlock('latest'))!.timestamp);
-  await hub.forwardCall(await css.getAddress(), css.interface.encodeFunctionData('setExactScheduleFrom', [ts]));
-  return ts;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,70 +232,7 @@ export const costOf = (value: bigint, bps: bigint): bigint => {
 export const valueFor = (cost: bigint, bps: bigint): bigint => (cost * BPS + (BPS - bps) - 1n) / (BPS - bps);
 
 // ---------------------------------------------------------------------------
-// The label basis
-// ---------------------------------------------------------------------------
-
-/**
- * The emission per epoch of an account whose window w spreads `amounts[w]`
- * forward from its close, as the schedule written at creation or migration
- * does: prorateActiveSink over the lock, anchored at each window's close. With
- * a carry of 0 every range divides exactly, so this is S(e).
- */
-export async function emissionOfWindows(opts: {
-  chronos: Chronos;
-  amounts: bigint[];
-  createdAt: bigint;
-  lock: bigint;
-  epLen: bigint;
-}): Promise<Map<bigint, bigint>> {
-  const model = new PoolModel(0n);
-  for (let w = 0n; w < opts.lock; w++) {
-    const amount = opts.amounts[Number(w)];
-    if (amount === 0n) continue;
-    const fromTs = opts.createdAt + (w + 1n) * opts.epLen;
-    const anchor = await opts.chronos.epochAtTimestamp(fromTs);
-    const timeRemaining = (await opts.chronos.timestampForEpoch(anchor + 1n)) - fromTs;
-    for (const r of prorateActiveSink(amount, anchor, opts.lock, opts.epLen, timeRemaining)) model.add(r);
-  }
-  return model.perEpoch;
-}
-
-/**
- * The window amounts of the label basis. An account created at or after the
- * cut-over has its window budget in every window; an older one has 0 for a
- * window that closed by the cut-over and the budget less what publishing drew
- * (window spend less service spend) for any other, rounded down to a multiple
- * of the lock. The last window also carries the `committed mod lock` dust.
- */
-export function basisAmounts(opts: {
-  committed: bigint;
-  lock: bigint;
-  epLen: bigint;
-  createdAt: bigint;
-  cutOver: bigint;
-  published?: (w: bigint) => bigint;
-}): bigint[] {
-  const budget = opts.committed / opts.lock;
-  const dust = opts.committed - budget * opts.lock;
-  const exact = opts.createdAt >= opts.cutOver;
-  const out: bigint[] = [];
-  for (let w = 0n; w < opts.lock; w++) {
-    let amount = 0n;
-    if (exact) {
-      amount = budget;
-    } else if (opts.createdAt + (w + 1n) * opts.epLen > opts.cutOver) {
-      const published = opts.published ? opts.published(w) : 0n;
-      amount = budget > published ? budget - published : 0n;
-    }
-    if (w === opts.lock - 1n) amount += dust;
-    if (!exact) amount -= amount % opts.lock;
-    out.push(amount);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Accounts from before the schedule cut-over
+// Accounts an older build created
 // ---------------------------------------------------------------------------
 
 let ownersSlot: bigint | undefined;
@@ -327,12 +252,12 @@ async function nftOwnersSlot(): Promise<bigint> {
 }
 
 /**
- * Write an account record the way an older build left it: created at
- * `createdAt`, with `lastSettledWindow` windows already swept under the old
- * per-window rules and `spent` drawn per window, but no up-front schedule. The
+ * Write an account record the way a build older than 10.0.8 left it: created
+ * at `createdAt`, with `lastSettledWindow` windows already swept under that
+ * build's per-window rules and `spent` drawn (and booked) per window. The
  * record goes straight into PublishingConvictionStorage (the Hub owner passes
  * its `onlyContracts`), and the NFT's ERC-721 owner slot is set to `owner`, so
- * the account has an owner without the creation path that would schedule it.
+ * the account has an owner without the creation path.
  */
 export async function writeLegacyAccount(opts: {
   pcs: PublishingConvictionStorage;

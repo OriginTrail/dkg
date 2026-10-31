@@ -32,7 +32,6 @@ import {
   TRAC,
   bucket,
   requestOf,
-  setExactScheduleFrom,
   signTerms,
   subscriptionIdOf,
   walletRequestOf,
@@ -321,7 +320,6 @@ describe('@integration Finalization of receipt claims against the funded cap', f
 
   describe('Conviction Account buckets', () => {
     it('finalize against the discounted cap: 7 of 10 at the 30 % tier, 2.5 of 10 at the 75 % tier', async () => {
-      await setExactScheduleFrom(f.Hub, f.CSS);
       const s1 = await seller(1_250_000n * TRAC);
       const e = await epochNow();
       const periods: Array<[string, bigint, bigint]> = [];
@@ -362,7 +360,6 @@ describe('@integration Finalization of receipt claims against the funded cap', f
     });
 
     it('a claim under the discounted cap finalizes in full', async () => {
-      await setExactScheduleFrom(f.Hub, f.CSS);
       const s1 = await seller(1_250_000n * TRAC);
       const e = await epochNow();
       const { accountId } = await openConvictionAccount({
@@ -595,7 +592,6 @@ describe('@integration Finalization of receipt claims against the funded cap', f
     });
 
     it('a re-assignment after revocation reopens batches only before the window opens, never after a claim is final', async () => {
-      await setExactScheduleFrom(f.Hub, f.CSS);
       const s1 = await seller(1_250_000n * TRAC);
       const e = await epochNow();
       const { accountId, terms } = await openConvictionAccount({

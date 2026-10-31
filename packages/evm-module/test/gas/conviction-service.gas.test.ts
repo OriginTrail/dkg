@@ -1,15 +1,16 @@
 // Gas of Conviction Account service spending (OT-RFC-27): the opt-in, an
-// assignment, a cap update and the fundings, each measured on the real account
-// stack and held to its committed target. The targets are targets, not limits:
-// a change that goes above one needs the figure reviewed and the target revised
-// on purpose, in the same change.
+// assignment, a cap update, the fundings and a top-up, each measured on the
+// real account stack and held to its committed target. The targets are
+// targets, not limits: a change that goes above one needs the figure reviewed
+// and the target revised on purpose, in the same change.
 //
-// Every case but the two "later period" ones is measured cold: the first such
-// transaction on its account, so each storage slot it writes goes from zero to
-// non-zero. A funding writes one base label slot per epoch it labels, and a
-// top-up funding a label slot in each of the `lock + 1` epochs its overflow
-// emits in. The later-period cases fund an account's next period, after a
-// first one, which is the usual funding.
+// A funding draws the cost from the account's allowance through
+// PublishingConviction.coverServiceCost and books it as due in
+// QueryInferenceStorage (10.2.0, ServiceSubscriptions 1.2.0): the same slots
+// whatever the lock, and nothing in the staker pool. A funding is the
+// account's first touch of a billing window that has closed books that window
+// on the way, so the later-period cases are measured both within the first
+// window and after it has closed.
 //
 // `measured` is the gas the transaction used when this file was written
 // (Hardhat, the repository's compiler settings); the test prints the current
@@ -32,6 +33,7 @@ import {
   ParametersStorage,
   PublishingConviction,
   PublishingConvictionStorage,
+  QueryInferenceStorage,
   ServiceSubscriptions,
   Token,
 } from '../../typechain';
@@ -45,41 +47,32 @@ import {
   capsOf,
   registerServiceContracts,
   requestOf,
-  setExactScheduleFrom,
   signTerms,
+  subscriptionIdOf,
   valueFor,
-  writeLegacyAccount,
 } from '../helpers/conviction-service';
-import { PoolModel, scheduleModel } from '../helpers/emission-model';
 
 type Case = { target: bigint; measured: bigint; above?: true };
 
 // The targets, and what this file measured against them.
 const GAS: Record<string, Case> = {
-  'setServiceSpending(…, true) on a scheduled account': { target: 120_000n, measured: 103_170n },
+  'setServiceSpending(…, true) on a use-time account': { target: 120_000n, measured: 101_856n },
   // An assignment is one limit and an expiry: two slots, the nonce, and the
   // assignee's list entry, list length and membership flag.
-  'assign, one EOA signature': { target: 250_000n, measured: 198_503n },
-  updateAssignmentCaps: { target: 100_000n, measured: 71_486n },
-  // Above its target: an account's first funding also creates its service
-  // spend, usage, label total, cursor and period list.
-  'fundFromConviction, one bucket, base only, labels within 3 epochs': {
-    target: 700_000n,
-    measured: 737_672n,
-    above: true,
-  },
-  'the same on an account from before the cut-over, lock 12': { target: 900_000n, measured: 801_789n },
-  // Above its target, as the first base-only funding is.
-  'fundFromConviction, one bucket, with top-up overflow, lock 12': {
-    target: 1_300_000n,
-    measured: 1_307_646n,
-    above: true,
-  },
-  'fundFromConviction, one bucket, with top-up overflow, lock 60': { target: 4_500_000n, measured: 3_633_964n },
-  // The same fundings for a later period of an account that has funded one
-  // before: the account's usage, label total, cursor and period list exist.
-  'base only, labels within 3 epochs, a later period': { target: 700_000n, measured: 635_084n },
-  'with top-up overflow, lock 12, a later period': { target: 1_300_000n, measured: 1_213_552n },
+  'assign, one EOA signature': { target: 250_000n, measured: 197_696n },
+  updateAssignmentCaps: { target: 100_000n, measured: 71_203n },
+  // An account's first funding also creates its usage and period list, and
+  // the epoch's due slot.
+  'fundFromConviction, one bucket, base only, first period': { target: 600_000n, measured: 516_386n },
+  'fundFromConviction, one bucket, with top-up overflow': { target: 600_000n, measured: 508_225n },
+  // A later period of an account that has funded one before: the usage, the
+  // period list and the epoch's due slot exist.
+  'fundFromConviction, a later period, same window': { target: 500_000n, measured: 465_086n },
+  // The same once the first window has closed: the funding books it, three
+  // staker-pool ranges forward from its close, and the shard finalizes the
+  // epochs since its last credit.
+  'fundFromConviction, a later period, one window closed': { target: 700_000n, measured: 657_852n },
+  'topUpFromConviction, one stored bucket': { target: 300_000n, measured: 205_488n },
 };
 
 const ROUNDING = 5_000n;
@@ -99,6 +92,7 @@ type Fixture = {
   NFT: DKGPublishingConvictionNFT;
   PC: PublishingConviction;
   PCS: PublishingConvictionStorage;
+  QIS: QueryInferenceStorage;
   CSS: ConvictionServiceStorage;
   SS: ServiceSubscriptions;
 };
@@ -107,7 +101,7 @@ async function deployFixture(): Promise<Fixture> {
   await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
   const accounts = await hre.ethers.getSigners();
   const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { CSS, SS } = await registerServiceContracts(Hub);
+  const { QIS, CSS, SS } = await registerServiceContracts(Hub);
   return {
     accounts,
     Hub,
@@ -117,6 +111,7 @@ async function deployFixture(): Promise<Fixture> {
     NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
     PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
     PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
+    QIS,
     CSS,
     SS,
   };
@@ -131,13 +126,13 @@ describe('@gas Conviction Account service spending', () => {
   });
 
   let accounts: SignerWithAddress[];
-  let HubContract: Hub;
   let Token: Token;
   let ChronosContract: Chronos;
   let Params: ParametersStorage;
   let NFT: DKGPublishingConvictionNFT;
   let PC: PublishingConviction;
   let PCS: PublishingConvictionStorage;
+  let QIS: QueryInferenceStorage;
   let CSS: ConvictionServiceStorage;
   let SS: ServiceSubscriptions;
   let owner: SignerWithAddress;
@@ -150,13 +145,13 @@ describe('@gas Conviction Account service spending', () => {
     hre.helpers.resetDeploymentsJson();
     ({
       accounts,
-      Hub: HubContract,
       Token,
       Chronos: ChronosContract,
       Params,
       NFT,
       PC,
       PCS,
+      QIS,
       CSS,
       SS,
     } = await loadFixture(deployFixture));
@@ -227,39 +222,19 @@ describe('@gas Conviction Account service spending', () => {
     return terms;
   };
 
-  /** A base-only cost that labels exactly three epochs, nearest first from `firstEpoch`. */
-  const threeEpochCost = async (committed: bigint, createdAt: bigint, lock: bigint, spent?: Map<bigint, bigint>) => {
-    const model = new PoolModel(0n);
-    await scheduleModel({ chronos: ChronosContract, model, committed, createdAtTimestamp: createdAt, lock, epLen, spent });
-    const first = await ChronosContract.epochAtTimestamp(createdAt + epLen);
-    const S = (e: bigint) => model.perEpoch.get(e) ?? 0n;
-    return S(first) + S(first + 1n) + S(first + 2n) / 2n;
-  };
-
-  /** Fund the current epoch's period: one per buyer key and epoch. */
-  const fundBase = async (accountId: bigint, cost: bigint) => {
-    const r = requestOf(accountId, await ChronosContract.getCurrentEpoch(), {
+  /** Fund the period of `epoch` (the current one by default): one per buyer key and epoch. */
+  const fundBase = async (accountId: bigint, cost: bigint, epoch?: bigint) => {
+    const r = requestOf(accountId, epoch ?? (await ChronosContract.getCurrentEpoch()), {
       buckets: [bucket(0, CLASS_INFERENCE, valueFor(cost, BPS))],
     });
     return (await (await SS.connect(buyer).fundFromConviction(r)).wait())!;
   };
 
-  const expectThreeLabelledEpochs = async (receipt: ContractTransactionReceipt) => {
-    const [label] = await eventsOf(receipt, SS, 'ServiceEmissionLabelled');
-    expect(label.fromTopUp).to.equal(false);
-    expect(label.toEpoch - label.fromEpoch).to.equal(2n);
-  };
-
-  /** From the contract's own views: a base-only cost that labels exactly three epochs from where labelling resumes. */
-  const threeEpochCostNow = async (accountId: bigint) => {
-    const [first] = await SS.emissionSpan(accountId);
-    const cursor = await CSS.labelCursor(accountId);
-    const current = await ChronosContract.getCurrentEpoch();
-    let start = first;
-    if (cursor > start) start = cursor;
-    if (current > start) start = current;
-    const free = async (e: bigint) => (await SS.scheduledEmission(accountId, e)) - (await CSS.baseLabel(accountId, e));
-    return (await free(start)) + (await free(start + 1n)) + (await free(start + 2n)) / 2n;
+  /** The funding booked its cost as due after its period, and nothing to the staker pool. */
+  const expectDue = async (receipt: ContractTransactionReceipt, cost: bigint, dueEpoch: bigint) => {
+    const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
+    expect(covered.cost).to.equal(cost);
+    expect(await QIS.convictionDue(dueEpoch)).to.be.at.least(cost);
   };
 
   /** Publishing spends all but `left` of the current window, through the account's agent. */
@@ -285,22 +260,13 @@ describe('@gas Conviction Account service spending', () => {
     await NFT.connect(owner).topUp(accountId, amount);
   };
 
-  const expectOverflow = async (receipt: ContractTransactionReceipt, lock: bigint) => {
-    const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
-    expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([10n * TRAC, 490n * TRAC]);
-    const topUp = (await eventsOf(receipt, SS, 'ServiceEmissionLabelled')).find((l) => l.fromTopUp)!;
-    expect((topUp.toEpoch as bigint) - (topUp.fromEpoch as bigint) + 1n).to.equal(lock + 1n);
-  };
-
-  it('setServiceSpending(…, true) on a scheduled account', async () => {
-    await setExactScheduleFrom(HubContract, CSS);
+  it('setServiceSpending(…, true) on a use-time account', async () => {
     const { accountId } = await createAccount();
     const receipt = (await (await SS.connect(owner).setServiceSpending(accountId, true)).wait())!;
-    record('setServiceSpending(…, true) on a scheduled account', receipt);
+    record('setServiceSpending(…, true) on a use-time account', receipt);
   });
 
   it('assign, one EOA signature', async () => {
-    await setExactScheduleFrom(HubContract, CSS);
     const { accountId } = await createAccount();
     await SS.connect(owner).setServiceSpending(accountId, true);
     const terms = await termsFor(accountId);
@@ -309,7 +275,6 @@ describe('@gas Conviction Account service spending', () => {
   });
 
   it('updateAssignmentCaps', async () => {
-    await setExactScheduleFrom(HubContract, CSS);
     const { accountId } = await createAccount();
     const terms = await optInAndAssign(accountId);
     // Both limits change.
@@ -318,88 +283,73 @@ describe('@gas Conviction Account service spending', () => {
     record('updateAssignmentCaps', receipt);
   });
 
-  it('fundFromConviction, one bucket, base only, labels within 3 epochs', async () => {
-    await setExactScheduleFrom(HubContract, CSS);
-    const { accountId, createdAt } = await createAccount();
+  it('fundFromConviction, one bucket, base only, first period', async () => {
+    const { accountId } = await createAccount();
     await optInAndAssign(accountId);
-    const lock = await Params.publishingConvictionEpochs();
-    const receipt = await fundBase(accountId, await threeEpochCost(COMMITTED, createdAt, lock));
-    await expectThreeLabelledEpochs(receipt);
-    record('fundFromConviction, one bucket, base only, labels within 3 epochs', receipt);
+    const epoch = await ChronosContract.getCurrentEpoch();
+    const receipt = await fundBase(accountId, 100n * TRAC);
+    await expectDue(receipt, 100n * TRAC, epoch + 1n);
+    record('fundFromConviction, one bucket, base only, first period', receipt);
   });
 
-  it('the same on an account from before the cut-over, lock 12', async () => {
+  it('fundFromConviction, one bucket, with top-up overflow', async () => {
     const lock = await Params.publishingConvictionEpochs();
-    expect(lock).to.equal(12n);
-    // An older account half a window old with some of window 0 spent; the
-    // cut-over follows its creation, and its opt-in writes its schedule.
-    const accountId = 5_000n;
-    const createdAt = (await latest()) - epLen / 2n;
-    const spent = new Map<bigint, bigint>([[0n, 1_000n * TRAC]]);
-    await writeLegacyAccount({
-      pcs: PCS,
-      nft: NFT,
-      chronosEpochAt: (ts) => ChronosContract.epochAtTimestamp(ts),
-      accountId,
-      owner: owner.address,
-      committed: COMMITTED,
-      createdAt,
-      lock,
-      epLen,
-      discountBps: BPS,
-      spent,
-    });
-    await setExactScheduleFrom(HubContract, CSS);
+    const { accountId } = await createAccount();
     await optInAndAssign(accountId);
-    const receipt = await fundBase(accountId, await threeEpochCost(COMMITTED, createdAt, lock, spent));
-    await expectThreeLabelledEpochs(receipt);
-    record('the same on an account from before the cut-over, lock 12', receipt);
-  });
-
-  for (const [lockName, lock] of [
-    ['lock 12', 12n],
-    ['lock 60', 60n],
-  ] as const) {
-    const name = `fundFromConviction, one bucket, with top-up overflow, ${lockName}`;
-    it(name, async () => {
-      if ((await Params.publishingConvictionEpochs()) !== lock) await Params.setPublishingConvictionEpochs(lock);
-      await setExactScheduleFrom(HubContract, CSS);
-      const { accountId } = await createAccount();
-      await optInAndAssign(accountId);
-      // Publishing spends all but 10 TRAC of the window, and the owner tops up:
-      // the funding is the account's first, and overflows into the buffer.
-      await publishAllBut(accountId, lock, 10n * TRAC);
-      await topUpBy(accountId, 1_000n * TRAC);
-
-      const receipt = await fundBase(accountId, 500n * TRAC);
-      await expectOverflow(receipt, lock);
-      record(name, receipt);
-    });
-  }
-
-  it('base only, labels within 3 epochs, a later period', async () => {
-    await setExactScheduleFrom(HubContract, CSS);
-    const { accountId, createdAt } = await createAccount();
-    await optInAndAssign(accountId);
-    await fundBase(accountId, 100n * TRAC);
-    // The next period, in the next window and the next epoch.
-    await time.increaseTo(createdAt + epLen + 60n);
-    const receipt = await fundBase(accountId, await threeEpochCostNow(accountId));
-    await expectThreeLabelledEpochs(receipt);
-    record('base only, labels within 3 epochs, a later period', receipt);
-  });
-
-  it('with top-up overflow, lock 12, a later period', async () => {
-    const lock = await Params.publishingConvictionEpochs();
-    await setExactScheduleFrom(HubContract, CSS);
-    const { accountId, createdAt } = await createAccount();
-    await optInAndAssign(accountId);
-    await fundBase(accountId, 100n * TRAC);
-    await time.increaseTo(createdAt + epLen + 60n);
+    // Publishing spends all but 10 TRAC of the window, and the owner tops up:
+    // the funding is the account's first, and overflows into the buffer.
     await publishAllBut(accountId, lock, 10n * TRAC);
     await topUpBy(accountId, 1_000n * TRAC);
+    const epoch = await ChronosContract.getCurrentEpoch();
     const receipt = await fundBase(accountId, 500n * TRAC);
-    await expectOverflow(receipt, lock);
-    record('with top-up overflow, lock 12, a later period', receipt);
+    const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
+    expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([10n * TRAC, 490n * TRAC]);
+    await expectDue(receipt, 500n * TRAC, epoch + 1n);
+    record('fundFromConviction, one bucket, with top-up overflow', receipt);
+  });
+
+  it('fundFromConviction, a later period, same window', async () => {
+    const { accountId } = await createAccount();
+    await optInAndAssign(accountId);
+    const epoch = await ChronosContract.getCurrentEpoch();
+    await fundBase(accountId, 100n * TRAC, epoch + 1n);
+    // The current epoch's period, after the next one's: the due slot of the
+    // next epoch exists, and no window has closed.
+    const receipt = await fundBase(accountId, 100n * TRAC);
+    await expectDue(receipt, 100n * TRAC, epoch + 1n);
+    expect(await eventsOf(receipt, PC, 'EmissionScheduled')).to.have.length(0);
+    record('fundFromConviction, a later period, same window', receipt);
+  });
+
+  it('fundFromConviction, a later period, one window closed', async () => {
+    const { accountId, createdAt } = await createAccount();
+    await optInAndAssign(accountId);
+    await fundBase(accountId, 100n * TRAC);
+    // The next period, in the next window and the next epoch: the funding
+    // books window 0 first.
+    await time.increaseTo(createdAt + epLen + 60n);
+    const epoch = await ChronosContract.getCurrentEpoch();
+    const receipt = await fundBase(accountId, 100n * TRAC);
+    const [booked] = await eventsOf(receipt, PC, 'EmissionScheduled');
+    expect([booked.fromWindow, booked.toWindow]).to.deep.equal([0n, 1n]);
+    await expectDue(receipt, 100n * TRAC, epoch + 1n);
+    record('fundFromConviction, a later period, one window closed', receipt);
+  });
+
+  it('topUpFromConviction, one stored bucket', async () => {
+    const { accountId } = await createAccount();
+    await optInAndAssign(accountId);
+    const epoch = await ChronosContract.getCurrentEpoch();
+    await fundBase(accountId, 100n * TRAC);
+    const subscriptionId = subscriptionIdOf(buyer.address, epoch);
+    const receipt = (await (
+      await SS.connect(buyer).topUpFromConviction(
+        subscriptionId,
+        [bucket(0, CLASS_INFERENCE, valueFor(50n * TRAC, BPS))],
+        hre.ethers.id('plan-2'),
+      )
+    ).wait())!;
+    await expectDue(receipt, 50n * TRAC, epoch + 1n);
+    record('topUpFromConviction, one stored bucket', receipt);
   });
 });

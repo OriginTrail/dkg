@@ -9,17 +9,19 @@
 //     next (from its start), no other; one per buyer key and epoch, shared by
 //     wallet and Conviction Account periods;
 //   - the money due: in the epoch after the period, for fundings and top-ups
-//     alike, whatever the receipt grace, which stays below one epoch;
+//     alike, whatever the receipt grace, which stays below one epoch, from a
+//     wallet and from a Conviction Account, each in its own ledger;
 //   - wallet top-ups and upgrades: caps unchanged, new buckets appended, the
 //     value into the vault and due after the period;
-//   - Conviction Account top-ups and upgrades: the draw and labels at the
-//     account's tier, the period limit counting the period's earlier cost, and
-//     the usage without another period;
+//   - Conviction Account top-ups and upgrades: the draw at the account's tier
+//     and its cost due after the period, the period limit counting the
+//     period's earlier cost, and the usage without another period;
 //   - a Conviction Account period funded ahead, or topped up before it
 //     starts, is refused if its assignment expires before the period starts;
-//   - refusals: a zero key, before activation or while it is unset, paused, an
-//     unknown or ended period, a wrong source or buyer, a changed cap, and the
-//     bucket rules; each without partial effect.
+//   - refusals: a zero key, before activation or while it is unset (from a
+//     wallet and from an account alike), paused, an unknown or ended period, a
+//     wrong source or buyer, a changed cap, and the bucket rules; each without
+//     partial effect.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -54,7 +56,6 @@ import {
   costOf,
   registerServiceContracts,
   requestOf,
-  setExactScheduleFrom,
   signTerms,
   subscriptionIdOf,
   walletRequestOf,
@@ -396,7 +397,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect(await QIS.walletDue(next)).to.equal(0n);
 
       // The same for a Conviction Account period.
-      await setExactScheduleFrom(HubContract, CSS);
       const accountId = await openAccount({ assignee: buyer2 });
       const ca = await caFund(accountId, next, 10n * TRAC, buyer2);
       const record = await CSS.getSubscription(ca.subscriptionId);
@@ -404,7 +404,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     });
 
     it('any other epoch is refused, for a wallet period and an account period alike', async () => {
-      await setExactScheduleFrom(HubContract, CSS);
       const accountId = await openAccount();
       await time.increase(2n * epLen);
       const now = await epochNow();
@@ -422,7 +421,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     });
 
     it('one period per buyer key and epoch, shared by wallet and account periods; another buyer key funds its own', async () => {
-      await setExactScheduleFrom(HubContract, CSS);
       const accountId = await openAccount();
       const now = await epochNow();
 
@@ -607,7 +605,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         .to.be.revertedWithCustomError(SSW, 'NotPeriodBuyer')
         .withArgs(subscriptionId, stranger.address);
 
-      await setExactScheduleFrom(HubContract, CSS);
       const accountId = await openAccount();
       const ca = await caFund(accountId, epoch + 1n, 10n * TRAC);
       await expect(SSW.connect(buyer).topUpFromWallet(ca.subscriptionId, [ca.r.buckets[0]], ethers.ZeroHash))
@@ -637,13 +634,12 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     let epoch: bigint;
 
     beforeEach(async () => {
-      await setExactScheduleFrom(HubContract, CSS);
       accountId = await openAccount({ limit: 30n * TRAC });
       epoch = await epochNow();
       ({ subscriptionId } = await caFund(accountId, epoch, 20n * TRAC));
     });
 
-    it('draws at the account tier, labels the cost, adds to the record and counts no new period', async () => {
+    it('draws at the account tier, books the cost due after the period, adds to the record and counts no new period', async () => {
       const additions = [bucket(0, CLASS_INFERENCE, 10n * TRAC), bucket(3, CLASS_QUERY, 5n * TRAC)];
       const cost = costOf(15n * TRAC, BPS);
       const vaultBefore = await vaultBalance();
@@ -653,8 +649,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
 
       const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
       expect([covered.subscriptionId, covered.value, covered.cost]).to.deep.equal([subscriptionId, 15n * TRAC, cost]);
-      const labels = await eventsOf(receipt, SS, 'ServiceEmissionLabelled');
-      expect(labels.map((l) => [l.subscriptionId, l.amount])).to.deep.equal([[subscriptionId, cost]]);
 
       const s = await CSS.getSubscription(subscriptionId);
       const fundedCost = costOf(20n * TRAC, BPS);
@@ -668,8 +662,12 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         tuples([bucket(0, CLASS_INFERENCE, 30n * TRAC), bucket(3, CLASS_QUERY, 5n * TRAC)]),
       );
       expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(1n);
-      expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(fundedCost + cost);
-      // No TRAC moves, and nothing is booked to the wallet ledger.
+      // The funding's cost and the top-up's are both due after the period, in
+      // the Conviction Account ledger. No TRAC moves, and nothing is booked to
+      // the wallet ledger.
+      expect(await QIS.convictionDue(epoch + 1n)).to.equal(fundedCost + cost);
+      expect(await QIS.convictionDue(epoch)).to.equal(0n);
+      expect(await QIS.convictionDue(epoch + 2n)).to.equal(0n);
       expect(await vaultBalance()).to.equal(vaultBefore);
       expect(await QIS.walletDue(epoch + 1n)).to.equal(0n);
 
@@ -742,7 +740,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     let nextStart: bigint;
 
     beforeEach(async () => {
-      await setExactScheduleFrom(HubContract, CSS);
       accountId = await openAccount({ limit: 100n * TRAC });
       now = await epochNow();
       nextStart = await epochStart(now + 1n);
@@ -758,7 +755,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
           .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
           .withArgs(accountId, buyer.address, expiresAt, nextStart);
         expect(await CSS.subscriptionExists(subscriptionIdOf(buyer.address, now + 1n))).to.equal(false);
-        expect(await CSS.accountServiceLabelTotal(accountId)).to.equal(0n);
+        expect(await QIS.convictionDue(now + 2n)).to.equal(0n);
       }
       await expireAt(nextStart + 1n);
       await caFund(accountId, now + 1n, 10n * TRAC);
@@ -796,7 +793,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
 
   describe('the session key, the pause and activation', () => {
     it('a zero session key is refused from a wallet and from an account', async () => {
-      await setExactScheduleFrom(HubContract, CSS);
       const accountId = await openAccount();
       const now = await epochNow();
       await expect(SSW.connect(buyer).fundFromWallet(walletRequestOf(now, { sessionKey: ethers.ZeroAddress })))
@@ -806,7 +802,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     });
 
     it('while paused, no funding or top-up runs, from a wallet or an account; unpaused, they go on', async () => {
-      await setExactScheduleFrom(HubContract, CSS);
       const accountId = await openAccount();
       const now = await epochNow();
       const wallet = await walletFund(walletRequestOf(now));
@@ -849,12 +844,33 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect(await QIS.walletDue(now + 2n)).to.equal(11n * TRAC);
     });
 
-    it('a Conviction Account funding keeps its built behaviour while activation is unset: it is not refused', async () => {
+    it('Conviction Account funding and top-ups are refused until the activation epoch too, so no cost is due in an epoch that never closes', async () => {
+      const accountId = await openAccount();
+      const now = await epochNow();
+      // A period funded while active, to try a top-up against later.
+      const active = await caFund(accountId, now + 1n, 10n * TRAC);
       await useInactiveStorage();
       expect(await QIS.activationEpoch()).to.equal(0n);
-      await setExactScheduleFrom(HubContract, CSS);
-      const accountId = await openAccount();
-      await caFund(accountId, await epochNow(), 10n * TRAC);
+      const add = [bucket(0, CLASS_INFERENCE, TRAC)];
+      const allowance = await SS.currentWindowAllowance(accountId);
+      await expect(SS.connect(buyer2).fundFromConviction(requestOf(accountId, now)))
+        .to.be.revertedWithCustomError(SS, 'QueryInferenceNotActive')
+        .withArgs(0n, now);
+      await expect(SS.connect(buyer).topUpFromConviction(active.subscriptionId, add, ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'QueryInferenceNotActive')
+        .withArgs(0n, now);
+
+      await activateQueryInference(HubContract, QIS, now + 1n);
+      await expect(SS.connect(buyer2).fundFromConviction(requestOf(accountId, now + 1n)))
+        .to.be.revertedWithCustomError(SS, 'QueryInferenceNotActive')
+        .withArgs(now + 1n, now);
+      expect(await SS.currentWindowAllowance(accountId)).to.deep.equal(allowance);
+
+      await time.increaseTo(await epochStart(now + 1n));
+      await assign(accountId, buyer2, 1_000n * TRAC);
+      await caFund(accountId, now + 1n, 10n * TRAC, buyer2);
+      await SS.connect(buyer).topUpFromConviction(active.subscriptionId, add, ethers.ZeroHash);
+      expect(await QIS.convictionDue(now + 2n)).to.equal(costOf(10n * TRAC, BPS) + costOf(TRAC, BPS));
     });
   });
 
