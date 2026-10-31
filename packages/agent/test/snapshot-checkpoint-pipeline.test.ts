@@ -7,6 +7,15 @@ import { SyncVerifyWorker } from '../src/sync-verify-worker.js';
 import { BULK_STAGING_ASSETS, BULK_STAGING_BYTES } from '../src/sync/bulk-graph-contract.js';
 import { checkpointFixture } from './helpers/public-checkpoint-fixture.js';
 
+vi.mock('node:os', async importOriginal => ({ ...await importOriginal<typeof import('node:os')>(),
+  availableParallelism: () => 2, freemem: () => 4 * 2 ** 30,
+}));
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+};
+
 const entry = (index: number, encodedBytes = 1) => ({ index, encodedBytes, plainBytes: encodedBytes,
   ual: `asset:${index}`, bodySha256: 'a'.repeat(64), metadataSha256: 'b'.repeat(64) });
 
@@ -133,4 +142,62 @@ it('rejects a source that ends before the entire selected inventory was verified
     const [attempt] = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
     expect(await readdir(join(f.directory, 'public-snapshot-checkpoints', attempt!))).not.toContain('manifest.json');
   } finally { source.mockRestore(); }
+}, 15_000);
+
+it('cancels a blocked receive and waiting lane on verifier failure, retaining both physical cleanup owners', async () => {
+  const supplierBlocked = deferred(), releaseSupplier = deferred(), verifying = deferred(), fail = deferred();
+  const laneCancelled = deferred(), workerClosing = deferred(), releaseWorkers = deferred();
+  const receiveClosing = deferred(), releaseReceive = deferred();
+  const cause = new Error('first-asset verification failed');
+  let waiting = 0, failing = false, settled = false;
+  const acquire = SnapshotCheckpointQueue.prototype.next;
+  const source = vi.spyOn(SnapshotCheckpointQueue.prototype, 'next').mockImplementation(async function (signal) {
+    waiting++;
+    try { return await acquire.call(this, signal); }
+    finally { if (--waiting === 0 && failing) laneCancelled.resolve(); }
+  });
+  const worker = vi.spyOn(SyncVerifyWorker.prototype, 'processDurableBatch').mockImplementation(async () => {
+    verifying.resolve(); await fail.promise; throw cause;
+  });
+  const close = SyncVerifyWorker.prototype.close;
+  const cleanup = vi.spyOn(SyncVerifyWorker.prototype, 'close').mockImplementation(async function () {
+    await close.call(this); workerClosing.resolve(); await releaseWorkers.promise;
+  });
+  const f = await checkpointFixture({ beforeSend: async (frame, signal) => {
+    if (frame.kind !== K.META || frame.index !== 1) return;
+    supplierBlocked.resolve();
+    const aborted = deferred();
+    signal.addEventListener('abort', aborted.resolve, { once: true });
+    try {
+      if (signal.aborted) aborted.resolve();
+      await Promise.race([releaseSupplier.promise, aborted.promise]);
+      signal.throwIfAborted();
+    } finally { signal.removeEventListener('abort', aborted.resolve); }
+  } });
+  const exchange = f.router.withDuplexStream.bind(f.router);
+  f.router.withDuplexStream = async (...args) => {
+    try { return await exchange(...args); }
+    finally { receiveClosing.resolve(); await releaseReceive.promise; }
+  };
+  const result = f.run();
+  void result.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await Promise.all([supplierBlocked.promise, verifying.promise]);
+    expect(waiting).toBe(1); // The second real pool lane is waiting for an entry.
+    failing = true; fail.resolve();
+    await Promise.all([laneCancelled.promise, workerClosing.promise]);
+    expect(waiting).toBe(0);
+    expect(settled).toBe(false);
+    releaseWorkers.resolve();
+    await receiveClosing.promise;
+    expect(settled).toBe(false);
+    releaseReceive.resolve();
+    await expect(result).rejects.toBe(cause);
+    const [attempt] = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
+    expect(await readdir(join(f.directory, 'public-snapshot-checkpoints', attempt!))).not.toContain('manifest.json');
+  } finally {
+    fail.resolve(); releaseWorkers.resolve(); releaseReceive.resolve(); releaseSupplier.resolve();
+    f.abort.abort(); await result.catch(() => {});
+    source.mockRestore(); worker.mockRestore(); cleanup.mockRestore();
+  }
 }, 15_000);

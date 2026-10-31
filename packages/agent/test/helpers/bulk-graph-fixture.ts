@@ -26,7 +26,7 @@ const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => { for (const close of cleanups.reverse()) await close(); cleanups.length = 0; });
 export async function fixture(count = 20, corruptAt = -1, failClose = false, hooks: {
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
-  beforeSend?: (frame: BulkGraphFrame) => Promise<void>; afterSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
+  beforeSend?: (frame: BulkGraphFrame, signal: AbortSignal) => Promise<void>; afterSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
   payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
   transformPayload?: (plain: string) => string;
   storeScheduler?: StorePriorityScheduler;
@@ -82,7 +82,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
     server.registerDuplexStream = (protocol, prepare, respond, options) => register(protocol, prepare, async context => {
       const session = context.continuation as unknown as BulkGraphSession, send = session.send.bind(session);
       session.send = async frame => {
-        await hooks.beforeSend?.(frame);
+        await hooks.beforeSend?.(frame, session.signal);
         if ((hooks.tamperDigest === 'asset' && frame.kind === K.META && frame.index === 0)
           || (hooks.tamperDigest === 'chunk' && frame.kind === K.CHUNK_END)) {
           if (frame.kind === K.CHUNK_END) await prefixCommitted;

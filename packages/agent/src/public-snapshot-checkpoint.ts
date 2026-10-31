@@ -54,9 +54,7 @@ export async function preparePublicSnapshotCheckpoint(host: PublicSnapshotSuppli
         snapshotDigest: snapshot.snapshotDigest, assetUals: uals.slice(entries.length, entries.length + BULK_GRAPH_MAX_ASSETS) };
       const chunk = await exchangePublicCheckpoint(host.router, selected, bulkJson(request),
         bulkGraphTransportOptions(deadline - Date.now(), signal), session => receiveSnapshotCheckpointChunk(session, request,
-          { directory, startIndex: entries.length, budget, assertCurrent: assertLive,
-            reserveVerification: (bytes, lifetime) => queue.reserve(bytes, lifetime),
-            onPersisted: entry => queue.publish(entry) }));
+          { directory, startIndex: entries.length, budget, assertCurrent: assertLive, staging: queue }));
       if (!chunk.length) throw new Error('Checkpoint made no progress');
       entries.push(...chunk);
     }
