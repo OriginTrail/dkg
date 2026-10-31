@@ -2,8 +2,8 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   assertSafeIri,
   assertSafeRdfTerm,
-  canonicalBlankNodeIdMap,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/sparql-safe';
+import { canonicalBlankNodeIdMap } from '@origintrail-official/dkg-core/dist/crypto/canonicalize.js';
 import { isBlankNode } from './skolemize.js';
 
 /**

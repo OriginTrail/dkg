@@ -2,14 +2,14 @@ import { normalizeGraphScopedHex32 as normalizeHex32 } from "./graph-scoped-root
 import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  parseGraphScopedAssertionSealCandidate,
   parseDeterministicKnowledgeAssetUal,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/dist/ka-content-scope.js';
+import { parseGraphScopedAssertionSealCandidate } from '@origintrail-official/dkg-core/dist/assertion-seal.js';
 import {
   parseWireGraphKnowledgeAssetStructure,
   computeFlatKCRootV10 as computeStructuredKCRoot,
   skolemizeByEntity,
-} from '@origintrail-official/dkg-publisher';
+} from '@origintrail-official/dkg-publisher/verification';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { appendInPlace } from './append-in-place.js';
