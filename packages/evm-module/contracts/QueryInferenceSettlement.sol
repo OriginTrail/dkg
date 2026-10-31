@@ -71,8 +71,8 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *
  * The close (`closeEpochs`, `ensureClosed`). Epochs close in order, from the
  * activation epoch, once they have ended. An epoch's money B is what is due in
- * it (the wallet-funded value of the periods of the epoch before) plus the
- * carry. If no node finalized value in it, the carry becomes B and its pool is
+ * it (the wallet-funded value and the Conviction Account cost of the periods
+ * of the epoch before) plus the carry. If no node finalized value in it, the carry becomes B and its pool is
  * 0 (rollover); otherwise its pool is B and the carry 0. The close freezes the
  * pool and λ beside the epoch's totals ΣR and ΣQueryInferenceScore, which
  * nothing writes once it has ended, so `queryInferenceGross`, a node's gross
@@ -271,13 +271,15 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     /// @notice A claim named in `finalizeClaims` was not finalized, for
     ///         `reason`.
     event ClaimSkipped(bytes32 indexed subscriptionId, uint8 indexed bucketIndex, uint72 indexed seller, Skip reason);
-    /// @notice Epoch `epoch` closed: `walletDue` was due in it and `carryIn`
-    ///         carried into it; `pool` is what its nodes share, by ΣR `sumR`,
-    ///         ΣQueryInferenceScore `sumScore` and λ `lambdaBps`. The carry
-    ///         out is `walletDue + carryIn − pool`.
+    /// @notice Epoch `epoch` closed: `walletDue` and `convictionDue` were due
+    ///         in it and `carryIn` carried into it; `pool` is what its nodes
+    ///         share, by ΣR `sumR`, ΣQueryInferenceScore `sumScore` and λ
+    ///         `lambdaBps`. The carry out is
+    ///         `walletDue + convictionDue + carryIn − pool`.
     event EpochClosed(
         uint256 indexed epoch,
         uint96 walletDue,
+        uint96 convictionDue,
         uint96 carryIn,
         uint96 pool,
         uint128 sumR,
@@ -740,10 +742,10 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     ///      which become its pool if a node finalized value in it, and the
     ///      carry out otherwise.
     function _closeEpoch(QueryInferenceStorage qis, uint256 epoch, uint96 carryIn) internal returns (uint96 carryOut) {
-        uint96 incoming = _incoming(qis, epoch);
+        (uint96 wallet, uint96 conviction) = _incoming(qis, epoch);
         QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
         uint16 lambda = qis.lambdaBpsAt(epoch);
-        uint96 money = SafeCast.toUint96(uint256(incoming) + carryIn);
+        uint96 money = SafeCast.toUint96(uint256(wallet) + conviction + carryIn);
         uint96 pool;
         if (t.sumR == 0) {
             carryOut = money;
@@ -751,14 +753,14 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
             pool = money;
         }
         qis.closeEpoch(epoch, pool, lambda, carryOut);
-        emit EpochClosed(epoch, incoming, carryIn, pool, t.sumR, t.sumScore, lambda);
+        emit EpochClosed(epoch, wallet, conviction, carryIn, pool, t.sumR, t.sumScore, lambda);
     }
 
     /// @dev The money that joins `epoch`'s pool at its close, beside the
-    ///      carry: the wallet-funded value due in it. Every source of an
-    ///      epoch's money is read here, and only here.
-    function _incoming(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint96) {
-        return qis.walletDue(epoch);
+    ///      carry: the wallet-funded value and the Conviction Account cost due
+    ///      in it. Every source of an epoch's money is read here, and only here.
+    function _incoming(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint96 wallet, uint96 conviction) {
+        return qis.dueIn(epoch);
     }
 
     /// @dev The funded cap of a bucket of value `value` in period `s`.

@@ -252,6 +252,12 @@
       {
         "indexed": false,
         "internalType": "uint96",
+        "name": "convictionDue",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
         "name": "carryIn",
         "type": "uint96"
       },
