@@ -56,8 +56,8 @@ afterEach(async () => {
   closeDashboardDbFromAgentCreateArg(checkpoint.open.mock.calls[0]?.[0]);
 });
 
-function start() {
-  boot = runDaemonInner(true, {
+function start(foreground = true) {
+  boot = runDaemonInner(foreground, {
     name: 'checkpoint-startup-test', networkConfig: 'mainnet-gnosis', nodeRole: 'edge', listenPort: 0, apiPort: 0,
     contextGraphs: ['native-graph'], localBootstrapContextGraphs: ['native-graph'],
     auth: { enabled: false }, promoteQueue: { enabled: false }, publisher: { enabled: false },
@@ -99,6 +99,16 @@ it('closes the owned checkpoint session when daemon network startup fails', asyn
   await expect(start()).rejects.toThrow('network startup failed');
   expect(session.close).toHaveBeenCalledTimes(1);
   expect(api.listen).not.toHaveBeenCalled(); expect(installed()).toHaveLength(0);
+});
+
+it('persists preparation failure before retiring the detached daemon log writer', async () => {
+  const failure = new Error('No compatible public checkpoint core; use incremental recovery');
+  checkpoint.open.mockRejectedValueOnce(failure);
+  await expect(start(false)).rejects.toBe(failure);
+  const log = await readFile(join(process.env.DKG_HOME!, 'daemon.log'), 'utf8');
+  expect(log).toContain('[startup] Failed: No compatible public checkpoint core; use incremental recovery');
+  expect(api.listen).not.toHaveBeenCalled();
+  expect(installed()).toHaveLength(0);
 });
 
 it('waits for a session acquired during interruption and closes it exactly once', async () => {

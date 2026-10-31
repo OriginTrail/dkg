@@ -1129,7 +1129,7 @@ export async function runDaemonInner(
   startedAt: number,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
-  let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
+  let cleanupOwnedStartupResources: ((error: unknown) => Promise<void>) | undefined;
   try {
     await runDaemonInnerWithStartupOwnership(
       foreground,
@@ -1139,7 +1139,7 @@ export async function runDaemonInner(
       shutdownPolicy,
     );
   } catch (error) {
-    await cleanupOwnedStartupResources?.();
+    await cleanupOwnedStartupResources?.(error);
     throw error;
   }
 }
@@ -1148,7 +1148,7 @@ async function runDaemonInnerWithStartupOwnership(
   foreground: boolean,
   config: Awaited<ReturnType<typeof loadConfig>>,
   startedAt: number,
-  registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
+  registerStartupFailureCleanup: (cleanup: (error: unknown) => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   // Snapshot peers supply authority-bearing state. Validate explicit operator
@@ -1242,7 +1242,11 @@ async function runDaemonInnerWithStartupOwnership(
     detachDaemonLogTee();
     await daemonLogFileWriter.shutdown();
   })();
-  registerStartupFailureCleanup(cleanupStartup);
+  registerStartupFailureCleanup(async error => {
+    // Detached workers discard stderr after cleanup restores the original stream.
+    log(`[startup] Failed: ${error instanceof Error ? error.message : String(error)}`);
+    await cleanupStartup();
+  });
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;

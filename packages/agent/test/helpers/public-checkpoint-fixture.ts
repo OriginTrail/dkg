@@ -5,8 +5,8 @@ import { preparePublicSnapshotCheckpoint } from '../../src/public-snapshot-check
 import type { PublicSnapshotMode, PublicSnapshotObservation } from '../../src/public-snapshot-evidence.js';
 import { fixture, cg, address } from './bulk-graph-fixture.js';
 
-export async function checkpointFixture(options: Parameters<typeof fixture>[3] = {}, mode: PublicSnapshotMode = 'core-cache') {
-  const f = await fixture(3, -1, false, options);
+export async function checkpointFixture(options: Parameters<typeof fixture>[3] = {}, mode: PublicSnapshotMode = 'core-cache', count = 3) {
+  const f = await fixture(count, -1, false, options);
   const now = Date.now();
   const snapshot = sealPublicGraphSnapshot({ version: 1, chainId: 'base:84532', deploymentId: 'fixture',
     contextGraphId: cg, onChainId: '14', nameHash: ethers.id(cg),

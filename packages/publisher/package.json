@@ -11,6 +11,11 @@
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
+    "./verification": {
+      "types": "./dist/verification.d.ts",
+      "import": "./dist/verification.js",
+      "default": "./dist/verification.js"
+    },
     "./dist/workspace-resolution.js": {
       "types": "./dist/workspace-resolution.d.ts",
       "import": "./dist/workspace-resolution.js",

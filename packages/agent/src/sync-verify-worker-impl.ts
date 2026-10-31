@@ -1,5 +1,5 @@
 import { parentPort } from 'node:worker_threads';
-import { validateSubGraphName } from '@origintrail-official/dkg-core';
+import { validateSubGraphName } from '@origintrail-official/dkg-core/dist/constants.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, DurableBatchVerificationMode, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
