@@ -9,6 +9,7 @@ import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
 import { existsSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { guardEngineForEmbeddedStore } from './oxigraph-engine-guard.js';
 import { loadOxigraphSnapshot, OxigraphSnapshotReadError, serializeOxigraphSnapshot } from './oxigraph-snapshot.js';
 import { OxigraphStoreReadOnlyError, type OxigraphStoreOptions } from './oxigraph-read-only.js';
 import type {
@@ -93,6 +94,7 @@ export class OxigraphStore implements TripleStore {
    *   it; see {@link OxigraphStoreOptions}.
    */
   constructor(persistPath?: string, options: OxigraphStoreOptions = {}) {
+    guardEngineForEmbeddedStore();
     this.store = new oxigraph.Store();
     this.persistPath = persistPath;
     this.readOnly = options.readOnly === true;
