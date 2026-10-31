@@ -90,7 +90,7 @@ describe('prepared SPARQL graph scope', () => {
     expect(collisionFallback.kind).toBe('ready');
 
     const compactCollisionScope = graphScope(
-      'SELECT ?n WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+      'SELECT ?n WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupGraph>0) }',
     );
     expect(wrapWithDeduplicatedGraphValues(
       compactCollisionScope,
@@ -106,9 +106,9 @@ describe('prepared SPARQL graph scope', () => {
       throw new Error('expected compact helper collision to use a safe fallback');
     }
     expect(compactCollisionFallback.value.source)
-      .toContain('FILTER(?n<100&&?__dkgDedupRank>0)');
+      .toContain('FILTER(?n<100&&?__dkgDedupGraph>0)');
     expect(compactCollisionFallback.value.source)
-      .not.toContain('VALUES (?__dkgDedupGraph ?__dkgDedupRank)');
+      .not.toContain('VALUES ?__dkgDedupGraph');
 
     const graphlessDescribe = rewriteGraphSet(
       graphScope('DESCRIBE <urn:s> LIMIT 10'),
@@ -287,7 +287,7 @@ describe('graph-scope engine integration', () => {
     expect(escaped.bindings.map((binding) => binding['s']).sort())
       .toEqual(equivalent.bindings.map((binding) => binding['s']).sort());
     expect(escaped.bindings.every((binding) => Object.keys(binding).join() === 's')).toBe(true);
-    expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
+    expect(queries.some((query) => query.includes('VALUES ?__dkgDedupGraph'))).toBe(false);
   });
 
   it('does not alias a compact-comparison caller variable to the dedup helper', async () => {
@@ -311,14 +311,14 @@ describe('graph-scope engine integration', () => {
     ]);
 
     const result = await engine.query(
-      'SELECT ?s WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+      'SELECT ?s WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupGraph>0) }',
       { contextGraphId: CG, view: 'verifiable-memory' },
     );
 
     expect(result.bindings).toEqual([]);
-    expect(queries.some((query) => query.includes('FILTER(?n<100&&?__dkgDedupRank>0)')))
+    expect(queries.some((query) => query.includes('FILTER(?n<100&&?__dkgDedupGraph>0)')))
       .toBe(true);
-    expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
+    expect(queries.some((query) => query.includes('VALUES ?__dkgDedupGraph'))).toBe(false);
   });
 
   it('does not alias a UCHAR-spelled caller variable to the view helper', async () => {
