@@ -253,12 +253,40 @@ function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
     ));
 }
 
+// These FILTER expressions only test an existing mapping. Keep volatile and
+// extension functions on the old route: mirrored triples could pass them
+// differently, invalidating the DISTINCT equivalence used below.
+const DEDUP_PURE_FILTER_WORDS = new Set([
+  'STR', 'STRSTARTS', 'STRENDS', 'CONTAINS', 'STRLEN', 'LCASE', 'UCASE',
+  'BOUND', 'TRUE', 'FALSE', 'IN', 'NOT',
+]);
+
 function isSingleTripleSelect(scope: PreparedGraphScope): boolean {
   if (scope.operation !== 'SELECT' || !scope.where) return false;
-  const tokens = scope.prepared.tokens.slice(
-    scope.where.openingTokenIndex + 1,
-    scope.where.closingTokenIndex,
-  );
+  const tokens: SparqlLexicalToken[] = [];
+  const source = scope.prepared.tokens;
+  const end = scope.where.closingTokenIndex;
+  for (let index = scope.where.openingTokenIndex + 1; index < end; index++) {
+    const token = source[index];
+    if (token.kind !== 'word' || token.upper !== 'FILTER') {
+      tokens.push(token);
+      continue;
+    }
+    const opening = source[index + 1];
+    if (opening?.kind !== 'symbol' || opening.logicalValue !== '(') return false;
+    const closing = scope.structure.parentheses.matchingTokenIndexes[index + 1] ?? -1;
+    if (closing <= index + 1 || closing >= end) return false;
+    for (let inner = index + 2; inner < closing; inner++) {
+      const expression = source[inner];
+      if (expression.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(expression.upper)) {
+        return false;
+      }
+      const next = source[inner + 1];
+      if ((expression.kind === 'iri' || expression.kind === 'prefixed-name')
+        && next?.kind === 'symbol' && next.logicalValue === '(') return false;
+    }
+    index = closing;
+  }
   const last = tokens.at(-1);
   if (last?.kind === 'symbol' && last.logicalValue === '.') {
     tokens.pop();
@@ -276,7 +304,8 @@ export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  // For one triple, DISTINCT over every matched variable removes graph mirrors
+  // For one triple with optional pure filters, DISTINCT over every matched
+  // variable removes graph mirrors
   // without changing multiplicity after the caller's projection or aggregation.
   // More complex patterns retain the existing graph-rank anti-join.
   const distinctMappings = isSingleTripleSelect(input);
