@@ -62,14 +62,16 @@ export async function probeContextGraphWritePreflight(
     const persistedSubscriptionPromise = subscriptionStore?.load
       ? subscriptionStore.load(contextGraphId)
       : Promise.resolve(null);
-    // One bounded point projection over the three trusted metadata sources.
+    // One bounded point projection over the three metadata sources.
     // Facts are intentionally collected independently: the established
     // ContextGraphMetaProjection model permits the declaration to live in one
     // source and policy/curator/gates in another. Requiring every source to
     // repeat rdf:type would both reject valid gate-only graphs and, worse,
-    // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
-    // so this path returns at most one gate row per source instead of expanding
-    // a potentially large allowlist.
+    // ignore a cross-source private-policy ratchet. As in that projection, the
+    // gates come from the graph's own `_meta`, and the agents graph can declare
+    // the graph and restrict it, nothing else. Gate presence uses EXISTS so this
+    // path returns at most one gate row per source instead of expanding a
+    // potentially large allowlist.
     const declarationPromise = host.store.query(`
       SELECT ?kind ?value WHERE {
         VALUES (?sourceGraph ?sourceSubject) {
@@ -100,12 +102,14 @@ export async function probeContextGraphWritePreflight(
               <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>
               <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}>
             }
-            GRAPH ?sourceGraph {
-              ?sourceSubject ?gatePredicate ?gateValue .
+            GRAPH <${cgMetaGraph}> {
+              <${metaSubjectUri}> ?gatePredicate ?gateValue .
             }
           }
           BIND("gate" AS ?kind)
         }
+        FILTER(?kind != "curator" || ?sourceGraph != <${agentsGraph}>)
+        FILTER(?kind != "access" || ?sourceGraph != <${agentsGraph}> || LCASE(STR(?value)) = "private")
       }
     `, { source: 'agent.writePreflight.declaration' });
 

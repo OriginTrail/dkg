@@ -92,6 +92,7 @@ export default defineConfig({
       'test/async-promote-admission.test.ts',
       'test/async-promote-format3-upgrade.test.ts',
       'test/promote-retry-policy.test.ts',
+      'test/local-private-access-signal.test.ts',
       'test/workspace-agent-recipients.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',
       'test/query-source-coverage.test.ts',
