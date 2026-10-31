@@ -320,9 +320,9 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
     // Windows later, settle books nothing; at expiry only the top-up tail.
     await time.increase(3n * epLen);
-    await expect(PC['settle(uint256)'](accountId)).to.not.emit(PC, 'EmissionScheduled');
+    await expect(PC.settle(accountId)).to.not.emit(PC, 'EmissionScheduled');
     await time.increaseTo((await PCS.getAccount(accountId)).expiresAtTimestamp);
-    const final = (await (await PC['settle(uint256)'](accountId)).wait())!;
+    const final = (await (await PC.settle(accountId)).wait())!;
     expect(await eventsOf(final, PC, 'EmissionScheduled')).to.have.length(0);
     const [swept] = await eventsOf(final, PC, 'AccountFinalSwept');
     expect(swept.topUpSwept).to.equal(1_000n * TRAC - overflow);
@@ -357,7 +357,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
     // Window 0 closes; the next touch books what is left of it.
     await time.increaseTo(createdAt + epLen);
-    const settled = (await (await PC['settle(uint256)'](accountId)).wait())!;
+    const settled = (await (await PC.settle(accountId)).wait())!;
     const [booked] = await eventsOf(settled, PC, 'EmissionScheduled');
     expect([booked.fromWindow, booked.toWindow, booked.scheduled, booked.treasuryFee]).to.deep.equal([
       0n,
@@ -452,7 +452,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     // to the current window, below the lock.
     for (let w = 1n; w < lock; w++) {
       await time.increaseTo(createdAt + w * epLen);
-      await PC['settle(uint256)'](accountId);
+      await PC.settle(accountId);
       const cursor = (await PCS.getAccount(accountId)).lastSettledWindow;
       expect(cursor, `window ${w}`).to.equal(w);
       expect(cursor < lock).to.equal(true);
@@ -461,7 +461,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     // The last seconds of the lock: still a use-time account, which funds
     // and publishes at use time.
     await time.setNextBlockTimestamp(expiresAt - 3n);
-    await PC['settle(uint256)'](accountId);
+    await PC.settle(accountId);
     expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(lock - 1n);
     await time.setNextBlockTimestamp(expiresAt - 2n);
     const funded = await fund(accountId, 10n * TRAC);
@@ -473,7 +473,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
     // At expiry the last window closes, and the final sweep books it.
     await time.setNextBlockTimestamp(expiresAt);
-    const final = (await (await PC['settle(uint256)'](accountId)).wait())!;
+    const final = (await (await PC.settle(accountId)).wait())!;
     const [booked] = await eventsOf(final, PC, 'EmissionScheduled');
     expect([booked.fromWindow, booked.toWindow]).to.deep.equal([lock - 1n, lock]);
     const acct = await PCS.getAccount(accountId);

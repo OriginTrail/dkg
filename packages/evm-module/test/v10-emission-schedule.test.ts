@@ -20,7 +20,7 @@
 //   P4 settle() is a no-op for a scheduled account; an account a build older
 //      than 10.0.8 created books exactly its closed windows (B − windowSpent
 //      per window) and its cursor stops at the current window.
-//   P5 the batch settle(uint256[]): permissionless, the single form per id, an
+//   P5 the batch settleMany(uint256[]): permissionless, the single form per id, an
 //      unknown id reverts; the one-time migration batch is gone.
 //   P6 post-expiry final sweep of a scheduled account: only the leftover topUp
 //      remains; fullySwept.
@@ -203,7 +203,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     return created;
   };
 
-  const settleOne = (accountId: bigint) => Logic['settle(uint256)'](accountId);
+  const settleOne = (accountId: bigint) => Logic.settle(accountId);
 
   // -------------------------------------------------------------------------
   // P1 — exact schedule at createAccount + conservation + K_n untouched
@@ -482,10 +482,14 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
   });
 
   // -------------------------------------------------------------------------
-  // P5 — the batch settle(uint256[]); the one-time migration is gone
+  // P5 — the batch settleMany(uint256[]); the one-time migration is gone
   // -------------------------------------------------------------------------
-  it('P5: the batch settle(uint256[]) is permissionless, settles each id as settle(uint256) does, and reverts on an unknown id; migrateEmissionSchedule is gone', async () => {
+  it('P5: the batch settleMany(uint256[]) is permissionless, settles each id as settle(uint256) does, and reverts on an unknown id; settle has one signature; migrateEmissionSchedule is gone', async () => {
     expect(Logic.interface.getFunction('migrateEmissionSchedule')).to.equal(null);
+    // One `settle`, so a bare `settle(id)` call resolves in every ABI client.
+    const settles = Logic.interface.fragments.filter((f) => f.type === 'function' && (f as { name?: string }).name === 'settle');
+    expect(settles.map((f) => f.format())).to.deep.equal(['settle(uint256)']);
+    expect(Logic.interface.getFunction('settleMany')!.format()).to.equal('settleMany(uint256[])');
 
     const scheduled = await createScheduledFor(accounts[5]);
     const useTime = await createAccountFor(accounts[6]);
@@ -495,12 +499,12 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
 
     // Unknown id → the whole batch reverts, loudly.
     await expect(
-      Logic.connect(accounts[7])['settle(uint256[])']([useTime.accountId, 424242n]),
+      Logic.connect(accounts[7]).settleMany([useTime.accountId, 424242n]),
     )
       .to.be.revertedWithCustomError(Logic, 'UnknownAccount')
       .withArgs(424242n);
 
-    const tx = await Logic.connect(accounts[7])['settle(uint256[])']([scheduled.accountId, useTime.accountId, old]);
+    const tx = await Logic.connect(accounts[7]).settleMany([scheduled.accountId, useTime.accountId, old]);
     const B = COMMITTED_TRAC / lock;
     await expect(tx).to.emit(Logic, 'EmissionScheduled').withArgs(useTime.accountId, 0n, 2n, 2n * B, 0n);
     await expect(tx).to.emit(Logic, 'EmissionScheduled').withArgs(old, 0n, 1n, ethers.parseEther('24000') / lock, 0n);
@@ -520,8 +524,8 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     expect((await PCS.getAccount(old)).lastSettledWindow).to.equal(1n);
 
     // An empty batch and a repeat are no-ops.
-    await expect(Logic['settle(uint256[])']([])).to.not.emit(Logic, 'EmissionScheduled');
-    await expect(Logic['settle(uint256[])']([useTime.accountId, old])).to.not.emit(Logic, 'EmissionScheduled');
+    await expect(Logic.settleMany([])).to.not.emit(Logic, 'EmissionScheduled');
+    await expect(Logic.settleMany([useTime.accountId, old])).to.not.emit(Logic, 'EmissionScheduled');
   });
 
   // -------------------------------------------------------------------------

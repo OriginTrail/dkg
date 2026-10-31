@@ -64,8 +64,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     run one closed window at a time by `_bookWindows`, with
  *     `lastSettledWindow` as its cursor. Every touch runs it (publish,
  *     service draw, top-up, transfer, `settle`), and the permissionless
- *     `settle` lets anyone bring accounts current. A late booking's elapsed
- *     epochs clamp into the first open epoch (`EpochStorage`).
+ *     `settle` and `settleMany` let anyone bring accounts current. A late
+ *     booking's elapsed epochs clamp into the first open epoch
+ *     (`EpochStorage`).
  *   - `topUpBalance[accountId]` is a separate prepaid usage buffer
  *     beyond the base budget. Any leftover at account expiry is swept to
  *     the staker pool (final chain epoch) via the same `settle()` path.
@@ -117,7 +118,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     NFT, the NFT forwards here with the publishing agent's address,
  *     and we resolve the paying account via PCS's `agentToAccountId`.
  *     A trusted caller cannot pass a victim's accountId.
- *   - `settle(accountId)` and its batch form `settle(accountIds)` are
+ *   - `settle(accountId)` and its batch form `settleMany(accountIds)` are
  *     intentionally permissionless — anyone can book an account's closed
  *     windows and, post-expiry, flush the topUp tail. The `fullySwept` flag
  *     short-circuits redundant work.
@@ -235,7 +236,7 @@ contract PublishingConviction is
     //          drops `topUpRanges`). Accounts that 10.0.8 or 10.1.0 scheduled
     //          (`lastSettledWindow == lockDurationEpochs` while live) publish
     //          as before and are refused services (`EmissionAlreadyScheduled`).
-    //          Adds the permissionless batch `settle(uint256[])`; removes
+    //          Adds the permissionless batch `settleMany(uint256[])`; removes
     //          `migrateEmissionSchedule`, whose migration would now write a
     //          full schedule. `EmissionScheduled` reports each booking's
     //          windows. `_distributeProratedRanges` folds back into
@@ -1204,12 +1205,14 @@ contract PublishingConviction is
     /**
      * @notice `settle` for each account in `accountIds`, in order (10.2.0).
      *         Permissionless, as `settle(accountId)` is, so a keeper can book
-     *         many accounts' closed windows in one transaction.
+     *         many accounts' closed windows in one transaction. A name of its
+     *         own, as `CGWeightTreeStorage.settleMany` has, so `settle` keeps a
+     *         single signature that every ABI client resolves unambiguously.
      * @dev    Reverts `UnknownAccount` on an id no account has, as the single
      *         form does. Each account's effects are persisted before its own
      *         treasury payment, the only external call that moves TRAC.
      */
-    function settle(uint256[] calldata accountIds) external {
+    function settleMany(uint256[] calldata accountIds) external {
         for (uint256 i; i < accountIds.length; i++) {
             _settle(accountIds[i]);
         }
@@ -1232,7 +1235,7 @@ contract PublishingConviction is
         _settle(accountId);
     }
 
-    /// @dev The settlement of one account, shared by both `settle` forms and
+    /// @dev The settlement of one account, shared by `settle`, `settleMany` and
     ///      the transfer hook. `getAccount` reverts `UnknownAccount` for an id
     ///      no account has.
     function _settle(uint256 accountId) internal {

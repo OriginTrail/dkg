@@ -12,7 +12,7 @@
 //     the rest of the spread is as scheduled;
 //   - several epochs late, EpochStorage's clamp moves every elapsed start to
 //     the first open epoch, and the window is conserved;
-//   - the batch settle(uint256[]) books exactly what settling each account
+//   - the batch settleMany(uint256[]) books exactly what settling each account
 //     alone books;
 //   - with a treasury wired, a booking splits net and fee on one curve, and a
 //     use-time publish skims its fee at once.
@@ -113,7 +113,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
     return { accountId: await NFT.totalSupply(), createdAt: await blockTime(receipt) };
   };
 
-  const settle = async (accountId: bigint) => (await (await PC['settle(uint256)'](accountId)).wait())!;
+  const settle = async (accountId: bigint) => (await (await PC.settle(accountId)).wait())!;
 
   const eventsOf = async (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
     const address = (await contract.getAddress()).toLowerCase();
@@ -289,7 +289,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
   // The batch
   // -------------------------------------------------------------------------
 
-  it('the batch settle(uint256[]) books exactly what settling each account alone books, in order', async () => {
+  it('the batch settleMany(uint256[]) books exactly what settling each account alone books, in order', async () => {
     const ids: bigint[] = [];
     for (let i = 0; i < 4; i++) {
       ids.push((await createAccount(accounts[20 + i], COMMITTED + BigInt(i) * 1_000n * TRAC)).accountId);
@@ -302,7 +302,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
     await hre.network.provider.send('evm_setAutomine', [false]);
     const txs = [];
     try {
-      for (const id of ids) txs.push(await PC['settle(uint256)'](id, { gasLimit: 3_000_000 }));
+      for (const id of ids) txs.push(await PC.settle(id, { gasLimit: 3_000_000 }));
       await hre.network.provider.send('evm_mine', []);
     } finally {
       await hre.network.provider.send('evm_setAutomine', [true]);
@@ -318,7 +318,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
     for (const id of ids) aloneCursors.push((await PCS.getAccount(id)).lastSettledWindow);
 
     await snapshot.restore();
-    const batch = (await (await PC.connect(accounts[30])['settle(uint256[])'](ids)).wait())!;
+    const batch = (await (await PC.connect(accounts[30]).settleMany(ids)).wait())!;
     expect(await credits(batch)).to.deep.equal(alone);
     expect((await eventsOf(batch, PC, 'EmissionScheduled')).map((ev) => [...ev])).to.deep.equal(aloneEvents);
     for (const [i, id] of ids.entries()) {

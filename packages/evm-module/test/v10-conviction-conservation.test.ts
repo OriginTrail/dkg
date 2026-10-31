@@ -296,7 +296,7 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
           topUps += amount;
           counts.accountTopUps++;
         } else if (action < 0.82) {
-          await send(f.PC['settle(uint256)'](accountId));
+          await send(f.PC.settle(accountId));
           counts.settles++;
         } else {
           // A time jump: within the window, across one or two windows, or
@@ -315,11 +315,11 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
       // The end of the lock: the final sweep books the windows left and the
       // top-up tail; a second settle is a no-op.
       await time.increaseTo(acct.expiresAtTimestamp + 1n);
-      await send(f.PC['settle(uint256)'](accountId));
+      await send(f.PC.settle(accountId));
       const after = await f.PCS.getAccount(accountId);
       expect([after.lastSettledWindow, after.fullySwept]).to.deep.equal([lock, true]);
       expect(await f.PCS.topUpBalance(accountId)).to.equal(0n);
-      const noop = await send(f.PC['settle(uint256)'](accountId));
+      const noop = await send(f.PC.settle(accountId));
       expect(noop.logs).to.have.length(0);
 
       // The tally of the run's transactions.
