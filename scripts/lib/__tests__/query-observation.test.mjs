@@ -323,6 +323,44 @@ test('a single read gives up as invalid evidence when read authority stays unava
   assert.match(result.stderr, /READ_AUTHORITY_STILL_SETTLING/);
 });
 
+test('a single read waits as long as Retry-After asks before it asks again', async t => {
+  const answersAt = [];
+  const url = await serve(t, (req, res) => {
+    req.resume(); answersAt.push(Date.now());
+    if (answersAt.length === 1) { res.writeHead(503, { 'Retry-After': '2' }); res.end(settling); return; }
+    res.end(oneRow);
+  });
+  const result = await runShell(singleRead().replace('SHARING_RETRY_AFTER=0; ', ''), { SHARING: sharing, PORT: new URL(url).port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /value=1 repeats=1/);
+  assert.ok(answersAt[1] - answersAt[0] >= 2_000, `asked again after ${answersAt[1] - answersAt[0]} ms`);
+});
+
+test('a single read backs off on its own when no Retry-After is given', async t => {
+  const answersAt = [];
+  const url = await serve(t, (req, res) => {
+    req.resume(); answersAt.push(Date.now());
+    if (answersAt.length <= 2) { res.writeHead(503); res.end(settling); return; }
+    res.end(oneRow);
+  });
+  const result = await runShell(singleRead().replace('SHARING_RETRY_AFTER=0; ', ''), { SHARING: sharing, PORT: new URL(url).port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /value=1 repeats=2/);
+  assert.ok(answersAt[1] - answersAt[0] >= 1_000); assert.ok(answersAt[2] - answersAt[1] >= 2_000);
+});
+
+test('a single read reports a Retry-After longer than its bound at once, as still unavailable', async t => {
+  let served = 0;
+  const url = await serve(t, (req, res) => { req.resume(); served += 1; res.writeHead(503, { 'Retry-After': '120' }); res.end(settling); });
+  const result = await runShell(singleRead().replace('SHARING_RETRY_AFTER=0; ', ''), { SHARING: sharing, PORT: new URL(url).port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 2); assert.match(result.stdout, /status=2 repeats=0/); assert.equal(served, 1);
+  assert.match(result.stderr, /READ_AUTHORITY_STILL_SETTLING/);
+});
+
+test('a single read stops at the bound of its waits even when asked for more attempts', async t => {
+  const { port, served } = await answering(t, [S]);
+  const result = await runShell(`SHARING_READ_ATTEMPTS=9; ${singleRead()}`, { SHARING: sharing, PORT: port, QUERY: select, LOG: retryLog(t) });
+  assert.equal(result.status, 2); assert.match(result.stdout, /status=2 repeats=4/); assert.equal(served(), 5);
+});
+
 test('a single read does not repeat any other answer', async t => {
   const busy = await answering(t, [[503, notSettling[0][2]], D]);
   const refused = await runShell(singleRead(), { SHARING: sharing, PORT: busy.port, QUERY: select, LOG: retryLog(t) });

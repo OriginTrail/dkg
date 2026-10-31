@@ -6,26 +6,32 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/devnet-observation-helpers
 # Loading this module does not initialize counters or change shell options.
 # One read through the API, made the way a client that follows the route's
 # contract makes it: the documented retryable 503 (read authority unavailable)
-# is asked again after its Retry-After, at most SHARING_READ_ATTEMPTS times in
-# all (default 5). Each repeat appends a line to $SHARING_RETRY_LOG when that
-# is set, so a suite can report how often its reads needed one. A read that is
-# still unavailable after the last attempt is invalid evidence (2), and so is
-# every other invalid answer, at once and without a repeat.
+# is asked again after a growing wait, never sooner than its Retry-After, at
+# most SHARING_READ_ATTEMPTS times in all (default 5, also the most the wait's
+# bound allows). SHARING_RETRY_AFTER replaces the wait in a test. Each repeat
+# appends a line to $SHARING_RETRY_LOG when that is set, so a suite can report
+# how often its reads needed one. A read that is still unavailable after the
+# last attempt is invalid evidence (2), and so is every other invalid answer,
+# at once and without a repeat.
 sharing_api_observe() {
-  local port="$1" attempt=1 value status
+  local port="$1" attempt=1 value status headers delay
   shift
+  headers=$(mktemp "${TMPDIR:-/tmp}/dkg-observation-headers.XXXXXX") || return 2
   while :; do
     status=0
-    value=$(devnet_query_api_settling "http://127.0.0.1:$port" "$AUTH" "$@") || status=$?
+    value=$(DEVNET_CAPTURE_HEADERS="$headers" devnet_query_api_settling "http://127.0.0.1:$port" "$AUTH" "$@") || status=$?
     [ "$status" -eq 3 ] || break
-    if [ "$attempt" -ge "${SHARING_READ_ATTEMPTS:-5}" ]; then
+    if [ "$attempt" -ge "${SHARING_READ_ATTEMPTS:-5}" ] \
+      || ! delay=$(devnet_authority_retry_wait "$((attempt - 1))" "$headers"); then
+      rm -f "$headers"
       echo '{"outcome":"INCONCLUSIVE","reason":"READ_AUTHORITY_STILL_SETTLING"}' >&2
       return 2
     fi
     [ -z "${SHARING_RETRY_LOG:-}" ] || printf '%s\n' "$port" >> "$SHARING_RETRY_LOG"
     attempt=$((attempt + 1))
-    sleep "${SHARING_RETRY_AFTER:-3}"
+    sleep "${SHARING_RETRY_AFTER:-$delay}"
   done
+  rm -f "$headers"
   [ "$status" -eq 0 ] || return "$status"
   printf '%s\n' "$value"
 }
