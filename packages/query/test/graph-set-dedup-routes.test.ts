@@ -167,6 +167,12 @@ describe('graph-set deduplication routes', () => {
     `?s <urn:p:count> ?o FILTER(DATATYPE(?o) = <${integer}>)`,
     '?s ?p ?o FILTER(ISLITERAL(?o) && !ISBLANK(?s) && !ISNUMERIC(?o))',
     '?s ?p ?o FILTER(SAMETERM(?s, ?o) || ISIRI(?o) || ISURI(?o))',
+    '?s <urn:p:value> ?o FILTER STRSTARTS(STR(?s), "urn:s:")',
+    '?s <urn:p:value> ?o FILTER(RAND() < 2)',
+    '?s <urn:p:value> ?o FILTER(STR(UUID()) != "")',
+    '?s <urn:p:value> ?o FILTER(STRUUID() != "")',
+    '?s <urn:p:value> ?o FILTER(NOW() = NOW())',
+    '?s <urn:p:value> ?o FILTER(COALESCE(?o = "one", false))',
     String.raw`?s <urn:p:value> ?\u006F . ?s <urn:p:other> $other`,
   ])('takes the DISTINCT route when a graph matches a mapping once: %s', async (pattern) => {
     const store = new OxigraphStore();
@@ -176,6 +182,7 @@ describe('graph-set deduplication routes', () => {
       const rewritten = rewrite(query);
       expect(rewritten.source).toContain('{ SELECT DISTINCT');
       expect(rewritten.source).not.toContain('__dkgDedupMatchGraph');
+      expect(rewritten.source).not.toContain('FILTER(true)');
       const actual = await store.query(materializePreparedSparql(rewritten.prepared));
       expect(bag(actual.bindings)).toEqual(bag(await lowestGraphRows(store, query)));
     } finally {
@@ -194,13 +201,8 @@ describe('graph-set deduplication routes', () => {
     '?s <urn:p:link>+ ?o',
     '?s <urn:p:link>? ?o',
     '?s (<urn:p:link>) ?o',
-    '?s <urn:p:value> ?o FILTER(RAND() < 2)',
-    '?s <urn:p:value> ?o FILTER(STR(UUID()) != "")',
-    '?s <urn:p:value> ?o FILTER(STRUUID() != "")',
-    '?s <urn:p:value> ?o FILTER(NOW() = NOW())',
     String.raw`?s <urn:p:link>/<urn:p:to> ?\u006F`,
     '$s <urn:p:link>/<urn:p:to> ?o FILTER(!BOUND(?missing))',
-    '?s <urn:p:value> ?o FILTER STRSTARTS(STR(?s), "urn:s:")',
   ])('reads one graph on the aggregate route when a mapping can repeat: %s', async (pattern) => {
     const store = new OxigraphStore();
     try {
@@ -240,10 +242,6 @@ describe('graph-set deduplication routes', () => {
 
   it.each([
     'SELECT ?s WHERE { _:x <urn:p:value> ?s }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(BOUND(BNODE())) }',
-    'SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(<urn:custom:function>(?s)) }',
-    'PREFIX f: <urn:custom:> SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(f:test(?s)) }',
-    String.raw`SELECT ?s WHERE { ?s <urn:p:value> ?o FILTER(R\u0041ND() < 0.5) }`,
     'CONSTRUCT { ?s <urn:p:seen> ?o } WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
     'DESCRIBE ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
   ])('takes the aggregate route for: %s', (query) => {
@@ -263,6 +261,110 @@ describe('graph-set deduplication routes', () => {
     const rewritten = rewrite(query);
     expect(rewritten.source).toContain('{ SELECT DISTINCT');
     expect(rewritten.source).not.toContain('__dkgDedupMatchGraph');
+  });
+
+  it.each([
+    'FILTER(RAND() < 0.5)',
+    'FILTER(STR(UUID()) != "")',
+    'FILTER(STRUUID() != "")',
+    'FILTER(BOUND(BNODE()))',
+    'FILTER(NOW() = NOW())',
+    'FILTER(<urn:custom:function>(?s))',
+    'FILTER <urn:custom:function>(?s)',
+    String.raw`FILTER(R\u0041ND() < 0.5)`,
+  ])('runs an impure FILTER once per result row on the aggregate route: %s', (filter) => {
+    const { source } = rewrite(`SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o ${filter} }`);
+    expect(source).toContain('MIN(?__dkgDedupMatchGraph)');
+    expect(source.split(filter)).toHaveLength(2);
+    expect(source).toContain(`} } ${filter} }`);
+    expect(source).toContain('FILTER(true)');
+  });
+
+  it('moves a prefixed extension function, and leaves pure FILTERs in both copies', () => {
+    const prefixed = rewrite('PREFIX f: <urn:custom:> SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(f:test(?s)) }').source;
+    expect(prefixed).toContain('} } FILTER(f:test(?s)) }');
+    const pattern = '?s <urn:p:link>/<urn:p:to> ?o FILTER(REGEX(STR(?o), "end"))';
+    const pure = rewrite(`SELECT ?s WHERE { ${pattern} }`).source;
+    expect(pure.split(pattern)).toHaveLength(3);
+    expect(pure).not.toContain('FILTER(true)');
+    const mixed = rewrite('SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(?o = "end") FILTER(RAND() < 2) }').source;
+    expect(mixed.split('FILTER(?o = "end") FILTER(true)')).toHaveLength(3);
+    expect(mixed).toContain('} } FILTER(RAND() < 2) }');
+  });
+
+  it.each([
+    '?s <urn:p:link>/<urn:p:to> ?o . FILTER(RAND() < 2) . ?s <urn:p:link> ?m',
+    '?s <urn:p:link>/<urn:p:to> ?o FILTER(RAND() < 2) ?s <urn:p:link> ?m',
+    'FILTER(RAND() < 2) ?s <urn:p:link>/<urn:p:to> ?o',
+    '?s <urn:p:link>/<urn:p:to> ?o FILTER(RAND() < 2) FILTER(RAND() < 3) . ',
+    '?s <urn:p:link>/<urn:p:to> ?o FILTER(COALESCE(?o = "end", false))',
+  ])('keeps the rows and valid syntax when moving a FILTER out of: %s', async (pattern) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const query = `SELECT * WHERE { ${pattern} }`;
+      const rewritten = rewrite(query);
+      expect(rewritten.source).toContain('FILTER(true)');
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(bag(actual.bindings)).toEqual(bag(await lowestGraphRows(store, query)));
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    ['RAND() < 2', [{ s: 'urn:s:hop', o: '"end"' }, { s: 'urn:s:hop', o: '"end"' }]],
+    ['RAND() < 0', []],
+  ])('never adds a row a FILTER did not accept on the aggregate route: %s', async (expression, expected) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const rewritten = rewrite(`SELECT ?s ?o WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(${expression}) }`);
+      expect(rewritten.source).toContain('MIN(?__dkgDedupMatchGraph)');
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(actual.bindings).toEqual(expected);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([
+    ['DISTINCT', '?s <urn:sample:value> ?o'],
+    ['aggregate', '?s <urn:sample:link>/<urn:sample:to> ?o'],
+  ])('tests each row of a volatile FILTER on the %s route', async (_route, pattern) => {
+    const store = new OxigraphStore();
+    try {
+      // Oxigraph samples per row here. Evaluating the FILTER once for the query would give all rows or none.
+      await store.insert(Array.from({ length: 2000 }, (_, n) => [
+        quad(`urn:sample:${n}`, 'urn:sample:value', `"v${n}"`, graphs[0]),
+        quad(`urn:sample:${n}`, 'urn:sample:link', `urn:sample:hop:${n}`, graphs[0]),
+        quad(`urn:sample:hop:${n}`, 'urn:sample:to', `"t${n}"`, graphs[0]),
+      ]).flat());
+      const rewritten = rewrite(`SELECT ?s WHERE { ${pattern} FILTER(RAND() < 0.5) }`);
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(actual.bindings.length).toBeGreaterThan(700);
+      expect(actual.bindings.length).toBeLessThan(1300);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('applies LIMIT after a moved FILTER, not before it', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        ...data,
+        quad('urn:s:target', 'urn:p:link', 'urn:m:target', graphs[0]),
+        quad('urn:m:target', 'urn:p:to', '"target"', graphs[0]),
+      ]);
+      // COALESCE is deterministic but off the pure list, so this FILTER moves.
+      const rewritten = rewrite('SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(COALESCE(?o = "target", false)) } LIMIT 1');
+      expect(rewritten.source.match(/LIMIT 1/g)).toHaveLength(1);
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(actual.bindings).toEqual([{ s: 'urn:s:target' }]);
+    } finally {
+      await store.close();
+    }
   });
 
   it.each([

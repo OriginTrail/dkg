@@ -113,14 +113,19 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
       { s: 'urn:s:1', o: '"x"' }, { s: 'urn:s:1', o: '"y"' }, { s: 'urn:s:2', o: '"x"' }, { s: 'urn:s:2', o: '"y"' },
       { s: 'urn:s:3', o: '"x"' }, { s: 'urn:s:3', o: '"y"' }, { s: 'urn:s:3', o: '"z"' },
     )],
-    ['a FILTER function kept off the DISTINCT route', `SELECT ?s WHERE { ?s <${A}> ?x FILTER(RAND() < 2) }`, rows({ s: 'urn:s:1' }, { s: 'urn:s:2' }, { s: 'urn:s:3' })],
+    ['a volatile FILTER that always passes', `SELECT ?s WHERE { ?s <${A}> ?x FILTER(RAND() < 2) }`, rows({ s: 'urn:s:1' }, { s: 'urn:s:2' }, { s: 'urn:s:3' })],
+    ['a volatile FILTER that never passes', `SELECT ?s WHERE { ?s <${A}> ?x FILTER(RAND() < 0) }`, rows()],
+    ['a path with a volatile FILTER that always passes', `SELECT ?s ?o WHERE { ?s <${LINK}>/<${TO}> ?o FILTER(RAND() < 2) }`, HOPS],
+    ['a path with a volatile FILTER that never passes', `SELECT ?s ?o WHERE { ?s <${LINK}>/<${TO}> ?o FILTER(RAND() < 0) }`, rows()],
+    // Two paths for each of two ?hop values in the lowest graph, and one more ?hop only in the next.
+    ['a path with FILTERs moved from between its triples', `SELECT ?s ?o WHERE { ?s <${LINK}>/<${TO}> ?o . FILTER(RAND() < 2) . ?s <${LINK}> ?hop FILTER(COALESCE(?s != <urn:s:5>, false)) }`, Array.from({ length: 5 }, () => ({ s: 'urn:s:4', o: '"t"' }))],
   ])('returns the exact rows for %s', async (_name, source, expected) => {
     expect(bag(await select(source))).toEqual(bag(expected));
   });
 
   it.each([
     ['DISTINCT', `SELECT ?s ?v WHERE { ?s <${BLANK}> ?v }`],
-    ['aggregate', `SELECT ?s ?v WHERE { ?s <${BLANK}> ?v FILTER(RAND() < 2) }`],
+    ['aggregate', `SELECT ?s ?v WHERE { ?s <${BLANK}>|<urn:p:none> ?v }`],
   ])('keeps blank-node identity on the %s route', async (_route, source) => {
     const found = await select(source);
     expect(found.map((row) => row.v).sort()).toEqual(['"alike"', '"alike"', '"mirrored"']);
@@ -161,6 +166,11 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
         .toBeLessThanOrEqual(expected.filter((item) => item === row).length);
     }
     expect(await select(`SELECT ?s ?x ?y WHERE { ${JOIN} } LIMIT 2`)).toHaveLength(2);
+    // A FILTER has to see every row before the LIMIT applies, on both routes.
+    expect(await select(`SELECT ?s WHERE { ?s <${A}> ?x FILTER(COALESCE(?s = <urn:s:3>, false)) } LIMIT 1`))
+      .toEqual([{ s: 'urn:s:3' }]);
+    expect(await select(`SELECT ?s WHERE { ?s <${LINK}>/<${TO}> ?o FILTER(COALESCE(?s = <urn:s:5>, false)) } LIMIT 1`))
+      .toEqual([{ s: 'urn:s:5' }]);
   });
 
   it.each([

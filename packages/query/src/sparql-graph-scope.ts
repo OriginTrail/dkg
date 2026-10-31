@@ -14,6 +14,7 @@ import {
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
+import { literalSuffixLength } from './sparql-literal-suffix.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -200,6 +201,11 @@ const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
 const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
 
+interface SourceRange {
+  readonly start: number;
+  readonly end: number;
+}
+
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
@@ -207,6 +213,7 @@ function wrapWithProjectedGraphSubselect(
   buildGraphPattern: (inner: string, graphs: readonly string[]) => string,
   acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
   distinctMappings = false,
+  movedFilters: readonly SourceRange[] = [],
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
@@ -231,10 +238,21 @@ function wrapWithProjectedGraphSubselect(
 
   const innerVariables = scope.whereVariables;
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
-  const graphPattern = buildGraphPattern(inner, graphs);
+  // A moved FILTER leaves a no-op behind, so the separators around it stay valid.
+  let pattern = '';
+  let from = openEnd;
+  for (const { start, end } of movedFilters) {
+    pattern += `${scope.source.slice(from, start)}FILTER(true)`;
+    from = end;
+  }
+  pattern += scope.source.slice(from, close);
+  const graphPattern = buildGraphPattern(pattern, graphs);
+  const trailing = movedFilters.map(({ start, end }) => scope.source.slice(start, end)).join(' ');
+  // A LIMIT inside the subselect would cut rows before a moved FILTER sees them.
+  const limit = movedFilters.length > 0 ? '' : graphSubselectLimit(scope);
   return ready(transitionGraphScope(
     scope,
-    `${scope.source.slice(0, openEnd)} { SELECT ${distinctMappings ? 'DISTINCT ' : ''}${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} }${graphSubselectLimit(scope)} } ${scope.source.slice(close)}`,
+    `${scope.source.slice(0, openEnd)} { SELECT ${distinctMappings ? 'DISTINCT ' : ''}${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} }${limit} } ${trailing} ${scope.source.slice(close)}`,
   ));
 }
 
@@ -251,15 +269,36 @@ function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
     ));
 }
 
-// These FILTER expressions only test an existing mapping. Keep volatile and
-// extension functions on the aggregate route: mirrored triples could pass them
-// differently, invalidating the DISTINCT equivalence used below.
+// These FILTER expressions only test an existing mapping, so they answer the same
+// every time the pattern runs. A volatile or extension function might not, so the
+// aggregate route, which runs the pattern twice, moves it after deduplication.
 const DEDUP_PURE_FILTER_WORDS = new Set([
   'STR', 'STRSTARTS', 'STRENDS', 'CONTAINS', 'STRLEN', 'LCASE', 'UCASE',
   'BOUND', 'TRUE', 'FALSE', 'IN', 'NOT',
   'REGEX', 'LANG', 'LANGMATCHES', 'DATATYPE', 'SAMETERM',
   'ISIRI', 'ISURI', 'ISBLANK', 'ISLITERAL', 'ISNUMERIC',
 ]);
+
+function isPureFilterExpression(
+  tokens: readonly SparqlLexicalToken[],
+  start: number,
+  end: number,
+): boolean {
+  for (let index = start; index < end; index++) {
+    const token = tokens[index];
+    if (token.kind === 'string') {
+      const suffix = literalSuffixLength(tokens, index + 1);
+      if (suffix < 0) return false;
+      index += suffix;
+      continue;
+    }
+    if (token.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(token.upper)) return false;
+    const next = tokens[index + 1];
+    if ((token.kind === 'iri' || token.kind === 'prefixed-name')
+      && next?.kind === 'symbol' && next.logicalValue === '(') return false;
+  }
+  return true;
+}
 
 function isVisibleTripleToken(token: SparqlLexicalToken): boolean {
   switch (token.kind) {
@@ -277,60 +316,51 @@ function isVisibleTripleToken(token: SparqlLexicalToken): boolean {
   }
 }
 
-/** Tokens after a string that belong to its literal: `@tag` or `^^datatype`. */
-function literalSuffixLength(tokens: readonly SparqlLexicalToken[], index: number): number {
-  const isSymbol = (at: number, value: string) => {
-    const token = tokens[at];
-    return token?.kind === 'symbol' && token.logicalValue === value;
-  };
-  if (isSymbol(index, '@')) return tokens[index + 1]?.kind === 'word' ? 2 : 0;
-  if (!isSymbol(index, '^') || !isSymbol(index + 1, '^')) return 0;
-  const datatype = tokens[index + 2]?.kind;
-  return datatype === 'iri' || datatype === 'prefixed-name' ? 3 : 0;
-}
-
 /**
- * True when every term of every triple is visible and all FILTERs are pure, so
- * one graph matches a mapping at most once. A path or blank node can match the
- * same mapping several ways, and those repeats are part of the caller's results.
+ * Read a flat pattern's FILTERs and terms. When every term is visible, one graph
+ * matches a mapping at most once. A path or blank node can match the same mapping
+ * several ways, and those repeats are part of the caller's results.
  */
-function matchesEachMappingOncePerGraph(scope: PreparedGraphScope): boolean {
-  if (!scope.where) return false;
-  const source = scope.prepared.tokens;
+function readDedupPattern(scope: PreparedGraphScope): {
+  readonly uniqueMappings: boolean;
+  readonly impureFilters: readonly SourceRange[];
+} {
+  const whole = { uniqueMappings: false, impureFilters: [] };
+  if (!scope.where) return whole;
+  const tokens = scope.prepared.tokens;
   const end = scope.where.closingTokenIndex;
+  const impureFilters: SourceRange[] = [];
+  let visible = true;
   let hasTriple = false;
   for (let index = scope.where.openingTokenIndex + 1; index < end; index++) {
-    const token = source[index];
+    const token = tokens[index];
+    if (token.kind === 'word' && token.upper === 'FILTER') {
+      // FILTER ( ... ) or FILTER fn( ... )
+      const isOpening = (at: number) => {
+        const candidate = tokens[at];
+        return candidate?.kind === 'symbol' && candidate.logicalValue === '(';
+      };
+      const opening = isOpening(index + 1) ? index + 1 : index + 2;
+      const closing = isOpening(opening)
+        ? scope.structure.parentheses.matchingTokenIndexes[opening] ?? -1
+        : -1;
+      if (closing <= opening || closing >= end) return whole;
+      if (!isPureFilterExpression(tokens, index + 1, closing)) {
+        impureFilters.push({ start: token.start, end: tokens[closing].end });
+      }
+      index = closing;
+      continue;
+    }
+    hasTriple = true;
     if (token.kind === 'string') {
-      hasTriple = true;
-      index += literalSuffixLength(source, index + 1);
-      continue;
+      const suffix = literalSuffixLength(tokens, index + 1);
+      if (suffix < 0) visible = false;
+      else index += suffix;
+    } else if (!isVisibleTripleToken(token)) {
+      visible = false;
     }
-    if (token.kind !== 'word' || token.upper !== 'FILTER') {
-      if (!isVisibleTripleToken(token)) return false;
-      hasTriple = true;
-      continue;
-    }
-    const opening = source[index + 1];
-    if (opening?.kind !== 'symbol' || opening.logicalValue !== '(') return false;
-    const closing = scope.structure.parentheses.matchingTokenIndexes[index + 1] ?? -1;
-    if (closing <= index + 1 || closing >= end) return false;
-    for (let inner = index + 2; inner < closing; inner++) {
-      const expression = source[inner];
-      if (expression.kind === 'string') {
-        inner += literalSuffixLength(source, inner + 1);
-        continue;
-      }
-      if (expression.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(expression.upper)) {
-        return false;
-      }
-      const next = source[inner + 1];
-      if ((expression.kind === 'iri' || expression.kind === 'prefixed-name')
-        && next?.kind === 'symbol' && next.logicalValue === '(') return false;
-    }
-    index = closing;
   }
-  return hasTriple;
+  return hasTriple ? { uniqueMappings: visible, impureFilters } : whole;
 }
 
 /** Scope a graph set, reading each mapping from one graph even when several hold it. */
@@ -341,7 +371,10 @@ export function wrapWithDeduplicatedGraphValues(
   // When each graph matches a mapping once, DISTINCT over every matched variable
   // removes graph mirrors without changing multiplicity after the caller's
   // projection or aggregation. ASK only needs one match, so it takes the same route.
-  const distinctMappings = input.operation === 'ASK' || matchesEachMappingOncePerGraph(input);
+  // Its FILTERs stay in the pattern, which runs once: placed after this subquery, a
+  // volatile FILTER stops testing each row on Oxigraph and passes all rows or none.
+  const { uniqueMappings, impureFilters } = readDedupPattern(input);
+  const distinctMappings = input.operation === 'ASK' || uniqueMappings;
   return wrapWithProjectedGraphSubselect(
     input,
     graphUris,
@@ -367,6 +400,7 @@ export function wrapWithDeduplicatedGraphValues(
     },
     isDedupSafeBasicGraphPattern,
     distinctMappings,
+    distinctMappings ? [] : impureFilters,
   );
 }
 
