@@ -1,10 +1,12 @@
 // Exact TypeScript model of the PublishingConviction emission math:
-// PublishingMathLib.prorateActiveSink, EpochStorage.addTokensToEpochRange with
-// its shard-global remainder carry and its clamp of elapsed epochs, the
-// treasury fee split, and the per-window booking of _bookWindows (which
-// 10.0.8 and 10.1.0 ran over every window at once, as their schedule). Shared
-// by the emission, sweep and conservation suites, so all check the contracts
-// against one model.
+// PublishingMathLib.prorateActiveSink, the booking from the current epoch on
+// (_bookFromCurrentEpoch), EpochStorage.addTokensToEpochRange with its
+// shard-global remainder carry, the treasury fee split, and the per-window
+// booking of _bookWindows (which 10.0.8 and 10.1.0 ran over every window at
+// once, as their schedule). PublishingConviction never books into an epoch
+// that has ended, so EpochStorage's clamp to its first unfinalized epoch never
+// moves one of these credits, and the model has none. Shared by the suites
+// that check these bookings, so all check the contracts against one model.
 
 import { Chronos } from '../../typechain';
 
@@ -42,43 +44,47 @@ export function prorateActiveSink(
 }
 
 /**
- * EpochStorage's clamp of one shard: a credit that starts before the first
- * epoch not yet finalized (`lastFinalizedEpoch + 1`) starts there instead, its
- * end moved up with it if needed, and every credit then finalizes the shard
- * through the epoch before the current one. Read `firstOpen` from
- * `lastFinalizedEpoch(shard) + 1` before the transaction.
+ * Byte-exact mirror of PublishingConviction._bookFromCurrentEpoch: the share of
+ * each range that falls on the epochs before `currentEpoch` is booked into
+ * `currentEpoch`, as one credit ahead of the rest, and every later share where
+ * the range puts it. Returns the credits in the order the contract makes them;
+ * a booking in the epoch its ranges start in returns them unchanged.
  */
-export type Clamp = { firstOpen: bigint; currentEpoch: bigint };
+export function fromCurrentEpoch(ranges: Range[], currentEpoch: bigint): Range[] {
+  let arrears = 0n;
+  const rest: Range[] = [];
+  for (const r of ranges) {
+    if (r.start >= currentEpoch) {
+      rest.push(r);
+      continue;
+    }
+    const epochs = r.end - r.start + 1n;
+    const ended = r.end < currentEpoch ? epochs : currentEpoch - r.start;
+    const share = (r.amount * ended) / epochs;
+    arrears += share;
+    if (r.amount > share) rest.push({ start: currentEpoch, end: r.end, amount: r.amount - share });
+  }
+  return arrears > 0n ? [{ start: currentEpoch, end: currentEpoch, amount: arrears }, ...rest] : rest;
+}
 
 /**
  * Byte-exact mirror of EpochStorage.addTokensToEpochRange's per-epoch split
- * with the shard-global `accumulatedRemainder` carry, and, given a `clamp`,
- * its clamp of elapsed epochs. Call order matters and is preserved by the
- * callers below. `credited` holds the ranges as the storage credits them.
+ * with the shard-global `accumulatedRemainder` carry. Call order matters and is
+ * preserved by the callers below. `credited` holds the ranges as the storage
+ * credits them.
  */
 export class PoolModel {
   perEpoch = new Map<bigint, bigint>();
   credited: Range[] = [];
-  constructor(
-    public remainder: bigint,
-    public clamp?: Clamp,
-  ) {}
+  constructor(public remainder: bigint) {}
 
   add(r: Range): void {
-    let { start, end } = r;
-    if (this.clamp) {
-      if (start < this.clamp.firstOpen) {
-        start = this.clamp.firstOpen;
-        if (end < start) end = start;
-      }
-      if (this.clamp.currentEpoch > 1n) this.clamp.firstOpen = this.clamp.currentEpoch;
-    }
-    this.credited.push({ start, end, amount: r.amount });
-    const num = end - start + 1n;
+    this.credited.push({ ...r });
+    const num = r.end - r.start + 1n;
     const total = r.amount + this.remainder;
     const per = total / num;
     this.remainder = total % num;
-    for (let e = start; e <= end; e++) {
+    for (let e = r.start; e <= r.end; e++) {
       this.perEpoch.set(e, (this.perEpoch.get(e) ?? 0n) + per);
     }
   }
@@ -94,8 +100,9 @@ export const feeOf = (amount: bigint, bps: bigint): bigint =>
  * schedule booked them — each split (B − spent_w [+ dust on last]) into
  * fee = feeOf(remainder, bps) → the treasury shard and net = remainder − fee
  * → the staker shard, both forward from the window's close on the same
- * curve. bps = 0 (treasury unwired at booking time) degenerates to the
- * all-gross staker booking.
+ * curve, and both booked from `currentEpoch`, the epoch of the booking
+ * transaction, on. bps = 0 (treasury unwired at booking time) degenerates to
+ * the all-gross staker booking.
  */
 export async function scheduleModel(opts: {
   chronos: Chronos;
@@ -104,6 +111,7 @@ export async function scheduleModel(opts: {
   createdAtTimestamp: bigint;
   lock: bigint;
   epLen: bigint;
+  currentEpoch: bigint;
   fromWindow?: bigint;
   toWindow?: bigint;
   spent?: Map<bigint, bigint>;
@@ -117,6 +125,7 @@ export async function scheduleModel(opts: {
     createdAtTimestamp,
     lock,
     epLen,
+    currentEpoch,
   } = opts;
   const fromWindow = opts.fromWindow ?? 0n;
   const toWindow = opts.toWindow ?? lock;
@@ -143,13 +152,13 @@ export async function scheduleModel(opts: {
     const timeRemaining = nextBoundary > fromTs ? nextBoundary - fromTs : 0n;
     if (net > 0n) {
       scheduled += net;
-      for (const r of prorateActiveSink(net, anchorEpoch, lock, epLen, timeRemaining)) {
+      for (const r of fromCurrentEpoch(prorateActiveSink(net, anchorEpoch, lock, epLen, timeRemaining), currentEpoch)) {
         model.add(r);
       }
     }
     if (fee > 0n) {
       treasuryFee += fee;
-      for (const r of prorateActiveSink(fee, anchorEpoch, lock, epLen, timeRemaining)) {
+      for (const r of fromCurrentEpoch(prorateActiveSink(fee, anchorEpoch, lock, epLen, timeRemaining), currentEpoch)) {
         feeModel.add(r);
       }
     }

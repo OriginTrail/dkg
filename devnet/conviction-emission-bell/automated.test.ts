@@ -42,8 +42,8 @@
  *
  * Windows close by moving the Hardhat clock (`evm_setNextBlockTimestamp`), as
  * the retired conviction-lazy-settle suite did: each window is settled seconds
- * after its close, in the epoch it closes in, so nothing is clamped and the
- * credits are exactly the bell's.
+ * after its close, in the epoch it closes in, so no share of its spread falls
+ * on an epoch that has ended and the credits are exactly the bell's.
  *
  * All assertions run against the LIVE devnet-deployed contracts (real Hub, NFT
  * wrapper, PublishingConviction logic, EpochStorage) — validating the actual

@@ -10,10 +10,10 @@
 //
 // A publish is measured as KnowledgeAssetsLifecycle makes it, through the NFT's
 // coverPublishingCost, from a Hub-registered stand-in. A window booking writes
-// up to three staker-pool ranges forward from the window's close, and the
-// first credit of an epoch finalizes the shard through the epoch before, so
-// the per-window figure is the difference between six windows and one, over
-// five.
+// up to three staker-pool ranges forward from the window's close, none into an
+// epoch that has ended, and the first credit of an epoch finalizes the shard
+// through the epoch before, so the per-window figure is the difference between
+// six windows and one, over five.
 //
 // `measured` is the gas the transaction used when this file was written
 // (Hardhat, the repository's compiler settings); the test prints the current
@@ -44,18 +44,20 @@ type Case = { target: bigint; measured: bigint; above?: true };
 const GAS: Record<string, Case> = {
   // The whole draw over the KA's epochs: three staker-pool ranges, here into
   // epoch slots no credit has written yet.
-  'coverPublishingCost, use-time account, base only, KA of 12 epochs': { target: 300_000n, measured: 257_965n },
-  'coverPublishingCost, use-time account, with top-up overflow': { target: 300_000n, measured: 266_940n },
+  'coverPublishingCost, use-time account, base only, KA of 12 epochs': { target: 300_000n, measured: 257_993n },
+  'coverPublishingCost, use-time account, with top-up overflow': { target: 300_000n, measured: 266_969n },
   // A budget gate only: no range.
-  'coverPublishingCost, scheduled account, base only': { target: 150_000n, measured: 120_624n },
+  'coverPublishingCost, scheduled account, base only': { target: 150_000n, measured: 120_652n },
   // The overflow forward over the lock: three ranges, into epoch slots the
   // account's own schedule has written.
-  'coverPublishingCost, scheduled account, with top-up overflow': { target: 250_000n, measured: 215_637n },
+  'coverPublishingCost, scheduled account, with top-up overflow': { target: 250_000n, measured: 215_666n },
   // The first credit of the epoch also finalizes the shard.
-  'settle, one closed window': { target: 250_000n, measured: 232_242n },
-  'settle, six closed windows': { target: 700_000n, measured: 629_000n },
-  'settleMany, ten accounts, one closed window each': { target: 1_000_000n, measured: 772_409n },
-  'settleMany, ten accounts, nothing to book': { target: 150_000n, measured: 122_163n },
+  'settle, one closed window': { target: 250_000n, measured: 234_239n },
+  // Five of the six windows are late: each books its share of the ended
+  // epochs into the current epoch, whose pool slots they share.
+  'settle, six closed windows': { target: 700_000n, measured: 576_736n },
+  'settleMany, ten accounts, one closed window each': { target: 1_000_000n, measured: 791_742n },
+  'settleMany, ten accounts, nothing to book': { target: 150_000n, measured: 121_909n },
 };
 
 const ROUNDING = 5_000n;

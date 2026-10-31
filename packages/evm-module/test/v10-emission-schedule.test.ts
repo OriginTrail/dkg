@@ -193,14 +193,21 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     return { accountId, createdAt: BigInt(block!.timestamp) };
   };
 
-  /** A PCA as 10.0.8 or 10.1.0 left it: created, then its whole base budget scheduled. */
+  /** The epoch the transaction of `receipt` ran in. */
+  const epochOfTx = async (receipt: ethers.ContractTransactionReceipt): Promise<bigint> =>
+    ChronosContract.epochAtTimestamp(BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp));
+
+  /**
+   * A PCA as 10.0.8 or 10.1.0 left it: created, then its whole base budget
+   * scheduled; `scheduledIn` is the epoch of the scheduling transaction.
+   */
   const createScheduledFor = async (
     owner: SignerWithAddress,
     committed: bigint = COMMITTED_TRAC,
-  ): Promise<{ accountId: bigint; createdAt: bigint }> => {
+  ): Promise<{ accountId: bigint; createdAt: bigint; scheduledIn: bigint }> => {
     const created = await createAccountFor(owner, committed);
-    await Harness.scheduleInFull(created.accountId);
-    return created;
+    const receipt = (await (await Harness.scheduleInFull(created.accountId)).wait())!;
+    return { ...created, scheduledIn: await epochOfTx(receipt) };
   };
 
   const settleOne = (accountId: bigint) => Logic.settle(accountId);
@@ -225,7 +232,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     expect(await Logic.queryFilter(Logic.filters.EmissionScheduled(accountId))).to.have.length(0);
 
     // As 10.0.8 scheduled it at creation.
-    await Harness.scheduleInFull(accountId);
+    const scheduling = (await (await Harness.scheduleInFull(accountId)).wait())!;
 
     // Model the schedule exactly.
     const model = new PoolModel(remBefore);
@@ -236,6 +243,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
       createdAtTimestamp: createdAt,
       lock,
       epLen,
+      currentEpoch: await epochOfTx(scheduling),
     });
     expect(scheduled).to.equal(COMMITTED_TRAC); // base commitment schedules gross
 
@@ -441,16 +449,19 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     const to = e1 + 2n * lock + 3n;
     before = await poolSnapshot(from, to);
     const remBefore = await ES.accumulatedRemainder(STAKER_SHARD_ID);
-    const clamp = { firstOpen: (await ES.lastFinalizedEpoch(STAKER_SHARD_ID)) + 1n, currentEpoch: e1 };
 
     const B = committed / lock;
-    await expect(settleOne(synthId))
+    const booking = await settleOne(synthId);
+    await expect(booking)
       .to.emit(Logic, 'EmissionScheduled')
       .withArgs(synthId, 0n, 2n, B - spent0 + B, 0n);
+    const bookedIn = await epochOfTx((await booking.wait())!);
+    expect(bookedIn).to.equal(e1);
 
     // Windows 0 and 1, each forward from its close, as the 10.0.8 schedule
-    // spread them; the elapsed part clamps into the first open epoch.
-    const model = new PoolModel(remBefore, clamp);
+    // spread them; the share of the epochs that have ended is booked into
+    // the current epoch.
+    const model = new PoolModel(remBefore);
     const { scheduled } = await scheduleModel({
       chronos: ChronosContract,
       model,
@@ -458,6 +469,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
       createdAtTimestamp: createdAt,
       lock,
       epLen,
+      currentEpoch: bookedIn,
       spent: new Map<bigint, bigint>([[0n, spent0]]),
       toWindow: 2n,
     });
@@ -467,6 +479,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     let sum = 0n;
     for (let e = from; e <= to; e++) {
       expect(diff.get(e) ?? 0n, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
+      if (e < bookedIn) expect(diff.get(e) ?? 0n, `ended epoch ${e}`).to.equal(0n);
       sum += diff.get(e) ?? 0n;
     }
     const remAfter = await ES.accumulatedRemainder(STAKER_SHARD_ID);
@@ -608,7 +621,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     // Neither the creation nor the schedule moves TRAC — the fee split is
     // accounting-only.
     const owner = accounts[5];
-    const { accountId, createdAt } = await createScheduledFor(owner);
+    const { accountId, createdAt, scheduledIn } = await createScheduledFor(owner);
 
     // Dual-shard model: per-window fee = floor(remainder × bps / 10⁴) to the
     // treasury shard, net (keeping the wei dust) to the staker shard.
@@ -623,6 +636,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
       createdAtTimestamp: createdAt,
       lock,
       epLen,
+      currentEpoch: scheduledIn,
     });
     expect(scheduled + treasuryFee).to.equal(COMMITTED_TRAC);
     expect(treasuryFee).to.be.greaterThan(0n);
