@@ -297,6 +297,19 @@
   },
   {
     "inputs": [],
+    "name": "queryInferenceSettlement",
+    "outputs": [
+      {
+        "internalType": "contract QueryInferenceSettlement",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "randomSamplingStorage",
     "outputs": [
       {

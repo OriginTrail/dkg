@@ -18,7 +18,12 @@
 //     their pools plus the carry;
 //   - queryInferenceGross: OT-RFC-27's formula at λ 0, 0.5 and 1, the R share
 //     when ΣQueryInferenceScore is 0, and 0 for an open epoch, an empty pool
-//     or a node with no value.
+//     or a node with no value;
+//   - the preview: previewEpochClose and previewQueryInferenceGross read an
+//     ended epoch's pool, λ and gross before its close exactly as the close
+//     then freezes them, replaying the rollover of the epochs before it, for
+//     wallet value and Conviction Account cost alike, account cost alone
+//     included.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -425,7 +430,17 @@ describe('@integration The epoch close of the query/inference pool', function ()
           await toEpoch(epoch + 1n);
         }
 
+        // The preview of every ended epoch still open is what its close freezes.
+        const previewed: Array<[bigint, bigint, bigint]> = [];
+        for (let e = (await QIS.closedThrough()) + 1n; e < (await epochNow()); e++) {
+          const [pool, lambdaBps] = await f.QS.previewEpochClose(e);
+          previewed.push([e, pool, lambdaBps]);
+        }
         await closeAll();
+        for (const [e, pool, lambdaBps] of previewed) {
+          const c = await QIS.getEpochClose(e);
+          expect([c.pool, c.lambdaBps], `preview of epoch ${e}`).to.deep.equal([pool, lambdaBps]);
+        }
         const closed = await QIS.closedThrough();
         let due = 0n;
         let pools = 0n;
@@ -522,6 +537,193 @@ describe('@integration The epoch close of the query/inference pool', function ()
       // Epoch e had no value and no money: its pool is 0.
       expect(await f.QS.epochPool(e)).to.equal(0n);
       expect(await f.QS.queryInferenceGross(e, a.identityId)).to.equal(0n);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The preview of an open epoch's close
+  // -------------------------------------------------------------------------
+
+  describe('previewEpochClose and previewQueryInferenceGross', () => {
+    const preview = async (e: bigint) => {
+      const [pool, lambdaBps] = await f.QS.previewEpochClose(e);
+      return [pool, lambdaBps];
+    };
+
+    it("reads every ended epoch's pool, λ and gross before the close as the close then freezes them, rollover replayed", async () => {
+      const a = await seller(1_250_000n * TRAC);
+      const b = await seller(4_050_000n * TRAC);
+      const e = await epochNow();
+      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
+      await walletFund(f.accounts[21], e, 10n * TRAC); // due e + 1, never claimed
+      await toEpoch(e + 1n);
+      const p1 = await walletFund(f.accounts[21], e + 1n, 20n * TRAC); // due e + 2
+      await claim(a, p1, TRAC); // claimed, but left void
+      await toEpoch(e + 3n);
+      const p3 = await walletFund(f.accounts[21], e + 3n, 5n * TRAC); // due e + 4
+      await claim(a, p3, TRAC);
+      await claim(b, p3, 3n * TRAC);
+      await finalizeIn(e + 3n, [p3], [a, b]);
+      await toEpoch(e + 5n);
+
+      // Nothing has closed: every epoch from activation is replayed.
+      expect(await QIS.closedThrough()).to.equal(e - 1n);
+      const epochs = [e, e + 1n, e + 2n, e + 3n, e + 4n];
+      const before = [];
+      for (const epoch of epochs) before.push(await preview(epoch));
+      const grossBefore = [
+        await f.QS.previewQueryInferenceGross(e + 4n, a.identityId),
+        await f.QS.previewQueryInferenceGross(e + 4n, b.identityId),
+      ];
+      expect(before).to.deep.equal([
+        [0n, 0n],
+        [0n, 5_000n],
+        [0n, 5_000n],
+        [0n, 5_000n],
+        [35n * TRAC, 5_000n],
+      ]);
+      expect(grossBefore[0] + grossBefore[1] > 34n * TRAC).to.equal(true);
+      // The frozen view reads nothing yet.
+      expect(await f.QS.queryInferenceGross(e + 4n, a.identityId)).to.equal(0n);
+
+      // Close part of the way: the rest replays from the carry the closes left.
+      await f.QS.closeEpochs(2n);
+      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 1n, 10n * TRAC]);
+      for (const [i, epoch] of epochs.entries()) expect(await preview(epoch), `epoch ${epoch}`).to.deep.equal(before[i]);
+
+      await closeAll();
+      for (const [i, epoch] of epochs.entries()) {
+        const c = await QIS.getEpochClose(epoch);
+        expect([c.pool, c.lambdaBps], `epoch ${epoch}`).to.deep.equal(before[i]);
+        expect(await preview(epoch), `epoch ${epoch}`).to.deep.equal(before[i]);
+      }
+      expect([
+        await f.QS.queryInferenceGross(e + 4n, a.identityId),
+        await f.QS.queryInferenceGross(e + 4n, b.identityId),
+      ]).to.deep.equal(grossBefore);
+      expect([
+        await f.QS.previewQueryInferenceGross(e + 4n, a.identityId),
+        await f.QS.previewQueryInferenceGross(e + 4n, b.identityId),
+      ]).to.deep.equal(grossBefore);
+    });
+
+    it('previews an epoch that has not ended as if it ended now', async () => {
+      const a = await seller(1_250_000n * TRAC);
+      const e = await epochNow();
+      const p = await walletFund(f.accounts[21], e, 6n * TRAC); // due e + 1
+      // In e, nothing is finalized in e + 1 yet: its money would carry.
+      expect(await preview(e + 1n)).to.deep.equal([0n, await QIS.lambdaBpsAt(e + 1n)]);
+      await claim(a, p, 2n * TRAC);
+      await finalizeIn(e, [p], [a]); // now in e + 1
+      expect(await f.Chronos.getCurrentEpoch()).to.equal(e + 1n);
+      expect((await preview(e + 1n))[0]).to.equal(6n * TRAC);
+      expect(await f.QS.previewQueryInferenceGross(e + 1n, a.identityId)).to.equal(6n * TRAC);
+    });
+
+    it("counts the Conviction Account cost due beside the wallet value, as the close does", async () => {
+      const a = await seller(1_250_000n * TRAC);
+      const b = await seller(4_050_000n * TRAC);
+      const e = await epochNow();
+      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
+      const p = await walletFund(f.accounts[21], e, 10n * TRAC);
+      // Booked as ServiceSubscriptions books a period's cost; the Hub owner
+      // passes onlyContracts.
+      await QIS.addConvictionDue(e + 1n, 4n * TRAC);
+      await QIS.addConvictionDue(e + 1n, 3n);
+      await claim(a, p, TRAC);
+      await claim(b, p, 2n * TRAC);
+      await finalizeIn(e, [p], [a, b]);
+      // While e + 1 runs, its preview already counts both parts.
+      expect(await preview(e + 1n)).to.deep.equal([14n * TRAC + 3n, 5_000n]);
+      await toEpoch(e + 2n);
+
+      const before = await preview(e + 1n);
+      const grossBefore = [
+        await f.QS.previewQueryInferenceGross(e + 1n, a.identityId),
+        await f.QS.previewQueryInferenceGross(e + 1n, b.identityId),
+      ];
+      const receipt = await closeAll();
+      const [, walletDue, convictionDue, carryIn, pool, , , lambdaBps] = closedEvents(receipt).find(
+        ([epoch]) => epoch === e + 1n,
+      )!;
+      expect([walletDue, convictionDue, carryIn]).to.deep.equal([10n * TRAC, 4n * TRAC + 3n, 0n]);
+      expect([pool, lambdaBps]).to.deep.equal(before);
+      expect(await record(e + 1n)).to.deep.equal([...before, true]);
+      expect([
+        await f.QS.queryInferenceGross(e + 1n, a.identityId),
+        await f.QS.queryInferenceGross(e + 1n, b.identityId),
+      ]).to.deep.equal(grossBefore);
+      expect(grossBefore[0] + grossBefore[1]).to.be.closeTo(14n * TRAC + 3n, 2n);
+    });
+
+    it('replays a rollover of Conviction Account cost alone into the next epoch with value, before and across a partial close', async () => {
+      const a = await seller(1_250_000n * TRAC);
+      const e = await epochNow();
+      await QIS.addConvictionDue(e + 1n, 6n * TRAC); // no value is finalized in e + 1
+      await toEpoch(e + 1n);
+      const p = await walletFund(f.accounts[21], e + 1n, 2n * TRAC); // due e + 2
+      await QIS.addConvictionDue(e + 2n, TRAC + 1n);
+      await claim(a, p, TRAC);
+      await finalizeIn(e + 1n, [p], [a]);
+      await QIS.addConvictionDue(e + 3n, 5n * TRAC); // no value is finalized in e + 3 either
+      await toEpoch(e + 4n);
+
+      const epochs = [e, e + 1n, e + 2n, e + 3n];
+      const before = [];
+      for (const epoch of epochs) before.push(await preview(epoch));
+      // The account money of e + 1 alone carries into e + 2, which pays it
+      // with its own; that of e + 3 carries on.
+      expect(before.map(([pool]) => pool)).to.deep.equal([0n, 0n, 9n * TRAC + 1n, 0n]);
+      const grossBefore = await f.QS.previewQueryInferenceGross(e + 2n, a.identityId);
+      expect(grossBefore).to.equal(9n * TRAC + 1n);
+
+      await f.QS.closeEpochs(2n);
+      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 1n, 6n * TRAC]);
+      for (const [i, epoch] of epochs.entries()) expect(await preview(epoch), `epoch ${epoch}`).to.deep.equal(before[i]);
+
+      const receipt = await closeAll();
+      expect(
+        closedEvents(receipt).map(([epoch, walletDue, convictionDue, carryIn, pool]) => [
+          epoch,
+          walletDue,
+          convictionDue,
+          carryIn,
+          pool,
+        ]),
+      ).to.deep.equal([
+        [e + 2n, 2n * TRAC, TRAC + 1n, 6n * TRAC, 9n * TRAC + 1n],
+        [e + 3n, 0n, 5n * TRAC, 0n, 0n],
+      ]);
+      for (const [i, epoch] of epochs.entries()) {
+        expect(await record(epoch), `epoch ${epoch}`).to.deep.equal([...before[i], true]);
+      }
+      expect(await QIS.carry()).to.equal(5n * TRAC);
+      expect(await f.QS.queryInferenceGross(e + 2n, a.identityId)).to.equal(grossBefore);
+    });
+
+    it('is (0, 0) before activation and with activation unset, and 0 gross for a node with no value', async () => {
+      const a = await seller(1_250_000n * TRAC);
+      const idle = await seller(1_250_000n * TRAC);
+      const e = await epochNow();
+      const p = await walletFund(f.accounts[21], e, 4n * TRAC);
+      await claim(a, p, TRAC);
+      await finalizeIn(e, [p], [a]);
+      await toEpoch(e + 2n);
+      expect(await preview(e - 1n)).to.deep.equal([0n, 0n]);
+      expect(await preview(0n)).to.deep.equal([0n, 0n]);
+      expect(await f.QS.previewQueryInferenceGross(e + 1n, a.identityId)).to.equal(4n * TRAC);
+      expect(await f.QS.previewQueryInferenceGross(e + 1n, idle.identityId)).to.equal(0n);
+      expect(await f.QS.previewQueryInferenceGross(e, a.identityId)).to.equal(0n);
+
+      const fresh = (await (
+        await hre.ethers.getContractFactory('QueryInferenceStorage')
+      ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceStorage;
+      await fresh.waitForDeployment();
+      await f.Hub.setContractAddress('QueryInferenceStorage', await fresh.getAddress());
+      await forward(fresh, 'initialize');
+      await forward(f.QS, 'initialize');
+      expect(await preview(e + 1n)).to.deep.equal([0n, 0n]);
+      expect(await f.QS.previewQueryInferenceGross(e + 1n, a.identityId)).to.equal(0n);
     });
   });
 });

@@ -49,4 +49,10 @@ func.dependencies = [
   // 10.0.6 — `StakingV10.initialize()` resolves `StakingV10Ledger`, which
   // runs the operator-fee withdrawal and the V8 drains.
   'StakingV10Ledger',
+  // 10.1.0 — `initialize()` also wires `QueryInferenceSettlement` and
+  // `QueryInferenceStorage` (OT-RFC-27) where the Hub holds the settlement,
+  // and 0 where it does not. They are not dependencies here: a staking-only
+  // deploy runs without the pool, as on mainnet, where 052c to 052f are
+  // skipped. In a full deploy 052f runs before this step, and on a live
+  // network 998 registers every contract before it initializes any.
 ];

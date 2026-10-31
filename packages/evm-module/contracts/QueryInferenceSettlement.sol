@@ -76,7 +76,10 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * 0 (rollover); otherwise its pool is B and the carry 0. The close freezes the
  * pool and λ beside the epoch's totals ΣR and ΣQueryInferenceScore, which
  * nothing writes once it has ended, so `queryInferenceGross`, a node's gross
- * reward from the pool, reads only frozen values.
+ * reward from the pool, reads only frozen values. `previewEpochClose` and
+ * `previewQueryInferenceGross` replay, in a view, the closes an open epoch is
+ * still to have, so an ended epoch's pool and gross read the same before its
+ * close as after it.
  *
  * Architecture: stateless logic, as `ServiceSubscriptions`. Every byte of
  * settlement state lives in `QueryInferenceStorage`, and the periods in
@@ -92,7 +95,8 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     string private constant _NAME = "QueryInferenceSettlement";
     // Version history:
     //   1.0.0 — receipt batches, their finalization against the funded cap,
-    //           and the epoch close of the query/inference pool (OT-RFC-27).
+    //           the epoch close of the query/inference pool, and a preview of
+    //           an open epoch's close (OT-RFC-27).
     string private constant _VERSION = "1.0.0";
 
     uint256 internal constant _SCALE18 = 1e18;
@@ -549,20 +553,49 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     function queryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256 gross) {
         QueryInferenceStorage qis = queryInferenceStorage;
         QueryInferenceStorage.EpochClose memory c = qis.getEpochClose(epoch);
-        if (!c.closed || c.pool == 0) return 0;
-        QueryInferenceStorage.NodeEpoch memory n = qis.getNodeEpoch(identityId, epoch);
-        // A node's score never exceeds its value, so no value means no score.
-        if (n.r == 0) return 0;
-        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
+        if (c.closed) gross = _gross(qis, epoch, identityId, c.pool, c.lambdaBps);
+    }
 
-        uint256 pool = c.pool;
-        uint256 lambda = c.lambdaBps;
-        gross = Math.mulDiv(pool * (_BPS - lambda), n.r, _BPS * uint256(t.sumR));
-        if (lambda != 0) {
-            gross += t.sumScore == 0
-                ? Math.mulDiv(pool * lambda, n.r, _BPS * uint256(t.sumR))
-                : Math.mulDiv(pool * lambda, n.score, _BPS * uint256(t.sumScore));
+    /**
+     * @notice The pool epoch `epoch`'s nodes share and its λ, as its close
+     *         freezes them: the frozen values once it has closed and, while
+     *         it is open, its close previewed by replaying the closes from the
+     *         one after `closedThrough` through `epoch`, over the money due
+     *         and the carry as they stand, by the rule of the close. Exact for
+     *         an epoch that has ended, in which no money is booked and no
+     *         claim is finalized any more; for one that has not, the close as
+     *         if it ended now. (0, 0) for an epoch before the activation
+     *         epoch, or any while that is unset: those never close.
+     */
+    function previewEpochClose(uint256 epoch) public view returns (uint96 pool, uint16 lambdaBps) {
+        QueryInferenceStorage qis = queryInferenceStorage;
+        QueryInferenceStorage.EpochClose memory c = qis.getEpochClose(epoch);
+        if (c.closed) return (c.pool, c.lambdaBps);
+        (uint40 activation, uint256 closed, uint96 carryIn, ) = qis.closeState();
+        // Epochs up to `closedThrough` that are not closed precede activation.
+        if (activation == 0 || epoch <= closed) return (0, 0);
+        // The rule of `_closeEpoch`: an epoch's money is the wallet value and
+        // the Conviction Account cost due in it and the carry, its pool if a
+        // node finalized value in it, and the carry out otherwise.
+        for (uint256 e = closed + 1; e <= epoch; e++) {
+            (uint96 wallet, uint96 conviction) = _incoming(qis, e);
+            uint96 money = SafeCast.toUint96(uint256(wallet) + conviction + carryIn);
+            if (qis.getEpochTotals(e).sumR == 0) {
+                (pool, carryIn) = (0, money);
+            } else {
+                (pool, carryIn) = (money, 0);
+            }
         }
+        lambdaBps = qis.lambdaBpsAt(epoch);
+    }
+
+    /// @notice `queryInferenceGross` over `previewEpochClose`: node
+    ///         `identityId`'s gross reward from the pool of `epoch`, frozen
+    ///         once it has closed and previewed while it is open. For an epoch
+    ///         that has ended, what `queryInferenceGross` reads once it closes.
+    function previewQueryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256) {
+        (uint96 pool, uint16 lambdaBps) = previewEpochClose(epoch);
+        return _gross(queryInferenceStorage, epoch, identityId, pool, lambdaBps);
     }
 
     /// @notice The EIP-712 domain separator of requests and receipts: name
@@ -761,6 +794,29 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     ///      in it. Every source of an epoch's money is read here, and only here.
     function _incoming(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint96 wallet, uint96 conviction) {
         return qis.dueIn(epoch);
+    }
+
+    /// @dev Node `identityId`'s pool × QIF in `epoch`, for a pool `pool` and λ
+    ///      `lambda`, over the epoch's totals; see `queryInferenceGross`.
+    function _gross(
+        QueryInferenceStorage qis,
+        uint256 epoch,
+        uint72 identityId,
+        uint256 pool,
+        uint256 lambda
+    ) internal view returns (uint256 gross) {
+        if (pool == 0) return 0;
+        QueryInferenceStorage.NodeEpoch memory n = qis.getNodeEpoch(identityId, epoch);
+        // A node's score never exceeds its value, so no value means no score.
+        if (n.r == 0) return 0;
+        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
+
+        gross = Math.mulDiv(pool * (_BPS - lambda), n.r, _BPS * uint256(t.sumR));
+        if (lambda != 0) {
+            gross += t.sumScore == 0
+                ? Math.mulDiv(pool * lambda, n.r, _BPS * uint256(t.sumR))
+                : Math.mulDiv(pool * lambda, n.score, _BPS * uint256(t.sumScore));
+        }
     }
 
     /// @dev The funded cap of a bucket of value `value` in period `s`.
