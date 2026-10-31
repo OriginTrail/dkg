@@ -3,7 +3,7 @@
 This is a reusable **DKG Source Worker handler**. Any operator can configure a
 Kafka broker/topic, an authorized DKG agent and a private Context Graph. There
 are no customer names, business ontologies, SQL tables or manufacturing rules
-in the implementation. It is an addition to DKG, not a JPB integration.
+in the implementation. Provider attribution and destination scope are operator configuration.
 
 The existing `kafka-plugin` registers/discovers stream metadata. This package
 performs the missing **consumption** step. They are separate responsibilities.
@@ -270,7 +270,7 @@ transaction before the Kafka offset commit. HTTP delivery is retried from the
 same journal, including empty polls and process restarts. A 2xx response must
 include the matching record ID and `accepted: true, status: "awaiting-workflow"`.
 That status means the backend durably retained the evidence; it does not mean
-n8n ran, a PLCA result exists, or an EPCIS event was captured.
+a downstream workflow ran, derived evidence exists, or an external event was delivered.
 
 The worker sends at most ten pending handoffs per drain, with a five-second
 request deadline and a 4 KiB response limit. It persists exponential retry delay

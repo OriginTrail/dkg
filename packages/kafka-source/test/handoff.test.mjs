@@ -17,18 +17,32 @@ afterEach(async () => {
   await Promise.all(dirs.splice(0).map(d => rm(d, { recursive: true, force: true })));
 });
 async function directory() { const d = await mkdtemp(join(tmpdir(), 'kafka-handoff-')); dirs.push(d); return d; }
-const descriptor = { name: 'KAM sample', kafkaBootstrapUrl: 'kafkas://broker.example:9094',
-  kafkaTopicName: 'measurements', dataFormat: 'JSON', providerIri: 'urn:provider:kam', clusterId: 'cluster-1' };
+const descriptor = { name: 'Example stream', kafkaBootstrapUrl: 'kafkas://broker.example:9094',
+  kafkaTopicName: 'measurements', dataFormat: 'JSON', providerIri: 'urn:provider:example', clusterId: 'cluster-1' };
 const registry = { version: 1, ual: 'did:dkg:registry:1', contextGraphId: 'catalog', descriptor,
   descriptorHash: descriptorHash(descriptor) };
-const source = enrollKafkaSource(registry, { id: 'kam-source', groupId: 'kam-demo', fromBeginning: false,
-  agentAddress: '0x' + 'a'.repeat(40), contextGraphId: 'kam-private',
-  handoff: { accountId: 'account-a', nodeId: 'kam-node', sourceRevision: 1,
+const source = enrollKafkaSource(registry, { id: 'source-a', groupId: 'consumer-group-a', fromBeginning: false,
+  agentAddress: '0x' + 'a'.repeat(40), contextGraphId: 'private-graph-a',
+  handoff: { accountId: 'account-a', nodeId: 'node-a', sourceRevision: 1,
     configurationDigest: 'd'.repeat(64), url: 'https://workflows.example/spike/pharmagenesis/source-handoffs', tokenEnv: 'TEST_HANDOFF_TOKEN' } });
 const record = { topic: 'measurements', partition: 0, offset: '9007199254740993', timestamp: '1700000000000',
   keyBase64: null, valueBase64: Buffer.from('not-json').toString('base64'), headers: { repeated: ['YQ==', 'Yg=='] }, fetchedAt: '2026-10-30T00:00:00.000Z' };
 const receipt = { name: buildAsset(source, record).name, assertion: 'sealed-1', assertionGraph: 'urn:sealed:1', reused: false };
 const ref = evidenceRef(source, record, receipt);
+test.each(['urn:provider:example', 'https://provider.example/organization/b'])('preserves configured provider attribution %s without domain metadata', providerIri => {
+  const selected = { ...descriptor, providerIri };
+  const entry = { ...registry, descriptor: selected, descriptorHash: descriptorHash(selected) };
+  const enrolled = enrollKafkaSource(entry, {
+    id: 'source-b', groupId: 'consumer-group-b', fromBeginning: false,
+    agentAddress: source.agentAddress, contextGraphId: 'private-graph-b',
+    handoff: { ...source.handoff, nodeId: 'node-b' },
+  });
+  validateHandoff(enrolled);
+  expect(evidenceRef(enrolled, record, receipt)).toMatchObject({
+    providerIri, sourceId: 'source-b', nodeId: 'node-b', contextGraphId: 'private-graph-b',
+    registry: { descriptorHash: descriptorHash(selected) },
+  });
+});
 async function journal() { const path = join(await directory(), 'journal.sqlite'); const j = new Journal(path, 'test'); journals.push(j); return { j, path }; }
 function enqueue(j, value = ref) {
   const row = j.stage(record, hash(record), receipt.name);
