@@ -1,7 +1,8 @@
 import { validateRegistryEntry, registryIriSchema } from '@origintrail-official/kafka-plugin/registry';
 
 const LOCAL_FIELDS = ['id', 'groupId', 'clusterId', 'agentAddress', 'contextGraphId', 'usernameEnv', 'passwordEnv',
-  'fromBeginning', 'maxMessages', 'maxBatchBytes', 'readTimeoutMs', 'clientId', 'maxRetries', 'mapping'];
+  'fromBeginning', 'maxMessages', 'maxBatchBytes', 'readTimeoutMs', 'clientId', 'maxRetries', 'mapping',
+  'caFileEnv', 'certFileEnv', 'keyFileEnv', 'startupTimeoutMs', 'handoff'];
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function transport(descriptor, allowPlaintext) {
@@ -38,11 +39,14 @@ export function enrollKafkaSource(value, options) {
   if (typeof clusterId !== 'string' || !clusterId.trim() || (entry.descriptor.clusterId && options.clusterId && clusterId !== options.clusterId))
     throw new Error('KAFKA_REGISTRY_CLUSTER_REQUIRED');
   const connection = transport(entry.descriptor, options.allowPlaintext === true);
-  for (const key of ['usernameEnv', 'passwordEnv']) {
+  for (const key of ['usernameEnv', 'passwordEnv', 'caFileEnv', 'certFileEnv', 'keyFileEnv']) {
     if (options[key] !== undefined && (typeof options[key] !== 'string' || !ENV_NAME.test(options[key])))
       throw new Error('KAFKA_REGISTRY_CREDENTIAL_REF_INVALID');
-    if (connection.saslMechanism && !options[key]) throw new Error('KAFKA_REGISTRY_CREDENTIAL_REFS_REQUIRED');
+    if (connection.saslMechanism && ['usernameEnv', 'passwordEnv'].includes(key) && !options[key]) throw new Error('KAFKA_REGISTRY_CREDENTIAL_REFS_REQUIRED');
   }
+  if (!!options.certFileEnv !== !!options.keyFileEnv ||
+    ((!connection.ssl) && (options.caFileEnv || options.certFileEnv || options.keyFileEnv)))
+    throw new Error('KAFKA_REGISTRY_TLS_REFS_INVALID');
   return { ...Object.fromEntries(LOCAL_FIELDS.filter(key => options[key] !== undefined).map(key => [key, options[key]])),
     kind: 'kafka', clusterId, ...connection, registryRef: entry };
 }

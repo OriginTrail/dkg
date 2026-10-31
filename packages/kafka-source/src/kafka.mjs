@@ -1,4 +1,5 @@
 import { Kafka, logLevel } from 'kafkajs';
+import { kafkaTls } from './tls.mjs';
 
 function encode(value) { return value === null ? null : Buffer.from(value).toString('base64'); }
 function envelope(topic, partition, message) {
@@ -17,18 +18,26 @@ export async function readKafka(source, journal) {
   if (source.saslMechanism && (!username || !password)) throw new Error('KAFKA_CREDENTIALS_REQUIRED');
   if (source.saslMechanism && source.ssl === false) throw new Error('KAFKA_SASL_REQUIRES_TLS');
   const kafka = new Kafka({ clientId: source.clientId ?? 'dkg-source-kafka', brokers: source.brokers,
-    ssl: source.ssl ?? true,
+    ssl: await kafkaTls(source),
     ...(source.saslMechanism ? { sasl: { mechanism: source.saslMechanism, username, password } } : {}),
     logLevel: logLevel.NOTHING, connectionTimeout: 5000, requestTimeout: 15000,
     retry: { retries: 1 } });
+  const startupMs = source.startupTimeoutMs ?? 60000;
+  if (!Number.isSafeInteger(startupMs) || startupMs < 1 || startupMs > 60000) throw new Error('KAFKA_STARTUP_LIMIT');
+  let startupTimer, startupExpired = false;
+  const deadline = new Promise((_, reject) => {
+    startupTimer = setTimeout(() => { startupExpired = true; reject(new Error('KAFKA_STARTUP_TIMEOUT')); }, startupMs);
+  });
+  void deadline.catch(() => {});
+  const startup = operation => Promise.race([operation, deadline]);
   const admin = kafka.admin();
   const starts = new Map();
   // Resolve a new group's tail once, durably, before opening its first poll.
   // There is deliberately no broker commit until DKG readback succeeds.
   try {
-    await admin.connect();
-    const bounds = await admin.fetchTopicOffsets(source.topic);
-    const groups = await admin.fetchOffsets({ groupId: source.groupId, topics: [source.topic] });
+    await startup(admin.connect());
+    const bounds = await startup(admin.fetchTopicOffsets(source.topic));
+    const groups = await startup(admin.fetchOffsets({ groupId: source.groupId, topics: [source.topic] }));
     const committed = new Map((groups.find(group => group.topic === source.topic)?.partitions ?? [])
       .map(item => [item.partition, item.offset]));
     for (const item of bounds) {
@@ -41,6 +50,7 @@ export async function readKafka(source, journal) {
       starts.set(item.partition, offset);
     }
   } catch (error) {
+    clearTimeout(startupTimer);
     throw new Error(/^KAFKA_[A-Z_]+$/.test(error.message) ? error.message : 'KAFKA_READ_FAILED');
   } finally { await admin.disconnect().catch(() => {}); }
   const consumer = kafka.consumer({ groupId: source.groupId, allowAutoTopicCreation: false, autoOffsetReset: false,
@@ -48,7 +58,7 @@ export async function readKafka(source, journal) {
     sessionTimeout: 60000, maxBytesPerPartition: 1024 * 1024 });
   // An unpatched KafkaJS ignores unknown options. Refuse that transport rather
   // than silently reverting to the library's reset-and-commit recovery path.
-  if (consumer.autoOffsetReset !== false) throw new Error('KAFKA_OFFSET_RESET_GUARD_REQUIRED');
+  if (consumer.autoOffsetReset !== false) { clearTimeout(startupTimer); throw new Error('KAFKA_OFFSET_RESET_GUARD_REQUIRED'); }
   let release;
   const held = new Promise(resolve => { release = resolve; });
   let finish, reject, selected = false, active;
@@ -63,7 +73,7 @@ export async function readKafka(source, journal) {
   };
   let target;
   const offJoin = consumer.on(consumer.events.GROUP_JOIN, ({ payload }) => {
-    if (selected) { active = undefined; return; }
+    if (startupExpired || selected) { active = undefined; return; }
     const assigned = payload.memberAssignment[source.topic] ?? [];
     if (assigned.some(partition => !starts.has(partition))) {
       reject(new Error('KAFKA_ASSIGNMENT_CHANGED'));
@@ -84,11 +94,11 @@ export async function readKafka(source, journal) {
   });
   let timer;
   try {
-    await consumer.connect();
-    await consumer.subscribe({ topics: [source.topic], fromBeginning: source.fromBeginning ?? false });
-    await consumer.run({ autoCommit: false, eachBatchAutoResolve: false, partitionsConsumedConcurrently: 1,
+    await startup(consumer.connect());
+    await startup(consumer.subscribe({ topics: [source.topic], fromBeginning: source.fromBeginning ?? false }));
+    await startup(consumer.run({ autoCommit: false, eachBatchAutoResolve: false, partitionsConsumedConcurrently: 1,
       eachBatch: async ({ batch, heartbeat, resolveOffset, isStale, isRunning }) => {
-        if (selected || batch.partition !== target || isStale() || !isRunning()) return;
+        if (startupExpired || selected || batch.partition !== target || isStale() || !isRunning()) return;
         selected = true;
         const records = [];
         let bytes = 0;
@@ -109,7 +119,8 @@ export async function readKafka(source, journal) {
         const pulse = setInterval(() => { void heartbeat().catch(() => { active = undefined; }); }, 1500);
         try { await held; } finally { clearInterval(pulse); }
       },
-    });
+    }));
+    clearTimeout(startupTimer);
     // run() completes group join/startup before the idle-fetch budget begins.
     // A queued batch may already have resolved ready during startup.
     if (!selected) timer = setTimeout(() => finish([]), source.readTimeoutMs ?? 10000);
@@ -126,7 +137,7 @@ export async function readKafka(source, journal) {
       async close() { clearTimeout(timer); off(); offJoin(); await close(); },
     };
   } catch (error) {
-    clearTimeout(timer); off(); offJoin(); await close().catch(() => {});
+    clearTimeout(startupTimer); clearTimeout(timer); off(); offJoin(); await close().catch(() => {});
     // Never include broker errors that might echo credentials or payloads.
     throw new Error(/^KAFKA_[A-Z_]+$/.test(error.message) ? error.message : 'KAFKA_READ_FAILED');
   }

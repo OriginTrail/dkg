@@ -3,7 +3,7 @@
 This is a reusable **DKG Source Worker handler**. Any operator can configure a
 Kafka broker/topic, an authorized DKG agent and a private Context Graph. There
 are no customer names, business ontologies, SQL tables or manufacturing rules
-in the implementation. It is an addition to DKG, not a JPB integration.
+in the implementation. Provider attribution and destination scope are operator configuration.
 
 The existing `kafka-plugin` registers/discovers stream metadata. This package
 performs the missing **consumption** step. They are separate responsibilities.
@@ -252,3 +252,39 @@ separate design and benchmarking. Node must satisfy the DKG engine range and
 provide `node:sqlite` (tested on Node 24/25).
 
 Kafka offset/session behavior follows the [KafkaJS consumer API](https://kafka.js.org/docs/consuming).
+
+## Optional nOS evidence handoff
+
+The nOS handoff is opt-in and requires an enrolled registry snapshot with a
+provider IRI. Raw-envelope ingestion must have no `mapping` entries; malformed
+JSON and tombstones must still be preserved. Add an operator-local `handoff`
+object to the source, containing `accountId`, `nodeId`, `sourceRevision`,
+`configurationDigest`, `url` and `tokenEnv`. The digest must match the source
+revision saved in nOS. The URL must be HTTPS (HTTP is allowed only on literal
+loopback) and end exactly in `/spike/pharmagenesis/source-handoffs`. The environment
+reference identifies a separate source-scoped service bearer, never a browser or
+n8n callback token. Enrollment does not create that credential or grant.
+
+Receipt verification and a reference-only outbox entry commit in one SQLite
+transaction before the Kafka offset commit. HTTP delivery is retried from the
+same journal, including empty polls and process restarts. A 2xx response must
+include the matching record ID and `accepted: true, status: "awaiting-workflow"`.
+That status means the backend durably retained the evidence; it does not mean
+a downstream workflow ran, derived evidence exists, or an external event was delivered.
+
+The worker sends at most ten pending handoffs per drain, with a five-second
+request deadline and a 4 KiB response limit. It persists exponential retry delay
+(capped at 60 seconds) and honors a longer server Retry-After. Authentication,
+configuration and identity-conflict responses stop automatic delivery and pause
+new reads for manual review. Error storage contains codes only. Pending handoffs
+pause polling at 1,000 and resume below 500; batches reserve available space.
+Accepted handoffs retain deduplication identity in the journal. There is no
+automatic retention, credential replacement, offset reset or unlock operation.
+
+TLS can use `caFileEnv`, `certFileEnv`, and `keyFileEnv`: names of environment
+variables containing absolute PEM-file paths. Certificate/key references must
+be paired; key files must be owner-only. Files are bounded to 64 KiB and opened
+without following a final symlink. Certificate verification remains enabled.
+`startupTimeoutMs` defaults to 60,000 and bounds connection/group startup
+separately from the existing idle-fetch budget. These additions do not change
+legacy source asset identity or enable any services.
