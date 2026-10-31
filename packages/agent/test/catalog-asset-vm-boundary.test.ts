@@ -22,7 +22,7 @@ async function fixture(version = '1') {
   const seal = await authorSealV1(1n, version);
   const asset = { assertionCoordinate: 'revision' as AssertionCoordinateV1, seal, projectionBytes: new Uint8Array() };
   const check = (required = false) => assertCatalogAssetVmBoundaryV1(store, scope, asset, required);
-  const confirmed = async (changes: Record<string, unknown> = {}) => {
+  const confirmed = async (changes: Record<string, unknown> = {}, status: 'confirmed' | 'tentative' = 'confirmed') => {
     const assertionVersion = String(changes.assertionVersion ?? version);
     const metadata = generateGraphKnowledgeAssetMetadata({ contextGraphId: CONTEXT_GRAPH_ID,
       ual: seal.kaUal, merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
@@ -31,9 +31,9 @@ async function fixture(version = '1') {
       publicTripleCount: Number(seal.publicTripleCount), privateTripleCount: 0,
       assertionGraph: knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
         createGraphKnowledgeAssetScope(seal.kaUal, assertionVersion)), ...changes,
-    }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+    }, status === 'confirmed' ? { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
       batchId: BigInt(seal.reservedKaId), materializedVersion: { blockNumber: 124, txIndex: 0 },
-    } } });
+    } } } : { status: 'tentative' });
     await store.insert(metadata);
   };
   return { store, asset, check, confirmed };
@@ -42,6 +42,12 @@ async function fixture(version = '1') {
 describe('catalog VM content boundary', () => {
   it('permits an unpublished inventory draft, but absence cannot authorize a confirmed same-version replacement', async () => {
     const f = await fixture();
+    await expect(f.check()).resolves.toBeUndefined();
+    await expect(f.check(true)).rejects.toMatchObject({ kind: 'version_conflict' });
+  });
+
+  it('permits valid tentative metadata for a draft without treating it as confirmation', async () => {
+    const f = await fixture(); await f.confirmed({}, 'tentative');
     await expect(f.check()).resolves.toBeUndefined();
     await expect(f.check(true)).rejects.toMatchObject({ kind: 'version_conflict' });
   });
