@@ -138,7 +138,7 @@ describe('bound share replay after a confirmed update of a newer version', () =>
     expect(await graphContent(agent, vm)).toEqual(content);
   }, 60_000);
 
-  it('records the admitted version\'s finalized placement repair through the real ownership transfer before the job succeeds', async () => {
+  it('records the admitted version\'s repair before job success without advertising it over newer confirmed VM', async () => {
     const placement: PlacementAgentV1 = await startPlacementAgentV1({ name: 'superseded-private', beforeStart: configureQueue });
     const { agent } = placement;
     await agent.whenRfc64CatalogResponsibilitiesIdleV1(); await agent.whenRfc64CatalogSupervisorsIdleV1();
@@ -147,15 +147,15 @@ describe('bound share replay after a confirmed update of a newer version', () =>
     expect(placement.markers()).toHaveLength(0);
     expect(await (agent.publisher as any).promoteOwnershipReader(OWNER)).toMatchObject({ jobId: job.jobId });
     agent.startRfc64SwmCatalogProjectionSupervisorV1(createOperationContext('share'));
-    // Park the placement inside its repair, so the durable marker is observable after the job ends.
-    const gate = placement.holdPlacements();
     const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1');
     const outcome = await replay(agent, job.jobId);
     expect(transfer).toHaveBeenCalledOnce();
     expect(transfer.mock.calls[0]![0]).toMatchObject({ shareOperationId: binding.intent.operationId,
       seal: { kaUal: seal.kaUal, assertionVersion: seal.assertionVersion } });
     await expect(transfer.mock.results[0]!.value).resolves.toBe('owned');
-    await gate.entered();
+    await untilV1(() => placement.warnings().some(line => line.includes('"kind":"version_conflict"')),
+      'superseded placement refused');
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     // The durable private repair obligation for the admitted version is recorded first.
     expect(placement.markers()).toEqual([expect.objectContaining({ assertionCoordinate: NAME, kaUal: seal.kaUal,
       assertionVersion: seal.assertionVersion, sealDigest: binding.sealDigest })]);
@@ -164,11 +164,11 @@ describe('bound share replay after a confirmed update of a newer version', () =>
     expect(outcome.outcome).toBe('succeeded');
     expect(await agent.promoteQueue.getStatus(job.jobId)).toMatchObject({ state: 'succeeded', request: { recoveryBinding: binding } });
     expect(await (agent.publisher as any).promoteOwnershipReader(OWNER)).toBeFalsy();
-    // The recorded obligation completes: the admitted version is placed and its marker retired.
-    gate.release();
-    await untilV1(() => placement.markers().length === 0, 'admitted placement retired');
-    expect(placement.events()).toContain(`marker-retired:${NAME}`);
-    expect(placement.catalogRows()).toBe('1');
+    // Newer confirmed VM prevents re-advertising the superseded admitted version.
+    // Its durable obligation stays owed rather than claiming unproved placement.
+    expect(placement.warnings()).toContainEqual(expect.stringContaining('"kind":"version_conflict"'));
+    expect(placement.events()).not.toContain(`marker-retired:${NAME}`);
+    expect(placement.catalogRows()).toBeNull();
     expect(await graphContent(agent, vm)).toEqual(content);
   }, 60_000);
 });
