@@ -4,7 +4,7 @@ import {
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   type AuthorCatalogScopeV1,
 } from '@origintrail-official/dkg-core';
-import { readConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
+import { readGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
@@ -24,7 +24,7 @@ export async function assertCatalogAssetVmBoundaryV1(
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfRfc64AbortedV1(signal);
-  const observed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
+  const observed = await readGraphKnowledgeAssetMetadataEnvelope(store, {
     contextGraphId: scope.contextGraphId, ual: asset.seal.kaUal,
   });
   throwIfRfc64AbortedV1(signal);
@@ -33,23 +33,31 @@ export async function assertCatalogAssetVmBoundaryV1(
   if (observed.state === 'invalid') {
     throw new CatalogRepairIntegrityErrorV1('RFC-64 catalog revision has ambiguous VM metadata');
   }
-  if (observed.state === 'absent') {
+  if (observed.state === 'absent' || observed.state === 'tentative') {
     if (requireConfirmed) throw conflict();
     return;
   }
-  const { envelope } = observed, { seal } = asset;
-  const vmVersion = BigInt(envelope.assertionVersion), desiredVersion = BigInt(seal.assertionVersion);
+  const vmVersion = BigInt(observed.envelope.assertionVersion);
+  const desiredVersion = BigInt(asset.seal.assertionVersion);
   if (vmVersion < desiredVersion && !requireConfirmed) return;
-  if (vmVersion !== desiredVersion
-    || envelope.batchId !== BigInt(seal.reservedKaId)
-    || envelope.subGraphName !== undefined
-    || envelope.assertionGraph !== knowledgeAssetLayerGraphUri(scope.contextGraphId,
+  if (!matchesCatalogConfirmedEnvelopeV1(scope.contextGraphId, asset.seal, observed.envelope)) throw conflict();
+}
+
+/** Exact content identity shared by mutation authorization and durable VM projection loading. */
+export function matchesCatalogConfirmedEnvelopeV1(
+  contextGraphId: AuthorCatalogScopeV1['contextGraphId'],
+  seal: Rfc64CatalogSuccessorAssetInputV1['seal'],
+  envelope: Readonly<ConfirmedGraphKnowledgeAssetMetadataEnvelope>,
+): boolean {
+  return envelope.assertionVersion === seal.assertionVersion
+    && envelope.batchId === BigInt(seal.reservedKaId)
+    && envelope.subGraphName === undefined
+    && envelope.assertionGraph === knowledgeAssetLayerGraphUri(contextGraphId,
       MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion))
-    || ethers.hexlify(envelope.merkleRoot) !== seal.assertionMerkleRoot
-    || envelope.publicTripleCount !== Number(seal.publicTripleCount)
-    || envelope.privateTripleCount !== Number(seal.privateTripleCount)
-    || (envelope.privateMerkleRoot === undefined ? null : ethers.hexlify(envelope.privateMerkleRoot)) !== seal.privateMerkleRoot
-  ) throw conflict();
+    && ethers.hexlify(envelope.merkleRoot) === seal.assertionMerkleRoot
+    && envelope.publicTripleCount === Number(seal.publicTripleCount)
+    && envelope.privateTripleCount === Number(seal.privateTripleCount)
+    && (envelope.privateMerkleRoot === undefined ? null : ethers.hexlify(envelope.privateMerkleRoot)) === seal.privateMerkleRoot;
 }
 
 export async function assertCatalogTargetRevisionsV1(

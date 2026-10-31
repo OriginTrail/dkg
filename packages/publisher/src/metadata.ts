@@ -1,6 +1,6 @@
 import { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES } from './graph-knowledge-asset-controls.js';
-import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, rdfLiteralLexicalValue,
-  type ConfirmedGraphKnowledgeAssetMetadataRead } from './graph-metadata-envelope.js';
+import { rdfLiteralLexicalValue } from './graph-metadata-envelope.js';
+export { readConfirmedGraphKnowledgeAssetMetadataEnvelope, readGraphKnowledgeAssetMetadataEnvelope } from './graph-metadata-reader.js';
 export { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   parseGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
   type ConfirmedGraphKnowledgeAssetMetadataRead, type GraphKnowledgeAssetMetadataRead } from './graph-metadata-envelope.js';
@@ -440,45 +440,6 @@ function canonicalMetadataObject(predicate: string, value: string): string {
     return `literal:${literal.replace(/^0x/i, '').toLowerCase()}`;
   }
   return `literal:${literal}`;
-}
-
-async function readGraphKnowledgeAssetMetadataRows(
-  store: TripleStore,
-  contextGraphId: string,
-  ual: string,
-): Promise<ReadonlyArray<Pick<Quad, 'predicate' | 'object'>>> {
-  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  assertSafeGraphIriForSparql(metaGraph);
-  assertSafeGraphIriForSparql(ual);
-  const result = await store.query(
-    `SELECT ?predicate ?object WHERE {
-      GRAPH <${metaGraph}> { <${ual}> ?predicate ?object }
-    }`,
-  );
-  if (result.type !== 'bindings') {
-    throw new Error('Graph-scoped metadata SELECT expected a bindings result');
-  }
-  if (result.bindings.some((row) =>
-    row['predicate'] === undefined || row['object'] === undefined)) {
-    throw new Error('Graph-scoped metadata SELECT returned an incomplete binding');
-  }
-  return result.bindings.map((row) => ({
-    predicate: row['predicate']!,
-    object: row['object']!,
-  }));
-}
-
-/**
- * Read the immutable subset needed to recognize an exact, already-confirmed
- * graph-scoped Verifiable Memory assertion after its mutable workspace head has been lost.
- * Structural drift is reported separately from absence; store failures throw.
- */
-export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
-  store: TripleStore,
-  input: { contextGraphId: string; ual: string },
-): Promise<ConfirmedGraphKnowledgeAssetMetadataRead> {
-  const rows = await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual);
-  return parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input);
 }
 
 /**

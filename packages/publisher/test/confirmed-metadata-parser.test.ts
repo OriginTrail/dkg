@@ -9,7 +9,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   parseGraphKnowledgeAssetMetadataEnvelope,
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope, readGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/metadata.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -37,6 +37,8 @@ async function compareWithReader(rows: readonly Pick<Quad, 'predicate' | 'object
   expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input)).toEqual(parsed);
   expect(query).toHaveBeenCalledOnce();
   expect(query.mock.calls[0]?.length).toBe(1);
+  expect(await readGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input))
+    .toEqual(parseGraphKnowledgeAssetMetadataEnvelope(rows, input));
   return parsed;
 }
 
@@ -92,11 +94,14 @@ describe('confirmed graph metadata parser', () => {
   });
 });
 
-it('preserves tentative envelopes without requiring chain provenance or upgrading their status', () => {
+it('preserves tentative envelopes without requiring chain provenance or upgrading their status', async () => {
   const rows = fixture().filter(q => ![`${DKG}batchId`, `${DKG}transactionHash`].includes(q.predicate))
     .map(q => q.predicate === `${DKG}status` ? { ...q, object: '"tentative"' } : q);
   expect(parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input)).toEqual({ state: 'invalid' });
   expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input)).toMatchObject({ state: 'tentative', envelope: { assertionVersion: '3' } });
+  const query = vi.fn(async () => ({ type: 'bindings' as const, bindings: rows }));
+  await expect(readGraphKnowledgeAssetMetadataEnvelope({ query } as unknown as TripleStore, input))
+    .resolves.toMatchObject({ state: 'tentative', envelope: { assertionVersion: '3' } });
   const corrupt = rows.map(q => q.predicate === `${DKG}assertionGraph` ? { ...q, object: 'urn:wrong' } : q);
   expect(parseGraphKnowledgeAssetMetadataEnvelope(corrupt, input)).toEqual({ state: 'invalid' });
   expect(parseGraphKnowledgeAssetMetadataEnvelope([...rows, { ...rows[0]!, predicate: `${DKG}status`, object: '"confirmed"' }], input)).toEqual({ state: 'invalid' });

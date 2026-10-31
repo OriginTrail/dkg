@@ -42,33 +42,37 @@ const SCOPE = Object.freeze({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRA
   subGraphName: null, authorAddress: AUTHOR, era: '0', bucketCount: '1',
 }) as AuthorCatalogScopeV1;
 
-async function confirmedRevision(agent: DKGAgent): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
+async function confirmedRevision(agent: DKGAgent, metadataState: 'confirmed' | 'tentative' | 'absent' = 'confirmed'): Promise<Rfc64PublicCatalogSuccessorAssetInputV1> {
   const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
     predicate: 'https://schema.org/description', object: '"Confirmed revised content"', graph: '' }];
   const seal = await authorSealV1(1n, '1', quads);
   const graph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
     createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion));
-  await agent.store.insert([
+  if (metadataState !== 'absent') await agent.store.insert([
     ...quads.map(quad => ({ ...quad, graph })),
     ...generateGraphKnowledgeAssetMetadata({ contextGraphId: CONTEXT_GRAPH_ID,
       ual: seal.kaUal, merkleRoot: ethers.getBytes(seal.assertionMerkleRoot),
       publisherPeerId: 'confirmed-fixture', accessPolicy: 'public', allowedPeers: [],
       timestamp: new Date(seal.assertionFinalizedAt), assertionVersion: '1', authorAddress: AUTHOR,
       publicTripleCount: quads.length, privateTripleCount: 0, assertionGraph: graph,
-    }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+    }, metadataState === 'confirmed' ? { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
       batchId: BigInt(seal.reservedKaId), materializedVersion: { blockNumber: 124, txIndex: 0 },
-    } } }),
+    } } } : { status: 'tentative' }),
   ]);
   return { assertionCoordinate: 'repair-revision' as AssertionCoordinateV1, seal,
     projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(quads) };
 }
 
-function upsert(agent: DKGAgent, asset: Awaited<ReturnType<typeof confirmedRevision>>) {
-  return agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({ scope: SCOPE, asset,
-    author: { address: AUTHOR, signMessage: bytes => AUTHOR_WALLET.signMessage(bytes) },
+function mutationParams() {
+  return { scope: SCOPE,
+    author: { address: AUTHOR, signMessage: (bytes: Uint8Array) => AUTHOR_WALLET.signMessage(bytes) },
     deployment: NATIVE_DEPLOYMENT, peers: [], catalogIssuerDelegationEffectiveAt: '0' as TimestampMsV1,
     catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
-  });
+  };
+}
+
+function upsert(agent: DKGAgent, asset: Rfc64PublicCatalogSuccessorAssetInputV1) {
+  return agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({ ...mutationParams(), asset });
 }
 
 async function author(persisted: { dataDir?: string; storePath?: string } = {}) {
@@ -147,6 +151,17 @@ async function catalog(agent: DKGAgent) {
 }
 
 describe('catalog revisions of an unpublished assertion number', () => {
+  it('preserves both rows when upserts arrive out of KA order', async () => {
+    const { agent } = await author();
+    for (const kaNumber of [2n, 1n]) {
+      await upsert(agent, { assertionCoordinate: `repair-${kaNumber}` as AssertionCoordinateV1,
+        seal: await authorSealV1(kaNumber),
+        projectionBytes: encodeCanonicalCgSharedPublicRootProjectionV1(PROJECTION_QUADS) });
+    }
+    expect((await catalog(agent)).assets.map(asset => asset.assertionCoordinate))
+      .toEqual(['repair-1', 'repair-2']);
+  });
+
   it('projects the revised share through valid successors and retires its exact confirmation repair', async () => {
     const { agent, project } = await author();
     const deliveries = vi.spyOn(agent, 'deliverRfc64CatalogHeadV1');
@@ -229,6 +244,36 @@ describe('catalog revisions of an unpublished assertion number', () => {
     await expect(upsert(agent, initial)).rejects.toMatchObject({ kind: 'version_conflict' });
     await expect(upsert(agent, { ...revised, assertionCoordinate: 'another-coordinate' as AssertionCoordinateV1 }))
       .rejects.toMatchObject({ kind: 'version_conflict' });
+    await expect(upsert(agent, { ...revised, seal: { ...revised.seal,
+      assertionVersion: '3' as typeof revised.seal.assertionVersion } }))
+      .rejects.toMatchObject({ kind: 'version_conflict' });
+    expect((await catalog(agent)).assets[0]!.seal).toEqual(revised.seal);
+  });
+
+  it('allows authenticated draft projection with valid tentative metadata', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first);
+    await confirmedRevision(agent, 'tentative');
+    await expect(project()).resolves.toMatchObject({ status: 'advanced', targetAssetCount: 1 });
+    expect((await catalog(agent)).assets[0]!.seal.assertionMerkleRoot)
+      .toBe(ethers.hexlify(first.seal.merkleRoot));
+  });
+
+  it('requires matching VM proof for confirmed exact-set replacement before withdrawing the old draft', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first);
+    await project();
+    const before = await catalog(agent);
+    const revised = await confirmedRevision(agent, 'absent');
+    const replace = () => agent.reconcileRfc64PublicRootCatalogExactSetV1({
+      ...mutationParams(), assets: [revised],
+    });
+    await expect(replace()).rejects.toMatchObject({ kind: 'version_conflict' });
+    expect((await catalog(agent)).current).toEqual(before.current);
+    await confirmedRevision(agent);
+    await expect(replace()).resolves.toMatchObject({ status: 'advanced', successorsApplied: 2 });
     expect((await catalog(agent)).assets[0]!.seal).toEqual(revised.seal);
   });
 
