@@ -31,14 +31,14 @@ import { readVerifiedRfc64CatalogMutationStateV1 } from '../src/internal/catalog
 import type { Rfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
 import { Rfc64PublicCatalogNativeReceiverV1 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
-import { generateGraphKnowledgeAssetMetadata, withMaterializationLock } from '@origintrail-official/dkg-publisher';
+import { generateGraphKnowledgeAssetMetadata, readGraphKnowledgeAssetMetadataEnvelope, withMaterializationLock } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { RFC64_PUBLIC_CATALOG_BUNDLE_FETCH_RESPONSE_MAX_BYTES_V1 } from '../src/rfc64/public-catalog-native-transport-v1.js';
 import { ethers } from 'ethers';
 import {
   AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, PROJECTION_QUADS, NETWORK_ID, NATIVE_DEPLOYMENT,
   authorSealV1, bootstrapConfigV1, catalogScopeDigestV1,
-  agents, tempDirs, seedDurableWorkspaceAssetV1, startRepairAgentV1,
+  agents, tempDirs, seedDurableWorkspaceAssetV1, startRepairAgentV1, publishInitialCatalogAssetV1,
 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 type ResolveLaneV1 = OmitThisParameter<Rfc64SwmCatalogProjectionMethods['resolveRfc64CatalogAuthoringLaneDecisionV1']>;
@@ -382,6 +382,66 @@ describe('catalog revisions of an unpublished assertion number', () => {
     expect(writer).toBeDefined(); await writer;
     expect(writerEntered).toBe(true);
     // The VM writer linearizes after the catalog. Its ordinary confirmation repair restores A.
+    await agent.observeRfc64ConfirmedVmV1({ contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: first.assertionCoordinate, shareOperationId: first.shareOperationId, seal: first.seal,
+      assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate),
+      ctx: createOperationContext('publish'), publicationLabel: 'queued publish' });
+    await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    expect((await catalog(agent)).assets[0]!.seal).toEqual(original.seal);
+  });
+
+  it('serializes the production initial publisher through the real catalog commit', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first); await project();
+    const original = (await catalog(agent)).assets[0]!;
+    await agent.store.deleteByPattern({ graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate) });
+    const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
+      predicate: 'https://schema.org/description', object: '"Draft B"', graph: '' }];
+    const draft = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n, 'public', {
+      quads, seal: await authorSealV1(1n, '1', quads), shareOperationId: 'initial-publish-race-draft',
+    });
+    await record(agent, draft);
+    let writerEntered = false, calls = 0;
+    const insert = agent.store.insert.bind(agent.store);
+    vi.spyOn(agent.store, 'insert').mockImplementation(async rows => {
+      if (rows.some(q => q.subject === original.seal.kaUal && q.graph === contextGraphMetaUri(CONTEXT_GRAPH_ID)))
+        writerEntered = true;
+      return insert(rows);
+    });
+    let confirmed!: () => void;
+    const chainConfirmed = new Promise<void>(resolve => { confirmed = resolve; });
+    let publication: ReturnType<typeof publishInitialCatalogAssetV1> | undefined;
+    const produce = agent.publishAuthorCatalogExactSetSuccessorV1.bind(agent);
+    vi.spyOn(agent, 'publishAuthorCatalogExactSetSuccessorV1').mockImplementation(async input => {
+      const result = await produce(input);
+      if (++calls === 2) {
+        publication = publishInitialCatalogAssetV1(agent, original.seal, PROJECTION_QUADS, confirmed);
+        await Promise.race([chainConfirmed, publication.then(() => { throw new Error('publisher returned before chain confirmation'); })]);
+        await new Promise<void>(resolve => setImmediate(resolve));
+        expect(writerEntered).toBe(false);
+      }
+      return result;
+    });
+    const internal = internalsOf(agent), apply = internal.applyRfc64CatalogSuccessorV1.bind(agent);
+    vi.spyOn(internal, 'applyRfc64CatalogSuccessorV1').mockImplementation(async (...args) => {
+      const result = await apply(...args);
+      if (calls === 2) expect(writerEntered).toBe(false);
+      return result;
+    });
+    try { await project(); } finally { if (publication) await publication; }
+    expect(publication).toBeDefined();
+    await expect(publication).resolves.toMatchObject({ status: 'confirmed', ual: original.seal.kaUal });
+    expect(writerEntered).toBe(true);
+    expect(await readGraphKnowledgeAssetMetadataEnvelope(agent.store, {
+      contextGraphId: CONTEXT_GRAPH_ID, ual: original.seal.kaUal,
+    })).toMatchObject({ state: 'confirmed', envelope: {
+      assertionVersion: original.seal.assertionVersion, batchId: BigInt(original.seal.reservedKaId),
+      merkleRoot: ethers.getBytes(original.seal.assertionMerkleRoot), publicTripleCount: 2, privateTripleCount: 0,
+      assertionGraph: knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(original.seal.kaUal, original.seal.assertionVersion)),
+    } });
     await agent.observeRfc64ConfirmedVmV1({ contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: first.assertionCoordinate, shareOperationId: first.shareOperationId, seal: first.seal,
       assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate),
