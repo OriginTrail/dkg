@@ -8,6 +8,8 @@ export const RFC64_UNIT_TESTS = [
   // #3134 — a full author catalog refuses a new asset once, visibly, and is not retried on a timer.
   "test/rfc64-author-catalog-capacity.test.ts",
   "test/rfc64-full-catalog-parking.test.ts",
+  // #3134 — a pass over thousands of parked markers does no per-marker work and yields to timers.
+  "test/finalized-private-placement-parked-backlog.test.ts",
   "test/rfc64-full-author-catalog.test.ts",
   // #3134 — an author's row leaves its SWM inventory when the node retires the asset's finalized twin.
   "test/rfc64-finalized-twin-inventory-row.integration.test.ts",

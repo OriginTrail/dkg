@@ -66,6 +66,10 @@ export function readFinalizedPlacementAuthorityV1(read: () => FinalizedPlacement
   try { return read(); }
   catch (error) { return { status: 'unavailable', error: error instanceof Error ? error : new Error(String(error)) }; }
 }
+/**
+ * Lane resets compare this, and a marker keeps its placement decision while it stays the same
+ * (GH#3134), so it names everything `resolveFinalizedPlacementDecisionV1` reads of the lane.
+ */
 export function finalizedPlacementAuthorityRevisionV1(authority: FinalizedPlacementAuthorityV1): CatalogRepairRevisionHintV1 | null | undefined {
   if (authority.status === 'unavailable') return undefined;
   if (authority.status === 'inactive') return null;
