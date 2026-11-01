@@ -11,6 +11,9 @@ import { sameRfc64SuccessorAssetV1 } from '../rfc64/public-catalog-successor-ass
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
 import { CatalogRepairConditionErrorV1, CatalogRepairIntegrityErrorV1 } from '../rfc64/catalog-repair-diagnostics-v1.js';
 import { throwIfRfc64AbortedV1 } from '../rfc64/abort-v1.js';
+import { mapWithConcurrencyDrained } from '../map-with-concurrency.js';
+
+const CATALOG_VM_PREFLIGHT_CONCURRENCY_V1 = 8;
 
 /**
  * An authenticated inventory can revise its unpublished draft number. It cannot replace
@@ -61,15 +64,14 @@ export function matchesCatalogConfirmedEnvelopeV1(
     && (envelope.privateMerkleRoot === undefined ? null : ethers.hexlify(envelope.privateMerkleRoot)) === seal.privateMerkleRoot;
 }
 
-export async function assertCatalogTargetRevisionsV1(
-  store: TripleStore,
-  scope: AuthorCatalogScopeV1,
+function revisionBoundaryChecksV1(
   current: readonly Rfc64CatalogSuccessorAssetInputV1[],
   target: readonly Rfc64CatalogSuccessorAssetInputV1[],
   source: 'confirmed' | 'inventory',
   signal?: AbortSignal,
-): Promise<void> {
+): ReadonlyArray<Readonly<{ asset: Rfc64CatalogSuccessorAssetInputV1; requireConfirmed: boolean }>> {
   const currentByKaId = new Map(current.map((asset) => [asset.seal.reservedKaId, asset]));
+  const checks: Array<Readonly<{ asset: Rfc64CatalogSuccessorAssetInputV1; requireConfirmed: boolean }>> = [];
   for (const targetAsset of target) {
     throwIfRfc64AbortedV1(signal);
     const currentAsset = currentByKaId.get(targetAsset.seal.reservedKaId);
@@ -84,9 +86,23 @@ export async function assertCatalogTargetRevisionsV1(
         `RFC-64 exact-set replacement for KA ${targetAsset.seal.reservedKaId} is not a newer assertion version on the same coordinate`,
       );
     }
-    await assertCatalogAssetVmBoundaryV1(store, scope, targetAsset,
-      source === 'confirmed' && targetVersion === currentVersion, signal);
+    checks.push({ asset: targetAsset, requireConfirmed: source === 'confirmed' && targetVersion === currentVersion });
   }
+  return checks;
+}
+
+/** Independent preliminary reads share their writers' locks and settle before preflight returns. */
+export async function assertCatalogTargetRevisionsV1(
+  store: TripleStore, scope: AuthorCatalogScopeV1,
+  current: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  target: readonly Rfc64CatalogSuccessorAssetInputV1[],
+  source: 'confirmed' | 'inventory', signal?: AbortSignal,
+): Promise<void> {
+  const checks = revisionBoundaryChecksV1(current, target, source, signal);
+  await mapWithConcurrencyDrained(checks, CATALOG_VM_PREFLIGHT_CONCURRENCY_V1,
+    ({ asset, requireConfirmed }) => withMaterializationLocks([{
+      metaGraph: contextGraphMetaUri(scope.contextGraphId), ual: asset.seal.kaUal,
+    }], () => assertCatalogAssetVmBoundaryV1(store, scope, asset, requireConfirmed, signal), { signal }));
 }
 
 /** Linearize each catalog delta with the node's existing VM writers through signing and CAS. */
@@ -103,8 +119,10 @@ export function withCatalogTransitionVmAuthorizationV1<T>(
   }], async () => {
     // A withdrawal explicitly carries its intended replacement. The same VM lock
     // remains held through the signed successor's applied-head CAS.
-    await assertCatalogTargetRevisionsV1(store, scope, currentAsset ? [currentAsset] : [],
-      targetAsset ? [targetAsset] : [], source, signal);
+    for (const { asset, requireConfirmed } of revisionBoundaryChecksV1(currentAsset ? [currentAsset] : [],
+      targetAsset ? [targetAsset] : [], source, signal)) {
+      await assertCatalogAssetVmBoundaryV1(store, scope, asset, requireConfirmed, signal);
+    }
     return work();
   }, { signal });
 }

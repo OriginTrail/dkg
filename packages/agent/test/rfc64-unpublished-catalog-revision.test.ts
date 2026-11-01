@@ -336,13 +336,70 @@ describe('catalog revisions of an unpublished assertion number', () => {
         started = true;
         writer = withMaterializationLock(contextGraphMetaUri(CONTEXT_GRAPH_ID), original.seal.kaUal,
           () => storeVmMetadata(agent, original, PROJECTION_QUADS));
-        await writer;
       }
       return result;
     });
     await expect(project()).rejects.toMatchObject({ kind: 'version_conflict' });
-    expect(writer).toBeDefined();
+    expect(writer).toBeDefined(); await writer;
     expect((await catalog(agent)).current).toEqual(before.current);
+  });
+
+  it('waits for production metadata insertion and pruning before reconciling a newer version', async () => {
+    const { agent, project } = await author();
+    const first = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n);
+    await record(agent, first); await project();
+    const original = (await catalog(agent)).assets[0]!;
+    await storeVmMetadata(agent, original, PROJECTION_QUADS);
+    const meta = contextGraphMetaUri(CONTEXT_GRAPH_ID);
+    await agent.store.deleteByPattern({ graph: meta,
+      subject: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, first.assertionCoordinate) });
+    const quads = [...PROJECTION_QUADS, { subject: 'https://example.org/alice',
+      predicate: 'https://schema.org/description', object: '"Updated content"', graph: '' }];
+    const seal = await authorSealV1(1n, '2', quads);
+    const next = await seedDurableWorkspaceAssetV1(agent, 'revision', 1n, 'public', {
+      seal, quads, shareOperationId: 'metadata-convergence-update',
+    });
+    await record(agent, next);
+    const graph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH_ID, MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion));
+    const metadata = generateGraphKnowledgeAssetMetadata({ contextGraphId: CONTEXT_GRAPH_ID,
+      ual: seal.kaUal, merkleRoot: ethers.getBytes(seal.assertionMerkleRoot), publisherPeerId: agent.peerId,
+      accessPolicy: 'public', allowedPeers: [], timestamp: new Date(seal.assertionFinalizedAt),
+      authorAddress: AUTHOR, assertionVersion: '2', publicTripleCount: quads.length, privateTripleCount: 0,
+      assertionGraph: graph }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+      batchId: BigInt(seal.reservedKaId), materializedVersion: { blockNumber: 125, txIndex: 0 },
+    } } });
+    let inserted!: () => void, release!: () => void, paused = false, settled = false;
+    const ready = new Promise<void>(resolve => { inserted = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const insert = agent.store.insert.bind(agent.store);
+    vi.spyOn(agent.store, 'insert').mockImplementation(async rows => {
+      await insert(rows);
+      if (!paused && rows.some(row => row.subject === seal.kaUal
+        && row.predicate === 'http://dkg.io/ontology/assertionVersion')) {
+        paused = true; inserted(); await gate;
+      }
+    });
+    // Narrow fixture boundary into the production metadata replacement primitive.
+    const publisher = agent.publisher as unknown as {
+      convergeKnowledgeAssetMetadataRows(metaGraph: string, subject: string, rows: readonly Quad[]): Promise<void>;
+    };
+    const writer = withMaterializationLock(meta, seal.kaUal, async () => {
+      await agent.store.insert(quads.map(row => ({ ...row, graph })));
+      await publisher.convergeKnowledgeAssetMetadataRows(meta, seal.kaUal, metadata);
+    });
+    let outcome: Promise<{ result: Awaited<ReturnType<typeof project>> } | { error: unknown }> | undefined;
+    try {
+      await Promise.race([ready, writer.then(() => { throw new Error('metadata writer did not pause'); })]);
+      expect((await readGraphKnowledgeAssetMetadataEnvelope(agent.store,
+        { contextGraphId: CONTEXT_GRAPH_ID, ual: seal.kaUal })).state).toBe('invalid');
+      outcome = project().then(result => ({ result }), error => ({ error: error as unknown }))
+        .finally(() => { settled = true; });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(settled ? await outcome : 'waiting-for-writer').toBe('waiting-for-writer');
+    } finally { release(); await writer; }
+    expect(await outcome).toMatchObject({ result: { status: 'advanced', targetAssetCount: 1 } });
+    expect((await catalog(agent)).assets[0]!.seal).toEqual(seal);
   });
 
   it('holds the VM lock from the insertion check through signing and applied-head commit', async () => {

@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
+  MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, contextGraphMetaUri,
   type AuthorCatalogScopeV1,
   type AssertionCoordinateV1,
 } from '@origintrail-official/dkg-core';
-import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { generateGraphKnowledgeAssetMetadata, withMaterializationLock } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import { assertCatalogAssetVmBoundaryV1 } from '../src/internal/catalog-asset-revision.js';
+import { assertCatalogAssetVmBoundaryV1, assertCatalogTargetRevisionsV1 } from '../src/internal/catalog-asset-revision.js';
 import { AUTHOR, CONTEXT_GRAPH_ID, NETWORK_ID, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 
 const scope = { networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID,
@@ -40,6 +40,66 @@ async function fixture(version = '1') {
 }
 
 describe('catalog VM content boundary', () => {
+  async function targets(count: number) {
+    return Promise.all(Array.from({ length: count }, async (_, index) => ({
+      assertionCoordinate: `revision-${index}` as AssertionCoordinateV1,
+      seal: await authorSealV1(BigInt(index + 1)), projectionBytes: new Uint8Array(),
+    })));
+  }
+
+  it('overlaps independent metadata reads within a fixed bound', async () => {
+    const f = await fixture(), assets = await targets(12), query = f.store.query.bind(f.store);
+    let release!: () => void, active = 0, maximum = 0, started = 0;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(f.store, 'query').mockImplementation(async (...args) => {
+      started++; active++; maximum = Math.max(maximum, active);
+      try { await gate; return await query(...args); } finally { active--; }
+    });
+    const check = assertCatalogTargetRevisionsV1(f.store, scope, [], assets, 'inventory');
+    try {
+      await vi.waitFor(() => expect(started).toBe(8));
+      expect(active).toBe(8);
+    } finally { release(); await check; }
+    expect(started).toBe(12); expect(maximum).toBe(8); expect(active).toBe(0);
+  });
+
+  it('drains admitted reads and stops scheduling after one fails', async () => {
+    const f = await fixture(), assets = await targets(12), query = f.store.query.bind(f.store);
+    const unavailable = new Error('metadata unavailable');
+    let release!: () => void, started = 0, active = 0, settled = false;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(f.store, 'query').mockImplementation(async (...args) => {
+      const index = started++; active++;
+      try { if (index === 1) throw unavailable; await gate; return await query(...args); }
+      finally { active--; }
+    });
+    const outcome = assertCatalogTargetRevisionsV1(f.store, scope, [], assets, 'inventory')
+      .then(() => undefined, error => error).finally(() => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(started).toBeGreaterThan(1));
+      expect(settled).toBe(false); expect(active).toBeGreaterThan(0);
+    } finally { release(); await outcome; }
+    expect(await outcome).toBe(unavailable); expect(started).toBeLessThan(12); expect(active).toBe(0);
+  });
+
+  it('cancels a preliminary check waiting behind a VM writer without issuing its read', async () => {
+    const f = await fixture(), controller = new AbortController();
+    let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const writer = withMaterializationLock(contextGraphMetaUri(CONTEXT_GRAPH_ID), f.asset.seal.kaUal,
+      async () => { entered(); await gate; });
+    await ready;
+    const query = vi.spyOn(f.store, 'query');
+    const outcome = assertCatalogTargetRevisionsV1(f.store, scope, [], [f.asset], 'inventory', controller.signal)
+      .then(() => undefined, error => error);
+    try {
+      controller.abort(new Error('caller stopped'));
+      expect(await outcome).toMatchObject({ name: 'AbortError' });
+      expect(query).not.toHaveBeenCalled();
+    } finally { release(); await writer; await outcome; }
+  });
+
   it('permits an unpublished inventory draft, but absence cannot authorize a confirmed same-version replacement', async () => {
     const f = await fixture();
     await expect(f.check()).resolves.toBeUndefined();
