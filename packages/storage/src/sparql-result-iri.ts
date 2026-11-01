@@ -1,16 +1,15 @@
-import { isSafeIri } from '@origintrail-official/dkg-core';
+import { isSafeResultIri } from '@origintrail-official/dkg-core';
 
 const MAX_CACHED_IRI_LENGTH = 1024;
 const MAX_CONSECUTIVE_IRI_MISSES = 16;
 const PAUSED_IRI_COMPARISON_ROWS = 128;
-const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
 
 export const MAX_CACHED_SPARQL_IRI_VARIABLES = 128;
 export type SparqlResultIriValidator = (value: string) => boolean;
 
 /** Match the established JSON/TSV result contract, including bare `scheme:` IRIs. */
 export function isSafeSparqlResultIri(value: string): boolean {
-  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
+  return isSafeResultIri(value);
 }
 
 /** One last successful value per response column role, never a growing cache. */
