@@ -5,7 +5,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { withMaterializationLocks, readGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
 import type { Rfc64CatalogTransitionV1 } from './catalog-exact-set-plan.js';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { storeLaneInflightLimit, type TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { sameRfc64SuccessorAssetV1 } from '../rfc64/public-catalog-successor-asset-v1.js';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from '../dkg-agent-rfc64-catalog.js';
@@ -99,7 +99,9 @@ export async function assertCatalogTargetRevisionsV1(
   source: 'confirmed' | 'inventory', signal?: AbortSignal,
 ): Promise<void> {
   const checks = revisionBoundaryChecksV1(current, target, source, signal);
-  await mapWithConcurrencyDrained(checks, CATALOG_VM_PREFLIGHT_CONCURRENCY_V1,
+  const concurrency = Math.min(CATALOG_VM_PREFLIGHT_CONCURRENCY_V1,
+    storeLaneInflightLimit(store) ?? CATALOG_VM_PREFLIGHT_CONCURRENCY_V1);
+  await mapWithConcurrencyDrained(checks, concurrency,
     ({ asset, requireConfirmed }) => withMaterializationLocks([{
       metaGraph: contextGraphMetaUri(scope.contextGraphId), ual: asset.seal.kaUal,
     }], () => assertCatalogAssetVmBoundaryV1(store, scope, asset, requireConfirmed, signal), { signal }));

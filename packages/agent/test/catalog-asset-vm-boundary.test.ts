@@ -5,7 +5,7 @@ import {
   type AssertionCoordinateV1,
 } from '@origintrail-official/dkg-core';
 import { generateGraphKnowledgeAssetMetadata, withMaterializationLock } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StorePriorityScheduler, withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { assertCatalogAssetVmBoundaryV1, assertCatalogTargetRevisionsV1 } from '../src/internal/catalog-asset-revision.js';
 import { AUTHOR, CONTEXT_GRAPH_ID, NETWORK_ID, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
@@ -47,20 +47,28 @@ describe('catalog VM content boundary', () => {
     })));
   }
 
-  it('overlaps independent metadata reads within a fixed bound', async () => {
+  it.each([
+    { priority: undefined, width: 8 }, { priority: 'normal', width: 6 }, { priority: 'background', width: 2 },
+  ] as const)('bounds independent reads by the $priority store lane ($width)', async ({ priority, width }) => {
     const f = await fixture(), assets = await targets(12), query = f.store.query.bind(f.store);
+    if (priority !== undefined) {
+      const scheduler = new StorePriorityScheduler({ maxConcurrent: 8, ackReservedSlots: 1,
+        healthReservedSlots: 1, normalReservedSlots: 4, backgroundReservedSlots: 2 });
+      Object.assign(f.store, { getPressureSnapshot: () => scheduler.snapshot });
+    }
     let release!: () => void, active = 0, maximum = 0, started = 0;
     const gate = new Promise<void>(resolve => { release = resolve; });
     vi.spyOn(f.store, 'query').mockImplementation(async (...args) => {
       started++; active++; maximum = Math.max(maximum, active);
       try { await gate; return await query(...args); } finally { active--; }
     });
-    const check = assertCatalogTargetRevisionsV1(f.store, scope, [], assets, 'inventory');
+    const read = () => assertCatalogTargetRevisionsV1(f.store, scope, [], assets, 'inventory');
+    const check = priority === undefined ? read() : withDefaultStoreWorkPriority(priority, read);
     try {
-      await vi.waitFor(() => expect(started).toBe(8));
-      expect(active).toBe(8);
+      await vi.waitFor(() => expect(started).toBe(width));
+      expect(active).toBe(width);
     } finally { release(); await check; }
-    expect(started).toBe(12); expect(maximum).toBe(8); expect(active).toBe(0);
+    expect(started).toBe(12); expect(maximum).toBe(width); expect(active).toBe(0);
   });
 
   it('drains admitted reads and stops scheduling after one fails', async () => {
