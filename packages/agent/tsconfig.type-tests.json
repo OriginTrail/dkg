@@ -17,6 +17,8 @@
     "src/jsonld.d.ts",
     "test/_helpers/sync-requester-fixtures.ts",
     "test/_helpers/rolling-subscription-promotion.ts",
+    "test/swm-protocol-root-ownership.test.ts",
+    "test/swm-shared-record-contracts.test.ts",
     "test/finalized-private-placement-ownership.test.ts",
     "test/publication-terminal-before-catalog-placement.test.ts",
     "test/rfc64-finalized-private-placement-repair-store-v1.test.ts",

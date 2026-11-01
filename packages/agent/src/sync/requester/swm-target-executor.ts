@@ -2,6 +2,8 @@
 
 /** Stable public/private target executor for graph-complete SWM recovery. */
 
+import { normalizeSharedMemoryFetcherContext } from './shared-memory-metadata-fetcher.js';
+
 import {
   DKG_ONTOLOGY,
   assertSafeIri,
@@ -112,16 +114,34 @@ interface PublicSwmTargetBaseV1 {
   readonly freshSnapshot?: boolean;
 }
 
-/** The only two valid public synchronization contracts. */
-export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
-  readonly mode:
-    | Readonly<{ kind: 'ordinary' }>
-    | Readonly<{
-      kind: 'selected-recovery';
-      recoveryGuard: RecoveryExecutionGuard;
+interface SelectedPublicSwmModeV1 {
+  readonly kind: 'selected-recovery';
+  readonly recoveryGuard: RecoveryExecutionGuard;
+  /** @deprecated Put metadataFetcher on the target. */
+  readonly metadataFetcher?: SharedMemoryMetadataFetcher;
+}
+
+/**
+ * The agent's lifecycle always passes a retained session. An ordinary target
+ * without one reads its metadata directly, and selected targets keep the
+ * released nested layout.
+ */
+export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & (
+  | {
+    readonly metadataFetcher: SharedMemoryMetadataFetcher;
+    readonly mode: Readonly<{ kind: 'ordinary' }> | Readonly<SelectedPublicSwmModeV1>;
+  }
+  | {
+    readonly metadataFetcher?: undefined;
+    readonly mode: Readonly<{ kind: 'ordinary' }>;
+  }
+  | {
+    readonly metadataFetcher?: undefined;
+    readonly mode: Readonly<SelectedPublicSwmModeV1 & {
       metadataFetcher: SharedMemoryMetadataFetcher;
     }>;
-}>;
+  }
+)>;
 
 export interface PrivateSwmRecoveryTargetV1 {
   readonly onRetry?: (progress: SwmRecoveryProgress) => void;
@@ -254,13 +274,13 @@ export class SwmTargetExecutorV1 {
   }
 
   async syncPublicTarget(
-    target: PublicSwmTargetV1,
+    input: PublicSwmTargetV1,
   ): Promise<SharedMemorySyncSummary> {
+    const target = normalizeSharedMemoryFetcherContext(input);
     const mode = target.mode.kind === 'selected-recovery'
       ? {
         kind: 'selected-recovery' as const,
         recoveryGuard: target.mode.recoveryGuard,
-        metadataFetcher: target.mode.metadataFetcher,
         snapshotEvidencePolicy: {
           accepts: ({
             verifiedMetadataTriples,
@@ -284,10 +304,11 @@ export class SwmTargetExecutorV1 {
       await insertKeepingOnePublishedAt(this.#ports.store, quads, {
         source: 'agent.sharedMemorySync', seam: 'swm-sync', recordDrops: this.#ports.recordDrops,
       });
-      await this.#registerSyncedSubGraphs(target, quads);
+      await this.#registerSyncedSubGraphs(input, quads);
     };
     return runSharedMemorySync({
       mode,
+      metadataFetcher: target.metadataFetcher,
       freshSnapshot: target.freshSnapshot,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
@@ -317,10 +338,10 @@ export class SwmTargetExecutorV1 {
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: (contextGraphId, descriptor) => (
-        this.#retireFinalizedTwinAfterWrite(target, contextGraphId, descriptor)
+        this.#retireFinalizedTwinAfterWrite(input, contextGraphId, descriptor)
       ),
       heldAsRetiredFinalizedTwin: (contextGraphId, descriptor) => (
-        this.#heldAsRetiredFinalizedTwin(target, contextGraphId, descriptor)
+        this.#heldAsRetiredFinalizedTwin(input, contextGraphId, descriptor)
       ),
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,

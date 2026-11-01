@@ -410,6 +410,21 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       contextGraphId,
       remainingContextGraphs: 1,
       mode: { kind: 'ordinary' },
+      metadataFetcher: {
+        fetch: async () => ({
+          result: {
+            quads: remoteMeta.map((quad) => ({ ...quad })),
+            bytesReceived: 0,
+            timedOut: false,
+            resumedFromOffset: 0,
+            nextOffset: remoteMeta.length,
+            checkpointKey: 'public:meta',
+            completed: true,
+          },
+          continuationYielded: false,
+        }),
+        release: () => undefined,
+      },
     });
     // A share that brings the copy back: graph, head and operation, as its apply writes them.
     const shareAgain = () => store.insert([

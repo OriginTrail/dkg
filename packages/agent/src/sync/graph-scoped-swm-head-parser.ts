@@ -12,31 +12,36 @@ import {
 import {
   canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
+  SWM_HEAD_SUFFIX,
+  SWM_PREDICATES as P,
+  SWM_WORKSPACE_OPERATION,
   type WorkspaceOperationModel,
   type PublisherWorkspaceOperationSemantics,
   type WorkspaceOperationAccessEnvelope,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { normalizeIdentityObject } from './graph-scoped-swm-operation-identity.js';
-const DKG = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
+import { admitSharedMemoryMetadata } from './shared-memory-metadata-admission.js';
+import { projectSwmRecovery, swmHeadRejectionError } from './shared-memory-metadata-projections.js';
+import { swmRecordKey, type AdmittedSwmRecord, type SwmRecordRejection } from './shared-memory-metadata-records.js';
+const RDF_TYPE = P.type;
+const WORKSPACE_OPERATION = SWM_WORKSPACE_OPERATION;
 
-const CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
-const KA_UAL = `${DKG}kaUal`;
-const ASSERTION_VERSION = `${DKG}assertionVersion`;
-const ASSERTION_GRAPH = `${DKG}assertionGraph`;
-const CONTEXT_GRAPH_ID = `${DKG}contextGraphId`;
-const PUBLIC_QUADS_DIGEST = `${DKG}publicQuadsDigest`;
-const PUBLIC_QUADS_COUNT = `${DKG}publicQuadsCount`;
-const PUBLIC_SNAPSHOT_REF = `${DKG}publicSnapshotRef`;
-const PUBLIC_SNAPSHOT_GRAPH = `${DKG}publicSnapshotGraph`;
-const PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
-const PRIVATE_MERKLE_ROOT = `${DKG}privateMerkleRoot`;
-const PUBLISHER_PEER_ID = `${DKG}publisherPeerId`;
-const ACCESS_POLICY = `${DKG}accessPolicy`;
-const ALLOWED_PEER = `${DKG}allowedPeer`;
-const SUB_GRAPH_NAME = `${DKG}subGraphName`;
+const CONTENT_SCOPE_VERSION = P.contentScopeVersion;
+const KA_UAL = P.kaUal;
+const ASSERTION_VERSION = P.assertionVersion;
+const ASSERTION_GRAPH = P.assertionGraph;
+const CONTEXT_GRAPH_ID = P.contextGraphId;
+const PUBLIC_QUADS_DIGEST = P.publicQuadsDigest;
+const PUBLIC_QUADS_COUNT = P.publicQuadsCount;
+const PUBLIC_SNAPSHOT_REF = P.publicSnapshotRef;
+const PUBLIC_SNAPSHOT_GRAPH = P.publicSnapshotGraph;
+const PRIVATE_TRIPLE_COUNT = P.privateTripleCount;
+const PRIVATE_MERKLE_ROOT = P.privateMerkleRoot;
+const PUBLISHER_PEER_ID = P.publisherPeerId;
+const ACCESS_POLICY = P.accessPolicy;
+const ALLOWED_PEER = P.allowedPeer;
+const SUB_GRAPH_NAME = P.subGraphName;
 
 interface RecoveryWorkspaceOperationIdentity {
   readonly contextGraphId: string;
@@ -123,9 +128,9 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly metadataQuads: readonly Quad[];
 }
 
-const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
-export const SWM_HEAD_SUFFIX = '#dkg-swm-head';
-export const SWM_SHARE_OPERATION_ID = 'http://dkg.io/ontology/shareOperationId';
+const PROV_WAS_ATTRIBUTED_TO = P.wasAttributedTo;
+export { SWM_HEAD_SUFFIX };
+export const SWM_SHARE_OPERATION_ID = P.shareOperationId;
 export interface HeadOperationReference {
   readonly shareOperationId: string;
   readonly operationSubject: string;
@@ -152,24 +157,27 @@ function rejectedHead(head: SwmRecoveryHead, error: unknown): SetAsideGraphScope
     error: error instanceof Error ? error : new Error(String(error)) };
 }
 
+/** A head admission refused has no rows to parse: it is set aside with the operations it names. */
+function rejectedAtAdmission(contextGraphId: string, rejection: SwmRecordRejection): RejectedHeadOutcome {
+  return { kind: 'rejected', rejection: {
+    metaGraph: rejection.metaGraph, headSubject: rejection.subject,
+    operationSubjects: (rejection.shareOperationIds ?? []).map(id => `urn:dkg:share:${contextGraphId}:${id}`),
+    error: swmHeadRejectionError(rejection),
+  } };
+}
+
 function parseGraphScopedSwmHeads(
   params: GraphScopedSwmRecoveryParseInput,
 ): readonly HeadParseOutcome[] {
-  const allowedMetaGraphs = allowedWorkspaceMetaGraphs(params.contextGraphId,
-    params.registeredSubGraphNames, params.excludedSubGraphNames);
-  const index = new Map<string, Quad[]>();
-  for (const quad of params.metaQuads) {
-    const key = `${quad.graph}\u0000${quad.subject}`;
-    const rows = index.get(key);
-    if (rows) rows.push(quad); else index.set(key, [quad]);
-  }
-  const heads: HeadClaimOutcome[] = [];
+  const excluded = new Set(params.excludedSubGraphNames ?? []);
+  const admitted = projectSwmRecovery(admitSharedMemoryMetadata(params.metaQuads, {
+    kind: 'context', contextGraphId: params.contextGraphId,
+    registeredSubGraphNames: new Set((params.registeredSubGraphNames ?? []).filter(name => !excluded.has(name))),
+  }));
+  const heads: HeadClaimOutcome[] = [...(params.rejectedHeads ?? []), ...admitted.rejectedHeads]
+    .map(rejection => rejectedAtAdmission(params.contextGraphId, rejection));
   const owners = new Map<string, Set<string>>();
-  for (const [key, headRows] of index) {
-    const separator = key.indexOf('\u0000');
-    const metaGraph = key.slice(0, separator);
-    const headSubject = key.slice(separator + 1);
-    if (!headSubject.endsWith(SWM_HEAD_SUFFIX)) continue;
+  for (const { rows: headRows, metaGraph, subject: headSubject } of admitted.heads) {
     const operationReferences = [...new Set(headRows.filter(row => row.predicate === SWM_SHARE_OPERATION_ID)
       .map(row => stripLiteral(row.object).trim()))]
       .map(shareOperationId => ({ shareOperationId, operationSubject: `urn:dkg:share:${params.contextGraphId}:${shareOperationId}` }));
@@ -177,7 +185,7 @@ function parseGraphScopedSwmHeads(
     try {
       // Graph ownership is independent of assertion version and operation validity.
       // Reserve every verifiable claim before any malformed envelope is set aside.
-      const claim = decodeHeadGraphClaim(params, head, allowedMetaGraphs);
+      const claim = decodeHeadGraphClaim(params, head);
       const graphOwners = owners.get(claim.assertionGraph) ?? new Set<string>();
       graphOwners.add(claim.scope.ual);
       owners.set(claim.assertionGraph, graphOwners);
@@ -198,13 +206,15 @@ function parseGraphScopedSwmHeads(
         `Graph-scoped SWM head ${head.headSubject} has unsupported contentScopeVersion ${scopeVersion}`);
       const assertionVersion = requirePositiveInteger(head.headRows, ASSERTION_VERSION, 'assertionVersion');
       const scope = createGraphKnowledgeAssetScope(claim.scope.ual, assertionVersion);
-      return { kind: 'descriptor' as const, descriptor: decodeHeadOperation(params, { ...head, ...claim, scope }, index) };
+      return { kind: 'descriptor' as const, descriptor: decodeHeadOperation(params, { ...head, ...claim, scope }, admitted.graphOperations) };
     } catch (error) { return { kind: 'rejected' as const, rejection: rejectedHead(head, error) }; }
   });
 }
 export interface GraphScopedSwmRecoveryParseInput {
   readonly contextGraphId: string;
   readonly metaQuads: readonly Quad[];
+  /** Heads the verifier refused: their rows are not in `metaQuads`, but the round must still answer for them. */
+  readonly rejectedHeads?: readonly SwmRecordRejection[];
   readonly registeredSubGraphNames?: readonly string[];
   readonly excludedSubGraphNames?: readonly string[];
 }
@@ -226,13 +236,8 @@ export function parseGraphScopedSwmRecoveryHeadResults(params: GraphScopedSwmRec
 }
 function decodeHeadGraphClaim(params: GraphScopedSwmRecoveryParseInput,
   head: SwmRecoveryHead,
-  allowedMetaGraphs: ReadonlySet<string>,
 ) {
   const { metaGraph, headSubject, headRows } = head;
-  if (!allowedMetaGraphs.has(metaGraph)) {
-    throw new Error(`Graph-scoped SWM head ${headSubject} is in an unregistered metadata graph ${metaGraph}`);
-  }
-
   const kaUalFromHead = headSubject.slice(0, -SWM_HEAD_SUFFIX.length);
   const kaUal = requireSingle(headRows, KA_UAL, 'kaUal');
   // The physical graph omits chain and assertion version. Validate its owner
@@ -254,11 +259,11 @@ function decodeHeadGraphClaim(params: GraphScopedSwmRecoveryParseInput,
 
 function decodeHeadOperation(params: GraphScopedSwmRecoveryParseInput,
   { metaGraph, headSubject, headRows, operationReferences, scope, subGraphName, assertionGraph }: ReturnType<typeof decodeHeadGraphClaim>,
-  byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>,
+  graphOperations: ReadonlyMap<string, AdmittedSwmRecord>,
 ): GraphScopedSwmRecoveryDescriptor {
   const operation = resolveEquivalentHeadOperation({
     headRows, operationReferences,
-    byGraphAndSubject,
+    graphOperations,
     contextGraphId: params.contextGraphId,
     metaGraph,
     headSubject,
@@ -393,7 +398,7 @@ function recoverySnapshotLocator(params: {
 function resolveEquivalentHeadOperation(params: {
   readonly operationReferences: readonly HeadOperationReference[];
   readonly headRows: readonly Quad[];
-  readonly byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>;
+  readonly graphOperations: ReadonlyMap<string, AdmittedSwmRecord>;
   readonly contextGraphId: string;
   readonly metaGraph: string;
   readonly headSubject: string;
@@ -410,9 +415,7 @@ function resolveEquivalentHeadOperation(params: {
   }
 
   const candidates: RecoveryOperationCandidate[] = params.operationReferences.map(({ shareOperationId, operationSubject }) => {
-    const operationRows = params.byGraphAndSubject.get(
-      `${params.metaGraph}\u0000${operationSubject}`,
-    ) ?? [];
+    const operationRows = params.graphOperations.get(swmRecordKey(params.metaGraph, operationSubject))?.rows ?? [];
     const semantics = validateOperationRows({
       rows: operationRows,
       contextGraphId: params.contextGraphId,
@@ -597,21 +600,6 @@ function validateOperationRows(params: {
         .map(normalizeIdentityObject),
     },
   };
-}
-
-function allowedWorkspaceMetaGraphs(
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[] | undefined,
-  excludedSubGraphNames: readonly string[] | undefined,
-): Set<string> {
-  const prefix = `did:dkg:context-graph:${contextGraphId}`;
-  const allowed = new Set<string>([`${prefix}/_shared_memory_meta`]);
-  const excluded = new Set(excludedSubGraphNames ?? []);
-  for (const name of registeredSubGraphNames ?? []) {
-    if (excluded.has(name) || !validateSubGraphName(name).valid) continue;
-    allowed.add(`${prefix}/${name}/_shared_memory_meta`);
-  }
-  return allowed;
 }
 
 function subGraphForMetaGraph(contextGraphId: string, metaGraph: string): string | undefined {

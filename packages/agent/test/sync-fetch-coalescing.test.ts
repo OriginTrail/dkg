@@ -1425,6 +1425,59 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('runs a fresh private-only shared-memory sync after the one it overlaps instead of joining it', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const sharedMemorySyncPlan = {
+      targets: [{ contextGraphId: 'private-cg', lane: 'ordinary-private' as const }],
+    };
+    const firstFetch = deferred<SyncPageResult>();
+    const fetches: SyncPhase[] = [];
+    (agent as any).listSubGraphs = async () => [];
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetches.push(phase);
+      if (fetches.length === 1) return firstFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).getOrCreateSyncVerifyWorker = () => ({
+      processSharedMemoryBatch: async () => ({
+        verifiedData: [],
+        verifiedMeta: [],
+        totalFetchedDataQuads: 0,
+        totalFetchedMetaQuads: 0,
+        droppedDataTriples: 0,
+        emptyResponses: 1,
+        entityCreators: [],
+      }),
+    });
+
+    try {
+      const running = (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['private-cg'], { sharedMemorySyncPlan });
+      const fresh = (agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        ['private-cg'],
+        { sharedMemorySyncPlan, freshSnapshot: true },
+      );
+      const joined = (agent as any).syncSharedMemoryFromPeerDetailed(PEER_A, ['private-cg'], { sharedMemorySyncPlan });
+      await waitFor(() => fetches.length === 1);
+      let freshSettled = false;
+      void fresh.finally(() => { freshSettled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // The fresh request waits behind the blocked sync: it has read nothing yet.
+      expect(freshSettled).toBe(false);
+      expect(fetches).toEqual(['meta']);
+
+      firstFetch.resolve(emptySyncPage(fetches[0]!));
+      const [runningResult, freshResult, joinedResult] = await Promise.all([running, fresh, joined]);
+      expect(joinedResult).toBe(runningResult);
+      expect(freshResult).not.toBe(runningResult);
+      expect(freshResult).toMatchObject({ failedPeers: 0 });
+      // The fresh sync's own read, after the first sync's.
+      expect(fetches).toEqual(['meta', 'meta']);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('leaves the only general slot to a transfer while a reserved-slot-only shared-memory sync runs (#3251)', async () => {
     // The Edge safety-net pull asks for the reserved slot only: on a node with
     // one sync slot and no queue, the large transfers keep that slot.
