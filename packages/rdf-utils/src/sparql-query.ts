@@ -79,6 +79,9 @@ function prefixesFromTokens(prepared: ValidPreparedSparql): Map<string, string> 
   return prefixes;
 }
 
+// Solution modifiers and a trailing VALUES come after the pattern, which may have no WHERE keyword.
+const AFTER_QUERY_PATTERN_WORDS = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'VALUES']);
+
 function whereRange(
   prepared: ValidPreparedSparql,
   structure: SparqlStructure,
@@ -97,6 +100,7 @@ function whereRange(
       explicitOpening = index + 1;
       break;
     }
+    if (token?.kind === 'word' && AFTER_QUERY_PATTERN_WORDS.has(token.upper)) break;
     if (token?.kind === 'symbol' && token.logicalValue === '{') {
       topLevelOpenings.push(index);
     }

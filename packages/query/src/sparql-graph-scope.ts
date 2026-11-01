@@ -7,12 +7,14 @@ import {
   type ValidPreparedSparql,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
+import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import {
   sparqlRewriteReady,
   sparqlRewriteUnsupported,
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
+import { applyGraphDataset } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
@@ -357,6 +359,11 @@ export function wrapWithGraphValues(
   );
 }
 
+/** Scope a graph set through a hidden GRAPH variable that the query's dataset limits. */
+function wrapWithDatasetGraphVariable(input: PreparedGraphScope, graphUris: readonly string[]): GraphScopeRewriteResult {
+  return wrapWithProjectedGraphSubselect(input, graphUris, [VIEW_GRAPH_SENTINEL], (inner) => `GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`);
+}
+
 export type GraphSetRoutingPolicy =
   | 'deduplicated-values-union'
   | 'values-union'
@@ -367,19 +374,29 @@ export function rewriteGraphSet(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
   policy: GraphSetRoutingPolicy,
+  engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
-  const strategies = policy === 'deduplicated-values-union'
-    ? [wrapWithDeduplicatedGraphValues, wrapWithGraphValues, wrapWithGraphUnion]
-    : policy === 'values-union'
-      ? [wrapWithGraphValues, wrapWithGraphUnion]
-      : [wrapWithGraphUnion];
-  let last = unsupported('strategy-rejected');
-  for (const strategy of strategies) {
-    const result = strategy(scope, graphUris);
-    if (result.kind === 'ready') return result;
-    last = result;
-  }
-  return last;
+  return applyGraphDataset(scope, graphUris, engine, (route) => {
+    const strategies = policy === 'union-only'
+      ? [wrapWithGraphUnion]
+      : route === 'dataset-only'
+        ? [wrapWithDatasetGraphVariable, wrapWithGraphUnion]
+        : policy === 'deduplicated-values-union'
+          ? [wrapWithDeduplicatedGraphValues, wrapWithGraphValues, wrapWithGraphUnion]
+          : [wrapWithGraphValues, wrapWithGraphUnion];
+    let last = unsupported('strategy-rejected');
+    for (const strategy of strategies) {
+      const result = strategy(scope, graphUris);
+      if (result.kind === 'ready') return result;
+      last = result;
+    }
+    return last;
+  });
+}
+
+/** Scope a read to one graph on a store with this engine. */
+export function rewriteSingleGraph(scope: PreparedGraphScope, graphUri: string, engine: SparqlEngineFamily | null): GraphScopeRewriteResult {
+  return applyGraphDataset(scope, [graphUri], engine, () => wrapWithGraph(scope, graphUri));
 }
 
 /** Apply a graph-set policy and its single-graph compatibility fallback. */
@@ -389,13 +406,14 @@ export function rewriteGraphRoute(
   fallbackGraphUri: string,
   policy: GraphSetRoutingPolicy,
   fallbackPolicy: 'compatibility' | 'preserve-scope' = 'compatibility',
+  engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
   if (graphUris.length > 0) {
-    const selected = rewriteGraphSet(scope, graphUris, policy);
+    const selected = rewriteGraphSet(scope, graphUris, policy, engine);
     if (selected.kind === 'ready') return selected;
     if (fallbackPolicy === 'preserve-scope' && graphUris.some(graph => graph !== fallbackGraphUri)) return selected;
   }
-  return wrapWithGraph(scope, fallbackGraphUri);
+  return rewriteSingleGraph(scope, fallbackGraphUri, engine);
 }
 
 /**
@@ -507,10 +525,11 @@ function nestedSelectContainsGraphVariable(scope: PreparedGraphScope): boolean {
 
 function graphVariablesAreTopLevel(scope: PreparedGraphScope): boolean {
   if (!scope.where) return false;
-  const outerDepth = scope.structure.braces.depthBefore[scope.where.openingTokenIndex] + 1;
-  return scope.graphTargets.every(
-    (target) => target.kind !== 'variable' || target.braceDepth === outerDepth,
-  );
+  const { openingTokenIndex, closingTokenIndex } = scope.where;
+  const outerDepth = scope.structure.braces.depthBefore[openingTokenIndex] + 1;
+  return scope.graphTargets.every((target) => target.kind !== 'variable'
+    || (target.braceDepth === outerDepth
+      && target.keywordTokenIndex > openingTokenIndex && target.keywordTokenIndex < closingTokenIndex));
 }
 
 function findBalancedParenthesisEnd(

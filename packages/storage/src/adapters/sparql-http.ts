@@ -84,6 +84,7 @@ import {
 import { readSparqlResponseText } from './sparql-response-policy.js';
 import { relayAnswer, type RelayedAnswer } from './sparql-answer-relay.js';
 import type { StoreOperation } from '../store-operation-outcome.js';
+import type { SparqlEngineFamily } from '../sparql-engine-capability.js';
 import type {
   Rfc64SharedProjectionStreamCapabilityV1,
 } from '../rfc64-shared-projection-stream-capability.js';
@@ -234,6 +235,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   readonly rfc64SharedProjectionStreamCertifiedV1: true | false;
   readonly rfc64ExactBindingsReadCertifiedV1: true | false;
   readonly rfc64SemanticReadCertifiedV1: true | false;
+  /** Known only for the managed runtime; an arbitrary SPARQL URL can front any engine. */
+  readonly sparqlEngine?: SparqlEngineFamily;
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
@@ -284,6 +287,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
+    if (this.managedOxigraph) this.sparqlEngine = 'oxigraph';
     this.onClientTimeout = managedRuntimeHooks?.onClientTimeout
       ?? managedRecovery?.recover;
     this.getRecoveryState = managedRuntimeHooks?.getRecoveryState

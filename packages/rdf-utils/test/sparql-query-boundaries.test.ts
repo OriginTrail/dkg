@@ -66,6 +66,23 @@ describe('prepared query boundaries', () => {
     });
   });
 
+  it.each([
+    ['SELECT ?s { ?s ?p ?o } ORDER BY (EXISTS { ?a ?b ?c })', '{ ?s ?p ?o }'],
+    ['SELECT ?s { ?s ?p ?o } GROUP BY ?s HAVING (EXISTS { ?a ?b ?c })', '{ ?s ?p ?o }'],
+    ['SELECT ?s { ?s ?p ?o } VALUES ?s { <urn:x> }', '{ ?s ?p ?o }'],
+    ['SELECT ?s { ?s ?p ?o } LIMIT 1', '{ ?s ?p ?o }'],
+    ['SELECT (EXISTS { ?a ?b ?c } AS ?x) { ?s ?p ?o }', '{ ?s ?p ?o }'],
+    ['SELECT (EXISTS { ?a ?b ?c } AS ?x) WHERE { ?s ?p ?o } ORDER BY (EXISTS { ?d ?e ?f })', '{ ?s ?p ?o }'],
+    ['SELECT (EXISTS { { SELECT ?a WHERE { ?a ?b ?c } } } AS ?x) { ?s ?p ?o }', '{ ?s ?p ?o }'],
+    ['DESCRIBE ?s { ?s ?p ?o } ORDER BY (EXISTS { ?a ?b ?c })', '{ ?s ?p ?o }'],
+    ['CONSTRUCT { ?a ?b ?c } { ?s ?p ?o } ORDER BY (EXISTS { ?d ?e ?f })', '{ ?s ?p ?o }'],
+    ['SELECT ?s WITH { SELECT ?s WHERE { ?s ?p ?o } } AS %x { INCLUDE %x }', '{ INCLUDE %x }'],
+    ['SELECT ?s WITH { SELECT ?s WHERE { ?s ?p ?o } } AS %x WHERE { INCLUDE %x } LIMIT 1', '{ INCLUDE %x }'],
+  ])('chooses the pattern over any group in an expression or after it (%s)', (source, group) => {
+    const { where } = query(source);
+    expect(source.slice(where!.openStart, where!.close + 1)).toBe(group);
+  });
+
   it.each(['', '?variable'])('has no operation for a non-keyword input (%s)', source => {
     expect(query(source).operation).toBeNull();
   });

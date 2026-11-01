@@ -187,6 +187,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 
 export class OxigraphWorkerStore implements TripleStore {
   readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
+  readonly sparqlEngine = 'oxigraph' as const;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
