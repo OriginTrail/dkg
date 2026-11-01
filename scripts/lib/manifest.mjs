@@ -3,20 +3,36 @@
  *
  * Implements the manifest pattern from
  * `docs/adr/0002-importer-chunking-contract.md` against the daemon's
- * own assertion API (via `DkgClient` from `./dkg-daemon.mjs`).
+ * Knowledge Asset API (via `DkgClient` from `./dkg-daemon.mjs`).
  *
  * An "Import" is a logical bulk-write operation that splits itself into
  * "Partitions" — typically one partition per source artefact (e.g. one
  * file in a code import, one PR in a GitHub import). The manifest is
- * itself an RDF assertion in the project's `meta` sub-graph so it can
- * be queried, gossiped, and resumed from any node.
+ * itself RDF in the project's `meta` sub-graph, shared to Shared Working
+ * Memory (SWM) so it can be queried, gossiped, and resumed from any node.
  *
- * Status events are append-only: each `markPartitionStatus` call writes
- * a new `StatusEvent` triple with a timestamp; the "current" status of
- * a partition is the latest event by `recordedAt`, with the event IRI as a
- * deterministic tie-breaker when two writes land in the same millisecond.
- * This avoids needing SPARQL DELETE/INSERT (which the daemon doesn't expose)
- * and gives a complete history "for free".
+ * A share covers a whole Knowledge Asset and seals it, and a peer that holds
+ * a shared asset does not take an edited copy of it. So the manifest is a set
+ * of small Knowledge Assets, each written and shared exactly once:
+ *
+ *   - the import head (`defaultManifestAssertionName(importId)`): the
+ *     Import node, its `startedAt`, its partition count and a hash of its
+ *     partition keys;
+ *   - partition pages (`import-partitions-<id>-<n>-<hash>`): each declares a
+ *     size-bounded batch of the partitions, in key order, well under the
+ *     share size cap of one Knowledge Asset;
+ *   - status batches (`import-status-<id>-<hash>`): one per `markPartitionStatus`
+ *     or `markPartitionStatuses` call.
+ *
+ * Every asset is its own named graph in SWM, and a sub-graph query is
+ * answered one asset graph at a time, so a SPARQL join across assets finds
+ * nothing. The readers below match each pattern inside `GRAPH ?g` and join
+ * partitions to their status events here.
+ *
+ * Status events are append-only: the "current" status of a partition is its
+ * latest event by `recordedAt`, with the event IRI as a deterministic
+ * tie-breaker when two writes land in the same millisecond. This avoids
+ * needing SPARQL DELETE/INSERT and gives a complete history "for free".
  *
  * Usage (TypeScript / JS):
  *
@@ -60,6 +76,8 @@ export const IMPORT_P = {
   startedAt: IMPORT_NS + 'startedAt',
   finishedAt: IMPORT_NS + 'finishedAt',
   partition: IMPORT_NS + 'partition',
+  partitionCount: IMPORT_NS + 'partitionCount',
+  partitionSetHash: IMPORT_NS + 'partitionSetHash',
   key: IMPORT_NS + 'key',
   initialStatus: IMPORT_NS + 'initialStatus',
   statusEvent: IMPORT_NS + 'statusEvent',
@@ -69,8 +87,29 @@ export const IMPORT_P = {
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const XSD_DATETIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
-const PROMOTE_ROOT_COUNT_CAP = 1000;
-const PROMOTE_BODY_SOFT_LIMIT_BYTES = 220 * 1024;
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const MAX_ASSERTION_NAME_LENGTH = 256;
+
+/**
+ * Size bounds of one partition page: its N-Quads estimate and its partition
+ * count. One Knowledge Asset is shared in one gossip message, capped at
+ * 4 MiB, so a page stays well under it.
+ */
+export const PAGE_MAX_BYTES = 1024 * 1024;
+export const PAGE_MAX_PARTITIONS = 2000;
+
+/**
+ * Size bound of one status batch: the estimated JSON body of the single
+ * create-and-share request that writes it.
+ */
+export const STATUS_BATCH_MAX_BYTES = 192 * 1024;
+
+/**
+ * Rows per read. The daemon refuses a query answer above 10 MiB, and the
+ * declarations and the status history of a large import go well past that,
+ * so they are read in keyset pages of this many rows.
+ */
+export const QUERY_PAGE_ROWS = 1000;
 
 /** Stable URI for an Import. Slug is `encodeURIComponent`'d. */
 export function importUri(importId) {
@@ -98,7 +137,9 @@ export function importUri(importId) {
  *   - throws a descriptive error if the `importId` reduces to an empty slug
  *     (e.g. `importId = "///"`), so callers don't get a cryptic 400 later
  *
- * Exported for tests + callers who want the same sanitization rule.
+ * The name is the import head's Knowledge Asset; the manifest's other assets
+ * are named after it. Exported for tests + callers who want the same
+ * sanitization rule.
  */
 export function defaultManifestAssertionName(importId) {
   if (typeof importId !== 'string' || importId.length === 0) {
@@ -134,6 +175,46 @@ export function defaultManifestAssertionName(importId) {
   return `${prefix}${slug}-${hash}`;
 }
 
+function shortHash(value, length) {
+  return createHash('sha256').update(value).digest('hex').slice(0, length);
+}
+
+/**
+ * `import-<kind>-<slug>-<id hash>-<suffix>`. Heads are `import-manifest-…`, so
+ * a page or a status batch can never take another import's head name, and the
+ * hash of the `importId` keeps the assets of different imports apart however
+ * their ids read. The slug only helps a reader; it is cut to fit 256 characters.
+ */
+function manifestPartAssertionName(kind, importId, suffix) {
+  const tail = `-${shortHash(importId, 16)}-${suffix}`;
+  const prefix = `import-${kind}`;
+  const slug = importId
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, MAX_ASSERTION_NAME_LENGTH - prefix.length - tail.length - 1)
+    .replace(/-+$/g, '');
+  return `${prefix}${slug ? `-${slug}` : ''}${tail}`;
+}
+
+/** A hash of a set of partition keys, independent of their order. */
+export function partitionSetHash(keys) {
+  return shortHash(JSON.stringify([...keys].sort(compareStrings)), 32);
+}
+
+/**
+ * Knowledge Asset name of a partition page: its index, and a hash of its
+ * partition keys, so a page that declares other keys never reuses the name.
+ */
+export function partitionPageAssertionName(importId, pageIndex, keys) {
+  return manifestPartAssertionName('partitions', importId, `${pageIndex}-${partitionSetHash(keys).slice(0, 12)}`);
+}
+
+/** Knowledge Asset name of a status batch, from the IRI of its first event. */
+export function statusBatchAssertionName(importId, firstEventIri) {
+  return manifestPartAssertionName('status', importId, shortHash(firstEventIri, 24));
+}
+
 /** Stable URI for a Partition within an Import. */
 export function partitionUri(importId, key) {
   return `${importUri(importId)}#part:${encodeURIComponent(key)}`;
@@ -143,13 +224,9 @@ export function partitionUri(importId, key) {
  * Single-round-trip existence check: does the manifest for `importId` declare
  * `partitionKey` as one of its partitions?
  *
- * `markPartitionStatus` used to validate the partition by loading the entire
- * manifest, but that turns status-tracking quadratic for bulk imports: a
- * 10k-partition import marking each one twice (in_progress + done) ran 20k
- * full SWM materialisations, each several round-trips. This helper replaces
- * that with a SPARQL `ASK` against the SWM tier — one row, one network call.
- *
- * Resolves Codex comment on PR #642 (quadratic validation).
+ * The link lives in the partition page that declares the partition, so the
+ * `ASK` matches it inside `GRAPH ?g`: each shared Knowledge Asset is its own
+ * graph in the sub-graph's SWM.
  *
  * @param {object} opts
  * @param {import('./dkg-daemon.mjs').DkgClient} opts.client
@@ -174,15 +251,10 @@ export async function partitionDeclared({
   const sparql = `
     PREFIX imp: <${IMPORT_NS}>
     ASK {
-      <${importIri}> imp:partition <${partIri}> .
+      GRAPH ?g { <${importIri}> imp:partition <${partIri}> . }
     }
   `;
-  const res = await client.query({
-    sparql,
-    contextGraphId: client.cgId,
-    subGraphName,
-    graphSuffix: '_shared_memory',
-  });
+  const res = await querySharedMemory(client, subGraphName, sparql);
   // The daemon's ASK response shape is the same as `/api/query`: either
   // `{boolean: true}` (Oxigraph) or `{result: {boolean: true}}` (SPARQL HTTP).
   // Tolerate both.
@@ -190,22 +262,21 @@ export async function partitionDeclared({
   if (typeof res?.result?.boolean === 'boolean') return res.result.boolean;
   // Belt-and-braces fallback: some test mocks return bindings even for an
   // ASK-shaped query. Treat any non-empty binding set as `true`.
-  const bindings = res?.result?.bindings ?? res?.bindings ?? [];
-  return bindings.length > 0;
+  return bindingsOf(res).length > 0;
 }
 
 // Per-process monotonic counter for StatusEvent IRIs. Two events that land in
 // the same millisecond would otherwise tie on `recordedAt` AND tie on a random
-// suffix, leaving the SPARQL "latest event" lookup non-deterministic. Putting
-// a zero-padded counter BEFORE the random suffix in the IRI guarantees
+// suffix, leaving the "latest event" choice non-deterministic. Putting a
+// zero-padded counter BEFORE the random suffix in the IRI guarantees
 // lexicographic ordering matches call order for same-ms events within this
 // process. Across processes the millisecond timestamp + cross-process random
-// suffix remain the disambiguators; in practice two daemons promoting the same
-// manifest in the same ms is a pathological case the random suffix is already
-// the right answer for.
+// suffix remain the disambiguators; in practice two processes recording the
+// same partition in the same ms is a pathological case the random suffix is
+// already the right answer for.
 let _statusEventCounter = 0;
 
-/** Stable URI for one StatusEvent. Exported so callers can promote it. */
+/** Stable URI for one StatusEvent. */
 export function statusEventUri(importId, key) {
   const ts = Date.now();
   const seq = String(++_statusEventCounter).padStart(12, '0');
@@ -238,71 +309,6 @@ function dt(iso) {
 
 function uri(s) {
   return `<${s}>`;
-}
-
-function isPayloadTooLarge(err) {
-  const status = err?.status ?? err?.statusCode ?? err?.response?.status;
-  if (status === 413) return true;
-  const msg = String(err?.message ?? err ?? '');
-  return /\b413\b|payload too large|request entity too large|body.*too large/i.test(msg);
-}
-
-function promotePayloadBytes({ contextGraphId, assertionName, subGraphName, entities }) {
-  return Buffer.byteLength(
-    JSON.stringify({ contextGraphId, assertionName, subGraphName, entities }),
-    'utf8',
-  );
-}
-
-async function promoteRoots(client, { contextGraphId, assertionName, subGraphName }, entities) {
-  let batch = [];
-  const flush = async () => {
-    if (batch.length === 0) return;
-    const roots = batch;
-    batch = [];
-    await promoteRootsBatch(client, { contextGraphId, assertionName, subGraphName }, roots);
-  };
-
-  for (const entity of entities) {
-    const next = [...batch, entity];
-    if (
-      batch.length > 0 &&
-      (next.length > PROMOTE_ROOT_COUNT_CAP ||
-        promotePayloadBytes({ contextGraphId, assertionName, subGraphName, entities: next }) >
-          PROMOTE_BODY_SOFT_LIMIT_BYTES)
-    ) {
-      await flush();
-    }
-    batch.push(entity);
-  }
-  await flush();
-}
-
-async function promoteRootsBatch(client, { contextGraphId, assertionName, subGraphName }, entities) {
-  try {
-    await client.promote({
-      contextGraphId,
-      assertionName,
-      subGraphName,
-      entities,
-    });
-  } catch (err) {
-    if (isPayloadTooLarge(err) && entities.length > 1) {
-      const mid = Math.ceil(entities.length / 2);
-      await promoteRootsBatch(
-        client,
-        { contextGraphId, assertionName, subGraphName },
-        entities.slice(0, mid),
-      );
-      await promoteRootsBatch(
-        client,
-        { contextGraphId, assertionName, subGraphName },
-        entities.slice(mid),
-      );
-      return;
-    }
-    throw err;
-  }
 }
 
 /**
@@ -380,22 +386,94 @@ function bareUri(v) {
   return typeof v === 'string' ? v : String(v ?? '');
 }
 
-function sameStringSet(a, b) {
-  if (a.length !== b.length) return false;
-  const seen = new Set(a);
-  if (seen.size !== a.length) return false;
-  for (const value of b) {
-    if (!seen.has(value)) return false;
-  }
-  return new Set(b).size === b.length;
+function bindingsOf(res) {
+  return res?.result?.bindings ?? res?.bindings ?? [];
 }
 
-function isMissingManifestError(err) {
-  return /No import manifest rows found/.test(String(err?.message ?? err ?? ''));
+// Query the SWM tier, not the bare data graph. The manifest is written
+// through the Knowledge Asset API (create -> write -> share), so the only
+// place a resume-from-restart or peer-side load will see it is the
+// sub-graph's SWM (`did:dkg:context-graph:<cg>/<subgraph>/_shared_memory`).
+// The daemon's default `/api/query` routing for `subGraphName` alone hits the
+// bare data graph, which is empty for Knowledge Asset data — so without
+// `graphSuffix` these queries would silently return nothing even on a healthy
+// import. See AGENTS.md §7b query gotchas.
+function querySharedMemory(client, subGraphName, sparql) {
+  return client.query({
+    sparql,
+    contextGraphId: client.cgId,
+    subGraphName,
+    graphSuffix: '_shared_memory',
+  });
 }
 
 /**
- * Build the initial set of triples for a fresh Import manifest.
+ * Every distinct row of `<pattern>` matched inside `GRAPH ?g`, yielded page
+ * by page, ordered by the IRI variable `key`, each page after the last key of
+ * the page before (a keyset cursor: a page reads only what follows it, and a
+ * row written in between cannot shift the pages). The callers' keys name one
+ * subject each, so the rows of one key are never split by a page boundary.
+ */
+async function* selectAllRows(client, subGraphName, { select, pattern, key }) {
+  let after;
+  for (;;) {
+    const cursor = after === undefined ? '' : `FILTER(STR(${key}) > ${JSON.stringify(after)})`;
+    const page = bindingsOf(await querySharedMemory(client, subGraphName, `
+      PREFIX imp: <${IMPORT_NS}>
+      SELECT DISTINCT ${select} WHERE {
+        GRAPH ?g {
+          ${pattern}
+          ${cursor}
+        }
+      }
+      ORDER BY STR(${key}) LIMIT ${QUERY_PAGE_ROWS}
+    `));
+    const last = page.length > 0 ? bareUri(page[page.length - 1][key.slice(1)]) : undefined;
+    // A store that ignored LIMIT or the cursor would keep this loop reading for ever.
+    if (page.length > QUERY_PAGE_ROWS || (after !== undefined && last === after)) {
+      throw new Error('The query answer ignored its LIMIT or its cursor, so the manifest cannot be read in pages.');
+    }
+    yield* page;
+    if (page.length < QUERY_PAGE_ROWS) return;
+    after = last;
+  }
+}
+
+function nquadsBytes(triples) {
+  let bytes = 0;
+  for (const t of triples) {
+    bytes += Buffer.byteLength(`<${t.subject}> <${t.predicate}> ${t.object} .\n`, 'utf8');
+  }
+  return bytes;
+}
+
+/** The head of a fresh manifest: the Import node, `startedAt`, the partition count and the partition set's hash. */
+export function buildImportHeadTriples(importId, partitions, startedAtIso) {
+  const importIri = importUri(importId);
+  return [
+    { subject: importIri, predicate: RDF_TYPE, object: uri(IMPORT_T.Import) },
+    { subject: importIri, predicate: IMPORT_P.startedAt, object: dt(startedAtIso) },
+    { subject: importIri, predicate: IMPORT_P.partitionCount, object: `${lit(partitions.length)}^^<${XSD_INTEGER}>` },
+    { subject: importIri, predicate: IMPORT_P.partitionSetHash, object: lit(partitionSetHash(partitions)) },
+  ];
+}
+
+/** One partition's declaration, as its page holds it: the Import's link to it, then its own triples. */
+export function buildPartitionTriples(importId, key) {
+  const importIri = importUri(importId);
+  const partIri = partitionUri(importId, key);
+  return [
+    { subject: importIri, predicate: IMPORT_P.partition, object: partIri },
+    { subject: partIri, predicate: RDF_TYPE, object: uri(IMPORT_T.Partition) },
+    { subject: partIri, predicate: IMPORT_P.key, object: lit(key) },
+    { subject: partIri, predicate: IMPORT_P.initialStatus, object: lit('pending') },
+  ];
+}
+
+/**
+ * Build the initial set of triples for a fresh Import manifest: the head,
+ * then every partition. `createImportManifest` shares the head and each
+ * partition page as its own Knowledge Asset.
  *
  * @param {string} importId
  * @param {string[]} partitions  Partition keys (caller-defined, e.g. file paths)
@@ -403,39 +481,251 @@ function isMissingManifestError(err) {
  * @returns {{subject:string,predicate:string,object:string}[]}
  */
 export function buildInitialManifestTriples(importId, partitions, startedAtIso) {
-  const importIri = importUri(importId);
-  const triples = [
-    { subject: importIri, predicate: RDF_TYPE, object: uri(IMPORT_T.Import) },
-    { subject: importIri, predicate: IMPORT_P.startedAt, object: dt(startedAtIso) },
+  return [
+    ...buildImportHeadTriples(importId, partitions, startedAtIso),
+    ...partitions.flatMap((key) => buildPartitionTriples(importId, key)),
   ];
-  for (const key of partitions) {
-    const partIri = partitionUri(importId, key);
-    triples.push(
-      { subject: importIri, predicate: IMPORT_P.partition, object: partIri },
-      { subject: partIri, predicate: RDF_TYPE, object: uri(IMPORT_T.Partition) },
-      { subject: partIri, predicate: IMPORT_P.key, object: lit(key) },
-      { subject: partIri, predicate: IMPORT_P.initialStatus, object: lit('pending') },
-    );
-  }
-  return triples;
+}
+
+/** One status event: the partition's link to it, then the event's own triples. */
+export function buildStatusEventTriples(importId, partitionKey, eventIri, status, recordedAtIso) {
+  return [
+    { subject: partitionUri(importId, partitionKey), predicate: IMPORT_P.statusEvent, object: eventIri },
+    { subject: eventIri, predicate: RDF_TYPE, object: uri(IMPORT_T.StatusEvent) },
+    { subject: eventIri, predicate: IMPORT_P.status, object: lit(status) },
+    { subject: eventIri, predicate: IMPORT_P.recordedAt, object: dt(recordedAtIso) },
+  ];
 }
 
 /**
- * Create an Import manifest assertion that lists every partition this
- * import will write. All partitions start with `initialStatus = "pending"`;
- * use {@link markPartitionStatus} to record progress.
+ * Split the partition keys into pages: sorted, so the same set always gives
+ * the same pages, and each page within `maxBytes` (N-Quads estimate) and
+ * `maxPartitions`. A single partition larger than `maxBytes` gets a page of
+ * its own.
  *
- * Per ADR 0002 the manifest itself respects the importer chunking contract:
- * the helper batches writes through `DkgClient.writeAssertion` (which itself
- * chunks at 500 quads/call by default — well below the daemon's 10 MB body
- * limit).
+ * @param {string} importId
+ * @param {string[]} partitions
+ * @param {{ maxBytes?: number, maxPartitions?: number }} [limits]
+ * @returns {string[][]}
+ */
+export function partitionPages(importId, partitions, { maxBytes = PAGE_MAX_BYTES, maxPartitions = PAGE_MAX_PARTITIONS } = {}) {
+  const pages = [];
+  let page = [];
+  let bytes = 0;
+  for (const key of [...partitions].sort(compareStrings)) {
+    const size = nquadsBytes(buildPartitionTriples(importId, key));
+    if (page.length > 0 && (page.length >= maxPartitions || bytes + size > maxBytes)) {
+      pages.push(page);
+      page = [];
+      bytes = 0;
+    }
+    page.push(key);
+    bytes += size;
+  }
+  if (page.length > 0) pages.push(page);
+  return pages;
+}
+
+function compareStrings(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function createManifestAsset(client, { contextGraphId, subGraphName, name }) {
+  return client.request('POST', '/api/knowledge-assets', { contextGraphId, name, subGraphName });
+}
+
+/**
+ * Write a manifest asset's triples, unless a share that did not complete
+ * already sealed it, then share the whole asset. A triple an open draft
+ * already holds is not added twice.
+ */
+async function writeAndShare(client, { contextGraphId, subGraphName, name, created, triples }) {
+  if (created?.status !== 'wm-sealed') {
+    await client.writeAssertion({ contextGraphId, assertionName: name, subGraphName, triples });
+  }
+  assertShared(await client.promote({ contextGraphId, assertionName: name, subGraphName }), name);
+}
+
+/**
+ * Share a partition page, or leave it alone when it is shared already (by an
+ * earlier or a concurrent run). Answers whether it was; the caller then checks
+ * that its partitions are visible, since only its name says it is this page.
+ */
+async function sharePartitionPage(client, { contextGraphId, subGraphName, name, triples }) {
+  const created = await createManifestAsset(client, { contextGraphId, subGraphName, name });
+  if (created?.status === 'swm-shared') return { foundShared: true };
+  await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
+  return { foundShared: false };
+}
+
+/**
+ * Make the head shared and for these partitions, whatever an earlier or a
+ * concurrent run left. An unshared head's draft must carry this partition-set
+ * hash (and keeps a `startedAt` it has), and once shared, by this or another
+ * run, the head must carry this hash and no other.
+ *
+ * The daemon offers no create that writes and seals in one step, so two runs
+ * that create the same new head with other partition sets at the same moment
+ * can both write into its draft. That head then carries two hashes: both runs
+ * fail here before writing any page, and every later run and load refuses the
+ * importId. Run one `createImportManifest` per importId at a time.
+ */
+async function ensureManifestHead(client, { contextGraphId, subGraphName, importId, partitions }) {
+  const name = defaultManifestAssertionName(importId);
+  const hash = partitionSetHash(partitions);
+  const created = await createManifestAsset(client, { contextGraphId, subGraphName, name });
+  if (created?.status !== 'swm-shared') {
+    const left = created?.alreadyExists === true ? await readDraftTriples(client, { contextGraphId, subGraphName, name }) : [];
+    const leftHash = left.find((t) => t.predicate === IMPORT_P.partitionSetHash);
+    if (leftHash && unquote(leftHash.object) !== hash) throw differentPartitionSet(importId);
+    const keepStartedAt = left.some((t) => t.predicate === IMPORT_P.startedAt);
+    const triples = buildImportHeadTriples(importId, partitions, new Date().toISOString())
+      .filter((t) => !keepStartedAt || t.predicate !== IMPORT_P.startedAt);
+    await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
+  }
+  const shared = await readManifestHead({ client, importId, subGraphName });
+  if (shared === undefined) {
+    throw new Error(`createImportManifest: the head of manifest '${importId}' is shared but not visible yet; try again.`);
+  }
+  if (shared.hash !== hash) throw differentPartitionSet(importId);
+}
+
+/** The triples of a Knowledge Asset's Working Memory draft. */
+async function readDraftTriples(client, { contextGraphId, subGraphName, name }) {
+  const params = new URLSearchParams({ contextGraphId, subGraphName });
+  const res = await client.request('GET', `/api/knowledge-assets/${encodeURIComponent(name)}/wm/quads?${params}`);
+  return Array.isArray(res?.quads) ? res.quads : [];
+}
+
+function assertShared(result, name) {
+  if (result?.swmShared === true) return;
+  const errors = Array.isArray(result?.errors) ? result.errors.map((e) => e?.error ?? JSON.stringify(e)).join('; ') : '';
+  const recovery = result?.recoveryJobId ? ` Its recovery job is ${result.recoveryJobId}.` : '';
+  throw new Error(`Knowledge Asset '${name}' was not shared to shared memory${errors ? `: ${errors}` : ''}.${recovery}`);
+}
+
+/**
+ * What of a manifest is already visible in SWM: the head (undefined when it
+ * is not visible), with its partition count and partition-set hash, and
+ * every declared partition.
+ */
+async function readManifestDeclarations({ client, importId, subGraphName }) {
+  const [head, partitions] = await Promise.all([
+    readManifestHead({ client, importId, subGraphName }),
+    readDeclaredPartitions({ client, importId, subGraphName }),
+  ]);
+  return { head, partitions };
+}
+
+/**
+ * The visible head's partition count and partition-set hash, or undefined.
+ * A head written for more than one partition set has `hash: null`.
+ */
+async function readManifestHead({ client, importId, subGraphName }) {
+  const rows = bindingsOf(await querySharedMemory(client, subGraphName, `
+    PREFIX imp: <${IMPORT_NS}>
+    SELECT ?count ?hash WHERE {
+      GRAPH ?g {
+        <${importUri(importId)}> imp:partitionCount ?count ;
+                                 imp:partitionSetHash ?hash .
+      }
+    }
+  `));
+  if (rows.length === 0) return undefined;
+  const hashes = new Set(rows.map((row) => String(unquote(row.hash))));
+  const counts = new Set(rows.map((row) => Number(unquote(row.count))));
+  return {
+    count: counts.size === 1 ? [...counts][0] : Number.NaN,
+    hash: hashes.size === 1 ? [...hashes][0] : null,
+  };
+}
+
+/** Every partition the manifest's visible pages declare, keyed by partition IRI. */
+async function readDeclaredPartitions({ client, importId, subGraphName }) {
+  const rows = selectAllRows(client, subGraphName, {
+    select: '?part ?key ?initial',
+    pattern: `<${importUri(importId)}> imp:partition ?part .
+          ?part imp:key ?key ;
+                imp:initialStatus ?initial .`,
+    key: '?part',
+  });
+  const partitions = new Map();
+  for await (const row of rows) {
+    const part = bareUri(row.part);
+    if (!partitions.has(part)) partitions.set(part, { key: unquote(row.key), initial: unquote(row.initial) });
+  }
+  return partitions;
+}
+
+/** The latest status event of each partition of the import that has one, keyed by partition IRI. */
+async function readLatestStatusEvents({ client, importId, subGraphName }) {
+  const rows = selectAllRows(client, subGraphName, {
+    select: '?part ?ev ?status ?recordedAt',
+    pattern: `?part imp:statusEvent ?ev .
+          ?ev imp:status ?status ;
+              imp:recordedAt ?recordedAt .
+          FILTER(STRSTARTS(STR(?part), "${importUri(importId)}#part:"))`,
+    key: '?ev',
+  });
+  const latest = new Map();
+  for await (const row of rows) {
+    const event = {
+      part: bareUri(row.part),
+      ev: bareUri(row.ev),
+      status: unquote(row.status),
+      recordedAt: String(unquote(row.recordedAt)).replace(/\^\^.*$/, ''),
+    };
+    const current = latest.get(event.part);
+    if (!current || compareEvents(event, current) > 0) latest.set(event.part, event);
+  }
+  return latest;
+}
+
+/**
+ * Event order: `recordedAt` (millisecond precision), then the event IRI,
+ * whose zero-padded counter follows call order within one process.
+ */
+function compareEvents(a, b) {
+  const at = timestamp(a.recordedAt);
+  const bt = timestamp(b.recordedAt);
+  if (at !== bt) return at > bt ? 1 : -1;
+  return compareStrings(a.ev, b.ev);
+}
+
+function timestamp(value) {
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+function differentPartitionSet(importId) {
+  return new Error(
+    `createImportManifest: manifest '${importId}' already exists with a different partition set. ` +
+    `Refusing to merge old and new partitions; pass a new importId for a new import run.`,
+  );
+}
+
+/**
+ * Create an Import manifest that lists every partition this import will
+ * write. All partitions start with `initialStatus = "pending"`; use
+ * {@link markPartitionStatus} to record progress.
+ *
+ * The head and each partition page are written and shared as Knowledge
+ * Assets of their own. Per ADR 0002 each write goes through
+ * `DkgClient.writeAssertion` (which chunks at 500 quads/call by default —
+ * well below the daemon's 10 MB body limit), and each page stays well under
+ * the 4 MiB share cap.
+ *
+ * Calling it again for the same `importId` resumes: an asset that is already
+ * shared is left as it is, an interrupted one is completed. A manifest that
+ * already declares a different partition set is refused.
  *
  * @param {object} opts
  * @param {import('./dkg-daemon.mjs').DkgClient} opts.client  Daemon client (with `cgId` set by `ensureProject`)
  * @param {string} opts.importId        Stable id for this import run (slug-safe)
- * @param {string[]} opts.partitions    Caller-defined partition keys
+ * @param {string[]} opts.partitions    Caller-defined partition keys, unique
  * @param {string} opts.subGraphName    Sub-graph that owns the manifest (typically `"meta"`)
- * @returns {Promise<{ assertionName: string, importUri: string }>}
+ * @param {number} [opts.maxPartitionsPerPage]  Page size bound; defaults to `PAGE_MAX_PARTITIONS`
+ * @returns {Promise<{ assertionName: string, importUri: string, pageAssertionNames: string[] }>}
  */
 export async function createImportManifest({
   client,
@@ -443,6 +733,7 @@ export async function createImportManifest({
   partitions,
   subGraphName,
   assertionName,
+  maxPartitionsPerPage = PAGE_MAX_PARTITIONS,
 }) {
   if (assertionName !== undefined) {
     throw new Error(
@@ -457,76 +748,178 @@ export async function createImportManifest({
   if (!Array.isArray(partitions) || partitions.length === 0) {
     throw new Error('createImportManifest requires a non-empty `partitions` array.');
   }
+  if (new Set(partitions).size !== partitions.length) {
+    throw new Error('createImportManifest requires unique partition keys.');
+  }
   if (!subGraphName) {
     throw new Error('createImportManifest requires `subGraphName` (typically "meta").');
   }
   const cgId = client.cgId;
-  const assertion = assertionName ?? defaultManifestAssertionName(importId);
-  let createdFresh = true;
-  try {
-    await client.request('POST', '/api/knowledge-assets', {
-      contextGraphId: cgId,
-      name: assertion,
-      subGraphName,
-    });
-  } catch (err) {
-    // `/api/knowledge-assets` (create) is intentionally idempotent on the daemon
-    // side. A retry after a transient failure, or a second process resuming
-    // the same import, may find the manifest assertion already staged. Treat
-    // that as success and continue with the additive write/promote below so
-    // a partially-created manifest can be healed.
-    if (!String(err?.message ?? '').includes('already exists')) {
-      throw err;
-    }
-    createdFresh = false;
-  }
-  if (!createdFresh) {
-    try {
-      const existing = await loadImportManifest({ client, importId, subGraphName });
-      const existingKeys = existing.partitions.map((p) => p.key);
-      if (!sameStringSet(existingKeys, partitions)) {
-        throw new Error(
-          `createImportManifest: manifest '${importId}' already exists with a different partition set. ` +
-          `Refusing to merge old and new partitions; pass a new importId for a new import run.`,
-        );
-      }
-    } catch (err) {
-      // If the assertion exists but no manifest rows are visible yet, this is
-      // the partial-create retry path the idempotent branch is meant to heal:
-      // continue with the additive write/promote below. Any visible manifest
-      // with a different partition set is a real caller error and must fail.
-      if (!isMissingManifestError(err)) throw err;
-    }
-  }
+  const head = defaultManifestAssertionName(importId);
   const importIri = importUri(importId);
-  const triples = buildInitialManifestTriples(importId, partitions, new Date().toISOString())
-    .filter((t) => createdFresh || !(t.subject === importIri && t.predicate === IMPORT_P.startedAt));
-  await client.writeAssertion({
-    contextGraphId: cgId,
-    assertionName: assertion,
-    subGraphName,
-    triples,
-  });
-  // Promote the import root AND every partition URI. Promoting only the
-  // root leaves partition subjects in WM, which means `loadImportManifest`
-  // running against SWM on another node can't see `imp:key` /
-  // `imp:initialStatus` and resume can't recover. Chunk by estimated JSON body
-  // size, and still split-and-retry if the daemon returns 413, because long
-  // percent-encoded partition keys can exceed the promote endpoint's 256 KB
-  // body cap well before a fixed root-count chunk reaches 1000 entries.
-  const allRoots = [importIri, ...partitions.map((k) => partitionUri(importId, k))];
-  await promoteRoots(client, {
-    contextGraphId: cgId,
-    assertionName: assertion,
-    subGraphName,
-  }, allRoots);
-  return { assertionName: assertion, importUri: importIri };
+
+  // A manifest that is already visible must declare exactly these partitions.
+  // Anything it already shares is left as it is.
+  const existing = await readManifestDeclarations({ client, importId, subGraphName });
+  const requested = new Set(partitions);
+  const visibleKeys = new Set([...existing.partitions.values()].map((p) => p.key));
+  if (
+    (existing.head !== undefined && existing.head.hash !== partitionSetHash(partitions)) ||
+    [...visibleKeys].some((key) => !requested.has(key))
+  ) {
+    throw differentPartitionSet(importId);
+  }
+
+  if (existing.head === undefined) {
+    await ensureManifestHead(client, { contextGraphId: cgId, subGraphName, importId, partitions });
+  }
+  const pageAssertionNames = [];
+  let unverified = false;
+  for (const [index, keys] of partitionPages(importId, partitions, { maxPartitions: maxPartitionsPerPage }).entries()) {
+    const name = partitionPageAssertionName(importId, index, keys);
+    pageAssertionNames.push(name);
+    if (keys.every((key) => visibleKeys.has(key))) continue;
+    const { foundShared } = await sharePartitionPage(client, {
+      contextGraphId: cgId,
+      subGraphName,
+      name,
+      triples: keys.flatMap((key) => buildPartitionTriples(importId, key)),
+    });
+    unverified ||= foundShared;
+  }
+  // A page found shared is this manifest's only if its partitions now show: never report an incomplete manifest done.
+  if (unverified) {
+    const declared = new Set([...(await readDeclaredPartitions({ client, importId, subGraphName })).values()].map((p) => p.key));
+    const missing = partitions.filter((key) => !declared.has(key));
+    if (missing.length > 0) {
+      throw new Error(
+        `createImportManifest: ${missing.length} of ${partitions.length} partitions of manifest '${importId}' are not visible ` +
+        `although their pages' assets are shared; an asset of another origin may hold a page's name.`,
+      );
+    }
+  }
+  return { assertionName: head, importUri: importIri, pageAssertionNames };
+}
+
+// Declarations never change once shared, so a process reads a manifest's
+// partitions once and again only for a key it has not seen: a read per
+// status write would cost a query over every asset of the sub-graph each time.
+const declaredPartitionKeys = new WeakMap();
+
+async function assertPartitionsDeclared({ client, importId, subGraphName }, keys, caller) {
+  let byManifest = declaredPartitionKeys.get(client);
+  if (!byManifest) {
+    byManifest = new Map();
+    declaredPartitionKeys.set(client, byManifest);
+  }
+  const manifestKey = JSON.stringify([client.cgId, subGraphName, importId]);
+  let declared = byManifest.get(manifestKey);
+  if (!declared || keys.some((key) => !declared.has(key))) {
+    const partitions = await readDeclaredPartitions({ client, importId, subGraphName });
+    declared = new Set([...partitions.values()].map((p) => p.key));
+    byManifest.set(manifestKey, declared);
+  }
+  const undeclared = keys.find((key) => !declared.has(key));
+  if (undeclared !== undefined) {
+    throw new Error(
+      `${caller}: partition '${undeclared}' is not declared in manifest '${importId}'. ` +
+      `Call createImportManifest with the complete partition set before recording status events.`,
+    );
+  }
+}
+
+/** Body of the one request that creates, writes, seals and shares a status batch. */
+function statusBatchBody({ contextGraphId, subGraphName, name, triples }) {
+  return { contextGraphId, name, subGraphName, quads: triples, alsoShareSwm: true };
+}
+
+/** Bytes a batch body takes beyond its quads, with room for the longest name. */
+const STATUS_BATCH_BODY_OVERHEAD_BYTES = 1024;
+
+/**
+ * Write status events as Knowledge Assets of their own: each batch is
+ * created, written, sealed and shared in a single request and never changed
+ * afterwards. A batch holds as many events as fit in `STATUS_BATCH_MAX_BYTES`.
+ */
+async function recordStatusEvents({ client, importId, subGraphName, statuses }, caller) {
+  await assertPartitionsDeclared({ client, importId, subGraphName }, statuses.map((s) => s.partitionKey), caller);
+
+  const contextGraphId = client.cgId;
+  const recordedAt = new Date().toISOString();
+  const recorded = [];
+  let batch = [];
+  let batchBytes = STATUS_BATCH_BODY_OVERHEAD_BYTES;
+  const flush = async () => {
+    const name = statusBatchAssertionName(importId, batch[0].eventUri);
+    const shared = await client.request('POST', '/api/knowledge-assets', statusBatchBody({
+      contextGraphId,
+      subGraphName,
+      name,
+      triples: batch.flatMap((event) => event.triples),
+    }));
+    assertShared(shared, name);
+    for (const { partitionKey, status, eventUri } of batch) recorded.push({ partitionKey, status, eventUri, assertionName: name });
+    batch = [];
+    batchBytes = STATUS_BATCH_BODY_OVERHEAD_BYTES;
+  };
+  for (const { partitionKey, status } of statuses) {
+    const eventUri = statusEventUri(importId, partitionKey);
+    const triples = buildStatusEventTriples(importId, partitionKey, eventUri, status, recordedAt);
+    const bytes = Buffer.byteLength(JSON.stringify(triples), 'utf8');
+    if (batch.length > 0 && batchBytes + bytes > STATUS_BATCH_MAX_BYTES) await flush();
+    batch.push({ partitionKey, status, eventUri, triples });
+    batchBytes += bytes;
+  }
+  await flush();
+  return recorded;
 }
 
 /**
- * Append a StatusEvent triple for a partition. Status events are
- * append-only; `loadImportManifest` resolves the "current" status by
- * taking the latest event per partition.
+ * Record status events for several partitions at once, in as few Knowledge
+ * Assets as their size allows (one for an ordinary batch). Events of one call
+ * share their `recordedAt`; for the same partition, a later entry wins.
+ *
+ * `status` is caller-defined. Conventional values are `"pending"`,
+ * `"in_progress"`, `"done"`, `"failed"`, `"skipped"`. The library does
+ * not validate the value.
+ *
+ * @param {object} opts
+ * @param {import('./dkg-daemon.mjs').DkgClient} opts.client
+ * @param {string} opts.importId
+ * @param {Array<{ partitionKey: string, status: string }>} opts.statuses
+ * @param {string} opts.subGraphName
+ * @returns {Promise<Array<{ partitionKey: string, status: string, eventUri: string, assertionName: string }>>}
+ */
+export async function markPartitionStatuses({
+  client,
+  importId,
+  statuses,
+  subGraphName,
+  assertionName,
+}) {
+  if (assertionName !== undefined) {
+    throw new Error(
+      'markPartitionStatuses does not accept `assertionName`: manifest assertion names are derived from importId so resume/status writes target the same assertion.',
+    );
+  }
+  if (!client?.cgId) {
+    throw new Error('markPartitionStatuses requires a DkgClient with `cgId` set.');
+  }
+  if (!Array.isArray(statuses) || statuses.length === 0) {
+    throw new Error('markPartitionStatuses requires a non-empty `statuses` array.');
+  }
+  if (statuses.some((entry) => !entry?.partitionKey || !entry.status)) {
+    throw new Error('markPartitionStatuses requires `partitionKey` and `status` in every entry.');
+  }
+  if (!subGraphName) throw new Error('markPartitionStatuses requires `subGraphName`.');
+  return recordStatusEvents({ client, importId, subGraphName, statuses }, 'markPartitionStatuses');
+}
+
+/**
+ * Append a StatusEvent for a partition. Status events are append-only;
+ * `loadImportManifest` resolves the "current" status by taking the latest
+ * event per partition. Each call writes one small Knowledge Asset; use
+ * {@link markPartitionStatuses} to record many partitions in one.
  *
  * `status` is caller-defined. Conventional values are `"pending"`,
  * `"in_progress"`, `"done"`, `"failed"`, `"skipped"`. The library does
@@ -538,7 +931,7 @@ export async function createImportManifest({
  * @param {string} opts.partitionKey
  * @param {string} opts.status
  * @param {string} opts.subGraphName
- * @returns {Promise<void>}
+ * @returns {Promise<{ partitionKey: string, status: string, eventUri: string, assertionName: string }>}
  */
 export async function markPartitionStatus({
   client,
@@ -559,63 +952,11 @@ export async function markPartitionStatus({
   if (!partitionKey) throw new Error('markPartitionStatus requires `partitionKey`.');
   if (!status) throw new Error('markPartitionStatus requires `status`.');
   if (!subGraphName) throw new Error('markPartitionStatus requires `subGraphName`.');
-
-  const cgId = client.cgId;
-  const assertion = assertionName ?? defaultManifestAssertionName(importId);
-  // Single-row existence check via SPARQL ASK rather than a full
-  // `loadImportManifest` load. For a 10k-partition import marking each
-  // partition twice (in_progress + done) the former approach ran 20k
-  // full-manifest SWM materialisations — quadratic in the partition
-  // count. ASK is one round-trip with one Boolean row. Resolves Codex
-  // PR #642 quadratic-validation finding.
-  const declared = await partitionDeclared({
-    client,
-    importId,
-    partitionKey,
-    subGraphName,
-  });
-  if (!declared) {
-    throw new Error(
-      `markPartitionStatus: partition '${partitionKey}' is not declared in manifest '${importId}'. ` +
-      `Call createImportManifest with the complete partition set before recording status events.`,
-    );
-  }
-  const partIri = partitionUri(importId, partitionKey);
-  const evIri = statusEventUri(importId, partitionKey);
-  const nowIso = new Date().toISOString();
-  const triples = [
-    { subject: partIri, predicate: IMPORT_P.statusEvent, object: evIri },
-    { subject: evIri, predicate: RDF_TYPE, object: uri(IMPORT_T.StatusEvent) },
-    { subject: evIri, predicate: IMPORT_P.status, object: lit(status) },
-    { subject: evIri, predicate: IMPORT_P.recordedAt, object: dt(nowIso) },
-  ];
-  await client.writeAssertion({
-    contextGraphId: cgId,
-    assertionName: assertion,
-    subGraphName,
-    triples,
-  });
-  // Promote BOTH roots so peers see the status update:
-  //
-  //   - `evIri` carries the StatusEvent's own triples (rdf:type, status,
-  //     recordedAt).
-  //   - `partIri` is the subject of the NEW `partIri imp:statusEvent
-  //     evIri` triple we just wrote — `assertion.promote({entities})`
-  //     only moves quads whose SUBJECT is in `entities`. If we promoted
-  //     `evIri` alone, the partition→event edge would stay in WM and
-  //     `loadImportManifest` running against SWM (or on a peer node)
-  //     would never see this event, treating the partition as still on
-  //     its previous status.
-  //
-  // `partIri`'s prior triples (rdf:type, imp:key, imp:initialStatus)
-  // are already in SWM from `createImportManifest`; re-promoting it is
-  // idempotent for those and ships the new `imp:statusEvent` edge.
-  await client.promote({
-    contextGraphId: cgId,
-    assertionName: assertion,
-    subGraphName,
-    entities: [partIri, evIri],
-  });
+  const [event] = await recordStatusEvents(
+    { client, importId, subGraphName, statuses: [{ partitionKey, status }] },
+    'markPartitionStatus',
+  );
+  return event;
 }
 
 /**
@@ -625,7 +966,9 @@ export async function markPartitionStatus({
  *
  * Returns `{ importUri, partitions: [{ key, status, uri, recordedAt }] }`
  * sorted by partition key. `recordedAt` is `null` for partitions still on
- * the initial status (no events).
+ * the initial status (no events). Fails when the head or any declared
+ * partition is not visible yet, so a resume never skips a partition it
+ * cannot see.
  *
  * @param {object} opts
  * @param {import('./dkg-daemon.mjs').DkgClient} opts.client
@@ -641,75 +984,46 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
 
   const cgId = client.cgId;
   const importIri = importUri(importId);
-
-  // Pick the latest StatusEvent per partition using the standard SPARQL
-  // "max row" idiom: bind the event whose `(recordedAt, event IRI)` tuple is
-  // greater than no other event tuple. The event IRI tie-breaker matters
-  // because `recordedAt` is millisecond precision, so two status writes can
-  // legitimately share the same timestamp. Avoids the SAMPLE+MAX
-  // decorrelation problem where SAMPLE can pick the status from one row and
-  // MAX the timestamp from another.
-  const sparql = `
-    PREFIX imp: <${IMPORT_NS}>
-    PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-    SELECT ?part ?key ?initial ?latestStatus ?latestRecordedAt WHERE {
-      <${importIri}> imp:partition ?part .
-      ?part imp:key ?key ;
-            imp:initialStatus ?initial .
-      OPTIONAL {
-        ?part imp:statusEvent ?ev .
-        ?ev imp:status ?latestStatus ;
-            imp:recordedAt ?latestRecordedAt .
-        FILTER NOT EXISTS {
-          ?part imp:statusEvent ?ev2 .
-          ?ev2 imp:recordedAt ?ts2 .
-          FILTER (
-            ?ts2 > ?latestRecordedAt ||
-            (?ts2 = ?latestRecordedAt && STR(?ev2) > STR(?ev))
-          )
-        }
-      }
-    }
-  `;
-  // Query the SWM tier, not the bare data graph. The manifest is created via
-  // the assertion API (create -> write -> promote), so the only place a
-  // resume-from-restart or peer-side load will see it is the per-sub-graph
-  // SWM graph (`did:dkg:context-graph:<cg>/<subgraph>/_shared_memory`). The
-  // daemon's default `/api/query` routing for `subGraphName` alone hits the
-  // bare data graph (`did:dkg:context-graph:<cg>/<subgraph>`), which is
-  // empty for assertion-API-written data — so without `graphSuffix` this
-  // query would silently return zero bindings even on a healthy import.
-  // See AGENTS.md §7b query gotchas + the existing
-  // scripts/devnet-test-rfc38-*.sh scripts that use the same pattern.
-  const res = await client.query({
-    sparql,
-    contextGraphId: cgId,
-    subGraphName,
-    graphSuffix: '_shared_memory',
-  });
-  const bindings = res?.result?.bindings ?? res?.bindings ?? [];
-  if (bindings.length === 0) {
+  const [{ head, partitions: declared }, latest] = await Promise.all([
+    readManifestDeclarations({ client, importId, subGraphName }),
+    readLatestStatusEvents({ client, importId, subGraphName }),
+  ]);
+  if (head === undefined) {
     throw new Error(
       `No import manifest rows found for '${importId}' in context graph '${cgId}' ` +
       `sub-graph '${subGraphName}'. The manifest is missing or not visible in shared memory.`,
     );
   }
-
-  const partitions = bindings.map((row) => {
-    const key = unquote(row.key);
-    const initial = unquote(row.initial);
-    const latestStatus = row.latestStatus != null ? unquote(row.latestStatus) : null;
-    const latestRecordedAt = row.latestRecordedAt != null
-      ? unquote(row.latestRecordedAt).replace(/\^\^.*$/, '')
-      : null;
+  if (head.hash === null) {
+    throw new Error(
+      `Import manifest '${importId}' in context graph '${cgId}' sub-graph '${subGraphName}' has a head written for ` +
+      `more than one partition set (two runs created it at once). Pass a new importId for a new import run.`,
+    );
+  }
+  if (declared.size < head.count) {
+    throw new Error(
+      `Import manifest '${importId}' in context graph '${cgId}' sub-graph '${subGraphName}' is incomplete in ` +
+      `shared memory: ${declared.size} of ${head.count} partitions are visible. Run createImportManifest ` +
+      `again with the same partitions to finish it, or wait until this node has received all of it.`,
+    );
+  }
+  if (partitionSetHash([...declared.values()].map((p) => p.key)) !== head.hash) {
+    throw new Error(
+      `Import manifest '${importId}' in context graph '${cgId}' sub-graph '${subGraphName}' declares partitions ` +
+      `its head does not list: another partition set was written under the same importId. ` +
+      `Pass a new importId for a new import run.`,
+    );
+  }
+  const partitions = [...declared].map(([part, { key, initial }]) => {
+    const event = latest.get(part);
     return {
       key,
-      status: latestStatus ?? initial ?? 'pending',
-      uri: bareUri(row.part),
-      recordedAt: latestRecordedAt,
+      status: event?.status ?? initial ?? 'pending',
+      uri: part,
+      recordedAt: event?.recordedAt ?? null,
     };
   });
-  partitions.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  partitions.sort((a, b) => compareStrings(a.key, b.key));
   return { importUri: importIri, partitions };
 }
 
