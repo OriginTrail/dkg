@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { gzipBounded, buildKnowledgeAssetUalFromOnChainIdV1 } from '@origintrail-official/dkg-core';
+import { setTimeout as delay } from 'node:timers/promises';
+import { BoundedGzipCapacityError, gzipBounded, buildKnowledgeAssetUalFromOnChainIdV1 } from '@origintrail-official/dkg-core';
 import { quadToBlazegraphNQuad } from '@origintrail-official/dkg-storage';
 import { PublicSnapshotEvidence, coreTrustedGraphQuads } from './public-snapshot-evidence.js';
 import { withSnapshotVerificationPool } from './snapshot-verification-pool.js';
@@ -12,6 +13,24 @@ import { checkpointAssetPath, checkpointSha256, readPinnedCheckpointFile, syncCh
 export interface VerifiedSnapshotCheckpointAsset {
   index: number; ual: string; graph: string; metaGraph: string; root: string; version: string;
   publicQuads: number; dataSha256: string; metadataSha256: string;
+}
+
+const CODEC_CAPACITY_WAIT_MS = 25;
+
+/**
+ * The process refuses a codec it has no room for, and one lane's worst case is a third of that room.
+ * A lane waits its turn rather than fail the job: every codec has a deadline, and the job's signal ends the wait.
+ */
+async function whenCodecCapacityFrees<T>(codec: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  for (;;) {
+    try {
+      return await codec();
+    } catch (error) {
+      if (!(error instanceof BoundedGzipCapacityError)) throw error;
+      await delay(CODEC_CAPACITY_WAIT_MS);
+      signal.throwIfAborted();
+    }
+  }
 }
 
 /** The result is an isolated import candidate; it confers no live Edge coverage. */
@@ -41,7 +60,8 @@ export async function verifySnapshotCheckpoint(options: {
         const entry = entries[index]!;
         const body = await readPinnedCheckpointFile(checkpointAssetPath(directory, index, 'body'), entry.bodySha256, 4 * 1024 * 1024);
         const metadata = await readPinnedCheckpointFile(checkpointAssetPath(directory, index, 'meta'), entry.metadataSha256, 66_000);
-        const decoded = await decodeNegotiatedExactSyncResponse(body, { allowCompression: true, signal });
+        const decoded = await whenCodecCapacityFrees(
+          () => decodeNegotiatedExactSyncResponse(body, { allowCompression: true, signal }), signal);
         if (decoded.bytes.length !== entry.plainBytes) throw new Error('Checkpoint expanded size mismatch');
         const asset = await lane.verify({ assetIndex: index, assetUal: entry.ual,
           metadataBytes: metadata, dataBytes: decoded.bytes });
@@ -49,10 +69,10 @@ export async function verifySnapshotCheckpoint(options: {
         // Only the verified quad collection may cross into the native parser.
         // Never reuse supplier bytes: its syntax can include rows our parser ignored.
         const safeData = Buffer.from(authenticated.dataQuads.map(q => `${quadToBlazegraphNQuad(q)}\n`).join(''));
-        const compressed = await gzipBounded(safeData, {
+        const compressed = await whenCodecCapacityFrees(() => gzipBounded(safeData, {
           maxInputBytes: 16 * 1024 * 1024, maxOutputBytes: 16 * 1024 * 1024,
           timeoutMs: 5_000, signal,
-        });
+        }), signal);
         // This journal is empty. No current version or local control sidecar
         // exists to merge; authentication already supplied receiver-owned metadata.
         const safeMeta = Buffer.from(authenticated.metadataQuads.map(q => `${quadToBlazegraphNQuad(q)}\n`).join(''));
