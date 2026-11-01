@@ -40,6 +40,11 @@
       "import": "./dist/query-result.js",
       "default": "./dist/query-result.js"
     },
+    "./context-graph-list-wire": {
+      "types": "./dist/context-graph-list-wire.d.ts",
+      "import": "./dist/context-graph-list-wire.js",
+      "default": "./dist/context-graph-list-wire.js"
+    },
     "./coalescing-recurring-task": {
       "types": "./dist/coalescing-recurring-task.d.ts",
       "import": "./dist/coalescing-recurring-task.js",

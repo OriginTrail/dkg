@@ -21,7 +21,7 @@ test.beforeEach(async ({ page }) => {
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/context-graph/list') {
-      await route.fulfill({ json: { contextGraphs: [{ id: cg, name: 'Browser preview' }] } });
+      await route.fulfill({ json: { contextGraphs: [{ id: cg, name: 'Browser preview', isSystem: false, subscribed: true, synced: true }] } });
     } else if (path === '/api/agent/identity') {
       await route.fulfill({ json: { agentAddress: owner, agentDid: `did:ethr:${owner}`,
         name: 'Browser preview', peerId: 'browser-preview', nodeIdentityId: '1' } });
@@ -115,7 +115,7 @@ test('Memory Stack distinguishes loading and failure from empty inventory, retri
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   await page.clock.install();
-  await page.route('**/api/context-graph/list', async route => {
+  await page.route('**/api/context-graph/list**', async route => {
     await pending;
     if (failing) await route.fulfill({ status: 503, json: { error: 'inventory unavailable' } });
     else await route.fallback();

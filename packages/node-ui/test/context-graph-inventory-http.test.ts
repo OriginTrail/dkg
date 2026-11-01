@@ -13,7 +13,7 @@ class Events {
   emit(type: string) { this.handlers.get(type)?.({ data: '{}' }); }
 }
 const json = (value: unknown) => new Response(JSON.stringify(value));
-const rows = (id: string) => ({ contextGraphs: [{ id, name: id, callerInvolved: true }] });
+const rows = (id: string) => ({ contextGraphs: [{ id, name: id, isSystem: false, subscribed: false, synced: false, callerInvolved: true }] });
 const agent = { agentDid: 'did:dkg:agent:0xabc', peerId: 'peer' };
 let root: Root | null;
 let container: HTMLDivElement;
@@ -31,7 +31,7 @@ beforeEach(() => {
   identity = async () => json(agent);
   http = vi.fn(async (url: string, init?: RequestInit) => {
     if (url === '/api/status') return json({});
-    if (url === '/api/context-graph/list') return list();
+    if (url.startsWith('/api/context-graph/list?')) return list();
     if (url === '/api/agent/identity') return identity(init?.signal as AbortSignal);
     throw new Error(`Unexpected HTTP request: ${url}`);
   });
@@ -49,7 +49,7 @@ async function mount(consumers = 1) {
   await act(async () => { root!.render(React.createElement(React.Fragment, {},
     ...Array.from({ length: consumers }, (_, key) => React.createElement(Probe, { key })))); });
 }
-const listCalls = () => http.mock.calls.filter(([url]) => url === '/api/context-graph/list').length;
+const listCalls = () => http.mock.calls.filter(([url]) => url.startsWith('/api/context-graph/list?')).length;
 
 it.each(['headers', 'body'])('bounds stalled identity %s so mutation completion and inventory polling recover', async stage => {
   let signal: AbortSignal | undefined;

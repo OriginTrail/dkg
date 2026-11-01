@@ -650,6 +650,32 @@ export function serializeJsonResponse(status: number, data: unknown): string {
     : rawBody;
 }
 
+/** One comma-separated header from several sources, each name once. */
+export function composeHeaderList(...values: Array<string | undefined>): string | undefined {
+  const names = new Map<string, string>();
+  for (const value of values) {
+    for (const rawName of value?.split(',') ?? []) {
+      const name = rawName.trim();
+      if (name) names.set(name.toLowerCase(), name);
+    }
+  }
+  return names.size > 0 ? [...names.values()].join(', ') : undefined;
+}
+
+export function jsonResponseHeaders(res: ServerResponse, corsOrigin?: string | null, extraHeaders?: Record<string, string>): Record<string, string> {
+  const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
+  const cors = corsHeaders(origin);
+  const vary = composeHeaderList(cors.Vary, extraHeaders?.Vary);
+  const exposed = composeHeaderList(cors['Access-Control-Expose-Headers'], extraHeaders?.['Access-Control-Expose-Headers']);
+  return {
+    "Content-Type": "application/json",
+    ...cors,
+    ...(extraHeaders ?? {}),
+    ...(vary === undefined ? {} : { Vary: vary }),
+    ...(exposed === undefined ? {} : { 'Access-Control-Expose-Headers': exposed }),
+  };
+}
+
 /** Sends a body {@link serializeJsonResponse} made. */
 export function sendSerializedJsonResponse(
   res: ServerResponse,
@@ -658,13 +684,8 @@ export function sendSerializedJsonResponse(
   corsOrigin?: string | null,
   extraHeaders?: Record<string, string>,
 ): void {
-  const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
   noteAdmissionResponse(res, status, body);
-  res.writeHead(status, {
-    "Content-Type": "application/json",
-    ...corsHeaders(origin),
-    ...(extraHeaders ?? {}),
-  });
+  res.writeHead(status, jsonResponseHeaders(res, corsOrigin, extraHeaders));
   res.end(body);
 }
 
@@ -1441,7 +1462,7 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   if (!origin) return {};
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match",
     // Lets cross-origin clients read a 503's retry hint and its log correlation id (#2834).
     "Access-Control-Expose-Headers": "Retry-After, x-dkg-operation-id",
   };
