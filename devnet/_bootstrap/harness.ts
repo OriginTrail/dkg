@@ -31,6 +31,7 @@ import {
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ethers } from 'ethers';
+import { askWithAuthorityRetry } from '../../scripts/lib/qa/authority-retry.mjs';
 import { selectBindings, type SparqlBindingCell } from './select-response.js';
 
 export const REPO_ROOT = resolve(import.meta.dirname, '../..');
@@ -636,6 +637,16 @@ export async function postJson(
   path: string,
   body: unknown,
 ): Promise<{ status: number; json: any }> {
+  const { status, json } = await postAnswer(node, path, body);
+  return { status, json };
+}
+
+/** One POST, with the `Retry-After` of its answer. */
+async function postAnswer(
+  node: DevnetNode,
+  path: string,
+  body: unknown,
+): Promise<{ status: number; json: any; retryAfter: string | null }> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (node.authToken) headers.Authorization = `Bearer ${node.authToken}`;
   const res = await fetchRetry(`http://127.0.0.1:${node.apiPort}${path}`, {
@@ -649,7 +660,7 @@ export async function postJson(
   } catch {
     /* non-JSON */
   }
-  return { status: res.status, json };
+  return { status: res.status, json, retryAfter: res.headers.get('retry-after') };
 }
 
 /** HTTP DELETE to a node API path (auth header + tolerant JSON parse), mirroring
@@ -713,13 +724,24 @@ export function buildQueryBody(sparql: string, opts: QueryOpts = {}): Record<str
  * `{ var: <n-triples-term-string> }` map (e.g. `{ name: '"Foo"' }`). THROWS on
  * an unrecognised 200 shape so a wrapper regression can't masquerade as 0 rows
  * (mirrors v10-core-flows `queryBindings`, otReviewAgent #1258).
+ *
+ * The node's retryable authority 503 is sent again the way a client that follows
+ * the route's contract does (`scripts/lib/qa/authority-retry.mjs`), and fails the
+ * call only once the retries run out.
  */
 export async function queryNode(
   node: DevnetNode,
   sparql: string,
   opts: QueryOpts = {},
 ): Promise<Array<Record<string, SparqlBindingCell>>> {
-  const { status, json } = await postJson(node, '/api/query', buildQueryBody(sparql, opts));
+  const { status, json } = await askWithAuthorityRetry(
+    () => postAnswer(node, '/api/query', buildQueryBody(sparql, opts)),
+    {
+      onRetry: ({ retry, delayMs }) => console.warn(
+        `[harness] node${node.num}: read authority unavailable, query retry ${retry} in ${delayMs} ms`,
+      ),
+    },
+  );
   if (status !== 200) {
     throw new Error(`query on node${node.num} failed (${status}): ${JSON.stringify(json)}`);
   }

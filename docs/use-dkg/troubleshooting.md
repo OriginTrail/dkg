@@ -42,6 +42,14 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
   a publish only if the answer says `jobCreated: false`; otherwise
   [find the job](../build/async-jobs.md#retry-safely) first. Never resend under a new name. What each answer means:
   [Async Share and Publish Jobs](../build/async-jobs.md).
+- A `503` with `retryable: true` and code `CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE`
+  means the node could not read a Context Graph's authority in time, usually
+  because an RPC endpoint is slow. It refuses rather than guesses, and nothing was
+  read or changed. The `dkg` CLI asks again by itself for reads and subscribes (and
+  for a synchronous publish on `CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE`): up to four
+  times, after 1, 2, 4 and 8 s, or the `Retry-After` when that is longer. A client
+  of your own should do the same. If the answer stays, check the node's RPC
+  endpoints.
 - To see whether admission, the store or the workers are slow, read the
   `async_admission_usage` line in `dkg logs`. The daemon writes it every five
   minutes. How to read it: [Monitor Store and Queue Pressure](backpressure-observability.md).
