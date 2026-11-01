@@ -378,6 +378,10 @@ export default defineConfig({
           'test/oxigraph-orphan-native.test.ts',
           'test/process-inventory.test.ts',
           'test/oxigraph-managed.test.ts',
+          // The sync responder against the real pinned executable, started as
+          // a node starts its managed store: page cost of a large metadata
+          // graph under the store's own client deadline.
+          'test/sync-large-graph-store-deadline-native.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
           // keeping it in the fast unit lane costs nothing.
