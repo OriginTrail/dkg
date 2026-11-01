@@ -380,7 +380,6 @@ const VERIFIED_CG_SHARED_PROJECTIONS_V1 = new WeakMap<
   VerifiedCgSharedProjectionStateV1
 >();
 
-/** Verify canonical bytes, private commitment, counts, and structured V10 root. */
 export function verifyCgSharedProjectionV1(
   transferredBundle: VerifiedTransferredCatalogBundleV1,
   signedHead: SignedAuthorCatalogHeadEnvelopeV1,
@@ -439,19 +438,13 @@ export function verifyCgSharedProjectionV1(
       cause,
     );
   }
-  if (projectionBytes.byteLength > verificationLimits.maxProjectionBytes) {
-    fail(
-      'projection-resource-refused',
-      'projection exceeds the local in-memory byte limit',
-    );
-  }
 
   const projectionDigest = metadata.projectionDigest;
   if (projectionDigest !== metadata.transfer.projectionDigest) {
     fail('projection-digest', 'catalog and transfer projection digests differ');
   }
 
-  const semantic = verifyCanonicalProjectionBytes(
+  const semantic = verifyCanonicalCgSharedProjectionBytesV1(
     projectionBytes,
     sealBinding.seal,
     projectionDigest,
@@ -587,7 +580,8 @@ export function readVerifiedCgSharedProjectionBytesV1(
   );
 }
 
-function verifyCanonicalProjectionBytes(
+/** Canonical semantics and local limits shared by preflight and transferred bundles. */
+export function verifyCanonicalCgSharedProjectionBytesV1(
   projectionBytes: Uint8Array,
   seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
   projectionDigest: Digest32V1,
@@ -597,6 +591,9 @@ function verifyCanonicalProjectionBytes(
   readonly privateDataHash: Digest32V1;
   readonly assertionMerkleRoot: Digest32V1;
 } {
+  limits = normalizeVerificationLimits(limits);
+  assertProjectionWithinLocalLimits(String(projectionBytes.byteLength) as ByteLengthV1,
+    seal.publicTripleCount, limits);
   if (projectionBytes.byteLength === 0) {
     fail('projection-empty', 'cg-shared-v1 projection must not be empty');
   }

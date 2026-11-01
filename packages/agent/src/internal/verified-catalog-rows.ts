@@ -25,6 +25,9 @@ import {
 
 import { assertRecoverableAuthorAttestationCapabilityV1 } from
   '../rfc64/recoverable-author-attestation-v1.js';
+import { assertCanonicalPreparedCatalogAssetV1,
+  type PreparedCatalogAssetV1, type PreparedSuccessorRowV1 } from './prepared-catalog-asset.js';
+export type { PreparedSuccessorRowV1 } from './prepared-catalog-asset.js';
 
 /**
  * GH#3081 / GH#3072 — rows of an author catalog that this process has already verified.
@@ -119,15 +122,6 @@ export class Rfc64VerifiedCatalogRowSetV1 implements Rfc64VerifiedCatalogRowsV1 
   }
 }
 
-/** The fields of a prepared successor row that its verification reads. */
-export interface PreparedSuccessorRowV1 {
-  readonly deployment: CatalogSealDeploymentProfileV1;
-  readonly scope: AuthorCatalogScopeV1;
-  readonly row: Readonly<AuthorCatalogRowV1>;
-  readonly sealBytes: Uint8Array;
-  readonly bundleBytes: Uint8Array;
-}
-
 export interface VerifiedSuccessorRowV1<Prepared extends PreparedSuccessorRowV1> {
   readonly prepared: Prepared;
   readonly row: Readonly<AuthorCatalogRowV1>;
@@ -181,6 +175,17 @@ export class Rfc64SuccessorRowVerificationV1 {
       prepared.deployment,
     );
     assertRecoverableAuthorAttestationCapabilityV1(readVerifiedCatalogSealBindingV1(sealBinding));
+  }
+
+  /** A complete target is safe to withdraw toward only when its replacement content is valid. */
+  assertAssetBinds(prepared: PreparedCatalogAssetV1): void {
+    assertCanonicalPreparedCatalogAssetV1(prepared);
+    if (this.#remembered !== undefined) {
+      const canonicalRow = canonicalizeAuthorCatalogRowV1(prepared.row);
+      if (this.#remembered.find(this.#bindingOfPrepared(prepared), canonicalRow) !== undefined) return;
+    }
+    this.assertSealBinds(prepared);
+    prepared.assertProjectionBinds();
   }
 
   /** After signing: exact verification of one produced row under the head that names it. */
