@@ -211,20 +211,35 @@ export function normalizeBlazegraphNamespaceApiUrl(namespaceApiUrl: string): str
   return parsed.toString().replace(/\/$/u, '');
 }
 
-/** Convert only the exact per-namespace SPARQL endpoint shape used by operators. */
-export function blazegraphNamespaceApiUrlFromSparqlEndpoint(endpoint: string): string {
+export interface BlazegraphNamespaceEndpointParts {
+  readonly namespace: string;
+  readonly baseUrl: string;
+  readonly sparqlUrl: string;
+  readonly namespaceApiUrl: string;
+}
+
+/** Parse the exact namespace endpoint once for storage and managed-store callers. */
+export function blazegraphNamespaceEndpointParts(endpoint: string): BlazegraphNamespaceEndpointParts {
   const parsed = parseHttpUrl(endpoint, 'Blazegraph SPARQL endpoint');
   const path = parsed.pathname.replace(/\/$/u, '');
   const match = /^(.*\/bigdata\/namespace)\/([^/]+)\/sparql$/u.exec(path);
   const apiPath = match?.[1];
-  const namespace = match?.[2];
-  if (apiPath === undefined || namespace === undefined || namespace.length === 0) {
-    throw new Error(
-      'Blazegraph SPARQL endpoint must end with /bigdata/namespace/<namespace>/sparql',
-    );
+  const encodedNamespace = match?.[2];
+  if (apiPath === undefined || encodedNamespace === undefined || encodedNamespace.length === 0) {
+    throw new Error('Blazegraph SPARQL endpoint must end with /bigdata/namespace/<namespace>/sparql');
   }
+  const namespace = decodeURIComponent(encodedNamespace);
   parsed.pathname = apiPath;
-  return parsed.toString().replace(/\/$/u, '');
+  const namespaceApiUrl = parsed.toString().replace(/\/$/u, '');
+  parsed.pathname = apiPath.slice(0, -'/bigdata/namespace'.length) || '/';
+  const baseUrl = parsed.toString().replace(/\/$/u, '');
+  return Object.freeze({ namespace, baseUrl, namespaceApiUrl,
+    sparqlUrl: `${namespaceApiUrl}/${encodeURIComponent(namespace)}/sparql` });
+}
+
+/** Convert only the exact per-namespace SPARQL endpoint shape used by operators. */
+export function blazegraphNamespaceApiUrlFromSparqlEndpoint(endpoint: string): string {
+  return blazegraphNamespaceEndpointParts(endpoint).namespaceApiUrl;
 }
 
 /** Convert the CLI provisioner's exact origin-style service URL. */
