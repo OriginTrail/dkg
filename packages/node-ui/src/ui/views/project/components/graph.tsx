@@ -5,9 +5,12 @@ import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
 import { useLayoutStore } from '../../../stores/layout.js';
 import { useVerifiableMemoryAnchors, type PublishAnchor } from '../../../hooks/useVerifiableMemoryAnchors.js';
+import { layerHex, neutralHex, vmAnchorHex } from '../../../layer-colors.js';
 import { useSwmAttributions, type AgentPaletteEntry, type SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { TRUST_COLORS, LAYER_CONFIG, buildLayerGraphOptions, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
+import { TRUST_COLORS, LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
+import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
+import { agentHexForUri } from '../../../hooks/useAgents.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -461,13 +464,15 @@ export function LayerGraphPanel({
   // caller's override taking precedence — it's the more specific
   // intent. The style engine still falls back to classColors /
   // namespaceColors / `defaultNodeColor` for unspecified URIs.
+  // Agent nodes (VM "signed by", agent profiles) take their chip colour;
+  // lowest priority so attribution and caller overrides still win.
+  const agentColors = useMemo(() => agentNodeColors(renderTriples), [renderTriples]);
   const mergedNodeColors = useMemo(() => {
     const swm = layer === 'swm' ? swmAttr.nodeColors : undefined;
-    if (!swm && !nodeColorsOverride) return undefined;
-    if (!swm) return nodeColorsOverride;
-    if (!nodeColorsOverride) return swm;
-    return { ...swm, ...nodeColorsOverride };
-  }, [layer, swmAttr.nodeColors, nodeColorsOverride]);
+    const hasAgents = Object.keys(agentColors).length > 0;
+    if (!swm && !nodeColorsOverride && !hasAgents) return undefined;
+    return { ...agentColors, ...(swm ?? {}), ...(nodeColorsOverride ?? {}) };
+  }, [layer, swmAttr.nodeColors, nodeColorsOverride, agentColors]);
   const { canvasTriples, singletonItems } = useMemo(
     () => splitGraphTriplesForShelf(renderTriples),
     [renderTriples],
@@ -637,7 +642,7 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
       </div>
       {palette.slice(0, 8).map(p => (
         <div key={p.agent} className="v10-swm-legend-row" title={p.agent}>
-          <span className="v10-swm-legend-swatch" style={{ background: p.color }} />
+          <AgentDot uri={p.agent} label={p.label} color={p.color} size={16} title={p.agent} />
           <span className="v10-swm-legend-label">{p.label}</span>
           <span className="v10-swm-legend-metric">{p.entityCount}</span>
         </div>
@@ -657,11 +662,13 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
 // Explains the synthetic VM anchor and agent decoration triples produced by
 // `useVerifiableMemoryAnchors` without pulling in the later VM metadata work.
 export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
-  const signerCount = useMemo(() => {
+  const signers = useMemo(() => {
     const s = new Set<string>();
     for (const a of anchors) for (const g of a.agents) s.add(g);
-    return s.size;
+    // Same colour as the agent's node in the graph (agentNodeColors).
+    return [...s].map(uri => ({ uri, color: agentHexForUri(uri) }));
   }, [anchors]);
+  const signerCount = signers.length;
   const latest = anchors[0]?.publishedAt;
   const latestLabel = (() => {
     if (!latest) return null;
@@ -679,16 +686,18 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
         <span className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</span>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: '#f5a524' }}>◉</span>
+        <span className="v10-vm-legend-swatch" style={{ background: vmAnchorHex('fill'), color: '#fff', boxShadow: `0 0 0 2px ${vmAnchorHex('ring')}` }}>◉</span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: '#c084fc' }}>◈</span>
+        {signerCount > 0
+          ? <AgentDotStack agents={signers} max={3} size={18} />
+          : <span className="v10-vm-legend-swatch v10-vm-legend-swatch-agent" style={{ background: neutralHex('node') }} />}
         <span className="v10-vm-legend-label">Agent identity ({signerCount})</span>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: '#4ade80' }}>—</span>
-        <span className="v10-vm-legend-label">Signed / anchored edge</span>
+        <span className="v10-vm-legend-swatch" style={{ background: layerHex('verified') }}>—</span>
+        <span className="v10-vm-legend-label">Anchored-in edge</span>
       </div>
       {latestLabel && (
         <div className="v10-vm-legend-foot">Latest: {latestLabel}</div>

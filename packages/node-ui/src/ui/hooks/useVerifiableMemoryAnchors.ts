@@ -1,16 +1,16 @@
 /**
- * useVerifiableMemoryAnchors — pulls Verifiable-Memory provenance out of the
- * daemon's `_shared_memory_meta` graphs and projects it as a small set of
- * "decoration" RDF triples that can be merged into the existing VM graph
- * visualisation.
+ * useVerifiableMemoryAnchors — pulls Verifiable-Memory provenance from the
+ * REAL on-chain publish receipts in the context graph's `_meta` (C10; it used
+ * to read WorkspaceOperation share records from `_shared_memory_meta`, which
+ * are not chain receipts) and projects it as a small set of "decoration" RDF
+ * triples merged into the VM graph visualisation.
  *
  * This is the visual realisation of the DKG "secret sauce": every VM entity
  * becomes surrounded by two extra kinds of nodes so the human eye instantly
  * sees *why* it is trusted:
  *
- *   ◉ OnChainAnchor    per WorkspaceOperation (publish batch).
- *                      Represents the on-chain anchor carrying this batch
- *                      of KAs. Labelled with op-id + timestamp.
+ *   ◉ OnChainAnchor    per receipted assertion (publish tx).
+ *                      Labelled with the tx hash + finalize time.
  *
  *   ◈ AgentIdentity    per unique DID / peer-ID that signed a publish.
  *                      Represents the agent that attested to the batch.
@@ -33,6 +33,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { authHeaders } from '../api.js';
 import type { Triple } from './useMemoryEntities.js';
+import { buildVmReceiptSummaryQuery, isSafeIriPart, receiptAgent, receiptValue } from './useVmReceiptSummary.js';
 
 /** Namespace for synthetic visualisation triples — unique to VM decoration
  *  so downstream code (SubGraphBar bucketing, counts) never mistakes them
@@ -108,40 +109,32 @@ function agentLabel(agentId: string): string {
   return agentId;
 }
 
-/** Build the SPARQL that enumerates every publish-batch WorkspaceOperation
- *  across every sub-graph's `_shared_memory_meta`. */
-function buildAnchorsQuery(): string {
-  // The server resolves registered partitions and excludes child Context Graphs.
-  return `PREFIX dkg: <http://dkg.io/ontology/>
-PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?op ?root ?agent ?publishedAt ?g WHERE {
-  GRAPH ?g {
-    ?op a dkg:WorkspaceOperation ;
-        dkg:rootEntity ?root ;
-        dkg:publishedAt ?publishedAt ;
-        prov:wasAttributedTo ?agent .
-  }
-  FILTER(STRENDS(STR(?g), "/_shared_memory_meta"))
-} ORDER BY ?publishedAt LIMIT 2000`;
-}
-
-function subGraphFromMetaGraphUri(gUri: string, cgId: string): string | undefined {
-  // did:dkg:context-graph:<cg>/<sg>/_shared_memory_meta  →  <sg>
-  // did:dkg:context-graph:<cg>/_shared_memory_meta       →  undefined
+/** did:dkg:context-graph:<cg>/<sub>/assertion/… → <sub> (undefined at the root). */
+function subGraphFromAssertionUri(asrt: string, cgId: string): string | undefined {
   const prefix = `did:dkg:context-graph:${cgId}/`;
-  if (!gUri.startsWith(prefix)) return undefined;
-  const tail = gUri.slice(prefix.length);
-  const slash = tail.indexOf('/');
-  if (slash < 0) return undefined;
-  const seg = tail.slice(0, slash);
-  if (!seg || seg.startsWith('_')) return undefined;
-  return seg;
+  if (!asrt.startsWith(prefix)) return undefined;
+  const seg = asrt.slice(prefix.length).split('/')[0];
+  return seg && seg !== 'assertion' ? seg : undefined;
 }
 
-function parseAnchorId(opUri: string): string {
-  // urn:dkg:share:<cg>:<opId>  →  <opId>
-  const lastColon = opUri.lastIndexOf(':');
-  return lastColon >= 0 ? opUri.slice(lastColon + 1) : opUri;
+/** Fold receipt rows into one anchor per receipted assertion. Exported for tests. */
+export function anchorsFromReceiptRows(rows: Array<Record<string, unknown>>, cgId: string): PublishAnchor[] {
+  const byAsrt = new Map<string, PublishAnchor>();
+  for (const row of rows) {
+    const asrt = receiptValue(row.asrt);
+    const tx = receiptValue(row.tx);
+    if (!asrt || !tx) continue;
+    let a = byAsrt.get(asrt);
+    if (!a) {
+      a = { opId: tx, opUri: asrt, agents: [], roots: [], publishedAt: receiptValue(row.finalizedAt), subGraph: subGraphFromAssertionUri(asrt, cgId) };
+      byAsrt.set(asrt, a);
+    }
+    const member = receiptValue(row.member);
+    if (member && !a.roots.includes(member)) a.roots.push(member);
+    const agent = receiptAgent(row);
+    if (agent && !a.agents.includes(agent)) a.agents.push(agent);
+  }
+  return [...byAsrt.values()].sort((x, y) => y.publishedAt.localeCompare(x.publishedAt));
 }
 
 function buildDecorationTriples(
@@ -156,8 +149,10 @@ function buildDecorationTriples(
     // restrict the anchor's edges to roots that will actually show up as
     // nodes — otherwise we end up with orphan anchor hubs floating next to
     // the graph, connected to roots that live only in SWM.
+    // Members come from the seal rows; entities namespaced under the
+    // assertion URI belong to it too (same rule as the receipt hook).
     const visibleRoots = visibleEntityUris
-      ? a.roots.filter(r => visibleEntityUris.has(r))
+      ? [...new Set([...a.roots.filter(r => visibleEntityUris.has(r)), ...[...visibleEntityUris].filter(u => u.startsWith(a.opUri + '/'))])]
       : a.roots;
     if (visibleRoots.length === 0) continue;
 
@@ -216,7 +211,7 @@ export function useVerifiableMemoryAnchors(
   const versionRef = useRef(0);
 
   useEffect(() => {
-    if (!contextGraphId) {
+    if (!contextGraphId || !isSafeIriPart(contextGraphId)) {
       setAnchors([]);
       setLoading(false);
       return;
@@ -230,46 +225,15 @@ export function useVerifiableMemoryAnchors(
         const res = await fetch('/api/query', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({
-            contextGraphId,
-            includeContextGraphPartitions: true,
-            includeSharedMemoryMeta: true,
-            sparql: buildAnchorsQuery(),
-          }),
+          body: JSON.stringify({ contextGraphId, sparql: buildVmReceiptSummaryQuery(contextGraphId) }),
         });
         if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);
         const data = await res.json();
         const rows: any[] = data?.result?.bindings ?? [];
-
-        // Fold rows into per-op buckets; each row is a single (op, root, agent)
-        // triple. A single op can carry many roots, hence the merge.
-        const byOp = new Map<string, PublishAnchor>();
-        for (const row of rows) {
-          const op = bv(row.op);
-          const root = bv(row.root);
-          const agent = bv(row.agent);
-          const ts = bv(row.publishedAt);
-          const g = bv(row.g);
-          if (!op || !root || !agent || !ts) continue;
-
-          let a = byOp.get(op);
-          if (!a) {
-            a = {
-              opId: parseAnchorId(op),
-              opUri: op,
-              agents: [],
-              roots: [],
-              publishedAt: ts,
-              subGraph: g ? subGraphFromMetaGraphUri(g, contextGraphId) : undefined,
-            };
-            byOp.set(op, a);
-          }
-          if (!a.roots.includes(root)) a.roots.push(root);
-          if (!a.agents.includes(agent)) a.agents.push(agent);
-        }
+        const next = anchorsFromReceiptRows(rows, contextGraphId);
 
         if (version !== versionRef.current) return;
-        setAnchors([...byOp.values()].sort((x, y) => y.publishedAt.localeCompare(x.publishedAt)));
+        setAnchors(next);
       } catch (err: any) {
         if (version !== versionRef.current) return;
         setError(err?.message ?? 'Failed to load anchors');

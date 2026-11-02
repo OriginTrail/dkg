@@ -8,6 +8,7 @@ import { canonicalAgentDid, normalizeAccessPolicy } from '../../../lib/contextGr
 import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from '../helpers.js';
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
+import { AgentDot } from '../../../components/AgentDot.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
 import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
 
@@ -489,6 +490,7 @@ export function ProjectOverviewCard({
             <span
               className="v10-po-badge"
               data-role={role.tone}
+              data-rank={role.rank}
               title={role.title}
             >
               {role.label}
@@ -669,6 +671,7 @@ export function ProjectOverviewCard({
                     title={full}
                     aria-label={ariaLabelParts.join(' ')}
                   >
+                    <AgentDot uri={canonical} label={display} size={16} title={full} />
                     <span className="v10-po-participant-name">{shortAddress}</span>
                     {isSelf && <span className="v10-po-participant-tag">you</span>}
                     {isCurator && <span className="v10-po-participant-tag">curator</span>}

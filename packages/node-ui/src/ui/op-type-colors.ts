@@ -52,7 +52,7 @@ export const opTypeRule = (name: string | undefined) => RULE[opTone(name)];
 
 // Fallbacks match 00-theme.css (dark / light) for tests and SSR.
 const DATA_FALLBACK = {
-  dark: ['#2b7de9', '#a08e10', '#d14d8a', '#c98500', '#d03fc0', '#b5772f', '#2a9fd6', '#1f9a1f'],
+  dark: ['#1a81ff', '#a69300', '#ec2890', '#c98500', '#e200d0', '#ac6800', '#00a1df', '#00a309'],
   light: ['#1f6fd1', '#8a7a00', '#a3195b', '#c28a00', '#b5179e', '#9a5b1e', '#0284c7', '#008300'],
 };
 

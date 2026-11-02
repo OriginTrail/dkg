@@ -380,7 +380,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
 /* Self-authored activity — the operator's OWN agent. The row text leads with
    "You …" for the explicit signal; this faint tint is a supplementary scan cue
    so own-agent activity is distinguishable at a glance (colour-not-alone). */
-.v10-notif-by-self { background: rgba(110, 168, 254, 0.07); }
+.v10-notif-by-self { background: color-mix(in srgb, var(--role) 8%, transparent); }
 
 /* Glyph cell */
 .v10-notif-glyph {
@@ -391,9 +391,10 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   line-height: 1.4;
 }
 .v10-notif-glyph-join { color: var(--role-text); }
+.v10-notif-agent { margin-right: 5px; vertical-align: -3px; }
 .v10-notif-glyph-created { color: var(--text-tertiary); }
-.v10-notif-glyph-promoted { color: var(--text-warning); }
-.v10-notif-glyph-published { color: var(--text-success); }
+.v10-notif-glyph-promoted { color: var(--layer-shared-text); }   /* C13: shared to SWM */
+.v10-notif-glyph-published { color: var(--layer-verified-text); } /* C13: published to VM */
 .v10-notif-glyph-approved { color: var(--text-success); }
 .v10-notif-glyph-rejected { color: var(--text-danger); }
 

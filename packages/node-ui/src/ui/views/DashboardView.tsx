@@ -18,6 +18,7 @@ import { nativeGasSymbol } from '../lib/nativeGasSymbol.js';
 import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
 import { dashboardSizePresentation } from './dashboard-size-presentation.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
+import { AgentDotStack } from '../components/AgentDot.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -542,6 +543,7 @@ export function DashboardView() {
     return {
       entities, triples,
       agentCount: agentSet.size,
+      agentList: [...agentSet],
       sizeLoading: hasCgs && sizeLoading,
       agentsLoading: hasCgs && agentsLoading,
       sizePartial,
@@ -697,7 +699,13 @@ export function DashboardView() {
             : agg.agentsPartial
               ? 'Some context graphs could not report agents; count is partial.'
               : "Unique agents — your own and others' — allow-listed and collaborating across your context graphs."}
-        />
+        >
+          {agg.hasCgs && !agg.agentsLoading && agg.agentList.length > 0 && (
+            <div className="v10-stat-agents">
+              <AgentDotStack agents={agg.agentList.map(uri => ({ uri }))} max={8} size={22} />
+            </div>
+          )}
+        </StatCard>
       </div>
 
       <div className="v10-dash-grid v10-dash-grid-2">

@@ -3,12 +3,13 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { useVerifiableMemoryAnchors } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
+import { useVerifiableMemoryAnchors, anchorsFromReceiptRows } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-// Server-owned partition discovery includes registered subgraphs and excludes child CGs.
-describe('useVerifiableMemoryAnchors — POST body scoping', () => {
+// C10: anchors come from real on-chain publish receipts in the CG's _meta,
+// not from WorkspaceOperation share records.
+describe('useVerifiableMemoryAnchors — receipt query', () => {
   let root: Root;
   let container: HTMLDivElement;
   let originalFetch: typeof globalThis.fetch | undefined;
@@ -31,7 +32,7 @@ describe('useVerifiableMemoryAnchors — POST body scoping', () => {
     if (originalFetch) globalThis.fetch = originalFetch;
   });
 
-  it('opts into server-scoped anchors across registered subgraphs', async () => {
+  it('reads publish receipts from the context graph _meta', async () => {
     function Probe({ id }: { id: string }) {
       useVerifiableMemoryAnchors(id);
       return null;
@@ -44,9 +45,24 @@ describe('useVerifiableMemoryAnchors — POST body scoping', () => {
     const calls = vi.mocked(fetch).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     const body = JSON.parse(String((calls[0][1] as any)?.body ?? '{}'));
-    expect(body.sparql).toContain('_shared_memory_meta');
-    expect(body).toMatchObject({ contextGraphId: 'cg-1', includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
-    expect(body.sparql).toContain('STRENDS(STR(?g), "/_shared_memory_meta")');
-    expect(body.sparql).not.toContain('STRSTARTS');
+    expect(body).toMatchObject({ contextGraphId: 'cg-1' });
+    expect(body.sparql).toContain('GRAPH <did:dkg:context-graph:cg-1/_meta>');
+    expect(body.sparql).toContain('dkg:publishedAtTx');
+    expect(body.sparql).not.toContain('WorkspaceOperation');
+  });
+});
+
+describe('anchorsFromReceiptRows', () => {
+  it('builds one anchor per receipted assertion with its members, agents and sub-graph', () => {
+    const A = 'did:dkg:context-graph:cg-1/research/assertion/0xabc/batch-1';
+    const anchors = anchorsFromReceiptRows([
+      { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+      { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:b', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+      { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', finalizedAt: '"2026-10-30T10:00:00Z"' },
+      { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/no-tx' },
+    ], 'cg-1');
+    expect(anchors).toHaveLength(2);
+    expect(anchors[0]).toMatchObject({ opId: '0x9f2c7a1d', roots: ['urn:x:a', 'urn:x:b'], agents: ['did:dkg:agent:0x1'], subGraph: 'research' });
+    expect(anchors[1]).toMatchObject({ opId: '0x41ab', agents: ['did:dkg:agent:0xdef'], subGraph: undefined });
   });
 });

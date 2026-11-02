@@ -46,23 +46,46 @@
   color: var(--text-primary);
   letter-spacing: 0.01em;
 }
-.v10-po-badge[data-role="curator"]::before {
-  content: "◆";
-  margin-right: 4px;
-  font-weight: 700;
-  color: var(--role-text);
+/* Role ladder: one blue, stronger with the role. Weight (solid → tint →
+   outline → grey → dashed) says how much you can do; the glyph says which
+   role it is, so the pill reads without colour. ◆ stays the canonical
+   curator glyph (also used on participant rows). */
+.v10-po-badge[data-rank]::before { font-weight: 700; margin-right: 2px; }
+.v10-po-badge[data-rank="curator"] {
+  border-color: var(--role);
+  background: var(--role);
+  color: var(--bg-surface);
 }
-/* Role you hold: tinted blue chip. */
-.v10-po-badge[data-role="curator"],
-.v10-po-badge[data-role="participant"] {
+.v10-po-badge[data-rank="curator"]::before { content: "◆"; }
+.v10-po-badge[data-rank="joined"] {
   border-color: var(--role-border);
   background: var(--role-bg);
   color: var(--role-text);
 }
-.v10-po-badge[data-role="viewer"],
-.v10-po-badge[data-role="unknown"] {
+.v10-po-badge[data-rank="joined"]::before { content: "✓"; }
+.v10-po-badge[data-rank="subscriber"] {
+  border-color: var(--role-border);
+  background: transparent;
+  color: var(--role-text);
+}
+.v10-po-badge[data-rank="subscriber"]::before { content: "◉"; }
+.v10-po-badge[data-rank="viewer"] {
+  border-color: color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  background: transparent;
   color: var(--text-secondary);
 }
+.v10-po-badge[data-rank="viewer"]::before { content: "○"; }
+.v10-po-badge[data-rank="not-joined"] {
+  border: 1px dashed color-mix(in srgb, var(--text-tertiary) 70%, transparent);
+  background: transparent;
+  color: var(--text-tertiary);
+}
+.v10-po-badge[data-rank="unknown"] {
+  border-color: transparent;
+  background: var(--bg-elevated);
+  color: var(--text-tertiary);
+}
+.v10-po-badge[data-rank="unknown"]::before { content: "?"; }
 /* Graph access: blue outline (same hue as role, lighter weight). */
 .v10-po-badge[data-cg-type="public"],
 .v10-po-badge[data-cg-type="curated"],
@@ -88,7 +111,7 @@
   padding: 0 12px;
 }
 .v10-po-identity-primer:hover {
-  border-color: var(--border-strong);
+  border-color: color-mix(in srgb, var(--text-tertiary) 70%, transparent);
   color: var(--text-primary);
   background: var(--bg-hover);
 }
@@ -109,41 +132,23 @@
 .v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .v10-po-participant {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600;
+  padding: 3px 10px 3px 3px; border-radius: 12px; font-size: 11px; font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
-/* Glyph is rendered in CSS so the data string the test reads stays
-   unambiguous (just the suffix). Default participants get the
-   hollow ◯ glyph in `--text-secondary`. */
-.v10-po-participant::before {
-  content: "◯ ";
-  font-size: 12px;
-  line-height: 1;
-  color: var(--text-secondary);
-}
-/* §4.2.1 Delta 1 (locked) — `.is-self` carries TWO signals only:
-   weight (you-ness, paired with the ` · you` suffix in the data
-   string) + the filled ◆ glyph in `--text-info`. No border or
-   background override — three signals for one fact would be the
-   M4 VM-hero regression pattern. */
+/* Each participant leads with its agent avatar (AgentDot), the same
+   circle agents have in the graphs. "You" is bold (plus the ` · you`
+   tag); a curator also carries the canonical ◆ role glyph, rendered in
+   CSS so the data string the tests read stays just the suffix. */
 .v10-po-participant.is-self { font-weight: 700; }
-.v10-po-participant.is-self::before {
-  content: "◆ ";
+.v10-po-participant.is-curator::before {
+  content: "◆";
+  order: 2;
+  font-size: 11px;
+  line-height: 1;
   color: var(--role-text);
 }
-/* A non-self curator also carries the filled ◆ glyph (canonical
-   role glyph), tinted with the verified-trust color. No bold, no
-   chip-level tint — the glyph + ` · curator` suffix carry the
-   meaning. */
-.v10-po-participant.is-curator:not(.is-self)::before {
-  content: "◆ ";
-  color: var(--role-text);
-}
-/* When the current user IS the curator, success color wins over
-   info so curator role reads first. The .is-self bold is retained. */
-.v10-po-participant.is-self.is-curator::before {
-  color: var(--role-text);
-}
+.v10-po-participant.is-curator .v10-po-participant-name { order: 3; }
+.v10-po-participant.is-curator .v10-po-participant-tag { order: 4; }
 .v10-po-participant-name {
   white-space: nowrap;
 }

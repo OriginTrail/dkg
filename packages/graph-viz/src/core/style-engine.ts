@@ -41,6 +41,9 @@ export class StyleEngine {
       classColors: config?.classColors ?? {},
       namespaceColors: config?.namespaceColors ?? {},
       predicateColors: config?.predicateColors ?? {},
+      classBorders: config?.classBorders ?? {},
+      edgeLabelMinZoom: config?.edgeLabelMinZoom ?? 0.3,
+      flatClasses: config?.flatClasses ?? [],
       gradient: config?.gradient ?? true,
       gradientIntensity: config?.gradientIntensity ?? 0.3,
       defaultNodeColor: config?.defaultNodeColor ?? this._palette.primary,
@@ -107,6 +110,25 @@ export class StyleEngine {
 
     // 3. Default
     return this._config.defaultNodeColor;
+  }
+
+  /** Outline override for a node's rdf:type, if one is configured. */
+  getClassBorder(node: GraphNode): { color: string; width?: number } | null {
+    const borders = this._config.classBorders;
+    if (!borders || Object.keys(borders).length === 0) return null;
+    for (const type of node.types) {
+      if (borders[type]) return borders[type]!;
+      const compact = this._prefixManager.compact(type);
+      if (compact && borders[compact]) return borders[compact]!;
+    }
+    return null;
+  }
+
+  /** Whether this node's class opts out of the gradient fill. */
+  isFlatFill(node: GraphNode): boolean {
+    const flat = this._config.flatClasses;
+    if (!flat || flat.length === 0) return false;
+    return node.types.some((t) => flat.includes(t) || flat.includes(this._prefixManager.compact(t) ?? ''));
   }
 
   /** Get the color for an edge */

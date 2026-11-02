@@ -31,7 +31,7 @@ export { GraphModel } from './core/graph-model.js';
 export { PrefixManager } from './core/prefix-manager.js';
 export { LabelResolver } from './core/label-resolver.js';
 export { StyleEngine } from './core/style-engine.js';
-export { HexagonPainter } from './core/hexagon-painter.js';
+export { HexagonPainter, agentInitials } from './core/hexagon-painter.js';
 export { FocusFilter } from './core/focus-filter.js';
 export { ReificationCollapser } from './core/reification-collapser.js';
 export { MetadataExtractor } from './core/metadata-extractor.js';

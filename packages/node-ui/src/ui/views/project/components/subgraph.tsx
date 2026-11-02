@@ -17,6 +17,7 @@ import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
 import { neutralHex } from '../../../layer-colors.js';
+import { useLayoutStore } from '../../../stores/layout.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
 // detail (named or Root). The three-sentence intro is non-dismissible —
@@ -688,6 +689,9 @@ export function SubGraphMiniCard({
   // A compact-mode graph options block — pared-down labels, smaller nodes,
   // brighter default color (driven by the sub-graph's profile color) so each
   // card reads as a distinct "island" at a glance.
+  // Canvas labels follow the app theme (dark palette text was unreadable in light mode).
+  const theme = useLayoutStore(st => st.theme);
+  const miniViewConfig = useMemo(() => ({ name: `sg-mini:${theme}`, palette: theme }), [theme]);
   const graphOptions = useMemo(() => ({
     labelMode: 'humanized' as const,
     renderer: '2d' as const,
@@ -707,7 +711,7 @@ export function SubGraphMiniCard({
       gradient: true,
       gradientIntensity: 0.35,
     },
-    hexagon: { baseSize: 6, minSize: 3, maxSize: 16, scaleWithDegree: true },
+    hexagon: { baseSize: 6, minSize: 5, maxSize: 16, scaleWithDegree: true },
     focus: { maxNodes: 5000, hops: 999 },
   }), [card.color, nodeColors]);
 
@@ -822,6 +826,7 @@ export function SubGraphMiniCard({
               data={card.triples}
               format="triples"
               options={graphOptions}
+              viewConfig={miniViewConfig}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
               onNodeClick={onNodeClick}
               initialFit

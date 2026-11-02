@@ -56,3 +56,17 @@ export const NEUTRAL_HEX: Record<'dark' | 'light', { node: string; edge: string 
 export function neutralHex(kind: 'node' | 'edge'): string {
   return NEUTRAL_HEX[activeTheme()][kind];
 }
+
+/** C10: on-chain anchor nodes in the VM graph. A very deep indigo, drawn
+ *  flat (no gradient), with a purple ring (pale lavender in dark mode, the
+ *  soft VM violet in light), so the anchor reads as a clearly darker node
+ *  than the VM-purple assets around it without a new hue. */
+export const VM_ANCHOR_HEX: Record<'dark' | 'light', { fill: string; ring: string }> = {
+  dark: { fill: '#2f1d8c', ring: '#d9d0ff' },
+  light: { fill: '#24127a', ring: '#8b85f4' },
+};
+export const VM_ANCHOR_RING_WIDTH = 4;
+
+export function vmAnchorHex(part: 'fill' | 'ring'): string {
+  return VM_ANCHOR_HEX[activeTheme()][part];
+}

@@ -67,6 +67,8 @@ export interface EntityTypeBinding {
   label?: string;
   icon?: string;
   color?: string;
+  /** True for the synthesised binding of a type the profile doesn't define. */
+  isFallback?: true;
   detailHint?: string;
   /**
    * Domain-aware copy for the Verify-on-DKG CTA. When all four are unset
@@ -198,6 +200,7 @@ const DEFAULT_TYPE_FALLBACK = (typeIri: string): EntityTypeBinding => ({
   typeIri,
   label: typeIri.split(/[/#]/).pop() || typeIri,
   color: neutralHex('node'),
+  isFallback: true,
 });
 
 // ── SPARQL helpers ────────────────────────────────────────────

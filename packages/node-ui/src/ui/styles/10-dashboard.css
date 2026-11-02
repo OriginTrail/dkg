@@ -225,13 +225,13 @@
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
 }
-/* Filled chip: `--accent-green` text on `--bg-elevated` fails AA in
-   light theme (~1.9:1 — accent-green is theme-invariant, bg-elevated is
-   not). Invert to a solid green chip with fixed near-black text — AA in
-   BOTH themes (~10:1, accent-green is constant) and rightly emphasises
-   the consequential "curator" role vs the quiet outlined "joined". #86 */
-.v10-cg-badge-curator { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
-.v10-cg-badge-joined { color: var(--text-secondary); }
+/* Role ladder (same as the overview pill): curator solid role blue with
+   the ◆ glyph, joined a blue tint with ✓. Text on the solid chip is the
+   surface colour, AA in both themes. */
+.v10-cg-badge-curator { background: var(--role); color: var(--bg-surface); border-color: var(--role); }
+.v10-cg-badge-curator::before { content: "◆ "; }
+.v10-cg-badge-joined { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
+.v10-cg-badge-joined::before { content: "✓ "; }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */
@@ -412,3 +412,6 @@
 .v10-dash-project-card:hover { border-color: var(--border-default); }
 .v10-dash-project-name { font-size: 12px; font-weight: 500; color: var(--text-primary); }
 .v10-dash-project-count { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
+
+/* Collaborating agents: the agents themselves as avatars under the count. */
+.v10-stat-agents { margin: 2px 0 6px; }

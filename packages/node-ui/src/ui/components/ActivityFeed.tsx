@@ -27,6 +27,13 @@ import type { AssertionLifecycleEvent } from '../hooks/useAssertionLifecycleEven
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { AgentChip } from './AgentChip.js';
+import { kindColorForType } from '../entity-kind-colors.js';
+
+/** "PullRequest" → "Pull request", "CreativeWork" → "Creative work". */
+export function humanizeTypeName(name: string): string {
+  const words = name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().split(/\s+/);
+  return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w.toLowerCase())).join(' ');
+}
 import { LAYER_VAR } from '../layer-colors.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
@@ -267,7 +274,11 @@ function ActivityRow({
         : 'Promoted to SWM';
     }
     if (item.event === 'published') return 'Published to VM';
-    return typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null) ?? 'Entity';
+    // A profile label wins as written; a raw type name ("PullRequest") is
+    // spaced out for reading ("Pull request").
+    if (typeBinding?.label && !typeBinding.isFallback) return typeBinding.label;
+    const raw = typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null);
+    return raw ? humanizeTypeName(raw) : 'Entity';
   })();
   const typeIcon = ((): string => {
     if (item.event === 'added') return '+';
@@ -279,7 +290,11 @@ function ActivityRow({
     if (item.event === 'promoted') return LAYER_COLOR.shared;
     if (item.event === 'published') return LAYER_COLOR.verified;
     if (item.event === 'added') return LAYER_VAR.working;
-    return typeBinding?.color ?? '#a855f7';
+    // A colour the context graph's profile sets wins; otherwise a known kind
+    // (decision, task, PR, …) keeps its shared data colour, same as its card
+    // and graph node; anything else is neutral.
+    if (typeBinding?.color && !typeBinding.isFallback) return typeBinding.color;
+    return kindColorForType(item.kindUri ?? undefined) ?? 'var(--text-tertiary)';
   })();
   const layerColor = LAYER_COLOR[item.layer];
 

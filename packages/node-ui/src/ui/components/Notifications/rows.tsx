@@ -19,6 +19,7 @@ import type {
   ActivityItem,
   ActionResult,
 } from '../../hooks/useNotificationsFeed.js';
+import { AgentDot } from '../AgentDot.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
 function cgLabel(name: string | undefined, cgId: string): string {
@@ -97,6 +98,7 @@ export function JoinRequestRow({
       <div className="v10-notif-row-body">
         <div className="v10-notif-row-title">Join request</div>
         <div className="v10-notif-row-detail">
+          <AgentDot uri={item.agentAddress} label={item.agentName?.trim() || item.agentAddress} size={16} className="v10-notif-agent" />
           <span className="v10-notif-actor">{who}</span> wants to join{' '}
           <button
             type="button"
@@ -251,7 +253,12 @@ export function ActivityDigestRow({
         {ACTIVITY_GLYPH[item.event]}
       </span>
       <span className="v10-notif-row-body" aria-hidden="true">
-        <span className="v10-notif-row-detail">{text} in <span className="v10-notif-cg-name">{cg}</span></span>
+        <span className="v10-notif-row-detail">
+          {item.actorAgentDid && !item.bySelf && (
+            <AgentDot uri={item.actorAgentDid} label={item.actorAgentName?.trim() || item.actorAgentDid} size={16} className="v10-notif-agent" />
+          )}
+          {text} in <span className="v10-notif-cg-name">{cg}</span>
+        </span>
       </span>
       <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
         {when}

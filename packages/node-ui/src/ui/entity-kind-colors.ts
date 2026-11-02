@@ -1,3 +1,5 @@
+import { dataHex } from './op-type-colors.js';
+
 /**
  * Colours for well-known entity kinds (decision, task, pull request, …).
  *
@@ -7,7 +9,9 @@
  * read as a layer (WM / SWM / VM) or a signal (success / warning / danger).
  * A context graph's own profile colour for a type still wins where one is set.
  */
-export type EntityKind = 'package' | 'file' | 'decision' | 'task' | 'pr' | 'issue' | 'commit';
+export type EntityKind =
+  | 'package' | 'file' | 'decision' | 'task' | 'pr' | 'issue' | 'commit'
+  | 'class' | 'function' | 'typeAlias' | 'enum' | 'interface';
 
 const KIND_SLOT: Record<EntityKind, number> = {
   package: 1,   // blue
@@ -17,6 +21,13 @@ const KIND_SLOT: Record<EntityKind, number> = {
   issue: 5,     // fuchsia
   pr: 6,        // brown
   task: 7,      // sky
+  // Code graph classes (C9). They share slots with the github/decision kinds,
+  // which don't appear in the same graph.
+  class: 3,     // berry
+  function: 4,  // gold
+  typeAlias: 5, // fuchsia
+  enum: 6,      // brown
+  interface: 7, // sky
 };
 
 const TYPE_KIND: Record<string, EntityKind> = {
@@ -27,6 +38,11 @@ const TYPE_KIND: Record<string, EntityKind> = {
   'http://dkg.io/ontology/github/Commit': 'commit',
   'http://dkg.io/ontology/code/Package': 'package',
   'http://dkg.io/ontology/code/File': 'file',
+  'http://dkg.io/ontology/code/Class': 'class',
+  'http://dkg.io/ontology/code/Function': 'function',
+  'http://dkg.io/ontology/code/TypeAlias': 'typeAlias',
+  'http://dkg.io/ontology/code/Enum': 'enum',
+  'http://dkg.io/ontology/code/Interface': 'interface',
 };
 
 /** CSS colour (a var() reference) for a kind. */
@@ -38,4 +54,9 @@ export function kindColor(kind: EntityKind): string {
 export function kindColorForType(typeIri: string | undefined): string | null {
   const kind = typeIri ? TYPE_KIND[typeIri] : undefined;
   return kind ? kindColor(kind) : null;
+}
+
+/** Resolved hex for a kind, for canvas renderers (graph nodes). */
+export function kindHex(kind: EntityKind): string {
+  return dataHex(KIND_SLOT[kind]);
 }

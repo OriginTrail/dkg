@@ -374,6 +374,7 @@
   flex-shrink: 0;
   box-shadow: 0 0 10px -2px currentColor;
 }
+.v10-vm-legend-swatch-agent { border-radius: 50%; }
 .v10-vm-legend-label {
   color: var(--text-primary, #f1f5f9);
   font-size: 11px;

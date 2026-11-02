@@ -7,6 +7,9 @@ import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
 import { truncateMiddle } from '../lib/truncate.js';
 import { neutralHex } from '../layer-colors.js';
+import { useLayoutStore } from '../stores/layout.js';
+import { dataHex } from '../op-type-colors.js';
+import { schemaTypeColors } from './schema-type-colors.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -29,27 +32,21 @@ const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: stri
   vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
 };
 
-const GRAPH_OPTIONS = {
-  labelMode: 'humanized' as const,
-  renderer: '2d' as const,
-  labels: memoryGraphLabels({ extraPredicates: ['http://schema.org/text'] }),
-  style: {
-    classColors: {
-      'http://schema.org/Person': '#f472b6',
-      'http://schema.org/Organization': '#fb923c',
-      'http://schema.org/Place': '#34d399',
-      'http://schema.org/Product': '#c084fc',
-      'http://schema.org/Event': '#facc15',
-      'http://schema.org/CreativeWork': '#7dd3fc',
-      'http://schema.org/Thing': '#94a3b8',
+function graphOptions(classColors: Record<string, string>) {
+  return {
+    labelMode: 'humanized' as const,
+    renderer: '2d' as const,
+    labels: memoryGraphLabels({ extraPredicates: ['http://schema.org/text'] }),
+    style: {
+      classColors,
+      defaultNodeColor: neutralHex('node'),
+      defaultEdgeColor: neutralHex('edge'),
+      edgeWidth: 0.9,
     },
-    defaultNodeColor: neutralHex('node'),
-    defaultEdgeColor: neutralHex('edge'),
-    edgeWidth: 0.9,
-  },
-  hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },
-  focus: { maxNodes: 3000, hops: 999 },
-};
+    hexagon: { baseSize: 9, minSize: 8, maxSize: 13, scaleWithDegree: true },
+    focus: { maxNodes: 3000, hops: 999 },
+  };
+}
 
 const TABLE_ICON = (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -215,6 +212,15 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       object: bv(row.o) ?? '',
     })).filter((t: any) => t.subject && t.predicate && t.object),
     [results]
+  );
+  // C8: the six most common schema.org types get data colours, the rest grey. Built
+  // per render so canvas colours follow the active theme.
+  // Canvas labels follow the app theme (dark palette text was unreadable in light mode).
+  const theme = useLayoutStore(st => st.theme);
+  const graphViewConfig = useMemo(() => ({ name: `memory-layer:${theme}`, palette: theme }), [theme]);
+  const graphOptionsForView = useMemo(
+    () => graphOptions(schemaTypeColors(triples, dataHex, neutralHex('node'))),
+    [triples],
   );
 
   const handleNodeClick = useCallback((node: any) => {
@@ -404,7 +410,8 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
             <RdfGraph
               data={triples}
               format="triples"
-              options={GRAPH_OPTIONS}
+              options={graphOptionsForView}
+              viewConfig={graphViewConfig}
               style={{ width: '100%', height: '100%' }}
               onNodeClick={handleNodeClick}
               initialFit

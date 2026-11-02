@@ -62,7 +62,7 @@ export function isSafeIriPart(value: string): boolean {
 export function buildVmReceiptSummaryQuery(cgId: string): string {
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?asrt ?finalizedAt ?agent ?member WHERE {
+SELECT ?asrt ?tx ?finalizedAt ?agent ?member WHERE {
   GRAPH <did:dkg:context-graph:${cgId}/_meta> {
     ?asrt dkg:publishedAtTx ?tx .
     OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
@@ -96,6 +96,16 @@ export function summariseVmReceipts(rows: Array<Record<string, unknown>>): VmRec
   }
   return { assertions: [...assertions], members, signers, lastPublishedAt: last };
 }
+
+/** Exported for the VM graph's anchor nodes: one row → its publishing agent. */
+export function receiptAgent(row: Record<string, unknown>): string | null {
+  const asrt = unwrapIri(bv(row.asrt));
+  const agent = unwrapIri(bv(row.agent));
+  if (agent) return agent;
+  const addr = asrt.match(/\/assertion\/([^/]+)\//)?.[1];
+  return addr ? `did:dkg:agent:${addr}` : null;
+}
+export const receiptValue = (v: unknown) => unwrapIri(bv(v));
 
 /** Is this entity covered by a receipted assertion (member row or URI prefix)? */
 export function hasReceipt(entityUri: string, s: VmReceiptSummary): boolean {

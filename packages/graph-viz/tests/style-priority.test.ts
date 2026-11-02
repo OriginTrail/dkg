@@ -65,3 +65,73 @@ it('falls through unrelated custom namespaces to a built-in vocabulary color', (
   const styles = new StyleEngine({ namespaceColors: { 'https://unrelated.invalid/': 'red' } }, new PrefixManager());
   expect(styles.getNodeColor(graph().node)).toBe('#8b5cf6');
 });
+
+describe('per-type outlines (classBorders)', () => {
+  it('returns the outline configured for a node type, by full or compact URI', () => {
+    const { node } = graph();
+    expect(new StyleEngine({ classBorders: { 'https://schema.org/Person': { color: '#d9d0ff', width: 4 } } }, new PrefixManager())
+      .getClassBorder(node)).toEqual({ color: '#d9d0ff', width: 4 });
+    expect(new StyleEngine({ classBorders: { 'schema:Person': { color: '#2a1680' } } }, new PrefixManager())
+      .getClassBorder(node)).toEqual({ color: '#2a1680' });
+  });
+  it('returns null when no outline applies', () => {
+    const { node } = graph();
+    expect(new StyleEngine({}, new PrefixManager()).getClassBorder(node)).toBeNull();
+    expect(new StyleEngine({ classBorders: { 'urn:other-type': { color: '#000' } } }, new PrefixManager()).getClassBorder(node)).toBeNull();
+  });
+});
+
+describe('withAlpha', () => {
+  it('turns hex into rgba and leaves other colours alone', async () => {
+    const { withAlpha } = await import('../src/core/palette.js');
+    expect(withAlpha('#f8fafc', 0.8)).toBe('rgba(248, 250, 252, 0.8)');
+    expect(withAlpha('#fff', 0.5)).toBe('rgba(255, 255, 255, 0.5)');
+    expect(withAlpha('transparent', 0.5)).toBe('transparent');
+  });
+});
+
+describe('agent avatar nodes', () => {
+  it('derives chip-style initials', async () => {
+    const { agentInitials } = await import('../src/core/hexagon-painter.js');
+    expect(agentInitials('Claude Code')).toBe('CC');
+    expect(agentInitials('hermes')).toBe('HE');
+    expect(agentInitials('0x3f2a…9b1c')).toBe('3F');
+    expect(agentInitials('did:dkg:agent:0xab12cd')).toBe('AB');
+    expect(agentInitials('')).toBe('?');
+  });
+
+  it('recognises agent types, expanded from compact form', async () => {
+    const { HexagonPainter } = await import('../src/core/hexagon-painter.js');
+    const { StyleEngine } = await import('../src/core/style-engine.js');
+    const { PrefixManager } = await import('../src/core/prefix-manager.js');
+    const pm = new PrefixManager();
+    const painter = new HexagonPainter({ agentTypes: ['schema:Person'] }, new StyleEngine(undefined, pm), pm);
+    const node = (types: string[]) => ({ id: 'x', types, label: 'x', degree: 1 } as any);
+    expect(painter.isAgentNode(node([pm.expand('schema:Person')]))).toBe(true);
+    expect(painter.isAgentNode(node(['https://schema.org/Thing']))).toBe(false);
+  });
+
+  it('defaults the edge label zoom threshold', async () => {
+    const { StyleEngine } = await import('../src/core/style-engine.js');
+    const { PrefixManager } = await import('../src/core/prefix-manager.js');
+    const pm = new PrefixManager();
+    expect(new StyleEngine(undefined, pm).config.edgeLabelMinZoom).toBe(0.3);
+    expect(new StyleEngine({ edgeLabelMinZoom: 1.2 }, pm).config.edgeLabelMinZoom).toBe(1.2);
+  });
+});
+
+describe('agent avatar initials from literals', () => {
+  it('ignores literal quotes', async () => {
+    const { agentInitials } = await import('../src/core/hexagon-painter.js');
+    expect(agentInitials('"0x7b21…9a12"')).toBe('7B');
+  });
+});
+
+describe('flat fill classes', () => {
+  it('opts listed classes out of the gradient', () => {
+    const pm = new PrefixManager();
+    const se = new StyleEngine({ flatClasses: ['urn:x:Anchor'] }, pm);
+    expect(se.isFlatFill({ id: 'a', types: ['urn:x:Anchor'] } as any)).toBe(true);
+    expect(se.isFlatFill({ id: 'b', types: ['urn:x:Other'] } as any)).toBe(false);
+  });
+});
