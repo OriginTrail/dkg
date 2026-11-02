@@ -615,3 +615,73 @@ body.light .ds-seg-item.active, body.light .v10-agent-mode-tab.active, body.ligh
 .v10-sidebar-node { margin-top: auto; flex-shrink: 0; padding: 6px 0 8px; border-top: 1px solid var(--border-subtle); }
 .v10-sidebar-group-label { padding: 6px 16px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
 .v10-sidebar-node .v10-tree-dashboard { margin-bottom: 0; }
+
+/* ══ Cards and surfaces ════════════════════════════════════════════════
+   Three corners (DESIGN.md): 12 overlays and dialogs, 10 cards and panels,
+   8 anything nested inside a card (cells, notes, legends) and menus or
+   popovers. Menu rows use 4. Existing per-screen classes are mapped here;
+   new code uses .ds-card / .ds-card-nested / .ds-overlay. */
+.ds-overlay,
+.v10-modal-box, .v10-drop-overlay-card {
+  border-radius: var(--radius-overlay);
+}
+.ds-card,
+.card, .stat-card, .v10-dash-section, .v10-layer-card, .v10-vm-hero, .v10-genui-card, .v10-genui-vm-panel,
+.v10-graph-prov-card, .v10-vm-identity, .v10-gen-widget, .v10-sgov-card, .v10-local-agent-detail,
+.v10-identity-wallet-card, .v10-journey-empty-card, .v10-empty-state, .v10-pv-overview-graph, .v10-pv-overview-graph-empty,
+.v10-graph-expanded-panel, .v10-local-agent-composer-shell, .chat-input, .v10-cg-query-zone, .v10-mlv-graph-container,
+.v10-publish-panel, .v10-import-dropzone {
+  border-radius: var(--radius-card);
+}
+.stat-card { padding: 16px 18px; }
+.ds-card-nested,
+.v10-memstack-cell, .v10-stat-strip-cell, .v10-vm-hero-stat, .v10-genui-stat, .v10-genui-type-group, .v10-genui-vm-block,
+.v10-genui-error, .v10-genui-triple-table, .v10-swm-legend, .v10-vm-legend, .v10-graph-rail-section, .v10-agent-profile-stat,
+.v10-modal-error, .v10-modal-tip, .v10-modal-warning, .v10-pca-verdict-banner, .v10-pca-card-warn, .v10-pca-create-warn,
+.v10-pca-owner-key-card, .v10-pca-node-picker-option, .v10-pca-node-picker-selected, .v10-pca-device-progress,
+.v10-pca-handshake-half, .v10-pca-filter, .v10-pca-tier-list, .v10-wallet-row, .v10-wallet-picker, .v10-wallet-provider,
+.v10-identity-wallet-signer, .v10-dash-project-card, .v10-agent-card, .v10-local-agent-card, .v10-decision-evidence,
+.v10-layer-preview, .v10-local-agent-warning, .v10-local-agent-error, .v10-local-agent-notice, .v10-form-advanced-body,
+.v10-import-progress, .v10-import-file-list, .v10-cg-query-parameters, .v10-cg-query-save-panel, .v10-po-join-item,
+.v10-po-pipeline-step, .v10-file-preview-error, .v10-mlv-node-panel, .v10-mlv-table-wrap, .v10-assertion-list,
+.v10-md-table-scroll, .v10-graph-singleton-shelf, .v10-memstack-empty, .v10-cg-query-chip,
+.v10-notif-pane, .v10-layer-more-menu, .v10-select-menu, .v10-agent-tab-menu-popover, .v10-pca-publish-popover,
+.v10-vm-search-panel, .tt {
+  border-radius: var(--radius-nested);
+}
+.v10-agent-tab-menu-item, .v10-layer-more-item, .v10-select-option { border-radius: var(--radius-xs); }
+
+/* ══ Inputs ════════════════════════════════════════════════════════════
+   Text fields, selects and textareas: 6px corners like buttons, the same
+   heights as the buttons beside them (32 default, 24 compact), 12px text,
+   one focus ring. The chat composer is a card (10px), not an input. */
+.ds-input,
+.input,
+.v10-form-input, .v10-form-select, .v10-form-textarea, .v10-select-trigger, .v10-mlv-query-input, .v10-vm-search-select,
+.v10-cg-query-textarea, .v10-token-prompt-input, .v10-log-filter, .v10-log-level-select, .v10-entity-list-sort-select {
+  border-radius: var(--radius-control);
+  font-size: var(--fs-control);
+}
+.ds-input:not(textarea),
+.v10-form-input, .v10-form-select, .v10-select-trigger, .v10-mlv-query-input, .v10-vm-search-select {
+  box-sizing: border-box;
+  height: var(--h-control-md);
+  min-height: var(--h-control-md);
+}
+.v10-mlv-query-input, .v10-vm-search-select { padding-top: 0; padding-bottom: 0; }
+.ds-input.ds-sm,
+.v10-token-prompt-input, .v10-log-filter, .v10-log-level-select, .v10-entity-list-sort-select {
+  box-sizing: border-box;
+  height: var(--h-control-sm);
+  min-height: var(--h-control-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+  font-size: var(--fs-label);
+}
+.ds-input:focus-visible,
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible,
+.v10-select-trigger:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
+}
+.v10-vm-search-toggle { border-radius: var(--radius-control); }

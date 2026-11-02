@@ -38,7 +38,7 @@ input, textarea {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   color: var(--text-primary);
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   padding: 6px 10px;
   outline: none;
 }
