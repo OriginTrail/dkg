@@ -22,6 +22,7 @@ import { useMemoryCounts } from './project/helpers.js';
 import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
+import { ContextGraphMark } from '../context-graph-colors.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -32,9 +33,9 @@ const LAYERS: Array<{
   desc: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
 }> = [
-  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: '#64748b', desc: 'Private agent drafts', tabPrefix: 'wm' },
-  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: '#f59e0b', desc: 'Team proposals',       tabPrefix: 'swm' },
-  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: '#22c55e', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
+  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: 'var(--layer-working)', desc: 'Private agent drafts', tabPrefix: 'wm' },
+  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: 'var(--layer-shared)', desc: 'Team proposals',       tabPrefix: 'swm' },
+  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: 'var(--layer-verified)', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
 ];
 
 const TS_PREDS = [
@@ -147,7 +148,7 @@ function MemoryStackRow({ cg }: { cg: ContextGraph }) {
     <div className="v10-memstack-row">
       <div className="v10-memstack-project">
         <button type="button" className="v10-memstack-project-btn" onClick={openProject}>
-          <span className="v10-memstack-project-dot" />
+          <ContextGraphMark id={cg.id} name={cg.name} />
           <span className="v10-memstack-project-name">{cg.name || cg.id}</span>
         </button>
         {cg.description && (

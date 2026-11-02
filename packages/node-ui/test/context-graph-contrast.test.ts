@@ -129,10 +129,37 @@ describe('Context Graph contrast tokens', () => {
     }
   });
 
-  it('keeps the trust palette tokens unchanged by the contrast sweep', () => {
-    expect(css).toContain('--layer-working: #64748b;');
-    expect(css).toContain('--layer-shared: #f59e0b;');
-    expect(css).toContain('--layer-verified: #22c55e;');
+  it('pins the layer palette to the shared nOS hues (WM slate, SWM cyan, VM purple)', () => {
+    expect(rootVars['--layer-working']).toBe('#94a3b8');
+    expect(rootVars['--layer-shared']).toBe('#1aded7');
+    expect(rootVars['--layer-verified']).toBe('#8b85f4');
+    expect(lightVars['--layer-working']).toBe('#526173');
+    expect(lightVars['--layer-shared']).toBe('#0f9c96');
+    expect(lightVars['--layer-verified']).toBe('#6344df');
+    // Signals keep their own hues and are no longer aliases of a layer.
+    expect(rootVars['--layer-shared']).not.toBe(rootVars['--accent-amber']);
+    expect(rootVars['--layer-verified']).not.toBe(rootVars['--accent-green']);
+  });
+
+  it('keeps every layer role legible in both themes', () => {
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      const surface = theme === 'dark' ? vars['--bg-panel'] : vars['--bg-surface'];
+      for (const layer of ['working', 'shared', 'verified']) {
+        const text = vars[`--layer-${layer}-text`];
+        const bg = vars[`--layer-${layer}-bg`];
+        const icon = vars[`--layer-${layer}`];
+        expect(contrast(text, bg), `${theme} ${layer} text on chip`).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(text, surface), `${theme} ${layer} text on surface`).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(icon, surface), `${theme} ${layer} icon on surface`).toBeGreaterThanOrEqual(3);
+      }
+      expect(contrast(vars['--text-on-vm'], vars['--accent-vm']), `${theme} publish-to-VM label`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--text-on-primary'], vars['--accent-primary']), `${theme} primary label`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--focus-ring'], surface), `${theme} focus ring`).toBeGreaterThanOrEqual(3);
+      // Role & access (blue): chip text on its tint and on the surface; bar/dot vs surface.
+      expect(contrast(vars['--role-text'], vars['--role-bg']), `${theme} role chip`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--role-text'], surface), `${theme} access outline text`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(vars['--role'], surface), `${theme} role bar`).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it('uses light-theme semantic foregrounds with AA contrast for status and action text', () => {
@@ -167,9 +194,11 @@ describe('Context Graph contrast tokens', () => {
       expect(contrast(foregroundFor(selector), lightVars['--bg-surface']), selector).toBeGreaterThanOrEqual(4.5);
     }
 
-    expect(contrast(foregroundFor('.v10-btn-promote-all'), lightVars['--layer-shared'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-btn-publish'), lightVars['--layer-verified'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), '#22c55e')).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), '#16a34a')).toBeGreaterThanOrEqual(4.5);
+    // Share-to-SWM uses the SWM layer tint; publish-to-VM is the purple fill.
+    expect(contrast(foregroundFor('.v10-btn-promote-all'), lightVars['--layer-shared-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(foregroundFor('.v10-ka-verify-btn.promote'), lightVars['--layer-shared-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(foregroundFor('.v10-btn-publish'), lightVars['--accent-vm'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), lightVars['--accent-vm'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), lightVars['--accent-vm-hover'])).toBeGreaterThanOrEqual(4.5);
   });
 });

@@ -155,7 +155,7 @@
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono);
 }
-.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 50%; } /* round = data; squares are context graphs */
 
 /* My Context Graphs list — column grid shared by header + rows. */
 .v10-cg-colhead, .v10-cg-row {
@@ -230,7 +230,7 @@
    not). Invert to a solid green chip with fixed near-black text — AA in
    BOTH themes (~10:1, accent-green is constant) and rightly emphasises
    the consequential "curator" role vs the quiet outlined "joined". #86 */
-.v10-cg-badge-curator { background: var(--accent-green); color: #0a0a0a; border-color: var(--accent-green); }
+.v10-cg-badge-curator { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
 .v10-cg-badge-joined { color: var(--text-secondary); }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 

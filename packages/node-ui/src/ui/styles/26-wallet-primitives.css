@@ -68,7 +68,7 @@
 .v10-wallet-provider:focus-visible,
 .v10-wallet-pill-btn:focus-visible,
 .v10-wallet-pill-link:focus-visible {
-  outline: 2px solid var(--text-link);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 .v10-wallet-note {
@@ -171,6 +171,9 @@
   color: var(--text-warning);
 }
 .v10-wallet-pill-link {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   border: none;
   background: transparent;
   color: var(--text-link);

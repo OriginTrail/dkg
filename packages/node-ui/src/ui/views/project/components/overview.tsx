@@ -9,6 +9,7 @@ import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from 
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
+import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
@@ -56,7 +57,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Working Memory"
         onClick={() => switchTo('wm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: '#64748b' }}>◇</span>
+        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-working)' }}>◇</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">WM</span>
         {counts.wm > 0 && <span className="v10-layer-switch-count">{counts.wm}</span>}
@@ -68,7 +69,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Shared Working Memory"
         onClick={() => switchTo('swm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: '#f59e0b' }}>◈</span>
+        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-shared)' }}>◈</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Shared Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">SWM</span>
         {counts.swm > 0 && <span className="v10-layer-switch-count">{counts.swm}</span>}
@@ -80,7 +81,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Verifiable Memory"
         onClick={() => switchTo('vm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: '#22c55e' }}>◉</span>
+        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-verified)' }}>◉</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Verifiable Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">VM</span>
         {counts.vm > 0 && <span className="v10-layer-switch-count">{counts.vm}</span>}
@@ -169,17 +170,15 @@ export function ProjectHeaderStrip({
   onClearSubGraph: () => void;
 }) {
   const name = cg.name || profile.displayName || cg.id;
+  const cgColor = useContextGraphColor(cg.id);
   return (
     <div
       className="v10-project-strip"
       style={{
-        '--sg-color': activeSubGraph?.color ?? profile.primaryColor,
+        '--sg-color': activeSubGraph?.color ?? cgColor,
       } as React.CSSProperties}
     >
-      <span
-        className="v10-project-strip-dot"
-        style={{ background: profile.primaryColor }}
-      />
+      <ContextGraphMark id={cg.id} name={name} size="md" />
       <button
         type="button"
         className="v10-project-strip-name"
@@ -455,7 +454,7 @@ export function ProjectOverviewCard({
       desc: 'Private staging area',
       count: working,
       status: memory.layerStatus?.wm ?? 'ok',
-      color: '#64748b',
+      color: 'var(--layer-working)',
     },
     {
       key: 'swm' as const,
@@ -463,7 +462,7 @@ export function ProjectOverviewCard({
       desc: 'Collaborative review',
       count: shared,
       status: memory.layerStatus?.swm ?? 'ok',
-      color: '#f59e0b',
+      color: 'var(--layer-shared)',
     },
     {
       key: 'vm' as const,
@@ -471,7 +470,7 @@ export function ProjectOverviewCard({
       desc: 'Published on-chain',
       count: verified,
       status: memory.layerStatus?.vm ?? 'ok',
-      color: '#22c55e',
+      color: 'var(--layer-verified)',
     },
   ];
   const pipelineHasUnavailableLayer = pipeline.some(item => item.status === 'error');

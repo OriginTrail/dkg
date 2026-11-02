@@ -390,7 +390,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   font-size: 13px;
   line-height: 1.4;
 }
-.v10-notif-glyph-join { color: var(--text-warning); }
+.v10-notif-glyph-join { color: var(--role-text); }
 .v10-notif-glyph-created { color: var(--text-tertiary); }
 .v10-notif-glyph-promoted { color: var(--text-warning); }
 .v10-notif-glyph-published { color: var(--text-success); }

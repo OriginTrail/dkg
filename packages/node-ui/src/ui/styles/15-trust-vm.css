@@ -54,26 +54,26 @@
 .v10-trust-summary { padding: 8px 16px; border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
 .v10-trust-summary-bar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: var(--bg-elevated); margin-bottom: 6px; }
 .v10-trust-bar-seg { min-width: 4px; transition: width 0.3s ease; }
-.v10-trust-bar-seg.trust-working { background: #64748b; }
-.v10-trust-bar-seg.trust-shared { background: #f59e0b; }
-.v10-trust-bar-seg.trust-verified { background: #22c55e; }
+.v10-trust-bar-seg.trust-working { background: var(--layer-working); }
+.v10-trust-bar-seg.trust-shared { background: var(--layer-shared); }
+.v10-trust-bar-seg.trust-verified { background: var(--layer-verified); }
 .v10-trust-summary-labels { display: flex; gap: 14px; font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-trust-summary-item { display: flex; align-items: center; gap: 4px; }
 .v10-trust-summary-item .v10-trust-summary-dot { width: 6px; height: 6px; border-radius: 50%; }
-.v10-trust-summary-item.trust-working .v10-trust-summary-dot { background: #64748b; }
-.v10-trust-summary-item.trust-shared .v10-trust-summary-dot { background: #f59e0b; }
-.v10-trust-summary-item.trust-verified .v10-trust-summary-dot { background: #22c55e; }
+.v10-trust-summary-item.trust-working .v10-trust-summary-dot { background: var(--layer-working); }
+.v10-trust-summary-item.trust-shared .v10-trust-summary-dot { background: var(--layer-shared); }
+.v10-trust-summary-item.trust-verified .v10-trust-summary-dot { background: var(--layer-verified); }
 
 /* ── Trust Badges ── */
 .v10-trust-badge { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; letter-spacing: 0.3px; white-space: nowrap; }
 .v10-trust-badge-icon { font-size: 10px; }
-.v10-trust-badge.trust-verified { background: rgba(34, 197, 94, 0.12); color: var(--text-success); }
-.v10-trust-badge.trust-shared { background: rgba(245, 158, 11, 0.12); color: var(--text-warning); }
-.v10-trust-badge.trust-working { background: rgba(100, 116, 139, 0.12); color: var(--text-tertiary); }
+.v10-trust-badge.trust-verified { background: var(--layer-verified-bg); color: var(--layer-verified-text); }
+.v10-trust-badge.trust-shared { background: var(--layer-shared-bg); color: var(--layer-shared-text); }
+.v10-trust-badge.trust-working { background: var(--layer-working-bg); color: var(--layer-working-text); }
 .v10-trust-ring { font-size: 14px; line-height: 1; }
-.v10-trust-ring.trust-verified { color: #22c55e; }
-.v10-trust-ring.trust-shared { color: #f59e0b; }
-.v10-trust-ring.trust-working { color: #64748b; }
+.v10-trust-ring.trust-verified { color: var(--layer-verified); }
+.v10-trust-ring.trust-shared { color: var(--layer-shared); }
+.v10-trust-ring.trust-working { color: var(--layer-working); }
 
 /* ── Loading / Error / Empty ── */
 .v10-me-loading { display: flex; align-items: center; justify-content: center; flex: 1; }
@@ -137,10 +137,10 @@
   transform: translateY(-1px);
 }
 .v10-subgraph-chip.active {
-  border-color: var(--sg-color, #a855f7);
-  background: color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
+  border-color: var(--sg-color, var(--text-tertiary));
+  background: color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 18%, transparent);
   color: var(--text-primary, #f8fafc);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sg-color, #a855f7) 40%, transparent) inset;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 40%, transparent) inset;
 }
 .v10-subgraph-chip-icon { font-size: 13px; line-height: 1; }
 .v10-subgraph-chip-label { font-weight: 600; }
@@ -154,10 +154,10 @@
 
 /* ── Verifiable Memory Hero Banner ── */
 .v10-vm-hero {
-  --v10-vm-accent: #86efac;
+  --v10-vm-accent: var(--layer-verified-text);
   --v10-vm-accent-strong: var(--layer-verified);
-  --v10-vm-border: color-mix(in srgb, var(--v10-vm-accent-strong) 28%, var(--border-default));
-  --v10-vm-surface: color-mix(in srgb, var(--v10-vm-accent-strong) 8%, var(--bg-surface));
+  --v10-vm-border: var(--layer-verified-border);
+  --v10-vm-surface: var(--layer-verified-bg);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -194,7 +194,7 @@
   border-radius: 999px;
   font-size: 11px;
   font-weight: 700;
-  background: rgba(34,197,94,0.16);
+  background: var(--layer-verified-bg);
   color: var(--v10-vm-accent);
   border: 1px solid var(--v10-vm-border);
   letter-spacing: 0.08em;
@@ -272,10 +272,7 @@
   border-radius: 999px;
   box-shadow: 0 0 6px currentColor;
 }
-body.light .v10-vm-hero {
-  --v10-vm-accent: #166534;
-  --v10-vm-accent-strong: #16a34a;
-}
+/* Light values come from the --layer-verified-* light tokens. */
 .v10-layer-expand-body.entities-tab > .v10-vm-hero {
   margin: 16px 16px 10px;
 }
@@ -301,7 +298,7 @@ body.light .v10-vm-hero {
   height: 32px;
   border-radius: 999px;
   color: var(--v10-vm-accent);
-  background: rgba(34,197,94,0.14);
+  background: color-mix(in srgb, var(--layer-verified) 14%, transparent);
   border: 1px solid var(--v10-vm-border);
   font-size: 15px;
   line-height: 1;
@@ -337,8 +334,8 @@ body.light .v10-vm-hero {
   gap: 6px;
   padding: 10px;
   width: 100%;
-  background: rgba(34,197,94,0.05);
-  border: 1px solid rgba(34,197,94,0.3);
+  background: color-mix(in srgb, var(--layer-verified) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--layer-verified) 30%, transparent);
   border-radius: 8px;
   font-size: 11px;
   color: var(--text-secondary, #cbd5e1);
@@ -354,10 +351,10 @@ body.light .v10-vm-hero {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #4ade80;
+  color: var(--layer-verified-text);
   justify-content: space-between;
   padding-bottom: 4px;
-  border-bottom: 1px solid rgba(34,197,94,0.18);
+  border-bottom: 1px solid color-mix(in srgb, var(--layer-verified) 18%, transparent);
 }
 .v10-vm-legend-count {
   font-variant-numeric: tabular-nums;
@@ -365,8 +362,8 @@ body.light .v10-vm-hero {
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(34,197,94,0.12);
-  border: 1px solid rgba(34,197,94,0.3);
+  background: color-mix(in srgb, var(--layer-verified) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--layer-verified) 30%, transparent);
   letter-spacing: 0;
   text-transform: none;
   font-size: 10px;
@@ -402,15 +399,15 @@ body.light .v10-vm-hero {
    layer. Lists each promoting agent + colour slot + how many entities
    they've proposed, plus a conflict pill when multiple agents touch the
    same entity. Amber accent instead of VM's green to reinforce the
-   layer-palette convention (SWM = amber across the UI). */
+   layer-palette convention (SWM = cyan across the UI). */
 .v10-swm-legend {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 10px;
   width: 100%;
-  background: rgba(245,158,11,0.05);
-  border: 1px solid rgba(245,158,11,0.3);
+  background: color-mix(in srgb, var(--layer-shared) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--layer-shared) 30%, transparent);
   border-radius: 8px;
   font-size: 11px;
   color: var(--text-secondary, #cbd5e1);
@@ -426,10 +423,10 @@ body.light .v10-vm-hero {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #fbbf24;
+  color: var(--layer-shared-text);
   justify-content: space-between;
   padding-bottom: 4px;
-  border-bottom: 1px solid rgba(245,158,11,0.18);
+  border-bottom: 1px solid color-mix(in srgb, var(--layer-shared) 18%, transparent);
 }
 .v10-swm-legend-count {
   font-variant-numeric: tabular-nums;
@@ -437,8 +434,8 @@ body.light .v10-vm-hero {
   font-weight: 700;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(245,158,11,0.12);
-  border: 1px solid rgba(245,158,11,0.3);
+  background: color-mix(in srgb, var(--layer-shared) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--layer-shared) 30%, transparent);
   letter-spacing: 0;
   text-transform: none;
   font-size: 10px;
@@ -474,7 +471,7 @@ body.light .v10-vm-hero {
 .v10-swm-legend-conflict {
   margin-top: 4px;
   padding-top: 6px;
-  border-top: 1px dashed rgba(245,158,11,0.22);
-  color: #fbbf24;
+  border-top: 1px dashed color-mix(in srgb, var(--accent-amber) 22%, transparent);
+  color: var(--text-warning);
 }
-.v10-swm-legend-conflict .v10-swm-legend-label { color: #fbbf24; }
+.v10-swm-legend-conflict .v10-swm-legend-label { color: var(--text-warning); }

@@ -27,12 +27,9 @@ import type { AssertionLifecycleEvent } from '../hooks/useAssertionLifecycleEven
 import { useAgentsContext } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { AgentChip } from './AgentChip.js';
+import { LAYER_VAR } from '../layer-colors.js';
 
-const LAYER_COLOR: Record<TrustLevel, string> = {
-  working:  '#64748b',
-  shared:   '#f59e0b',
-  verified: '#22c55e',
-};
+const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
 
 const LAYER_GLYPH: Record<TrustLevel, string> = {
   working:  '◇',
@@ -281,7 +278,7 @@ function ActivityRow({
   const typeColor = ((): string => {
     if (item.event === 'promoted') return LAYER_COLOR.shared;
     if (item.event === 'published') return LAYER_COLOR.verified;
-    if (item.event === 'added') return '#64748b';
+    if (item.event === 'added') return LAYER_VAR.working;
     return typeBinding?.color ?? '#a855f7';
   })();
   const layerColor = LAYER_COLOR[item.layer];

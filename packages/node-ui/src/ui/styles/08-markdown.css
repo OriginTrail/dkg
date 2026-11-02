@@ -51,6 +51,7 @@
 .v10-md-link {
   color: var(--text-link);
   text-decoration: underline;
+  text-decoration-color: var(--link-underline);
   text-underline-offset: 2px;
   word-break: break-word;
 }

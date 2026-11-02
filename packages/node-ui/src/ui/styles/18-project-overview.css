@@ -50,31 +50,26 @@
   content: "◆";
   margin-right: 4px;
   font-weight: 700;
-  color: var(--text-success);
+  color: var(--role-text);
 }
-.v10-po-badge[data-role="curator"] {
-  border-color: rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.1);
-  color: var(--text-success);
-}
+/* Role you hold: tinted blue chip. */
+.v10-po-badge[data-role="curator"],
 .v10-po-badge[data-role="participant"] {
-  border-color: rgba(59, 130, 246, 0.4);
-  background: rgba(59, 130, 246, 0.1);
-  color: var(--text-primary);
+  border-color: var(--role-border);
+  background: var(--role-bg);
+  color: var(--role-text);
 }
 .v10-po-badge[data-role="viewer"],
 .v10-po-badge[data-role="unknown"] {
   color: var(--text-secondary);
 }
-.v10-po-badge[data-cg-type="public"] {
-  border-color: rgba(34, 197, 94, 0.4);
-  background: rgba(34, 197, 94, 0.1);
-  color: var(--text-success);
-}
-.v10-po-badge[data-cg-type="curated"] {
-  border-color: rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.1);
-  color: var(--text-warning);
+/* Graph access: blue outline (same hue as role, lighter weight). */
+.v10-po-badge[data-cg-type="public"],
+.v10-po-badge[data-cg-type="curated"],
+.v10-po-badge[data-cg-type="private"] {
+  border-color: var(--role-border);
+  background: transparent;
+  color: var(--role-text);
 }
 .v10-po-badge[data-cg-type="unknown"] {
   color: var(--text-secondary);
@@ -134,7 +129,7 @@
 .v10-po-participant.is-self { font-weight: 700; }
 .v10-po-participant.is-self::before {
   content: "◆ ";
-  color: var(--text-info);
+  color: var(--role-text);
 }
 /* A non-self curator also carries the filled ◆ glyph (canonical
    role glyph), tinted with the verified-trust color. No bold, no
@@ -142,12 +137,12 @@
    meaning. */
 .v10-po-participant.is-curator:not(.is-self)::before {
   content: "◆ ";
-  color: var(--text-success);
+  color: var(--role-text);
 }
 /* When the current user IS the curator, success color wins over
    info so curator role reads first. The .is-self bold is retained. */
 .v10-po-participant.is-self.is-curator::before {
-  color: var(--text-success);
+  color: var(--role-text);
 }
 .v10-po-participant-name {
   white-space: nowrap;
@@ -292,18 +287,23 @@
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default));
+  border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
   border-radius: 8px;
-  background: color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface));
+  background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
   color: var(--text-secondary);
   cursor: pointer;
   font-family: var(--font-sans);
   text-align: left;
 }
 .v10-po-pipeline-step:hover {
-  border-color: color-mix(in srgb, var(--po-layer-color) 48%, var(--border-strong));
-  background: color-mix(in srgb, var(--po-layer-color) 10%, var(--bg-hover));
+  border-color: color-mix(in srgb, var(--po-layer-color) 60%, var(--border-strong));
+  background: color-mix(in srgb, var(--po-layer-color) 10%, var(--po-layer-bg, var(--bg-hover)));
 }
+/* Each layer card takes its chip tokens, so WM, SWM and VM carry equal
+   weight on true black (a 6% purple mix all but vanished). */
+.v10-po-pipeline-step.wm  { --po-layer-bg: var(--layer-working-bg);  --po-layer-border: var(--layer-working-border); }
+.v10-po-pipeline-step.swm { --po-layer-bg: var(--layer-shared-bg);   --po-layer-border: var(--layer-shared-border); }
+.v10-po-pipeline-step.vm  { --po-layer-bg: var(--layer-verified-bg); --po-layer-border: var(--layer-verified-border); }
 .v10-po-pipeline-step-index {
   display: inline-flex;
   align-items: center;
@@ -370,6 +370,9 @@
   font-size: 12px;
 }
 .v10-po-primer-footer-link {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   background: none;
   border: none;
   padding: 0;

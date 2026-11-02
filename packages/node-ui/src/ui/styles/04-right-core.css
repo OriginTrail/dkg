@@ -373,7 +373,7 @@
 .v10-local-agent-badge.connecting,
 .v10-local-agent-status-pill.connecting {
   color: var(--text-info);
-  border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border-subtle));
+  border-color: var(--border-strong);
 }
 .v10-local-agent-badge.bridge_offline,
 .v10-local-agent-status-pill.bridge_offline {
@@ -388,7 +388,7 @@
 .v10-local-agent-badge.available,
 .v10-local-agent-status-pill.available {
   color: var(--text-info);
-  border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border-subtle));
+  border-color: var(--border-strong);
 }
 .v10-local-agent-detail {
   margin-top: 12px;

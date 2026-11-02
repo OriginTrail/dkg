@@ -1,7 +1,11 @@
 import type { TrustLevel } from '../../hooks/useMemoryEntities.js';
+import { layerHex } from '../../layer-colors.js';
 
 // ─── Shared layer configuration ─────────────────────────────
 // Single source of truth for the visual identity of WM / SWM / VM.
+// `color` is a getter: it resolves to the active theme's hex at read time,
+// so canvas consumers (graph-viz) and inline styles share one value. The
+// palette itself lives in ../../layer-colors.ts.
 export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   icon: string;
   color: string;
@@ -12,7 +16,7 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
 }> = {
   wm: {
     icon: '◇',
-    color: '#64748b',
+    get color() { return layerHex('working'); },
     title: 'Working Memory',
     desc: 'Private agent scratchpad — ephemeral, fast local storage',
     trustLabel: 'Working',
@@ -20,7 +24,7 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   },
   swm: {
     icon: '◈',
-    color: '#f59e0b',
+    get color() { return layerHex('shared'); },
     title: 'Shared Working Memory',
     desc: 'Team workspace — shared proposals, TTL-bounded',
     trustLabel: 'Shared',
@@ -28,7 +32,7 @@ export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
   },
   vm: {
     icon: '◉',
-    color: '#22c55e',
+    get color() { return layerHex('verified'); },
     title: 'Verifiable Memory',
     desc: 'Endorsed, published, on-chain knowledge',
     trustLabel: 'Verifiable',

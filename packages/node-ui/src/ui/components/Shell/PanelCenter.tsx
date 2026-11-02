@@ -7,6 +7,7 @@ import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
+import { ContextGraphMark, contextGraphIdFromTab } from '../../context-graph-colors.js';
 
 const CLOSE_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -61,6 +62,7 @@ function TabBar() {
           className={`v10-center-tab ${tab.id === activeTabId ? 'active' : ''}`}
           onClick={() => setActiveTab(tab.id)}
         >
+          {contextGraphIdFromTab(tab.id) && <ContextGraphMark id={contextGraphIdFromTab(tab.id)!} name={tab.label} />}
           <span className="v10-center-tab-label">{tab.label}</span>
           {tab.closable && (
             <span

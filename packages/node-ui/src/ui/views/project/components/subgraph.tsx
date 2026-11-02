@@ -852,9 +852,9 @@ export function MiniLayerBar({
     return compact ? null : <div className="v10-minibar v10-minibar-empty">No data</div>;
   }
   const rows: Array<{ key: TrustLevel; short: string; count: number; color: string; label: string }> = [
-    { key: 'verified', short: 'VM',  count: counts.vm,  color: '#22c55e', label: 'Verifiable' },
-    { key: 'shared',   short: 'SWM', count: counts.swm, color: '#f59e0b', label: 'Shared' },
-    { key: 'working',  short: 'WM',  count: counts.wm,  color: '#64748b', label: 'Working' },
+    { key: 'verified', short: 'VM',  count: counts.vm,  color: 'var(--layer-verified)', label: 'Verifiable' },
+    { key: 'shared',   short: 'SWM', count: counts.swm, color: 'var(--layer-shared)', label: 'Shared' },
+    { key: 'working',  short: 'WM',  count: counts.wm,  color: 'var(--layer-working)', label: 'Working' },
   ];
   const interactive = !!onClickLayer;
   return (

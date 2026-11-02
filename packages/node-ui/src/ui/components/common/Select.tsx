@@ -6,6 +6,8 @@ export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** Optional leading mark (e.g. a context graph's monogram tile). */
+  mark?: React.ReactNode;
 }
 
 interface SelectProps {
@@ -195,6 +197,7 @@ export function Select({
         aria-label={ariaLabel}
       >
         {prefixIcon && <span className="v10-select-prefix" aria-hidden="true">{prefixIcon}</span>}
+        {selected?.mark && <span className="v10-select-mark">{selected.mark}</span>}
         <span className={`v10-select-value ${selected ? '' : 'placeholder'}`}>{displayLabel}</span>
         <ChevronDown className="v10-select-caret" size={12} aria-hidden="true" />
 
@@ -238,6 +241,7 @@ export function Select({
                 close();
               }}
             >
+              {opt.mark}
               {opt.label}
             </li>
           ))}

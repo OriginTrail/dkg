@@ -71,11 +71,11 @@
   font-family: var(--font-sans);
   transition: color 0.15s;
 }
-.v10-memstack-project-btn:hover { color: var(--accent-blue, #3b82f6); }
+.v10-memstack-project-btn:hover { color: var(--text-primary); }
 .v10-memstack-project-dot {
   width: 8px; height: 8px; border-radius: 50%;
-  background: #a855f7;
-  box-shadow: 0 0 0 3px rgba(168,85,247,0.15);
+  background: var(--text-tertiary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-tertiary) 15%, transparent);
   flex-shrink: 0;
 }
 .v10-memstack-project-name {
@@ -190,19 +190,15 @@
   margin-bottom: 16px;
   padding: 12px 14px;
   border-radius: 10px;
-  background: linear-gradient(
-    135deg,
-    rgba(34,197,94,0.10) 0%,
-    rgba(245,158,11,0.05) 100%
-  );
-  border: 1px solid rgba(34,197,94,0.35);
+  background: var(--layer-verified-bg);
+  border: 1px solid var(--layer-verified-border);
   display: flex; flex-direction: column; gap: 8px;
 }
 .v10-vm-identity-head {
   display: flex; align-items: center; gap: 8px;
 }
 .v10-vm-identity-glyph {
-  font-size: 14px; color: #22c55e; line-height: 1;
+  font-size: 14px; color: var(--layer-verified); line-height: 1;
 }
 .v10-vm-identity-title {
   font-size: 12px; font-weight: 700; color: var(--text-primary);
@@ -214,9 +210,9 @@
   text-transform: uppercase; letter-spacing: 0.08em;
   padding: 2px 7px;
   border-radius: 10px;
-  color: var(--text-success);
-  background: rgba(34,197,94,0.12);
-  border: 1px solid rgba(34,197,94,0.35);
+  color: var(--layer-verified-text);
+  background: var(--layer-verified-bg);
+  border: 1px solid var(--layer-verified-border);
 }
 .v10-vm-identity-row {
   display: flex; align-items: center; gap: 6px;
@@ -304,7 +300,7 @@
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--sg-color, #a855f7) 8%, transparent) 0%,
+    color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 8%, transparent) 0%,
     transparent 40%
   );
   /* PR #793 round 2 — `min-height: 44px` reserves space for the
@@ -319,7 +315,7 @@
 }
 .v10-project-strip-dot {
   width: 9px; height: 9px; border-radius: 50%;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, #a855f7) 18%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 18%, transparent);
   flex-shrink: 0;
 }
 .v10-project-strip-name {
@@ -334,7 +330,7 @@
   cursor: default; opacity: 1;
 }
 .v10-project-strip-name:not(:disabled):hover {
-  color: var(--sg-color, #a855f7);
+  color: var(--sg-color, var(--text-tertiary));
 }
 .v10-project-strip-sep {
   color: var(--text-ghost);
@@ -433,16 +429,16 @@
   text-align: center;
 }
 .v10-primer-pipeline .wm {
-  border-color: rgba(100, 116, 139, 0.48);
-  background: rgba(100, 116, 139, 0.12);
+  border-color: var(--layer-working-border);
+  background: var(--layer-working-bg);
 }
 .v10-primer-pipeline .swm {
-  border-color: rgba(245, 158, 11, 0.45);
-  background: rgba(245, 158, 11, 0.12);
+  border-color: var(--layer-shared-border);
+  background: var(--layer-shared-bg);
 }
 .v10-primer-pipeline .vm {
-  border-color: rgba(34, 197, 94, 0.42);
-  background: rgba(34, 197, 94, 0.11);
+  border-color: var(--layer-verified-border);
+  background: var(--layer-verified-bg);
 }
 .v10-primer-pipeline .connector {
   height: 1px;

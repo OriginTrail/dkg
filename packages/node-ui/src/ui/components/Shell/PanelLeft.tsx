@@ -14,6 +14,7 @@ import {
   type LocalAgentIntegration,
   type LocalAgentIntegrationStatus,
 } from '../../api.js';
+import { ContextGraphMark } from '../../context-graph-colors.js';
 import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
@@ -51,7 +52,7 @@ function ProjectTreeItem({
         className={`v10-tree-section-header ${isActive ? 'active' : ''}`}
         onClick={onSelect}
       >
-        <span className="v10-tree-project-dot" />
+        <ContextGraphMark id={cg.id} name={cg.name} />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <button
           type="button"
@@ -85,7 +86,7 @@ function OracleCatalogueItem({
   return (
     <div className="v10-tree-section">
       <div className={`v10-tree-section-header catalogue ${isBrowsing ? 'active' : ''}`}>
-        <span className="v10-tree-project-dot" />
+        <ContextGraphMark id={cg.id} name={cg.name} />
         <span className="v10-tree-section-label">{label}</span>
         <button
           type="button"

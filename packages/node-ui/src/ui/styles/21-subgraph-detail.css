@@ -61,13 +61,13 @@
 }
 .v10-subgraph-savedquery:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .v10-subgraph-savedquery.active {
-  background: color-mix(in srgb, var(--sg-color, #a855f7) 14%, transparent);
-  border-color: var(--sg-color, #a855f7);
+  background: color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 14%, transparent);
+  border-color: var(--sg-color, var(--text-tertiary));
   color: var(--text-primary);
 }
 .v10-subgraph-savedquery:disabled { opacity: 0.5; cursor: default; }
 .v10-subgraph-savedquery-glyph {
-  font-size: 10px; color: var(--sg-color, #a855f7);
+  font-size: 10px; color: var(--sg-color, var(--text-tertiary));
 }
 .v10-subgraph-savedquery-error {
   color: var(--text-danger); font-size: 11px;
@@ -110,8 +110,8 @@
   border-color: var(--border-strong); color: var(--text-primary);
 }
 .v10-subgraph-filter-chip.active {
-  background: color-mix(in srgb, var(--sg-color, #a855f7) 22%, transparent);
-  border-color: var(--sg-color, #a855f7);
+  background: color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 22%, transparent);
+  border-color: var(--sg-color, var(--text-tertiary));
   color: var(--text-primary);
 }
 .v10-subgraph-filter-reset {
@@ -222,10 +222,10 @@
   animation: v10-pulse-red 2s infinite;
 }
 .v10-subgraph-chip-badge.tone-info {
-  background: rgba(59,130,246,0.15); color: var(--text-info);
+  background: var(--bg-elevated); color: var(--text-info);
 }
 .v10-subgraph-chip-badge.tone-info .v10-subgraph-chip-badge-dot {
-  background: #3b82f6;
+  background: var(--text-tertiary);
 }
 .v10-subgraph-chip-badge.tone-muted {
   background: rgba(100,116,139,0.15); color: var(--text-tertiary);

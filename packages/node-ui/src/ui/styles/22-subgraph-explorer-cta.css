@@ -187,16 +187,12 @@
   gap: 8px;
 }
 .v10-ka-verify-promote {
-  background: linear-gradient(135deg,
-    rgba(245,158,11,0.10) 0%,
-    rgba(168,85,247,0.05) 100%);
-  border: 1px solid rgba(245,158,11,0.30);
+  background: var(--layer-shared-bg);
+  border: 1px solid var(--layer-shared-border);
 }
 .v10-ka-verify-publish {
-  background: linear-gradient(135deg,
-    rgba(34,197,94,0.10) 0%,
-    rgba(168,85,247,0.06) 100%);
-  border: 1px solid rgba(34,197,94,0.30);
+  background: var(--layer-verified-bg);
+  border: 1px solid var(--layer-verified-border);
 }
 .v10-ka-verify-head {
   display: flex; align-items: center; gap: 8px;
@@ -205,8 +201,8 @@
   font-size: 18px;
   line-height: 1;
 }
-.v10-ka-verify-promote .v10-ka-verify-arrow { color: #f59e0b; }
-.v10-ka-verify-publish .v10-ka-verify-arrow { color: #22c55e; }
+.v10-ka-verify-promote .v10-ka-verify-arrow { color: var(--layer-shared); }
+.v10-ka-verify-publish .v10-ka-verify-arrow { color: var(--layer-verified); }
 .v10-ka-verify-title {
   font-size: 13px; font-weight: 700;
   color: var(--text-primary);
@@ -223,12 +219,15 @@
   transition: filter 0.15s, background 0.15s;
 }
 .v10-ka-verify-btn.promote {
-  background: #f59e0b;
-  color: #0a0a0a;
+  /* Share to SWM: the SWM layer tint, as on every share action. */
+  background: var(--layer-shared-bg);
+  color: var(--layer-shared-text);
+  box-shadow: inset 0 0 0 1px var(--layer-shared-border);
 }
 .v10-ka-verify-btn.publish {
-  background: #22c55e;
-  color: #0a0a0a;
+  /* Commits to VM: the purple fill. */
+  background: var(--accent-vm);
+  color: var(--text-on-vm);
 }
 .v10-ka-verify-btn:hover:not(:disabled) { filter: brightness(1.12); }
 .v10-ka-verify-btn:disabled { opacity: 0.45; cursor: default; }

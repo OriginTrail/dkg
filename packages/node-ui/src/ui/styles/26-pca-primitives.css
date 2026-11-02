@@ -24,7 +24,7 @@
   flex-shrink: 0;
 }
 .v10-pca-copy-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
-.v10-pca-copy-btn:focus-visible { outline: 2px solid var(--text-link); outline-offset: 1px; }
+.v10-pca-copy-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 
 /* Visually-hidden live announcement (mirrors the markdown copy announce). */
 .v10-pca-copy-announce {
@@ -200,6 +200,9 @@
   line-height: 1.45;
 }
 .v10-pca-device-progress-tx {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   grid-column: 2;
   display: block;
   color: var(--text-link);

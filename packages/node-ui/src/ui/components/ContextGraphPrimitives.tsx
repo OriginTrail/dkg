@@ -15,15 +15,15 @@ type EmptyStateAction = {
 
 const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   neutral: 'var(--border-strong)',
-  wm: 'var(--layer-working, #64748b)',
-  swm: 'var(--layer-shared, #f59e0b)',
-  vm: 'var(--layer-verified, #22c55e)',
+  wm: 'var(--layer-working)',
+  swm: 'var(--layer-shared)',
+  vm: 'var(--layer-verified)',
   danger: 'var(--text-danger)',
-  query: '#38bdf8',
+  query: 'var(--text-secondary)', // navigation, not a layer: neutral
   // Warning tone (PCA edge/fall-through empty states). Resolves to the same
   // `--text-warning` token as `.badge-warn` / `.v10-modal-warning` — the
-  // theme-aware amber (#fbbf24 dark / #92400e light), NOT the SWM
-  // `--layer-shared` #f59e0b layer-identity accent used by the `swm` tone.
+  // theme-aware amber (#fbbf24 dark / #a35207 light), NOT the SWM
+  // `--layer-shared` layer-identity accent used by the `swm` tone.
   warning: 'var(--text-warning)',
 };
 

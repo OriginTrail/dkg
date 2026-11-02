@@ -118,11 +118,12 @@
 .v10-layer-switch-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
 .v10-layer-switch-btn.active { color: var(--text-primary); }
 .v10-layer-switch-btn.active[data-layer="overview"] { border-bottom-color: var(--text-secondary); }
-.v10-layer-switch-btn.active[data-layer="graph-overview"] { border-bottom-color: #38bdf8; }
-.v10-layer-switch-btn.active[data-layer="query"] { border-bottom-color: #38bdf8; }
-.v10-layer-switch-btn.active[data-layer="wm"] { border-bottom-color: #64748b; }
-.v10-layer-switch-btn.active[data-layer="swm"] { border-bottom-color: #f59e0b; }
-.v10-layer-switch-btn.active[data-layer="vm"] { border-bottom-color: #22c55e; }
+/* Navigation tabs are not layers: neutral underline. */
+.v10-layer-switch-btn.active[data-layer="graph-overview"] { border-bottom-color: var(--text-secondary); }
+.v10-layer-switch-btn.active[data-layer="query"] { border-bottom-color: var(--text-secondary); }
+.v10-layer-switch-btn.active[data-layer="wm"] { border-bottom-color: var(--layer-working); }
+.v10-layer-switch-btn.active[data-layer="swm"] { border-bottom-color: var(--layer-shared); }
+.v10-layer-switch-btn.active[data-layer="vm"] { border-bottom-color: var(--layer-verified); }
 .v10-layer-switch-icon { font-size: 11px; }
 .v10-layer-switch-separator {
   flex: 0 0 auto;
@@ -210,6 +211,10 @@
   color: var(--text-secondary);
   text-align: left;
 }
+/* Layer-toned empty states use the chip tokens (same weight per layer). */
+.v10-empty-state[data-tone="wm"]:not(.inline)  { border-color: var(--layer-working-border);  background: var(--layer-working-bg); }
+.v10-empty-state[data-tone="swm"]:not(.inline) { border-color: var(--layer-shared-border);   background: var(--layer-shared-bg); }
+.v10-empty-state[data-tone="vm"]:not(.inline)  { border-color: var(--layer-verified-border); background: var(--layer-verified-bg); }
 .v10-empty-state.compact {
   min-height: 118px;
   padding: 18px;

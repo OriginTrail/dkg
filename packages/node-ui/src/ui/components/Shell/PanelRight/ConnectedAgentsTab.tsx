@@ -21,6 +21,7 @@ import {
 } from './selection.js';
 import type { LocalAgentAttachmentDraft, LocalAgentMessage } from './types.js';
 import { agentLogoDataUri } from './agentLogos.js';
+import { ContextGraphMark } from '../../../context-graph-colors.js';
 
 /**
  * The agent's own mark, drawn as a mask so it inherits the panel's text colour
@@ -805,7 +806,7 @@ export function ConnectedAgentsTab(props: {
                               ...(activeProjectId
                                 ? [{ value: '', label: 'No context graph (clear selection)' }]
                                 : []),
-                              ...selectableProjects.map((project) => ({ value: project.id, label: project.name })),
+                              ...selectableProjects.map((project) => ({ value: project.id, label: project.name, mark: <ContextGraphMark id={project.id} name={project.name} /> })),
                             ]}
                             placeholder={projectsLoading ? 'Loading context graphs…' : 'Choose a context graph'}
                             // Disable while loading. When no project is active

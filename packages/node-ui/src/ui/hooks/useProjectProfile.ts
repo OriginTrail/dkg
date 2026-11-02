@@ -160,8 +160,10 @@ export interface ProjectProfile {
 
 const DEFAULT_PROFILE_SEED = {
   displayName: 'Project',
-  primaryColor: '#a855f7',
-  accentColor: '#22c55e',
+  // Neutral unless the context graph's profile sets a colour: violet and
+  // green now mean VM and success, so they can't be a default identity.
+  primaryColor: 'var(--text-tertiary)',
+  accentColor: 'var(--text-tertiary)',
 };
 
 const DEFAULT_SUBGRAPH_FALLBACK = (slug: string): SubGraphBinding => ({

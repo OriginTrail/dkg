@@ -223,8 +223,6 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   }, [contextGraphId, run]);
 
   if (count === 0) return null;
-  const color = '#f59e0b';
-
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
@@ -236,7 +234,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
       <button
         data-testid="widget-promote-all-btn"
         className="v10-decision-btn approve"
-        style={{ borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }}
+        style={{ borderColor: 'var(--layer-shared-border)', color: 'var(--layer-shared-text)', background: 'var(--layer-shared-bg)', opacity: busy ? 0.5 : 1 }}
         disabled={busy}
         onClick={promote}
       >

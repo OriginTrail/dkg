@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { LAYER_HEX } from '../src/ui/layer-colors.js';
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
@@ -174,7 +175,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     });
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
-    expect(graph.getAttribute('data-default-color')).toBe('#f59e0b');
+    expect(graph.getAttribute('data-default-color')).toBe(LAYER_HEX.dark.shared);
   });
 
   it('releases the SWM graph if attribution lookup stalls', async () => {
@@ -210,7 +211,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     const graph = container.querySelector('[data-testid="rdf-graph"]') as HTMLElement;
     expect(requestSignal?.aborted).toBe(true);
-    expect(graph.getAttribute('data-default-color')).toBe('#f59e0b');
+    expect(graph.getAttribute('data-default-color')).toBe(LAYER_HEX.dark.shared);
     expect(JSON.parse(graph.getAttribute('data-node-colors') ?? '{}')).toEqual({});
   });
 
@@ -323,8 +324,8 @@ describe('LayerGraphPanel graph lifecycle', () => {
       expect(graphState.mounts).toHaveLength(2);
     });
 
-    expect(graphState.mounts).toEqual(['#64748b', '#f59e0b']);
-    expect(graphState.unmounts).toEqual(['#64748b']);
+    expect(graphState.mounts).toEqual([LAYER_HEX.dark.working, LAYER_HEX.dark.shared]);
+    expect(graphState.unmounts).toEqual([LAYER_HEX.dark.working]);
   });
 
   it('renders layer graph with degree sizing and in-canvas expand control', async () => {

@@ -295,9 +295,9 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   position: absolute; left: -21px; top: 2px; width: 10px; height: 10px;
   border-radius: 50%; border: 2px solid var(--border-strong); background: var(--bg-elevated);
 }
-.v10-ka-event-dot.created { border-color: var(--layer-working); background: rgba(100,116,139,0.15); }
-.v10-ka-event-dot.shared { border-color: var(--layer-shared); background: rgba(245,158,11,0.15); }
-.v10-ka-event-dot.verified { border-color: var(--layer-verified); background: rgba(34,197,94,0.15); }
+.v10-ka-event-dot.created { border-color: var(--layer-working); background: color-mix(in srgb, var(--layer-working) 15%, transparent); }
+.v10-ka-event-dot.shared { border-color: var(--layer-shared); background: color-mix(in srgb, var(--layer-shared) 15%, transparent); }
+.v10-ka-event-dot.verified { border-color: var(--layer-verified); background: color-mix(in srgb, var(--layer-verified) 15%, transparent); }
 .v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
 .v10-ka-event-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
 .v10-ka-event-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
