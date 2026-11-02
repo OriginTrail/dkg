@@ -13,6 +13,10 @@ import { parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV
 import { sqlBlobsEqualV1 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
 type SqlRowV1 = Record<string, unknown>;
+interface DecodedRepairRowV1 {
+  readonly json: string;
+  readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
+}
 interface Host {
   assertOpen(): void;
   prepare(sql: string): StatementSync;
@@ -26,14 +30,22 @@ interface Host {
 
 /** Same owned connection, transactions, latency bounds and exact commit recovery as inventory. */
 export class FinalizedPrivateRepairPersistenceV1 {
+  // Reuse validation only for the exact digest and bytes from the last successful snapshot.
+  // SQLite remains authoritative: every listing reads it, and changed rows are fully validated.
+  private decodedRows = new Map<string, DecodedRepairRowV1>();
+
   constructor(private readonly host: Host) {}
   listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[] {
     this.host.assertOpen();
-    return this.host.read(() => {
+    const previous = this.decodedRows;
+    const next = new Map<string, DecodedRepairRowV1>();
+    const repairs = this.host.read(() => {
       const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs);
       const rows = this.host.statement(() => query.all() as SqlRowV1[]);
-      return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row)));
+      return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row, previous, next)));
     });
+    this.decodedRows = next;
+    return repairs;
   }
 
   async listFinalizedPrivatePlacementRepairsAsync(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]> {
@@ -42,17 +54,22 @@ export class FinalizedPrivateRepairPersistenceV1 {
     // Copy rows in one synchronous read transaction. Never hold SQLite across a yield.
     const rows = this.host.read(() => this.host.statement(() =>
       this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs).all() as SqlRowV1[]));
+    const previous = this.decodedRows;
+    const next = new Map<string, DecodedRepairRowV1>();
     const repairs: Rfc64FinalizedPrivatePlacementRepairV1[] = [];
     const checkpoint = createMainThreadTimeSlice({ sliceMs: 8, maxIterations: 32 });
     for (const row of rows) {
       signal.throwIfAborted();
       this.host.assertOpen();
-      repairs.push(this.decodeFinalizedPrivatePlacementRepair(row));
+      repairs.push(this.decodeFinalizedPrivatePlacementRepair(row, previous, next));
       const pause = checkpoint();
       if (pause) await pause;
     }
     signal.throwIfAborted();
     this.host.assertOpen();
+    // A cancelled or failed snapshot must not replace the last fully validated cache.
+    // Successful replacement also releases rows that SQLite no longer lists.
+    this.decodedRows = next;
     return Object.freeze(repairs);
   }
 
@@ -139,6 +156,8 @@ export class FinalizedPrivateRepairPersistenceV1 {
 
   private decodeFinalizedPrivatePlacementRepair(
     row: SqlRowV1,
+    previous: ReadonlyMap<string, DecodedRepairRowV1>,
+    next: Map<string, DecodedRepairRowV1>,
   ): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
     if (!(row.repair_digest instanceof Uint8Array)
       || row.repair_digest.byteLength !== 32
@@ -146,6 +165,12 @@ export class FinalizedPrivateRepairPersistenceV1 {
       throw this.host.corrupt(
         'finalized-private placement repair row has invalid storage types',
       );
+    }
+    const key = Buffer.from(row.repair_digest).toString('hex');
+    const cached = previous.get(key);
+    if (cached?.json === row.repair_json) {
+      next.set(key, cached);
+      return cached.repair;
     }
     const bytes = new TextEncoder().encode(row.repair_json);
     const repair = parseRfc64FinalizedPrivatePlacementRepairV1(bytes);
@@ -160,6 +185,7 @@ export class FinalizedPrivateRepairPersistenceV1 {
         'finalized-private placement repair row is not canonical or digest-bound',
       );
     }
+    next.set(key, { json: row.repair_json, repair });
     return repair;
   }
 

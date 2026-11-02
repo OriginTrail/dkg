@@ -51,6 +51,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-catalog-applied-head-coordinator-v1.test.ts",
   "test/rfc64-catalog-synchronization-evidence-v1.test.ts",
   "test/rfc64-finalized-private-placement-repair-store-v1.test.ts",
+  "test/rfc64-finalized-private-repair-decode-cache.test.ts",
   "test/finalized-private-placement-key.test.ts",
   "test/confirmed-catalog-obligation-recovery.test.ts",
   "test/confirmed-catalog-publication-admission.test.ts",
