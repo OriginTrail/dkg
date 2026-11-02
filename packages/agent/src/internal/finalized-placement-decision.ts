@@ -22,6 +22,22 @@ export type FinalizedPlacementDecisionV1<Lane = unknown> =
   } & ({ action: 'place-private-row'; capacityScope: Readonly<AuthorCatalogScopeV1> }
     | { action: 'retire-public-row'; capacityScope: undefined })>;
 
+/** Only admission inputs may outlive a pass; execution always reads the current lane. */
+export type FinalizedPlacementAdmissionDecisionV1 =
+  | Readonly<{ status: 'ready' | 'inactive'; capacityScope: Readonly<AuthorCatalogScopeV1> | undefined }>
+  | Readonly<{ status: 'unavailable'; error: Error; capacityScope: Readonly<AuthorCatalogScopeV1> | undefined }>;
+
+export function resolveFinalizedPlacementAdmissionDecisionV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+  readLane: () => FinalizedPlacementAuthorityV1,
+): FinalizedPlacementAdmissionDecisionV1 {
+  const decision = resolveFinalizedPlacementDecisionV1(repair, readLane);
+  const { status, capacityScope } = decision;
+  return status === 'unavailable'
+    ? Object.freeze({ status, capacityScope, error: decision.error })
+    : Object.freeze({ status, capacityScope });
+}
+
 /** Admission and retries retain this decision for capacity parking; execution re-reads authority. */
 export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1>(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
