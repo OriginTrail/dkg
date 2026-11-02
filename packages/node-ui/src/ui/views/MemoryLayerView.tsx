@@ -6,6 +6,7 @@ import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { memoryGraphLabels } from '../lib/memoryLabels.js';
 import { truncateMiddle } from '../lib/truncate.js';
+import { neutralHex } from '../layer-colors.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -42,8 +43,8 @@ const GRAPH_OPTIONS = {
       'http://schema.org/CreativeWork': '#7dd3fc',
       'http://schema.org/Thing': '#94a3b8',
     },
-    defaultNodeColor: '#94a3b8',
-    defaultEdgeColor: '#5f8598',
+    defaultNodeColor: neutralHex('node'),
+    defaultEdgeColor: neutralHex('edge'),
     edgeWidth: 0.9,
   },
   hexagon: { baseSize: 4, minSize: 3, maxSize: 6, scaleWithDegree: true },

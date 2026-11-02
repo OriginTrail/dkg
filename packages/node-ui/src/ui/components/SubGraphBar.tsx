@@ -22,6 +22,7 @@ import type { ProjectProfile } from '../hooks/useProjectProfile.js';
 import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
+import { neutralHex } from '../layer-colors.js';
 
 export interface SubGraphBadge {
   /** Short label shown inline on the chip, e.g. "2 proposed" */
@@ -261,7 +262,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
-          color: binding.color ?? '#64748b',
+          color: binding.color ?? neutralHex('node'),
           displayName: binding.displayName ?? sg.name,
           description: binding.description ?? sg.description,
           rank: binding.rank ?? 99,

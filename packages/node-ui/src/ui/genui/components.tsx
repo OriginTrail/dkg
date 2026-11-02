@@ -10,8 +10,12 @@
  * `.v10-genui-*` classes defined in styles.css.
  */
 import React from 'react';
+import { kindColor, type EntityKind } from '../entity-kind-colors.js';
 
 type RenderProps<P> = { props: P; renderNode: (value: unknown) => React.ReactNode };
+
+/** Each card kind keeps its data-palette colour (icon tile), same as elsewhere. */
+const kindStyle = (kind: EntityKind) => ({ '--kind': kindColor(kind) }) as React.CSSProperties;
 
 /**
  * URL allow-list for anchors embedded in LLM-generated / graph-sourced GenUI.
@@ -164,9 +168,9 @@ export const PackageCardImpl: React.FC<RenderProps<{
   name: string; folder?: string; description?: string;
   fileCount?: number; classCount?: number; functionCount?: number; interfaceCount?: number;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-package-card">
+  <div className="v10-genui-card v10-genui-package-card" style={kindStyle('package')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#a855f7' }}>📦</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">▦</span>
       <div className="v10-genui-card-title">{props.name}</div>
       {props.folder ? <div className="v10-genui-card-type">packages/{props.folder}</div> : null}
     </div>
@@ -184,9 +188,9 @@ export const PackageCardImpl: React.FC<RenderProps<{
 export const FileCardImpl: React.FC<RenderProps<{
   path: string; language?: string; lineCount?: number; packageName?: string;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-file-card">
+  <div className="v10-genui-card v10-genui-file-card" style={kindStyle('file')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#3b82f6' }}>📄</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">▤</span>
       <div className="v10-genui-card-title">{basename(props.path)}</div>
       {props.language ? <div className="v10-genui-card-type">.{props.language}</div> : null}
     </div>
@@ -205,9 +209,9 @@ export const DecisionCardImpl: React.FC<RenderProps<{
   date?: string;
   context?: string; outcome?: string; consequences?: string; alternatives?: string;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-decision-card">
+  <div className="v10-genui-card v10-genui-decision-card" style={kindStyle('decision')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#ef4444' }}>◆</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">◆</span>
       <div className="v10-genui-card-title">{props.title}</div>
       {props.status ? <div className={`v10-genui-status-chip status-${props.status}`}>{props.status}</div> : null}
     </div>
@@ -224,9 +228,9 @@ export const PRCardImpl: React.FC<RenderProps<{
   title: string; number?: number; state?: 'open' | 'closed' | 'merged';
   author?: string; mergedAt?: string; body?: string; url?: string;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-pr-card">
+  <div className="v10-genui-card v10-genui-pr-card" style={kindStyle('pr')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#f59e0b' }}>⇄</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">⇄</span>
       <div className="v10-genui-card-title">
         {typeof props.number === 'number' ? <span className="v10-genui-pr-num">#{props.number}</span> : null}
         {props.title}
@@ -254,9 +258,9 @@ export const TaskCardImpl: React.FC<RenderProps<{
   priority?: 'p0' | 'p1' | 'p2' | 'p3';
   assignee?: string; estimate?: number;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-task-card">
+  <div className="v10-genui-card v10-genui-task-card" style={kindStyle('task')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#06b6d4' }}>✓</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">✓</span>
       <div className="v10-genui-card-title">{props.title}</div>
       {props.status ? <div className={`v10-genui-status-chip task-status-${props.status}`}>{props.status.replace('_', ' ')}</div> : null}
       {props.priority ? <div className={`v10-genui-priority-chip priority-${props.priority}`}>{props.priority.toUpperCase()}</div> : null}

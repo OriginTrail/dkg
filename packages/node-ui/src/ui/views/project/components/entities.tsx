@@ -2,6 +2,8 @@ import React, { useMemo } from 'react';
 import type { ReactNode } from 'react';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+import { useVmReceiptSummary } from '../../../hooks/useVmReceiptSummary.js';
+import { buildVmFacts } from '../vm-facts.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
@@ -349,6 +351,23 @@ export function LayerContent({
 // Sits at the top of the VM tab's "Knowledge Assets" view. Pulls together
 // the DKG "secret sauce" into a compact visual: anchoring, consensus,
 // agent identity — the verifiability elements that justify the VM's cost.
+const VM_BADGE_TIP = 'Verifiable Memory: Knowledge Assets published to the DKG chain, signed by the publishing agent, and tamper-evident via content hashes.';
+
+function VmHeroFacts({ entities, contextGraphId }: { entities: MemoryEntity[]; contextGraphId: string }) {
+  const { summary, loading, error } = useVmReceiptSummary(contextGraphId);
+  const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }), [entities, summary, loading, error]);
+  return (
+    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this context graph">
+      {facts.map(f => (
+        <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
+          <dt>{f.label}</dt>
+          <dd>{f.value}{f.tone === 'warn' ? <span aria-label="needs attention" className="v10-vm-hero-fact-icon">⚠</span> : null}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraphId }: {
   entities: MemoryEntity[];
   tripleCount: number;
@@ -386,7 +405,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
   return (
     <div className="v10-vm-hero">
       <div className="v10-vm-hero-title">
-        <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+        <span className="v10-vm-hero-badge" title={VM_BADGE_TIP}>◉ Verifiable Memory</span>
         <div className="v10-vm-hero-heading">
           <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>
@@ -403,24 +422,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
-      <div className="v10-vm-hero-strip">
-        <div className="v10-vm-hero-chip" title="Multi-agent endorsement">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#22c55e' }} />
-          Consensus
-        </div>
-        <div className="v10-vm-hero-chip" title="Published to the DKG blockchain anchor">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#3b82f6' }} />
-          On-chain
-        </div>
-        <div className="v10-vm-hero-chip" title="Each contribution bound to a DID">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#a855f7' }} />
-          Agent Identity
-        </div>
-        <div className="v10-vm-hero-chip" title="Tamper-evident via content hashing">
-          <span className="v10-vm-hero-chip-dot" style={{ background: '#f59e0b' }} />
-          Content Hash
-        </div>
-      </div>
+      <VmHeroFacts entities={entities} contextGraphId={contextGraphId} />
     </div>
   );
 }

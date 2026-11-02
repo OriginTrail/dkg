@@ -1,9 +1,11 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
 } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
+import { opTypeText, opTypeBg, opTypeRule, opChartColor, cssColor } from '../op-type-colors.js';
+import { layerHex } from '../layer-colors.js';
 import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
@@ -21,7 +23,7 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 
-const CANCELLED_COLOR = '#94a3b8';
+const CANCELLED_COLOR = 'var(--border-strong)';
 
 const PHASE_DESCRIPTIONS: Record<string, string> = {
   prepare: 'Partitioning triples, computing Merkle hashes, validating & signing.',
@@ -40,23 +42,6 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
   verify: 'Verifying Merkle proofs and inserting synced triples.',
 };
 
-const OP_TYPE_COLORS: Record<string, string> = {
-  publish:        '#22c55e',
-  publishFromSWM: '#16a34a',
-  update:         '#14b8a6',
-  'ka-update':    '#0d9488',
-  query:          '#8b5cf6',
-  resolve:        '#a78bfa',
-  workspace:      '#f59e0b',
-  connect:        '#06b6d4',
-  sync:           '#ec4899',
-  share:          '#f472b6',
-  gossip:         '#f97316',
-  reconstruct:    '#fb923c',
-  verify:         '#84cc16',
-  init:           '#94a3b8',
-  system:         '#6b7280',
-};
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   publish:        'Publish a Knowledge Asset on-chain to a context graph',
@@ -256,9 +241,9 @@ function ReplicationTab() {
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
               <Tooltip />
               <Legend />
-              <Area type="monotone" dataKey="promotes" stackId="1" stroke="#22c55e" fill="#22c55e" fillOpacity={0.5} name="promotes" />
-              <Area type="monotone" dataKey="fetches" stackId="1" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.4} name="fetches" />
-              <Area type="monotone" dataKey="defers" stackId="1" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.4} name="defers" />
+              <Area type="monotone" dataKey="promotes" stackId="1" stroke={layerHex('verified')} fill={layerHex('verified')} fillOpacity={0.55} name="promotes" />
+              <Area type="monotone" dataKey="fetches" stackId="1" stroke={cssColor('--text-tertiary')} fill={cssColor('--text-tertiary')} fillOpacity={0.2} name="fetches" />
+              <Area type="monotone" dataKey="defers" stackId="1" stroke={cssColor('--text-warning')} fill={cssColor('--text-warning')} fillOpacity={0.45} name="defers" />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -287,7 +272,7 @@ function ReplicationTab() {
                     <td>{c.core_hosted ? <span className="badge badge-info" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">host</span> : <span className="badge">member</span>}</td>
                     <td>{wm}</td>
                     <td>{head ?? '—'}</td>
-                    <td>{lag == null ? '—' : <span className={`badge ${lag === 0 ? 'badge-success' : 'badge-error'}`}>{lag}</span>}</td>
+                    <td>{lag == null ? '—' : <span className={`badge ${lag === 0 ? 'badge-success' : 'badge-warn'}`}>{lag}</span>}</td>
                     <td>{c.last_event_ts ? formatTime(c.last_event_ts) : '—'}</td>
                   </tr>
                 );
@@ -340,7 +325,7 @@ function ReplicationTab() {
                 {events.map((e, i) => (
                   <tr key={i}>
                     <td>{formatTime(e.ts)}</td>
-                    <td><span className={`badge ${e.action === 'promote' ? 'badge-success' : e.action === 'defer' ? 'badge-error' : ''}`}>{e.action}</span></td>
+                    <td><span className={`badge ${e.action === 'defer' ? 'badge-warn' : ''}`} style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)' } : undefined}>{e.action}</span></td>
                     <td>{e.ordinal ?? '—'}</td>
                     <td className="mono">{e.from_watermark != null && e.to_watermark != null ? `${e.from_watermark}->${e.to_watermark}` : '—'}</td>
                     <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.ual ?? ''}>{e.ual ?? '—'}</td>
@@ -432,7 +417,7 @@ function HealthTab() {
                       <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
                       {h.operation_name}
                     </td>
-                    <td style={{ color: PHASE_COLORS[h.phase] ?? PHASE_FALLBACK_COLOR, fontWeight: 600, padding: '10px 14px' }}>
+                    <td style={{ color: 'var(--text-primary)', fontWeight: 600, padding: '10px 14px' }}>
                       {h.phase}
                     </td>
                     <td style={{ padding: '10px 14px' }}><span className="badge badge-error">{h.error_count}</span></td>
@@ -478,7 +463,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
             }}
           >
             <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
-            <span style={{ fontWeight: 600, fontSize: 12, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span>
+            <span style={{ fontWeight: 600, fontSize: 12, color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
             <StatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
@@ -606,10 +591,10 @@ function OperationStatsSection() {
           {rates.length > 0 && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
               {rates.map((r: any) => {
-                const color = OP_TYPE_COLORS[r.type] ?? 'var(--text-muted)';
+                const color = opTypeText(r.type);
                 const rateColor = r.rate >= 0.9 ? 'var(--green-mid)' : r.rate >= 0.7 ? 'var(--amber)' : 'var(--red)';
                 return (
-                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 8, padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${color}` }}>
+                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 8, padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 700, color }}>{r.type}</span>
                     </div>
@@ -653,7 +638,7 @@ function OperationStatsSection() {
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} hide={hiddenSeries.has(t)} />
+                      <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
@@ -669,7 +654,7 @@ function OperationStatsSection() {
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
+                      <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={opChartColor(t, types)} fill={opChartColor(t, types)} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
@@ -685,7 +670,7 @@ function OperationStatsSection() {
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={OP_TYPE_COLORS[t] ?? '#6b7280'} fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
+                      <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={opChartColor(t, types)} fill={opChartColor(t, types)} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
@@ -701,7 +686,7 @@ function OperationStatsSection() {
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
-                      <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={OP_TYPE_COLORS[t] ?? '#6b7280'} fillOpacity={0.6} hide={hiddenSeries.has(t)} />
+                      <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
                     ))}
                   </BarChart>
                 </ResponsiveContainer>
@@ -740,6 +725,7 @@ function HardwareTab() {
     time: new Date(s.ts).toLocaleString(undefined, timeFmt),
     cpu: s.cpu_percent ?? 0,
     memGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(2) : 0,
+    memPct: s.mem_total_bytes ? Math.round((s.mem_used_bytes / s.mem_total_bytes) * 100) : 0,
     heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(1) : 0,
     diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : 0,
     peers: s.peer_count ?? 0,
@@ -765,11 +751,37 @@ function HardwareTab() {
   }, [hwData]);
 
   const loading = !hw;
+  // C7: one colour per metric; amber / red only past a threshold, with ⚠.
+  type Level = 'ok' | 'warn' | 'crit';
+  const level = (v: number | null | undefined, warn: number, crit: number): Level =>
+    v == null ? 'ok' : v > crit ? 'crit' : v > warn ? 'warn' : 'ok';
+  const LEVEL_COLOR: Record<Level, string> = { ok: 'var(--data-1)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
+  const LEVEL_TEXT: Record<Level, string> = { ok: 'var(--text-primary)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
+  const IDLE = 'var(--text-tertiary)';
+  // Thresholds shared by the cards and the chart reference lines.
+  const TH = { cpu: [60, 80], mem: [70, 85], disk: [70, 85], rpcMs: 500 } as const;
+  const cpuLv = level(hw?.cpu, ...TH.cpu);
+  const memLv = level(hw?.memPct, ...TH.mem);
+  const diskLv = level(hw?.diskPct, ...TH.disk);
   const statCards = [
-    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, color: hw ? (hw.cpu > 80 ? '#ef4444' : hw.cpu > 60 ? '#f59e0b' : '#3b82f6') : '#374151' },
-    { label: 'RAM', value: hw ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : '—', sub: hw ? `${hw.memPct}% used` : 'waiting…', pct: hw ? hw.memPct : null, color: hw ? (hw.memPct > 85 ? '#ef4444' : hw.memPct > 70 ? '#f59e0b' : '#8b5cf6') : '#374151' },
-    { label: 'Heap', value: hw ? `${hw.heapMB} MB` : '—', sub: hw ? 'Node.js heap' : 'waiting…', pct: null, color: hw ? '#06b6d4' : '#374151' },
-    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, color: hw ? (hw.diskPct !== null ? (hw.diskPct > 85 ? '#ef4444' : '#f59e0b') : '#6b7280') : '#374151' },
+    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, lv: cpuLv },
+    { label: 'RAM', value: hw ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : '—', sub: hw ? `${hw.memPct}% used` : 'waiting…', pct: hw ? hw.memPct : null, lv: memLv },
+    { label: 'Heap', value: hw ? `${hw.heapMB} MB` : '—', sub: hw ? 'Node.js heap' : 'waiting…', pct: null, lv: 'ok' as Level },
+    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, lv: diskLv },
+  ];
+  const peersLv: Level = hw && hw.peers === 0 ? 'crit' : 'ok';
+  const rpcLv: Level = hw && hw.rpcMs !== null && hw.rpcMs > TH.rpcMs ? 'crit' : 'ok';
+  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6, fontSize: 13 }}>⚠</span>;
+  const s1 = cssColor('--data-1');
+  const grid = cssColor('--border-subtle'), tick = cssColor('--text-tertiary');
+  const warnLine = cssColor('--text-warning'), critLine = cssColor('--text-danger');
+  const hwCharts: Array<{ key: string; title: string; name: string; pct?: boolean; warn?: number; crit?: number }> = [
+    { key: 'cpu', title: 'CPU usage (%)', name: 'CPU %', pct: true, warn: TH.cpu[0], crit: TH.cpu[1] },
+    { key: 'memPct', title: 'RAM used (%)', name: 'RAM %', pct: true, warn: TH.mem[0], crit: TH.mem[1] },
+    { key: 'diskPct', title: 'Disk used (%)', name: 'Disk %', pct: true, warn: TH.disk[0], crit: TH.disk[1] },
+    { key: 'heapMB', title: 'Node.js heap (MB)', name: 'Heap MB' },
+    { key: 'peers', title: 'Peers', name: 'Peers' },
+    { key: 'rpcMs', title: 'RPC latency (ms)', name: 'RPC ms', crit: TH.rpcMs },
   ];
 
   return (
@@ -782,10 +794,10 @@ function HardwareTab() {
         {statCards.map(stat => (
           <div key={stat.label} className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: stat.color, lineHeight: 1, marginBottom: 3 }}>{stat.value}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
-              <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, margin: '5px 0 3px' }}>
-                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: stat.color, borderRadius: 2, transition: 'width .4s ease' }} />
+              <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 2, margin: '5px 0 3px' }}>
+                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 2, transition: 'width .4s ease' }} />
               </div>
             ) : <div style={{ height: 3, margin: '5px 0 3px' }} />}
             <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{stat.sub}</div>
@@ -796,73 +808,38 @@ function HardwareTab() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
         <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? '#22c55e' : '#374151', lineHeight: 1 }}>{hw ? hw.peers : '—'}</div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
         <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
-          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? (hw.rpcMs !== null && hw.rpcMs > 500 ? '#ef4444' : '#22c55e') : '#374151', lineHeight: 1 }}>
-            {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}
+          <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
+            {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
           <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
         </div>
       </div>
 
       {hwChartData.length > 1 ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>CPU Usage (%)</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Area type="monotone" dataKey="cpu" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="CPU %" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Memory & Heap</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 9 }} />
-                <Area type="monotone" dataKey="memGB" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Sys RAM (GB)" />
-                <Area type="monotone" dataKey="heapMB" stroke="#06b6d4" fill="#06b6d4" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Heap (MB)" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Disk Usage (%)</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Area type="monotone" dataKey="diskPct" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.12} strokeWidth={1.5} dot={false} name="Disk %" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="card" style={{ padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Network & RPC</div>
-            <ResponsiveContainer width="100%" height={150}>
-              <AreaChart data={hwChartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} yAxisId="left" />
-                <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} yAxisId="right" orientation="right" />
-                <Tooltip contentStyle={TOOLTIP_STYLE} />
-                <Legend wrapperStyle={{ fontSize: 9 }} />
-                <Area type="monotone" dataKey="peers" stroke="#22c55e" fill="#22c55e" fillOpacity={0.1} strokeWidth={1.5} dot={false} name="Peers" yAxisId="left" />
-                <Area type="monotone" dataKey="rpcMs" stroke="#ef4444" fill="#ef4444" fillOpacity={0.08} strokeWidth={1.5} dot={false} name="RPC (ms)" yAxisId="right" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
+        // One unit per chart (no shared or dual axes). Top row: the three
+        // percentages on the same 0–100 scale, with their warning thresholds.
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+          {hwCharts.map(c => (
+            <div key={c.key} className="card" style={{ padding: '12px 14px' }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
+              <ResponsiveContainer width="100%" height={140}>
+                <AreaChart data={hwChartData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={grid} />
+                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: tick }} minTickGap={24} />
+                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 9, fill: tick }} width={32} />
+                  <Tooltip contentStyle={TOOLTIP_STYLE} />
+                  {c.warn != null && <ReferenceLine y={c.warn} stroke={warnLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
+                  {c.crit != null && <ReferenceLine y={c.crit} stroke={critLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
+                  <Area type="monotone" dataKey={c.key} stroke={s1} fill={s1} fillOpacity={0.12} strokeWidth={1.5} dot={false} name={c.name} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ))}
         </div>
       ) : (
         <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'center', padding: '8px 0' }}>
@@ -908,7 +885,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         })}
       </div>
       {/* Gantt bar */}
-      <div style={{ display: 'flex', height: 10, borderRadius: 3, overflow: 'hidden', background: 'rgba(255,255,255,.04)' }}>
+      <div style={{ display: 'flex', gap: 2, height: 10, borderRadius: 3, overflow: 'hidden', background: 'transparent' }}>
         {phases.map((p: any, i: number) => {
           const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 3);
           const color = p.status === 'error'
@@ -924,7 +901,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               onMouseLeave={() => setHover(null)}
               style={{
                 width: `${pct}%`, background: color, minWidth: 3,
-                opacity: isHovered ? 1 : 0.65,
+                opacity: 1,
                 transition: 'opacity .15s, width .2s',
                 cursor: 'default',
               }}
@@ -1043,7 +1020,7 @@ function OperationsTab() {
             title={PHASE_DESCRIPTIONS[phase] ?? ''}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'default' }}
           >
-            <span style={{ width: 7, height: 7, borderRadius: 2, background: color, display: 'inline-block', flexShrink: 0 }} />
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
             {label}
           </span>
         ))}
@@ -1080,7 +1057,7 @@ function OperationsTab() {
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
                   <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
-                  <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: `${OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)'}22`, color: OP_TYPE_COLORS[op.operation_name] ?? 'var(--text-muted)' }}>{op.operation_name}</span></td>
+                  <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name) }}>{op.operation_name}</span></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td>{formatDuration(op.duration_ms)}</td>
@@ -1233,7 +1210,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
             : isCancelled
               ? CANCELLED_COLOR
               : isInProgress
-                ? '#f59e0b'
+                ? (PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR)
                 : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
 
           return (
@@ -1666,7 +1643,7 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
     );
   }
 
-  const opColor = OP_TYPE_COLORS[parsed.opName] ?? 'var(--text-muted)';
+  const opColor = opTypeText(parsed.opName);
   return (
     <div style={{ padding: '0 16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
       <span style={{ color: 'var(--text-dim)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>

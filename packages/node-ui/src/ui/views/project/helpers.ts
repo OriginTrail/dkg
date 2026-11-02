@@ -13,7 +13,7 @@ import {
 } from '../../hooks/useVerifiableMemoryAnchors.js';
 import { memoryGraphLabels } from '../../lib/memoryLabels.js';
 import { LAYER_CONFIG } from './layer-presentation.js';
-import { layerHex } from '../../layer-colors.js';
+import { layerHex, neutralHex } from '../../layer-colors.js';
 export { LAYER_CONFIG, layerNoun, VM_TRIPLE_STAT } from './layer-presentation.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
@@ -247,7 +247,7 @@ export function buildLayerGraphOptions(
       // the style engine keeps falling back to classColors.
       ...(nodeColors && Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
       defaultNodeColor: color,
-      defaultEdgeColor: isVM ? layerHex('verified') : layerHex('working'), // VM: layer-purple edges
+      defaultEdgeColor: isVM ? layerHex('verified') : neutralHex('edge'), // VM: layer-purple edges; WM/SWM neutral (C15)
       edgeWidth: isVM ? 1.8 : 1.2,
       // Keep VM very slightly bolder than WM/SWM for hierarchy, but well
       // below the previous 16/17 — those drowned dense layouts in text.

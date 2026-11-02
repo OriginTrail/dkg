@@ -45,3 +45,14 @@ function activeTheme(): 'dark' | 'light' {
 export function layerHex(level: LayerLevel): string {
   return LAYER_HEX[activeTheme()][level];
 }
+
+/** Neutral greys for canvas fallbacks: untyped nodes, default subgraph,
+ *  graph edges. Pure grey on purpose; slate is WM's colour now (C15). */
+export const NEUTRAL_HEX: Record<'dark' | 'light', { node: string; edge: string }> = {
+  dark: { node: '#9a9a9a', edge: '#4d4d4d' },
+  light: { node: '#6b6b6b', edge: '#a3a3a3' },
+};
+
+export function neutralHex(kind: 'node' | 'edge'): string {
+  return NEUTRAL_HEX[activeTheme()][kind];
+}

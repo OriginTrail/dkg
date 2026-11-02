@@ -249,29 +249,22 @@
   font-size: 11px;
   letter-spacing: 0.07em;
 }
-.v10-vm-hero-strip {
+/* C11: facts about this graph's VM, as label/value readouts (not pills).
+   Neutral by default; only a fact that needs attention turns amber. */
+.v10-vm-hero-facts {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px 22px;
+  margin: 0;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--layer-verified) 22%, transparent);
 }
-.v10-vm-hero-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary, #cbd5e1);
-  background: var(--v10-vm-surface);
-  border: 1px solid var(--v10-vm-border);
-  border-radius: 999px;
-}
-.v10-vm-hero-chip-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  box-shadow: 0 0 6px currentColor;
-}
+.v10-vm-hero-fact { display: flex; gap: 6px; align-items: baseline; font-size: 12px; }
+.v10-vm-hero-fact dt { color: var(--text-tertiary); }
+.v10-vm-hero-fact dd { margin: 0; font-weight: 600; color: var(--text-primary); }
+.v10-vm-hero-fact.tone-muted dd { color: var(--text-tertiary); }
+.v10-vm-hero-fact.tone-warn dd { color: var(--text-warning); }
+.v10-vm-hero-fact-icon { margin-left: 4px; }
 /* Light values come from the --layer-verified-* light tokens. */
 .v10-layer-expand-body.entities-tab > .v10-vm-hero {
   margin: 16px 16px 10px;

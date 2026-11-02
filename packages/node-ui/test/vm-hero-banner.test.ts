@@ -2,7 +2,13 @@
 
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The hero's facts line reads publish receipts; keep this test offline.
+vi.mock('../src/ui/hooks/useVmReceiptSummary.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/ui/hooks/useVmReceiptSummary.js')>()),
+  useVmReceiptSummary: () => ({ summary: null, loading: false, error: null }),
+}));
 import { LayerContent, VerifiableMemoryHeroBanner } from '../src/ui/views/project/components.js';
 import type { MemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
 

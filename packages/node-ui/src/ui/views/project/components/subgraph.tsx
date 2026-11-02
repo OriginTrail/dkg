@@ -16,6 +16,7 @@ import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
+import { neutralHex } from '../../../layer-colors.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
 // detail (named or Root). The three-sentence intro is non-dismissible —
@@ -289,7 +290,7 @@ export function SubGraphOverviewGrid({
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
-          color: binding.color ?? '#64748b',
+          color: binding.color ?? neutralHex('node'),
           displayName: binding.displayName ?? sg.name,
           description: binding.description,
           rank: binding.rank ?? 99,
@@ -475,7 +476,7 @@ export function SubGraphOverviewGrid({
       // Color left unset — the chrome falls through to neutral
       // tokens via the `.v10-sgov-card.root` modifier (mirrors
       // the chip's `--text-tertiary` neutral fallback).
-      color: binding.color ?? '#64748b',
+      color: binding.color ?? neutralHex('node'),
       displayName: binding.displayName ?? 'Root',
       description: binding.description,
       rank: 999,
@@ -700,7 +701,7 @@ export function SubGraphMiniCard({
       // every entity in the card's scope (#3 polish).
       ...(Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
       defaultNodeColor: card.color,
-      defaultEdgeColor: '#475569',
+      defaultEdgeColor: neutralHex('edge'),
       edgeWidth: 1.0,
       fontSize: 12,
       gradient: true,
@@ -1460,7 +1461,7 @@ export function SubGraphDetailView({
   // detail header, the project breadcrumb strip — reads the same
   // identity. Root's color is left unset so the CSS neutral
   // (--text-tertiary via the `--sg-color` fallback) wins.
-  const color = binding?.color ?? (isRoot ? 'var(--text-tertiary)' : '#64748b');
+  const color = binding?.color ?? (isRoot ? 'var(--text-tertiary)' : neutralHex('node'));
   const icon = binding?.icon ?? '•';
   const title = binding?.displayName ?? slug;
   const desc = binding?.description;

@@ -12,6 +12,7 @@ import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
 import { useLayoutStore } from '../../../stores/layout.js';
 import { TRUST_COLORS, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
+import { neutralHex } from '../../../layer-colors.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -36,7 +37,7 @@ export function SubGraphBadge({
   }, [entity.subGraphs]);
   if (!slug || !profile) return null;
   const binding = profile.forSubGraph(slug);
-  const color = binding?.color ?? '#64748b';
+  const color = binding?.color ?? neutralHex('node');
   const icon = binding?.icon ?? '•';
   const label = binding?.displayName ?? slug;
   return (
@@ -394,7 +395,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
       style: {
         namespaceColors: neutraliseBuiltinNamespaces(focalColor),
         defaultNodeColor: focalColor,
-        defaultEdgeColor: '#475569',
+        defaultEdgeColor: neutralHex('edge'),
         edgeWidth: 1.0,
         fontSize: 11,
       },

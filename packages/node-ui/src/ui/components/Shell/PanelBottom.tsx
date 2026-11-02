@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
+import { opTypeText } from '../../op-type-colors.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -142,14 +143,6 @@ function NodeLogContent() {
 
 const TX_OP_TYPES = new Set(['publish', 'publishFromSWM', 'update', 'ka-update', 'verify', 'reconstruct']);
 
-const TX_TYPE_COLORS: Record<string, string> = {
-  publish:        '#22c55e',
-  publishFromSWM: '#16a34a',
-  update:         '#14b8a6',
-  'ka-update':    '#0d9488',
-  verify:         '#8b5cf6',
-  reconstruct:    '#fb923c',
-};
 
 function TransactionsContent() {
   const [ops, setOps] = useState<any[]>([]);
@@ -206,7 +199,7 @@ function TransactionsContent() {
                   onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'rgba(255,255,255,.03)' : undefined }}
                 >
-                  <td style={{ padding: '7px 12px', color: TX_TYPE_COLORS[op.operation_name] ?? 'var(--text-secondary)', fontWeight: 600 }}>
+                  <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
                     {op.operation_name}
                   </td>
                   <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
