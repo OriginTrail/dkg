@@ -119,33 +119,30 @@ select.input {
 .data-table tbody tr:last-child td { border-bottom: none; }
 
 /* Badges */
+/* Generic table/status badge — the Badge "sm" look (components/ds/Badge):
+   18px pill, 10px sentence-case text, tint carries the tone. Prefer
+   <Badge size="sm" tone=…> in new code. */
 .badge {
   display: inline-flex;
   align-items: center;
-  padding: 2px 7px;
-  border-radius: 5px;
-  font-size: 10px;
-  font-weight: 700;
-  font-family: var(--font-mono);
+  gap: 4px;
+  height: var(--h-badge-sm);
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  line-height: 1;
   white-space: nowrap;
   background: var(--bg-elevated);
   color: var(--text-secondary);
+  box-shadow: inset 0 0 0 1px var(--border-default);
 }
-/* F7/M5: theme-aware text tokens (dark-on-tint in light theme) so these clear
-   WCAG 4.5:1 — the raw #22c55e/#ef4444/#3b82f6 failed in light theme. Mirrors
-   `.badge-warn` below. */
-.badge-success { background: rgba(34,197,94,.12); color: var(--text-success); }
-.badge-error   { background: rgba(239,68,68,.12);  color: var(--text-danger); }
-.badge-cancelled { background: rgba(148,163,184,.14); color: var(--text-muted); }
-/* Warning semantics resolve to the theme-aware `--text-warning` token
-   (#fbbf24 dark / #a35207 light) on `--amber-dim`, matching
-   `.v10-modal-warning` and the EmptyState `warning` tone so the whole
-   warning family shares ONE token. This is deliberately NOT the raw
-   `#f59e0b` (`--accent-amber` / `--layer-shared`), which is the SWM
-   layer-IDENTITY accent — those uses stay as-is. */
-.badge-warn    { background: var(--amber-dim); color: var(--text-warning); }
-.badge-info    { background: var(--bg-elevated); color: var(--text-info); box-shadow: inset 0 0 0 1px var(--border-strong); }
-.badge-info::before { content: "\24D8"; margin-right: 4px; }
+.badge-success { background: color-mix(in srgb, var(--text-success) 13%, transparent); color: var(--text-success); box-shadow: none; }
+.badge-error   { background: color-mix(in srgb, var(--text-danger) 13%, transparent);  color: var(--text-danger);  box-shadow: none; }
+.badge-warn    { background: color-mix(in srgb, var(--text-warning) 13%, transparent); color: var(--text-warning); box-shadow: none; }
+.badge-cancelled { background: transparent; color: var(--text-tertiary); }
+.badge-info    { background: var(--bg-elevated); color: var(--text-secondary); }
 
 /* Empty states */
 .empty-state {

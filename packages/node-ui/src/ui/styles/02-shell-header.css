@@ -202,22 +202,18 @@
 .v10-header-icon-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
 .v10-header-icon-btn.active-toggle { color: var(--text-secondary); }
 .v10-header-notif-wrap { position: relative; }
-.v10-header-notif-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  min-width: 14px;
-  height: 14px;
-  border-radius: 7px;
-  background: var(--accent-red);
-  color: #fff;
-  font-size: 9px;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 3px;
+.v10-header-notif-badge { position: absolute; top: 2px; right: 2px; }
+/* Unread count sits on the button's corner, clear of the bell glyph, as a
+   solid amber disc with a ring in the header colour. With unread items the
+   bell itself brightens, so the icon stays the strongest mark (dark-first). */
+.v10-header-notif-badge.ds-count.ds-tone-attention {
+  top: -1px; right: -3px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  background: var(--text-warning);
+  color: var(--bg-root);
+  box-shadow: 0 0 0 2px var(--bg-panel);
 }
+.v10-header-icon-btn:has(.v10-header-notif-badge) { color: var(--text-primary); }
 /* ── Notifications pane (redesign) ─────────────────────────────────────────
    Bell dropdown surface + the two sections (pinned "Needs your action" +
    "Activity") + the three row kinds. Reuses design tokens for dark/light,
@@ -316,21 +312,6 @@
   letter-spacing: 0.6px;
   text-transform: uppercase;
   color: var(--text-tertiary);
-}
-.v10-notif-section-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 5px;
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
-  background: rgba(245, 158, 11, 0.16);
-  color: var(--text-warning);
-  border: 1px solid rgba(245, 158, 11, 0.4);
 }
 .v10-notif-section-rows { display: flex; flex-direction: column; }
 .v10-notif-section-empty { padding: 6px 14px 10px; font-size: 11px; color: var(--text-tertiary); font-style: italic; }

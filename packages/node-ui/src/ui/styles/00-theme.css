@@ -217,3 +217,28 @@
   --text-muted: var(--text-secondary);
   --text-dim: var(--text-tertiary);
 }
+
+:root {
+  /* ── Shape and size scale (theme-independent) ──────────────────────
+     One radius per job (see DESIGN.md): controls 6, nested 8, cards 10,
+     overlays 12, pills full. Control heights 24/32/40, badges 18/22.
+     Type scale floor is 10px. */
+  --radius-xs: 4px;
+  --radius-control: 6px;
+  --radius-nested: 8px;
+  --radius-card: 10px;
+  --radius-overlay: 12px;
+  --radius-pill: 999px;
+  --h-badge-sm: 18px;
+  --h-badge-md: 22px;
+  --h-control-sm: 24px;
+  --h-control-md: 32px;
+  --h-control-lg: 40px;
+  --fs-micro: 10px;
+  --fs-label: 11px;
+  --fs-control: 12px;
+  --fs-body: 13px;
+  --fs-title: 15px;
+  --fs-heading: 18px;
+  --fs-display: 24px;
+}

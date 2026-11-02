@@ -11,6 +11,7 @@ import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 import { AgentDot } from '../../../components/AgentDot.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
 import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
+import { Count } from '../../../components/ds/Badge.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
@@ -61,7 +62,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-working)' }}>◇</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">WM</span>
-        {counts.wm > 0 && <span className="v10-layer-switch-count">{counts.wm}</span>}
+        {counts.wm > 0 && <Count value={counts.wm} className="v10-layer-switch-count" />}
       </button>
       <button
         className={`v10-layer-switch-btn ${active === 'swm' ? 'active' : ''}`}
@@ -73,7 +74,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-shared)' }}>◈</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Shared Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">SWM</span>
-        {counts.swm > 0 && <span className="v10-layer-switch-count">{counts.swm}</span>}
+        {counts.swm > 0 && <Count value={counts.swm} className="v10-layer-switch-count" />}
       </button>
       <button
         className={`v10-layer-switch-btn ${active === 'vm' ? 'active' : ''}`}
@@ -85,7 +86,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-verified)' }}>◉</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Verifiable Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">VM</span>
-        {counts.vm > 0 && <span className="v10-layer-switch-count">{counts.vm}</span>}
+        {counts.vm > 0 && <Count value={counts.vm} className="v10-layer-switch-count" />}
       </button>
       <span className="v10-layer-switch-separator" aria-hidden="true" />
       <button
@@ -807,9 +808,12 @@ export function PendingJoinRequestsSection({
     <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
         <span className="v10-po-section-title">Pending join requests</span>
-        <span className="v10-po-join-count" data-empty={requests.length === 0 ? 'true' : 'false'}>
-          {requests.length}
-        </span>
+        <Count
+          value={requests.length}
+          tone={requests.length > 0 ? 'attention' : 'neutral'}
+          className="v10-po-join-count"
+          data-empty={requests.length === 0 ? 'true' : 'false'}
+        />
       </header>
       {status === 'loading'
         ? <div className="v10-po-join-empty">Loading join requests...</div>

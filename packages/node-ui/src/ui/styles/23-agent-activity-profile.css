@@ -208,18 +208,6 @@
   font-size: 14px; line-height: 1;
   justify-self: center;
 }
-.v10-activity-feed-type {
-  display: inline-flex; align-items: center; gap: 5px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: 10px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  color: var(--text-secondary);
-  background: color-mix(in srgb, var(--type-color, var(--text-tertiary)) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--type-color, var(--text-tertiary)) 30%, var(--border-subtle));
-  white-space: nowrap;
-}
-.v10-activity-feed-type-icon { font-size: 11px; color: var(--type-color, var(--text-tertiary)); }
 .v10-activity-feed-title-text {
   /* Entity / assertion name in each row (e.g.
    * "pharmaceutical-derived-product-metadata"). Was `600` to
@@ -233,18 +221,6 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0;
 }
-.v10-activity-feed-status {
-  font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: 8px;
-  border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-}
-.v10-activity-feed-status.status-good  { color: var(--text-success); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
-.v10-activity-feed-status.status-warn  { color: var(--text-warning); border-color: rgba(245,158,11,0.35); background: rgba(245,158,11,0.08); }
-.v10-activity-feed-status.status-bad   { color: var(--text-danger); border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.08); }
 .v10-activity-feed-author { display: inline-flex; }
 .v10-activity-feed-time {
   font-family: var(--font-mono); font-size: 10px;

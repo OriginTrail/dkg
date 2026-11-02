@@ -49,14 +49,6 @@
    --text-secondary so it reads as a quiet affordance, not a control. */
 .v10-dash-section-title { display: flex; align-items: center; gap: 6px; }
 .v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
-.v10-dash-section-badge {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  padding: 2px 8px;
-  border-radius: 4px;
-}
 .v10-dash-section-link {
   font-size: 12px;
   color: var(--text-secondary);
@@ -214,14 +206,19 @@
    in the screenshot review. */
 .v10-cg-colhead .v10-cg-type { justify-content: center; text-align: center; }
 .v10-cg-colhead .v10-cg-agents { text-align: right; }
-/* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
+/* Role badge in the graph table — the Badge "sm" size with the role ladder. */
 .v10-cg-badge {
-  display: inline-block;
-  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  gap: 4px;
+  font-size: var(--fs-micro);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
-  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+  height: var(--h-badge-sm);
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
 }
@@ -229,9 +226,9 @@
    the ◆ glyph, joined a blue tint with ✓. Text on the solid chip is the
    surface colour, AA in both themes. */
 .v10-cg-badge-curator { background: var(--role); color: var(--bg-surface); border-color: var(--role); }
-.v10-cg-badge-curator::before { content: "◆ "; }
+.v10-cg-badge-curator::before { content: "◆"; }
 .v10-cg-badge-joined { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
-.v10-cg-badge-joined::before { content: "✓ "; }
+.v10-cg-badge-joined::before { content: "✓"; }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */

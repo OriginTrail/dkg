@@ -36,15 +36,14 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 22px;
-  padding: 2px 10px;
-  border-radius: 999px;
+  height: var(--h-badge-md);
+  padding: 0 9px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--fs-label);
+  font-weight: 600;
   color: var(--text-primary);
-  letter-spacing: 0.01em;
 }
 /* Role ladder: one blue, stronger with the role. Weight (solid → tint →
    outline → grey → dashed) says how much you can do; the glyph says which
@@ -174,26 +173,6 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
-}
-.v10-po-join-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
-  background: rgba(245, 158, 11, 0.16);
-  color: var(--text-warning);
-  border: 1px solid rgba(245, 158, 11, 0.4);
-}
-.v10-po-join-count[data-empty="true"] {
-  background: var(--bg-elevated);
-  color: var(--text-tertiary);
-  border-color: var(--border-default);
 }
 .v10-po-join-empty {
   font-size: 11px;
@@ -414,7 +393,6 @@
 
 @media (max-width: 1180px) {
   .v10-layer-switch-btn { padding: 0 9px; gap: 5px; font-size: 11px; }
-  .v10-layer-switch-count { display: none; }
   .v10-layer-switch-separator { margin: 0 4px; }
 }
 

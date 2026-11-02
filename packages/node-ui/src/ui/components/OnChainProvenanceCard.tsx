@@ -18,6 +18,7 @@ import React, { useEffect, useState } from 'react';
 import { useRdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { truncateId } from '../hooks/useVerifiedEntityIdentity.js';
+import { Badge } from './ds/Badge.js';
 
 export interface OnChainProvenanceCardProps {
   contextGraphId: string;
@@ -70,7 +71,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
       <div className="v10-graph-prov-head">
         <span className="v10-graph-prov-glyph">{verified ? '◉' : '◌'}</span>
         <span className="v10-graph-prov-title">On-chain provenance</span>
-        {verified && <span className="v10-graph-prov-badge">VERIFIED</span>}
+        {verified && <Badge tone="vm" size="sm" icon="✓" className="v10-graph-prov-badge">Verified</Badge>}
         <button
           type="button"
           className="v10-graph-prov-close"
@@ -94,7 +95,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
 
       {(receipt.status === 'offchain') && (
         <div className="v10-graph-prov-offchain">
-          <span className="v10-graph-prov-offchain-tag">Off-chain</span>
+          <Badge tone="muted" size="sm" className="v10-graph-prov-offchain-tag">Off-chain</Badge>
           <p>{LAYER_OFFCHAIN_COPY[layer ?? 'vm']}</p>
         </div>
       )}

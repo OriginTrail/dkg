@@ -50,17 +50,6 @@
   letter-spacing: 0.01em;
   color: var(--text-primary);
 }
-.v10-graph-prov-badge {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 2px 7px;
-  border-radius: 10px;
-  color: var(--layer-verified-text);
-  background: var(--layer-verified-bg);
-  border: 1px solid var(--layer-verified-border);
-}
 .v10-graph-prov-close {
   margin-left: auto;
   background: none;
@@ -96,18 +85,7 @@
   flex-direction: column;
   gap: 6px;
 }
-.v10-graph-prov-offchain-tag {
-  align-self: flex-start;
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 2px 7px;
-  border-radius: 10px;
-  color: var(--text-tertiary);
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-}
+.v10-graph-prov-offchain-tag { align-self: flex-start; }
 .v10-graph-prov-offchain p {
   margin: 0;
   font-size: 11px;

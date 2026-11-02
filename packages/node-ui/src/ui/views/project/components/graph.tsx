@@ -11,6 +11,7 @@ import { TRUST_COLORS, LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, hu
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
+import { Badge } from '../../../components/ds/Badge.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -638,7 +639,7 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
     <div className="v10-swm-legend" aria-label="SWM attribution legend">
       <div className="v10-swm-legend-row v10-swm-legend-head">
         <span>SWM attribution</span>
-        <span className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</span>
+        <Badge size="sm" tone="swm" className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</Badge>
       </div>
       {palette.slice(0, 8).map(p => (
         <div key={p.agent} className="v10-swm-legend-row" title={p.agent}>
@@ -683,7 +684,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
     <div className="v10-vm-legend" aria-label="Verifiable Memory legend">
       <div className="v10-vm-legend-row v10-vm-legend-head">
         <span>VM provenance layer</span>
-        <span className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</span>
+        <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
         <span className="v10-vm-legend-swatch" style={{ background: vmAnchorHex('fill'), color: '#fff', boxShadow: `0 0 0 2px ${vmAnchorHex('ring')}` }}>◉</span>

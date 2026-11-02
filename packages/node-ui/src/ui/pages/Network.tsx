@@ -5,7 +5,7 @@ import { fetchConnections, fetchAgents } from '../api.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
   if (a.connectionStatus === 'self') {
-    return <span className="badge" style={{ background: 'var(--text-muted)' }}>Self</span>;
+    return <span className="badge">Self</span>;
   }
   if (a.connectionStatus === 'connected') {
     const label = a.connectionTransport === 'relayed' ? 'Relayed' : 'Direct';
@@ -19,7 +19,7 @@ function ConnectionBadge({ agent: a }: { agent: any }) {
       </span>
     );
   }
-  return <span className="badge" style={{ background: 'var(--error)' }}>Disconnected</span>;
+  return <span className="badge badge-error">Disconnected</span>;
 }
 
 export function NetworkPage() {

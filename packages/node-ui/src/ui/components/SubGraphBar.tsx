@@ -23,6 +23,7 @@ import type { MemoryEntity, TrustLevel } from '../hooks/useMemoryEntities.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { neutralHex } from '../layer-colors.js';
+import { Badge } from './ds/Badge.js';
 
 export interface SubGraphBadge {
   /** Short label shown inline on the chip, e.g. "2 proposed" */
@@ -362,10 +363,14 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
             <span className="v10-subgraph-chip-label">{sg.displayName}</span>
             <span className="v10-subgraph-chip-count">{sg.entityCount}</span>
             {badge && (
-              <span className={`v10-subgraph-chip-badge tone-${badge.tone}`}>
-                <span className="v10-subgraph-chip-badge-dot" />
+              <Badge
+                size="sm"
+                dot
+                tone={badge.tone === 'warn' ? 'warning' : badge.tone === 'danger' ? 'danger' : badge.tone === 'muted' ? 'muted' : 'neutral'}
+                className={`v10-subgraph-chip-badge tone-${badge.tone}`}
+              >
                 {badge.label}
-              </span>
+              </Badge>
             )}
           </button>
         );

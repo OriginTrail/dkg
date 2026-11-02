@@ -136,19 +136,8 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 .v10-genui-chip.tone-danger .v10-genui-chip-value { color: var(--text-danger); }
 
 /* Status + priority chips: neutral unless the state needs attention or is done */
-.v10-genui-status-chip, .v10-genui-priority-chip {
-  flex: none; padding: 2px 8px; border-radius: 999px;
-  font: 600 10px var(--font-sans); text-transform: uppercase; letter-spacing: .06em;
-  color: var(--text-secondary); background: var(--bg-elevated); box-shadow: inset 0 0 0 1px var(--border-default);
-}
-.v10-genui-status-chip.status-accepted, .v10-genui-status-chip.pr-state-merged, .v10-genui-status-chip.task-status-done {
-  color: var(--text-success); background: color-mix(in srgb, var(--text-success) 12%, transparent); box-shadow: none;
-}
-.v10-genui-status-chip.status-rejected { color: var(--text-danger); background: color-mix(in srgb, var(--text-danger) 12%, transparent); box-shadow: none; }
-.v10-genui-status-chip.task-status-blocked { color: var(--text-warning); background: color-mix(in srgb, var(--text-warning) 14%, transparent); box-shadow: none; }
-.v10-genui-status-chip.status-superseded, .v10-genui-status-chip.pr-state-closed, .v10-genui-status-chip.task-status-cancelled { color: var(--text-tertiary); text-decoration: line-through; }
-.v10-genui-priority-chip.priority-p0 { color: var(--text-danger); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-danger) 45%, transparent); background: transparent; }
-.v10-genui-priority-chip.priority-p1 { color: var(--text-warning); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-warning) 45%, transparent); background: transparent; }
+.v10-genui-status-chip, .v10-genui-priority-chip { flex: none; }
+.v10-genui-status-chip.status-superseded, .v10-genui-status-chip.pr-state-closed, .v10-genui-status-chip.task-status-cancelled { text-decoration: line-through; }
 
 /* Decision sections */
 .v10-genui-decision-section { display: flex; flex-direction: column; gap: 3px; padding-top: 8px; border-top: 1px solid var(--border-subtle); }
@@ -181,8 +170,7 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
   background: var(--layer-verified-bg); border: 1px solid var(--layer-verified-border); border-radius: 10px;
 }
 .v10-genui-vm-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.v10-genui-vm-badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font: 700 10px var(--font-sans); text-transform: uppercase; letter-spacing: .07em; color: var(--layer-verified-text); box-shadow: inset 0 0 0 1px var(--layer-verified-border); }
-.v10-genui-vm-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--layer-verified); }
+.v10-genui-vm-badge-dot { width: 6px; }
 .v10-genui-vm-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .v10-genui-vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .v10-genui-vm-block { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; background: var(--bg-surface); border-radius: 8px; min-width: 0; }

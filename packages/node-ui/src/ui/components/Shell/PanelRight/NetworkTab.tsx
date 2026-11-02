@@ -3,6 +3,8 @@ import { ChevronRight } from 'lucide-react';
 import { formatDuration } from './format.js';
 import { buildPeers, shortAgentUri, shortPeerId } from './peer-model.js';
 import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
+import { Badge } from '../../ds/Badge.js';
+import { humanizeStatus } from '../../ActivityFeed.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -27,9 +29,9 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
       <div className="v10-agent-card-header">
         <span className={`v10-agent-card-dot ${statusClass}`} />
         <span className="v10-peer-card-name">{displayName}</span>
-        <span className="v10-agent-card-badge" title={transportTitle}>
-          {transportLabel}
-        </span>
+        <Badge tone="muted" size="sm" className="v10-agent-card-badge" title={transportTitle}>
+          {humanizeStatus(String(transportLabel))}
+        </Badge>
       </div>
       <div className="v10-peer-card-meta">
         <span title={peer.peerId}>{shortPeerId(peer.peerId)}</span>

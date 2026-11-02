@@ -11,6 +11,18 @@
  */
 import React from 'react';
 import { kindColor, type EntityKind } from '../entity-kind-colors.js';
+import { Badge, LayerBadge, type BadgeTone } from '../components/ds/Badge.js';
+import { humanizeStatus } from '../components/ActivityFeed.js';
+
+/** Card status → badge tone: done is success, blocked/rejected danger, open/in progress warning. */
+function genuiStatusTone(status: string): BadgeTone {
+  switch (status) {
+    case 'accepted': case 'done': case 'merged': return 'success';
+    case 'rejected': case 'superseded': case 'cancelled': case 'closed': case 'blocked': return 'danger';
+    case 'proposed': case 'in_progress': case 'open': return 'warning';
+    default: return 'neutral';
+  }
+}
 
 type RenderProps<P> = { props: P; renderNode: (value: unknown) => React.ReactNode };
 
@@ -213,7 +225,7 @@ export const DecisionCardImpl: React.FC<RenderProps<{
     <div className="v10-genui-card-head">
       <span className="v10-genui-card-icon" aria-hidden="true">◆</span>
       <div className="v10-genui-card-title">{props.title}</div>
-      {props.status ? <div className={`v10-genui-status-chip status-${props.status}`}>{props.status}</div> : null}
+      {props.status ? <Badge size="sm" tone={genuiStatusTone(props.status)} className={`v10-genui-status-chip status-${props.status}`}>{humanizeStatus(props.status)}</Badge> : null}
     </div>
     {props.date ? <div className="v10-genui-card-subtitle">Decided {props.date}</div> : null}
     {props.context ? <DecisionSection heading="Context" body={props.context} /> : null}
@@ -235,7 +247,7 @@ export const PRCardImpl: React.FC<RenderProps<{
         {typeof props.number === 'number' ? <span className="v10-genui-pr-num">#{props.number}</span> : null}
         {props.title}
       </div>
-      {props.state ? <div className={`v10-genui-status-chip pr-state-${props.state}`}>{props.state}</div> : null}
+      {props.state ? <Badge size="sm" tone={genuiStatusTone(props.state)} className={`v10-genui-status-chip pr-state-${props.state}`}>{humanizeStatus(props.state)}</Badge> : null}
     </div>
     <div className="v10-genui-chips">
       {props.author ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">by</span><span className="v10-genui-chip-value">{props.author}</span></span> : null}
@@ -262,8 +274,8 @@ export const TaskCardImpl: React.FC<RenderProps<{
     <div className="v10-genui-card-head">
       <span className="v10-genui-card-icon" aria-hidden="true">✓</span>
       <div className="v10-genui-card-title">{props.title}</div>
-      {props.status ? <div className={`v10-genui-status-chip task-status-${props.status}`}>{props.status.replace('_', ' ')}</div> : null}
-      {props.priority ? <div className={`v10-genui-priority-chip priority-${props.priority}`}>{props.priority.toUpperCase()}</div> : null}
+      {props.status ? <Badge size="sm" tone={genuiStatusTone(props.status)} className={`v10-genui-status-chip task-status-${props.status}`}>{humanizeStatus(props.status)}</Badge> : null}
+      {props.priority ? <Badge size="sm" tone={props.priority === 'p0' ? 'danger' : props.priority === 'p1' ? 'warning' : 'neutral'} className={`v10-genui-priority-chip priority-${props.priority}`}>{props.priority.toUpperCase()}</Badge> : null}
     </div>
     <div className="v10-genui-chips">
       {props.assignee ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">assignee</span><span className="v10-genui-chip-value">@{props.assignee}</span></span> : null}
@@ -284,10 +296,7 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-vm-panel">
     <div className="v10-genui-vm-panel-head">
-      <div className="v10-genui-vm-badge">
-        <span className="v10-genui-vm-badge-dot" />
-        Verifiable Memory
-      </div>
+      <LayerBadge layer="vm" label="Verifiable Memory" className="v10-genui-vm-badge" />
       <div className="v10-genui-vm-title">On-chain provenance</div>
     </div>
     <div className="v10-genui-vm-grid">

@@ -204,16 +204,7 @@
   font-size: 12px; font-weight: 700; color: var(--text-primary);
   letter-spacing: 0.01em;
 }
-.v10-vm-identity-badge {
-  margin-left: auto;
-  font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.08em;
-  padding: 2px 7px;
-  border-radius: 10px;
-  color: var(--layer-verified-text);
-  background: var(--layer-verified-bg);
-  border: 1px solid var(--layer-verified-border);
-}
+.v10-vm-identity-badge { margin-left: auto; }
 .v10-vm-identity-row {
   display: flex; align-items: center; gap: 6px;
   flex-wrap: wrap;

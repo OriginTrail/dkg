@@ -16,6 +16,8 @@ import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
+import { Badge } from '../../../components/ds/Badge.js';
+import { humanizeStatus } from '../../../components/ActivityFeed.js';
 function contextGraphQueryTemplate(contextGraphId: string): string {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }
@@ -587,7 +589,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   <div className="v10-cg-query-catalog-group-header">
                     <div>
                       <div className="v10-cg-query-catalog-title-row">
-                        <span className="v10-cg-query-catalog-kind">{kind}</span>
+                        <Badge size="sm" className="v10-cg-query-catalog-kind">{humanizeStatus(String(kind))}</Badge>
                         <h4>{label}</h4>
                       </div>
                       {description && <p>{description}</p>}

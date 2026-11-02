@@ -15,6 +15,7 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { Count } from '../../components/ds/Badge.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -270,7 +271,7 @@ export function ConvictionOverview() {
           <div className="v10-pca-linked-pcas" data-testid="pca-approved-section">
             <div className="v10-pca-account-group-head">
               <h3 className="v10-pca-account-group-title">PCAs linked to this node</h3>
-              <span className="v10-pca-account-group-count">{approved.length}</span>
+              <Count value={approved.length} className="v10-pca-account-group-count" />
             </div>
             <p className="v10-pca-overview-caveat">
               Account summaries for PCAs that approve at least one of this node&apos;s publishing wallets.
@@ -352,7 +353,7 @@ export function ConvictionOverview() {
           <section className="v10-pca-section" data-testid="pca-tracked-external-section">
             <div className="v10-pca-account-group-head">
               <h3 className="v10-pca-section-title">Tracked external accounts</h3>
-              <span className="v10-pca-account-group-count">{trackedExternal.length}</span>
+              <Count value={trackedExternal.length} className="v10-pca-account-group-count" />
             </div>
             <p className="v10-pca-overview-caveat">
               Read-only PCA records you track manually. Connect the owner wallet to manage one.
@@ -530,7 +531,7 @@ function AccountGroup({
     <section className="v10-pca-account-group">
       <div className="v10-pca-account-group-head">
         <h3 className="v10-pca-account-group-title">{title}</h3>
-        <span className="v10-pca-account-group-count">{accounts.length}</span>
+        <Count value={accounts.length} className="v10-pca-account-group-count" />
       </div>
       <p className="v10-pca-overview-caveat">{description}</p>
       <div className="v10-pca-card-grid">

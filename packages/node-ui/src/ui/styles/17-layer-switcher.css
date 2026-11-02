@@ -132,11 +132,6 @@
   margin: 0 6px;
   background: var(--border-subtle);
 }
-.v10-layer-switch-count {
-  font-family: var(--font-mono); font-size: 9px; padding: 1px 5px;
-  border-radius: 3px; background: var(--bg-elevated); color: var(--text-tertiary);
-}
-.v10-layer-switch-btn.active .v10-layer-switch-count { color: var(--text-tertiary); }
 .v10-layer-switcher-spacer { flex: 1; min-width: 6px; }
 .v10-layer-switcher-actions { display: flex; align-items: center; gap: 4px; padding-right: 4px; flex: 0 0 auto; }
 .v10-layer-more {

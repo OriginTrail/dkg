@@ -169,20 +169,6 @@
   gap: 8px;
   margin-bottom: 4px;
 }
-.v10-cg-query-catalog-kind {
-  display: inline-flex;
-  align-items: center;
-  min-height: 18px;
-  padding: 2px 7px;
-  border: 1px solid color-mix(in srgb, var(--sg-color) 38%, var(--border-subtle));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--sg-color) 12%, var(--bg-surface));
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-}
 .v10-cg-query-catalog-group-header h4 {
   margin: 0;
   font-size: 13px;

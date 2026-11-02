@@ -194,45 +194,9 @@
 
 /* ── SubGraphBar chip badge (ambient "2 proposed" / "2 p0" / "N open") ── */
 .v10-subgraph-chip.has-badge { padding-right: 6px; }
-.v10-subgraph-chip-badge {
-  display: inline-flex; align-items: center; gap: 3px;
-  margin-left: 6px;
-  padding: 1px 5px;
-  border-radius: 8px;
-  font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 0.04em;
-  background: rgba(255,255,255,0.06);
-  font-family: var(--font-sans);
-}
-.v10-subgraph-chip-badge-dot {
-  width: 5px; height: 5px; border-radius: 50%;
-  display: inline-block;
-}
-.v10-subgraph-chip-badge.tone-warn {
-  background: rgba(245,158,11,0.15); color: var(--text-warning);
-}
-.v10-subgraph-chip-badge.tone-warn .v10-subgraph-chip-badge-dot {
-  background: #f59e0b; box-shadow: 0 0 4px rgba(245,158,11,0.6);
-}
-.v10-subgraph-chip-badge.tone-danger {
-  background: rgba(239,68,68,0.15); color: var(--text-danger);
-}
-.v10-subgraph-chip-badge.tone-danger .v10-subgraph-chip-badge-dot {
-  background: #ef4444; box-shadow: 0 0 4px rgba(239,68,68,0.6);
-  animation: v10-pulse-red 2s infinite;
-}
-.v10-subgraph-chip-badge.tone-info {
-  background: var(--bg-elevated); color: var(--text-info);
-}
-.v10-subgraph-chip-badge.tone-info .v10-subgraph-chip-badge-dot {
-  background: var(--text-tertiary);
-}
-.v10-subgraph-chip-badge.tone-muted {
-  background: rgba(100,116,139,0.15); color: var(--text-tertiary);
-}
-.v10-subgraph-chip-badge.tone-muted .v10-subgraph-chip-badge-dot {
-  background: #64748b;
-}
+.v10-subgraph-chip-badge { margin-left: 6px; }
+.v10-subgraph-chip-badge-dot { width: 5px; }
+.v10-subgraph-chip-badge.tone-danger .v10-subgraph-chip-badge-dot { animation: v10-pulse-red 2s infinite; }
 @keyframes v10-pulse-red {
   0%, 100% { box-shadow: 0 0 4px rgba(239,68,68,0.6); }
   50%      { box-shadow: 0 0 8px rgba(239,68,68,0.9); }

@@ -63,13 +63,6 @@
 .v10-trust-summary-item.trust-working .v10-trust-summary-dot { background: var(--layer-working); }
 .v10-trust-summary-item.trust-shared .v10-trust-summary-dot { background: var(--layer-shared); }
 .v10-trust-summary-item.trust-verified .v10-trust-summary-dot { background: var(--layer-verified); }
-
-/* ── Trust Badges ── */
-.v10-trust-badge { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 600; letter-spacing: 0.3px; white-space: nowrap; }
-.v10-trust-badge-icon { font-size: 10px; }
-.v10-trust-badge.trust-verified { background: var(--layer-verified-bg); color: var(--layer-verified-text); }
-.v10-trust-badge.trust-shared { background: var(--layer-shared-bg); color: var(--layer-shared-text); }
-.v10-trust-badge.trust-working { background: var(--layer-working-bg); color: var(--layer-working-text); }
 .v10-trust-ring { font-size: 14px; line-height: 1; }
 .v10-trust-ring.trust-verified { color: var(--layer-verified); }
 .v10-trust-ring.trust-shared { color: var(--layer-shared); }
@@ -186,20 +179,7 @@
   flex-direction: column;
   gap: 4px;
 }
-.v10-vm-hero-badge {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  background: var(--layer-verified-bg);
-  color: var(--v10-vm-accent);
-  border: 1px solid var(--v10-vm-border);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
+.v10-vm-hero-badge { flex: 0 0 auto; }
 .v10-vm-hero-headline {
   font-size: 14px;
   line-height: 1.35;
@@ -349,18 +329,6 @@
   padding-bottom: 4px;
   border-bottom: 1px solid color-mix(in srgb, var(--layer-verified) 18%, transparent);
 }
-.v10-vm-legend-count {
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary, #f1f5f9);
-  font-weight: 700;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--layer-verified) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--layer-verified) 30%, transparent);
-  letter-spacing: 0;
-  text-transform: none;
-  font-size: 10px;
-}
 .v10-vm-legend-swatch {
   display: inline-flex;
   align-items: center;
@@ -421,18 +389,6 @@
   justify-content: space-between;
   padding-bottom: 4px;
   border-bottom: 1px solid color-mix(in srgb, var(--layer-shared) 18%, transparent);
-}
-.v10-swm-legend-count {
-  font-variant-numeric: tabular-nums;
-  color: var(--text-primary, #f1f5f9);
-  font-weight: 700;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--layer-shared) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--layer-shared) 30%, transparent);
-  letter-spacing: 0;
-  text-transform: none;
-  font-size: 10px;
 }
 .v10-swm-legend-swatch {
   display: inline-flex;

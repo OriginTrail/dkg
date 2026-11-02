@@ -19,6 +19,7 @@ import { PcaDashboardRow } from '../pages/conviction/PcaDashboardRow.js';
 import { dashboardSizePresentation } from './dashboard-size-presentation.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
 import { AgentDotStack } from '../components/AgentDot.js';
+import { Count } from '../components/ds/Badge.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -458,7 +459,7 @@ function CgRow({
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
-          {isCurator ? 'CURATOR' : 'JOINED'}
+          {isCurator ? 'Curator' : 'Joined'}
         </span>
       </span>
     </button>
@@ -715,7 +716,7 @@ export function DashboardView() {
               <Share2 size={13} aria-hidden />
               <h3>My Context Graphs</h3>
             </div>
-            <span className="v10-dash-section-badge">{cgsResolving ? '…' : graphCount}</span>
+            <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
           </div>
           {cgsResolving ? (
             <p className="v10-cg-empty">Loading context graphs…</p>

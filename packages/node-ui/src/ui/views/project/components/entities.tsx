@@ -14,6 +14,9 @@ import { EmptyState, StatStrip, toneForLayer } from '../../../components/Context
 import { LayerGraphPanel } from './graph.js';
 import { LayerWidgetStrip } from './layer-widgets.js';
 import { AssertionsList } from './assertions.js';
+import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
+import { kindColorForType } from '../../../entity-kind-colors.js';
+import { humanizeTypeName } from '../../../components/ActivityFeed.js';
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -133,7 +136,7 @@ export function EntityList({
                   />
                 )}
                 {type && type !== 'Entity' && (
-                  <span className="v10-entity-type-pill">{icon} {type}</span>
+                  <Badge tone="kind" size="sm" kindColor={e.types.map(t => kindColorForType(t)).find(Boolean) ?? undefined} className="v10-entity-type-pill">{humanizeTypeName(type)}</Badge>
                 )}
                 {ts != null && (
                   <span
@@ -149,14 +152,10 @@ export function EntityList({
             {perEntityTrustBadge ? (() => {
               const badge = TRUST_BADGE_CONFIG[e.trustLevel];
               return (
-                <span className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`}>
-                  {badge.icon} {badge.label}
-                </span>
+                <LayerBadge layer={badge.layerKey} label={badge.label} size="sm" className={`v10-trust-badge ${badge.layerKey}`} title={`${badge.label} Memory`} />
               );
             })() : (
-              <span className={`v10-trust-badge ${layerKey}`}>
-                {layerIcon} {trustLabel}
-              </span>
+              <LayerBadge layer={layerKey} label={trustLabel} size="sm" className={`v10-trust-badge ${layerKey}`} />
             )}
           </div>
         );
@@ -382,7 +381,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
     return (
       <div className="v10-vm-hero v10-vm-hero-empty">
         <div className="v10-vm-hero-title">
-          <span className="v10-vm-hero-badge">◉ Verifiable Memory</span>
+          <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" />
           <div className="v10-vm-hero-heading">
             <span className="v10-vm-hero-headline">Nothing published yet</span>
             <span className="v10-vm-hero-context" title={contextGraphId}>
@@ -405,7 +404,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
   return (
     <div className="v10-vm-hero">
       <div className="v10-vm-hero-title">
-        <span className="v10-vm-hero-badge" title={VM_BADGE_TIP}>◉ Verifiable Memory</span>
+        <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" title={VM_BADGE_TIP} />
         <div className="v10-vm-hero-heading">
           <span className="v10-vm-hero-headline">On-chain anchored · cryptographically signed</span>
           <span className="v10-vm-hero-context" title={contextGraphId}>

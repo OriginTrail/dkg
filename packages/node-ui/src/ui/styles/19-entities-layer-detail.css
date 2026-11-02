@@ -161,14 +161,6 @@
   display: flex; align-items: center; gap: 8px;
   font-size: 10px;
 }
-.v10-entity-type-pill {
-  display: inline-flex; align-items: center; gap: 3px;
-  padding: 1px 7px; border-radius: 9px;
-  font-size: 10px; font-weight: 500;
-  background: var(--bg-elevated); color: var(--text-secondary);
-  border: 1px solid var(--border-subtle);
-  line-height: 1.4;
-}
 .v10-entity-card-triples {
   font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
 }
@@ -227,13 +219,7 @@
 .v10-item-count { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
 .v10-item-owner { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); flex-shrink: 0; margin-right: 6px; }
 .v10-item-owner-dot { width: 5px; height: 5px; border-radius: 50%; }
-.v10-trust-badge {
-  display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px;
-  border-radius: 4px; font-size: 9px; font-weight: 600; letter-spacing: 0.3px; flex-shrink: 0;
-}
-.v10-trust-badge.vm { background: var(--layer-verified-bg); color: var(--layer-verified-text); }
-.v10-trust-badge.swm { background: var(--layer-shared-bg); color: var(--layer-shared-text); }
-.v10-trust-badge.wm { background: var(--layer-working-bg); color: var(--layer-working-text); }
+.v10-trust-badge { flex-shrink: 0; }
 .v10-item-promote-btn {
   padding: 3px 10px; border-radius: 5px; font-size: 10px; font-weight: 600;
   border: 1px solid var(--border-default); color: var(--text-tertiary);

@@ -35,6 +35,7 @@ export function humanizeTypeName(name: string): string {
   return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w.toLowerCase())).join(' ');
 }
 import { LAYER_VAR } from '../layer-colors.js';
+import { Badge } from './ds/Badge.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
 
@@ -328,18 +329,14 @@ function ActivityRow({
       >
         {LAYER_GLYPH[item.layer]}
       </span>
-      <span
-        className="v10-activity-feed-type"
-        style={{ '--type-color': typeColor } as React.CSSProperties}
-      >
-        <span className="v10-activity-feed-type-icon">{typeIcon}</span>
+      <Badge tone="kind" size="sm" kindColor={typeColor} className="v10-activity-feed-type">
         <span className="v10-activity-feed-type-label">{typeLabel}</span>
-      </span>
+      </Badge>
       <span className="v10-activity-feed-title-text">{item.entity.label}</span>
       {status && (
-        <span className={`v10-activity-feed-status status-${statusTone(status)}`}>
-          {status}
-        </span>
+        <Badge tone={STATUS_BADGE_TONE[statusTone(status)]} size="sm" className={`v10-activity-feed-status status-${statusTone(status)}`}>
+          {humanizeStatus(status)}
+        </Badge>
       )}
       {(author || item.authorUri) && (
         <span className="v10-activity-feed-author">
@@ -392,6 +389,13 @@ function findStatus(e: MemoryEntity): string | null {
     if (v) return v;
   }
   return null;
+}
+
+const STATUS_BADGE_TONE = { good: 'success', warn: 'warning', bad: 'danger', neutral: 'neutral' } as const;
+/** "in_progress" → "In progress". */
+export function humanizeStatus(status: string): string {
+  const t = status.replace(/[_-]+/g, ' ').trim();
+  return t ? t[0].toUpperCase() + t.slice(1) : t;
 }
 
 function statusTone(status: string): 'good' | 'warn' | 'bad' | 'neutral' {

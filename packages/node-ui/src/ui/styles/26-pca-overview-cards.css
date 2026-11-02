@@ -151,17 +151,6 @@
   font-weight: 700;
   color: var(--text-primary);
 }
-.v10-pca-account-group-count {
-  min-width: 22px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border-default);
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
 .v10-pca-card-btn {
   border: 1px solid var(--border-default);
   background: var(--bg-surface);

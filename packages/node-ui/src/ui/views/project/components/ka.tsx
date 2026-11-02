@@ -13,6 +13,7 @@ import { useLayoutStore } from '../../../stores/layout.js';
 import { TRUST_COLORS, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
 import { neutralHex } from '../../../layer-colors.js';
+import { LayerBadge } from '../../../components/ds/Badge.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -432,7 +433,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">
             {icon} {entity.label}
-            <span className={`v10-trust-badge ${layerBadge}`}>{layerLabel}</span>
+            <LayerBadge layer={layerBadge} label={layerLabel} size="sm" className={`v10-trust-badge ${layerBadge}`} />
           </div>
           <div className="v10-ka-ual">{entity.uri} · {type} · {tripleCount} triples</div>
         </div>

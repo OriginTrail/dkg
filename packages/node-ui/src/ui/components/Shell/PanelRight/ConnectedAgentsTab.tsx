@@ -22,6 +22,8 @@ import {
 import type { LocalAgentAttachmentDraft, LocalAgentMessage } from './types.js';
 import { agentLogoDataUri } from './agentLogos.js';
 import { ContextGraphMark } from '../../../context-graph-colors.js';
+import { Badge } from '../../ds/Badge.js';
+import { humanizeStatus } from '../../ActivityFeed.js';
 
 /**
  * The agent's own mark, drawn as a mask so it inherits the panel's text colour
@@ -356,9 +358,13 @@ export function ConnectedAgentsTab(props: {
                     </div>
                     <div className="v10-local-agent-subtitle">{integration.description}</div>
                   </div>
-                  <span className={`v10-local-agent-status-pill ${integration.status}`}>
-                    {integration.statusLabel}
-                  </span>
+                  <Badge
+                    size="sm"
+                    tone={integration.status === 'chat_ready' ? 'success' : integration.status === 'bridge_offline' || integration.status === 'degraded' ? 'warning' : 'neutral'}
+                    className={`v10-local-agent-status-pill ${integration.status}`}
+                  >
+                    {humanizeStatus(String(integration.statusLabel))}
+                  </Badge>
                 </div>
                 <p className="v10-local-agent-copy">{integration.detail}</p>
                 {integration.error && (

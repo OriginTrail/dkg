@@ -22,6 +22,7 @@ import {
   PHASE_FALLBACK_COLOR,
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
+import { humanizeStatus } from '../components/ActivityFeed.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -325,7 +326,7 @@ function ReplicationTab() {
                 {events.map((e, i) => (
                   <tr key={i}>
                     <td>{formatTime(e.ts)}</td>
-                    <td><span className={`badge ${e.action === 'defer' ? 'badge-warn' : ''}`} style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)' } : undefined}>{e.action}</span></td>
+                    <td><span className={`badge ${e.action === 'defer' ? 'badge-warn' : ''}`} style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)', boxShadow: 'none' } : undefined}>{humanizeStatus(String(e.action))}</span></td>
                     <td>{e.ordinal ?? '—'}</td>
                     <td className="mono">{e.from_watermark != null && e.to_watermark != null ? `${e.from_watermark}->${e.to_watermark}` : '—'}</td>
                     <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.ual ?? ''}>{e.ual ?? '—'}</td>
@@ -1665,7 +1666,7 @@ export function operationStatusBadgeClass(status: string): string {
 
 export function StatusBadge({ status }: { status: string }) {
   const cls = operationStatusBadgeClass(status);
-  return <span className={`badge ${cls}`}>{status}</span>;
+  return <span className={`badge ${cls}`}>{humanizeStatus(status)}</span>;
 }
 
 function CopyButton({ text }: { text: string }) {

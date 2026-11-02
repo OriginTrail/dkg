@@ -86,7 +86,8 @@ function foregroundFor(selector: string): string {
 describe('Context Graph contrast tokens', () => {
   it('keeps readable Context Graph text off the decoration-only ghost token', () => {
     const readableSelectors = [
-      '.v10-layer-switch-count',
+      '.ds-badge',
+      '.ds-count',
       '.v10-entity-list-empty',
       '.v10-entity-list-header',
       '.v10-entity-card-triples',
@@ -166,26 +167,12 @@ describe('Context Graph contrast tokens', () => {
     const selectorsOnSurface = [
       '.v10-mlv-save-btn',
       '.v10-btn-promote',
-      '.v10-trust-badge.trust-verified',
-      '.v10-trust-badge.trust-shared',
-      '.v10-trust-badge.trust-working',
-      '.v10-trust-badge.vm',
-      '.v10-trust-badge.swm',
-      '.v10-trust-badge.wm',
       '.v10-layer-expand-footer-btn.promote',
       '.v10-layer-expand-footer-btn.publish',
       '.v10-layer-action-btn.primary',
       '.v10-layer-action-btn.promote',
       '.v10-decision-btn.approve',
       '.v10-decision-btn.revise',
-      '.v10-subgraph-chip-badge.tone-warn',
-      '.v10-subgraph-chip-badge.tone-danger',
-      '.v10-subgraph-chip-badge.tone-info',
-      '.v10-subgraph-chip-badge.tone-muted',
-      '.v10-activity-feed-type',
-      '.v10-activity-feed-status.status-good',
-      '.v10-activity-feed-status.status-warn',
-      '.v10-activity-feed-status.status-bad',
       '.v10-po-join-btn.approve',
       '.v10-po-join-btn.reject',
     ];
@@ -193,6 +180,16 @@ describe('Context Graph contrast tokens', () => {
     for (const selector of selectorsOnSurface) {
       expect(contrast(foregroundFor(selector), lightVars['--bg-surface']), selector).toBeGreaterThanOrEqual(4.5);
     }
+
+    // Badges (components/ds/Badge): each tone's text colour must clear AA on
+    // the light surface. Tones set --badge-fg rather than `color`.
+    for (const tone of ['success', 'warning', 'danger', 'wm', 'swm', 'vm', 'role', 'muted']) {
+      const fg = resolveColor(customProperties(`.ds-badge.ds-tone-${tone}`)['--badge-fg']);
+      expect(contrast(fg, lightVars['--bg-surface']), `badge ${tone}`).toBeGreaterThanOrEqual(4.5);
+    }
+    // Attention counts use --text-warning on a light tint; the bell's solid disc puts --bg-root on it.
+    expect(contrast(resolveColor(lightVars['--text-warning']), lightVars['--bg-surface']), 'count attention').toBeGreaterThanOrEqual(4.5);
+    expect(contrast(resolveColor(lightVars['--bg-root']), resolveColor(lightVars['--text-warning'])), 'bell count').toBeGreaterThanOrEqual(4.5);
 
     // Share-to-SWM uses the SWM layer tint; publish-to-VM is the purple fill.
     expect(contrast(foregroundFor('.v10-btn-promote-all'), lightVars['--layer-shared-bg'])).toBeGreaterThanOrEqual(4.5);
