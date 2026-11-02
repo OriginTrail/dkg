@@ -17,8 +17,8 @@
     "@origintrail-official/dkg-rdf-utils": "workspace:*"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.0.18",
-    "vitest": "^4.0.18"
+    "@vitest/coverage-v8": "^5.0.5",
+    "vitest": "^5.0.5"
   },
   "description": "Kafka source handler for the native DKG Source Worker",
   "license": "Apache-2.0",
