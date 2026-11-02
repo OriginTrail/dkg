@@ -106,24 +106,8 @@
   padding: 0 4px; height: 36px; min-height: 36px; gap: 0;
   flex-wrap: nowrap;
 }
-.v10-layer-switch-btn {
-  height: 100%; padding: 0 14px; display: flex; align-items: center; gap: 6px;
-  font-size: 12px; font-weight: 500; color: var(--text-tertiary);
-  border: none; background: none; cursor: pointer;
-  border-bottom: 2px solid transparent; transition: all 0.15s; white-space: nowrap;
-  font-family: var(--font-sans);
-}
 .v10-layer-switch-label { display: inline; }
 .v10-layer-switch-label-compact { display: none; }
-.v10-layer-switch-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
-.v10-layer-switch-btn.active { color: var(--text-primary); }
-.v10-layer-switch-btn.active[data-layer="overview"] { border-bottom-color: var(--text-secondary); }
-/* Navigation tabs are not layers: neutral underline. */
-.v10-layer-switch-btn.active[data-layer="graph-overview"] { border-bottom-color: var(--text-secondary); }
-.v10-layer-switch-btn.active[data-layer="query"] { border-bottom-color: var(--text-secondary); }
-.v10-layer-switch-btn.active[data-layer="wm"] { border-bottom-color: var(--layer-working); }
-.v10-layer-switch-btn.active[data-layer="swm"] { border-bottom-color: var(--layer-shared); }
-.v10-layer-switch-btn.active[data-layer="vm"] { border-bottom-color: var(--layer-verified); }
 .v10-layer-switch-icon { font-size: 11px; }
 .v10-layer-switch-separator {
   flex: 0 0 auto;
@@ -174,13 +158,6 @@
 .v10-layer-more-item.active {
   color: var(--text-primary);
   background: var(--bg-hover);
-}
-
-.v10-layer-action-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
 }
 .v10-layer-action-icon {
   flex: 0 0 auto;
@@ -273,26 +250,6 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 6px;
-}
-.v10-empty-state-action {
-  height: 30px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 650;
-  cursor: pointer;
-}
-.v10-empty-state-action.primary {
-  border-color: color-mix(in srgb, var(--v10-empty-accent) 55%, var(--border-default));
-  background: color-mix(in srgb, var(--v10-empty-accent) 18%, var(--bg-elevated));
-  color: var(--text-primary);
-}
-.v10-empty-state-action:hover {
-  border-color: var(--border-strong);
-  background: var(--bg-hover);
 }
 .v10-stat-strip {
   --v10-stat-accent: var(--border-strong);

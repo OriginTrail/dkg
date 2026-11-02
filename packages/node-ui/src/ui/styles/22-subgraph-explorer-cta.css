@@ -21,21 +21,8 @@
   color: var(--text-secondary);
   max-width: 760px;
 }
-
-/* ── Subgraph Explorer Root chip (S3) ── */
-/* Quieter than named chips — it's a fallback bucket. The ⊘ glyph
-   signals "no subgraph". Sits at the end of the chip row, after
-   any named chips. */
-.v10-subgraph-chip.v10-subgraph-chip-root {
-  color: var(--text-tertiary);
-}
 .v10-subgraph-chip.v10-subgraph-chip-root .v10-subgraph-chip-icon {
   color: var(--text-tertiary);
-}
-.v10-subgraph-chip.v10-subgraph-chip-root.active {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-  background: rgba(255,255,255,0.05);
 }
 
 /* ── Cross-layer count strip + active-layer pill (S3) ── */
@@ -208,29 +195,8 @@
   color: var(--text-primary);
   letter-spacing: 0.01em;
 }
-.v10-ka-verify-btn {
-  display: block; width: 100%;
-  padding: 8px 12px;
-  border: none; border-radius: 6px;
-  font-size: 12px; font-weight: 700;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  font-family: var(--font-sans);
-  transition: filter 0.15s, background 0.15s;
-}
-.v10-ka-verify-btn.promote {
-  /* Share to SWM: the SWM layer tint, as on every share action. */
-  background: var(--layer-shared-bg);
-  color: var(--layer-shared-text);
-  box-shadow: inset 0 0 0 1px var(--layer-shared-border);
-}
-.v10-ka-verify-btn.publish {
-  /* Commits to VM: the purple fill. */
-  background: var(--accent-vm);
-  color: var(--text-on-vm);
-}
-.v10-ka-verify-btn:hover:not(:disabled) { filter: brightness(1.12); }
-.v10-ka-verify-btn:disabled { opacity: 0.45; cursor: default; }
+.v10-ka-verify-btn { width: 100%; }
+.v10-ka-verify-btn:disabled { opacity: 0.45; }
 .v10-ka-verify-hint {
   margin-top: 8px;
   font-size: 10px; color: var(--text-tertiary); line-height: 1.5;

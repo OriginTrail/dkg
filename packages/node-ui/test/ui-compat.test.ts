@@ -97,7 +97,7 @@ describe('V10 CSS layout selectors', () => {
   });
 
   it('includes .v10-agent-send-btn selector', () => {
-    expect(css).toMatch(/\.v10-agent-send-btn\s*\{/);
+    expect(css).toMatch(/\.v10-agent-send-btn[\s,{:]/);
   });
 
   it('includes .chat-bubble selector (legacy)', () => {
@@ -108,12 +108,12 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.v10-header-notif/);
   });
 
-  it('includes .dkg-btn selector', () => {
-    expect(css).toMatch(/\.dkg-btn\s*\{/);
+  it('includes the design-system .ds-btn selector', () => {
+    expect(css).toMatch(/\.ds-btn[\s,{]/);
   });
 
   it('includes .v10-modal-btn selector', () => {
-    expect(css).toMatch(/\.v10-modal-btn\s*\{/);
+    expect(css).toMatch(/\.v10-modal-btn[\s,{:]/);
   });
 });
 

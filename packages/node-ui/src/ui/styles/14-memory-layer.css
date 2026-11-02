@@ -11,35 +11,7 @@
   margin-left: auto;
   flex-shrink: 0;
 }
-.v10-mlv-toggle-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  color: var(--text-tertiary);
-  background: var(--bg-surface);
-  transition: all 0.15s;
-  border-right: 1px solid var(--border-default);
-}
-.v10-mlv-toggle-btn:last-child { border-right: none; }
-.v10-mlv-toggle-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
-.v10-mlv-toggle-btn.active {
-  color: var(--text-primary);
-  background: var(--bg-active);
-}
-
-/* ── Clear / Reset button ── */
-.v10-mlv-clear-btn {
-  padding: 8px 12px;
-  border-radius: 6px;
-  background: none;
-  border: 1px solid var(--border-default);
-  font-size: 11px;
-  color: var(--text-tertiary);
-  transition: all 0.15s;
-}
-.v10-mlv-clear-btn:hover { border-color: var(--border-strong); color: var(--text-secondary); }
+.v10-mlv-toggle-btn { width: 32px; }
 
 /* ── Result count badge ── */
 .v10-mlv-result-count {

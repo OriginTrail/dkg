@@ -96,24 +96,7 @@
 .v10-po-badge[data-cg-type="unknown"] {
   color: var(--text-secondary);
 }
-.v10-po-identity-primer {
-  flex: 0 0 auto;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  min-height: 28px;
-  padding: 0 12px;
-}
-.v10-po-identity-primer:hover {
-  border-color: color-mix(in srgb, var(--text-tertiary) 70%, transparent);
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
+.v10-po-identity-primer { flex: 0 0 auto; }
 .v10-po-stat-strip { margin-bottom: 12px; }
 /* ui-lead item 3 — section title above the At-a-glance grid so it
    matches the structure of the other peer regions (Knowledge
@@ -194,19 +177,7 @@
 .v10-po-join-name { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
 .v10-po-join-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-po-join-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.v10-po-join-btn {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-.v10-po-join-btn.approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
-.v10-po-join-btn.approve:hover { background: rgba(34, 197, 94, 0.2); }
-.v10-po-join-btn.reject { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); padding: 4px 8px; }
-.v10-po-join-btn.reject:hover { background: rgba(239, 68, 68, 0.2); }
-.v10-po-join-btn:disabled { opacity: 0.5; cursor: default; }
+.v10-po-join-btn:disabled { opacity: 0.5; }
 .v10-po-pipeline {
   display: flex;
   flex-direction: column;
@@ -379,11 +350,6 @@
   .v10-layer-switch-label-full { display: none; }
   .v10-layer-switch-label-compact { display: inline; }
   .v10-layer-action-label { display: none; }
-  .v10-layer-action-btn {
-    min-width: 30px;
-    padding-left: 9px;
-    padding-right: 9px;
-  }
 }
 
 @media (max-width: 1320px) {
@@ -392,29 +358,17 @@
 }
 
 @media (max-width: 1180px) {
-  .v10-layer-switch-btn { padding: 0 9px; gap: 5px; font-size: 11px; }
   .v10-layer-switch-separator { margin: 0 4px; }
 }
 
 @media (max-width: 920px) {
   .v10-layer-switcher { padding: 0 2px; }
-  .v10-layer-switch-btn {
-    width: 30px;
-    min-width: 30px;
-    padding: 0;
-    justify-content: center;
-    gap: 0;
-  }
+  .v10-layer-switch-btn { width: 30px; }
   .v10-layer-switch-label { display: none; }
   .v10-layer-switch-separator { margin: 0 2px; }
   .v10-layer-switcher-spacer { flex: 0 0 2px; min-width: 2px; }
   .v10-layer-switcher-actions { gap: 2px; padding-right: 2px; }
-  .v10-layer-action-btn {
-    min-width: 28px;
-    width: 28px;
-    padding-left: 0;
-    padding-right: 0;
-  }
+  .v10-layer-action-btn { width: 28px; }
 }
 
 @media (max-width: 900px) {
@@ -426,9 +380,7 @@
   .v10-po-identity-pairs {
     flex-wrap: wrap;
   }
-  .v10-po-identity-primer {
-    align-self: flex-start;
-  }
+  .v10-po-identity-primer { align-self: flex-start; }
   .v10-po-pipeline-steps {
     grid-template-columns: 1fr;
   }

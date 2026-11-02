@@ -84,11 +84,6 @@
 .v10-pca-get-added-body .v10-pca-detail-form .v10-form-input {
   max-width: none;
 }
-.v10-pca-get-added-body .v10-pca-detail-form .v10-pca-card-btn.primary {
-  min-height: 36px;
-  padding-top: 5px;
-  padding-bottom: 5px;
-}
 .v10-pca-discovered-check {
   display: flex;
   align-items: center;

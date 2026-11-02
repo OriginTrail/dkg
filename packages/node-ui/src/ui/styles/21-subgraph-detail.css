@@ -94,26 +94,6 @@
   min-width: 62px;
 }
 .v10-subgraph-filter-chips { display: flex; gap: 5px; flex-wrap: wrap; }
-.v10-subgraph-filter-chip {
-  padding: 2px 9px;
-  background: none;
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  font-size: 10px; font-weight: 600; letter-spacing: 0.02em;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-.v10-subgraph-filter-chip:hover {
-  border-color: var(--border-strong); color: var(--text-primary);
-}
-.v10-subgraph-filter-chip.active {
-  background: color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 22%, transparent);
-  border-color: var(--sg-color, var(--text-tertiary));
-  color: var(--text-primary);
-}
 .v10-subgraph-filter-reset {
   align-self: flex-start;
   padding: 2px 8px;
@@ -191,9 +171,6 @@
   font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
-
-/* ── SubGraphBar chip badge (ambient "2 proposed" / "2 p0" / "N open") ── */
-.v10-subgraph-chip.has-badge { padding-right: 6px; }
 .v10-subgraph-chip-badge { margin-left: 6px; }
 .v10-subgraph-chip-badge-dot { width: 5px; }
 .v10-subgraph-chip-badge.tone-danger .v10-subgraph-chip-badge-dot { animation: v10-pulse-red 2s infinite; }

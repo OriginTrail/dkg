@@ -164,21 +164,28 @@ describe('Context Graph contrast tokens', () => {
   });
 
   it('uses light-theme semantic foregrounds with AA contrast for status and action text', () => {
-    const selectorsOnSurface = [
-      '.v10-mlv-save-btn',
-      '.v10-btn-promote',
-      '.v10-layer-expand-footer-btn.promote',
-      '.v10-layer-expand-footer-btn.publish',
-      '.v10-layer-action-btn.primary',
-      '.v10-layer-action-btn.promote',
-      '.v10-decision-btn.approve',
-      '.v10-decision-btn.revise',
-      '.v10-po-join-btn.approve',
-      '.v10-po-join-btn.reject',
-    ];
-
-    for (const selector of selectorsOnSurface) {
-      expect(contrast(foregroundFor(selector), lightVars['--bg-surface']), selector).toBeGreaterThanOrEqual(4.5);
+    // Buttons (components/ds/Button + legacy aliases in 27-ds-components.css):
+    // every variant's label clears AA on its own fill, in dark (preferred) and light.
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      const c = (fg: string, bg: string) => contrast(resolveColor(vars[fg], vars), resolveColor(vars[bg], vars));
+      expect(c('--text-primary', '--bg-surface'), `${theme} secondary`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-on-primary', '--accent-primary'), `${theme} primary`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-secondary', '--bg-surface'), `${theme} ghost`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-danger', '--bg-surface'), `${theme} danger`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--layer-shared-text', '--layer-shared-bg'), `${theme} share to SWM`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-on-vm', '--accent-vm'), `${theme} publish to VM`).toBeGreaterThanOrEqual(4.5);
+      expect(c('--text-on-vm', '--accent-vm-hover'), `${theme} publish to VM hover`).toBeGreaterThanOrEqual(4.5);
+    }
+    // The legacy classes must keep pointing at those variants.
+    const ds = css.slice(css.indexOf('/* ══ Button'));
+    for (const [variant, legacy] of [
+      ['ds-primary', '.v10-modal-btn.primary'], ['ds-primary', '.v10-po-join-btn.approve'],
+      ['ds-danger', '.v10-po-join-btn.reject'], ['ds-swm', '.v10-btn-promote-all'],
+      ['ds-swm', '.v10-ka-verify-btn.promote'], ['ds-vm', '.v10-btn-publish'],
+      ['ds-vm', '.v10-decision-btn.primary-cta.publish-vm'],
+    ] as const) {
+      const block = ds.slice(ds.indexOf(`.ds-btn.${variant},`));
+      expect(block.slice(0, block.indexOf('{')), `${legacy} → ${variant}`).toContain(legacy);
     }
 
     // Badges (components/ds/Badge): each tone's text colour must clear AA on
@@ -191,11 +198,5 @@ describe('Context Graph contrast tokens', () => {
     expect(contrast(resolveColor(lightVars['--text-warning']), lightVars['--bg-surface']), 'count attention').toBeGreaterThanOrEqual(4.5);
     expect(contrast(resolveColor(lightVars['--bg-root']), resolveColor(lightVars['--text-warning'])), 'bell count').toBeGreaterThanOrEqual(4.5);
 
-    // Share-to-SWM uses the SWM layer tint; publish-to-VM is the purple fill.
-    expect(contrast(foregroundFor('.v10-btn-promote-all'), lightVars['--layer-shared-bg'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-ka-verify-btn.promote'), lightVars['--layer-shared-bg'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-btn-publish'), lightVars['--accent-vm'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), lightVars['--accent-vm'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(foregroundFor('.v10-decision-btn.primary-cta.publish-vm'), lightVars['--accent-vm-hover'])).toBeGreaterThanOrEqual(4.5);
   });
 });

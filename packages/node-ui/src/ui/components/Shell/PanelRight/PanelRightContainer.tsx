@@ -882,24 +882,29 @@ export function PanelRight() {
   return (
     <div className="v10-panel-right">
       <div className="v10-agent-mode-tabs">
+        <div className="ds-seg" role="group" aria-label="Panel view">
         <button
+          aria-pressed={mode === 'agents'}
           className={`v10-agent-mode-tab ${mode === 'agents' ? 'active' : ''}`}
           onClick={() => setMode('agents')}
         >
           Agents
         </button>
         <button
+          aria-pressed={mode === 'network'}
           className={`v10-agent-mode-tab ${mode === 'network' ? 'active' : ''}`}
           onClick={() => setMode('network')}
         >
           Network
         </button>
         <button
+          aria-pressed={mode === 'sessions'}
           className={`v10-agent-mode-tab ${mode === 'sessions' ? 'active' : ''}`}
           onClick={() => setMode('sessions')}
         >
           Sessions
         </button>
+        </div>
       </div>
 
       {mode === 'agents' && (

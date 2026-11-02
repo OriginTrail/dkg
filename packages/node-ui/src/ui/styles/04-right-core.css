@@ -17,16 +17,6 @@
   border-bottom: 1px solid var(--border-subtle);
   gap: 2px;
 }
-.v10-agent-mode-tab {
-  padding: 4px 14px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-  transition: all 0.15s;
-}
-.v10-agent-mode-tab:hover { color: var(--text-secondary); background: var(--bg-hover); }
-.v10-agent-mode-tab.active { color: var(--text-primary); background: var(--bg-active); }
 .v10-agent-content { flex: 1; overflow-y: auto; }
 
 /* Agent onboarding (stage 0) */
@@ -134,26 +124,8 @@
 .v10-agents-stat-dot.known { background: var(--text-tertiary); }
 .v10-agents-stat-dot.offline { background: var(--accent-red); }
 .v10-agents-stat-dot.degraded { background: #f59e0b; }
-.v10-agents-refresh {
-  margin-left: auto;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: 11px;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.v10-agents-refresh:hover { background: var(--bg-elevated); color: var(--text-primary); }
-.v10-agents-refresh.disconnect {
-  margin-left: 0;
-  color: var(--text-danger);
-  border-color: color-mix(in srgb, #ef4444 35%, var(--border-subtle));
-}
-.v10-agents-refresh.disconnect:hover {
-  color: var(--text-danger-hover);
-  background: color-mix(in srgb, #ef4444 10%, var(--bg-elevated));
-}
+.v10-agents-refresh { margin-left: auto; }
+.v10-agents-refresh.disconnect { margin-left: 0; }
 .v10-agent-subtabs {
   display: flex;
   align-items: center;
@@ -289,27 +261,6 @@
 }
 .v10-peer-chip-label {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* "+N more" / "Show less" toggle button. Shares the chip-pill geometry
-   so it sits in the same row; one-tier-stronger border + transparent
-   background distinguish it as interactive. No scoped :focus-visible —
-   the global focus ring (styles.css:167) is the convention. */
-.v10-peer-chip-more {
-  padding: 2px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border-default);
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.4;
-  cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, color 0.15s;
-}
-.v10-peer-chip-more:hover {
-  background: var(--bg-hover);
-  border-color: var(--border-strong);
-  color: var(--text-primary);
 }
 
 .v10-local-agent-list {

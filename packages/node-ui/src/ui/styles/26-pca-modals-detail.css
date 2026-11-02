@@ -113,9 +113,7 @@
 .v10-pca-detail-result { font-size: 11px; color: var(--text-success); margin: 8px 0 0; line-height: 1.5; }
 .v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: 8px; }
 .v10-pca-detail-agentlist + .v10-pca-card-btn,
-.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn {
-  margin-top: 10px;
-}
+.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn { margin-top: 10px; }
 .v10-pca-agent-row { display: flex; }
 .v10-pca-agent-row .v10-wallet-row { flex: 1; }
 .v10-pca-agent-confirm {

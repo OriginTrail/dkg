@@ -242,24 +242,28 @@ export function PanelLeft() {
 
   return (
     <div className="v10-panel-left">
-      <div style={{ display: 'flex', gap: 4, padding: '8px 8px 4px' }}>
+      <div className="v10-tree-create-actions">
         <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
         <button className="v10-new-project-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
       </div>
 
       <div className="v10-tree-header">
+        <div className="ds-seg" role="group" aria-label="Sidebar view">
         <button
+          aria-pressed={treeMode === 'explorer'}
           className={`v10-tree-mode-btn ${treeMode === 'explorer' ? 'active' : ''}`}
           onClick={() => setTreeMode('explorer')}
         >
           Context Graphs
         </button>
         <button
+          aria-pressed={treeMode === 'oracle'}
           className={`v10-tree-mode-btn ${treeMode === 'oracle' ? 'active' : ''}`}
           onClick={() => setTreeMode('oracle')}
         >
           Context Oracle
         </button>
+        </div>
       </div>
 
       {inventoryError && (

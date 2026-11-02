@@ -52,18 +52,7 @@
   justify-content: center;
   gap: 6px;
 }
-.v10-wallet-connect-btn {
-  align-self: flex-start;
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 12px;
-  border-radius: 7px;
-  cursor: pointer;
-}
-.v10-wallet-connect-btn:hover { background: var(--bg-hover); }
+.v10-wallet-connect-btn { align-self: flex-start; }
 .v10-wallet-connect-btn:focus-visible,
 .v10-wallet-provider:focus-visible,
 .v10-wallet-pill-btn:focus-visible,
@@ -151,16 +140,6 @@
   font-size: 11px;
   color: var(--text-tertiary);
 }
-.v10-wallet-pill-btn {
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.v10-wallet-pill-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-wallet-pill-sub {
   display: flex;
   align-items: center;

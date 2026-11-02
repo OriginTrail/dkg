@@ -9,22 +9,7 @@
    ══════════════════════════════════════════ */
 
 /* ----- Copy button (shared) ----- */
-.v10-pca-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.v10-pca-copy-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
-.v10-pca-copy-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.v10-pca-copy-btn { flex-shrink: 0; }
 
 /* Visually-hidden live announcement (mirrors the markdown copy announce). */
 .v10-pca-copy-announce {

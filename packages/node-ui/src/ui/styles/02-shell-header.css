@@ -66,23 +66,7 @@
   background: var(--amber-dim, rgba(251, 191, 36, 0.16));
   border-bottom: 1px solid rgba(251, 191, 36, 0.4);
 }
-.v10-stale-banner .v10-retry-btn {
-  margin-left: auto;
-}
-
-/* ── Retry control for failed view fetches (GH #905) ── */
-.v10-retry-btn {
-  font-size: 12px;
-  padding: 4px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text-primary, #e5e7eb);
-  background: var(--bg-elevated, rgba(255, 255, 255, 0.06));
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
-}
-.v10-retry-btn:hover {
-  background: var(--bg-hover, rgba(255, 255, 255, 0.12));
-}
+.v10-stale-banner .v10-retry-btn { margin-left: auto; }
 
 /* ── Header ── */
 .v10-header {
@@ -188,19 +172,7 @@
 .v10-header-status-dot.offline { background: var(--accent-amber); }
 .v10-header-meta-sep { color: var(--text-ghost); }
 .v10-header-actions { display: flex; align-items: center; gap: 4px; }
-.v10-header-icon-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 4px;
-  color: var(--text-tertiary);
-  transition: all 0.15s;
-  position: relative;
-}
-.v10-header-icon-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
-.v10-header-icon-btn.active-toggle { color: var(--text-secondary); }
+.v10-header-icon-btn { width: 32px; position: relative; }
 .v10-header-notif-wrap { position: relative; }
 .v10-header-notif-badge { position: absolute; top: 2px; right: 2px; }
 /* Unread count sits on the button's corner, clear of the bell glyph, as a
@@ -213,7 +185,6 @@
   color: var(--bg-root);
   box-shadow: 0 0 0 2px var(--bg-panel);
 }
-.v10-header-icon-btn:has(.v10-header-notif-badge) { color: var(--text-primary); }
 /* ── Notifications pane (redesign) ─────────────────────────────────────────
    Bell dropdown surface + the two sections (pinned "Needs your action" +
    "Activity") + the three row kinds. Reuses design tokens for dark/light,
@@ -252,17 +223,6 @@
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
-.v10-notif-pane-markread {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-}
-.v10-notif-pane-markread:hover { color: var(--text-primary); }
 /* Body scrolls under the sticky titlebar; the pinned action section sits
    first in the same scroll container (never a nested scrollbar). */
 .v10-notif-pane-body { overflow-y: auto; padding: 6px 0; }
@@ -356,7 +316,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
 .v10-notif-time { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; flex-shrink: 0; }
 /* Unread accent rail — colour-not-alone is covered by the row's text + glyph;
    this is a supplementary scan cue. */
-.v10-notif-unread { box-shadow: inset 2px 0 0 var(--accent-red); }
+.v10-notif-unread { box-shadow: inset 2px 0 0 var(--text-warning); } /* unread = needs a look: amber, never red */
 
 /* Self-authored activity — the operator's OWN agent. The row text leads with
    "You …" for the explicit signal; this faint tint is a supplementary scan cue
@@ -381,22 +341,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
 
 /* Join request actions */
 .v10-notif-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.v10-notif-btn {
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 4px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.v10-notif-btn:disabled { opacity: 0.5; cursor: default; }
-.v10-notif-btn-approve { background: rgba(34, 197, 94, 0.12); color: var(--text-success); border: 1px solid rgba(34, 197, 94, 0.32); }
-.v10-notif-btn-approve:hover:not(:disabled) { background: rgba(34, 197, 94, 0.2); }
-.v10-notif-btn-ghost { background: none; color: var(--text-secondary); border: 1px solid var(--border-default); }
-.v10-notif-btn-ghost:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-.v10-notif-btn-deny { background: rgba(239, 68, 68, 0.12); color: var(--text-danger); border: 1px solid rgba(239, 68, 68, 0.32); }
-.v10-notif-btn-deny:hover:not(:disabled) { background: rgba(239, 68, 68, 0.2); }
+.v10-notif-btn:disabled { opacity: 0.5; }
 .v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: 6px; }
 .v10-notif-deny-confirm-label { font-size: 11px; color: var(--text-danger); font-weight: 600; }
 

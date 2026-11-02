@@ -151,28 +151,7 @@
   font-weight: 700;
   color: var(--text-primary);
 }
-.v10-pca-card-btn {
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 7px;
-  cursor: pointer;
-}
-.v10-pca-card-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-.v10-pca-card-btn.compact {
-  padding: 4px 10px;
-  min-height: 32px;
-}
-.v10-pca-card-btn.primary {
-  background: var(--accent-blue);
-  border-color: var(--accent-blue);
-  color: var(--text-on-accent);
-}
-.v10-pca-card-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.v10-pca-card-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
+.v10-pca-card-btn:disabled { opacity: 0.5; }
 .v10-pca-inline-btn {
   text-decoration: underline;
   text-decoration-color: var(--link-underline);

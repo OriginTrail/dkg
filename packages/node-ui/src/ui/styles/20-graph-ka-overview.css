@@ -181,19 +181,7 @@
   font-size: 11px;
   color: var(--text-secondary);
 }
-.v10-graph-expanded-close {
-  width: 30px;
-  height: 28px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.v10-graph-expanded-close:hover {
-  border-color: var(--graph-accent);
-  color: var(--text-primary);
-}
+.v10-graph-expanded-close { width: 30px; }
 .v10-graph-expanded-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -445,20 +433,6 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: flex; gap: 4px; flex-wrap: wrap;
   align-items: center;
 }
-.v10-minibar-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 7px;
-  background: none;
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  font-size: 10px; font-weight: 600;
-  color: var(--text-secondary);
-  font-family: var(--font-sans);
-  cursor: default;
-  transition: border-color 0.15s, color 0.15s, opacity 0.15s;
-}
-.v10-minibar-chip.interactive { cursor: pointer; }
-.v10-minibar-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .v10-minibar-chip.dim { opacity: 0.4; }
 .v10-minibar-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 50%;

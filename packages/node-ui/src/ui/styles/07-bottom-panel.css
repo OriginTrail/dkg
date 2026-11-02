@@ -32,37 +32,7 @@
   gap: 0;
   border-bottom: 1px solid var(--border-subtle);
 }
-.v10-bottom-tab {
-  padding: 0 12px;
-  height: 100%;
-  font-size: 12px;
-  font-weight: 500;
-  font-family: var(--font-sans);
-  color: var(--text-tertiary);
-  border: none;
-  outline: none;
-  background: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-}
-.v10-bottom-tab:hover { color: var(--text-secondary); }
-.v10-bottom-tab:focus { outline: none; }
-.v10-bottom-tab.active { color: var(--text-primary); border-bottom-color: var(--text-primary); }
-.v10-bottom-toggle {
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-  padding: 4px 6px;
-  border-radius: 4px;
-  border: none;
-  outline: none;
-  background: none;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.v10-bottom-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
-.v10-bottom-toggle:focus { outline: none; }
+.v10-bottom-toggle { flex-shrink: 0; }
 .v10-bottom-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 
 /* Log viewer */

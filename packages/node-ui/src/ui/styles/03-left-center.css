@@ -82,43 +82,9 @@
 /* Hover-revealed "hide" affordance on each project row. Keeps the tree
    quiet by default and lets the user dismiss any leftover project from
    their sidebar without a daemon-side delete. */
-.v10-tree-hide-btn {
-  flex-shrink: 0;
-  margin-left: 6px;
-  width: 18px; height: 18px;
-  padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: none; background: none;
-  color: var(--text-ghost);
-  font-size: 14px; line-height: 1;
-  cursor: pointer; border-radius: 4px;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-}
+.v10-tree-hide-btn { flex-shrink: 0; margin-left: 6px; width: 18px; opacity: 0; }
 .v10-tree-section-header:hover .v10-tree-hide-btn { opacity: 1; }
-.v10-tree-hide-btn:hover {
-  background: rgba(239, 68, 68, 0.12);
-  color: var(--accent-red, #ef4444);
-}
-.v10-tree-catalogue-btn {
-  flex-shrink: 0;
-  border: 1px solid var(--border-primary);
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-  padding: 2px 5px;
-  font-size: 10px;
-  line-height: 1.3;
-  cursor: pointer;
-}
-.v10-tree-catalogue-btn:hover {
-  border-color: var(--text-tertiary);
-  color: var(--text-primary);
-}
-.v10-tree-catalogue-btn.primary {
-  border-color: color-mix(in srgb, var(--accent-primary) 55%, transparent);
-  color: var(--accent-primary);
-}
+.v10-tree-catalogue-btn { flex-shrink: 0; }
 
 /* "My Projects" / "Participating Projects" group dividers. Token
    moved from --text-ghost → --text-tertiary (PR8) — ghost was never
@@ -134,24 +100,8 @@
 }
 
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
-.v10-tree-move-btn {
-  flex-shrink: 0;
-  margin-left: 4px;
-  width: 18px; height: 18px;
-  padding: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  border: none; background: none;
-  color: var(--text-ghost);
-  font-size: 12px; line-height: 1;
-  cursor: pointer; border-radius: 4px;
-  opacity: 0;
-  transition: opacity 0.15s, background 0.15s, color 0.15s;
-}
+.v10-tree-move-btn { flex-shrink: 0; margin-left: 4px; width: 18px; opacity: 0; }
 .v10-tree-section-header:hover .v10-tree-move-btn { opacity: 1; }
-.v10-tree-move-btn:hover {
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--accent-blue, #3b82f6);
-}
 
 .v10-tree-show-hidden {
   display: block;
@@ -197,19 +147,6 @@
   text-overflow: ellipsis;
   font-size: 12px;
 }
-/* Tree mode tabs */
-.v10-tree-mode-btn {
-  padding: 0 10px;
-  height: 100%;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-  transition: all 0.15s;
-}
-.v10-tree-mode-btn:hover { color: var(--text-secondary); }
-.v10-tree-mode-btn.active { color: var(--text-primary); }
 
 /* Project dot */
 .v10-tree-project-dot {
@@ -242,21 +179,7 @@
 }
 
 /* New project button */
-.v10-new-project-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: calc(100% - 16px);
-  margin: 6px 8px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 1px dashed var(--border-strong);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.v10-new-project-btn:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+.v10-new-project-btn { width: calc(100% - 16px); margin: 6px 8px; }
 
 /* Journey empty card */
 .v10-journey-empty-card {

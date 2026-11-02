@@ -49,23 +49,7 @@
   color: var(--text-tertiary);
   line-height: 1.55;
 }
-.v10-genui-error-cta-btn {
-  align-self: flex-start;
-  padding: 6px 14px;
-  border-radius: 6px;
-  background: rgba(245,158,11,0.16);
-  color: #f59e0b;
-  border: 1px solid rgba(245,158,11,0.4);
-  font-size: 11px;
-  font-weight: 700;
-  cursor: pointer;
-  font-family: var(--font-sans);
-  transition: background 0.15s, border-color 0.15s;
-}
-.v10-genui-error-cta-btn:hover {
-  background: rgba(245,158,11,0.24);
-  border-color: rgba(245,158,11,0.6);
-}
+.v10-genui-error-cta-btn { align-self: flex-start; }
 .v10-me-error { padding: 12px 16px; font-size: 12px; color: var(--accent-red); background: rgba(239,68,68,0.06); }
 
 /* ── Graph View (full graph tab) ── */

@@ -3,11 +3,6 @@
 .v10-file-preview-modal .v10-modal-header {
   display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
 }
-.v10-modal-close {
-  background: none; border: none; color: var(--text-tertiary); font-size: 22px; cursor: pointer;
-  padding: 0 4px; line-height: 1; border-radius: 4px;
-}
-.v10-modal-close:hover { color: var(--text-primary); background: var(--bg-hover); }
 .v10-file-preview-loading { padding: 32px 24px; text-align: center; font-size: 12px; color: var(--text-tertiary); }
 .v10-file-preview-error {
   margin: 16px 24px; padding: 14px; border-radius: 8px;
@@ -181,7 +176,6 @@ body.light .v10-modal-box {
   border-color: var(--border-default);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
 }
-body.light .v10-modal-btn.primary { background: #1a1a1a; color: #ffffff; border-color: #1a1a1a; }
 
 /* ═══════════════════════════════════════════
    IMPORT / INGESTION UI

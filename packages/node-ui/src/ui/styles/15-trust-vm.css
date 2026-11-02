@@ -105,36 +105,7 @@
   color: var(--text-tertiary, #94a3b8);
   padding-right: 4px;
 }
-/* PR #793 round 2 — the `.v10-subgraph-bar-hint` rule (sweep 3
-   Bug K's locked literal `+ Root, subgraphs`) was removed
-   alongside the corresponding render in SubGraphBar.tsx. Users
-   asked what the literal meant on manual test; the inline hint
-   was demoted entirely. The long-form tooltip on the All chip's
-   count badge still carries the cross-membership disclosure. */
-.v10-subgraph-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
-  background: var(--surface-2, rgba(255,255,255,0.04));
-  color: var(--text-secondary, #cbd5e1);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
-}
-.v10-subgraph-chip:hover {
-  background: var(--surface-3, rgba(255,255,255,0.07));
-  transform: translateY(-1px);
-}
-.v10-subgraph-chip.active {
-  border-color: var(--sg-color, var(--text-tertiary));
-  background: color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 18%, transparent);
-  color: var(--text-primary, #f8fafc);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 40%, transparent) inset;
-}
+.v10-subgraph-chip:hover { transform: translateY(-1px); }
 .v10-subgraph-chip-icon { font-size: 13px; line-height: 1; }
 .v10-subgraph-chip-label { font-weight: 600; }
 .v10-subgraph-chip-count {
