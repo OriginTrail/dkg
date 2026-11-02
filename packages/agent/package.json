@@ -143,6 +143,7 @@
     "./dist/rfc64/inventory-v1/swm-author-inventory-contracts.js": null,
     "./dist/rfc64/inventory-persistence-failure.js": null,
     "./dist/rfc64/inventory-v1/open-error.js": null,
+    "./dist/rfc64/inventory-v1/sqlite-header.js": null,
     "./dist/rfc64/finalized-policy-agent-precommit-v1.js": null,
     "./dist/rfc64/finalized-policy-verifier-v1.js": null,
     "./dist/rfc64/finalized-vm-agent-precommit-v1.js": null,

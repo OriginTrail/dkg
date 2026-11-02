@@ -97,3 +97,18 @@ export function compareRfc64PublicCatalogSuccessorAssetsByKaIdV1(
 ): -1 | 0 | 1 {
   return compareAuthorCatalogKaIdsV1(left.seal.reservedKaId, right.seal.reservedKaId);
 }
+
+export function sameRfc64SuccessorAssetV1(
+  left: Rfc64PublicCatalogSuccessorAssetInputV1,
+  right: Rfc64PublicCatalogSuccessorAssetInputV1,
+): boolean {
+  return left.assertionCoordinate === right.assertionCoordinate
+    && canonicalizeCanonicalGraphScopedAuthorSealV1(left.seal)
+      === canonicalizeCanonicalGraphScopedAuthorSealV1(right.seal)
+    && equalBytes(left.projectionBytes, right.projectionBytes);
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength
+    && left.every((byte, index) => byte === right[index]);
+}

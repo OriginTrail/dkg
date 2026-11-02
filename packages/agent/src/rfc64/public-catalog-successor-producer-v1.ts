@@ -10,28 +10,20 @@
  */
 
 import {
-  KA_TRANSFER_CHUNK_SIZE_BYTES_V1,
-  KA_TRANSFER_CHUNK_SIZE_V1,
-  KA_TRANSFER_CODEC_V1,
-  KA_TRANSFER_PROJECTION_V1,
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   MIN_KA_BUNDLE_BYTES_V1,
+  assertAuthorCatalogBucketV1, computeAuthorCatalogScopeDigestV1,
+  type AuthorCatalogScopeV1,
   ZERO_DIGEST32_V1,
   assertAuthorCatalogHeadScopeBindingV1,
   calculateOpaqueKaBundleByteLengthV1,
-  canonicalizeAuthorCatalogRowV1,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
-  computeCanonicalGraphScopedAuthorSealDigestV1,
-  computeKaChunkTreeRootV1,
-  encodeOpaqueKaBundleV1,
-  parseCanonicalAuthorCatalogRowV1,
   verifyAuthorCatalogDirectoryPathV1,
   type AssertionCoordinateV1,
   type AuthorCatalogRowV1,
   type ByteLengthV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CatalogSealDeploymentProfileV1,
-  type CountV1,
   type DecimalU64V1,
   type Digest32V1,
   type SignedAuthorCatalogIssuerDelegationEnvelopeV1,
@@ -49,6 +41,7 @@ import {
   Rfc64SuccessorRowVerificationV1,
   type Rfc64VerifiedCatalogRowsV1,
 } from '../internal/verified-catalog-rows.js';
+import { prepareCatalogAssetV1 } from '../internal/prepared-catalog-asset.js';
 import { createMainThreadTimeSlice } from '../main-thread-time-slice.js';
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import { throwIfRfc64AbortedV1 } from './abort-v1.js';
@@ -481,20 +474,20 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       async ({ prepared, row }): Promise<void> => {
         try {
           if (
-            previousBundleByKaId.get(row.kaId) === prepared.encoded.blobDigest
+            previousBundleByKaId.get(row.kaId) === prepared.row.transfer.blobDigest
             && this.#readKaBundleByDigest !== undefined
           ) {
-            const existing = await this.#readKaBundleByDigest(prepared.encoded.blobDigest);
+            const existing = await this.#readKaBundleByDigest(prepared.row.transfer.blobDigest);
             if (existing !== null && bytesEqualV1(existing, prepared.bundleBytes)) return;
           }
           const bundleReceipt = await this.#stageKaBundle(Object.freeze({
-            blobDigest: prepared.encoded.blobDigest,
-            bundleBytes: new Uint8Array(prepared.bundleBytes),
+            blobDigest: prepared.row.transfer.blobDigest,
+            bundleBytes: prepared.bundleBytes,
           }));
           assertExactDurableBundleReceipt(
             bundleReceipt,
-            prepared.encoded.blobDigest,
-            prepared.bundleBytes.byteLength,
+            prepared.row.transfer.blobDigest,
+            Number(prepared.row.transfer.byteLength),
           );
         } catch (cause) {
           fail(
@@ -531,8 +524,8 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
       }
       return Object.freeze({
         row: verified.row,
-        bundleDigest: verified.prepared.encoded.blobDigest,
-        bundleBytes: new Uint8Array(verified.prepared.bundleBytes),
+        bundleDigest: verified.prepared.row.transfer.blobDigest,
+        bundleBytes: verified.prepared.bundleBytes,
         sealBinding: verified.sealBinding,
         transfer: verified.transfer,
         projection: verified.projection,
@@ -560,7 +553,8 @@ function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
  * set and the scope and deployment every row binds to. Synchronous, so the
  * caller's objects are read once and never across a row boundary.
  */
-function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInputV1) {
+function snapshotExactSet(input: Pick<ProduceAndStagePublicOpenExactSetSuccessorInputV1, 'assets' | 'deployment'>
+  & ({ previousHead: SignedAuthorCatalogHeadEnvelopeV1 } | { scope: AuthorCatalogScopeV1 })) {
   let assets: readonly Readonly<Rfc64PublicCatalogSuccessorAssetInputV1>[];
   try {
     assets = snapshotAndSortRfc64PublicCatalogSuccessorAssetsV1(
@@ -600,7 +594,6 @@ function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInput
         assertionCoordinate: asset.assertionCoordinate,
         projectionBytes: new Uint8Array(asset.projectionBytes),
         seal: asset.seal,
-        sealBytes,
         bundleByteLength,
       }));
     } catch (cause) {
@@ -614,10 +607,9 @@ function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInput
   let binding: Rfc64PublicCatalogSuccessorRowBindingV1 | null = null;
   if (snapshots.length > 0) {
     try {
-      binding = snapshotRfc64PublicCatalogSuccessorRowBindingV1(
-        input.previousHead,
-        input.deployment,
-      );
+      binding = 'previousHead' in input
+        ? snapshotRfc64PublicCatalogSuccessorRowBindingV1(input.previousHead, input.deployment)
+        : Object.freeze({ scope: Object.freeze({ ...input.scope }), deployment: Object.freeze({ ...input.deployment }) });
     } catch (cause) {
       fail(
         'catalog-successor-producer-input',
@@ -627,6 +619,26 @@ function snapshotExactSet(input: ProduceAndStagePublicOpenExactSetSuccessorInput
     }
   }
   return Object.freeze({ snapshots: Object.freeze(snapshots), binding });
+}
+
+/** Validate the complete target without signing or staging any catalog object. */
+export async function validateRfc64CatalogTargetAssetsV1(
+  assets: readonly Rfc64PublicCatalogSuccessorAssetInputV1[], scope: AuthorCatalogScopeV1,
+  deployment: CatalogSealDeploymentProfileV1, signal?: AbortSignal, verifiedRows?: Rfc64VerifiedCatalogRowsV1,
+): Promise<void> {
+  const exact = snapshotExactSet({ assets, scope, deployment });
+  const rows = new Rfc64SuccessorRowVerificationV1(verifiedRows);
+  const slice = createMainThreadTimeSlice();
+  const targetRows: AuthorCatalogRowV1[] = [];
+  for (const asset of exact.snapshots) {
+    await slice();
+    throwIfRfc64AbortedV1(signal);
+    const prepared = prepareRowAndBundle(asset, exact.binding!);
+    rows.assertAssetBinds(prepared);
+    targetRows.push(prepared.row);
+  }
+  if (targetRows.length) assertAuthorCatalogBucketV1({ catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+    era: scope.era, bucketCount: scope.bucketCount, bucketId: '0' as DecimalU64V1, rows: targetRows });
 }
 
 async function prepareExactSet(
@@ -646,7 +658,6 @@ interface PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1 {
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly projectionBytes: Uint8Array;
   readonly seal: CanonicalGraphScopedAuthorSealV1;
-  readonly sealBytes: Uint8Array;
   readonly bundleByteLength: bigint;
 }
 
@@ -654,41 +665,12 @@ function prepareRowAndBundle(
   asset: PreparedRfc64PublicCatalogSuccessorAssetSnapshotV1,
   binding: Rfc64PublicCatalogSuccessorRowBindingV1,
 ) {
-  let encoded: ReturnType<typeof encodeOpaqueKaBundleV1>;
-  let row: AuthorCatalogRowV1;
   try {
-    encoded = encodeOpaqueKaBundleV1(asset.projectionBytes, asset.sealBytes);
-    const byteLength = BigInt(encoded.bundleBytes.byteLength);
-    if (byteLength !== asset.bundleByteLength) {
+    const prepared = prepareCatalogAssetV1(asset, binding);
+    if (BigInt(prepared.row.transfer.byteLength) !== asset.bundleByteLength) {
       throw new Error('encoded bundle length differs from its exact-set budget snapshot');
     }
-    const chunkCount = ((byteLength - 1n) / KA_TRANSFER_CHUNK_SIZE_BYTES_V1) + 1n;
-    row = parseCanonicalAuthorCatalogRowV1(canonicalizeAuthorCatalogRowV1({
-      kaId: asset.seal.reservedKaId,
-      assertionCoordinate: asset.assertionCoordinate,
-      assertionVersion: asset.seal.assertionVersion,
-      projectionId: KA_TRANSFER_PROJECTION_V1,
-      projectionDigest: encoded.projectionDigest,
-      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(asset.seal),
-      transfer: {
-        codec: KA_TRANSFER_CODEC_V1,
-        projectionId: KA_TRANSFER_PROJECTION_V1,
-        projectionDigest: encoded.projectionDigest,
-        byteLength: byteLength.toString() as ByteLengthV1,
-        chunkSize: KA_TRANSFER_CHUNK_SIZE_V1,
-        chunkCount: chunkCount.toString() as CountV1,
-        blobDigest: encoded.blobDigest,
-        chunkTreeRoot: computeKaChunkTreeRootV1(encoded.bundleBytes),
-      },
-    }));
-    return Object.freeze({
-      deployment: binding.deployment,
-      scope: binding.scope,
-      row: Object.freeze(row),
-      sealBytes: asset.sealBytes,
-      encoded,
-      bundleBytes: new Uint8Array(encoded.bundleBytes),
-    });
+    return prepared;
   } catch (cause) {
     fail(
       'catalog-successor-producer-input',

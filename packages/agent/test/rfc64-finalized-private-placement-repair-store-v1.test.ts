@@ -3,6 +3,7 @@ import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finali
 // SPDX-License-Identifier: Apache-2.0
 
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { setImmediate as nextTurn } from 'node:timers';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,6 +74,85 @@ async function openStore(dataDir: string) {
 }
 
 describe('RFC-64 finalized-private placement repair store', () => {
+  it('rejects cancellation before invoking asynchronous operations', async () => {
+    const list = vi.fn(async () => [repair]);
+    const store = createRfc64FinalizedPrivatePlacementRepairStoreV1({
+      listFinalizedPrivatePlacementRepairs: () => [repair],
+      listFinalizedPrivatePlacementRepairsAsync: list,
+      readFinalizedPrivatePlacementFailure: () => null,
+      writeFinalizedPrivatePlacementFailures: () => {},
+      putFinalizedPrivatePlacementRepair: () => {},
+      deleteFinalizedPrivatePlacementRepair: () => {},
+    });
+    await expect(store.listAsync(new AbortController().signal)).resolves.toEqual([repair]);
+    const controller = new AbortController();
+    controller.abort(new Error('stop'));
+    await expect(store.listAsync(controller.signal)).rejects.toThrow('stop');
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the asynchronous operation receiver without taking the synchronous path', async () => {
+    const operations = {
+      rows: [repair],
+      listFinalizedPrivatePlacementRepairs: vi.fn(() => []),
+      async listFinalizedPrivatePlacementRepairsAsync(_signal: AbortSignal) { return this.rows; },
+      readFinalizedPrivatePlacementFailure: () => null,
+      writeFinalizedPrivatePlacementFailures: () => {},
+      putFinalizedPrivatePlacementRepair: () => {},
+      deleteFinalizedPrivatePlacementRepair: () => {},
+    };
+    const store = createRfc64FinalizedPrivatePlacementRepairStoreV1(operations);
+    await expect(store.listAsync(new AbortController().signal)).resolves.toEqual([repair]);
+    expect(operations.listFinalizedPrivatePlacementRepairs).not.toHaveBeenCalled();
+  });
+
+  it('yields while decoding a snapshot and does not hold the database transaction open', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-sliced-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    for (let i = 0; i < 100; i++) await store.put({ ...repair, assertionCoordinate: `asset-${i}` as AssertionCoordinateV1 });
+    const before = store.list();
+    let finished = false;
+    const listing = store.listAsync(new AbortController().signal).then(rows => { finished = true; return rows; });
+    await new Promise<void>(resolve => nextTurn(resolve));
+    expect(finished).toBe(false);
+    // Writes are legal between slices; the listing still represents its original snapshot.
+    await store.delete(before[0]!);
+    await store.put({ ...repair, assertionCoordinate: 'later' as AssertionCoordinateV1 });
+    expect(await listing).toEqual(before);
+    expect(await store.listAsync(new AbortController().signal)).toEqual(store.list());
+  });
+
+  it('cancels decoding and rejects a listing whose inventory closes between slices', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-cancel-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    for (let i = 0; i < 100; i++) await store.put({ ...repair, assertionCoordinate: `asset-${i}` as AssertionCoordinateV1 });
+    const controller = new AbortController();
+    const listing = store.listAsync(controller.signal);
+    controller.abort(new Error('cancel listing'));
+    await expect(listing).rejects.toThrow('cancel listing');
+    const closing = store.listAsync(new AbortController().signal);
+    inventories.pop()!.close();
+    await expect(closing).rejects.toThrow();
+  });
+
+  it('rejects altered durable bytes on asynchronous reads rather than using a stale decoded value', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-corrupt-list-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    await store.put(repair);
+    expect(await store.listAsync(new AbortController().signal)).toEqual([repair]);
+    const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
+    try {
+      db.prepare('UPDATE rfc64_finalized_private_placement_repairs_v1 SET repair_json = ?').run(
+        new TextDecoder().decode(encodeRfc64FinalizedPrivatePlacementRepairV1({ ...repair, assertionCoordinate: 'altered' as AssertionCoordinateV1 })),
+      );
+      await expect(store.listAsync(new AbortController().signal)).rejects.toThrow(/digest-bound/);
+    } finally { db.close(); }
+  });
+
   it('durably retains confirmation in the inventory database until exact completion', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-repair-'));
     roots.push(dataDir);
@@ -103,6 +183,7 @@ describe('RFC-64 finalized-private placement repair store', () => {
     inventories.pop()?.close();
     const restarted = await openStore(dataDir);
     expect(restarted.list()).toEqual(expect.arrayContaining([repair, confirmed]));
+    expect(await restarted.listAsync(new AbortController().signal)).toEqual(restarted.list());
     await restarted.delete(confirmed);
     expect(restarted.list()).toEqual([repair]);
   });
@@ -224,7 +305,8 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
       listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
       readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair), readRepairRevision: () => null,
-      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+      listFinalizedPrivateRepairs: () => store.list(),
+      listFinalizedPrivateRepairsAsync: signal => store.listAsync(signal), readPrivateFailure: row => store.readFailure(row),
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
     });
@@ -316,7 +398,8 @@ it.each(['availability', 'refused request'] as const)('persists a %s lane reset 
       resolvePartition: () => ({ retryIntervalMs: 5000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
       readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
-      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+      listFinalizedPrivateRepairs: () => store.list(),
+      listFinalizedPrivateRepairsAsync: signal => store.listAsync(signal), readPrivateFailure: row => store.readFailure(row),
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
     });
@@ -358,7 +441,8 @@ it('keeps all lane observations unchanged when SQLite rejects the reset batch, t
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
     readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
-    listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+    listFinalizedPrivateRepairs: () => store.list(),
+      listFinalizedPrivateRepairsAsync: signal => store.listAsync(signal), readPrivateFailure: row => store.readFailure(row),
     writePrivateFailures: entries => store.writeFailures(entries),
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
   });
@@ -408,7 +492,8 @@ it.each(['availability', 'refused request'] as const)(
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
       readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
-      listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
+      listFinalizedPrivateRepairs: () => store.list(),
+      listFinalizedPrivateRepairsAsync: signal => store.listAsync(signal), readPrivateFailure: row => store.readFailure(row),
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
     });
@@ -463,6 +548,7 @@ it.each([
       listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
       readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
       listFinalizedPrivateRepairs: () => store.list(),
+      listFinalizedPrivateRepairsAsync: signal => store.listAsync(signal),
       readPrivateFailure: row => { if (readUnavailable) throw new Error('diagnostic read unavailable'); return store.readFailure(row); },
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -507,6 +593,7 @@ it('keeps unread SQLite history intact while runtime backoff continues, until op
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
     readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair), readRepairRevision: () => null,
     listFinalizedPrivateRepairs: () => store.list(),
+      listFinalizedPrivateRepairsAsync: signal => store.listAsync(signal),
     readPrivateFailure: row => { if (readUnavailable) throw new Error('diagnostic read unavailable'); return store.readFailure(row); },
     writePrivateFailures: entries => store.writeFailures(entries),
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),

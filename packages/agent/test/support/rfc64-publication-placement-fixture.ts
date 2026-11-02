@@ -416,6 +416,7 @@ export async function startPlacementAgentV1(
   const markerStore = persistence.finalizedPrivatePlacementRepairs;
   const watchedMarkerStore: Rfc64FinalizedPrivatePlacementRepairStoreV1 = Object.freeze({
     list: () => markerStore.list(),
+    listAsync: (signal: AbortSignal) => markerStore.listAsync(signal),
     readFailure: (repair: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['readFailure']>[0]) => markerStore.readFailure(repair),
     writeFailure: (...[repair, state]: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailure']>) => markerStore.writeFailure(repair, state),
     writeFailures: (entries: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailures']>[0]) => markerStore.writeFailures(entries),

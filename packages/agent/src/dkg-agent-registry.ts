@@ -18,7 +18,7 @@ import { type PublishResult } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { type SkillHandler, type SkillResponse, type ChatHandler, type ChatAclCheck, type SkillAclCheck } from './messaging.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, advertisedRelayAddress, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { advertisedRelayAddress, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
 import { connectToMultiaddr } from './p2p/peer-connect.js';
 import { NetworkAdmissionRejectedError, NetworkAdmissionInvalidPeerIdError, type NetworkAdmissionAttemptOptions } from './p2p/network-admission-coordinator.js';
 import { MultiaddrPeerTargetParseError, parseExplicitConnectTarget as parseMultiaddrExplicitConnectTarget } from './p2p/multiaddr-peer-target.js';
@@ -210,7 +210,7 @@ export class AgentRegistryMethods extends DKGAgentBase {
     const profileCtx = createOperationContext('publish');
     this.log.info(profileCtx, `Publishing agent profile`);
     const result = await this.profileManager.publishProfile(profileConfig);
-    await this.broadcastPublish(AGENT_REGISTRY_CONTEXT_GRAPH, result, profileCtx);
+    await this.broadcastAgentProfile(result, profileCtx);
 
     return result;
   }

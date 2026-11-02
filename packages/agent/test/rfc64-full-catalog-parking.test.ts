@@ -152,6 +152,7 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => model.state.markers,
+    listFinalizedPrivateRepairsAsync: async () => model.state.markers,
     repairFinalizedPrivatePlacement: model.place,
     reconcile,
     ...(options.readHead === false ? {} : { readAppliedCatalogHead: model.readAppliedCatalogHead as never }),
