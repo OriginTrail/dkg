@@ -1,4 +1,4 @@
-import React, { useCallback, useId, useState } from 'react';
+import React, { useCallback, useEffect, useId, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -22,6 +22,13 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
+import { DASHBOARD_ICON, OBSERVABILITY_ICON, CONVICTION_ICON, SETTINGS_ICON } from './nav-icons.js';
+
+const NODE_PLACES = [
+  { id: 'operations', label: 'Observability', title: 'Observability: operations, replication, hardware, logs', icon: OBSERVABILITY_ICON, testId: undefined },
+  { id: 'conviction', label: 'Publisher Conviction', title: 'Publisher Conviction: publishing discounts', icon: CONVICTION_ICON, testId: 'pca-launch-btn' },
+  { id: 'settings', label: 'Settings', title: 'Node settings', icon: SETTINGS_ICON, testId: undefined },
+] as const;
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -219,6 +226,12 @@ export function PanelLeft() {
   const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
 
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
+  // Tabs restored from a refresh or opened from an address carry a short id
+  // as their label; give them the graph's real name once the list loads.
+  const renameTab = useTabsStore((s) => s.renameTab);
+  useEffect(() => {
+    for (const cg of contextGraphs) if (cg.name) renameTab(`project:${cg.id}`, cg.name);
+  }, [contextGraphs, renameTab]);
   const myProjects = visibleContextGraphs.filter((cg) =>
     belongsInMyProjectsSidebar(cg, agentIdentity));
   const contextOracleProjects = visibleContextGraphs.filter((cg) =>
@@ -277,12 +290,14 @@ export function PanelLeft() {
 
       {treeMode === 'explorer' && (
         <div className="v10-tree-content">
-          <div
+          <button
+            type="button"
             className={`v10-tree-dashboard ${activeTabId === 'dashboard' ? 'active' : ''}`}
+            aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
             onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
           >
-            <span>▦</span> Dashboard
-          </div>
+            <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span> Dashboard
+          </button>
 
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
@@ -458,6 +473,27 @@ export function PanelLeft() {
           )}
         </div>
       )}
+
+      {/* Node-level places: every destination lives in the sidebar
+          (DESIGN.md · Navigation); the header keeps only status and
+          global controls. */}
+      <nav className="v10-sidebar-node" aria-label="Node">
+        <div className="v10-sidebar-group-label">Node</div>
+        {NODE_PLACES.map((place) => (
+          <button
+            key={place.id}
+            type="button"
+            className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === place.id ? 'active' : ''}`}
+            aria-current={activeTabId === place.id ? 'page' : undefined}
+            data-testid={place.testId}
+            title={place.title}
+            onClick={() => openTab({ id: place.id, label: place.label, closable: true })}
+          >
+            <span className="v10-sidebar-place-icon">{place.icon}</span>
+            {place.label}
+          </button>
+        ))}
+      </nav>
 
       <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
       <JoinProjectModal

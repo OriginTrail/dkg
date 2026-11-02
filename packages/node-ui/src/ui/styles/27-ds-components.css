@@ -475,3 +475,143 @@ body.light .ds-seg-item.active, body.light .v10-agent-mode-tab.active, body.ligh
   background: var(--bg-surface);
   box-shadow: 0 0 0 1px var(--border-default), 0 1px 2px rgba(0, 0, 0, .06);
 }
+
+/* ══ Centre tab bar (browser-like tabs) ════════════════════════════════
+   Each tab: its mark + label; the active one sits on the page colour with
+   a primary underline. × always on the active tab, on hover for others.
+   Dashboard is a pinned, icon-only tab. */
+.v10-center-tabbar {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  height: var(--tab-h);
+  min-height: var(--tab-h);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+}
+.v10-center-tabbar .v10-center-tabs {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border-bottom: 0;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.v10-center-tabbar .v10-center-tabs::-webkit-scrollbar { display: none; }
+.v10-center-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  height: 100%;
+  padding: 0 6px 0 12px;
+  border-right: 1px solid var(--border-subtle);
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: var(--fs-control);
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: color .12s, background-color .12s;
+}
+.v10-center-tab:hover { color: var(--text-secondary); background: var(--bg-surface); }
+.v10-center-tab.active { color: var(--text-primary); background: var(--bg-root); border-bottom-color: var(--text-primary); }
+.v10-center-tab.pinned { padding: 0 12px; }
+.v10-center-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-center-tab-label { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.v10-tab-mark-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; color: currentColor; }
+.v10-center-tab .v10-agent-dot { font-size: 7px; }
+.v10-center-tab-close {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-tertiary);
+  opacity: 1;
+  visibility: hidden;
+  cursor: pointer;
+}
+.v10-center-tab:hover .v10-center-tab-close,
+.v10-center-tab.active .v10-center-tab-close,
+.v10-center-tab:focus-within .v10-center-tab-close { visibility: visible; opacity: 1; }
+.v10-center-tab-close:hover { background: var(--bg-active); color: var(--text-primary); }
+.v10-center-tab.dragging { opacity: .35; }
+.v10-center-tab.drop-before { box-shadow: inset 2px 0 0 var(--focus-ring); }
+.v10-center-tab.drop-after { box-shadow: inset -2px 0 0 var(--focus-ring); }
+.v10-center-tabs-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  border: 0;
+  border-left: 1px solid var(--border-subtle);
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: none;
+}
+.v10-center-tabs-all:hover, .v10-center-tabs-all[aria-expanded="true"] { background: var(--bg-hover); color: var(--text-primary); }
+.v10-center-tabs-all:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-center-tabs-count { font-size: var(--fs-micro); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+.v10-tab-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 240px;
+  max-width: 340px;
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-nested);
+  background: var(--bg-elevated);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+}
+.v10-tab-menu-label { padding: 8px 8px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+.v10-tab-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-control);
+  text-align: left;
+  cursor: pointer;
+}
+.v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); outline: none; }
+.v10-tab-menu-item.active { color: var(--text-primary); }
+.v10-tab-menu-item:disabled { opacity: .4; cursor: default; }
+.v10-tab-menu-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v10-tab-menu-hint { margin-left: auto; padding-left: 12px; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); }
+.v10-tab-menu-sep { height: 1px; margin: 4px 0; background: var(--border-subtle); }
+.v10-tab-menu-empty { padding: 4px 8px 8px; color: var(--text-tertiary); font-size: var(--fs-label); }
+
+/* Sidebar: places. Dashboard at the top, the node's places pinned to the
+   bottom in a labelled group — every destination lives in the sidebar. */
+.v10-tree-dashboard {
+  width: calc(100% - 16px); margin: 0 8px 4px; height: 28px; padding: 0 8px;
+  border: 0; border-radius: var(--radius-control); background: none;
+  font-family: var(--font-sans); text-align: left;
+}
+.v10-tree-dashboard:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+.v10-sidebar-place-icon { display: inline-grid; place-items: center; width: 16px; color: var(--text-tertiary); flex: none; }
+.v10-tree-dashboard.active .v10-sidebar-place-icon, .v10-tree-dashboard:hover .v10-sidebar-place-icon { color: var(--text-primary); }
+.v10-sidebar-node { margin-top: auto; flex-shrink: 0; padding: 6px 0 8px; border-top: 1px solid var(--border-subtle); }
+.v10-sidebar-group-label { padding: 6px 16px 4px; font-size: var(--fs-micro); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }
+.v10-sidebar-node .v10-tree-dashboard { margin-bottom: 0; }

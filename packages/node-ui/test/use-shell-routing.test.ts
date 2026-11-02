@@ -138,12 +138,9 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       expect(ref.current).toBe('/observability');
     });
 
-    it('Codex follow-up: deep-link to /settings → open project tab (unmapped) → URL resets to / so refresh lands on dashboard', async () => {
-      // The previous implementation only updated the URL for tabs in
-      // TAB_TO_URL_PATH. Deep-linking to /settings then opening a
-      // project:foo tab left pathname stuck at /settings, so refresh
-      // dropped the user back into Settings instead of the project
-      // they were viewing.
+    it('every tab has an address: opening a graph from /settings moves the URL to /graph/<id>', async () => {
+      // Replaces the old "reset to /" rule: unmapped tabs used to drop the
+      // URL back to / so a refresh lost them. Now every tab has an address.
       const ref = { current: '' };
       mountAtPath('/settings', ref);
       expect(ref.current).toBe('/settings');
@@ -151,33 +148,25 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       await act(async () => {
         useTabsStore.getState().openTab({ id: 'project:foo', label: 'Foo', closable: true });
       });
-      expect(ref.current).toBe('/');
+      expect(ref.current).toBe('/graph/foo');
     });
 
-    it('returns to / when an unmapped tab is opened from the dashboard (active tab is dashboard, no clobber of other deep-link paths)', async () => {
+    it('opening a graph from the dashboard moves the URL off /', async () => {
       const ref = { current: '' };
       mountAtPath('/', ref);
       expect(ref.current).toBe('/');
 
-      // Open an unmapped tab; URL stays at / (dashboard's mapped path).
       await act(async () => {
         useTabsStore.getState().openTab({ id: 'project:bar', label: 'Bar', closable: true });
       });
-      // Active tab is now unmapped, and pathname is '/' which is NOT
-      // in URL_PATH_TO_TAB. The hook leaves the URL alone — Step 2's
-      // reset only fires when pathname IS a known deep-link path.
-      expect(ref.current).toBe('/');
+      expect(ref.current).toBe('/graph/bar');
     });
 
-    it('the unmapped-tab reset is scoped to known deep-link paths: switching from /observability to a project tab triggers the reset (BUG-018 follow-up scope)', async () => {
+    it('landing on a graph address opens that graph tab', () => {
       const ref = { current: '' };
-      mountAtPath('/observability', ref);
-      expect(ref.current).toBe('/observability');
-
-      await act(async () => {
-        useTabsStore.getState().openTab({ id: 'project:baz', label: 'Baz', closable: true });
-      });
-      expect(ref.current).toBe('/');
+      mountAtPath('/graph/baz', ref);
+      expect(useTabsStore.getState().activeTabId).toBe('project:baz');
+      expect(ref.current).toBe('/graph/baz');
     });
 
     it('idempotent — switching to the active tab does not push history when URL already matches', async () => {

@@ -7,13 +7,8 @@ import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
-import { ContextGraphMark, contextGraphIdFromTab } from '../../context-graph-colors.js';
+import { TabBar } from './TabBar.js';
 
-const CLOSE_ICON = (
-  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-  </svg>
-);
 
 const OperationsView = createRecoverableLazyView(() =>
   import('../../pages/Operations.js').then((m) => m.OperationsPage)
@@ -51,32 +46,6 @@ const MemoryStackView = createRecoverableLazyView(() =>
   import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
 , 'memory stack');
 
-function TabBar() {
-  const { tabs, activeTabId, setActiveTab, closeTab } = useTabsStore();
-
-  return (
-    <div className="v10-center-tabs">
-      {tabs.map((tab) => (
-        <button
-          key={tab.id}
-          className={`v10-center-tab ${tab.id === activeTabId ? 'active' : ''}`}
-          onClick={() => setActiveTab(tab.id)}
-        >
-          {contextGraphIdFromTab(tab.id) && <ContextGraphMark id={contextGraphIdFromTab(tab.id)!} name={tab.label} />}
-          <span className="v10-center-tab-label">{tab.label}</span>
-          {tab.closable && (
-            <span
-              className="v10-center-tab-close"
-              onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-            >
-              {CLOSE_ICON}
-            </span>
-          )}
-        </button>
-      ))}
-    </div>
-  );
-}
 
 const TEXT_CONTENT_TYPES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/x-yaml'];
 function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.startsWith(t)); }
