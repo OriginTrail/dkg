@@ -593,7 +593,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {pending && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
               background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
               color: 'var(--accent-primary, #3b82f6)',
             }}>
@@ -603,7 +603,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {approved && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
               background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
               color: 'var(--accent-green)',
             }}>
@@ -613,7 +613,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
 
           {rejected && (
             <div style={{
-              padding: '10px 14px', borderRadius: 8, marginBottom: 16, fontSize: 12,
+              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
               background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)',
               color: 'var(--accent-warning, #f59e0b)',
             }}>

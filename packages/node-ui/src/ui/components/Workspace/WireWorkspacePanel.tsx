@@ -233,7 +233,7 @@ export function WireWorkspacePanel({
     return (
       <div>
         <div style={{
-          padding: '12px 14px', borderRadius: 8, marginBottom: 14, fontSize: 12,
+          padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
           background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
           color: 'var(--accent-green)',
         }}>
@@ -248,7 +248,7 @@ export function WireWorkspacePanel({
         </div>
         <pre style={{
           fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
-          padding: 10, borderRadius: 6, background: 'var(--bg-secondary)',
+          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
           border: '1px solid var(--border-primary)', margin: 0,
         }}>
           {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
@@ -275,7 +275,7 @@ export function WireWorkspacePanel({
 
         <pre style={{
           fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
-          padding: 12, borderRadius: 6, background: 'var(--bg-secondary)',
+          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
           border: '1px solid var(--border-primary)', margin: 0, whiteSpace: 'pre-wrap',
         }}>
           {planResult.markdown}
@@ -311,7 +311,7 @@ export function WireWorkspacePanel({
   return (
     <div>
       <div style={{
-        padding: '10px 14px', borderRadius: 8, marginBottom: 14, fontSize: 12,
+        padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
         background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
         color: 'var(--accent-primary, #3b82f6)',
       }}>

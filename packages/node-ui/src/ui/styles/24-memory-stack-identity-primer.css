@@ -21,7 +21,7 @@
   padding: 40px 0;
   text-align: center;
   border: 1px dashed var(--border-subtle);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
 }
 .v10-memstack-table {
   display: flex; flex-direction: column;
@@ -72,12 +72,6 @@
   transition: color 0.15s;
 }
 .v10-memstack-project-btn:hover { color: var(--text-primary); }
-.v10-memstack-project-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--text-tertiary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-tertiary) 15%, transparent);
-  flex-shrink: 0;
-}
 .v10-memstack-project-name {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -98,7 +92,7 @@
 .v10-memstack-cell {
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 20%, var(--border-subtle));
   background: color-mix(in srgb, var(--cell-color, #64748b) 3%, transparent);
   min-height: 130px;
@@ -171,7 +165,7 @@
   padding: 3px 10px;
   background: none;
   border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 30%, var(--border-subtle));
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--cell-color, var(--text-secondary));
   font-size: 10px; font-weight: 700;
   letter-spacing: 0.04em;
@@ -189,7 +183,7 @@
 .v10-vm-identity {
   margin-bottom: 16px;
   padding: 12px 14px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   background: var(--layer-verified-bg);
   border: 1px solid var(--layer-verified-border);
   display: flex; flex-direction: column; gap: 8px;
@@ -241,7 +235,7 @@
   padding: 1px 6px;
   background: none;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-tertiary);
   font-size: 10px;
   cursor: pointer;
@@ -303,11 +297,6 @@
      the body content down on transition. Reserving the
      expanded height at all times eliminates the layout shift. */
   min-height: 44px;
-}
-.v10-project-strip-dot {
-  width: 9px; height: 9px; border-radius: 50%;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sg-color, var(--text-tertiary)) 18%, transparent);
-  flex-shrink: 0;
 }
 .v10-project-strip-name {
   font-size: 13px; font-weight: 600;
@@ -389,7 +378,7 @@
 .v10-primer-pipeline span:not(.connector) {
   min-width: 0;
   padding: 12px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   border: 1px solid var(--border-default);
   color: var(--text-primary);
   font-size: 13px;

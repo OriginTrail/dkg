@@ -24,7 +24,7 @@
 .v10-dash-section {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   padding: 16px 18px;
   /* Same hover lift/glow as the stat cards so the lower panels feel
      part of the same surface family (round-2 feedback). */
@@ -49,12 +49,6 @@
    --text-secondary so it reads as a quiet affordance, not a control. */
 .v10-dash-section-title { display: flex; align-items: center; gap: 6px; }
 .v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
-.v10-dash-section-link {
-  font-size: 12px;
-  color: var(--text-secondary);
-  transition: color 0.15s;
-}
-.v10-dash-section-link:hover { color: var(--text-primary); }
 
 /* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
 .v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
@@ -92,7 +86,6 @@
   font-variant-numeric: tabular-nums;
 }
 .v10-cg-size-num .v10-cg-dim { font-size: 12px; }
-.v10-cg-size-empty { font-size: 20px; font-weight: 600; padding: 6px 0; }
 /* The Size card is the densest of the three stat cards; trim its
    padding so the two big numbers + bars + legend + sub don't bloat it
    past the other two (ui-lead). */
@@ -312,7 +305,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.v10-ws-balcol { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
 .v10-ws-bal {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -359,42 +351,6 @@
 /* Chain/RPC partial-error caveat under the wallet list. --text-secondary
    (AA on the card surface), small but not micro. */
 .v10-ws-note { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
-
-/* Quick actions */
-.v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
-.v10-quick-action-icon { font-size: 14px; width: 20px; text-align: center; }
-
-/* Recent ops */
-.v10-recent-ops { display: flex; flex-direction: column; gap: 0; }
-.v10-recent-op {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 12px;
-}
-.v10-recent-op:last-child { border-bottom: none; }
-.v10-recent-op-type { font-weight: 500; color: var(--text-primary); }
-.v10-recent-op-status { font-family: var(--font-mono); font-size: 11px; }
-.v10-recent-op-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); margin-left: auto; }
-
-/* Project cards in dashboard */
-.v10-dash-projects { display: flex; flex-direction: column; gap: 6px; }
-.v10-dash-project-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  transition: all 0.15s;
-  text-align: left;
-}
-.v10-dash-project-card:hover { border-color: var(--border-default); }
-.v10-dash-project-name { font-size: 12px; font-weight: 500; color: var(--text-primary); }
-.v10-dash-project-count { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
 
 /* Collaborating agents: the agents themselves as avatars under the count. */
 .v10-stat-agents { margin: 2px 0 6px; }

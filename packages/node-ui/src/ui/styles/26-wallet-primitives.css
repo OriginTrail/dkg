@@ -81,7 +81,7 @@
   width: min(320px, 90vw);
   padding: 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-surface);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   display: flex;
@@ -96,7 +96,7 @@
   font-size: 12px;
   font-weight: 600;
   padding: 7px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
@@ -104,7 +104,7 @@
 .v10-wallet-provider-icon {
   width: 16px;
   height: 16px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .v10-wallet-picker-empty {
   margin: 0;
@@ -124,7 +124,7 @@
   flex-wrap: wrap;
   padding: 5px 6px 5px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-surface);
 }
 .v10-wallet-pill[data-state='wrong-network'] {

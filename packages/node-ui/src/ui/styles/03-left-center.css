@@ -39,14 +39,6 @@
 }
 .v10-tree-dashboard:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-tree-dashboard.active { background: var(--bg-active); color: var(--text-primary); }
-.v10-tree-empty-state {
-  padding: 24px 16px;
-  text-align: center;
-}
-.v10-tree-empty-state p {
-  font-size: 12px;
-  color: var(--text-tertiary);
-}
 
 /* Tree sections (project list) */
 .v10-tree-section { margin-bottom: 2px; }
@@ -62,13 +54,6 @@
 .v10-tree-section-header:hover { background: var(--bg-hover); }
 .v10-tree-section-header.active { background: var(--bg-active); }
 .v10-tree-section-header.catalogue { cursor: default; gap: 6px; }
-.v10-tree-chevron {
-  color: var(--text-tertiary);
-  transition: transform 0.15s;
-  display: flex;
-  align-items: center;
-}
-.v10-tree-chevron.open { transform: rotate(90deg); }
 .v10-tree-section-label {
   /* CG names — the single biggest sidebar readability win. 12 → 13. */
   font-size: 13px;
@@ -100,8 +85,6 @@
 }
 
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
-.v10-tree-move-btn { flex-shrink: 0; margin-left: 4px; width: 18px; opacity: 0; }
-.v10-tree-section-header:hover .v10-tree-move-btn { opacity: 1; }
 
 .v10-tree-show-hidden {
   display: block;
@@ -110,7 +93,7 @@
   padding: 6px 10px;
   background: none;
   border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   color: var(--text-tertiary);
   font-size: 12px; font-family: var(--font-sans);
   cursor: pointer;
@@ -134,48 +117,12 @@
 }
 .v10-tree-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-tree-item.active { background: var(--bg-active); color: var(--text-primary); }
-.v10-tree-layer-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
 .v10-tree-item-label {
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 12px;
-}
-
-/* Project dot */
-.v10-tree-project-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-primary);
-  flex-shrink: 0;
-}
-.v10-tree-integration-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: transparent;
-  border: 1px solid var(--text-tertiary);
-  flex-shrink: 0;
-}
-
-/* Layer headers inside project tree. Same token + size fix as
-   .v10-tree-group-label — was unreadable on --text-ghost. */
-.v10-tree-layer-header {
-  padding: 3px 12px 3px 32px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-  margin-top: 4px;
-  cursor: default;
 }
 
 /* New project button */
@@ -186,30 +133,18 @@
   margin: 16px 10px;
   padding: 16px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-surface);
   text-align: center;
 }
 .v10-jec-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
 .v10-jec-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin-bottom: 10px; }
 
-/* Tree divider */
-.v10-tree-divider { height: 1px; background: var(--border-subtle); margin: 8px 12px; }
-
 /* Tree items are toggled via React state — no CSS display:none needed */
 
 /* ── Center ── */
-.v10-center-empty { flex: 1; min-width: 0; height: 100%; background: var(--bg-root); }
 
 /* ── Center stack (center + bottom) ── */
-.v10-center-stack {
-  height: 100%;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.v10-center-stack-main { flex: 1; min-height: 0; overflow: hidden; }
 
 /* ── Center panel ── */
 .v10-panel-center {
@@ -276,7 +211,7 @@
 
 /* Context graph identity mark: rounded square + initial (squares = graphs,
    round = data). Tint fill, colour outline and letter, from --cg-color. */
-.v10-cg-mark{display:inline-grid;place-items:center;flex:none;border-radius:4px;font-family:var(--font-sans);font-weight:700;line-height:1;letter-spacing:0;
+.v10-cg-mark{display:inline-grid;place-items:center;flex:none;border-radius:var(--radius-xs);font-family:var(--font-sans);font-weight:700;line-height:1;letter-spacing:0;
   color:var(--cg-color);background:color-mix(in srgb,var(--cg-color) 20%,var(--bg-surface));box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--cg-color) 55%,transparent)}
 .v10-cg-mark::before{content:attr(data-initial)}
 .v10-cg-mark-sm{width:16px;height:16px;font-size:9.5px}

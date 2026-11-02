@@ -16,14 +16,6 @@
   line-height: 1.45;
   color: var(--text-secondary);
 }
-.v10-pca-overview-owner-actions {
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-end;
-  gap: 12px;
-  flex-wrap: wrap;
-  max-width: 100%;
-}
 .v10-pca-overview-wallet {
   width: auto;
   max-width: min(420px, 100%);
@@ -176,7 +168,7 @@
   margin-top: 8px;
   padding: 10px 12px;
   border: 1px solid rgba(96, 165, 250, 0.35);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: rgba(96, 165, 250, 0.08);
   color: var(--text-secondary);
   font-size: 12px;

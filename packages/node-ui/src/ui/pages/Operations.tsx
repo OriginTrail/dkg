@@ -62,7 +62,7 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   system:         'Internal system maintenance operation',
 };
 
-const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, color: 'var(--text)' };
+const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-control)', fontSize: 12, color: 'var(--text)' };
 
 const TIME_PERIODS = [
   { value: '5m', label: '5 min', ms: 5 * 60_000 },
@@ -474,12 +474,12 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 11, color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.2)', fontSize: 11, color: 'var(--red)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 6, border: '1px solid rgba(239,68,68,.15)', fontSize: 11, color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.15)', fontSize: 11, color: 'var(--red)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -595,7 +595,7 @@ function OperationStatsSection() {
                 const color = opTypeText(r.type);
                 const rateColor = r.rate >= 0.9 ? 'var(--green-mid)' : r.rate >= 0.7 ? 'var(--amber)' : 'var(--red)';
                 return (
-                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 8, padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
+                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 700, color }}>{r.type}</span>
                     </div>
@@ -917,7 +917,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         return (
           <div style={{
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
-            marginBottom: 6, padding: '5px 10px', borderRadius: 6,
+            marginBottom: 6, padding: '5px 10px', borderRadius: 'var(--radius-control)',
             background: 'var(--surface)', border: '1px solid var(--border)',
             boxShadow: '0 4px 12px rgba(0,0,0,.4)',
             fontSize: 11, zIndex: 10, pointerEvents: 'none',
@@ -1010,7 +1010,7 @@ function OperationsTab() {
       {/* Phase color legend */}
       <div style={{
         display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 10,
-        padding: '6px 12px', borderRadius: 6,
+        padding: '6px 12px', borderRadius: 'var(--radius-control)',
         background: 'rgba(255,255,255,.02)', border: '1px solid var(--border)',
         fontSize: 10, color: 'var(--text-muted)', alignItems: 'center',
       }}>
@@ -1092,7 +1092,7 @@ function OperationsTab() {
               disabled={page === 0}
               onClick={() => setPage(0)}
               style={{
-                padding: '4px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
+                padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page === 0 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page === 0 ? 0.4 : 1,
               }}
@@ -1103,7 +1103,7 @@ function OperationsTab() {
               disabled={page === 0}
               onClick={() => setPage(p => Math.max(0, p - 1))}
               style={{
-                padding: '4px 10px', borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
+                padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page === 0 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page === 0 ? 0.4 : 1,
               }}
@@ -1117,7 +1117,7 @@ function OperationsTab() {
               disabled={page >= totalPages - 1}
               onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
               style={{
-                padding: '4px 10px', borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
+                padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page >= totalPages - 1 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page >= totalPages - 1 ? 0.4 : 1,
               }}
@@ -1128,7 +1128,7 @@ function OperationsTab() {
               disabled={page >= totalPages - 1}
               onClick={() => setPage(totalPages - 1)}
               style={{
-                padding: '4px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
+                padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
                 border: '1px solid var(--border)', background: 'var(--surface)', color: page >= totalPages - 1 ? 'var(--text-dim)' : 'var(--text-muted)',
                 opacity: page >= totalPages - 1 ? 0.4 : 1,
               }}
@@ -1197,7 +1197,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         <span>{formatAbsTime(opEnd)}</span>
       </div>
 
-      <div style={{ position: 'relative', background: 'rgba(255,255,255,.03)', borderRadius: 6, border: '1px solid var(--border)', padding: '6px 0' }}>
+      <div style={{ position: 'relative', background: 'rgba(255,255,255,.03)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', padding: '6px 0' }}>
         {phases.map((p: any, i: number) => {
           const phaseStart = p.started_at ?? opStart;
           const phaseDuration = p.duration_ms ?? 0;
@@ -1309,7 +1309,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 6, border: '1px solid rgba(239,68,68,.2)', fontSize: 12, color: 'var(--red)' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.2)', fontSize: 12, color: 'var(--red)' }}>
             {op.error_message}
           </div>
         )}
@@ -1341,7 +1341,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 // to the umbrella `chain` entry.
                 const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
-                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 6, borderLeft: `3px solid ${terminalColor}` }}>
+                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
@@ -1498,7 +1498,7 @@ function LogsTab() {
           title="Refresh now"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
-            borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface)',
+            borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', background: 'var(--surface)',
             color: 'var(--text-muted)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
             transition: 'all .15s',
           }}
@@ -1515,7 +1515,7 @@ function LogsTab() {
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 6, border: `1px solid ${autoScroll ? 'rgba(74,222,128,.3)' : 'var(--border)'}`,
+            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'rgba(74,222,128,.3)' : 'var(--border)'}`,
             background: autoScroll ? 'var(--green-dim)' : 'var(--surface)',
             color: autoScroll ? 'var(--green)' : 'var(--text-muted)',
             fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
@@ -1528,7 +1528,7 @@ function LogsTab() {
         </button>
       </div>
 
-      <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid rgba(139,92,246,.15)', boxShadow: '0 0 40px rgba(139,92,246,.04)' }}>
+      <div style={{ borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid rgba(139,92,246,.15)', boxShadow: '0 0 40px rgba(139,92,246,.04)' }}>
         <div style={{
           padding: '8px 16px',
           background: 'linear-gradient(135deg, rgba(139,92,246,.08) 0%, rgba(59,130,246,.05) 100%)',
@@ -1613,7 +1613,7 @@ function StyledLogEntry({ ts, level, module, message }: { ts: number; level: str
 function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode; maxHeight?: number }) {
   return (
     <div style={{
-      maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 6, padding: '6px 0',
+      maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
       fontFamily: LOG_FONT, fontSize: 10.5, lineHeight: 1.5,
     }}>
       {children}

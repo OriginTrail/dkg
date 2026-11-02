@@ -593,7 +593,7 @@ export function ConnectedAgentsTab(props: {
                           className="v10-local-agent-attachment-chip"
                           style={{
                             padding: '2px 8px',
-                            borderRadius: 999,
+                            borderRadius: 'var(--radius-pill)',
                             // `--panel-elevated` is undefined in styles.css —
                             // the token is `--bg-elevated`. Pre-existing typo
                             // surfaced by UI-lead's PR4 audit (Task #69):

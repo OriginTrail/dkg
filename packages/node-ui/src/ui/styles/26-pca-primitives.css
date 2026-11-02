@@ -44,7 +44,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
   padding: 1px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-elevated);
 }
 .v10-pca-crux-help {
@@ -69,7 +69,7 @@
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   overflow: hidden;
 }
 .v10-pca-tier-row {
@@ -98,7 +98,7 @@
 /* ----- EligibilityVerdictBanner ----- */
 .v10-pca-verdict-banner {
   padding: 10px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
 }
@@ -136,7 +136,7 @@
 .v10-pca-device-progress {
   padding: 10px 12px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-surface);
   max-width: 100%;
   min-width: 0;
@@ -224,7 +224,7 @@
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-surface);
 }
 .v10-pca-handshake-half[data-emphasis='true'] {
@@ -242,7 +242,7 @@
   color: var(--text-secondary);
   font-size: 11px;
   padding: 4px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .v10-pca-handshake-copyall:hover { background: var(--bg-hover); color: var(--text-primary); }

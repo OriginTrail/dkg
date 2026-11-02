@@ -88,7 +88,6 @@ describe('Context Graph contrast tokens', () => {
     const readableSelectors = [
       '.ds-badge',
       '.ds-count',
-      '.v10-entity-list-empty',
       '.v10-entity-list-header',
       '.v10-entity-card-triples',
       '.v10-item-ual',
@@ -105,8 +104,6 @@ describe('Context Graph contrast tokens', () => {
       '.v10-activity-feed-time',
       '.v10-vm-identity-lbl',
       '.v10-gen-widget-footnote',
-      '.v10-evidence-title',
-      '.v10-canvas-empty',
       '.v10-empty-state-title',
       '.v10-empty-state-desc',
       '.v10-stat-strip-label',

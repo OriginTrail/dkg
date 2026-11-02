@@ -177,7 +177,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             aria-label="Document view mode"
             style={{
               marginLeft: 'auto', display: 'flex', gap: 2, padding: 2,
-              border: '1px solid var(--border-default)', borderRadius: 6,
+              border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)',
               background: 'var(--bg-surface)',
             }}
           >
@@ -190,7 +190,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
                   aria-pressed={active}
                   onClick={() => setViewMode(mode)}
                   style={{
-                    border: 'none', borderRadius: 4, cursor: 'pointer',
+                    border: 'none', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
                     padding: '3px 12px', fontSize: 11, fontWeight: 600,
                     fontFamily: 'var(--font-sans)',
                     color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
@@ -226,14 +226,14 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
             {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
             {!loading && isImage && blobUrl && (
-              <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 8 }} />
+              <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
             )}
             {!loading && isPdf && blobUrl && (
-              <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 8 }} />
+              <iframe src={blobUrl} title={docLabel} style={{ width: '100%', height: '100%', border: 'none', borderRadius: 'var(--radius-nested)' }} />
             )}
             {content !== null && !isImage && !isPdf && isMarkdown && viewMode === 'formatted' && (
               <div style={{
-                background: 'var(--bg-surface)', borderRadius: 8, padding: '16px 20px',
+                background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: '16px 20px',
                 border: '1px solid var(--border-default)', color: 'var(--text-primary)',
               }}>
                 <MarkdownMessage content={content} />
@@ -243,7 +243,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
               <pre style={{
                 fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
                 color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                background: 'var(--bg-surface)', borderRadius: 8, padding: 16,
+                background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: 16,
                 border: '1px solid var(--border-default)', margin: 0,
               }}>
                 {content}

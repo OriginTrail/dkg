@@ -52,7 +52,7 @@
   font-size: 11px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-primary);
   font-family: var(--font-mono);
   outline: none;
@@ -65,7 +65,7 @@
   font-size: 11px;
   background: var(--bg-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E") no-repeat right 6px center;
   border: 1px solid var(--border-subtle);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-secondary);
   font-family: var(--font-sans);
   outline: none;
@@ -128,7 +128,7 @@
 .v10-chat-bubble.user {
   /* User pill — right-aligned, capped width, distinct surface. */
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: var(--radius-card);
   max-width: 85%;
   background: var(--bg-active);
   border: 1px solid var(--border-default);

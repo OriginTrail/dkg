@@ -536,7 +536,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           )}
 
           {pane === 'triples' && (
-            <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 6 }}>
+            <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)' }}>
               <table className="v10-ka-triples-table">
                 <thead>
                   <tr><th>Subject</th><th>Predicate</th><th>Object</th></tr>
@@ -607,7 +607,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           />
 
           {/* Trust Summary */}
-          <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 6, background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
+          <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 'var(--radius-control)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
             <div className="v10-ka-section-title" style={{ marginBottom: 6 }}>Entity Summary</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>

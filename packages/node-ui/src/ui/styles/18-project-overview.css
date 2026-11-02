@@ -114,7 +114,7 @@
 .v10-po-participants-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .v10-po-participant {
   display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 10px 3px 3px; border-radius: 12px; font-size: 11px; font-weight: 600;
+  padding: 3px 10px 3px 3px; border-radius: var(--radius-overlay); font-size: 11px; font-weight: 600;
   background: var(--bg-surface); border: 1px solid var(--border-default); color: var(--text-primary);
 }
 /* Each participant leads with its agent avatar (AgentDot), the same
@@ -169,7 +169,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 8px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
 }
@@ -219,7 +219,7 @@
   width: 100%;
   height: 7px;
   overflow: hidden;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg-elevated);
 }
 .v10-po-pipeline-seg {
@@ -243,7 +243,7 @@
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
   color: var(--text-secondary);
   cursor: pointer;
@@ -266,7 +266,7 @@
   flex: 0 0 24px;
   width: 24px;
   height: 24px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: color-mix(in srgb, var(--po-layer-color) 20%, transparent);
   color: var(--text-primary);
   font-family: var(--font-mono);

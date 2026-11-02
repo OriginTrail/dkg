@@ -100,10 +100,6 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.v10-agent-send-btn[\s,{:]/);
   });
 
-  it('includes .chat-bubble selector (legacy)', () => {
-    expect(css).toMatch(/\.chat-bubble\s*\{/);
-  });
-
   it('includes .v10-header-notif selectors', () => {
     expect(css).toMatch(/\.v10-header-notif/);
   });
@@ -757,10 +753,6 @@ describe('Graph visualization CSS', () => {
   it('has responsive rules for graph containers', () => {
     expect(css).toContain('@media (max-height: 700px)');
     expect(css).toContain('@media (max-width: 700px)');
-  });
-
-  it('has .v10-layer-card-count for triple counts on layer cards', () => {
-    expect(css).toMatch(/\.v10-layer-card-count\s*\{/);
   });
 });
 

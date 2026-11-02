@@ -72,7 +72,7 @@
      (the negative margin negates the added padding so neighbours
      don't shift). */
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   padding: 4px 8px;
   margin: -4px -8px;
   transition: background 0.15s, color 0.15s, opacity 0.15s;
@@ -168,7 +168,7 @@
 .v10-ka-verify {
   margin-top: 16px;
   padding: 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -204,7 +204,7 @@
 .v10-ka-verify-err {
   margin-top: 8px; padding: 6px 8px;
   background: rgba(239,68,68,0.12);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-danger); font-size: 11px;
   font-family: var(--font-mono);
 }
@@ -217,7 +217,7 @@
   display: flex; flex-direction: column; gap: 4px;
   padding: 6px 8px;
   background: rgba(245,158,11,0.12);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .v10-ka-verify-ok-row {
   display: flex; justify-content: space-between; align-items: center;

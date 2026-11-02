@@ -207,7 +207,7 @@ function TransactionsContent() {
                   </td>
                   <td style={{ padding: '7px 12px' }}>
                     <span style={{
-                      padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
                       background: op.status === 'success' ? 'rgba(34,197,94,.15)' : op.status === 'error' ? 'rgba(239,68,68,.15)' : 'rgba(245,158,11,.15)',
                       color: op.status === 'success' ? '#22c55e' : op.status === 'error' ? '#ef4444' : '#f59e0b',
                     }}>{op.status}</span>
@@ -244,7 +244,7 @@ function TransactionsContent() {
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {op.phases.map((p: any) => (
                             <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
                               background: 'rgba(255,255,255,.06)', color: 'var(--text-secondary)',
                             }}>
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}

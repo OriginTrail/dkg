@@ -113,7 +113,7 @@
      UI-lead Task #66. */
   margin: 8px 0;
   overflow-x: auto;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   border: 1px solid var(--border-prominent);
 }
 .v10-md-table {
@@ -149,7 +149,7 @@
   display: inline-flex;
   align-items: center;
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--text-secondary);
   font-size: 11px;
@@ -162,7 +162,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
   padding: 2px 5px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-active);
   color: var(--text-primary);
   /* 1px border keeps the chip visible on bubbles whose bg is also --bg-active
@@ -195,7 +195,7 @@
      Task #65. */
   position: relative;
   margin: 8px 0;
-  border-radius: 12px;
+  border-radius: var(--radius-overlay);
   background: var(--bg-elevated);
   border: 1px solid var(--border-prominent);
   overflow: hidden;
@@ -213,7 +213,7 @@
   text-transform: uppercase;
   color: var(--text-secondary);
   background: var(--bg-elevated);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   pointer-events: none;
 }
 .v10-md-pre-rendered,

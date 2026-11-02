@@ -37,7 +37,7 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -63,7 +63,7 @@
   height: 28px;
   min-width: 28px;
   padding: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0;
   background: var(--text-primary);
   color: var(--bg-root);
@@ -164,7 +164,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 8px 8px 8px;
-  border-radius: 12px;
+  border-radius: var(--radius-overlay);
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   max-width: 100%;
@@ -183,7 +183,7 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-active);
   color: var(--text-secondary);
   font-size: 10px;
@@ -233,7 +233,7 @@
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -324,7 +324,7 @@
 .v10-local-agent-notice,
 .v10-local-agent-error {
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   font-size: 11px;
   line-height: 1.5;
 }
