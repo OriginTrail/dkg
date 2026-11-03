@@ -169,7 +169,6 @@
   justify-content: space-between;
   gap: 12px;
   padding: 8px 10px;
-  border-radius: var(--radius-control);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
 }
@@ -243,7 +242,6 @@
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--po-layer-border, color-mix(in srgb, var(--po-layer-color) 28%, var(--border-default)));
-  border-radius: var(--radius-nested);
   background: var(--po-layer-bg, color-mix(in srgb, var(--po-layer-color) 6%, var(--bg-surface)));
   color: var(--text-secondary);
   cursor: pointer;

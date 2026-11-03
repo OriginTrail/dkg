@@ -15,16 +15,16 @@ import { fetchApiInPage } from '../helpers/page-api.js';
  *     dependent — devnet ships 7 days), never mutated.
  */
 test.describe('Settings page (rc.12 rewrite)', () => {
-  test.beforeEach(async ({ shell, header, settingsPage }) => {
+  test.beforeEach(async ({ shell, leftPanel, settingsPage }) => {
     await shell.goto();
-    await header.openSettings();
+    await leftPanel.openSettings();
     await settingsPage.waitForLoaded();
     // Gate on the async /api/status fetch so identity-derived assertions never
     // race the "—" first paint (status can lag under the local parallel load).
     await settingsPage.waitForIdentityLoaded();
   });
 
-  test('opens as the active, closable center tab from the header gear', async ({ centerPanel, settingsPage }) => {
+  test('opens as the active, closable center tab from the sidebar', async ({ centerPanel, settingsPage }) => {
     await expect(settingsPage.title).toBeVisible();
     expect(await centerPanel.getTabNames()).toContain('Settings');
     expect((await centerPanel.getActiveTabName())?.trim()).toBe('Settings');
@@ -154,10 +154,10 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect(res.status).toBe(200);
   });
 
-  test('Settings tab can be closed and reopened from the header', async ({ centerPanel, header, settingsPage }) => {
+  test('Settings tab can be closed and reopened from the sidebar', async ({ centerPanel, leftPanel, settingsPage }) => {
     await centerPanel.closeTab('Settings');
     expect(await centerPanel.getTabNames()).not.toContain('Settings');
-    await header.openSettings();
+    await leftPanel.openSettings();
     await settingsPage.waitForLoaded();
     expect(await centerPanel.getTabNames()).toContain('Settings');
   });

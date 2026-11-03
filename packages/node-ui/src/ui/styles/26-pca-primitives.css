@@ -69,7 +69,6 @@
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-nested);
   overflow: hidden;
 }
 .v10-pca-tier-row {
@@ -98,7 +97,6 @@
 /* ----- EligibilityVerdictBanner ----- */
 .v10-pca-verdict-banner {
   padding: 10px 14px;
-  border-radius: var(--radius-nested);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
 }
@@ -136,7 +134,6 @@
 .v10-pca-device-progress {
   padding: 10px 12px;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-nested);
   background: var(--bg-surface);
   max-width: 100%;
   min-width: 0;
@@ -224,7 +221,6 @@
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-nested);
   background: var(--bg-surface);
 }
 .v10-pca-handshake-half[data-emphasis='true'] {

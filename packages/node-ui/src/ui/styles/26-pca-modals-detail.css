@@ -29,7 +29,6 @@
   line-height: 1.5;
   color: var(--text-warning);
   background: var(--amber-dim);
-  border-radius: var(--radius-control);
 }
 .v10-pca-create-tx { font-size: 11px; color: var(--text-secondary); margin: 8px 0 0; word-break: break-all; }
 .v10-pca-create-review { display: flex; flex-direction: column; gap: 6px; }
@@ -61,7 +60,6 @@
   gap: 8px;
   padding: 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
   background: var(--bg-surface);
   min-width: 0;
 }

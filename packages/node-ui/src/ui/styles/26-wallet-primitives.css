@@ -8,7 +8,6 @@
   min-width: 0;
   padding: 6px 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
   background: var(--bg-surface);
 }
 .v10-wallet-addr {
@@ -81,7 +80,6 @@
   width: min(320px, 90vw);
   padding: 8px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-nested);
   background: var(--bg-surface);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   display: flex;
@@ -96,7 +94,6 @@
   font-size: 12px;
   font-weight: 600;
   padding: 7px 10px;
-  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }

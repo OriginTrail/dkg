@@ -264,14 +264,14 @@ export function PanelLeft() {
         <div className="ds-seg" role="group" aria-label="Sidebar view">
         <button
           aria-pressed={treeMode === 'explorer'}
-          className={`v10-tree-mode-btn ${treeMode === 'explorer' ? 'active' : ''}`}
+          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'explorer' ? 'active' : ''}`}
           onClick={() => setTreeMode('explorer')}
         >
           Context Graphs
         </button>
         <button
           aria-pressed={treeMode === 'oracle'}
-          className={`v10-tree-mode-btn ${treeMode === 'oracle' ? 'active' : ''}`}
+          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'oracle' ? 'active' : ''}`}
           onClick={() => setTreeMode('oracle')}
         >
           Context Oracle
@@ -280,7 +280,7 @@ export function PanelLeft() {
       </div>
 
       {inventoryError && (
-        <div className="v10-journey-empty-card" role="alert">
+        <div className="v10-journey-empty-card ds-card" role="alert">
           <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
           <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
           <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
@@ -302,7 +302,7 @@ export function PanelLeft() {
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading && (
-            <div className="v10-journey-empty-card">
+            <div className="v10-journey-empty-card ds-card">
               <div className="v10-jec-title">No context graphs yet</div>
               <div className="v10-jec-hint">
                 {stage === 0

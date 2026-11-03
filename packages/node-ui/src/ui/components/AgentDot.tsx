@@ -8,34 +8,13 @@
  * use this where only the mark fits or the name is already on the row.
  */
 import React from 'react';
+import { agentInitials } from '@origintrail-official/dkg-graph-viz/agent-initials';
 import { agentColorForUri } from '../hooks/useAgents.js';
 
-/** "Claude Code" → "CC", "hermes" → "HE"; addresses and DIDs use the first
- *  two hex digits after 0x ("0x3f2a…9b1c" → "3F"). Same rule as graph-viz's
- *  `agentInitials`, so a legend dot matches its graph node. */
-export function agentInitials(label: string): string {
-  let t = stripQuotes((label ?? '').trim()).trim(); // labels can arrive as quoted literals
-  if (t.startsWith('did:')) t = t.split(':').pop() ?? '';
-  if (!t) return '?';
-  const hex = t.match(/^0x([0-9a-f]{2})/i);
-  if (hex) return hex[1].toUpperCase();
-  // Separator-only names ("_", "--") leave no parts: fall back like an empty name.
-  const parts = t.split(/[\s_-]+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
-
-const QUOTES = new Set(['"', "'", '\u201c', '\u201d']);
-
-/** Trim surrounding quote marks with a linear scan (no backtracking regex). */
-function stripQuotes(s: string): string {
-  let start = 0;
-  let end = s.length;
-  while (start < end && QUOTES.has(s[start])) start++;
-  while (end > start && QUOTES.has(s[end - 1])) end--;
-  return s.slice(start, end);
-}
+// One initials rule for avatars and graph agent nodes, so a legend dot
+// matches its graph node. The subpath is dependency-free: it doesn't pull
+// the (lazy-loaded) graph renderer into the shell bundle.
+export { agentInitials };
 
 export interface AgentDotProps {
   /** Agent URI / DID; hashed for the colour unless `color` is given. */

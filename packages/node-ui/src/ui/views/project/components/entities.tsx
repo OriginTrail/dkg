@@ -228,21 +228,21 @@ export function LayerContent({
     <>
       <div className="v10-layer-expand-tabs">
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'items' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'items' ? 'active' : ''}`}
           onClick={handleTab('items')}
         >{itemsLabel}</button>
         {layer !== 'vm' && (
           <button
-            className={`v10-layer-expand-tab ${activeTab === 'assertions' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${activeTab === 'assertions' ? 'active' : ''}`}
             onClick={handleTab('assertions')}
           >Assertions</button>
         )}
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'graph' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'graph' ? 'active' : ''}`}
           onClick={handleTab('graph')}
         >Graph</button>
         <button
-          className={`v10-layer-expand-tab ${activeTab === 'docs' ? 'active' : ''}`}
+          className={`v10-layer-expand-tab ds-tab ${activeTab === 'docs' ? 'active' : ''}`}
           onClick={handleTab('docs')}
         >Documents</button>
         {layer !== 'vm' && onShowQueryCatalogChange && (
@@ -380,7 +380,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
 
   if (totalAssets === 0) {
     return (
-      <div className="v10-vm-hero v10-vm-hero-empty">
+      <div className="v10-vm-hero ds-card v10-vm-hero-empty">
         <div className="v10-vm-hero-title">
           <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" />
           <div className="v10-vm-hero-heading">
@@ -403,7 +403,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
   }
 
   return (
-    <div className="v10-vm-hero">
+    <div className="v10-vm-hero ds-card">
       <div className="v10-vm-hero-title">
         <LayerBadge layer="vm" label="Verifiable Memory" className="v10-vm-hero-badge" title={VM_BADGE_TIP} />
         <div className="v10-vm-hero-heading">

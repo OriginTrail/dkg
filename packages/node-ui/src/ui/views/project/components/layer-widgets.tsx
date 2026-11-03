@@ -20,7 +20,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
   children: React.ReactNode;
 }) {
   return (
-    <div className={`v10-gen-widget ${dismissed ? 'dissolved' : ''}`}>
+    <div className={`v10-gen-widget ds-card ${dismissed ? 'dissolved' : ''}`}>
       <div className="v10-gen-widget-header">
         <span className="v10-gen-widget-title">{title}</span>
         <div className="v10-gen-widget-right">

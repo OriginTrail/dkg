@@ -553,7 +553,7 @@ describe('MemoryLayerView graph visualization', () => {
 
   it('renders NodePanel inside RdfGraph for detail overlay', () => {
     expect(mlv).toContain('<NodePanel');
-    expect(mlv).toContain('className="v10-mlv-node-panel"');
+    expect(mlv).toContain('className="v10-mlv-node-panel ds-card-nested"');
   });
 
   it('has a Reset button that clears custom queries', () => {
@@ -739,9 +739,9 @@ describe('Graph visualization CSS', () => {
     expect(css).toMatch(/\.v10-mlv-view-toggle\s*\{/);
   });
 
-  it('has .v10-mlv-toggle-btn and active state', () => {
+  it('has .v10-mlv-toggle-btn; the active state comes from the segmented control', () => {
     expect(css).toMatch(/\.v10-mlv-toggle-btn\s*\{/);
-    expect(css).toMatch(/\.v10-mlv-toggle-btn\.active\s*\{/);
+    expect(css).toMatch(/\.ds-seg-item\.active[^{]*\{/);
   });
 
   it('has .v10-mlv-graph-container with height', () => {

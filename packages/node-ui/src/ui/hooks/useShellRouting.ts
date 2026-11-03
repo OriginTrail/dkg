@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
+import { useProjectsStore } from '../stores/projects.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
 
 // Kept for callers and tests that read the place table directly.
@@ -78,4 +79,19 @@ export function useShellRouting(): void {
     // adding a history entry; later tab switches push one each.
     navigate(target, { replace: initial || route === null || route.id === active });
   }, [activeTabId, pathname, navigate]);
+
+  // Active tab → active graph. Back/Forward, a refreshed or bookmarked graph
+  // address and the tab bar all establish the same context as picking the
+  // graph in the sidebar, so the agent panel's chat and attachments target
+  // the graph on screen. The dashboard clears it, like its sidebar entry;
+  // other places (Settings, Observability) leave it as it was.
+  useEffect(() => {
+    const { setActiveProject, activeProjectId } = useProjectsStore.getState();
+    if (activeTabId.startsWith('project:')) {
+      const graphId = activeTabId.slice('project:'.length);
+      if (graphId && graphId !== activeProjectId) setActiveProject(graphId);
+    } else if (activeTabId === 'dashboard' && activeProjectId !== null) {
+      setActiveProject(null);
+    }
+  }, [activeTabId]);
 }

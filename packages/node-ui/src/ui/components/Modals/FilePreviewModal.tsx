@@ -108,7 +108,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box v10-file-preview-modal"
+        className="v10-modal-box ds-overlay v10-file-preview-modal"
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
@@ -122,7 +122,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
         {loading && <div className="v10-file-preview-loading">Loading file preview...</div>}
 
         {error && (
-          <div className="v10-file-preview-error">
+          <div className="v10-file-preview-error ds-card-nested">
             <p>{error}</p>
             <p style={{ fontSize: 11, marginTop: 4 }}>
               File preview requires the extraction status to still be cached on the node.

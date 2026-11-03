@@ -57,7 +57,7 @@ export function DiscountTierLadder({
 
   return (
     <div className={['v10-pca-tier-ladder', className].filter(Boolean).join(' ')} data-testid="pca-tier-ladder">
-      <ul className="v10-pca-tier-list" role="list">
+      <ul className="v10-pca-tier-list ds-card-nested" role="list">
         {PCA_DISCOUNT_TIERS.map((tier) => {
           const isActive = active != null && active.minTrac === tier.minTrac;
           return (

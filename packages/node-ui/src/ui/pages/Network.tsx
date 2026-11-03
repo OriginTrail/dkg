@@ -54,25 +54,25 @@ export function NetworkPage() {
       <h1 className="page-title">Network</h1>
 
       <div className="stats-grid">
-        <div className="stat-card">
+        <div className="stat-card ds-card">
           <div className="stat-label">Total Connections</div>
           <div className="stat-value">{connData?.total ?? '—'}</div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card ds-card">
           <div className="stat-label">Direct</div>
           <div className="stat-value">{connData?.direct ?? '—'}</div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card ds-card">
           <div className="stat-label">Relayed</div>
           <div className="stat-value">{connData?.relayed ?? '—'}</div>
         </div>
-        <div className="stat-card">
+        <div className="stat-card ds-card">
           <div className="stat-label">Known Agents</div>
           <div className="stat-value">{agents.length}</div>
         </div>
       </div>
 
-      <div className="card">
+      <div className="card ds-card">
         <div className="card-title">Active Connections</div>
         {connections.length === 0 ? (
           <div className="empty-state empty-state--compact">
@@ -108,7 +108,7 @@ export function NetworkPage() {
         )}
       </div>
 
-      <div className="card">
+      <div className="card ds-card">
         <div className="card-title">Discovered Agents</div>
         {agents.length === 0 ? (
           <div className="empty-state empty-state--compact">

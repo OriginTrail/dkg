@@ -137,7 +137,7 @@ export function FundingSection({
       {ownerTrac != null && <p className="v10-pca-detail-hint">Owner balance: {formatPcaTrac(ownerTrac)} TRAC</p>}
       <div className="v10-pca-detail-form">
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           inputMode="decimal"
           value={topUp}
@@ -159,7 +159,7 @@ export function FundingSection({
       </div>
       <ActionFeedback state={fund} explorer={explorer} onRecheck={refresh} />
       {topUpPending && (
-        <p className="v10-pca-create-warn" data-testid="pca-topup-pending" role="alert">
+        <p className="v10-pca-create-warn ds-card-nested" data-testid="pca-topup-pending" role="alert">
           Top-up transaction <code>{topUpPending.txHash}</code> is pending confirmation. The top-up
           button is disabled while this exact receipt is checked; adding again could lock more TRAC.
           {' '}
@@ -183,7 +183,7 @@ function ActionFeedback({
     // W2 — ambiguous broadcast: role=alert, tx + recheck, NOT a benign "try again".
     const txUrl = explorer && state.warning.txHash ? `${explorer}/tx/${state.warning.txHash}` : undefined;
     return (
-      <p className="v10-pca-create-warn" data-testid="pca-action-warning" role="alert">
+      <p className="v10-pca-create-warn ds-card-nested" data-testid="pca-action-warning" role="alert">
         {state.warning.message}{' '}
         {state.warning.txHash &&
           (txUrl ? (
@@ -197,7 +197,7 @@ function ActionFeedback({
       </p>
     );
   }
-  if (state.error) return <p className="v10-modal-error" role="alert">{state.error}</p>;
+  if (state.error) return <p className="v10-modal-error ds-card-nested" role="alert">{state.error}</p>;
   if (!state.result) return null;
   const txUrl = explorer && state.result.txHash ? `${explorer}/tx/${state.result.txHash}` : undefined;
   return (

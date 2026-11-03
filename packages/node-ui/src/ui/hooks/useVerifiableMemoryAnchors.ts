@@ -52,21 +52,10 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
 const SCHEMA_DESC = 'http://schema.org/description';
 
-/** One receipted assertion, as drawn in the VM graph. */
-export interface PublishAnchor {
-  opId: string;        // publish transaction hash
-  opUri: string;       // assertion URI
-  agents: string[];    // distinct DIDs that published it
-  roots: string[];     // member entities of the assertion
-  /** ISO timestamp of the on-chain finalize, or null when the receipt has
-   *  none (older receipts, or a finalize not yet recorded). */
-  publishedAt: string | null;
-  subGraph?: string;   // sub-graph slug (from the graph URI)
-}
-
 export interface VerifiableMemoryAnchorsResult {
-  /** Every anchor we know about. Useful for legends / ledgers. */
-  anchors: PublishAnchor[];
+  /** Every receipt we know about, newest first (undated last). Useful for
+   *  legends / ledgers. */
+  anchors: VmReceipt[];
   /** Synthetic triples to merge into the RdfGraph input, already filtered
    *  to the subset of anchors whose roots are visible in the current layer
    *  (see `visibleEntityUris` argument). */
@@ -76,10 +65,10 @@ export interface VerifiableMemoryAnchorsResult {
 }
 
 
-/** Short label for an anchor: `tx mo3e0z…` + relative time if we can derive it. */
-function anchorLabel(a: PublishAnchor): string {
-  const short = a.opId.slice(0, 10);
-  return a.publishedAt ? `anchor ${short} · ${a.publishedAt.slice(11, 16)}UTC` : `anchor ${short}`;
+/** Short label for an anchor: `tx mo3e0z…` + finalize time when known. */
+function anchorLabel(r: VmReceipt): string {
+  const short = r.tx.slice(0, 10);
+  return r.finalizedAt ? `anchor ${short} · ${r.finalizedAt.slice(11, 16)}UTC` : `anchor ${short}`;
 }
 
 
@@ -95,49 +84,48 @@ function agentLabel(agentId: string): string {
   return agentId;
 }
 
-/** One anchor per receipt, newest first; receipts without a finalize time
- *  go last. Exported for tests. */
-export function anchorsFromReceipts(receipts: readonly VmReceipt[]): PublishAnchor[] {
-  return receipts
-    .map(r => ({ opId: r.tx, opUri: r.assertion, agents: [...r.signers], roots: [...r.members], publishedAt: r.finalizedAt, subGraph: r.subGraph }))
-    .sort((x, y) => (y.publishedAt ?? '').localeCompare(x.publishedAt ?? ''));
+/** Receipts newest first; receipts without a finalize time go last.
+ *  Sorts a copy. Exported for tests. */
+export function newestFirst(receipts: readonly VmReceipt[]): VmReceipt[] {
+  return [...receipts].sort((x, y) => (y.finalizedAt ?? '').localeCompare(x.finalizedAt ?? ''));
 }
 
 /** Synthetic anchor / agent triples for the graph. Exported for tests. */
 export function buildDecorationTriples(
-  anchors: PublishAnchor[],
+  receipts: readonly VmReceipt[],
   visibleEntityUris: Set<string> | null,
 ): Triple[] {
   const out: Triple[] = [];
   const seenAgents = new Set<string>();
 
-  for (const a of anchors) {
+  for (const r of receipts) {
     // If we know which entities the graph is currently rendering (VM view),
     // restrict the anchor's edges to roots that will actually show up as
     // nodes — otherwise we end up with orphan anchor hubs floating next to
     // the graph, connected to roots that live only in SWM.
-    // Members come from the seal rows; entities namespaced under the
-    // assertion URI belong to it too (same rule as the receipt hook).
+    // Members come from the seal rows and the per-KA graph; entities
+    // namespaced under the assertion URI belong to it too (same rule as the
+    // receipt summary).
     const visibleRoots = visibleEntityUris
-      ? [...new Set([...a.roots.filter(r => visibleEntityUris.has(r)), ...[...visibleEntityUris].filter(u => u !== a.opUri && isAtOrUnder(u, a.opUri))])]
-      : a.roots;
+      ? [...new Set([...r.members.filter(m => visibleEntityUris.has(m)), ...[...visibleEntityUris].filter(u => u !== r.assertion && isAtOrUnder(u, r.assertion))])]
+      : r.members;
     if (visibleRoots.length === 0) continue;
 
-    const anchorUri = `urn:dkg:viz:anchor:${a.opId}`;
+    const anchorUri = `urn:dkg:viz:anchor:${r.tx}`;
     // Anchor node typing + label so RdfGraph can render it with our viz colors.
-    out.push({ subject: anchorUri, predicate: RDF_TYPE, object: VIZ_ANCHOR_TYPE, subGraph: a.subGraph });
-    out.push({ subject: anchorUri, predicate: SCHEMA_NAME, object: `"${anchorLabel(a)}"`, subGraph: a.subGraph });
+    out.push({ subject: anchorUri, predicate: RDF_TYPE, object: VIZ_ANCHOR_TYPE, subGraph: r.subGraph });
+    out.push({ subject: anchorUri, predicate: SCHEMA_NAME, object: `"${anchorLabel(r)}"`, subGraph: r.subGraph });
     out.push({
       subject: anchorUri,
       predicate: SCHEMA_DESC,
-      object: `"Published ${a.roots.length} KA${a.roots.length === 1 ? '' : 's'}${a.publishedAt ? ` · ${a.publishedAt}` : ' · finalize time unknown'}"`,
-      subGraph: a.subGraph,
+      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · ${r.finalizedAt}` : ' · finalize time unknown'}"`,
+      subGraph: r.subGraph,
     });
 
     // anchor ← anchoredIn ← entity  (we model the edge outward-from-entity
     // so it reads `<decision> anchored-in <anchor>` in graph hover).
     for (const root of visibleRoots) {
-      out.push({ subject: root, predicate: VIZ_PRED_ANCHORED_IN, object: anchorUri, subGraph: a.subGraph });
+      out.push({ subject: root, predicate: VIZ_PRED_ANCHORED_IN, object: anchorUri, subGraph: r.subGraph });
       // A per-entity consensus literal — picked up by the entity card / hover.
       // We only know 1 signer in the current devnet (minimumRequiredSignatures=1)
       // so we render 1-of-1. A production publish with a quorum would list
@@ -145,23 +133,23 @@ export function buildDecorationTriples(
       out.push({
         subject: root,
         predicate: VIZ_PRED_CONSENSUS,
-        object: `"${a.agents.length}-of-${a.agents.length}"`,
-        subGraph: a.subGraph,
+        object: `"${r.signers.length}-of-${r.signers.length}"`,
+        subGraph: r.subGraph,
       });
     }
 
     // Agent nodes — dedupe so we don't emit 50 copies of the same DID.
-    for (const agentRaw of a.agents) {
+    for (const agentRaw of r.signers) {
       const agent = agentRaw.startsWith('did:') || agentRaw.startsWith('12D3')
         ? agentRaw
         : `did:dkg:agent:${agentRaw}`;
       const agentUri = `urn:dkg:viz:agent:${encodeURIComponent(agent)}`;
-      out.push({ subject: anchorUri, predicate: VIZ_PRED_SIGNED_BY, object: agentUri, subGraph: a.subGraph });
+      out.push({ subject: anchorUri, predicate: VIZ_PRED_SIGNED_BY, object: agentUri, subGraph: r.subGraph });
       if (!seenAgents.has(agentUri)) {
         seenAgents.add(agentUri);
-        out.push({ subject: agentUri, predicate: RDF_TYPE, object: VIZ_AGENT_TYPE, subGraph: a.subGraph });
-        out.push({ subject: agentUri, predicate: SCHEMA_NAME, object: `"${agentLabel(agent)}"`, subGraph: a.subGraph });
-        out.push({ subject: agentUri, predicate: SCHEMA_DESC, object: `"${agent}"`, subGraph: a.subGraph });
+        out.push({ subject: agentUri, predicate: RDF_TYPE, object: VIZ_AGENT_TYPE, subGraph: r.subGraph });
+        out.push({ subject: agentUri, predicate: SCHEMA_NAME, object: `"${agentLabel(agent)}"`, subGraph: r.subGraph });
+        out.push({ subject: agentUri, predicate: SCHEMA_DESC, object: `"${agent}"`, subGraph: r.subGraph });
       }
     }
   }
@@ -173,7 +161,7 @@ export function useVerifiableMemoryAnchors(
   visibleEntityUris?: Set<string> | Iterable<string>,
 ): VerifiableMemoryAnchorsResult {
   const { receipts, loading, error } = useVmReceipts(contextGraphId);
-  const anchors = useMemo(() => (receipts ? anchorsFromReceipts(receipts) : []), [receipts]);
+  const anchors = useMemo(() => (receipts ? newestFirst(receipts) : []), [receipts]);
 
   // Normalise visibleEntityUris into a stable Set whose identity only
   // changes when the membership changes. We serialise to a sorted join

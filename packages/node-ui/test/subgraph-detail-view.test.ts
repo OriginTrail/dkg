@@ -13,6 +13,9 @@ import { graphPalette } from '../src/ui/graph-palette.js';
 const TRUST_COLORS = trustColors(graphPalette('dark'));
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+// The VM graph's receipts reload on node events; happy-dom has no EventSource.
+class StubEventSource { addEventListener() {} close() {} onerror: (() => void) | null = null; }
+vi.stubGlobal('EventSource', StubEventSource);
 
 vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
   const React = await import('react');

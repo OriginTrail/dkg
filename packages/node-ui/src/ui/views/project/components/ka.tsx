@@ -456,9 +456,9 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
         {/* Left pane: Content / Triples / Graph */}
         <div className="v10-ka-left">
           <div className="v10-content-tabs" style={{ margin: '0 -20px', padding: '0 20px', background: 'transparent' }}>
-            <button className={`v10-content-tab ${pane === 'content' ? 'active' : ''}`} onClick={() => setPane('content')}>Content</button>
-            <button className={`v10-content-tab ${pane === 'triples' ? 'active' : ''}`} onClick={() => setPane('triples')}>Triples</button>
-            <button className={`v10-content-tab ${pane === 'graph' ? 'active' : ''}`} onClick={() => setPane('graph')}>Graph</button>
+            <button className={`v10-content-tab ds-tab ${pane === 'content' ? 'active' : ''}`} onClick={() => setPane('content')}>Content</button>
+            <button className={`v10-content-tab ds-tab ${pane === 'triples' ? 'active' : ''}`} onClick={() => setPane('triples')}>Triples</button>
+            <button className={`v10-content-tab ds-tab ${pane === 'graph' ? 'active' : ''}`} onClick={() => setPane('graph')}>Graph</button>
           </div>
 
           {pane === 'content' && (

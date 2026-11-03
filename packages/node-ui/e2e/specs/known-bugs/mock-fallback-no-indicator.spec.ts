@@ -4,7 +4,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { fetchApiInPage } from '../../helpers/page-api.js';
-import { HeaderPage } from '../../pages/header.po.js';
+import { LeftPanelPage } from '../../pages/left-panel.po.js';
 import { SettingsPage } from '../../pages/settings.po.js';
 
 test.describe('unavailable node recovery', () => {
@@ -75,7 +75,7 @@ test.describe('unavailable node recovery', () => {
     await expect(page.locator('.v10-app-body')).toBeVisible();
     await expect(page.getByText(/mock-node-agent|my-dkg-node/i)).toHaveCount(0);
 
-    await new HeaderPage(page).openSettings();
+    await new LeftPanelPage(page).openSettings();
     const settings = new SettingsPage(page);
     await settings.waitForLoaded();
     await settings.waitForIdentityLoaded();

@@ -21,7 +21,6 @@
   padding: 40px 0;
   text-align: center;
   border: 1px dashed var(--border-subtle);
-  border-radius: var(--radius-nested);
 }
 .v10-memstack-table {
   display: flex; flex-direction: column;
@@ -92,7 +91,6 @@
 .v10-memstack-cell {
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 12px;
-  border-radius: var(--radius-nested);
   border: 1px solid color-mix(in srgb, var(--cell-color, #64748b) 20%, var(--border-subtle));
   background: color-mix(in srgb, var(--cell-color, #64748b) 3%, transparent);
   min-height: 130px;
@@ -183,7 +181,6 @@
 .v10-vm-identity {
   margin-bottom: 16px;
   padding: 12px 14px;
-  border-radius: var(--radius-card);
   background: var(--layer-verified-bg);
   border: 1px solid var(--layer-verified-border);
   display: flex; flex-direction: column; gap: 8px;

@@ -153,7 +153,7 @@ export function PublishingWalletsSection({
             </p>
           </>
         )}
-        {removeState.error && <p className="v10-modal-error" role="alert">{removeState.error}</p>}
+        {removeState.error && <p className="v10-modal-error ds-card-nested" role="alert">{removeState.error}</p>}
         {/* D2 (#1357) — surface the deregister success (was a dead state). */}
         {removeState.result && (
           <p className="v10-pca-detail-result" role="status" data-testid="pca-remove-result">{removeState.result.message}</p>

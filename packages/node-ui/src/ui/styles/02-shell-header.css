@@ -32,9 +32,7 @@
 .v10-token-prompt-input {
   flex: 0 1 280px;
   min-width: 160px;
-  font-size: 12px;
   padding: 3px 8px;
-  border-radius: var(--radius-control);
   color: var(--text-primary, inherit);
   background: var(--bg-surface, transparent);
   border: 1px solid rgba(251, 191, 36, 0.6);
@@ -202,7 +200,6 @@
   flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-nested);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
   z-index: 200;
   overflow: hidden;

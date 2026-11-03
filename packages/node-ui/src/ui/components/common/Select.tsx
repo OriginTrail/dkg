@@ -188,7 +188,7 @@ export function Select({
       <button
         ref={triggerRef}
         type="button"
-        className="v10-select-trigger"
+        className="v10-select-trigger ds-input"
         onClick={() => !disabled && setOpen((o) => !o)}
         onKeyDown={onTriggerKeyDown}
         disabled={disabled}
@@ -206,7 +206,7 @@ export function Select({
       {open && position && createPortal(
         <ul
           ref={menuRef}
-          className={`v10-select-menu v10-select-menu-${position.placement}`}
+          className={`v10-select-menu ds-card-nested v10-select-menu-${position.placement}`}
           role="listbox"
           tabIndex={-1}
           onKeyDown={onMenuKeyDown}

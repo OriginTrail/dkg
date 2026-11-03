@@ -22,7 +22,7 @@ export function PcaSettingsCard() {
   const tracked = accounts.length;
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header">
         <h2 className="card-title">Publisher Conviction</h2>
       </div>

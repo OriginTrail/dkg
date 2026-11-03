@@ -12,7 +12,6 @@
 .v10-mlv-desc { font-size: 12px; line-height: 1.4; color: var(--text-secondary); margin: 0; }
 .v10-vm-search-panel {
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-card);
   background: var(--bg-surface);
   padding: 12px;
   margin-bottom: 16px;
@@ -28,7 +27,7 @@
 .v10-vm-search-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
 .v10-vm-search-toggle {
   padding: 7px 10px;
-  border-radius: var(--radius-nested);
+  border-radius: var(--radius-control);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   font-size: 11px;
@@ -44,23 +43,19 @@
 }
 .v10-vm-search-select {
   min-width: 108px;
-  padding: 8px 12px;
-  border-radius: var(--radius-control);
+  padding: 0 12px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-size: 12px;
 }
 .v10-vm-search-select:focus { outline: none; border-color: var(--border-strong); }
 .v10-mlv-query-bar { display: flex; gap: 8px; margin-bottom: 16px; }
 .v10-mlv-query-input {
   flex: 1;
-  padding: 8px 12px;
+  padding: 0 12px;
   font-family: var(--font-mono);
-  font-size: 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
   color: var(--text-primary);
 }
 .v10-mlv-query-input:focus { border-color: var(--border-strong); }
@@ -78,7 +73,6 @@
 }
 .v10-cg-query-zone {
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-nested);
   background: var(--bg-panel);
   padding: 16px;
 }
@@ -168,7 +162,6 @@
   text-align: left;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
   background: var(--bg-surface);
   color: var(--text-secondary);
 }
@@ -213,7 +206,6 @@
   padding: 10px 12px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
 }
 .v10-cg-query-parameter {
   display: flex;
@@ -236,11 +228,9 @@
   resize: vertical;
   padding: 10px 12px;
   font-family: var(--font-mono);
-  font-size: 12px;
   line-height: 1.5;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
   color: var(--text-primary);
 }
 .v10-cg-query-textarea:focus { border-color: var(--border-strong); outline: none; }
@@ -257,7 +247,6 @@
   padding: 12px;
   margin: -4px 0 16px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
   background: var(--bg-panel);
 }
 .v10-cg-query-save-field {
@@ -284,7 +273,7 @@
 .v10-mlv-status { font-size: 12px; color: var(--text-tertiary); padding: 8px 0; }
 .v10-mlv-empty { padding: 32px 0; text-align: center; }
 .v10-mlv-empty p { font-size: 12px; color: var(--text-tertiary); }
-.v10-mlv-table-wrap { overflow-x: auto; border: 1px solid var(--border-default); border-radius: var(--radius-nested); }
+.v10-mlv-table-wrap { overflow-x: auto; border: 1px solid var(--border-default); }
 .v10-cg-query-results {
   flex: 1 1 auto;
   min-height: 220px;
@@ -345,7 +334,7 @@
 }
 
 /* ── Assertion List (WM → SWM) ── */
-.v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); border-radius: var(--radius-nested); overflow: hidden; }
+.v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden; }
 .v10-assertion-list-loading { font-size: 12px; color: var(--text-tertiary); padding: 8px 0; }
 .v10-assertion-list-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-default); }
 .v10-assertion-list-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
@@ -377,7 +366,7 @@
 
 /* ── Publish Panel (SWM → VM) ── */
 .v10-publish-panel {
-  margin-bottom: 16px; border: 1px solid var(--border-default); border-radius: var(--radius-nested); overflow: hidden;
+  margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden;
 }
 .v10-publish-panel-header {
   display: flex; align-items: center; justify-content: space-between;

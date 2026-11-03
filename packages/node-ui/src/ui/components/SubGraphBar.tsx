@@ -329,7 +329,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
       <div className="v10-subgraph-bar-label">Subgraphs</div>
       <button
         type="button"
-        className={`v10-subgraph-chip${selected === null ? ' active' : ''}`}
+        className={`v10-subgraph-chip ds-filter${selected === null ? ' active' : ''}`}
         /* All chip clears the selection — no originatingLayer
            seed because the All view shows daemon-wide totals. */
         onClick={() => onSelect(null)}
@@ -346,7 +346,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
           <button
             key={sg.slug}
             type="button"
-            className={`v10-subgraph-chip${selected === sg.slug ? ' active' : ''}${badge ? ' has-badge' : ''}`}
+            className={`v10-subgraph-chip ds-filter${selected === sg.slug ? ' active' : ''}${badge ? ' has-badge' : ''}`}
             /* #9 polish — forward the bar's `layer` prop as the
                originating layer so the detail view's
                `enabledLayers` is seeded to match the scope the
@@ -381,7 +381,7 @@ export const SubGraphBar: React.FC<SubGraphBarProps> = ({ contextGraphId, profil
         return (
           <button
             type="button"
-            className={`v10-subgraph-chip v10-subgraph-chip-root${isActive ? ' active' : ''}`}
+            className={`v10-subgraph-chip ds-filter v10-subgraph-chip-root${isActive ? ' active' : ''}`}
             data-active={isActive}
             data-count={displayCount}
             /* #9 polish — Root chip carries the originating layer

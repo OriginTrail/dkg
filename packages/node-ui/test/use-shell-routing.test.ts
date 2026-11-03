@@ -11,6 +11,7 @@ import {
   useShellRouting,
 } from '../src/ui/hooks/useShellRouting.js';
 import { useTabsStore } from '../src/ui/stores/tabs.js';
+import { useProjectsStore } from '../src/ui/stores/projects.js';
 
 const mountedRoots: Root[] = [];
 const mountedContainers: HTMLElement[] = [];
@@ -59,6 +60,7 @@ function resetTabsStore() {
     tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }],
     activeTabId: 'dashboard',
   });
+  useProjectsStore.setState({ activeProjectId: null });
 }
 
 describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
@@ -315,6 +317,53 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       await act(async () => { nav.current!(-1); });
       await settle();
       expect(ref.current).toBe('/settings');
+    });
+  });
+
+  // The agent panel's chat and attachments target `activeProjectId`; every
+  // way of reaching a graph tab must set it like the sidebar does.
+  describe('the active graph follows the active tab', () => {
+    async function settle() {
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    }
+    const activeGraph = () => useProjectsStore.getState().activeProjectId;
+
+    it('refreshing or bookmarking a graph address sets the active graph', async () => {
+      const ref = { current: '' };
+      mountAtPath('/graph/baz', ref);
+      await settle();
+      expect(activeGraph()).toBe('baz');
+    });
+
+    it('Back and Forward between graphs keep the active graph on the graph shown', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/graph/a', ref, nav);
+      await settle();
+      await act(async () => { useTabsStore.getState().openTab({ id: 'project:b', label: 'B', closable: true }); });
+      await settle();
+      expect([ref.current, activeGraph()]).toEqual(['/graph/b', 'b']);
+
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect([ref.current, useTabsStore.getState().activeTabId, activeGraph()]).toEqual(['/graph/a', 'project:a', 'a']);
+
+      await act(async () => { nav.current!(1); });
+      await settle();
+      expect([ref.current, activeGraph()]).toEqual(['/graph/b', 'b']);
+    });
+
+    it('the dashboard clears it and other places leave it as it was', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/graph/a', ref, nav);
+      await settle();
+      await act(async () => { useTabsStore.getState().openTab({ id: 'settings', label: 'Settings', closable: true }); });
+      await settle();
+      expect(activeGraph()).toBe('a');
+      await act(async () => { useTabsStore.getState().setActiveTab('dashboard'); });
+      await settle();
+      expect([ref.current, activeGraph()]).toEqual(['/', null]);
     });
   });
 });

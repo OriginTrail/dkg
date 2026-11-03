@@ -49,8 +49,7 @@
     "radius": 1
   },
   "styles/06-right-composer.css": {
-    "colour": 5,
-    "radius": 2
+    "colour": 5
   },
   "styles/07-bottom-panel.css": {
     "colour": 2
@@ -112,18 +111,13 @@
     "colour": 2
   },
   "styles/26-pca-followup-overrides.css": {
-    "colour": 2,
-    "radius": 1
-  },
-  "styles/26-pca-modals-detail.css": {
-    "radius": 1
+    "colour": 2
   },
   "styles/26-pca-primitives.css": {
     "colour": 3
   },
   "styles/26-wallet-primitives.css": {
-    "colour": 2,
-    "radius": 1
+    "colour": 2
   },
   "styles/27-ds-components.css": {
     "colour": 2,

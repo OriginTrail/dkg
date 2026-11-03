@@ -63,7 +63,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
   if (error || !snapshot) {
     return (
       <div className="v10-pca-detail">
-        <div className="card">
+        <div className="card ds-card">
           <div className="card-body v10-pca-card-error">
             <p>Couldn’t load PCA #{accountId}.</p>
             <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
@@ -193,7 +193,7 @@ function DetailBody({
         <HealthChip state={health} />
       </div>
 
-      <div className="v10-modal-tip" role="status">
+      <div className="v10-modal-tip ds-card-nested" role="status">
         {walletSurfaceCopy}
         {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
@@ -211,9 +211,9 @@ function DetailBody({
         // load", no Retry (the balances are auto-fetching); owner controls stay disabled for the
         // brief window. FAILED/EXTERNAL/wrong-network keep the warning box (+ Retry when unreadable).
         walletsLoading ? (
-          <div className="v10-modal-tip" role="status">{ownerOnlyReason}</div>
+          <div className="v10-modal-tip ds-card-nested" role="status">{ownerOnlyReason}</div>
         ) : (
-          <div className="v10-modal-warning" role="status">
+          <div className="v10-modal-warning ds-card-nested" role="status">
             ⓘ {ownerOnlyReason}{' '}
             {walletsUnreadable ? (
               <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}>Retry</button>

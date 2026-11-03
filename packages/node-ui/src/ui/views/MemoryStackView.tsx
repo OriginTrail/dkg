@@ -72,7 +72,7 @@ export function MemoryStackView() {
       </div>}
       {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
-        <div className="v10-memstack-empty">
+        <div className="v10-memstack-empty ds-card-nested">
           No visible context graphs. Create one from the sidebar or un-hide dismissed ones.
         </div>
       )) : (
@@ -215,7 +215,7 @@ function LayerCell({
   const isEmpty = entityCount === 0;
   return (
     <div
-      className={`v10-memstack-cell${isEmpty ? ' empty' : ''}`}
+      className={`v10-memstack-cell ds-card-nested${isEmpty ? ' empty' : ''}`}
       style={{ '--cell-color': color } as React.CSSProperties}
     >
       <div className="v10-memstack-cell-stats">

@@ -66,7 +66,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   };
 
   return (
-    <div className="v10-vm-identity">
+    <div className="v10-vm-identity ds-card">
       <div className="v10-vm-identity-head">
         <span className="v10-vm-identity-glyph">◉</span>
         <span className="v10-vm-identity-title">On-chain identity</span>

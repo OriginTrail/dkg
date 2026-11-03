@@ -298,8 +298,8 @@ export function ConvictionOverview() {
 
       {loading && accounts.length === 0 ? (
         <div className="v10-pca-card-grid">
-          <div className="card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
-          <div className="card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
+          <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
+          <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
         </div>
       ) : (
         <>
@@ -587,7 +587,7 @@ function TrackByIdDisclosure({ onTrack }: { onTrack: (id: string) => void }) {
         <div id={panelId} className="v10-pca-track-panel">
           <input
             type="text"
-            className="v10-form-input"
+            className="v10-form-input ds-input"
             data-testid="pca-track-input"
             value={value}
             onChange={(e) => setValue(e.target.value)}

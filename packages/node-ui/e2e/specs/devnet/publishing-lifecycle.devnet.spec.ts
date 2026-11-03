@@ -21,9 +21,9 @@ test.describe('Publishing lifecycle (devnet)', () => {
     expect(names.length).toBeGreaterThan(0);
   });
 
-  test('operations view shows publish operations after devnet activity', async ({ shell, header, page }) => {
+  test('operations view shows publish operations after devnet activity', async ({ shell, leftPanel, page }) => {
     await shell.goto();
-    await header.openObservability();
+    await leftPanel.openObservability();
     await expect(page.getByRole('heading', { name: 'Observability' })).toBeVisible();
     // Devnet may or may not have operations — assert the view loads without crash.
     await expect(page.locator('.v10-me-error')).toBeHidden();

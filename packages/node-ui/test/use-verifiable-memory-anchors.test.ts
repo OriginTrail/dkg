@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   useVerifiableMemoryAnchors,
-  anchorsFromReceipts,
+  newestFirst,
   buildDecorationTriples,
   VIZ_ANCHOR_TYPE,
   VIZ_PRED_ANCHORED_IN,
@@ -13,11 +13,16 @@ import {
   VIZ_AGENT_TYPE,
   type VerifiableMemoryAnchorsResult,
 } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
-import { parseVmReceiptRows } from '../src/ui/hooks/useVmReceipts.js';
+import { parseVmReceiptRows, refreshVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
 
-const anchorsFromReceiptRows = (rows: Array<Record<string, unknown>>, cg: string) => anchorsFromReceipts(parseVmReceiptRows(rows, cg));
+const anchorsFromReceiptRows = (rows: Array<Record<string, unknown>>, cg: string) => newestFirst(parseVmReceiptRows(rows, cg));
+const AUTHOR = '0x' + 'ab'.repeat(20);
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+// useVmReceipts reloads on node events; happy-dom has no EventSource.
+class StubEventSource { addEventListener() {} close() {} onerror: (() => void) | null = null; }
+vi.stubGlobal('EventSource', StubEventSource);
 
 // C10: anchors come from real on-chain publish receipts in the CG's _meta,
 // not from WorkspaceOperation share records.
@@ -89,7 +94,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
 
     const r = result as unknown as VerifiableMemoryAnchorsResult;
     expect(r.error).toBeNull();
-    expect(r.anchors.map(a => [a.opId, a.publishedAt])).toEqual([
+    expect(r.anchors.map(a => [a.tx, a.finalizedAt])).toEqual([
       ['0x9f2c7a1d', '2026-10-31T10:00:00.000Z'],
       ['0x77', '2026-10-29T10:00:00.000Z'],
       ['0x41ab', null],
@@ -110,6 +115,61 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
     ]);
     expect(t.filter(x => x.object === VIZ_AGENT_TYPE)).toHaveLength(2);
   });
+
+  it('anchors entities of a graph-scoped KA through its per-KA graph', async () => {
+    const A = `did:dkg:context-graph:cg-1/assertion/${AUTHOR}/note`;
+    const KA_GRAPH = `did:dkg:context-graph:cg-1/_verifiable_memory/${AUTHOR}/7`;
+    vi.mocked(fetch).mockImplementation(async (_url: any, init: any) => {
+      const sparql = String(JSON.parse(String(init?.body ?? '{}')).sparql ?? '');
+      const bindings = sparql.includes('VALUES ?g')
+        ? [{ g: KA_GRAPH, member: 'urn:member-one:note' }]
+        // A v2 seal: no member rows, the content lives in the KA graph.
+        : [{ asrt: A, tx: '0x5555', kaUal: `did:dkg:hardhat:31337/${AUTHOR}/7`, finalizedAt: '"2026-10-31T10:00:00Z"' }];
+      return { ok: true, status: 200, json: async () => ({ result: { bindings } }) } as any;
+    });
+    let result: VerifiableMemoryAnchorsResult | null = null;
+    const visible = new Set(['urn:member-one:note']);
+    function Probe() {
+      result = useVerifiableMemoryAnchors('cg-1', visible);
+      return null;
+    }
+    await act(async () => { root.render(React.createElement(Probe)); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const r = result as unknown as VerifiableMemoryAnchorsResult;
+    const membershipCall = vi.mocked(fetch).mock.calls.map(c => JSON.parse(String((c[1] as any)?.body ?? '{}')).sparql as string).find(q => q.includes('VALUES ?g'));
+    expect(membershipCall).toContain(`<${KA_GRAPH}>`);
+    expect(r.anchors[0]).toMatchObject({ tx: '0x5555', kaGraph: KA_GRAPH, members: ['urn:member-one:note'] });
+    expect(r.decorationTriples.filter(x => x.predicate === VIZ_PRED_ANCHORED_IN).map(x => `${x.subject} → ${x.object}`))
+      .toEqual(['urn:member-one:note → urn:dkg:viz:anchor:0x5555']);
+  });
+
+  it('reloads receipts on refreshVmReceipts without remounting', async () => {
+    let published = false;
+    vi.mocked(fetch).mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: { bindings: published
+        ? [{ asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/new', tx: '0x6666', member: 'urn:x:new' }]
+        : [] } }),
+    } as any));
+    let result: VerifiableMemoryAnchorsResult | null = null;
+    function Probe() {
+      result = useVerifiableMemoryAnchors('cg-1');
+      return null;
+    }
+    await act(async () => { root.render(React.createElement(Probe)); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect((result as unknown as VerifiableMemoryAnchorsResult).anchors).toEqual([]);
+
+    published = true;
+    refreshVmReceipts('cg-2'); // another graph: nothing reloads
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect((result as unknown as VerifiableMemoryAnchorsResult).anchors).toEqual([]);
+    await act(async () => { refreshVmReceipts('cg-1'); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect((result as unknown as VerifiableMemoryAnchorsResult).anchors.map(a => a.tx)).toEqual(['0x6666']);
+  });
 });
 
 describe('anchors from receipts', () => {
@@ -122,8 +182,8 @@ describe('anchors from receipts', () => {
       { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/no-tx' },
     ], 'cg-1');
     expect(anchors).toHaveLength(2);
-    expect(anchors[0]).toMatchObject({ opId: '0x9f2c7a1d', roots: ['urn:x:a', 'urn:x:b'], agents: ['did:dkg:agent:0x1'], subGraph: 'research' });
-    expect(anchors[1]).toMatchObject({ opId: '0x41ab', agents: ['did:dkg:agent:0xdef'], subGraph: undefined });
+    expect(anchors[0]).toMatchObject({ tx: '0x9f2c7a1d', members: ['urn:x:a', 'urn:x:b'], signers: ['did:dkg:agent:0x1'], subGraph: 'research' });
+    expect(anchors[1]).toMatchObject({ tx: '0x41ab', signers: ['did:dkg:agent:0xdef'], subGraph: undefined });
   });
 });
 
@@ -136,8 +196,8 @@ describe('receipts without a finalize time', () => {
 
   it('keeps the anchor with an unknown time and sorts it after dated ones', () => {
     const anchors = anchorsFromReceiptRows(rows, 'cg-1');
-    expect(anchors.map(a => a.opId)).toEqual(['0x3333', '0x1111', '0x2222']);
-    expect(anchors.map(a => a.publishedAt)).toEqual(['2026-10-31T10:00:00.000Z', null, null]);
+    expect(anchors.map(a => a.tx)).toEqual(['0x3333', '0x1111', '0x2222']);
+    expect(anchors.map(a => a.finalizedAt)).toEqual(['2026-10-31T10:00:00.000Z', null, null]);
   });
 
   it('builds decorations without throwing and says the time is unknown', () => {

@@ -12,7 +12,6 @@
   color: #f87171;
   background: rgba(248,113,113,0.08);
   border: 1px solid rgba(248,113,113,0.25);
-  border-radius: var(--radius-nested);
 }
 /* When the error is specifically "LLM not configured", we upgrade to a
    call-to-action card: amber tone (info, not error), a head row, and a
@@ -68,7 +67,6 @@
   padding: 12px 14px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-card);
   min-width: 0;
 }
 .v10-genui-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; flex-wrap: wrap; }
@@ -88,7 +86,7 @@
 
 /* Stats */
 .v10-genui-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }
-.v10-genui-stat { padding: 8px 10px; background: var(--bg-elevated); border-radius: var(--radius-nested); display: flex; flex-direction: column; gap: 2px; }
+.v10-genui-stat { padding: 8px 10px; background: var(--bg-elevated); display: flex; flex-direction: column; gap: 2px; }
 .v10-genui-stat-value { font: 600 16px var(--font-mono); color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .v10-genui-stat-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); }
 
@@ -121,13 +119,13 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 .v10-genui-section { display: flex; flex-direction: column; gap: 6px; }
 .v10-genui-section-heading { display: flex; gap: 6px; align-items: baseline; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
 .v10-genui-section-sub { font: 500 11px var(--font-mono); text-transform: none; letter-spacing: 0; }
-.v10-genui-triple-table { border: 1px solid var(--border-subtle); border-radius: var(--radius-nested); overflow: hidden; }
+.v10-genui-triple-table { border: 1px solid var(--border-subtle); overflow: hidden; }
 .v10-genui-triple-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 10px; padding: 6px 10px; font-size: 12px; }
 .v10-genui-triple-row + .v10-genui-triple-row { border-top: 1px solid var(--border-subtle); }
 .v10-genui-triple-predicate { font-family: var(--font-mono); color: var(--text-tertiary); overflow-wrap: anywhere; }
 .v10-genui-triple-object { color: var(--text-primary); overflow-wrap: anywhere; }
 .v10-genui-type-groups { display: flex; flex-direction: column; gap: 8px; }
-.v10-genui-type-group { border: 1px solid var(--border-subtle); border-radius: var(--radius-nested); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.v10-genui-type-group { border: 1px solid var(--border-subtle); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .v10-genui-type-group-head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .v10-genui-type-icon { color: var(--text-tertiary); }
 .v10-genui-type-count { margin-left: auto; font: 500 11px var(--font-mono); color: var(--text-tertiary); }
@@ -140,12 +138,12 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 /* Verifiable Memory provenance panel: the one card that is VM purple */
 .v10-genui-vm-panel {
   display: flex; flex-direction: column; gap: 12px; padding: 12px 14px;
-  background: var(--layer-verified-bg); border: 1px solid var(--layer-verified-border); border-radius: var(--radius-card);
+  background: var(--layer-verified-bg); border: 1px solid var(--layer-verified-border);
 }
 .v10-genui-vm-panel-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .v10-genui-vm-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
 .v10-genui-vm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
-.v10-genui-vm-block { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; background: var(--bg-surface); border-radius: var(--radius-nested); min-width: 0; }
+.v10-genui-vm-block { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; background: var(--bg-surface); min-width: 0; }
 .v10-genui-vm-block-heading { display: flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--text-tertiary); }
 .v10-genui-vm-quorum { font: 600 10px var(--font-mono); color: var(--layer-verified-text); text-transform: none; letter-spacing: 0; }
 .v10-genui-prov-row { display: flex; gap: 8px; font-size: 12px; min-width: 0; }

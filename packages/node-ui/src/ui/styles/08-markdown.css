@@ -113,7 +113,6 @@
      UI-lead Task #66. */
   margin: 8px 0;
   overflow-x: auto;
-  border-radius: var(--radius-nested);
   border: 1px solid var(--border-prominent);
 }
 .v10-md-table {

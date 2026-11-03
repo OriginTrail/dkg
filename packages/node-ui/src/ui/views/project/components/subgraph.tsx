@@ -10,15 +10,14 @@ import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useP
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { SubGraphBar } from '../../../components/SubGraphBar.js';
-import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
-import { trustColors, LAYER_CONFIG, codeClassColors, codePredicateColors, entityAuthorUri, entityMeta, neutraliseBuiltinNamespaces, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
+import { trustColors, LAYER_CONFIG, entityAuthorUri, entityMeta, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
 import { LAYER_VAR } from '../../../layer-colors.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
-import { useLayoutStore } from '../../../stores/layout.js';
+import { subGraphMiniGraphOptions } from './subgraph-mini-graph.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
 // detail (named or Root). The three-sentence intro is non-dismissible —
@@ -694,35 +693,13 @@ export function SubGraphMiniCard({
   // brighter default color (driven by the sub-graph's profile color) so each
   // card reads as a distinct "island" at a glance.
   // Canvas labels follow the app theme (dark palette text was unreadable in light mode).
-  const theme = useLayoutStore(st => st.theme);
-  const miniViewConfig = useMemo(() => ({ name: `sg-mini:${theme}`, palette: theme }), [theme]);
-  const graphOptions = useMemo(() => ({
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: memoryGraphLabels({ minZoomForLabels: 0.8 }), // Keep labels out of the way in the mini view.
-    style: {
-      classColors: codeClassColors(palette),
-      predicateColors: codePredicateColors(palette),
-      namespaceColors: neutraliseBuiltinNamespaces(card.color),
-      // Per-URI tints sit ABOVE classColors / namespaceColors in
-      // the style-engine priority stack — the trust colour wins for
-      // every entity in the card's scope (#3 polish).
-      ...(Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
-      defaultNodeColor: card.color,
-      defaultEdgeColor: palette.neutral.edge,
-      edgeWidth: 1.0,
-      fontSize: 12,
-      gradient: true,
-      gradientIntensity: 0.35,
-    },
-    hexagon: { baseSize: 6, minSize: 5, maxSize: 16, scaleWithDegree: true },
-    focus: { maxNodes: 5000, hops: 999 },
-  }), [card.color, nodeColors]);
+  const miniViewConfig = useMemo(() => ({ name: `sg-mini:${palette.theme}`, palette: palette.theme }), [palette]);
+  const graphOptions = useMemo(() => subGraphMiniGraphOptions(palette, card.color, nodeColors), [palette, card.color, nodeColors]);
 
   const isRoot = variant === 'root';
   return (
     <div
-      className={`v10-sgov-card${isRoot ? ' root' : ''}`}
+      className={`v10-sgov-card ds-card${isRoot ? ' root' : ''}`}
       style={isRoot
         // Root card: chrome falls through to neutral tokens via
         // the `.root` modifier — no per-card color injection.
@@ -892,7 +869,7 @@ export function MiniLayerBar({
             <button
               key={r.key}
               type="button"
-              className={`v10-minibar-chip${active ? '' : ' dim'}${interactive ? ' interactive' : ''}`}
+              className={`v10-minibar-chip${active ? '' : ' dim'}${interactive ? ' interactive ds-filter ds-sm' : ''}`}
               onClick={interactive ? () => onClickLayer!(r.key) : undefined}
               disabled={!interactive}
               title={`${r.label} Memory — ${r.count} entities${interactive ? ' (click to toggle)' : ''}`}
@@ -1681,7 +1658,7 @@ export function SubGraphDetailView({
                       <button
                         key={v}
                         type="button"
-                        className={`v10-subgraph-filter-chip${on ? ' active' : ''}`}
+                        className={`v10-subgraph-filter-chip ds-filter ds-sm${on ? ' active' : ''}`}
                         onClick={() => toggleChip(chip.slug, v)}
                       >
                         {v}
@@ -1703,27 +1680,27 @@ export function SubGraphDetailView({
       <div className="v10-layer-detail-body">
         <div className="v10-layer-expand-tabs">
           <button
-            className={`v10-layer-expand-tab ${selectedTab === 'items' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${selectedTab === 'items' ? 'active' : ''}`}
             onClick={() => setSelectedTab('items')}
           >
             Entities ({filteredEntities.length}{filteredEntities.length !== scopedEntities.length ? ` / ${scopedEntities.length}` : ''})
           </button>
           <button
-            className={`v10-layer-expand-tab ${selectedTab === 'graph' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${selectedTab === 'graph' ? 'active' : ''}`}
             onClick={() => setSelectedTab('graph')}
           >
             Graph
           </button>
           {timelinePredicate && (
             <button
-              className={`v10-layer-expand-tab ${selectedTab === 'timeline' ? 'active' : ''}`}
+              className={`v10-layer-expand-tab ds-tab ${selectedTab === 'timeline' ? 'active' : ''}`}
               onClick={() => setSelectedTab('timeline')}
             >
               Timeline
             </button>
           )}
           <button
-            className={`v10-layer-expand-tab ${selectedTab === 'docs' ? 'active' : ''}`}
+            className={`v10-layer-expand-tab ds-tab ${selectedTab === 'docs' ? 'active' : ''}`}
             onClick={() => setSelectedTab('docs')}
           >
             Documents
@@ -1746,7 +1723,7 @@ export function SubGraphDetailView({
                 <label className="v10-entity-list-sort">
                   <span className="v10-entity-list-sort-label">Sort</span>
                   <select
-                    className="v10-entity-list-sort-select"
+                    className="v10-entity-list-sort-select ds-input ds-sm"
                     value={entitySort}
                     onChange={(e) => setEntitySort(e.target.value as SubGraphEntitySort)}
                     aria-label="Sort entities"

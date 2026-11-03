@@ -112,7 +112,7 @@ function NetworkTelemetrySection() {
   }, [showConsentModal]);
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Network Telemetry</h2></div>
       <div className="card-body">
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
@@ -282,7 +282,7 @@ function LocalDataRetentionSection() {
   const storeBytes = (metrics as any)?.store_bytes ?? null;
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Local Data Retention</h2></div>
       <div className="card-body">
         <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
@@ -440,7 +440,7 @@ function GeneralSettingsTab() {
   return (
     <div className="settings-stack">
       {/* Node Identity */}
-      <section className="card">
+      <section className="card ds-card">
         <div className="card-header"><h2 className="card-title">Node Identity</h2></div>
         <div className="card-body">
           <Field label="Name" value={s?.name ?? '—'} />
@@ -468,7 +468,7 @@ function GeneralSettingsTab() {
       <IdentityWalletsSection blockExplorerUrl={s?.blockExplorerUrl ?? null} />
 
       {/* Blockchain Config */}
-      <section className="card">
+      <section className="card ds-card">
         <div className="card-header"><h2 className="card-title">Blockchain Config</h2></div>
         <div className="card-body">
           <Field label="Chain" value={chainLabel(w?.chainId)} />
@@ -520,7 +520,7 @@ function GeneralSettingsTab() {
       <LocalDataRetentionSection />
 
       {/* Danger Zone (full-width footer; last in the stack) */}
-      <section className="card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
+      <section className="card ds-card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
         <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>

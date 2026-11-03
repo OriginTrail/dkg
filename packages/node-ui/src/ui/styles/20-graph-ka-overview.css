@@ -56,7 +56,6 @@
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-nested);
   background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
   box-shadow: 0 14px 34px -20px rgba(0,0,0,0.8);
 }
@@ -113,7 +112,6 @@
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-card);
   background: var(--bg-panel);
   box-shadow: 0 24px 70px -28px rgba(0,0,0,0.9);
 }
@@ -265,7 +263,6 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   min-height: 320px;
   background: var(--surface-1, rgba(255,255,255,0.02));
   border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
-  border-radius: var(--radius-overlay);
   overflow: hidden;
   transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
@@ -376,6 +373,16 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   display: flex; gap: 4px; flex-wrap: wrap;
   align-items: center;
 }
+.v10-minibar-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: var(--h-badge-sm); padding: 0 6px;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--border-default);
+  color: var(--text-secondary);
+  font-size: var(--fs-micro); font-weight: 600;
+}
+/* Clickable mini-bar chips are filter chips (ds-filter ds-sm). */
+.v10-minibar-chip.interactive { box-shadow: none; border-radius: var(--radius-control); }
 .v10-minibar-chip.dim { opacity: 0.4; }
 .v10-minibar-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 50%;

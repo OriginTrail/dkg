@@ -122,9 +122,7 @@
   background: var(--bg-elevated, #1a1a1a);
   color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xs);
-  padding: 3px 22px 3px 8px;
-  font-size: 11px; font-family: var(--font-mono);
+  padding: 3px 22px 3px 8px; font-family: var(--font-mono);
   cursor: pointer;
   background-image: linear-gradient(45deg, transparent 50%, var(--text-tertiary) 50%),
                     linear-gradient(135deg, var(--text-tertiary) 50%, transparent 50%);
@@ -162,9 +160,9 @@
   font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary);
 }
 .v10-layer-expand-tabs {
-  display: flex; align-items: center; gap: 2px;
+  display: flex; align-items: stretch; gap: 2px;
   padding: 0 10px; border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-panel); height: 28px; min-height: 28px;
+  background: var(--bg-panel); height: var(--h-control-md); min-height: var(--h-control-md);
   flex-shrink: 0;
 }
 .v10-query-catalog-visibility {
@@ -210,17 +208,16 @@
 
 /* ── Content tabs (inside layer views) ── */
 .v10-content-tabs {
-  flex-shrink: 0; display: flex; align-items: center;
+  flex-shrink: 0; display: flex; align-items: stretch;
   border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel);
-  padding: 0 12px; height: 32px; min-height: 32px; gap: 2px;
+  padding: 0 12px; height: var(--h-control-md); min-height: var(--h-control-md); gap: 2px;
 }
 
 /* ── Split-Pane Layout (canvas left | content right) ── */
 
 /* ── Generative Widgets ── */
 .v10-gen-widget {
-  width: 100%; border: 1px solid var(--border-default);
-  border-radius: var(--radius-card); background: var(--bg-surface); overflow: hidden;
+  width: 100%; border: 1px solid var(--border-default); background: var(--bg-surface); overflow: hidden;
   animation: v10SlideUp 0.3s ease;
 }
 @keyframes v10SlideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }

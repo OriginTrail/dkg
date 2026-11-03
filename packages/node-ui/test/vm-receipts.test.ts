@@ -6,12 +6,16 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { parseVmReceiptRows, buildVmReceiptQuery, useVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
+import { parseVmReceiptRows, buildVmReceiptQuery, buildKaGraphMemberQuery, addKaGraphMembers, kaGraphOf, useVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
 import { useVmReceiptSummary } from '../src/ui/hooks/useVmReceiptSummary.js';
 import { useVerifiableMemoryAnchors } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
 import { invalidateQueryCache } from '../src/ui/query-api.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+// useVmReceipts reloads on node events; happy-dom has no EventSource.
+class StubEventSource { addEventListener() {} close() {} onerror: (() => void) | null = null; }
+vi.stubGlobal('EventSource', StubEventSource);
 
 const CG = 'cg-1';
 const A = `did:dkg:context-graph:${CG}/assertion/0xabc/notes`;
@@ -97,7 +101,7 @@ describe('useVmReceipts', () => {
     const body = JSON.parse(String((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body));
     expect(body).toMatchObject({ contextGraphId: CG, sparql: buildVmReceiptQuery(CG) });
     expect([...seen.summary.members]).toEqual(['urn:x:a']);
-    expect(seen.anchors).toEqual([expect.objectContaining({ opId: '0x9f2c', opUri: A, roots: ['urn:x:a'], agents: ['did:dkg:agent:0x1'] })]);
+    expect(seen.anchors).toEqual([expect.objectContaining({ tx: '0x9f2c', assertion: A, members: ['urn:x:a'], signers: ['did:dkg:agent:0x1'] })]);
   });
 
   it('reports loading, then an error without receipts when the query fails', async () => {
@@ -125,5 +129,31 @@ describe('useVmReceipts', () => {
     await act(async () => { root.render(React.createElement(Probe, { id: 'x> } DROP' })); });
     await settle();
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+});
+
+describe('graph-scoped KA membership', () => {
+  const AUTHOR = '0x' + 'Ab'.repeat(20);
+  const lower = AUTHOR.toLowerCase();
+
+  it('derives the per-KA Verifiable Memory graph from dkg:kaUal', () => {
+    expect(kaGraphOf(`did:dkg:base:8453/${AUTHOR}/12`, CG)).toBe(`did:dkg:context-graph:${CG}/_verifiable_memory/${lower}/12`);
+    expect(kaGraphOf(`did:dkg:base:8453/${AUTHOR}/12`, CG, 'research')).toBe(`did:dkg:context-graph:${CG}/research/_verifiable_memory/${lower}/12`);
+    expect(kaGraphOf('did:dkg:base:8453/not-an-address/12', CG)).toBeUndefined();
+    expect(kaGraphOf(`did:dkg:base:8453/${AUTHOR}/12> } DROP ALL {`, CG)).toBeUndefined();
+  });
+
+  it('reads members of KA graphs with a VALUES-bounded query and adds them to the receipt', () => {
+    const [r] = parseVmReceiptRows([{ asrt: A, tx: '0x1', kaUal: `did:dkg:base:8453/${AUTHOR}/12` }], CG);
+    expect(r.members).toEqual([]);
+    const query = buildKaGraphMemberQuery([r.kaGraph!, 'bad graph']);
+    expect(query).toContain(`VALUES ?g { <${r.kaGraph}> }`);
+    expect(query).toContain('LIMIT');
+    const [withMembers] = addKaGraphMembers([r], [
+      { g: r.kaGraph, member: 'urn:x:one' },
+      { g: r.kaGraph, member: 'urn:x:one' },
+      { g: 'did:dkg:context-graph:other/_verifiable_memory/0x1/1', member: 'urn:x:elsewhere' },
+    ]);
+    expect(withMembers.members).toEqual(['urn:x:one']);
   });
 });

@@ -4,7 +4,8 @@ import { useMemoryEntities, canonicalEntityUri, type MemoryEntity, type Triple }
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
 import { useLayoutStore } from '../../../stores/layout.js';
-import { useVerifiableMemoryAnchors, type PublishAnchor } from '../../../hooks/useVerifiableMemoryAnchors.js';
+import { useVerifiableMemoryAnchors } from '../../../hooks/useVerifiableMemoryAnchors.js';
+import type { VmReceipt } from '../../../hooks/useVmReceipts.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { useSwmAttributions, type AgentPaletteEntry, type SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
 import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
@@ -118,7 +119,7 @@ function GraphSingletonShelf({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="v10-graph-singleton-shelf" aria-label="Standalone entities without visible links">
+    <div className="v10-graph-singleton-shelf ds-card-nested" aria-label="Standalone entities without visible links">
       <div
         className="v10-graph-singleton-head"
         title="Entities with no visible links are grouped here to keep the graph readable."
@@ -281,7 +282,7 @@ export function GraphSurface({
             if (event.target === event.currentTarget) setExpanded(false);
           }}
         >
-          <div className={`v10-graph-expanded-panel v10-graph-shell-${tone}`}>
+          <div className={`v10-graph-expanded-panel ds-card v10-graph-shell-${tone}`}>
             <div className="v10-graph-expanded-head">
               <div>
                 <div className="v10-graph-expanded-title">{title}</div>
@@ -637,7 +638,7 @@ export function LayerGraphPanel({
 // the root attribution data already available today.
 export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPaletteEntry[]; conflicts: number }) {
   return (
-    <div className="v10-swm-legend" aria-label="SWM attribution legend">
+    <div className="v10-swm-legend ds-card-nested" aria-label="SWM attribution legend">
       <div className="v10-swm-legend-row v10-swm-legend-head">
         <span>SWM attribution</span>
         <Badge size="sm" tone="swm" className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</Badge>
@@ -663,16 +664,16 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
 // ─── Verifiable Memory graph legend (docked rail) ─────────
 // Explains the synthetic VM anchor and agent decoration triples produced by
 // `useVerifiableMemoryAnchors` without pulling in the later VM metadata work.
-export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
+export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[] }) {
   const palette = useGraphPalette();
   const signers = useMemo(() => {
     const s = new Set<string>();
-    for (const a of anchors) for (const g of a.agents) s.add(g);
+    for (const a of anchors) for (const g of a.signers) s.add(g);
     // Same colour as the agent's node in the graph (agentNodeColors).
     return [...s].map(uri => ({ uri, color: agentHexForUri(uri) }));
   }, [anchors]);
   const signerCount = signers.length;
-  const latest = anchors[0]?.publishedAt;
+  const latest = anchors[0]?.finalizedAt;
   const latestLabel = (() => {
     if (!latest) return null;
     try {
@@ -683,7 +684,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: PublishAnchor[] }) {
   })();
 
   return (
-    <div className="v10-vm-legend" aria-label="Verifiable Memory legend">
+    <div className="v10-vm-legend ds-card-nested" aria-label="Verifiable Memory legend">
       <div className="v10-vm-legend-row v10-vm-legend-head">
         <span>VM provenance layer</span>
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>

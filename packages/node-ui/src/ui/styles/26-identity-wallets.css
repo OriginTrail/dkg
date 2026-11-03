@@ -41,7 +41,6 @@
   padding: 10px;
   margin-bottom: 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-nested);
   background: var(--bg-surface);
 }
 
@@ -90,7 +89,6 @@
   min-width: 0;
   padding: 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-nested);
   background: var(--bg-surface);
 }
 

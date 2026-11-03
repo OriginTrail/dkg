@@ -296,7 +296,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         role="presentation"
       >
         <div
-          className="v10-modal-box"
+          className="v10-modal-box ds-overlay"
           ref={wiredDismiss.dialogRef}
           role="dialog"
           aria-modal="true"
@@ -320,7 +320,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           </div>
           <div className="v10-modal-body">
             {registrationWarning && (
-              <div className="v10-modal-warning">
+              <div className="v10-modal-warning ds-card-nested">
                 {registrationWarning}
               </div>
             )}
@@ -343,7 +343,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       role="presentation"
     >
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         ref={wireDismiss.dialogRef}
         role="dialog"
         aria-modal="true"
@@ -369,19 +369,19 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
         <div className="v10-modal-body">
           {error && (
-            <div className="v10-modal-error">
+            <div className="v10-modal-error ds-card-nested">
               {error}
             </div>
           )}
 
           {registrationWarning && (
-            <div className="v10-modal-warning">
+            <div className="v10-modal-warning ds-card-nested">
               {registrationWarning}
             </div>
           )}
 
           {isFirstProject && (
-            <div className="v10-modal-tip">
+            <div className="v10-modal-tip ds-card-nested">
               <div className="v10-modal-tip-title">First context graph tip</div>
               This is your agent's first memory space. Consider importing any existing knowledge
               your agent has — notes, documents, conversation logs — so it can build on what it already knows.
@@ -393,7 +393,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <input
               id="dkg-cg-name"
               name="dkg-cg-name"
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               type="text"
               placeholder="e.g. Pharma Drug Interactions"
               value={name}
@@ -422,7 +422,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <textarea
               id="dkg-cg-description"
               name="dkg-cg-description"
-              className="v10-form-textarea"
+              className="v10-form-textarea ds-input"
               placeholder="What should your agent remember? Describe the domain, goals, or context..."
               value={description}
               onChange={(e) => setDescription(e.target.value)}
@@ -496,7 +496,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               {ontology === 'community' && (
                 <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
                   <select
-                    className="v10-form-select"
+                    className="v10-form-select ds-input"
                     value={starterSlug}
                     onChange={(e) => setStarterSlug(e.target.value)}
                   >
@@ -533,10 +533,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           </div>
 
           {showAdvanced && (
-            <div className="v10-form-advanced-body" style={{ opacity: 0.5, pointerEvents: 'none' }}>
+            <div className="v10-form-advanced-body ds-card-nested" style={{ opacity: 0.5, pointerEvents: 'none' }}>
               <div className="v10-form-group">
                 <label className="v10-form-label">Consensus Quorum <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select" value={quorum} disabled>
+                <select className="v10-form-select ds-input" value={quorum} disabled>
                   <option value="off">Off — no consensus verification required</option>
                   <option value="2of3">2 of 3 — lightweight consensus</option>
                   <option value="3of5">3 of 5 — standard consensus (recommended for teams)</option>
@@ -545,7 +545,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </div>
               <div className="v10-form-group">
                 <label className="v10-form-label">SWM TTL <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select" value={swmTtl} disabled>
+                <select className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
                   <option value="1d">1 day</option>
@@ -554,7 +554,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
                 <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select" value={swmCap} disabled>
+                <select className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>

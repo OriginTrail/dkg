@@ -143,7 +143,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       <div className="v10-agent-profile-stats">
         <button
           type="button"
-          className={`v10-agent-profile-stat${typeFilter === null ? ' active' : ''}`}
+          className={`v10-agent-profile-stat ds-card-nested${typeFilter === null ? ' active' : ''}`}
           onClick={() => setTypeFilter(null)}
         >
           <span className="v10-agent-profile-stat-val">{total}</span>
@@ -158,7 +158,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
             <button
               key={t.iri}
               type="button"
-              className={`v10-agent-profile-stat${typeFilter === t.iri ? ' active' : ''}`}
+              className={`v10-agent-profile-stat ds-card-nested${typeFilter === t.iri ? ' active' : ''}`}
               style={{ '--stat-color': color } as React.CSSProperties}
               onClick={() => setTypeFilter(t.iri)}
             >

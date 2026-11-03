@@ -101,7 +101,7 @@ function NodeLogContent() {
           name="dkg-node-log-filter"
           type="text"
           placeholder="Filter logs..."
-          className="v10-log-filter"
+          className="v10-log-filter ds-input ds-sm"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           aria-label="Filter node log lines"
@@ -109,7 +109,7 @@ function NodeLogContent() {
         <select
           id="dkg-node-log-level"
           name="dkg-node-log-level"
-          className="v10-log-level-select"
+          className="v10-log-level-select ds-input ds-sm"
           value={level}
           onChange={e => setLevel(e.target.value as typeof level)}
           aria-label="Filter node log level"
@@ -333,7 +333,7 @@ export function PanelBottom() {
         {BOTTOM_TABS.map((tab) => (
           <button
             key={tab}
-            className={`v10-bottom-tab ${tab === activeTab ? 'active' : ''}`}
+            className={`v10-bottom-tab ds-tab ${tab === activeTab ? 'active' : ''}`}
             onClick={() => { setActiveTab(tab); if (bottomCollapsed) toggleBottom(); }}
           >
             {tab}

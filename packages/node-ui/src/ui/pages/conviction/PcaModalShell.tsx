@@ -40,7 +40,7 @@ export function PcaModalShell({
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box v10-pca-modal-box"
+        className="v10-modal-box ds-overlay v10-pca-modal-box"
         data-testid={testId}
         ref={dialogRef}
         role="dialog"

@@ -136,9 +136,6 @@
   font-size: var(--fs-body);
 }
 
-/* Sidebar create/join: stacked, full width, compact — full labels never truncate. */
-.v10-tree-create-actions { display: flex; flex-direction: column; gap: 4px; padding: 8px 8px 4px; }
-.v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: flex-start; padding: 0 10px; }
 
 /* Square icon buttons */
 .ds-btn.ds-icon {
@@ -213,10 +210,7 @@
    12px medium, tertiary text, the active tab in primary text with a 2px
    underline. Main bars are 36px tall, sub-bars inside a view 32px.
    Layer tabs keep their layer colour on the underline. */
-.tab-group { height: var(--tab-h); align-items: stretch; }
-.v10-layer-expand-tabs, .v10-content-tabs { height: var(--h-control-md); min-height: var(--h-control-md); align-items: stretch; }
-.ds-tab,
-.tab-item, .v10-layer-switch-btn, .v10-bottom-tab, .v10-layer-expand-tab, .v10-content-tab {
+.ds-tab {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -236,33 +230,23 @@
   cursor: pointer;
   transition: color .12s, border-color .12s;
 }
-.ds-tab:hover,
-.tab-item:hover, .v10-layer-switch-btn:hover, .v10-bottom-tab:hover, .v10-layer-expand-tab:hover, .v10-content-tab:hover {
+.ds-tab:hover {
   color: var(--text-secondary);
 }
-.ds-tab.active, .ds-tab[aria-selected="true"],
-.tab-item.active, .v10-layer-switch-btn.active, .v10-bottom-tab.active, .v10-layer-expand-tab.active, .v10-content-tab.active {
+.ds-tab.active, .ds-tab[aria-selected="true"] {
   color: var(--text-primary);
   border-bottom-color: var(--text-primary);
 }
-.v10-layer-switch-btn.active[data-layer="wm"]  { border-bottom-color: var(--layer-working); }
-.v10-layer-switch-btn.active[data-layer="swm"] { border-bottom-color: var(--layer-shared); }
-.v10-layer-switch-btn.active[data-layer="vm"]  { border-bottom-color: var(--layer-verified); }
-.ds-tab:focus-visible,
-.tab-item:focus-visible, .v10-layer-switch-btn:focus-visible, .v10-bottom-tab:focus-visible,
-.v10-layer-expand-tab:focus-visible, .v10-content-tab:focus-visible {
+.ds-tab:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: -2px;
-}
-@media (max-width: 920px) {
-  .v10-layer-switch-btn { min-width: 30px; padding: 0; justify-content: center; gap: 0; }
 }
 
 /* ══ Segmented control ═════════════════════════════════════════════════
    Switches what a panel or view shows (Agents / Network / Sessions,
    Context graphs / Context oracle, table / graph). A 6px track with
    4px segments; the selected one is lifted onto the surface. */
-.ds-seg, .v10-mlv-view-toggle {
+.ds-seg {
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -273,8 +257,7 @@
   box-shadow: inset 0 0 0 1px var(--border-default);
   overflow: visible;
 }
-.ds-seg-item,
-.v10-agent-mode-tab, .v10-tree-mode-btn, .v10-mlv-toggle-btn {
+.ds-seg-item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -295,29 +278,22 @@
   cursor: pointer;
   transition: color .12s, background-color .12s;
 }
-.v10-mlv-toggle-btn { width: auto; padding: 0 6px; }
-.ds-seg-item:hover,
-.v10-agent-mode-tab:hover, .v10-tree-mode-btn:hover, .v10-mlv-toggle-btn:hover { color: var(--text-primary); }
-.ds-seg-item.active, .ds-seg-item[aria-pressed="true"],
-.v10-agent-mode-tab.active, .v10-tree-mode-btn.active, .v10-mlv-toggle-btn.active {
+.ds-seg-item:hover { color: var(--text-primary); }
+.ds-seg-item.active, .ds-seg-item[aria-pressed="true"] {
   background: var(--bg-active);
   color: var(--text-primary);
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
-.ds-seg-item:focus-visible,
-.v10-agent-mode-tab:focus-visible, .v10-tree-mode-btn:focus-visible, .v10-mlv-toggle-btn:focus-visible {
+.ds-seg-item:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
-.v10-tree-header .ds-seg, .v10-agent-mode-tabs .ds-seg { flex: 1; }
-.v10-tree-header .ds-seg > *, .v10-agent-mode-tabs .ds-seg > * { flex: 1; }
 
 /* ══ Filter chip ═══════════════════════════════════════════════════════
    Something you set: a 6px rectangle (never a pill — pills are read-only).
    On = lifted with a stronger border; a sub-graph chip uses its own
    colour for the "on" ring. */
-.ds-filter,
-.v10-subgraph-chip, .v10-subgraph-filter-chip, .v10-minibar-chip.interactive {
+.ds-filter {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -336,34 +312,21 @@
   cursor: pointer;
   transition: background-color .12s, border-color .12s, color .12s;
 }
-.v10-subgraph-filter-chip, .v10-minibar-chip.interactive { height: var(--h-control-sm); padding: 0 8px; font-size: var(--fs-label); }
-.ds-filter:hover,
-.v10-subgraph-chip:hover, .v10-subgraph-filter-chip:hover, .v10-minibar-chip.interactive:hover {
+.ds-filter.ds-sm { height: var(--h-control-sm); padding: 0 8px; font-size: var(--fs-label); }
+.ds-filter:hover {
   background: var(--bg-hover);
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
-.ds-filter.active, .ds-filter[aria-pressed="true"],
-.v10-subgraph-chip.active, .v10-subgraph-filter-chip.active {
+.ds-filter.active, .ds-filter[aria-pressed="true"] {
   background: color-mix(in srgb, var(--sg-color, var(--text-primary)) 12%, var(--bg-elevated));
   border-color: var(--sg-color, var(--border-strong));
   color: var(--text-primary);
 }
-.ds-filter:focus-visible,
-.v10-subgraph-chip:focus-visible, .v10-subgraph-filter-chip:focus-visible, .v10-minibar-chip.interactive:focus-visible {
+.ds-filter:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
-.v10-minibar-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  height: var(--h-badge-sm); padding: 0 6px;
-  border-radius: var(--radius-pill);
-  box-shadow: inset 0 0 0 1px var(--border-default);
-  color: var(--text-secondary);
-  font-size: var(--fs-micro); font-weight: 600;
-}
-.v10-minibar-chip.interactive { box-shadow: none; border-radius: var(--radius-control); }
-.v10-subgraph-chip .v10-subgraph-chip-count { background: transparent; box-shadow: none; color: var(--text-tertiary); padding: 0; min-width: 0; }
 
 /* ══ Entity chip ═══════════════════════════════════════════════════════
    A thing you can open: leading mark (context graph tile; agents use
@@ -392,20 +355,8 @@
 .ds-entity-chip.interactive:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
-/* AgentChip sizes on the shared scale: avatars 20 / 24 / 32, chip heights
-   24 / 28 / 40. The framework glyph sits outside the initials. */
-.v10-agent-chip-sm { height: var(--h-control-sm); box-sizing: border-box; padding: 0 9px 0 2px; font-size: var(--fs-label); }
-.v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: 9px; }
-.v10-agent-chip-sm .v10-agent-chip-glyph { width: 10px; height: 10px; font-size: 7px; bottom: -2px; right: -4px; }
-.v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 10px 0 2px; font-size: var(--fs-control); }
-.v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: 10px; }
-.v10-agent-chip-md .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: 8px; bottom: -2px; right: -4px; }
-.v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: 4px 14px 4px 4px; font-size: var(--fs-body); }
-.v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: 12px; }
-.v10-agent-chip-lg .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: 10px; bottom: -2px; right: -4px; }
-.v10-agent-chip-sub { font-size: var(--fs-micro); text-transform: none; letter-spacing: 0; }
 /* Light: the selected segment is the white surface lifted off a grey track. */
-body.light .ds-seg-item.active, body.light .v10-agent-mode-tab.active, body.light .v10-tree-mode-btn.active, body.light .v10-mlv-toggle-btn.active {
+body.light .ds-seg-item.active {
   background: var(--bg-surface);
   box-shadow: 0 0 0 1px var(--border-default), 0 1px 2px rgba(0, 0, 0, .06);
 }
@@ -553,57 +504,26 @@ body.light .ds-seg-item.active, body.light .v10-agent-mode-tab.active, body.ligh
 /* ══ Cards and surfaces ════════════════════════════════════════════════
    Three corners (DESIGN.md): 12 overlays and dialogs, 10 cards and panels,
    8 anything nested inside a card (cells, notes, legends) and menus or
-   popovers. Menu rows use 4. Existing per-screen classes are mapped here;
-   new code uses .ds-card / .ds-card-nested / .ds-overlay. */
-.ds-overlay,
-.v10-modal-box, .v10-drop-overlay-card {
-  border-radius: var(--radius-overlay);
-}
-.ds-card,
-.card, .stat-card, .v10-dash-section, .v10-vm-hero, .v10-genui-card, .v10-genui-vm-panel,
-.v10-graph-prov-card, .v10-vm-identity, .v10-gen-widget, .v10-sgov-card, .v10-local-agent-detail,
-.v10-identity-wallet-card, .v10-journey-empty-card, .v10-empty-state,
-.v10-graph-expanded-panel, .v10-local-agent-composer-shell, .v10-cg-query-zone, .v10-mlv-graph-container,
-.v10-publish-panel, .v10-import-dropzone {
-  border-radius: var(--radius-card);
-}
-.stat-card { padding: 16px 18px; }
-.ds-card-nested,
-.v10-memstack-cell, .v10-stat-strip-cell, .v10-genui-stat, .v10-genui-type-group, .v10-genui-vm-block,
-.v10-genui-error, .v10-genui-triple-table, .v10-swm-legend, .v10-vm-legend, .v10-agent-profile-stat,
-.v10-modal-error, .v10-modal-tip, .v10-modal-warning, .v10-pca-verdict-banner, .v10-pca-card-warn, .v10-pca-create-warn,
-.v10-pca-owner-key-card, .v10-pca-node-picker-option, .v10-pca-node-picker-selected, .v10-pca-device-progress,
-.v10-pca-handshake-half, .v10-pca-tier-list, .v10-wallet-row, .v10-wallet-picker, .v10-wallet-provider,
-.v10-identity-wallet-signer, .v10-agent-card, .v10-local-agent-warning, .v10-local-agent-error, .v10-local-agent-notice, .v10-form-advanced-body,
-.v10-import-progress, .v10-import-file-list, .v10-cg-query-parameters, .v10-cg-query-save-panel, .v10-po-join-item,
-.v10-po-pipeline-step, .v10-file-preview-error, .v10-mlv-node-panel, .v10-mlv-table-wrap, .v10-assertion-list,
-.v10-md-table-scroll, .v10-graph-singleton-shelf, .v10-memstack-empty, .v10-cg-query-chip,
-.v10-notif-pane, .v10-layer-more-menu, .v10-select-menu, .v10-agent-tab-menu-popover,
-.v10-vm-search-panel {
-  border-radius: var(--radius-nested);
-}
-.v10-agent-tab-menu-item, .v10-layer-more-item, .v10-select-option { border-radius: var(--radius-xs); }
+   popovers. Menu rows use 4. Put the class on the element; the screen's own
+   class keeps only layout. */
+.ds-overlay { border-radius: var(--radius-overlay); }
+.ds-card { border-radius: var(--radius-card); }
+.ds-card-nested { border-radius: var(--radius-nested); }
 
 /* ══ Inputs ════════════════════════════════════════════════════════════
    Text fields, selects and textareas: 6px corners like buttons, the same
    heights as the buttons beside them (32 default, 24 compact), 12px text,
    one focus ring. The chat composer is a card (10px), not an input. */
-.ds-input,
-.input,
-.v10-form-input, .v10-form-select, .v10-form-textarea, .v10-select-trigger, .v10-mlv-query-input, .v10-vm-search-select,
-.v10-cg-query-textarea, .v10-token-prompt-input, .v10-log-filter, .v10-log-level-select, .v10-entity-list-sort-select {
+.ds-input {
   border-radius: var(--radius-control);
   font-size: var(--fs-control);
 }
-.ds-input:not(textarea),
-.v10-form-input, .v10-form-select, .v10-select-trigger, .v10-mlv-query-input, .v10-vm-search-select {
+.ds-input:not(textarea) {
   box-sizing: border-box;
   height: var(--h-control-md);
   min-height: var(--h-control-md);
 }
-.v10-mlv-query-input, .v10-vm-search-select { padding-top: 0; padding-bottom: 0; }
-.ds-input.ds-sm,
-.v10-token-prompt-input, .v10-log-filter, .v10-log-level-select, .v10-entity-list-sort-select {
+.ds-input.ds-sm {
   box-sizing: border-box;
   height: var(--h-control-sm);
   min-height: var(--h-control-sm);
@@ -612,9 +532,7 @@ body.light .ds-seg-item.active, body.light .v10-agent-mode-tab.active, body.ligh
   font-size: var(--fs-label);
 }
 .ds-input:focus-visible,
-:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible,
-.v10-select-trigger:focus-visible {
+:where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 0;
 }
-.v10-vm-search-toggle { border-radius: var(--radius-control); }

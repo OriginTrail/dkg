@@ -516,7 +516,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         role="presentation"
       >
         <div
-          className="v10-modal-box"
+          className="v10-modal-box ds-overlay"
           ref={wireDismiss.dialogRef}
           role="dialog"
           aria-modal="true"
@@ -564,7 +564,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       role="presentation"
     >
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         ref={inviteDismiss.dialogRef}
         role="dialog"
         aria-modal="true"
@@ -589,7 +589,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error">{error}</div>}
+          {error && <div className="v10-modal-error ds-card-nested">{error}</div>}
 
           {pending && (
             <div style={{
@@ -626,7 +626,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
-              className="v10-form-textarea"
+              className="v10-form-textarea ds-input"
               placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}

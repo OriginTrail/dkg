@@ -4,11 +4,10 @@ import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAss
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { memoryGraphLabels } from '../lib/memoryLabels.js';
 import { truncateMiddle } from '../lib/truncate.js';
-import { neutralHex } from '../layer-colors.js';
-import { useLayoutStore } from '../stores/layout.js';
-import { dataHex } from '../op-type-colors.js';
+import { useGraphPalette } from '../hooks/useGraphPalette.js';
+import { dataSlotHex } from '../graph-palette.js';
+import { graphOptions } from './memory-layer-graph-options.js';
 import { schemaTypeColors } from './schema-type-colors.js';
 
 const RdfGraph = lazy(() =>
@@ -31,22 +30,6 @@ const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: stri
   swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: '◈', description: 'Shared proposals with collaborators. TTL-bounded.' },
   vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
 };
-
-function graphOptions(classColors: Record<string, string>) {
-  return {
-    labelMode: 'humanized' as const,
-    renderer: '2d' as const,
-    labels: memoryGraphLabels({ extraPredicates: ['http://schema.org/text'] }),
-    style: {
-      classColors,
-      defaultNodeColor: neutralHex('node'),
-      defaultEdgeColor: neutralHex('edge'),
-      edgeWidth: 0.9,
-    },
-    hexagon: { baseSize: 9, minSize: 8, maxSize: 13, scaleWithDegree: true },
-    focus: { maxNodes: 3000, hops: 999 },
-  };
-}
 
 const TABLE_ICON = (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -213,14 +196,14 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
     })).filter((t: any) => t.subject && t.predicate && t.object),
     [results]
   );
-  // C8: the six most common schema.org types get data colours, the rest grey. Built
-  // per render so canvas colours follow the active theme.
-  // Canvas labels follow the app theme (dark palette text was unreadable in light mode).
-  const theme = useLayoutStore(st => st.theme);
-  const graphViewConfig = useMemo(() => ({ name: `memory-layer:${theme}`, palette: theme }), [theme]);
+  // C8: the six most common schema.org types get data colours, the rest grey.
+  // Canvas colours and labels follow the app theme through the palette
+  // (dark palette text was unreadable in light mode).
+  const palette = useGraphPalette();
+  const graphViewConfig = useMemo(() => ({ name: `memory-layer:${palette.theme}`, palette: palette.theme }), [palette]);
   const graphOptionsForView = useMemo(
-    () => graphOptions(schemaTypeColors(triples, dataHex, neutralHex('node'))),
-    [triples],
+    () => graphOptions(palette, schemaTypeColors(triples, slot => dataSlotHex(palette, slot), palette.neutral.node)),
+    [triples, palette],
   );
 
   const handleNodeClick = useCallback((node: any) => {
@@ -248,7 +231,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {layer === 'vm' && (
-        <div className="v10-vm-search-panel">
+        <div className="v10-vm-search-panel ds-card-nested">
           <div className="v10-vm-search-header">
             <div>
               <div className="v10-vm-search-title">Search Verifiable Memory</div>
@@ -268,14 +251,14 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           <div className="v10-vm-search-controls">
             <input
               type="text"
-              className="v10-mlv-query-input"
+              className="v10-mlv-query-input ds-input"
               placeholder="Search verifiable memory..."
               value={draftSearch}
               onChange={(e) => setDraftSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
             />
             <select
-              className="v10-vm-search-select"
+              className="v10-vm-search-select ds-input"
               value={draftField}
               onChange={(e) => setDraftField(e.target.value as 'any' | 'subject' | 'predicate' | 'object')}
             >
@@ -285,7 +268,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               <option value="object">Object</option>
             </select>
             <select
-              className="v10-vm-search-select"
+              className="v10-vm-search-select ds-input"
               value={String(draftLimit)}
               onChange={(e) => setDraftLimit(Number.parseInt(e.target.value, 10) || 50)}
             >
@@ -305,7 +288,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
         <div className="v10-mlv-query-bar">
           {queryPresetOptions?.length ? (
             <select
-              className="v10-vm-search-select"
+              className="v10-vm-search-select ds-input"
               value={selectedPresetLabel}
               onChange={(e) => {
                 const nextLabel = e.target.value;
@@ -324,7 +307,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           ) : (
             <input
               type="text"
-              className="v10-mlv-query-input"
+              className="v10-mlv-query-input ds-input"
               placeholder="Custom SPARQL query..."
               value={draftQuery}
               onChange={(e) => setDraftQuery(e.target.value)}
@@ -343,16 +326,16 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               Reset
             </button>
           )}
-          <div className="v10-mlv-view-toggle">
+          <div className="v10-mlv-view-toggle ds-seg">
             <button
-              className={`v10-mlv-toggle-btn ${viewMode === 'table' ? 'active' : ''}`}
+              className={`v10-mlv-toggle-btn ds-seg-item ${viewMode === 'table' ? 'active' : ''}`}
               onClick={() => setViewMode('table')}
               title="Table view"
             >
               {TABLE_ICON}
             </button>
             <button
-              className={`v10-mlv-toggle-btn ${viewMode === 'graph' ? 'active' : ''}`}
+              className={`v10-mlv-toggle-btn ds-seg-item ${viewMode === 'graph' ? 'active' : ''}`}
               onClick={() => setViewMode('graph')}
               title="Graph view"
             >
@@ -377,7 +360,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {!loading && results.length > 0 && viewMode === 'table' && (
-        <div className="v10-mlv-table-wrap">
+        <div className="v10-mlv-table-wrap ds-card-nested">
           <div className="v10-mlv-result-count">{results.length} triples</div>
           <table className="v10-mlv-table">
             <thead>
@@ -401,7 +384,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {!loading && triples.length > 0 && viewMode === 'graph' && (
-        <div className="v10-mlv-graph-container">
+        <div className="v10-mlv-graph-container ds-card">
           <div className="v10-mlv-graph-info">
             <span>{triples.length} triples</span>
             {activeQuery && <span className="v10-mlv-graph-info-custom">filtered</span>}
@@ -417,7 +400,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               initialFit
             >
               <NodePanel
-                className="v10-mlv-node-panel"
+                className="v10-mlv-node-panel ds-card-nested"
                 showUri
                 showTypes
                 showProperties
@@ -555,7 +538,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
   if (!assertions?.length) return null;
 
   return (
-    <div className="v10-assertion-list">
+    <div className="v10-assertion-list ds-card-nested">
       <div className="v10-assertion-list-header">
         <span className="v10-assertion-list-title">Assertions in Working Memory ({assertions.length})</span>
         <button
@@ -719,7 +702,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   if (loading) return <div className="v10-assertion-list-loading">Loading SWM contents...</div>;
   if (isEmpty) {
     return (
-      <div className="v10-publish-panel">
+      <div className="v10-publish-panel ds-card">
         <div className="v10-publish-panel-header">
           <span className="v10-publish-panel-title">Publish to Verifiable Memory</span>
         </div>
@@ -731,7 +714,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   }
 
   return (
-    <div className="v10-publish-panel">
+    <div className="v10-publish-panel ds-card">
       <div className="v10-publish-panel-header">
         <span className="v10-publish-panel-title">
           Knowledge assets in Shared Working Memory ({assertions!.length} asset{assertions!.length === 1 ? '' : 's'} · {totalTriples} triples)

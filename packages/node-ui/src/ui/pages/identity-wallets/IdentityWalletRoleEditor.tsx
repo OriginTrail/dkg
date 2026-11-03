@@ -52,13 +52,13 @@ export function IdentityWalletRoleEditor({
   const inputId = `identity-${role}-address`;
   const empty = !value.trim();
   return (
-    <div className="v10-identity-wallet-card" data-testid={`${role}-wallet-editor`}>
+    <div className="v10-identity-wallet-card ds-card" data-testid={`${role}-wallet-editor`}>
       <h4>{meta.title}</h4>
       <p>{meta.description}</p>
       <label htmlFor={inputId}>{meta.label}</label>
       <input
         id={inputId}
-        className="v10-form-input mono"
+        className="v10-form-input ds-input mono"
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder="0x…"

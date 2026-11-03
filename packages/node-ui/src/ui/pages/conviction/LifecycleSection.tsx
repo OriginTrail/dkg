@@ -27,7 +27,7 @@ export function LifecycleSection({
       <section className="v10-pca-detail-section">
         <h3 className="v10-pca-detail-section-title">Lifecycle</h3>
         {(health === 'expiring' || health === 'expired') && (
-          <p className="v10-pca-card-warn">
+          <p className="v10-pca-card-warn ds-card-nested">
             {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. The lock period can’t be extended —
             Renew creates a fresh replacement account seeded from this one (the old TRAC stays locked
             until its own expiry).

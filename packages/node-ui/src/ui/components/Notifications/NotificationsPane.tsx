@@ -61,7 +61,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
   const isEmpty = !hasJoin && !hasActivity && !hasPca;
 
   return (
-    <div className="v10-notif-pane" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
+    <div className="v10-notif-pane ds-card-nested" role="region" aria-label="Notifications" id={id} ref={paneRef} tabIndex={-1}>
       <div className="v10-notif-pane-titlebar">
         <div className="v10-notif-pane-title">Notifications</div>
         {hasInformationalUnread && (

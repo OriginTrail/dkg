@@ -223,7 +223,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         style={{ maxWidth: 560 }}
         ref={dialogRef}
         role="dialog"

@@ -160,7 +160,7 @@ export function EligibilityVerdictBanner({
 
   return (
     <div
-      className={['v10-pca-verdict-banner', meta.toneClass, className].filter(Boolean).join(' ')}
+      className={['v10-pca-verdict-banner ds-card-nested', meta.toneClass, className].filter(Boolean).join(' ')}
       data-testid="pca-eligibility-verdict"
       data-verdict={verdict}
       role={role}

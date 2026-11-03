@@ -64,7 +64,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
 
   return (
     <div
-      className={`v10-graph-prov-card${verified ? ' verified' : ''}`}
+      className={`v10-graph-prov-card ds-card${verified ? ' verified' : ''}`}
       role="dialog"
       aria-label="On-chain provenance"
     >
@@ -101,7 +101,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
       )}
 
       {verified && (
-        <div className="v10-vm-identity" style={{ margin: 0, background: 'none', border: 'none', padding: 0 }}>
+        <div className="v10-vm-identity ds-card" style={{ margin: 0, background: 'none', border: 'none', padding: 0 }}>
           {receipt.ual && (
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">UAL</span>

@@ -5,7 +5,7 @@
 }
 .v10-file-preview-loading { padding: 32px 24px; text-align: center; font-size: 12px; color: var(--text-tertiary); }
 .v10-file-preview-error {
-  margin: 16px 24px; padding: 14px; border-radius: var(--radius-nested);
+  margin: 16px 24px; padding: 14px;
   background: rgba(239, 68, 68, 0.06); border: 1px solid rgba(239, 68, 68, 0.2);
   color: var(--text-danger); font-size: 12px;
 }
@@ -56,22 +56,16 @@
 }
 .v10-form-input {
   width: 100%;
-  height: 36px;
-  border-radius: var(--radius-control);
-  font-size: 12px;
   padding: 0 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   color: var(--text-primary);
   font-family: var(--font-sans);
-  box-sizing: border-box;
 }
 .v10-form-input:focus { border-color: var(--border-strong); }
 .v10-form-textarea {
   width: 100%;
   min-height: 60px;
-  border-radius: var(--radius-control);
-  font-size: 12px;
   padding: 8px 12px;
   resize: vertical;
   font-family: var(--font-sans);
@@ -113,9 +107,6 @@
 }
 .v10-form-select {
   width: 100%;
-  height: 36px;
-  border-radius: var(--radius-control);
-  font-size: 12px;
   padding: 0 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
@@ -150,7 +141,6 @@
   margin-top: 12px;
   padding: 12px 14px;
   background: var(--bg-surface);
-  border-radius: var(--radius-control);
 }
 
 /* Light theme modal overrides */
@@ -165,7 +155,6 @@ body.light .v10-modal-box {
    ═══════════════════════════════════════════ */
 .v10-import-dropzone {
   border: 2px dashed var(--border-default);
-  border-radius: var(--radius-nested);
   padding: 24px;
   text-align: center;
   cursor: pointer;
@@ -188,7 +177,6 @@ body.light .v10-modal-box {
 }
 .v10-import-file-list {
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-control);
   overflow: hidden;
   margin-bottom: 16px;
   max-height: 200px;
@@ -240,7 +228,6 @@ body.light .v10-modal-box {
   margin-top: 12px;
   padding: 12px 14px;
   background: var(--bg-surface);
-  border-radius: var(--radius-control);
 }
 .v10-import-progress-bar {
   height: 4px;

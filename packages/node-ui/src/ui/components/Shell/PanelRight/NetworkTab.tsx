@@ -25,7 +25,7 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
       ? 'Direct + relay paths active — direct shown'
       : undefined;
   return (
-    <div className={`v10-agent-card v10-peer-card ${statusClass}`}>
+    <div className={`v10-agent-card ds-card-nested v10-peer-card ${statusClass}`}>
       <div className="v10-agent-card-header">
         <span className={`v10-agent-card-dot ${statusClass}`} />
         <span className="v10-peer-card-name">{displayName}</span>

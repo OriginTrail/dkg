@@ -17,6 +17,8 @@
   border-bottom: 1px solid var(--border-subtle);
   gap: 2px;
 }
+/* Agents / Network / Sessions fills the bar. */
+.v10-agent-mode-tabs .ds-seg, .v10-agent-mode-tabs .ds-seg > * { flex: 1; }
 /* Agent tab */
 .v10-agents-tab {
   display: flex;
@@ -174,7 +176,7 @@
 }
 .v10-agent-add-surface { padding-top: 8px; }
 .v10-agent-card {
-  padding: 10px 12px; border-radius: var(--radius-control); margin-bottom: 4px;
+  padding: 10px 12px; margin-bottom: 4px;
   border: 1px solid var(--border-subtle); background: var(--bg-surface);
   transition: background 0.15s;
 }
@@ -240,7 +242,6 @@
 .v10-local-agent-detail {
   margin-top: 12px;
   padding: 14px;
-  border-radius: var(--radius-card);
   border: 1px solid var(--border-default);
   background: color-mix(in srgb, var(--bg-surface) 86%, var(--bg-elevated));
   display: flex;

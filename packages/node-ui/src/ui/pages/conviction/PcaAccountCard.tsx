@@ -66,7 +66,7 @@ export function PcaAccountCard({
   // --- Per-card error states ---
   if (notFound) {
     return (
-      <div className="card v10-pca-card" data-state="not-found" data-account={accountId} data-testid="pca-account-card">
+      <div className="card ds-card v10-pca-card" data-state="not-found" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body v10-pca-card-error">
           <p>PCA #{accountId} no longer exists on-chain.</p>
           {onRemove && (
@@ -80,7 +80,7 @@ export function PcaAccountCard({
   }
   if (!snapshot) {
     return (
-      <div className="card v10-pca-card" data-state="error" data-account={accountId} data-testid="pca-account-card">
+      <div className="card ds-card v10-pca-card" data-state="error" data-account={accountId} data-testid="pca-account-card">
         <div className="card-body v10-pca-card-error">
           <p>Couldn’t load PCA #{accountId}.</p>
           {onRetry && (
@@ -167,7 +167,7 @@ export function PcaAccountCard({
     const inconclusive = account.probesInconclusive;
     return (
       <div
-        className="card v10-pca-card"
+        className="card ds-card v10-pca-card"
         data-state="owned"
         data-owner-mode={ownerMode}
         data-account={accountId}
@@ -195,7 +195,7 @@ export function PcaAccountCard({
               per-wallet probes couldn't be read — caveat instead of a false
               "discounts nothing yet". */}
           {walletWrongNetwork && (
-            <p className="v10-pca-card-warn" role="alert">
+            <p className="v10-pca-card-warn ds-card-nested" role="alert">
               Wrong network. Reads still work, but wallet-owner writes are disabled until the wallet is
               switched.{' '}
               {onSwitchNetwork && (
@@ -206,19 +206,19 @@ export function PcaAccountCard({
             </p>
           )}
           {ownerMode === 'external' && (
-            <p className="v10-pca-card-warn">
+            <p className="v10-pca-card-warn ds-card-nested">
               {connectedAs
                 ? `Connected as ${connectedAs} - switch to ${snapshot.owner} to manage PCA #${accountId}.`
                 : `Connect ${snapshot.owner} to manage PCA #${accountId}.`}
             </p>
           )}
           {inconclusive ? (
-            <p className="v10-pca-card-warn">
+            <p className="v10-pca-card-warn ds-card-nested">
               ⚠ Couldn’t verify which of this node’s wallets are approved — retry. Until then, whether
               this account discounts your publishes is unconfirmed.
             </p>
           ) : !selfCovers ? (
-            <p className="v10-pca-card-warn">
+            <p className="v10-pca-card-warn ds-card-nested">
               ⚠ 0 of this node’s wallets are approved here — it discounts nothing yet. Approve this
               node’s operational wallets to start saving.
             </p>
@@ -269,7 +269,7 @@ export function PcaAccountCard({
   const allApproved = account.walletCount > 0 && account.approvedCount === account.walletCount;
   const inconclusive = account.probesInconclusive;
   return (
-    <div className="card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
+    <div className="card ds-card v10-pca-card" data-state="approved" data-account={accountId} data-testid="pca-account-card">
       <div className="card-body">
         <div className="v10-pca-card-title">
           <span className="v10-pca-card-id">PCA #{accountId}</span>
@@ -296,9 +296,9 @@ export function PcaAccountCard({
             : `${account.approvedCount} of ${account.walletCount} node publishing wallet${account.walletCount === 1 ? '' : 's'} approved.`}
         </p>
         {inconclusive ? (
-          <p className="v10-pca-card-warn">Couldn’t verify which wallets are approved — retry.</p>
+          <p className="v10-pca-card-warn ds-card-nested">Couldn’t verify which wallets are approved — retry.</p>
         ) : !allApproved && account.walletCount > 0 ? (
-          <p className="v10-pca-card-warn">
+          <p className="v10-pca-card-warn ds-card-nested">
             Publishes from the un-approved wallet(s) will quietly pay the direct cost.
           </p>
         ) : null}

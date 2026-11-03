@@ -143,11 +143,11 @@ export function ObservabilitySection() {
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`tab-item ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
-        <button className={`tab-item ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
-        <button className={`tab-item ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
-        <button className={`tab-item ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
-        <button className={`tab-item ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button className={`tab-item ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
+        <button className={`tab-item ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
+        <button className={`tab-item ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
+        <button className={`tab-item ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
+        <button className={`tab-item ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
       </div>
       {tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
     </div>
@@ -202,22 +202,22 @@ function ReplicationTab() {
 
       {/* KPI cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Promotions</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>landed in VM this period</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Success rate</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{successPct}</div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>promote / (promote + defer)</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Promotion latency</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
         </div>
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Active fetches</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>core-first catch-up pulls</div>
@@ -225,7 +225,7 @@ function ReplicationTab() {
       </div>
 
       {/* Timeline */}
-      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
           Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
         </div>
@@ -251,7 +251,7 @@ function ReplicationTab() {
       </div>
 
       {/* Cursor inspector */}
-      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
           Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
@@ -284,7 +284,7 @@ function ReplicationTab() {
       </div>
 
       {/* Per-CG activity */}
-      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
@@ -315,7 +315,7 @@ function ReplicationTab() {
 
       {/* Event stream drawer */}
       {selectedCg && (
-        <div className="card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
           {events.length === 0 ? (
             <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
@@ -387,7 +387,7 @@ function HealthTab() {
         />
       </div>
 
-      <div className="card" style={{ padding: 16 }}>
+      <div className="card ds-card" style={{ padding: 16 }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error Hotspots</div>
         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
@@ -629,7 +629,7 @@ function OperationStatsSection() {
           {/* Operation charts */}
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <div className="card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations Over Time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
@@ -645,7 +645,7 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg Duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
@@ -661,7 +661,7 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
@@ -677,7 +677,7 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card" style={{ padding: '12px 14px' }}>
+              <div className="card ds-card" style={{ padding: '12px 14px' }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
@@ -694,7 +694,7 @@ function OperationStatsSection() {
               </div>
             </div>
           ) : (
-            <div className="card" style={{ marginBottom: 14 }}>
+            <div className="card ds-card" style={{ marginBottom: 14 }}>
               <div className="empty-state empty-state--compact">
                 <div className="empty-state-icon">
                   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -793,7 +793,7 @@ function HardwareTab() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
-          <div key={stat.label} className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div key={stat.label} className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
@@ -807,12 +807,12 @@ function HardwareTab() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
-        <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
-        <div className="card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
@@ -826,7 +826,7 @@ function HardwareTab() {
         // percentages on the same 0–100 scale, with their warning thresholds.
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
           {hwCharts.map(c => (
-            <div key={c.key} className="card" style={{ padding: '12px 14px' }}>
+            <div key={c.key} className="card ds-card" style={{ padding: '12px 14px' }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
@@ -1027,7 +1027,7 @@ function OperationsTab() {
         ))}
       </div>
 
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
         {operations.length === 0 ? (
           <div className="empty-state empty-state--rich" style={{ margin: 16 }}>
             <div className="empty-state-icon">
@@ -1285,7 +1285,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       </div>
 
       {/* Header: Operation metadata as compact inline badges */}
-      <div className="card" style={{ padding: 16, marginBottom: 12 }}>
+      <div className="card ds-card" style={{ padding: 16, marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
           <span style={{ fontSize: 15, fontWeight: 700 }}>{op.operation_name}</span>
           <StatusBadge status={op.status} />
@@ -1318,12 +1318,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       {/* Phase timeline + Phase details */}
       {phases.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
-          <div className="card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 16 }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase Timeline</div>
             <PhaseTimeline phases={phases} op={op} />
           </div>
 
-          <div className="card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 16 }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase Details</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
@@ -1366,7 +1366,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       )}
 
       {/* Logs below — full width */}
-      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+      <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
         <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
         </div>

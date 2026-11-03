@@ -3,6 +3,7 @@ import { useFetch } from '../hooks.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
+import { refreshVmReceipts } from '../hooks/useVmReceipts.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
@@ -785,7 +786,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onSwitch={handleLayerSwitch}
         onShare={() => setShowShare(true)}
         onImport={() => setShowImport(true)}
-        onRefresh={rawMemory.refresh}
+        onRefresh={() => { rawMemory.refresh(); refreshVmReceipts(contextGraphId); }}
       />
 
       <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
@@ -807,7 +808,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
-          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); }}
+          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); refreshVmReceipts(contextGraphId); }}
         />
       )}
 

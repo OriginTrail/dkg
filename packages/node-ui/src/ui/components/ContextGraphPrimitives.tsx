@@ -57,7 +57,7 @@ export function EmptyState({
   return (
     <div
       className={[
-        'v10-empty-state',
+        'v10-empty-state ds-card',
         compact ? 'compact' : '',
         inline ? 'inline' : '',
         className,
@@ -127,7 +127,7 @@ export function StatStrip({
       {items.map((item, index) => (
         <div
           key={item.id ?? index}
-          className="v10-stat-strip-cell"
+          className="v10-stat-strip-cell ds-card-nested"
           data-stat-id={item.id}
           title={item.tooltip}
         >

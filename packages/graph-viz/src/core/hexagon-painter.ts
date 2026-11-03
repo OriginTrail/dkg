@@ -1,6 +1,9 @@
 import type { GraphNode, GraphEdge, HexagonConfig } from './types.js';
 import { StyleEngine } from './style-engine.js';
 import { PrefixManager } from './prefix-manager.js';
+import { agentInitials } from '../agent-initials.js';
+
+export { agentInitials };
 
 const DEFAULT_HEXAGON: Required<HexagonConfig> = {
   baseSize: 36,
@@ -552,33 +555,4 @@ function lightenColor(hex: string, factor: number): string {
   const g = Math.round(parseInt(match[2], 16) + (255 - parseInt(match[2], 16)) * factor);
   const b = Math.round(parseInt(match[3], 16) + (255 - parseInt(match[3], 16)) * factor);
   return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-}
-
-/**
- * Two-letter initials for an agent avatar, matching the UI's agent chip:
- * "Claude Code" → "CC", "hermes" → "HE". Shortened addresses ("0x3f2a…9b1c")
- * and DIDs use the first two hex digits after 0x.
- */
-export function agentInitials(label: string): string {
-  let t = stripQuotes((label ?? '').trim()).trim(); // labels can arrive as quoted literals
-  if (t.startsWith('did:')) t = t.split(':').pop() ?? '';
-  if (!t) return '?';
-  const hex = t.match(/^0x([0-9a-f]{2})/i);
-  if (hex) return hex[1].toUpperCase();
-  // Separator-only names ("_", "--") leave no parts: fall back like an empty name.
-  const parts = t.split(/[\s_-]+/).filter(Boolean);
-  if (parts.length === 0) return '?';
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
-
-const QUOTES = new Set(['"', "'", '\u201c', '\u201d']);
-
-/** Trim surrounding quote marks with a linear scan (no backtracking regex). */
-function stripQuotes(s: string): string {
-  let start = 0;
-  let end = s.length;
-  while (start < end && QUOTES.has(s[start])) start++;
-  while (end > start && QUOTES.has(s[end - 1])) end--;
-  return s.slice(start, end);
 }

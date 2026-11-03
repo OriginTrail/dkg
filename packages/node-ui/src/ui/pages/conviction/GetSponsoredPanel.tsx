@@ -172,7 +172,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             {walletsLoading && !wb ? (
               <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
             ) : walletsReadError && wallets.length === 0 ? (
-              <p className="v10-modal-error" role="alert">
+              <p className="v10-modal-error ds-card-nested" role="alert">
                 Couldn’t load your wallets.{' '}
                 <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}>Retry</button>
               </p>
@@ -215,7 +215,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         </section>
 
         {/* Gas nudge */}
-        <div className="v10-modal-warning">
+        <div className="v10-modal-warning ds-card-nested">
           ⚠ Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
           wallet with native {gasSymbol}.
           {faucet ? (
@@ -243,7 +243,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           )}
           <div className="v10-pca-detail-form">
             <input
-              className="v10-form-input"
+              className="v10-form-input ds-input"
               type="text"
               value={sponsorId}
               onChange={(e) => setSponsorId(e.target.value)}
@@ -254,7 +254,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
-          {probeError && <p className="v10-modal-error" role="alert">{probeError}</p>}
+          {probeError && <p className="v10-modal-error ds-card-nested" role="alert">{probeError}</p>}
           {probed && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">

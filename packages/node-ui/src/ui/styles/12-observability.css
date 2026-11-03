@@ -7,7 +7,7 @@
 p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
 
 /* Cards */
-.card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-overlay);overflow:hidden;transition:border-color .15s}
+.card{background:var(--bg-surface);border:1px solid var(--border-default);overflow:hidden;transition:border-color .15s}
 .card-header{padding:14px 18px;border-bottom:1px solid var(--border-default);display:flex;align-items:center;justify-content:space-between}
 .card-title{font-size:12px;font-weight:700;color:var(--text-primary);letter-spacing:.04em;text-transform:uppercase}
 
@@ -30,6 +30,8 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
 /* Tab bar (legacy v9-style, used by Observability page) */
 .tab-group {
   display: flex;
+  align-items: stretch;
+  height: var(--tab-h);
   gap: 0;
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 0;
@@ -147,7 +149,7 @@ select.input {
 .tx-link-icon:hover { opacity: 1; color: var(--accent-blue); }
 
 /* Stat cards */
-.stat-card{background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--radius-overlay);padding:18px 20px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
+.stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:16px 18px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
 .stat-card:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.15)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
 .stat-label{font-size:12px;color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
@@ -171,7 +173,6 @@ select.input {
 .v10-modal-box {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-overlay);
   width: 560px;
   max-height: 85vh;
   overflow-y: auto;
@@ -209,7 +210,6 @@ select.input {
   padding: 10px 14px;
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.25);
-  border-radius: var(--radius-nested);
   margin-bottom: 16px;
   font-size: 12px;
   color: var(--text-danger);
@@ -220,7 +220,6 @@ select.input {
   padding: 10px 14px;
   background: var(--amber-dim);
   border: 1px solid rgba(245, 158, 11, 0.25);
-  border-radius: var(--radius-nested);
   margin-bottom: 16px;
   font-size: 12px;
   color: var(--text-warning);
@@ -231,7 +230,6 @@ select.input {
   padding: 12px 14px;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-nested);
   margin-bottom: 16px;
   font-size: 11px;
   color: var(--text-secondary);

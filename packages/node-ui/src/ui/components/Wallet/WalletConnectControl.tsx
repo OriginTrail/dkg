@@ -101,7 +101,7 @@ export function WalletConnectControl({
         Provider names are self-reported and display-only.
       </p>
       {pickerOpen && (
-        <div className="v10-wallet-picker" role="menu" aria-label="Wallet providers">
+        <div className="v10-wallet-picker ds-card-nested" role="menu" aria-label="Wallet providers">
           {discovered.length > 0 ? (
             discovered.map((detail) => {
               const key = providerKey(detail);
@@ -109,7 +109,7 @@ export function WalletConnectControl({
                 <button
                   key={key}
                   type="button"
-                  className="v10-wallet-provider"
+                  className="v10-wallet-provider ds-card-nested"
                   role="menuitem"
                   onClick={() => void connectDetail(detail)}
                   disabled={busyKey != null}

@@ -71,8 +71,8 @@ test.describe('Tab Management (rc.12)', () => {
     expect(await centerPanel.getTabCount()).toBe(countBefore);
   });
 
-  test('Observability opens as closable tab from header', async ({ header, centerPanel }) => {
-    await header.openObservability();
+  test('Observability opens as closable tab from the sidebar', async ({ leftPanel, centerPanel }) => {
+    await leftPanel.openObservability();
     expect(await centerPanel.getTabNames()).toContain('Observability');
     expect(await centerPanel.isTabClosable('Observability')).toBe(true);
   });

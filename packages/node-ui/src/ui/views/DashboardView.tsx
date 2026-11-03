@@ -110,7 +110,7 @@ function StatCard({
   className?: string;
 }) {
   return (
-    <div className={`stat-card v10-anim-mount${className ? ` ${className}` : ''}`}>
+    <div className={`stat-card ds-card v10-anim-mount${className ? ` ${className}` : ''}`}>
       {accentColor && <div className="accent" style={{ background: accentColor }} />}
       <div className="stat-label">{icon}{label}</div>
       {value != null && value !== '' && <div className="stat-value">{value}</div>}
@@ -710,7 +710,7 @@ export function DashboardView() {
       </div>
 
       <div className="v10-dash-grid v10-dash-grid-2">
-        <div className="v10-dash-section v10-dash-section-wide v10-anim-mount">
+        <div className="v10-dash-section ds-card v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Share2 size={13} aria-hidden />
@@ -758,7 +758,7 @@ export function DashboardView() {
           )}
         </div>
 
-        <div className="v10-dash-section v10-anim-mount">
+        <div className="v10-dash-section ds-card v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Wallet size={13} aria-hidden />

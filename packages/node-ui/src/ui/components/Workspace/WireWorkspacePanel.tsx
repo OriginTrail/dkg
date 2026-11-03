@@ -267,7 +267,7 @@ export function WireWorkspacePanel({
   if (planResult) {
     return (
       <div>
-        {error && <div className="v10-modal-error" style={{ marginBottom: 12 }}>{error}</div>}
+        {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
         <div style={{ marginBottom: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
           Review the install plan. Files are only written when you click Install.
@@ -323,12 +323,12 @@ export function WireWorkspacePanel({
           : 'Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.'}
       </div>
 
-      {error && <div className="v10-modal-error" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           value={workspaceRoot}
           onChange={(e) => setWorkspaceRoot(e.target.value)}
@@ -346,7 +346,7 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Coding tool to wire</label>
         <select
-          className="v10-form-select"
+          className="v10-form-select ds-input"
           value={toolSelection}
           onChange={(e) => setToolSelection(e.target.value as ToolSelection)}
         >
@@ -368,7 +368,7 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Your agent identity</label>
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
           disabled
@@ -384,7 +384,7 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Nickname for this agent</label>
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           value={nickname}
           onChange={(e) => setNickname(e.target.value)}

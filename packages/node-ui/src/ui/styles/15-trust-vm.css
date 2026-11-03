@@ -97,6 +97,8 @@
   border-radius: var(--radius-pill);
   background: rgba(255,255,255,0.06);
 }
+/* Inside a sub-graph filter chip the count is plain text. */
+.v10-subgraph-chip .v10-subgraph-chip-count { background: transparent; box-shadow: none; color: var(--text-tertiary); padding: 0; min-width: 0; }
 
 /* ── Verifiable Memory Hero Banner ── */
 .v10-vm-hero {
@@ -116,7 +118,6 @@
   flex-shrink: 0;
   background: color-mix(in srgb, var(--v10-vm-accent-strong) 5%, var(--bg-panel));
   border: 1px solid var(--v10-vm-border);
-  border-radius: var(--radius-card);
   box-shadow: none;
 }
 .v10-vm-hero-title {
@@ -211,7 +212,6 @@
   width: 100%;
   background: color-mix(in srgb, var(--layer-verified) 5%, transparent);
   border: 1px solid color-mix(in srgb, var(--layer-verified) 30%, transparent);
-  border-radius: var(--radius-nested);
   font-size: 11px;
   color: var(--text-secondary, #cbd5e1);
 }
@@ -272,7 +272,6 @@
   width: 100%;
   background: color-mix(in srgb, var(--layer-shared) 5%, transparent);
   border: 1px solid color-mix(in srgb, var(--layer-shared) 30%, transparent);
-  border-radius: var(--radius-nested);
   font-size: 11px;
   color: var(--text-secondary, #cbd5e1);
 }
