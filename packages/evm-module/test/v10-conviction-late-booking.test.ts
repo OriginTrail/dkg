@@ -3,9 +3,9 @@
 // an epoch's staker pool at the first claim on that node and epoch, and claims
 // run only over epochs that have ended, so a credit to an ended epoch that a
 // claim has already split is never paid. No booking credits an epoch that has
-// ended: the share of a late window's spread that falls on the ended epochs,
-// and an expiry tail swept after the lock's final epoch, go to the current
-// epoch.
+// ended: a late window's whole curve, its on-time curve shifted later, starts
+// in the current epoch, so no epoch takes more of a window than on time, and
+// an expiry tail swept after the lock's final epoch goes to the current epoch.
 //
 // One node with two delegators, operator fee 0, and in every scored epoch
 // all-nodes score = node score = the sum of the delegators' scores, so the
@@ -20,7 +20,8 @@
 //     and the last window and the top-up tail on time; claims and the
 //     withdrawal pay out everything;
 //   - the same with the whole account, its three windows and its top-up tail,
-//     booked four epochs late, after the lock.
+//     booked four epochs late, after the lock: every window spread from the
+//     current epoch, none in one epoch.
 
 import { randomBytes } from 'crypto';
 
@@ -46,6 +47,7 @@ import {
   Token,
 } from '../typechain';
 import { ACCOUNT_STACK_TAGS, TRAC } from './helpers/conviction-service';
+import { largestSlice, prorateActiveSink } from './helpers/emission-model';
 
 const STAKER_SHARD_ID = 1n;
 const SCALE18 = 10n ** 18n;
@@ -346,11 +348,19 @@ describe('@integration A late window booking pays the stakers in full (Publishin
 
     const credited = await book(run);
     expect((await f.PCS.getAccount(run.accountId)).fullySwept).to.equal(true);
-    // The arrears of all three windows, then the shares not yet due, and the
-    // tail, in the current epoch.
+    // Each window's whole curve from the current epoch on, then the tail in it.
     const current = run.a + 4n;
     expect(credited[0].slice(0, 2)).to.deep.equal([current, current]);
     expect(credited[credited.length - 1]).to.deep.equal([current, current, TOP_UP]);
+    // No epoch takes more of a window than its on-time slice, the last
+    // window's, which carries the dust, the largest.
+    const close = run.expiresAt - LOCK * epLen + epLen;
+    const timeRemaining = (await startOf(run.a + 1n)) - close;
+    const B = COMMITTED / LOCK;
+    const slice = largestSlice(prorateActiveSink(COMMITTED - (LOCK - 1n) * B, run.a + LOCK - 1n, LOCK, epLen, timeRemaining));
+    for (const [start, end, amount] of credited.slice(0, -1)) {
+      expect(amount / (end - start + 1n) <= slice, `${start}..${end}: ${amount}`).to.equal(true);
+    }
 
     await payOut(run, credited);
   });

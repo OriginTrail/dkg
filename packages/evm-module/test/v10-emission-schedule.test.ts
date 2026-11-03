@@ -458,9 +458,9 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     const bookedIn = await epochOfTx((await booking.wait())!);
     expect(bookedIn).to.equal(e1);
 
-    // Windows 0 and 1, each forward from its close, as the 10.0.8 schedule
-    // spread them; the share of the epochs that have ended is booked into
-    // the current epoch.
+    // Windows 0 and 1, each with the curve the 10.0.8 schedule gave it, a
+    // window whose close epoch has ended shifted to start in the current
+    // epoch.
     const model = new PoolModel(remBefore);
     const { scheduled } = await scheduleModel({
       chronos: ChronosContract,

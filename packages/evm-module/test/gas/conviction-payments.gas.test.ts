@@ -10,10 +10,11 @@
 //
 // A publish is measured as KnowledgeAssetsLifecycle makes it, through the NFT's
 // coverPublishingCost, from a Hub-registered stand-in. A window booking writes
-// up to three staker-pool ranges forward from the window's close, none into an
-// epoch that has ended, and the first credit of an epoch finalizes the shard
-// through the epoch before, so the per-window figure is the difference between
-// six windows and one, over five.
+// up to three staker-pool ranges forward from the window's close, or, for a
+// late window, the same three from the current epoch, none into an epoch that
+// has ended, and the first credit of an epoch finalizes the shard through the
+// epoch before, so the per-window figure is the difference between six windows
+// and one, over five.
 //
 // `measured` is the gas the transaction used when this file was written
 // (Hardhat, the repository's compiler settings); the test prints the current
@@ -52,12 +53,12 @@ const GAS: Record<string, Case> = {
   // account's own schedule has written.
   'coverPublishingCost, scheduled account, with top-up overflow': { target: 250_000n, measured: 215_666n },
   // The first credit of the epoch also finalizes the shard.
-  'settle, one closed window': { target: 250_000n, measured: 234_239n },
-  // Five of the six windows are late: each books its share of the ended
-  // epochs into the current epoch, whose pool slots they share.
-  'settle, six closed windows': { target: 700_000n, measured: 576_736n },
-  'settleMany, ten accounts, one closed window each': { target: 1_000_000n, measured: 791_742n },
-  'settleMany, ten accounts, nothing to book': { target: 150_000n, measured: 121_909n },
+  'settle, one closed window': { target: 250_000n, measured: 233_218n },
+  // Five of the six windows are late: each books its whole curve from the
+  // current epoch on, into the pool slots they then share.
+  'settle, six closed windows': { target: 700_000n, measured: 460_336n },
+  'settleMany, ten accounts, one closed window each': { target: 1_000_000n, measured: 781_582n },
+  'settleMany, ten accounts, nothing to book': { target: 150_000n, measured: 121_941n },
 };
 
 const ROUNDING = 5_000n;

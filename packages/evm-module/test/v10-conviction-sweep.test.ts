@@ -8,13 +8,14 @@
 //   - on time (in the epoch in which the window closes), an idle account gets,
 //     window by window, exactly the credits its 10.0.8 schedule wrote for that
 //     window, and at the end of the lock exactly the same pool, epoch by epoch;
-//   - late, no booking credits an epoch that has ended: the share of the
-//     spread that falls on the ended epochs is booked into the current epoch,
-//     and the rest of the spread is as scheduled. One epoch late, the credits
-//     are the same on an idle shard as on one another booking has just
-//     finalized; several epochs late, on the staker and the treasury shard
-//     alike, the windows are conserved; and the expiry tail of an account
-//     swept epochs after its lock lands in the current epoch;
+//   - late, a window's whole curve is its on-time curve shifted to start in
+//     the current epoch: no booking credits an epoch that has ended, and no
+//     epoch takes more of a window than its on-time slice. One epoch late,
+//     the credits are the same on an idle shard as on one another booking
+//     has just finalized; several epochs late, on the staker and the treasury
+//     shard alike, every window is booked once and conserved; and an account
+//     first settled epochs after its lock spreads every window from the
+//     current epoch, its expiry tail landing in the current epoch;
 //   - the batch settleMany(uint256[]) books exactly what settling each account
 //     alone books;
 //   - with a treasury wired, a booking splits net and fee on one curve, and a
@@ -38,7 +39,7 @@ import {
   Token,
 } from '../typechain';
 import { ACCOUNT_STACK_TAGS, TRAC, costOf } from './helpers/conviction-service';
-import { PoolModel, feeOf, fromCurrentEpoch, prorateActiveSink, scheduleModel } from './helpers/emission-model';
+import { PoolModel, feeOf, largestSlice, prorateActiveSink, scheduleModel } from './helpers/emission-model';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
 const STAKER_SHARD_ID = 1n;
@@ -232,22 +233,18 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
   // Late
   // -------------------------------------------------------------------------
 
-  it("one epoch late, the close epoch's share is booked into the current epoch, the same on an idle shard as on a busy one, and the rest is as scheduled", async () => {
+  it("one epoch late, the window's curve is its on-time curve one epoch later, the same on an idle shard as on a busy one", async () => {
     const { accountId, createdAt } = await createAccount(accounts[20]);
     const close = createdAt + epLen;
     const anchor = await ChronosContract.epochAtTimestamp(close);
     const B = COMMITTED / lock;
-    const scheduled = prorateActiveSink(
-      B,
-      anchor,
-      lock,
-      epLen,
-      (await ChronosContract.timestampForEpoch(anchor + 1n)) - close,
-    );
-    // The close epoch's share, booked into the current epoch ahead of the
-    // rest; the full epochs, which start in the current epoch, and the final
-    // one are untouched.
-    const expected = [[anchor + 1n, anchor + 1n, scheduled[0].amount], ...asTuples(scheduled.slice(1))];
+    const timeRemaining = (await ChronosContract.timestampForEpoch(anchor + 1n)) - close;
+    const onTime = prorateActiveSink(B, anchor, lock, epLen, timeRemaining);
+    // The same curve from the current epoch on: its partial first slice, its
+    // full epochs and its final one, each an epoch later.
+    const scheduled = prorateActiveSink(B, anchor + 1n, lock, epLen, timeRemaining);
+    expect(scheduled.map((r) => [r.start - 1n, r.end - 1n, r.amount])).to.deep.equal(asTuples(onTime));
+    const expected = asTuples(scheduled);
 
     // Another account, whose publish books into the shard on the busy run.
     const other = await createAccount(accounts[21]);
@@ -267,7 +264,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
       const delta = await deltas(before, from, to);
       await expectNoEndedEpochCredited(receipt, delta);
       const model = new PoolModel(carry);
-      for (const r of fromCurrentEpoch(scheduled, anchor + 1n)) model.add(r);
+      for (const r of scheduled) model.add(r);
       for (const [e, v] of delta) expect(v, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
     };
 
@@ -284,7 +281,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
     await lateBooking();
   });
 
-  it('several epochs late, every share of the ended epochs is booked into the current epoch, on the staker and the treasury shard alike, and the windows are conserved', async () => {
+  it('several epochs late, every window is its on-time curve shifted to the current epoch, on the staker and the treasury shard alike, booked once and conserved', async () => {
     const treasury = accounts[9];
     await Params.setProtocolTreasury(treasury.address);
     const feeBps = BigInt(await Params.protocolTreasuryFee());
@@ -309,7 +306,7 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
 
     const staker = new PoolModel(carry);
     const treasuryShard = new PoolModel(feeCarry);
-    const { scheduled, treasuryFee } = await scheduleModel({
+    const { scheduled, treasuryFee, curves } = await scheduleModel({
       chronos: ChronosContract,
       model: staker,
       feeModel: treasuryShard,
@@ -342,13 +339,33 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
       }
       expect(sum + (await ES.accumulatedRemainder(shard)) - carryBefore, `shard ${shard}`).to.equal(total);
     }
-    // The arrears are one credit into the current epoch, ahead of the rest.
-    expect((await credits(receipt))[0].slice(0, 2)).to.deep.equal([current, current]);
+    // Window by window, the staker credits are the window's on-time curve
+    // shifted to start in the current epoch (window 4 closed in it, so it is
+    // on time), and no epoch takes more of a window than its on-time slice.
+    const got = await credits(receipt);
+    let at = 0;
+    for (const { window, anchorEpoch, onTime, booked } of curves) {
+      const late = current - anchorEpoch;
+      if (window === 0n) expect(late >= 4n, 'window 0').to.equal(true);
+      if (window === 4n) expect(late, 'window 4').to.equal(0n);
+      expect(booked.map((r) => [r.start - late, r.end - late, r.amount]), `window ${window}`).to.deep.equal(
+        asTuples(onTime),
+      );
+      const mine = got.slice(at, at + booked.length);
+      at += booked.length;
+      expect(mine, `window ${window}`).to.deep.equal(asTuples(booked));
+      for (const [start, end, amount] of mine) {
+        expect(amount / (end - start + 1n) <= largestSlice(onTime), `window ${window}, ${start}..${end}`).to.equal(true);
+      }
+    }
+    expect(at).to.equal(got.length);
+    // Each window is booked once: a second settle in the same epoch books nothing.
+    expect(await credits(await settle(accountId))).to.deep.equal([]);
     // A booking moves no TRAC.
     expect(await Token.balanceOf(treasury.address)).to.equal(treasuryBalance);
   });
 
-  it('swept epochs after its lock, an account books its windows and its top-up tail from the current epoch on', async () => {
+  it('first settled epochs after its lock, an account spreads every window from the current epoch, no window in one epoch, and books its top-up tail there', async () => {
     const L = 3n;
     await Params.setPublishingConvictionEpochs(L);
     const holder = accounts[20];
@@ -373,9 +390,10 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
     const [swept] = await eventsOf(receipt, PC, 'AccountFinalSwept');
     expect([swept.topUpSwept, swept.dustSwept]).to.deep.equal([topUp, 0n]);
 
-    // Every window, then the tail, into the current epoch.
+    // Every window, each its on-time curve from the current epoch, then the
+    // tail into the current epoch.
     const model = new PoolModel(carry);
-    const { scheduled } = await scheduleModel({
+    const { scheduled, curves } = await scheduleModel({
       chronos: ChronosContract,
       model,
       committed: COMMITTED,
@@ -389,6 +407,22 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
     const got = await credits(receipt);
     expect(got).to.deep.equal(asTuples(model.credited));
     expect(got[got.length - 1]).to.deep.equal([current, current, topUp]);
+    // No window goes into one epoch: each runs over the L epoch-lengths from
+    // the current epoch, no epoch taking more of it than its on-time slice.
+    expect(curves).to.have.length(Number(L));
+    let at = 0;
+    for (const { window, anchorEpoch, onTime, booked } of curves) {
+      const late = current - anchorEpoch;
+      expect(booked.map((r) => [r.start - late, r.end - late, r.amount]), `window ${window}`).to.deep.equal(
+        asTuples(onTime),
+      );
+      expect(booked[0].start, `window ${window}`).to.equal(current);
+      expect(booked[booked.length - 1].end - current + 1n >= L, `window ${window}`).to.equal(true);
+      for (const [start, end, amount] of got.slice(at, at + booked.length)) {
+        expect(amount / (end - start + 1n) <= largestSlice(onTime), `window ${window}, ${start}..${end}`).to.equal(true);
+      }
+      at += booked.length;
+    }
 
     const delta = await deltas(before, from, to);
     await expectNoEndedEpochCredited(receipt, delta);

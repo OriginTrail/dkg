@@ -66,11 +66,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     service draw, top-up, transfer, `settle`), and the permissionless
  *     `settle` and `settleMany` let anyone bring accounts current.
  *   - No booking credits an epoch that has ended. A window booked after the
- *     epoch it closed in books the share of its spread that falls on the
- *     epochs already ended into the current epoch, and the rest where the
- *     spread puts it (`_bookFromCurrentEpoch`). A window booked in the epoch
- *     it closes in has no such share, so it is booked exactly as the 10.0.8
- *     schedule booked it.
+ *     epoch it closed in keeps the shape of its spread, shifted to start in
+ *     the current epoch (`_emitForwardFrom`), so no epoch takes more of it
+ *     than on time. A window booked in the epoch it closes in starts there,
+ *     so it is booked exactly as the 10.0.8 schedule booked it.
  *   - `topUpBalance[accountId]` is a separate prepaid usage buffer
  *     beyond the base budget. Any leftover at account expiry is swept to
  *     the staker pool, in the epoch of the sweep (the lock's final chain
@@ -246,9 +245,11 @@ contract PublishingConviction is
     //          full schedule. `EmissionScheduled` reports each booking's
     //          windows. `_distributeProratedRanges` folds back into
     //          `_distributeProrated`; the two draws share `_draw`. No booking
-    //          credits an epoch that has ended (`_bookFromCurrentEpoch`): a
-    //          late window books its arrears into the current epoch, and the
-    //          expiry tail goes to the epoch of the sweep.
+    //          credits an epoch that has ended: a late window's whole spread,
+    //          staker and treasury side alike, starts in the current epoch
+    //          with the shape of its on-time spread, shifted later
+    //          (`_emitForwardFrom`), and the expiry tail, a one-epoch credit
+    //          on time, goes to the epoch of the sweep.
     string private constant _VERSION = "10.2.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -1292,8 +1293,8 @@ contract PublishingConviction is
     ///         purely on STORED account fields (never `block.timestamp`), so a
     ///         window booked in the epoch in which it closes gets exactly the
     ///         credits the 10.0.8 schedule wrote for it. A later booking books
-    ///         the spread's share of the epochs that have ended into the
-    ///         current epoch, and the rest as scheduled (`_bookFromCurrentEpoch`).
+    ///         the same curve shifted to start in the current epoch
+    ///         (`_emitForwardFrom`).
     ///         No-op when the cursor is at or past `toWindow`. Mutates
     ///         `acct.lastSettledWindow` in memory so callers see a consistent
     ///         snapshot after the call.
@@ -1366,7 +1367,20 @@ contract PublishingConviction is
     ///      destination pool: `STAKER_SHARD_ID` for the net emission,
     ///      `TREASURY_SHARD_ID` for the fee on a window's unused budget —
     ///      both sides of the `_bookWindows` split ride the identical curve.
-    ///      Booked from `currentEpoch` on (`_bookFromCurrentEpoch`).
+    ///
+    ///      The curve starts in the epoch the window closed in, or, when that
+    ///      epoch has ended, in `currentEpoch`: a late window keeps its
+    ///      on-time shape, shifted later, so no epoch that has ended is
+    ///      credited and no epoch takes more of the window than its on-time
+    ///      slice. StakingV10 fixes a node's split of an epoch's pool at the
+    ///      first claim on that node and epoch, and claims run only over
+    ///      epochs that have ended, so a credit to an ended epoch could miss
+    ///      a split already fixed and stay in the vault for good.
+    ///      `EpochStorage`'s own clamp is not enough: it moves a credit only up
+    ///      to the first epoch it has not finalized, which on a shard no
+    ///      booking has touched for a while is an epoch that has already
+    ///      ended. A window booked in the epoch it closes in starts there, and
+    ///      is booked exactly as the 10.0.8 schedule booked it.
     function _emitForwardFrom(
         uint256 shardId,
         uint256 fromTs,
@@ -1375,54 +1389,17 @@ contract PublishingConviction is
         uint256 epLen,
         uint256 currentEpoch
     ) internal {
-        uint40 anchorEpoch = uint40(chronos.epochAtTimestamp(fromTs));
-        uint256 nextBoundary = chronos.timestampForEpoch(uint256(anchorEpoch) + 1);
+        uint256 closeEpoch = chronos.epochAtTimestamp(fromTs);
+        uint256 nextBoundary = chronos.timestampForEpoch(closeEpoch + 1);
         uint256 timeRemaining = nextBoundary > fromTs ? nextBoundary - fromTs : 0;
 
-        _bookFromCurrentEpoch(
-            shardId,
-            PublishingMathLib.prorateActiveSink(amount, anchorEpoch, lockEpochs, epLen, timeRemaining),
-            currentEpoch
+        PublishingMathLib.ActiveSinkRange[3] memory ranges = PublishingMathLib.prorateActiveSink(
+            amount,
+            uint40(closeEpoch < currentEpoch ? currentEpoch : closeEpoch),
+            lockEpochs,
+            epLen,
+            timeRemaining
         );
-    }
-
-    /// @dev Book `ranges` into `shardId`, never into an epoch before
-    ///      `currentEpoch`. StakingV10 fixes a node's split of an epoch's pool
-    ///      at the first claim on that node and epoch, and claims run only
-    ///      over epochs that have ended, so a credit to an ended epoch can
-    ///      miss a split already fixed and stay in the vault for good. The
-    ///      share of each range that falls on the epochs before
-    ///      `currentEpoch` is therefore booked into `currentEpoch`, ahead of
-    ///      the rest, and every later share stays where the range puts it.
-    ///      Each `prorateActiveSink` range spreads evenly over its epochs, so
-    ///      that share is exact. `EpochStorage`'s own clamp is not enough: it
-    ///      moves a credit only up to the first epoch it has not finalized,
-    ///      which on a shard no booking has touched for a while is an epoch
-    ///      that has already ended.
-    function _bookFromCurrentEpoch(
-        uint256 shardId,
-        PublishingMathLib.ActiveSinkRange[3] memory ranges,
-        uint256 currentEpoch
-    ) internal {
-        uint96 arrears;
-        for (uint256 i; i < ranges.length; i++) {
-            PublishingMathLib.ActiveSinkRange memory r = ranges[i];
-            if (r.tokenAmount == 0 || r.startEpoch >= currentEpoch) continue;
-            // Cannot overflow or underflow: startEpoch <= endEpoch,
-            // startEpoch < currentEpoch, share <= tokenAmount, and the
-            // shares sum to at most the ranges' uint96 total.
-            unchecked {
-                uint256 epochs = uint256(r.endEpoch) - uint256(r.startEpoch) + 1;
-                uint256 ended = r.endEpoch < currentEpoch ? epochs : currentEpoch - uint256(r.startEpoch);
-                uint96 share = uint96((uint256(r.tokenAmount) * ended) / epochs);
-                arrears += share;
-                r.tokenAmount -= share;
-            }
-            r.startEpoch = uint40(currentEpoch);
-        }
-        if (arrears > 0) {
-            epochStorage.addTokensToEpochRange(shardId, currentEpoch, currentEpoch, arrears);
-        }
         for (uint256 i; i < ranges.length; i++) {
             if (ranges[i].tokenAmount == 0) continue;
             epochStorage.addTokensToEpochRange(
@@ -1444,7 +1421,9 @@ contract PublishingConviction is
     ///         `fullySwept = true`. At or after expiry the current epoch is
     ///         the lock's final chain epoch or a later one, so the tail lands
     ///         in the final chain epoch when it is swept in it, and never in
-    ///         an epoch that has ended.
+    ///         an epoch that has ended. On time the tail is that one-epoch
+    ///         credit; swept later it keeps the shape, one credit, shifted to
+    ///         the current epoch, as a late window keeps its spread's.
     function _finalSweep(uint256 accountId) internal {
         (address treasury, uint256 feeBps) = _treasuryParams();
         uint96 accruedFee;
