@@ -14,10 +14,10 @@ import { queryInferenceDomain, signedItems } from '../../../test/helpers/query-i
 import type { Contracts } from '../contracts';
 import { BUCKET0, UNIT_ASK, inference } from '../plans';
 import { fmt } from '../report';
-import { SmokeTx, StepResult } from './tx';
+import { SmokeTx, Step, StepResult } from './tx';
 
-/** Steps that need an earlier step, and what makes them done already on chain. */
-export type StepOpts = { needs?: string[]; done?: string };
+/** Steps that need an earlier step, what makes them done already on chain, and what they move. */
+export type StepOpts = Pick<Step, 'needs' | 'done' | 'reads' | 'expected'>;
 
 export class Marketplace {
   private qiDomain?: Domain;
@@ -41,8 +41,8 @@ export class Marketplace {
   }
 
   /** A position of `amount` TRAC on `node` at tier 0, which has no lock, so it can withdraw at any time. */
-  async stake(prefix: string, owner: Signer, node: bigint, amount: bigint, done?: string): Promise<StepResult> {
-    await this.approve(`${prefix}.approve-staking`, 'owner', owner, await this.c.sv10.getAddress(), amount, 'StakingV10', { done });
+  async stake(prefix: string, owner: Signer, node: bigint, amount: bigint, opts: StepOpts = {}): Promise<StepResult> {
+    await this.approve(`${prefix}.approve-staking`, 'owner', owner, await this.c.sv10.getAddress(), amount, 'StakingV10', { done: opts.done });
     return this.tx.step({
       key: `${prefix}.stake`,
       label: `owner: createConviction(node ${node}, ${fmt(amount)} TRAC, tier 0)`,
@@ -51,14 +51,14 @@ export class Marketplace {
       to: await this.c.snft.getAddress(),
       data: this.c.snft.interface.encodeFunctionData('createConviction', [node, amount, 0]),
       needs: [`${prefix}.approve-staking`],
-      done,
+      ...opts,
     });
   }
 
   /** A new Conviction Account of `committed` TRAC, with no designated node, under the Hub's PublishingConviction. */
-  async createAccount(prefix: string, owner: Signer, committed: bigint, done?: string): Promise<StepResult> {
+  async createAccount(prefix: string, owner: Signer, committed: bigint, opts: StepOpts = {}): Promise<StepResult> {
     const nft = await this.c.nft.getAddress();
-    await this.approve(`${prefix}.approve-account`, 'owner', owner, nft, committed, 'DKGPublishingConvictionNFT', { done });
+    await this.approve(`${prefix}.approve-account`, 'owner', owner, nft, committed, 'DKGPublishingConvictionNFT', { done: opts.done });
     return this.tx.step({
       key: `${prefix}.create-account`,
       label: `owner: createAccount(${fmt(committed)} TRAC, no designated node)`,
@@ -67,7 +67,7 @@ export class Marketplace {
       to: nft,
       data: this.c.nft.interface.encodeFunctionData('createAccount', [committed, 0]),
       needs: [`${prefix}.approve-account`],
-      done,
+      ...opts,
     });
   }
 
@@ -161,10 +161,10 @@ export class Marketplace {
     sessionKey: string,
     value: bigint,
     planDigest: string,
-    done?: string,
+    opts: StepOpts = {},
   ): Promise<StepResult> {
     const ssw = await this.c.ssw.getAddress();
-    await this.approve(`${prefix}.approve-wallet`, who, buyer, ssw, value, 'ServiceSubscriptionsWallet', { done });
+    await this.approve(`${prefix}.approve-wallet`, who, buyer, ssw, value, 'ServiceSubscriptionsWallet', { done: opts.done });
     return this.tx.step({
       key: `${prefix}.fund-wallet-period`,
       label: `${who}: fundFromWallet(epoch ${epoch}, ${fmt(value)} TRAC)`,
@@ -173,7 +173,7 @@ export class Marketplace {
       to: ssw,
       data: this.c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequestOf(epoch, { sessionKey, planDigest, buckets: inference(value) })]),
       needs: [`${prefix}.approve-wallet`],
-      done,
+      ...opts,
     });
   }
 

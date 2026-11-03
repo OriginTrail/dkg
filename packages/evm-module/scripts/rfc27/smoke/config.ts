@@ -39,6 +39,8 @@ export type SmokeEnv = {
   warp: boolean;
   /** Fork-only: write the seller's proofs where the real node would have proved. */
   proofs: boolean;
+  /** Fork-only: end the process right after the journal records this step, as a crash would. */
+  stopAfter?: string;
   run: string;
   stateFile: string;
 };
@@ -53,6 +55,7 @@ export function readEnv(): SmokeEnv {
     send: process.env.SEND === '1',
     warp: process.env.FORK_WARP === '1',
     proofs: process.env.FORK_PROOFS === '1',
+    stopAfter: process.env.FORK_STOP_AFTER || undefined,
     run,
     stateFile: path.join(RESULTS_DIR, `${run}.json`),
   };

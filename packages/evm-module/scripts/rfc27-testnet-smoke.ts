@@ -105,7 +105,7 @@ import { roles } from './rfc27/smoke/roles';
 import { phaseServe } from './rfc27/smoke/serve';
 import { phaseSetup } from './rfc27/smoke/setup';
 import { StateFile } from './rfc27/smoke/state';
-import { SmokeTx } from './rfc27/smoke/tx';
+import { SmokeTx, stoppingAt } from './rfc27/smoke/tx';
 import { phaseWithdraw } from './rfc27/smoke/withdraw';
 
 const redactor = new Redactor();
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
   env = readEnv();
   const net = await guardNetwork(hre, redactor);
   guarded = true;
-  if (!net.local && (env.warp || env.proofs)) throw new Error('refusing to run: FORK_WARP and FORK_PROOFS are for the local fork only');
+  if (!net.local && (env.warp || env.proofs || env.stopAfter)) throw new Error('refusing to run: FORK_WARP, FORK_PROOFS and FORK_STOP_AFTER are for the local fork only');
   const block = await hre.ethers.provider.getBlock('latest');
   if (!block) throw new Error('no latest block');
   report.set('network', { name: net.name, chainId: net.chainId, client: net.client, forkBlock: net.forkBlock, block: block.number, timestamp: block.timestamp });
@@ -133,7 +133,12 @@ async function main(): Promise<void> {
   report.say(`epoch ${current}, ends ${iso(next)}, in ${span(next - BigInt(block.timestamp))}; epoch length ${await base.chronos.epochLength()} s`);
   const fork = new Fork(hre, net, report);
   const file = new StateFile(env.stateFile, redactor, !env.send);
-  const ctx: Ctx = { hre, env, net, report, stack, base, fork, file, tx: new SmokeTx(hre, report, env.send, file), roles: await roles({ hre, fork, redactor, c: base, run: env.run }) };
+  const stop = (): never => {
+    report.say(`\nFORK_STOP_AFTER=${env?.stopAfter}: stopping here, as a crash would`);
+    process.exit(75);
+  };
+  const journal = env.stopAfter ? stoppingAt(file, env.stopAfter, stop) : file;
+  const ctx: Ctx = { hre, env, net, report, stack, base, fork, file, tx: new SmokeTx(hre, report, env.send, journal), roles: await roles({ hre, fork, redactor, c: base, run: env.run }) };
 
   if (env.phase === 'check') return phaseCheck(ctx);
   if (!(await deployed(ctx))) throw new Error('the OT-RFC-27 contracts are not deployed yet: run PHASE=check once the deploy and the Hub owner\'s two transactions are in');

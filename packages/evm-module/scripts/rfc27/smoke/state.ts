@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 
 import { JsonObject, Redactor, toJson, writeJson } from '../report';
-import type { Journal, StepRecord } from './tx';
+import type { Journal, Reads, StepRecord } from './tx';
 
 export const PHASES = ['check', 'setup', 'serve', 'finalize', 'close-claim', 'withdraw'] as const;
 export type PhaseName = (typeof PHASES)[number];
@@ -149,6 +149,12 @@ function oneOf<T extends string>(o: Obj, k: string, values: readonly T[], where:
 const AMOUNT_KEYS = ['stake', 'caValue', 'caTopUp', 'edgeValue', 'walletValue', 'keyEth', 'committed', 'committedFloor', 'lock', 'discountBps'] as const;
 const REF_STATUSES: readonly RefStatus[] = ['finalized', 'finalized by another caller', 'waiting on the seller', 'void', 'skipped'];
 
+function optReads(o: Obj, k: string, where: string): Reads | undefined {
+  if (o[k] === undefined || o[k] === null) return undefined;
+  const r = obj(o[k], `${where}.${k}`);
+  return Object.fromEntries(Object.keys(r).map((name) => [name, bi(r, name, `${where}.${k}`)]));
+}
+
 function decodeStep(x: unknown, where: string): StepRecord {
   const o = obj(x, where);
   return {
@@ -160,6 +166,9 @@ function decodeStep(x: unknown, where: string): StepRecord {
     gasLimit: bi(o, 'gasLimit', where),
     block: optNum(o, 'block', where),
     gasUsed: optBi(o, 'gasUsed', where),
+    before: optReads(o, 'before', where),
+    after: optReads(o, 'after', where),
+    expected: optReads(o, 'expected', where),
   };
 }
 

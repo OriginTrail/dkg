@@ -13,7 +13,7 @@ import { rewardClaims } from './reward-claims';
 import { need } from './roles';
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
-  const { report, c } = ctx;
+  const { report, c, file } = ctx;
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
   const s = await runState(ctx, 'serve');
   if (!ctx.file.done('finalize')) report.note('finalize has not completed: the epoch closes with whatever was finalized');
@@ -60,7 +60,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       };
     }
   } else {
-    report.note(`=     epoch ${P} is closed already, by another caller (closed through ${closedThrough}): its numbers come from storage`);
+    report.note(`=     epoch ${P} is closed already, by ${file.get('close-claim.close-epochs') ? 'this phase before it was interrupted' : 'another caller'} (closed through ${closedThrough}): its numbers come from storage`);
     close = { ...(await closeFromStorage(c, P)), from: 'storage' };
   }
   if (close) {
@@ -93,8 +93,19 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.check(`node ${s.sellerId}'s gross from the pool of epoch ${P} is what the preview said`, gross === previewGross && gross <= close.pool, `${fmt(gross)} TRAC`);
   }
 
-  // 2. claimFor on our position, against StakingKPI's preview. Claims another caller (the
-  //    upkeep cron) made before it are checked first, from the claims the chain recorded.
+  // 2. claimFor on our position, against StakingKPI's preview. Claims made before it, by
+  //    another caller (the upkeep cron) or by this phase before it was interrupted, are
+  //    checked first, from the claims the chain recorded.
+  const claimStep = {
+    key: 'close-claim.claim',
+    label: `owner: StakingV10.claimFor(${tokenId})`,
+    role: 'owner',
+    signer: r.owner,
+    to: await c.sv10.getAddress(),
+    data: c.sv10.interface.encodeFunctionData('claimFor', [tokenId]),
+  };
+  const ours = file.get(claimStep.key);
+  if (ours) await ctx.tx.step(claimStep);
   const pos = await c.css.getPosition(tokenId);
   const per: EpochReward[] = [];
   let claimed = false;
@@ -103,7 +114,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     const by = await rewardClaims(ctx.hre.ethers.provider, c, { tokenId, node: s.sellerId, stakeRaw: s.stakeRaw, firstEpoch: windowStart, fromBlock: staked.blockNumber });
     const windows = by.claims.map((x) => (x.from === x.to ? `${x.from}` : `${x.from}..${x.to}`)).join(', ');
     report.check(
-      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by another caller (the upkeep cron): what each claim paid is StakingKPI's preview`,
+      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by ${by.claims.every((x) => x.tx === ours?.hash) ? 'this phase before it was interrupted' : 'another caller (the upkeep cron)'}: what each claim paid is StakingKPI's preview`,
       by.through === pos.lastClaimedEpoch && by.total === pos.cumulativeRewardsClaimed && by.claims.every((x) => x.paid === x.previewed),
       `paid ${fmt(by.total)} TRAC of ${fmt(pos.cumulativeRewardsClaimed)} in ${by.claims.length} claim${by.claims.length > 1 ? 's' : ''}, of epochs ${windows}, through ${by.through}`,
     );
@@ -111,19 +122,12 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.set('claimsByOthers', by);
     claimed = true;
   }
-  if (pos.lastClaimedEpoch < current - 1n) {
+  if (pos.lastClaimedEpoch < current - 1n && !ours) {
     const expect = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw, pre.nets);
     // The epochs the claim pays, as the preview gives them: what a dry run shows, and what the send checks.
     per.push(...expect.per);
     claimed = true;
-    const res = await ctx.tx.step({
-      key: 'close-claim.claim',
-      label: `owner: StakingV10.claimFor(${tokenId})`,
-      role: 'owner',
-      signer: r.owner,
-      to: await c.sv10.getAddress(),
-      data: c.sv10.interface.encodeFunctionData('claimFor', [tokenId]),
-    });
+    const res = await ctx.tx.step(claimStep);
     if (res.receipt) {
       const paid = eventsIn(res.receipt, c.sv10, c.sv10.getEvent('RewardsClaimed')).find((x) => x.tokenId === tokenId)?.amount ?? 0n;
       const after = await c.css.getPosition(tokenId);

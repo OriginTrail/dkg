@@ -13,6 +13,7 @@ import { PoolCtx, complete, doneEarlier, epochStart, now, runState, standInProof
 import { need } from './roles';
 import { fundOnFork, planDigest } from './setup';
 import { serveMissing } from './state';
+import { movedBy, movement } from './tx';
 
 export async function phaseServe(ctx: PoolCtx): Promise<void> {
   const { report, c, market, file } = ctx;
@@ -57,10 +58,9 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   }
 
   // 2. The top-up of the account period: accepted, its cost due in E+1, the bucket's funded cap raised.
-  const capBefore = await c.qs.fundedCap(ca, 0);
-  const dueBefore = (await c.qis.dueIn(E + 1n)).conviction;
   const topUp = await market.topUp('serve.top-up', 'buyer key', r.buyer, ca, a.caTopUp, planDigest(ctx, 'account plan, topped up'), {
     done: (await c.cssvc.getSubscription(ca)).value >= a.caValue + a.caTopUp ? 'the period holds the topped-up value' : undefined,
+    reads: async (blockTag) => ({ due: (await c.qis.dueIn(E + 1n, { blockTag })).conviction, cap: await c.qs.fundedCap(ca, 0, { blockTag }) }),
   });
   if (ctx.env.send) {
     s.costs.topUp = (await c.cssvc.getSubscription(ca)).cost - s.costs.ca;
@@ -70,10 +70,11 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   if (toppedUp) {
     report.check(
       `the top-up is accepted at ${fmt(toppedUp.cost)} TRAC, due in epoch ${E + 1n}`,
-      toppedUp.cost === costOf(a.caTopUp, a.discountBps) && (await c.qis.dueIn(E + 1n)).conviction - dueBefore === toppedUp.cost,
+      toppedUp.cost === costOf(a.caTopUp, a.discountBps) && movedBy(topUp, 'due', toppedUp.cost),
+      movement(topUp, 'due'),
     );
     const capAfter = await c.qs.fundedCap(ca, 0);
-    report.check(`the account bucket's funded cap rises from ${fmt(capBefore)} to ${fmt(capAfter)} TRAC`, capAfter === ((a.caValue + a.caTopUp) * (10_000n - a.discountBps)) / 10_000n);
+    report.check(`the account bucket's funded cap rises to ${fmt(capAfter)} TRAC`, capAfter === ((a.caValue + a.caTopUp) * (10_000n - a.discountBps)) / 10_000n, movement(topUp, 'cap'));
   }
 
   // 3. The second batch: one more account request, above the cap before the top-up.
@@ -126,11 +127,12 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   });
   const ssAddr = await c.ss.getAddress();
   const topUpEdge = market.topUpData(edgePeriod, a.caTopUp, planDigest(ctx, 'edge plan, topped up'));
-  if (revoked.receipt) {
+  const edge2 = await c.cssvc.getAssignment(accountId, r.edgeBuyer.address);
+  // Resumed once the key is assigned again, the moment this check is about has passed.
+  if (revoked.receipt && edge2.revokedAt !== 0n) {
     const why = await ctx.tx.refusal(r.edgeBuyer.address, ssAddr, topUpEdge);
     report.check('while the edge key stands revoked, a top-up of its period is refused (AssignmentRevoked)', why.startsWith('AssignmentRevoked'), why);
   }
-  const edge2 = await c.cssvc.getAssignment(accountId, r.edgeBuyer.address);
   const again = await market.assign('serve.edge-reassign', 'owner: assign the same edge buyer key again', r.owner, account, r.edgeBuyer, edgeCap, {
     needs: ['serve.edge-revoke'],
     done: s.edgeNonce !== undefined && edge2.revokedAt === 0n && edge2.nonce > s.edgeNonce ? `assigned again at nonce ${edge2.nonce}` : undefined,
