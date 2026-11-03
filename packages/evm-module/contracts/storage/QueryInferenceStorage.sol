@@ -385,7 +385,12 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         emit MaxCloseStepsPerClaimSet(old, value);
     }
 
-    /// @notice Switch the pause on or off.
+    /// @notice Switch the pause on or off. While it is on, no period is funded
+    ///         or topped up, from a wallet or from a Conviction Account alike,
+    ///         and no receipt is batched or finalized; closes and claims go
+    ///         on. With the settlement removed from the Hub, the emergency
+    ///         switch (`StakingV10.queryInferenceSettlement`), only the pause
+    ///         stops the funding.
     function setPaused(bool value) external onlyHub {
         paused = value;
         emit PausedSet(value);

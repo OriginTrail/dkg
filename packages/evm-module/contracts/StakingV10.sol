@@ -328,10 +328,54 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
     }
 
-    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
-    ///         close and each node's gross from it, read from the Hub at each
-    ///         claim, so a replaced settlement serves the next claim. 0 where
-    ///         the Hub holds no settlement.
+    /**
+     * @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
+     *         close and each node's gross from it, read from the Hub at each
+     *         claim, so a replaced settlement serves the next claim. 0 where
+     *         the Hub holds no settlement.
+     * @dev    Replacing the settlement in the Hub with a fixed one
+     *         (`Hub.setContractAddress`, then its `initialize()`) strands
+     *         nothing, and comes first: the new one reads the same
+     *         `QueryInferenceStorage`, so the frozen closes, the claims and
+     *         the carry are all kept.
+     *
+     *         Removing it from the Hub is the emergency switch: with no
+     *         settlement, a claim pays the rewards of 10.0.6, without the
+     *         pool. It strands money, so:
+     *           1. Funding goes on. Wallet and Conviction Account periods are
+     *              still funded and topped up until `QueryInferenceStorage` is
+     *              paused too; `setPaused(true)` stops both.
+     *           2. While the settlement is out, any one claim fixes the split
+     *              of each node-epoch it passes without the pool, closed
+     *              epochs included, and for good: the pool's share stays in
+     *              the vault, and registering a settlement again does not
+     *              restore it. `claimFor` is permissionless, a withdrawal
+     *              claims first, and `claimWithdrawnEpoch` spends its record
+     *              the same way. So stop your own upkeep calls before pulling
+     *              the switch, and keep the outage short.
+     *           3. Sellers stop. `submitReceiptBatch`, `finalizeClaims` and
+     *              `closeEpochs` revert, because `QueryInferenceStorage`
+     *              takes writes only from Hub contracts. Work delivered but
+     *              not yet batched loses its R if its batch deadline,
+     *              `periodEnd + grace`, passes during the outage, and a claim
+     *              not finalized within its due epoch is void. The money
+     *              itself is not lost: an epoch with no finalized value
+     *              carries it forward.
+     *           4. Pull the switch only with `Hub.removeContractByName`. On
+     *              the Hub's last entry, `removeContractByAddress` leaves the
+     *              name's pointer dangling in
+     *              `UnorderedNamedContractDynamicSet`, so this lookup, and
+     *              every claim and withdrawal with it, reverts until a
+     *              contract under another name is added. Switch back on with
+     *              a fresh deployment of the settlement and its
+     *              `initialize()`: removing the last entry by name leaves its
+     *              address's pointer dangling instead, and a settlement
+     *              registered again is always the last entry, so registering
+     *              the same address again can revert `AddressAlreadyInSet`.
+     *           5. Coming back after more than `maxCloseStepsPerClaim` epochs
+     *              (32 by default), claims revert `QueryInferenceCloseBehind`
+     *              until `closeEpochs` has caught the closes up.
+     */
     function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
         if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
         return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));

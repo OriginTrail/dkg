@@ -95,6 +95,12 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * Gates: every batch and finalization is refused while
  * `QueryInferenceStorage` is paused, before its activation epoch and while that
  * is unset.
+ *
+ * Out of the Hub. `QueryInferenceStorage` takes writes only from Hub
+ * contracts, so while this contract is out of the Hub, which is the emergency
+ * switch (`StakingV10.queryInferenceSettlement`), every batch, finalization
+ * and close reverts. A fresh deployment, registered and initialized, takes
+ * over the same storage, its closes, claims and carry.
  */
 contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "QueryInferenceSettlement";
