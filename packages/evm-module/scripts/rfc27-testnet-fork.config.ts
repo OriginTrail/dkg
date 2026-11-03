@@ -112,13 +112,21 @@ function seedScratchDeployments(network: string): { tracked: string; bytes: Buff
 task('deploy').setAction(async (args, hre, runSuper) => {
   await assertLocalAnvilFork(hre);
   const { tracked, bytes } = seedScratchDeployments(hre.network.name);
-  try {
-    return await runSuper(args);
-  } finally {
+  // Checked after the run whether it succeeds or fails; a changed tracked file is the error reported.
+  const untouched = () => {
     if (!fs.readFileSync(tracked).equals(bytes)) {
       throw new Error(`${tracked} changed during the run, which must never write it`);
     }
+  };
+  let result: unknown;
+  try {
+    result = await runSuper(args);
+  } catch (e: unknown) {
+    untouched();
+    throw e;
   }
+  untouched();
+  return result;
 });
 
 task(TASK_RUN).setAction(async (args, hre, runSuper) => {
