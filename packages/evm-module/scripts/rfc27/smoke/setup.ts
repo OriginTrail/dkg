@@ -19,9 +19,9 @@ import { movedBy, movement } from './tx';
 /** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
 export const planDigest = (ctx: PoolCtx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
 
-/** FORK-ONLY: the owner's ETH and TRAC, and the seller's ETH, from anvil's balance setters. */
+/** FORK-ONLY: the owner's ETH and TRAC, and the seller's ETH, from anvil's balance setters, with SEND=1: a dry run changes nothing. */
 export async function fundOnFork(ctx: PoolCtx, trac: bigint): Promise<void> {
-  if (!ctx.net.local) return;
+  if (!ctx.net.local || !ctx.env.send) return;
   const { ownerAddr, sellerAddr } = ctx.roles;
   const provider = ctx.hre.ethers.provider;
   if (ownerAddr && (await provider.getBalance(ownerAddr)) < FORK_ETH / 10n) {

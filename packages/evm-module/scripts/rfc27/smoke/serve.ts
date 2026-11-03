@@ -96,7 +96,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   }
 
   // FORK-ONLY, with FORK_PROOFS=1: the seller proves in E after the stake, so the position holds score in E.
-  if (ctx.env.send && !(s.fork?.proofs ?? []).includes(E.toString())) await standInProof(ctx, 'after the stake, so the position holds score in E');
+  if (!(s.fork?.proofs ?? []).includes(E.toString())) await standInProof(ctx, 'after the stake, so the position holds score in E');
 
   // 4. The edge.
   report.say('\n  The edge: revoke, assign the same key again, and a top-up of the old period is refused:');

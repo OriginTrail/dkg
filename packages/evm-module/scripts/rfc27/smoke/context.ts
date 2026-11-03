@@ -39,9 +39,16 @@ export async function withPool(ctx: Ctx): Promise<PoolCtx> {
 
 export const now = (ctx: Ctx): Promise<bigint> => chainNow(ctx.hre);
 
-/** The phase may run from `ts`: see fork.notBefore. */
-export const opensAt = (ctx: Ctx, ts: bigint, what: string): Promise<boolean> =>
-  notBefore({ hre: ctx.hre, fork: ctx.fork, report: ctx.report, warp: ctx.env.warp }, ts, what);
+/**
+ * The phase may run from `ts`: see fork.notBefore. A dry run changes nothing on
+ * the fork either, so it does not move the clock: it is deferred, as without
+ * FORK_WARP.
+ */
+export async function opensAt(ctx: Ctx, ts: bigint, what: string): Promise<boolean> {
+  const open = await notBefore({ hre: ctx.hre, fork: ctx.fork, report: ctx.report, warp: ctx.env.warp && ctx.env.send }, ts, what);
+  if (!open && ctx.env.warp && !ctx.env.send) ctx.report.note('a dry run changes nothing on the fork: FORK_WARP=1 moves the clock with SEND=1 only');
+  return open;
+}
 
 export const epochStart = (ctx: Ctx, e: bigint): Promise<bigint> => ctx.base.chronos.timestampForEpoch(e);
 
@@ -105,9 +112,17 @@ export function complete(ctx: Ctx): void {
   if (ctx.env.send && !ctx.report.stopped && ctx.report.status === 'ran') ctx.file.finish(ctx.env.phase, ctx.report.failed);
 }
 
-/** FORK-ONLY: the seller's next proof, where the real node would have proved, with FORK_PROOFS=1. */
+/**
+ * FORK-ONLY: the seller's next proof, where the real node would have proved,
+ * with FORK_PROOFS=1 and SEND=1. It sends transactions outside the runner, so a
+ * dry run only says what it would write.
+ */
 export async function standInProof(ctx: PoolCtx, why: string): Promise<boolean> {
   if (!ctx.net.local || !ctx.env.proofs) return false;
+  if (!ctx.env.send) {
+    ctx.report.note(`plan  fork-only: a stand-in proof of node ${ctx.file.s.sellerId}, with SEND=1: ${why}`);
+    return false;
+  }
   const s = ctx.file.s;
   s.fork ??= { proofs: [] };
   if (s.fork.mirrorScore === undefined) {

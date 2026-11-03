@@ -32,7 +32,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
       current = await c.chronos.getCurrentEpoch();
     }
     report.say(`\nWithdraw in the middle of epoch ${current}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
-    if (ctx.env.send && !(s.fork?.proofs ?? []).includes(current.toString())) await standInProof(ctx, 'before the withdrawal, so the position holds score in its epoch');
+    if (!(s.fork?.proofs ?? []).includes(current.toString())) await standInProof(ctx, 'before the withdrawal, so the position holds score in its epoch');
     const pos = await c.css.getPosition(tokenId);
     if (pos.identityId === 0n) throw new Error(`position ${tokenId} does not exist`);
     const auto = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw);
