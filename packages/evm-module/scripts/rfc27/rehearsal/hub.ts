@@ -102,14 +102,14 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
   const guards: Record<string, string> = {};
   guards.beforeHubTransaction = await expectRevert(ctx, 'Hub.forwardCall(QueryInferenceStorage, setActivationEpoch) before the Hub transaction', ownerAddr, HUB, activateData(E0 + 1n));
   check('before the Hub transaction the activation is refused', guards.beforeHubTransaction.startsWith('InvalidTargetContract'), guards.beforeHubTransaction);
-  const piecewise = await ctx.fork.snapshot();
-  await ctx.fork.send('Hub.setContractAddress(QueryInferenceStorage)', owner, HUB, register('QueryInferenceStorage', qisNew));
-  guards.storageOnly = await expectRevert(ctx, 'setActivationEpoch with only QueryInferenceStorage registered', ownerAddr, HUB, activateData(E0 + 1n));
-  await ctx.fork.send('Hub.setContractAddress(ConvictionServiceStorage)', owner, HUB, register('ConvictionServiceStorage', cssvcNew));
-  await ctx.fork.send('Hub.setContractAddress(QueryInferenceSettlement)', owner, HUB, register('QueryInferenceSettlement', qsNew));
-  await ctx.fork.send('Hub.forwardCall(QueryInferenceSettlement, initialize)', owner, HUB, forward(qsNew, QueryInferenceSettlement__factory.createInterface().encodeFunctionData('initialize')));
-  guards.stakingV10Old = await expectRevert(ctx, `setActivationEpoch with the settlement registered and StakingV10 ${replaced.StakingV10}`, ownerAddr, HUB, activateData(E0 + 1n));
-  await ctx.fork.revert(piecewise);
+  await ctx.fork.inSnapshot(async () => {
+    await ctx.fork.send('Hub.setContractAddress(QueryInferenceStorage)', owner, HUB, register('QueryInferenceStorage', qisNew));
+    guards.storageOnly = await expectRevert(ctx, 'setActivationEpoch with only QueryInferenceStorage registered', ownerAddr, HUB, activateData(E0 + 1n));
+    await ctx.fork.send('Hub.setContractAddress(ConvictionServiceStorage)', owner, HUB, register('ConvictionServiceStorage', cssvcNew));
+    await ctx.fork.send('Hub.setContractAddress(QueryInferenceSettlement)', owner, HUB, register('QueryInferenceSettlement', qsNew));
+    await ctx.fork.send('Hub.forwardCall(QueryInferenceSettlement, initialize)', owner, HUB, forward(qsNew, QueryInferenceSettlement__factory.createInterface().encodeFunctionData('initialize')));
+    guards.stakingV10Old = await expectRevert(ctx, `setActivationEpoch with the settlement registered and StakingV10 ${replaced.StakingV10}`, ownerAddr, HUB, activateData(E0 + 1n));
+  });
   check('PoolNotWired while the Hub holds no settlement', guards.storageOnly === 'PoolNotWired(QueryInferenceSettlement)', guards.storageOnly);
   check(`PoolNotWired while StakingV10 is ${replaced.StakingV10}`, guards.stakingV10Old === 'PoolNotWired(StakingV10)', guards.stakingV10Old);
 

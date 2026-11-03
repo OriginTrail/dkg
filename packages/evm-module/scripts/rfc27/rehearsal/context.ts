@@ -65,6 +65,9 @@ export async function withPool(ctx: Ctx): Promise<Contracts> {
 
 export type Sent = { receipt: TransactionReceipt; gasUsed: bigint };
 
+/** FORK-ONLY: a part of a transaction's label; a phase fails just before it, to show what its snapshots restore. */
+const FAIL_AT = process.env.REHEARSAL_FAIL_AT;
+
 /**
  * One transaction, through the shared runner: estimated, the estimate, its
  * smallest gas limit, checked against 2^24 as a check of its own (anvil does
@@ -74,6 +77,7 @@ export type Sent = { receipt: TransactionReceipt; gasUsed: bigint };
  * a revert is recorded and rethrown.
  */
 export async function send(ctx: Ctx, label: string, signer: Signer, to: string | undefined, data: string): Promise<Sent> {
+  if (FAIL_AT && label.includes(FAIL_AT)) throw new Error(`REHEARSAL_FAIL_AT: stopping before "${label}"`);
   const role = label.includes(':') ? label.slice(0, label.indexOf(':')) : label;
   let result;
   try {

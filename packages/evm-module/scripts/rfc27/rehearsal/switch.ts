@@ -24,7 +24,7 @@ import { ethers } from 'ethers';
 
 import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
 import type { QueryInferenceSettlement } from '../../../typechain';
-import { eventsIn, typedAt } from '../contracts';
+import { Contracts, eventsIn, typedAt } from '../contracts';
 import { chainNow } from '../network';
 import { poolShareOf } from '../reads';
 import { fmt } from '../report';
@@ -43,8 +43,33 @@ const SWITCH_UNSERVED_VALUE = 2n * TRAC; // a wallet period no one serves, so it
 
 export async function phaseSwitch(ctx: Ctx): Promise<void> {
   const { report, stack } = ctx;
-  const check = report.check.bind(report);
   const c = await withPool(ctx);
+  const h = stack.hub;
+  const qsDeployedAddr = await c.qs.getAddress();
+  const S = await c.qis.activationEpoch();
+  const C = await c.chronos.getCurrentEpoch();
+  const closed0 = await c.qis.closedThrough();
+  if (S === 0n || C > S || closed0 !== S - 1n) {
+    throw new Error(`run PHASE=switch right after PHASE=hub: activation ${S}, current epoch ${C}, closed through ${closed0}`);
+  }
+  const startBlock = await ctx.hre.ethers.provider.getBlockNumber();
+  report.say(`\nin a snapshot from epoch ${C}, block ${startBlock}: the switch, then revert`);
+  const out = await ctx.fork.inSnapshot(() => offAndOn(ctx, c, S, C));
+  report.check(
+    'the snapshot is reverted: the block, the epoch, the deployed settlement and the closes are as the hub phase left them',
+    (await ctx.hre.ethers.provider.getBlockNumber()) === startBlock &&
+      (await c.chronos.getCurrentEpoch()) === C &&
+      (await h.getContractAddress('QueryInferenceSettlement')) === qsDeployedAddr &&
+      !(await c.qis.paused()) &&
+      (await c.qis.closedThrough()) === closed0,
+  );
+  saveResults(ctx, 'switch', out);
+}
+
+/** Everything the phase reverts: the pool's first epochs from activation epoch S, the switch off, on again, and the removals. */
+async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{ [key: string]: unknown }> {
+  const { report, stack } = ctx;
+  const check = report.check.bind(report);
   const h = stack.hub;
   const qisAddr = await c.qis.getAddress();
   const qsDeployed = c.qs;
@@ -56,12 +81,6 @@ export async function phaseSwitch(ctx: Ctx): Promise<void> {
   const owner = await impersonate(ctx, ownerAddr);
   const [deployer, walletBuyer, caOwner, buyerKey, caSession, , keeper, walletSession] = await ctx.hre.ethers.getSigners();
 
-  const S = await c.qis.activationEpoch();
-  const C = await c.chronos.getCurrentEpoch();
-  const closed0 = await c.qis.closedThrough();
-  if (S === 0n || C > S || closed0 !== S - 1n) {
-    throw new Error(`run PHASE=switch right after PHASE=hub: activation ${S}, current epoch ${C}, closed through ${closed0}`);
-  }
   const [nOn, nOff] = SELLERS; // nOff is claimed while the switch is off, nOn once it is on again
   const ops = await operationalKeys(ctx);
   const mirror: Record<string, bigint> = {};
@@ -71,10 +90,6 @@ export async function phaseSwitch(ctx: Ctx): Promise<void> {
     if (mirror[String(n)] === 0n) throw new Error(`node ${n} scored nothing in epoch ${C - 1n}`);
   }
   const out: { [key: string]: unknown } = { activation: S, sellers: SELLERS, epochLength: await c.chronos.epochLength() };
-
-  const snap = await ctx.fork.snapshot();
-  const startBlock = await ctx.hre.ethers.provider.getBlockNumber();
-  report.say(`\nsnapshot ${snap} at epoch ${C}, block ${startBlock}: the switch, then revert`);
 
   // ---- epoch S: a wallet period both sellers serve; a Conviction Account to fund from later ----
   await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S)) + 120n);
@@ -169,9 +184,7 @@ export async function phaseSwitch(ctx: Ctx): Promise<void> {
   const shareWithout = (await expectedReward(c, pOff, S + 1n, S + 1n, { [keyOff]: netWithout[String(nOff)] })).total;
 
   // The counterfactual: token pOff's claim with the switch on, reverted at once.
-  const counterfactual = await ctx.fork.snapshot();
-  const [claimOn] = await claimAll(ctx, [pOff], 'counterfactual, switch on:');
-  await ctx.fork.revert(counterfactual);
+  const [claimOn] = await ctx.fork.inSnapshot(() => claimAll(ctx, [pOff], 'counterfactual, switch on:'));
 
   // ---- off ----
   const offTxs = ctx.txs.length;
@@ -332,14 +345,5 @@ export async function phaseSwitch(ctx: Ctx): Promise<void> {
     gas: { off: gasOf(offTxs, onTxs), on: gasOf(onTxs, byAddressTxs), byAddress: gasOf(byAddressTxs, ctx.txs.length) },
   };
 
-  await ctx.fork.revert(snap);
-  check(
-    'the snapshot is reverted: the block, the epoch, the deployed settlement and the closes are as the hub phase left them',
-    (await ctx.hre.ethers.provider.getBlockNumber()) === startBlock &&
-      (await c.chronos.getCurrentEpoch()) === C &&
-      (await h.getContractAddress('QueryInferenceSettlement')) === qsDeployedAddr &&
-      !(await c.qis.paused()) &&
-      (await c.qis.closedThrough()) === closed0,
-  );
-  saveResults(ctx, 'switch', out);
+  return out;
 }

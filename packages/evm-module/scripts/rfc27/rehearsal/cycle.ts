@@ -258,10 +258,10 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   const stayed = await positionScore(c, w.tokenId, w.node, A + 1n, rawBefore);
   // Real nodes keep proving after a withdrawal. The counterfactual, in a
   // reverted snapshot: the node's next proof with the position still staked.
-  const counterfactual = await ctx.fork.snapshot();
-  await prove(w.node, `node ${w.node}'s next proof in epoch ${A + 1n}, in a reverted snapshot, with token ${w.tokenId} still staked`);
-  const stayedThroughLaterProof = await positionScore(c, w.tokenId, w.node, A + 1n, rawBefore);
-  await ctx.fork.revert(counterfactual);
+  const stayedThroughLaterProof = await ctx.fork.inSnapshot(async () => {
+    await prove(w.node, `node ${w.node}'s next proof in epoch ${A + 1n}, in a reverted snapshot, with token ${w.tokenId} still staked`);
+    return positionScore(c, w.tokenId, w.node, A + 1n, rawBefore);
+  });
   // What the withdrawal pays, from views before it: the stake, plus every
   // ended epoch since the position's last claim (from its migration epoch, if
   // later) at StakingKPI's nets and the position's scores in storage.

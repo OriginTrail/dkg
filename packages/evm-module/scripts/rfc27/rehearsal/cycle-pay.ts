@@ -79,8 +79,7 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   // The emergency switch, inside a reverted snapshot: with the settlement out
   // of the Hub, a claim and a withdrawal go through and pay the publishing pool
   // alone.
-  {
-    const snap = await ctx.fork.snapshot();
+  await ctx.fork.inSnapshot(async () => {
     await send(ctx, 'Hub owner: removeContractByName("QueryInferenceSettlement") (in a snapshot)', owner, HUB, h.interface.encodeFunctionData('removeContractByName', ['QueryInferenceSettlement']));
     const n1 = SELLERS[1];
     const k1 = `${n1}:${A + 1n}`;
@@ -129,8 +128,7 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
       fundingOpen,
       paused: pausedWhy,
     };
-    await ctx.fork.revert(snap);
-  }
+  });
 
   // The sellers' real delegators claim.
   const expected: Record<string, ExpectedReward> = {};
