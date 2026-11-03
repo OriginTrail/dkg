@@ -508,6 +508,7 @@ export default defineConfig({
       "test/context-graph-list-wire-only.test.ts",
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
+      "test/participant-join-approval-proof.test.ts",
       "test/join-approval-metadata-refetch.test.ts",
       // #3421 — a join approval whose member list is still pending, and the
       // members a curator's join admission recognises.
