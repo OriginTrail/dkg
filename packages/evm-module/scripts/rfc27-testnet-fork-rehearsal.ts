@@ -10,10 +10,11 @@
 //
 // The stack: ConvictionServiceStorage (052c), ServiceSubscriptions and
 // ServiceSubscriptionsWallet (052d), QueryInferenceStorage (052e),
-// QueryInferenceSettlement (052f) and StakingV10Ledger (054a) are new;
-// PublishingConviction moves to 10.2.0, StakingV10 to 10.1.0 (055) and
-// StakingKPI to 10.1.0 (024); 998 registers and initializes everything in one
-// Hub transaction.
+// QueryInferenceSettlement (052f), StakingV10Ledger (054a) and
+// ConvictionWithdrawalStorage (054b) are new; PublishingConviction moves to
+// 10.2.0, StakingV10 to 10.1.0 (055) and StakingKPI to 10.1.0 (024); 998
+// registers and initializes everything in one Hub transaction, and 998b
+// leaves the activation epoch to the Hub owner, after it.
 //
 // Why an external anvil fork: Hardhat's in-process fork has no Base hardfork
 // history (see scripts/fork-rehearsal.ts). The deploy pipeline runs through
@@ -35,22 +36,37 @@
 //   PHASE=pre $RUN
 //
 //   # 2. the real deploy pipeline. The three upgrades are redeployed by marking
-//   #    their entries not deployed, as 052d documents; the run rewrites the
-//   #    deployments file, which is restored afterwards and never committed.
-//   cp deployments/base_sepolia_v10_contracts.json cache/rfc27-fork/contracts.live.json
-//   node -e "const f='deployments/base_sepolia_v10_contracts.json',j=require('./'+f);for(const n of ['PublishingConviction','StakingV10','StakingKPI'])j.contracts[n].deployed=false;require('fs').writeFileSync(f,JSON.stringify(j,null,4))"
+//   #    their entries not deployed, as 052d and 052e document; the run
+//   #    rewrites the deployments file, which is restored afterwards and never
+//   #    committed. flip marks the given entries not deployed:
+//   flip() { node -e "const f='deployments/base_sepolia_v10_contracts.json',j=require('./'+f);for(const n of process.argv.slice(1))j.contracts[n].deployed=false;require('fs').writeFileSync(f,JSON.stringify(j,null,4))" "$@"; }
+//   #    2a. the guard: with StakingV10 left deployed, 052e refuses the run, before any transaction
+//   flip PublishingConviction StakingKPI
+//   npx hardhat deploy --network base_sepolia_v10 --config $CFG    # fails: StakingV10 10.0.4 is kept
+//   git checkout -- deployments/base_sepolia_v10_contracts.json
+//   #    2b. the real run
+//   flip PublishingConviction StakingV10 StakingKPI
 //   npx hardhat deploy --network base_sepolia_v10 --config $CFG | tee cache/rfc27-fork/deploy.log
 //   cp deployments/base_sepolia_v10_contracts.json cache/rfc27-fork/contracts.deployed.json
 //   git checkout -- deployments/base_sepolia_v10_contracts.json
 //
-//   # 3. the Hub owner's transaction 998 printed, then the activation epoch
+//   # 3. the activation refused before the Hub transaction (and, in a reverted
+//   #    snapshot, while the settlement or StakingV10 does not read the pool),
+//   #    then the Hub owner's transaction 998 printed, then the activation
 //   PHASE=hub DEPLOY_LOG=cache/rfc27-fork/deploy.log $RUN
 //
-//   # 4. existing accounts and positions after the upgrade, 5. one full cycle,
-//   # 6. the close falling more than maxCloseStepsPerClaim epochs behind
+//   # 4. existing accounts and positions after the upgrade, with every
+//   #    position's first-claim gas and the longest history's withdrawal gas;
+//   # 5. one full cycle, with a withdrawal in the middle of an epoch and its
+//   #    claimWithdrawnEpoch, and the settlement removed in a reverted snapshot;
+//   # 6. an account untouched for several epochs, booked late;
+//   # 7. the close falling more than maxCloseStepsPerClaim epochs behind;
+//   # 8. the unused share of every closed epoch, read from storage
 //   PHASE=existing $RUN
 //   PHASE=cycle $RUN
+//   PHASE=late-booking $RUN
 //   PHASE=close-behind $RUN
+//   PHASE=unused $RUN
 //
 // Each phase writes cache/rfc27-fork/<phase>.json (REHEARSAL_DIR overrides the
 // directory) and reads what the earlier phases wrote.
@@ -91,6 +107,7 @@ const LIVE_JSON = 'deployments/base_sepolia_v10_contracts.json';
 
 // Cycle parameters.
 const COMMITTED = BigInt(process.env.COMMITTED ?? String(100_000n * TRAC)); // the 30 % tier
+const LATE_COMMITTED = 12_000n * TRAC; // an account left untouched, booked late
 const CA_PERIOD_VALUE = 10n * TRAC; // a 7 TRAC cost at the 30 % tier
 const WALLET_PERIOD_VALUE = 5n * TRAC;
 const PUBLISH_BASE_COST = 20n * TRAC;
@@ -314,28 +331,54 @@ async function expectRevert(label: string, p: Promise<Any>): Promise<string> {
  * account or impersonated.
  */
 async function minGasLimit(from: string, to: string, data: string, hi = 30_000_000n): Promise<bigint> {
-  const goesThrough = async (gas: bigint) => {
+  return (await measureTx(from, to, data, hi)).minGasLimit;
+}
+
+/**
+ * A transaction's gas used, sent with a generous limit, and the smallest gas
+ * limit it goes through with, all in reverted snapshots: the state is left as
+ * it was.
+ */
+async function measureTx(from: string, to: string, data: string, hi = 30_000_000n) {
+  // A cold fork fetches every slot a large claim reads from the upstream
+  // endpoint, which can fail transiently (an HTTP 502 or 429): one call first,
+  // retried, fills anvil's cache, which the snapshots below keep.
+  for (let i = 0; ; i++) {
+    try {
+      await rpc('eth_call', [{ from, to, data, gas: ethers.toQuantity(hi) }, 'latest']);
+      break;
+    } catch (e: Any) {
+      if (i >= 5 || !/Fork Error|50[234]|429|timed out|ECONNRESET/i.test(String(e?.message ?? e))) throw e;
+      console.log(`  (upstream error while warming the fork, retrying: ${String(e?.message ?? e).slice(0, 80)})`);
+      await new Promise((res) => setTimeout(res, 10_000 * (i + 1)));
+    }
+  }
+  const attempt = async (gas: bigint): Promise<{ ok: boolean; gasUsed: bigint }> => {
     const snap = await rpc('evm_snapshot', []);
     try {
       const hash = await rpc('eth_sendTransaction', [{ from, to, data, gas: ethers.toQuantity(gas) }]);
-      for (let i = 0; i < 50; i++) {
+      // A fork still fetching upstream state can take minutes to mine a large
+      // claim; the snapshot is reverted only once the transaction is in.
+      for (let i = 0; i < 6_000; i++) {
         const r = await ethers.provider.getTransactionReceipt(hash);
-        if (r) return r.status === 1;
-        await new Promise((res) => setTimeout(res, 100));
+        if (r) return { ok: r.status === 1, gasUsed: big(r.gasUsed) };
+        await new Promise((res) => setTimeout(res, 200));
       }
-      throw new Error(`no receipt for ${hash}`);
+      throw new Error(`no receipt for ${hash} after 20 minutes`);
     } finally {
       await rpc('evm_revert', [snap]);
     }
   };
-  if (!(await goesThrough(hi))) throw new Error(`the transaction fails even with a gas limit of ${hi}`);
+  const full = await attempt(hi);
+  if (!full.ok) throw new Error(`the transaction fails even with a gas limit of ${hi}`);
   let lo = 21_000n;
-  while (hi - lo > 1_000n) {
-    const mid = (lo + hi) / 2n;
-    if (await goesThrough(mid)) hi = mid;
+  let top = hi;
+  while (top - lo > 1_000n) {
+    const mid = (lo + top) / 2n;
+    if ((await attempt(mid)).ok) top = mid;
     else lo = mid;
   }
-  return hi;
+  return { gasUsed: full.gasUsed, minGasLimit: top, marginTo2pow24: TX_GAS_CAP - top };
 }
 
 const stakerCredits = (events: Ev[]) =>
@@ -606,6 +649,40 @@ async function phaseHub() {
       before[c.name] = ethers.ZeroAddress;
     }
   }
+  // The activation guard, before the Hub transaction. The storage is not in
+  // the Hub yet, so the Hub refuses the forward itself; inside a reverted
+  // snapshot, with the pool's contracts registered piecewise, the storage's
+  // own guard refuses while either reader is missing.
+  const qisNew = newContracts.find((c: Any) => c.name === 'QueryInferenceStorage').addr;
+  const qsNew = newContracts.find((c: Any) => c.name === 'QueryInferenceSettlement').addr;
+  const cssvcNew = newContracts.find((c: Any) => c.name === 'ConvictionServiceStorage').addr;
+  const qisIface = (await ethers.getContractFactory('QueryInferenceStorage')).interface;
+  const activateData = (e: bigint) => qisIface.encodeFunctionData('setActivationEpoch', [e]);
+  const E0 = big(await (await at('Chronos')).getCurrentEpoch());
+  const guards: Record<string, string> = {};
+  guards.beforeHubTransaction = await expectRevert(
+    'Hub.forwardCall(QueryInferenceStorage, setActivationEpoch) before the Hub transaction',
+    h.connect(owner).forwardCall.staticCall(qisNew, activateData(E0 + 1n)),
+  );
+  check('before the Hub transaction the activation is refused', guards.beforeHubTransaction.startsWith('InvalidTargetContract'), guards.beforeHubTransaction);
+  const piecewise = await rpc('evm_snapshot', []);
+  const init = (await ethers.getContractFactory('QueryInferenceSettlement')).interface.encodeFunctionData('initialize');
+  await (await h.connect(owner).setContractAddress('QueryInferenceStorage', qisNew)).wait();
+  guards.storageOnly = await expectRevert(
+    'setActivationEpoch with only QueryInferenceStorage registered',
+    h.connect(owner).forwardCall.staticCall(qisNew, activateData(E0 + 1n)),
+  );
+  await (await h.connect(owner).setContractAddress('ConvictionServiceStorage', cssvcNew)).wait();
+  await (await h.connect(owner).setContractAddress('QueryInferenceSettlement', qsNew)).wait();
+  await (await h.connect(owner).forwardCall(qsNew, init)).wait();
+  guards.stakingV10Old = await expectRevert(
+    `setActivationEpoch with the settlement registered and StakingV10 ${pre.versions.StakingV10}`,
+    h.connect(owner).forwardCall.staticCall(qisNew, activateData(E0 + 1n)),
+  );
+  await rpc('evm_revert', [piecewise]);
+  check('PoolNotWired while the Hub holds no settlement', guards.storageOnly === 'PoolNotWired(QueryInferenceSettlement)', guards.storageOnly);
+  check(`PoolNotWired while StakingV10 is ${pre.versions.StakingV10}`, guards.stakingV10Old === 'PoolNotWired(StakingV10)', guards.stakingV10Old);
+
   const estimate = big(await rpc('eth_estimateGas', [{ from: ownerAddr, to: HUB, data: hubTx.data }]));
   console.log(`estimated gas ${estimate}${estimate > TX_GAS_CAP ? ' ⚠ above the 2^24 transaction gas cap' : ''}`);
   const hubSend = await send('Hub owner: Hub.setAndReinitializeContracts (998)', owner.sendTransaction({ to: HUB, data: hubTx.data }));
@@ -647,6 +724,7 @@ async function phaseHub() {
     'QueryInferenceStorage',
     'QueryInferenceSettlement',
     'StakingV10Ledger',
+    'ConvictionWithdrawalStorage',
     'PublishingConviction',
     'StakingV10',
     'StakingKPI',
@@ -662,10 +740,12 @@ async function phaseHub() {
   check('PublishingConviction is 10.2.0', versions.PublishingConviction === '10.2.0');
   check('StakingV10 is 10.1.0', versions.StakingV10 === '10.1.0');
   check('StakingKPI is 10.1.0', versions.StakingKPI === '10.1.0');
-  check('StakingV10 wired the settlement and the pool storage at initialize()',
+  check('StakingV10 reads the settlement and the pool storage from the Hub',
     (await sv10.queryInferenceSettlement()) === qs && (await sv10.queryInferenceStorage()) === (await qis.getAddress()));
-  check('the Hub holds StakingV10Ledger', await h['isContract(string)']('StakingV10Ledger'));
-  check('StakingKPI wired the settlement', (await kpi.queryInferenceSettlement()) === qs);
+  check('the Hub holds StakingV10Ledger and ConvictionWithdrawalStorage, which the ledger wired',
+    (await h['isContract(string)']('StakingV10Ledger')) &&
+      (await ((await at('StakingV10Ledger')) as Any).withdrawalStorage()) === (await addr('ConvictionWithdrawalStorage')));
+  check('StakingKPI reads the settlement from the Hub', (await kpi.queryInferenceSettlement()) === qs);
   check('DKGStakingConvictionNFT re-read StakingV10', (await (snft as Any).stakingV10()) === (await sv10.getAddress()));
   const params = {
     receiptGraceSeconds: big(await qis.receiptGraceSeconds()),
@@ -673,6 +753,8 @@ async function phaseHub() {
     maxGroupsPerBatch: big(await qis.maxGroupsPerBatch()),
     maxCloseStepsPerClaim: big(await qis.maxCloseStepsPerClaim()),
     lambdaBps: big(await qis.lambdaBps()),
+    latestLambdaBps: big(await qis.latestLambdaBps()),
+    latestReceiptGraceSeconds: big(await qis.latestReceiptGraceSeconds()),
     activationEpoch: big(await qis.activationEpoch()),
     closedThrough: big(await qis.closedThrough()),
     maxBucketsPerPeriod: big(await cssvc.maxBucketsPerPeriod()),
@@ -693,6 +775,7 @@ async function phaseHub() {
   }
 
   save('hub', {
+    guards,
     hubTransaction: {
       to: hubTx.to,
       dataBytes: (hubTx.data.length - 2) / 2,
@@ -776,16 +859,34 @@ async function phaseExisting() {
   }
   const longest = history.reduce((a, b) => (b.scoredEpochs > a.scoredEpochs ? b : a));
   const snftC = await at('DKGStakingConvictionNFT');
+  const snftAddr = await snftC.getAddress();
+  // Every position's claim as the first on its node, which splits each epoch's
+  // operator fee and so costs the most, and the longest history's withdrawal
+  // (its claim, then the record of the epoch in progress): gas used and the
+  // smallest gas limit, each in reverted snapshots.
+  console.log(`\nfirst-claim gas of every position, and the withdrawal of token ${longest.tokenId}, against 2^24 = ${TX_GAS_CAP}:`);
+  const firstClaims: Any[] = [];
+  for (const h of history) {
+    const owner = pos.find((p) => p.tokenId === h.tokenId)!.owner;
+    await impersonate(owner);
+    const m = await measureTx(owner, snftAddr, snftC.interface.encodeFunctionData('claim', [h.tokenId]));
+    firstClaims.push({ ...h, ...m });
+    console.log(
+      `  token ${h.tokenId} (node ${h.node}): ${h.scoredEpochs} scored epochs, gas used ${m.gasUsed}, ` +
+        `smallest limit ${m.minGasLimit}, margin to 2^24 ${m.marginTo2pow24}`,
+    );
+  }
   const longestOwner = pos.find((p) => p.tokenId === longest.tokenId)!.owner;
   await impersonate(longestOwner);
-  const longestLimit = await minGasLimit(
-    longestOwner,
-    await snftC.getAddress(),
-    snftC.interface.encodeFunctionData('claim', [longest.tokenId]),
-  );
+  const longestWithdraw = await measureTx(longestOwner, snftAddr, snftC.interface.encodeFunctionData('withdraw', [longest.tokenId]));
   console.log(
-    `longest unclaimed history: token ${longest.tokenId} (node ${longest.node}), ${longest.scoredEpochs} scored of ` +
-      `${longest.unclaimedEpochs} unclaimed epochs; its claim needs a gas limit of ${longestLimit} (2^24 = ${TX_GAS_CAP})`,
+    `  withdraw token ${longest.tokenId}: gas used ${longestWithdraw.gasUsed}, smallest limit ${longestWithdraw.minGasLimit}, ` +
+      `margin to 2^24 ${longestWithdraw.marginTo2pow24}`,
+  );
+  const longestLimit = firstClaims.find((c) => c.tokenId === longest.tokenId)!.minGasLimit;
+  check(
+    'every first claim and the longest withdrawal fit 2^24',
+    firstClaims.every((c) => c.minGasLimit <= TX_GAS_CAP) && longestWithdraw.minGasLimit <= TX_GAS_CAP,
   );
   const claims = await claimAll(pos, '10.1.0');
   for (const c of claims) {
@@ -822,7 +923,8 @@ async function phaseExisting() {
     refused,
     settleMany: { swept, credits, gasUsed: big(many.receipt.gasUsed) },
     history,
-    longest: { ...longest, gasUsed: longestClaim.gasUsed, minGasLimit: longestLimit },
+    firstClaims,
+    longest: { ...longest, gasUsed: longestClaim.gasUsed, minGasLimit: longestLimit, withdraw: longestWithdraw },
     claims,
     nets,
     txs: txLog,
@@ -953,7 +1055,7 @@ async function phaseCycle() {
   const hubState = load('hub');
   const chronos = await at('Chronos');
   const signers = await ethers.getSigners();
-  const [, walletBuyer, caOwner, buyerKey, caSession, agent, keeper, walletSession, nodeAdmin] = signers;
+  const [, walletBuyer, caOwner, buyerKey, caSession, agent, keeper, walletSession, nodeAdmin, lateOwner] = signers;
   const token = await at('Token');
   const vault = await addr('ConvictionStakingStorage');
   const nft = await at('DKGPublishingConvictionNFT');
@@ -1014,6 +1116,7 @@ async function phaseCycle() {
   const owner = await impersonate(await (await hubContract()).owner());
   await send('fork-only: Hub owner sends TRAC to the wallet buyer', (token as Any).connect(owner).transfer(walletBuyer.address, 100n * TRAC));
   await send('fork-only: Hub owner sends TRAC to the account owner', (token as Any).connect(owner).transfer(caOwner.address, COMMITTED));
+  await send('fork-only: Hub owner sends TRAC to a second account owner', (token as Any).connect(owner).transfer(lateOwner.address, LATE_COMMITTED));
   const vault0 = big(await token.balanceOf(vault));
 
   // A wallet-funded period.
@@ -1067,6 +1170,13 @@ async function phaseCycle() {
     cost === (CA_PERIOD_VALUE * (10_000n - big(acct.discountBps))) / 10_000n,
   );
 
+  // A second 10.2.0 account, which nothing touches until the late-booking phase.
+  await send('second account owner: approve the publishing NFT', (token as Any).connect(lateOwner).approve(await nft.getAddress(), LATE_COMMITTED));
+  const lateCreated = await send(`second account owner: createAccount(${fmt(LATE_COMMITTED)} TRAC)`, (nft as Any).connect(lateOwner).createAccount(LATE_COMMITTED, 0));
+  const lateId = big(lateCreated.events.find((e) => e.name === 'AccountCreated')!.args.accountId);
+  const lateAcct = await pcs.getAccount(lateId);
+  out.lateAccount = { accountId: lateId, committed: LATE_COMMITTED, createdAtTimestamp: big(lateAcct.createdAtTimestamp), lock: big(lateAcct.lockDurationEpochs) };
+
   // A publish from the account.
   await send('account owner: registerAgent', (nft as Any).connect(caOwner).registerAgent(accountId, agent.address));
   const publish = await publishAs(accountId, agent.address, PUBLISH_BASE_COST, PUBLISH_KA_EPOCHS, 'fork-only (KnowledgeAssetsLifecycle impersonated):');
@@ -1086,8 +1196,10 @@ async function phaseCycle() {
   const qiDomain = { name: 'DKGQueryInference', version: '1', chainId: 84532n, verifyingContract: await qis.getAddress() };
   const issuedAt = await now();
   const plan: Record<string, { ca: bigint[]; wallet: bigint[] }> = {
-    [String(SELLERS[0])]: { ca: [2n * TRAC, 2n * TRAC], wallet: [3n * TRAC] },
-    [String(SELLERS[1])]: { ca: [4n * TRAC], wallet: [2n * TRAC] },
+    // The account bucket is claimed above its cap (8 of 7), the wallet bucket
+    // below it (3 of 5): the epoch's money is 12, its served value 10.
+    [String(SELLERS[0])]: { ca: [2n * TRAC, 2n * TRAC], wallet: [2n * TRAC] },
+    [String(SELLERS[1])]: { ca: [4n * TRAC], wallet: [1n * TRAC] },
   };
   out.batches = [];
   for (const seller of SELLERS) {
@@ -1137,6 +1249,71 @@ async function phaseCycle() {
   const caFinal = sum(out.finalized.filter((f: Any) => f.sub === 'account').map((f: Any) => f.value));
   check(`the account bucket's claims shrank to its funded cap ${fmt(out.fundedCap.ca)}`, caFinal <= out.fundedCap.ca && caFinal >= out.fundedCap.ca - 2n);
 
+  // A withdrawal in the middle of A + 1: the smallest position of the first
+  // seller, a real delegator of a real node. Its score in A + 1, the epoch in
+  // progress, up to the withdrawal, is recorded and paid by
+  // claimWithdrawnEpoch once A + 1 ends, as a position holding that score is
+  // paid at the epoch's end. The node proves once more after the withdrawal,
+  // and the withdrawn stake takes no share of that proof.
+  await warpTo(big(await chronos.timestampForEpoch(A + 1n)) + big(await chronos.epochLength()) / 2n);
+  const w = (await positions()).filter((p: Any) => p.node === SELLERS[0]).sort((a: Any, b: Any) => (a.raw < b.raw ? -1 : 1))[0];
+  const wKey = ethers.zeroPadValue(ethers.toBeHex(w.tokenId), 32);
+  // The score a position staying to the end of A + 1 holds in it, from views:
+  // what `_claim` integrates for an epoch after the position's boost expired.
+  const cur = big(await rss.getEpochLastScorePerStake(w.node, A + 1n));
+  const lastSettled = big(await rss.getDelegatorLastSettledNodeEpochScorePerStake(A + 1n, w.node, wKey));
+  const settledScore = big(await rss.getEpochNodeDelegatorScore(A + 1n, w.node, wKey));
+  const rawBefore = big((await css.getPosition(w.tokenId)).raw);
+  const stayed = settledScore + (cur > lastSettled ? (rawBefore * (cur - lastSettled)) / TRAC : 0n);
+  // Real nodes keep proving after a withdrawal. The counterfactual, in a
+  // reverted snapshot: the node's next proof with the position still staked.
+  const counterfactual = await rpc('evm_snapshot', []);
+  await writeProofScore(w.node, mirror[String(w.node)]);
+  const curStaying = big(await rss.getEpochLastScorePerStake(w.node, A + 1n));
+  const stayedThroughLaterProof = settledScore + (rawBefore * (curStaying - lastSettled)) / TRAC;
+  await rpc('evm_revert', [counterfactual]);
+  const wOwner = await impersonate(w.owner);
+  const ownerBal = big(await token.balanceOf(w.owner));
+  const wd = await send(`token ${w.tokenId} owner: withdraw in the middle of epoch ${A + 1n}`, (snft as Any).connect(wOwner).withdraw(w.tokenId));
+  const paidOut = big(await token.balanceOf(w.owner)) - ownerBal;
+  const withdrawnEv = wd.events.find((e) => e.name === 'Withdrawn')!;
+  const recordedEv = wd.events.find((e) => e.name === 'WithdrawnEpochRecorded');
+  const recordedScore = big(await rss.getEpochNodeDelegatorScore(A + 1n, w.node, wKey));
+  check(`the withdrawal pays the position's whole raw stake, rewards compounded (${fmt(paidOut)} TRAC)`, paidOut === big(withdrawnEv.args.amount));
+  check(
+    `the withdrawal records epoch ${A + 1n} for the staker, with the position's score up to the withdrawal`,
+    !!recordedEv && big(recordedEv.args.epoch) === A + 1n && recordedEv.args.staker === w.owner && recordedScore === stayed && stayed > 0n,
+    `score ${recordedScore}`,
+  );
+  check(`node ${SELLERS[0]} stays in the sharding table`, await (await at('ShardingTableStorage')).nodeExists(SELLERS[0]));
+  // FORK-ONLY: the node's next proof in A + 1, after the withdrawal. The
+  // withdrawn position's recorded score must not take any of it.
+  await writeProofScore(w.node, mirror[String(w.node)]);
+  check(
+    `a proof after the withdrawal leaves the recorded score of epoch ${A + 1n} as it was`,
+    big(await rss.getEpochNodeDelegatorScore(A + 1n, w.node, wKey)) === recordedScore,
+  );
+  check(
+    'a position that had stayed through that proof would hold more score, by its share of the proof',
+    stayedThroughLaterProof > stayed,
+    `${stayedThroughLaterProof} staying vs ${stayed} withdrawn`,
+  );
+  const sv10 = await at('StakingV10');
+  const early = await expectRevert(
+    `claimWithdrawnEpoch(${w.tokenId}) before epoch ${A + 1n} ends`,
+    (sv10 as Any).connect(keeper).claimWithdrawnEpoch.staticCall(w.tokenId),
+  );
+  check('the withdrawn epoch cannot be claimed before it ends', early.startsWith('WithdrawnEpochInProgress'), early);
+  out.withdrawal = {
+    tokenId: w.tokenId,
+    node: w.node,
+    amount: paidOut,
+    gasUsed: big(wd.receipt.gasUsed),
+    recordedScore,
+    stayedThroughLaterProof,
+    epoch: A + 1n,
+  };
+
   // ---- epoch A + 2: close, claims, withdrawal, window booking ----
   await warpTo(big(await chronos.timestampForEpoch(A + 2n)) + 120n);
   const E3 = big(await chronos.getCurrentEpoch());
@@ -1165,8 +1342,87 @@ async function phaseCycle() {
   const grossSum = sum(Object.values(gross));
   check('the sellers\' query/inference gross adds up to the pool, less floor dust', grossSum <= pool && pool - grossSum <= 4n, `${Object.entries(gross).map(([n, g]) => `node ${n} ${fmt(g)}`).join(', ')}; dust ${pool - grossSum} wei`);
 
-  // The sellers' real delegators claim.
+  // The unused share of each closed epoch: its money less the receipt value
+  // finalized in it. The whole money is the pool once any value is finalized.
+  out.unused = out.closes.map((c: Any) => {
+    const money = c.walletDue + c.convictionDue + c.carryIn;
+    return { epoch: c.epoch, money, served: c.sumR, unused: money - c.sumR, pool: c.pool };
+  });
+  console.log('  unused share per closed epoch (money = walletDue + convictionDue + carryIn, served = sumR):');
+  for (const u of out.unused) console.log(`    epoch ${u.epoch}: money ${fmt(u.money)}, served ${fmt(u.served)}, unused ${fmt(u.unused)}, pool ${fmt(u.pool)}`);
+  check(
+    `epoch ${A + 1n}: 2 TRAC of the 12 went unserved, and the pool is the whole money`,
+    out.unused.some((u: Any) => u.epoch === A + 1n && u.money === 12n * TRAC && u.served === 10n * TRAC && u.unused === 2n * TRAC && u.pool === 12n * TRAC),
+  );
+
   const cyclePositions = (await positions()).filter((p: Any) => SELLERS.includes(p.node));
+
+  // The emergency switch, inside a reverted snapshot: with the settlement out
+  // of the Hub, a claim and a withdrawal go through and pay the publishing pool
+  // alone.
+  {
+    const snap = await rpc('evm_snapshot', []);
+    const h = await hubContract();
+    await send('Hub owner: removeContractByName("QueryInferenceSettlement") (in a snapshot)', h.connect(owner).removeContractByName('QueryInferenceSettlement'));
+    const n1 = SELLERS[1];
+    const noPool: Record<string, bigint> = { ...kpiPreview };
+    noPool[`${n1}:${A + 1n}`] = big(await kpi.getNetNodeRewards(n1, A + 1n));
+    const fee1 = big(await ps.getOperatorFeePercentageByTimestampReverse(n1, big(await chronos.timestampForEpoch(A + 2n)) - 1n));
+    const pub1 =
+      (big(await es.getEpochPool(1, A + 1n)) * big(await rss.getNodeEpochScore(A + 1n, n1))) / big(await rss.getAllNodesEpochScore(A + 1n));
+    check(
+      `with the settlement removed, StakingKPI's net of node ${n1} in epoch ${A + 1n} is the publishing share alone`,
+      noPool[`${n1}:${A + 1n}`] === pub1 - (pub1 * fee1) / 10_000n && noPool[`${n1}:${A + 1n}`] < kpiPreview[`${n1}:${A + 1n}`],
+      `${fmt(kpiPreview[`${n1}:${A + 1n}`])} → ${fmt(noPool[`${n1}:${A + 1n}`])}`,
+    );
+    const [claimer, withdrawer] = cyclePositions.filter((p: Any) => p.node === n1).sort((a: Any, b: Any) => (a.raw < b.raw ? -1 : 1));
+    const xc = await expectedReward(claimer, claimer.lastClaimedEpoch + 1n, E3 - 1n, noPool);
+    const [c] = await claimAll([claimer], 'switch off:');
+    check(`switch off: token ${claimer.tokenId}'s claim pays the publishing pool alone`, c.reward === xc.total, `${fmt(c.reward)} TRAC`);
+    const xw = await expectedReward(withdrawer, withdrawer.lastClaimedEpoch + 1n, E3 - 1n, noPool);
+    const wo = await impersonate(withdrawer.owner);
+    const before = big(await token.balanceOf(withdrawer.owner));
+    const rawW = big((await css.getPosition(withdrawer.tokenId)).raw);
+    await send(`switch off: token ${withdrawer.tokenId} owner: withdraw`, (snft as Any).connect(wo).withdraw(withdrawer.tokenId));
+    const got = big(await token.balanceOf(withdrawer.owner)) - before;
+    check(
+      `switch off: token ${withdrawer.tokenId}'s withdrawal goes through, its claim paying the publishing pool alone`,
+      got === rawW + xw.total,
+      `${fmt(got)} TRAC = raw ${fmt(rawW)} + rewards ${fmt(xw.total)}`,
+    );
+    // Funding stays open with the settlement out of the Hub; the pause closes it.
+    const sswAddr = await ssw.getAddress();
+    await send('wallet buyer: approve 1 TRAC (in the snapshot)', (token as Any).connect(walletBuyer).approve(sswAddr, TRAC));
+    const lateReq = {
+      epoch: E3,
+      sessionKey: walletSession.address,
+      planDigest: ethers.id('rehearsal plan, settlement removed'),
+      buckets: [{ bucketId: bucket0, serviceClass: CLASS_INFERENCE, value: TRAC, maxAskWeiPerUnit: PRICE_CAP }],
+    };
+    let fundingOpen = true;
+    try {
+      await (ssw as Any).connect(walletBuyer).fundFromWallet.staticCall(lateReq);
+    } catch {
+      fundingOpen = false;
+    }
+    check('switch off: a wallet period can still be funded, so the pause belongs with the removal', fundingOpen);
+    await send(
+      'Hub owner: forwardCall(QueryInferenceStorage, setPaused(true)) (in the snapshot)',
+      h.connect(owner).forwardCall(await qis.getAddress(), qis.interface.encodeFunctionData('setPaused', [true])),
+    );
+    const pausedWhy = await expectRevert('switch off and paused: fundFromWallet', (ssw as Any).connect(walletBuyer).fundFromWallet.staticCall(lateReq));
+    check('the pause refuses the funding', pausedWhy.startsWith('QueryInferencePaused'), pausedWhy);
+    out.emergencySwitch = {
+      claim: { tokenId: claimer.tokenId, reward: c.reward, gasUsed: c.gasUsed },
+      withdraw: { tokenId: withdrawer.tokenId, amount: got },
+      kpiNet: { withPool: kpiPreview[`${n1}:${A + 1n}`], without: noPool[`${n1}:${A + 1n}`] },
+      fundingOpen,
+      paused: pausedWhy,
+    };
+    await rpc('evm_revert', [snap]);
+  }
+
+  // The sellers' real delegators claim.
   const expected: Record<string, Any> = {};
   for (const p of cyclePositions) expected[String(p.tokenId)] = await expectedReward(p, p.lastClaimedEpoch + 1n, E3 - 1n, kpiPreview);
   const vaultBeforeClaims = big(await token.balanceOf(vault));
@@ -1181,6 +1437,22 @@ async function phaseCycle() {
   }
   check('claims move no TRAC (rewards compound into the positions)', big(await token.balanceOf(vault)) === vaultBeforeClaims);
 
+  // The withdrawn position's share of A + 1, paid by anyone's claimWithdrawnEpoch.
+  const nodeScoreW = big(await rss.getNodeEpochScore(A + 1n, w.node));
+  const tailExpected = (out.withdrawal.recordedScore * kpiPreview[`${w.node}:${A + 1n}`]) / nodeScoreW;
+  const stakerBefore = big(await token.balanceOf(w.owner));
+  const keeperBefore = big(await token.balanceOf(keeper.address));
+  const tail = await send(`keeper: claimWithdrawnEpoch(${w.tokenId})`, (sv10 as Any).connect(keeper).claimWithdrawnEpoch(w.tokenId));
+  const tailPaid = big(await token.balanceOf(w.owner)) - stakerBefore;
+  check(
+    `the withdrawn epoch pays the staker its score's share of the net of ${A + 1n}, as the end of the epoch pays a position`,
+    tailPaid === tailExpected && tailPaid > 0n && big(await token.balanceOf(keeper.address)) === keeperBefore,
+    `${fmt(tailPaid)} TRAC = score × StakingKPI's net / node score (${fmt(tailExpected)})`,
+  );
+  const twice = await expectRevert(`claimWithdrawnEpoch(${w.tokenId}) again`, (sv10 as Any).connect(keeper).claimWithdrawnEpoch.staticCall(w.tokenId));
+  check('the withdrawn epoch is paid once', twice.startsWith('NoWithdrawnEpoch'), twice);
+  out.withdrawnEpoch = { tokenId: w.tokenId, paid: tailPaid, expected: tailExpected, gasUsed: big(tail.receipt.gasUsed) };
+
   // The node-epoch accounting of the pool epoch, per seller.
   out.nodeEpoch = {};
   const S = big(await rss.getAllNodesEpochScore(A + 1n));
@@ -1190,7 +1462,9 @@ async function phaseCycle() {
     const pub = (stakerPool * s) / S;
     const g = pub + gross[String(n)];
     const net = big(await css.getNetNodeEpochRewards(n, A + 1n));
-    const paid = sum(claims.filter((c) => c.node === n).map((c) => expected[String(c.tokenId)].per[String(A + 1n)] ?? 0n));
+    const paid =
+      sum(claims.filter((c) => c.node === n).map((c) => expected[String(c.tokenId)].per[String(A + 1n)] ?? 0n)) +
+      (n === w.node ? tailPaid : 0n);
     const feeBps = big(await ps.getOperatorFeePercentageByTimestampReverse(n, big(await chronos.timestampForEpoch(A + 2n)) - 1n));
     out.nodeEpoch[String(n)] = { publishingShare: pub, queryInferenceGross: gross[String(n)], gross: g, operatorFeeBps: feeBps, operatorFee: g - net, net, paidToDelegators: paid };
     check(
@@ -1212,7 +1486,6 @@ async function phaseCycle() {
     feeBalance - feeBalance0 === out.nodeEpoch[String(feeNode)].operatorFee,
     fmt(feeBalance - feeBalance0),
   );
-  const sv10 = await at('StakingV10');
   await send(
     `node ${feeNode} admin: requestOperatorFeeWithdrawal(${fmt(feeBalance)})`,
     (sv10 as Any).connect(nodeAdmin).requestOperatorFeeWithdrawal(feeNode, feeBalance),
@@ -1223,17 +1496,6 @@ async function phaseCycle() {
   const feePaid = big(await token.balanceOf(nodeAdmin.address)) - adminBefore;
   check('the operator-fee withdrawal pays the whole balance out of ConvictionStakingStorage', feePaid === feeBalance, fmt(feePaid));
   out.operatorFeeWithdrawal = { node: feeNode, amount: feePaid, gasUsed: big(feeWd.receipt.gasUsed) };
-
-  // A withdrawal: the smallest unlocked position of the first seller.
-  const w = cyclePositions.filter((p: Any) => p.node === SELLERS[0]).sort((a: Any, b: Any) => (a.raw < b.raw ? -1 : 1))[0];
-  const wOwner = await impersonate(w.owner);
-  const ownerBal = big(await token.balanceOf(w.owner));
-  const raw = big((await css.getPosition(w.tokenId)).raw);
-  const wd = await send(`token ${w.tokenId} owner: withdraw`, (snft as Any).connect(wOwner).withdraw(w.tokenId));
-  const paidOut = big(await token.balanceOf(w.owner)) - ownerBal;
-  check(`the withdrawal pays the position's whole raw stake, rewards compounded (${fmt(paidOut)} TRAC)`, paidOut === raw);
-  check(`node ${SELLERS[0]} stays in the sharding table`, await (await at('ShardingTableStorage')).nodeExists(SELLERS[0]));
-  out.withdrawal = { tokenId: w.tokenId, amount: paidOut, gasUsed: big(wd.receipt.gasUsed) };
 
   // Window booking: the account's closed windows, booked by anyone's settle.
   const settled = await send(`keeper: settle(${accountId})`, (pc as Any).connect(keeper).settle(accountId));
@@ -1256,9 +1518,9 @@ async function phaseCycle() {
   // Conservation.
   const vault1 = big(await token.balanceOf(vault));
   check(
-    'TRAC into ConvictionStakingStorage: the wallet value and the commitment in, the two withdrawals out',
-    vault1 - vault0 === WALLET_PERIOD_VALUE + COMMITTED - paidOut - feePaid,
-    `Δ ${fmt(vault1 - vault0)} = ${fmt(WALLET_PERIOD_VALUE)} + ${fmt(COMMITTED)} − ${fmt(paidOut)} − ${fmt(feePaid)}`,
+    'TRAC into ConvictionStakingStorage: the wallet value and both commitments in; the withdrawal, its epoch and the operator fee out',
+    vault1 - vault0 === WALLET_PERIOD_VALUE + COMMITTED + LATE_COMMITTED - paidOut - tailPaid - feePaid,
+    `Δ ${fmt(vault1 - vault0)} = ${fmt(WALLET_PERIOD_VALUE)} + ${fmt(COMMITTED)} + ${fmt(LATE_COMMITTED)} − ${fmt(paidOut)} − ${fmt(tailPaid)} − ${fmt(feePaid)}`,
   );
   const publishCredits = sum(publish.stakerCredits.map((c: Any) => c.amount));
   const bookedCredits = sum(booking.map((c) => c.amount));
@@ -1272,6 +1534,82 @@ async function phaseCycle() {
   out.vault = { before: vault0, after: vault1 };
   out.walletFundGas = big(walletFund.receipt.gasUsed);
   save('cycle', { ...out, txs: txLog, checks });
+}
+
+// ---------------------------------------------------------------------------
+// PHASE late-booking — an account no one touched for several epochs
+// ---------------------------------------------------------------------------
+
+/** PublishingMathLib.prorateActiveSink, the spread of one window's booking. */
+function prorate(amount: bigint, start: bigint, epochs: bigint, epLen: bigint, timeRemaining: bigint) {
+  const base = amount / epochs;
+  const first = (base * timeRemaining) / epLen;
+  let last = base - first;
+  const full = epochs - 1n;
+  const fullTotal = base * full;
+  if (first + fullTotal + last < amount) last += amount - (first + fullTotal + last);
+  const r: { start: bigint; end: bigint; amount: bigint }[] = [];
+  if (first > 0n) r.push({ start, end: start, amount: first });
+  if (full > 0n && fullTotal > 0n) r.push({ start: start + 1n, end: start + full, amount: fullTotal });
+  if (last > 0n) r.push({ start: start + epochs, end: start + epochs, amount: last });
+  return r;
+}
+
+async function phaseLateBooking() {
+  const cyc = load('cycle');
+  const chronos = await at('Chronos');
+  const pc = await at('PublishingConviction');
+  const pcs = await at('PublishingConvictionStorage');
+  const [, , , , , , keeper] = await ethers.getSigners();
+  const id = BigInt(cyc.lateAccount.accountId);
+  const acct = await pcs.getAccount(id);
+  const created = big(acct.createdAtTimestamp);
+  const lock = big(acct.lockDurationEpochs);
+  const epLen = big(await chronos.epochLength());
+  const committed = big(acct.committedTRAC);
+  const B = committed / lock;
+  const dust = committed - B * lock;
+  await warpTo(big(await chronos.timestampForEpoch(BigInt(cyc.activation) + 6n)) + 60n);
+  const E = big(await chronos.getCurrentEpoch());
+  console.log(`\nEpoch ${E}: account ${id}, created in epoch ${await chronos.epochAtTimestamp(created)}, untouched since`);
+  check(`account ${id} has booked no window yet`, big(acct.lastSettledWindow) === 0n);
+
+  const settled = await send(`keeper: settle(${id})`, (pc as Any).connect(keeper).settle(id));
+  const sched = settled.events.find((e) => e.name === 'EmissionScheduled')!;
+  const fromW = big(sched.args.fromWindow);
+  const toW = big(sched.args.toWindow);
+  const credits = stakerCredits(settled.events);
+  const expected: { start: bigint; end: bigint; amount: bigint }[] = [];
+  const windows: Any[] = [];
+  let shapeKept = true;
+  for (let w = fromW; w < toW; w++) {
+    const remainder = B - big(await pcs.windowSpent(id, w)) + (w === lock - 1n ? dust : 0n);
+    const closeTs = created + (w + 1n) * epLen;
+    const closeEpoch = big(await chronos.epochAtTimestamp(closeTs));
+    const boundary = big(await chronos.timestampForEpoch(closeEpoch + 1n));
+    const timeRemaining = boundary > closeTs ? boundary - closeTs : 0n;
+    const start = closeEpoch < E ? E : closeEpoch;
+    const late = prorate(remainder, start, lock, epLen, timeRemaining);
+    const onTime = prorate(remainder, closeEpoch, lock, epLen, timeRemaining);
+    shapeKept &&=
+      late.length === onTime.length &&
+      late.every((r, i) => r.amount === onTime[i].amount && r.start - onTime[i].start === start - closeEpoch && r.end - onTime[i].end === start - closeEpoch);
+    expected.push(...late);
+    windows.push({ window: w, closeEpoch, startEpoch: start, shiftedBy: start - closeEpoch, remainder, ranges: late });
+  }
+  console.log(`  windows ${fromW}..${toW - 1n} booked, each closed in epochs ${windows.map((x) => x.closeEpoch).join(', ')}`);
+  check(
+    'each late window is booked with its on-time curve, shifted to start in the current epoch',
+    shapeKept && JSON.stringify(jsonable(credits)) === JSON.stringify(jsonable(expected)),
+    `${credits.length} credits from epoch ${credits[0]?.start} to ${credits[credits.length - 1]?.end}`,
+  );
+  check('no late booking credits an epoch that has ended', credits.every((c) => c.start >= E));
+  check(
+    'the money is conserved: the booked windows\' whole budget, and nothing else',
+    sum(credits.map((c) => c.amount)) === big(sched.args.scheduled) && big(sched.args.scheduled) === B * (toW - fromW),
+    `${fmt(sum(credits.map((c) => c.amount)))} TRAC = ${toW - fromW} × ${fmt(B)}`,
+  );
+  save('late-booking', { epoch: E, accountId: id, fromWindow: fromW, toWindow: toW, windows, credits, gasUsed: big(settled.receipt.gasUsed), txs: txLog, checks });
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,9 +1633,55 @@ async function phaseCloseBehind() {
   const why = await expectRevert(`token ${p.tokenId} claim`, (snft as Any).connect(owner).claim.staticCall(p.tokenId));
   check('a claim reverts QueryInferenceCloseBehind once the close is more than maxCloseStepsPerClaim epochs behind', why.startsWith('QueryInferenceCloseBehind'), why);
   const c = await send(`keeper: closeEpochs(${steps * 2n})`, (qs as Any).connect(keeper).closeEpochs(steps * 2n));
+  const closes = c.events.filter((e) => e.name === 'EpochClosed').map((e) => {
+    const money = big(e.args.walletDue) + big(e.args.convictionDue) + big(e.args.carryIn);
+    return { epoch: big(e.args.epoch), money, served: big(e.args.sumR), unused: money - big(e.args.sumR) };
+  });
+  console.log(
+    `  unused share of epochs ${closes[0]?.epoch}..${closes[closes.length - 1]?.epoch}: money ${fmt(sum(closes.map((x) => x.money)))}, ` +
+      `served ${fmt(sum(closes.map((x) => x.served)))}, unused ${fmt(sum(closes.map((x) => x.unused)))}`,
+  );
   const cl = await send(`token ${p.tokenId} owner: claim`, (snft as Any).connect(owner).claim(p.tokenId));
   check('after closeEpochs the claim goes through', cl.receipt.status === 1);
   save('close-behind', { epoch: E, closedBefore: closed, closeGas: big(c.receipt.gasUsed), claimGas: big(cl.receipt.gasUsed), txs: txLog, checks });
+}
+
+// ---------------------------------------------------------------------------
+// PHASE unused — the unused share of every closed epoch, from storage
+// ---------------------------------------------------------------------------
+
+/**
+ * Per closed epoch from activation: money = walletDue + convictionDue +
+ * carryIn, served = ΣR finalized in it, unused = money − served, whoever
+ * closed it (a keeper's closeEpochs or a claim on its way). The carry into
+ * the activation epoch is 0, and each close carries money − pool on.
+ */
+async function phaseUnused() {
+  const qis = await at('QueryInferenceStorage');
+  const activation = big(await qis.activationEpoch());
+  const closedThrough = big(await qis.closedThrough());
+  const rows: Any[] = [];
+  let carry = 0n;
+  for (let e = activation; e <= closedThrough; e++) {
+    const [wallet, conviction] = await qis.dueIn(e);
+    const close = await qis.getEpochClose(e);
+    const money = big(wallet) + big(conviction) + carry;
+    const served = big((await qis.getEpochTotals(e)).sumR);
+    const pool = big(close.pool);
+    rows.push({ epoch: e, walletDue: big(wallet), convictionDue: big(conviction), carryIn: carry, money, served, unused: money - served, pool });
+    carry = money - pool;
+  }
+  console.log(`\nunused share, epochs ${activation}..${closedThrough} (money = walletDue + convictionDue + carryIn, served = sumR):`);
+  for (const r of rows) {
+    if (r.money > 0n || r.served > 0n) {
+      console.log(`  epoch ${r.epoch}: money ${fmt(r.money)}, served ${fmt(r.served)}, unused ${fmt(r.unused)}, pool ${fmt(r.pool)}`);
+    }
+  }
+  const empty = rows.filter((r) => r.money === 0n && r.served === 0n).map((r) => r.epoch);
+  console.log(`  the other ${empty.length} epochs had no money and served nothing`);
+  console.log(`  total: money ${fmt(sum(rows.map((r) => r.money)))}, served ${fmt(sum(rows.map((r) => r.served)))}, unused ${fmt(sum(rows.map((r) => r.unused)))}`);
+  check('every closed epoch pools its whole money once value is served, and carries it otherwise', rows.every((r) => (r.served > 0n ? r.pool === r.money : r.pool === 0n)));
+  save('unused', { activation, closedThrough, rows, checks });
 }
 
 async function main() {
@@ -1307,8 +1691,10 @@ async function main() {
   else if (PHASE === 'hub') await phaseHub();
   else if (PHASE === 'existing') await phaseExisting();
   else if (PHASE === 'cycle') await phaseCycle();
+  else if (PHASE === 'late-booking') await phaseLateBooking();
   else if (PHASE === 'close-behind') await phaseCloseBehind();
-  else throw new Error('set PHASE to pre, hub, existing, cycle or close-behind');
+  else if (PHASE === 'unused') await phaseUnused();
+  else throw new Error('set PHASE to pre, hub, existing, cycle, late-booking, close-behind or unused');
   const failed = checks.filter(([, ok]) => !ok);
   console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
   if (failed.length) process.exitCode = 1;
