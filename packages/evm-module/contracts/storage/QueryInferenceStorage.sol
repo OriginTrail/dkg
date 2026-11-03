@@ -21,9 +21,9 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *   - The money due per epoch. A plan period is one epoch, and its money
  *     joins the pool of its due epoch, the epoch after it. That epoch holds
  *     the period's batch deadline, `periodEnd` plus the receipt grace of the
- *     period's epoch, because the grace is kept below the epoch length, and
- *     its claims are finalized in it, so it is the epoch in which the
- *     period's receipt value counts. `walletDue(e)` is the value of
+ *     period's epoch, in its first half, because the grace is at most half
+ *     an epoch, and its claims are finalized in its second half, so it is the
+ *     epoch in which the period's receipt value counts. `walletDue(e)` is the value of
  *     wallet-funded periods and their top-ups due in `e`, and
  *     `convictionDue(e)` the cost that Conviction Account periods and their
  *     top-ups drew from the accounts' allowances, due in `e`. Both are booked
@@ -176,7 +176,7 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /// @notice The time after a period's end, or its Conviction Account
     ///         assignment's end, within which receipt batches still land, for
     ///         the periods of epochs before `nextReceiptGraceFromEpoch` (all
-    ///         epochs while that is 0). Always below the epoch length.
+    ///         epochs while that is 0). At most half the epoch length.
     uint32 public receiptGraceSeconds;
     /// @notice While true, no period is funded or topped up, and no receipt is
     ///         batched or finalized. Closes and claims go on.
@@ -238,12 +238,15 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     /// @dev Idempotent across redeploys: seeds each bound's default only while
     ///      it is unset, so a value governance has tuned survives a
-    ///      re-initialization. The default grace, 1 hour, is below the epoch
-    ///      length of every network this storage deploys to (1 day and more).
-    ///      λ has no default: 0 is a valid value, and the deployment sets it.
+    ///      re-initialization. The default grace is 1 hour, or half an epoch
+    ///      where epochs are shorter than 2 hours, so it keeps to the bound
+    ///      `setReceiptGraceSeconds` enforces on every network. λ has no
+    ///      default: 0 is a valid value, and the deployment sets it.
     function initialize() external onlyHub {
         if (receiptGraceSeconds == 0) {
-            receiptGraceSeconds = _DEFAULT_RECEIPT_GRACE_SECONDS;
+            uint256 grace = _maxReceiptGrace(_chronos());
+            if (grace > _DEFAULT_RECEIPT_GRACE_SECONDS) grace = _DEFAULT_RECEIPT_GRACE_SECONDS;
+            receiptGraceSeconds = uint32(grace);
         }
         if (maxItemsPerBatch == 0) {
             maxItemsPerBatch = _DEFAULT_MAX_ITEMS_PER_BATCH;
@@ -284,9 +287,13 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     }
 
     /**
-     * @notice Set the receipt grace, from 1 second to less than one epoch, so
-     *         a period's batch deadline always falls in the epoch after it,
-     *         its due epoch. A change moves no money already booked.
+     * @notice Set the receipt grace, from 1 second to half an epoch, so a
+     *         period's batch deadline falls in the first half of the epoch
+     *         after it, its due epoch, and at least the second half of that
+     *         epoch, less a second, is left to finalize the period's claims
+     *         in: a claim is finalized only after the deadline and before the
+     *         due epoch ends, so a grace of nearly an epoch would leave no
+     *         time at all. A change moves no money already booked.
      * @dev    A period of epoch e takes the grace of e
      *         (`receiptGraceSecondsAt(e)`). A change made during epoch c
      *         applies to the periods of c + 1 on, as a change to λ applies
@@ -308,7 +315,7 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
      */
     function setReceiptGraceSeconds(uint32 value) external onlyHub {
         Chronos chronos = _chronos();
-        if (value == 0 || value >= chronos.epochLength()) revert InvalidParameter("receiptGraceSeconds");
+        if (value == 0 || value > _maxReceiptGrace(chronos)) revert InvalidParameter("receiptGraceSeconds");
         uint256 current = chronos.getCurrentEpoch();
         uint256 activation = activationEpoch;
         if (activation == 0 || current < activation) {
@@ -573,5 +580,11 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     function _chronos() internal view returns (Chronos) {
         return Chronos(hub.getContractAddress("Chronos"));
+    }
+
+    /// @dev The longest receipt grace: half an epoch, the most that leaves the
+    ///      due epoch's other half for finalization.
+    function _maxReceiptGrace(Chronos chronos) internal view returns (uint256) {
+        return chronos.epochLength() / 2;
     }
 }

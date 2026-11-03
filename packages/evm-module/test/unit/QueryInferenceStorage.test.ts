@@ -5,8 +5,9 @@
 //   - the gates: every mutator is onlyContracts (a Hub-registered contract or
 //     the Hub owner), every parameter setter is onlyHub (the Hub, through
 //     forwardCall, or the Hub owner), and neither admits the other's callers;
-//   - the parameters: defaults, bounds (a receipt grace below one epoch), the
-//     pause, and an activation epoch set once and never to an ended epoch;
+//   - the parameters: defaults, bounds (a receipt grace of at most half an
+//     epoch, the default included), the pause, and an activation epoch set
+//     once and never to an ended epoch;
 //   - the λ schedule: a change applies from the next epoch, at once while no
 //     epoch from activation on has started, and a scheduled value is folded in
 //     only once every epoch before it is closed;
@@ -100,6 +101,26 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.fundingState()).to.deep.equal([0n, false]);
     });
 
+    it('initialize seeds a grace of 1 hour, or half an epoch where epochs are shorter than 2 hours', async () => {
+      // An hour-long epoch would otherwise take a grace of all of it, and no
+      // claim could ever be finalized.
+      const start = BigInt(await time.latest());
+      const seeded: bigint[] = [];
+      for (const length of [3_600n, 7_199n, 7_200n, 86_400n]) {
+        const chronos = await (await hre.ethers.getContractFactory('Chronos')).deploy(start, length);
+        await chronos.waitForDeployment();
+        await HubContract.setContractAddress('Chronos', await chronos.getAddress());
+        const fresh = (await (
+          await hre.ethers.getContractFactory('QueryInferenceStorage')
+        ).deploy(await HubContract.getAddress())) as unknown as QueryInferenceStorage;
+        await fresh.waitForDeployment();
+        await HubContract.setContractAddress('QueryInferenceStorage', await fresh.getAddress());
+        await HubContract.forwardCall(await fresh.getAddress(), fresh.interface.encodeFunctionData('initialize'));
+        seeded.push(await fresh.receiptGraceSeconds());
+      }
+      expect(seeded).to.deep.equal([1_800n, 3_599n, 3_600n, 3_600n]);
+    });
+
     it('initialize is idempotent: a tuned bound survives a re-initialization', async () => {
       await QIS.setReceiptGraceSeconds(600n);
       await QIS.setMaxItemsPerBatch(64n);
@@ -151,18 +172,20 @@ describe('@unit QueryInferenceStorage', () => {
       });
     }
 
-    it('setReceiptGraceSeconds accepts 1 second to one second less than an epoch, so a deadline stays in the next epoch', async () => {
-      for (const bad of [0n, epLen, epLen + 1n]) {
+    it('setReceiptGraceSeconds accepts 1 second to half an epoch, so the epoch after a period keeps half of it to finalize in', async () => {
+      // Above half an epoch the finalization window, the rest of the due
+      // epoch after the deadline, shrinks; at an epoch less a second it is gone.
+      for (const bad of [0n, epLen / 2n + 1n, epLen - 1n, epLen, epLen + 1n]) {
         await expect(QIS.setReceiptGraceSeconds(bad))
           .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
           .withArgs('receiptGraceSeconds');
       }
       const now = await currentEpoch();
       await expect(QIS.setReceiptGraceSeconds(1n)).to.emit(QIS, 'ReceiptGraceSecondsSet').withArgs(1n, now);
-      await expect(QIS.setReceiptGraceSeconds(epLen - 1n))
+      await expect(QIS.setReceiptGraceSeconds(epLen / 2n))
         .to.emit(QIS, 'ReceiptGraceSecondsSet')
-        .withArgs(epLen - 1n, now);
-      expect(await QIS.receiptGraceSeconds()).to.equal(epLen - 1n);
+        .withArgs(epLen / 2n, now);
+      expect(await QIS.receiptGraceSeconds()).to.equal(epLen / 2n);
     });
 
     it('setMaxItemsPerBatch accepts 1 to 1,024', async () => {
@@ -354,13 +377,15 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.receiptGraceSecondsAt(e + 3n)).to.equal(1_200n);
     });
 
-    it('keeps every value below one epoch, scheduled or not', async () => {
+    it('keeps every value at most half an epoch, scheduled or not', async () => {
       await activateAt(await currentEpoch());
-      await expect(QIS.setReceiptGraceSeconds(epLen))
-        .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
-        .withArgs('receiptGraceSeconds');
-      await QIS.setReceiptGraceSeconds(epLen - 1n);
-      expect(await QIS.nextReceiptGraceSeconds()).to.equal(epLen - 1n);
+      for (const bad of [epLen / 2n + 1n, epLen - 1n]) {
+        await expect(QIS.setReceiptGraceSeconds(bad))
+          .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
+          .withArgs('receiptGraceSeconds');
+      }
+      await QIS.setReceiptGraceSeconds(epLen / 2n);
+      expect(await QIS.nextReceiptGraceSeconds()).to.equal(epLen / 2n);
     });
   });
 

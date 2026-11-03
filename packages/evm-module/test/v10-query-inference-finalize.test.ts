@@ -418,6 +418,33 @@ describe('@integration Finalization of receipt claims against the funded cap', f
       expect(await nodeEpoch(s2, e + 1n)).to.deep.equal([0n, 0n]);
       expect(await nodeEpoch(s2, e + 2n)).to.deep.equal([0n, 0n]);
     });
+
+    it('stays open for the second half of e + 1 less a second at the longest grace, half an epoch, and no grace leaves less', async () => {
+      const s1 = await seller(1_250_000n * TRAC);
+      const epLen = await f.Chronos.epochLength();
+      await expect(forward(f.QIS, 'setReceiptGraceSeconds', [epLen / 2n + 1n]))
+        .to.be.revertedWithCustomError(f.QIS, 'InvalidParameter')
+        .withArgs('receiptGraceSeconds');
+      // Set now, the longest grace applies to the next epoch's periods.
+      await forward(f.QIS, 'setReceiptGraceSeconds', [epLen / 2n]);
+      const e = (await epochNow()) + 1n;
+      const p = await walletFund(buyer, e, [bucket(0, CLASS_INFERENCE, 10n * TRAC, PRICE_CAP)]);
+      await time.increaseTo(await epochStart(e));
+      await claim(s1, p, 0, TRAC);
+
+      const deadline = await deadlineOf(e);
+      expect(deadline).to.equal((await epochStart(e + 1n)) + epLen / 2n);
+      expect(await f.QS.batchDeadline(p)).to.equal(deadline);
+      await scoreNode(f.RSS, e + 1n, s1.identityId);
+      await time.setNextBlockTimestamp(deadline);
+      let receipt = await finalize([ref(p, 0, s1)]);
+      expect(skipped(receipt)).to.deep.equal([[p, 0n, s1.identityId, Skip.TooEarly]]);
+      // The last second of e + 1 still finalizes.
+      await time.setNextBlockTimestamp((await epochStart(e + 2n)) - 1n);
+      receipt = await finalize([ref(p, 0, s1)]);
+      expect(skipped(receipt)).to.have.length(0);
+      expect((await nodeEpoch(s1, e + 1n))[0]).to.equal(TRAC);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -543,10 +570,10 @@ describe('@integration Finalization of receipt claims against the funded cap', f
 
       // The grace is raised to its longest during e + 1: e's deadline does not move.
       const epLen = await f.Chronos.epochLength();
-      await forward(f.QIS, 'setReceiptGraceSeconds', [epLen - 1n]);
+      await forward(f.QIS, 'setReceiptGraceSeconds', [epLen / 2n]);
       expect(await f.QIS.receiptGraceSecondsAt(e)).to.equal(3_600n);
       expect(await f.QIS.receiptGraceSecondsAt(e + 1n)).to.equal(3_600n);
-      expect(await f.QIS.receiptGraceSecondsAt(e + 2n)).to.equal(epLen - 1n);
+      expect(await f.QIS.receiptGraceSecondsAt(e + 2n)).to.equal(epLen / 2n);
       expect(await f.QS.batchDeadline(p)).to.equal((await epochStart(e + 1n)) + 3_600n);
       const late = await lateItem(p, s1, 7n, (await epochStart(e + 1n)) - 100n);
       await expect(f.QS.connect(s1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, items: late }]))

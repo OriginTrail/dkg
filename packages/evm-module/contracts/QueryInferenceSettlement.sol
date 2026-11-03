@@ -59,11 +59,12 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * captured once per batch and never revised.
  *
  * Finalization (`finalizeClaims`). An epoch e has one batch deadline, its end
- * plus the receipt grace of e, which falls in e + 1, the due epoch of its
- * periods; a Conviction Account period whose assignment ended sooner has an
- * earlier deadline of its own. A seller's claims in a bucket are finalized in
- * e + 1 and only there, after the epoch's deadline, and are void once e + 1
- * has ended. Anyone may finalize, and the value goes to the seller the claim
+ * plus the receipt grace of e, which falls in the first half of e + 1, the
+ * due epoch of its periods, since the grace is at most half an epoch; a
+ * Conviction Account period whose assignment ended sooner has an earlier
+ * deadline of its own. A seller's claims in a bucket are finalized in e + 1
+ * and only there, after the epoch's deadline, so in at least the second half
+ * of e + 1 less a second, and are void once e + 1 has ended. Anyone may finalize, and the value goes to the seller the claim
  * names, who must have a positive node score in e + 1. A bucket's claims
  * above its funded cap all shrink by the same ratio, so the order of batches
  * gives no priority, and the result counts as R and QueryInferenceScore in

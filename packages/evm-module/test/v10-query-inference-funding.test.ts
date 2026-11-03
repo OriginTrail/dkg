@@ -473,18 +473,18 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect(await QIS.walletDue(now + 2n)).to.equal(0n);
     });
 
-    it('the receipt grace stays below one epoch, so the batch deadline always falls in the due epoch; a change to it moves no booking', async () => {
-      for (const bad of [0n, epLen]) {
+    it('the receipt grace stays at most half an epoch, so the batch deadline always falls in the due epoch; a change to it moves no booking', async () => {
+      for (const bad of [0n, epLen / 2n + 1n, epLen]) {
         await expect(forward(QIS, 'setReceiptGraceSeconds', [bad]))
           .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
           .withArgs('receiptGraceSeconds');
       }
       // A change applies to the next epoch's periods: fund one, under the longest grace.
-      await forward(QIS, 'setReceiptGraceSeconds', [epLen - 1n]);
+      await forward(QIS, 'setReceiptGraceSeconds', [epLen / 2n]);
       const next = (await epochNow()) + 1n;
       const { subscriptionId } = await walletFund(walletRequestOf(next));
       const s = await CSS.getSubscription(subscriptionId);
-      expect(await QIS.receiptGraceSecondsAt(next)).to.equal(epLen - 1n);
+      expect(await QIS.receiptGraceSecondsAt(next)).to.equal(epLen / 2n);
       const deadline = s.periodEnd + (await QIS.receiptGraceSecondsAt(next));
       expect(await ChronosContract.epochAtTimestamp(deadline)).to.equal(next + 1n);
       expect(await QIS.walletDue(next + 1n)).to.equal(10n * TRAC);
