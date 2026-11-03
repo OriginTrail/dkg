@@ -14,15 +14,27 @@ import { agentColorForUri } from '../hooks/useAgents.js';
  *  two hex digits after 0x ("0x3f2a…9b1c" → "3F"). Same rule as graph-viz's
  *  `agentInitials`, so a legend dot matches its graph node. */
 export function agentInitials(label: string): string {
-  let t = (label ?? '').trim();
-  t = t.replace(/^["'“”]+|["'“”]+$/g, '').trim(); // labels can arrive as quoted literals
+  let t = stripQuotes((label ?? '').trim()).trim(); // labels can arrive as quoted literals
+  if (t.startsWith('did:')) t = t.split(':').pop() ?? '';
   if (!t) return '?';
-  if (t.startsWith('did:')) t = t.split(':').pop() ?? t;
   const hex = t.match(/^0x([0-9a-f]{2})/i);
   if (hex) return hex[1].toUpperCase();
+  // Separator-only names ("_", "--") leave no parts: fall back like an empty name.
   const parts = t.split(/[\s_-]+/).filter(Boolean);
+  if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + (parts[1][0] ?? '')).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+const QUOTES = new Set(['"', "'", '\u201c', '\u201d']);
+
+/** Trim surrounding quote marks with a linear scan (no backtracking regex). */
+function stripQuotes(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && QUOTES.has(s[start])) start++;
+  while (end > start && QUOTES.has(s[end - 1])) end--;
+  return s.slice(start, end);
 }
 
 export interface AgentDotProps {

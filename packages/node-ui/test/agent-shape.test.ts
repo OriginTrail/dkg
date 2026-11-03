@@ -19,6 +19,21 @@ describe('agent initials', () => {
     expect(agentInitials(DID)).toBe('A4');
     expect(agentInitials('  ')).toBe('?');
   });
+
+  it('falls back instead of throwing for separator-only names and empty DID suffixes', () => {
+    for (const name of ['_', '-', '__--__', ' _ ', '"_"', 'did:dkg:agent:', 'did:dkg:agent:_']) {
+      expect(agentInitials(name)).toBe('?');
+    }
+    expect(agentInitials('_hermes_')).toBe('HE');
+  });
+
+  it('strips long runs of quotes in linear time', () => {
+    const quotes = '"'.repeat(50_000);
+    const started = performance.now();
+    expect(agentInitials(`${quotes}Claude Code${quotes}`)).toBe('CC');
+    expect(agentInitials(`${quotes}x`)).toBe('X');
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });
 
 describe('agent node colours', () => {

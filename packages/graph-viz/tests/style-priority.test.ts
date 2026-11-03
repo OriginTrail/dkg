@@ -125,6 +125,22 @@ describe('agent avatar initials from literals', () => {
     const { agentInitials } = await import('../src/core/hexagon-painter.js');
     expect(agentInitials('"0x7b21…9a12"')).toBe('7B');
   });
+
+  it('falls back instead of throwing for separator-only names and empty DID suffixes', async () => {
+    const { agentInitials } = await import('../src/core/hexagon-painter.js');
+    for (const name of ['_', '-', '__--__', '"_"', 'did:dkg:agent:', 'did:dkg:agent:_']) {
+      expect(agentInitials(name)).toBe('?');
+    }
+  });
+
+  it('strips long runs of quotes in linear time', async () => {
+    const { agentInitials } = await import('../src/core/hexagon-painter.js');
+    const quotes = '"'.repeat(50_000);
+    const started = performance.now();
+    expect(agentInitials(`${quotes}Claude Code${quotes}`)).toBe('CC');
+    expect(agentInitials(`${quotes}x`)).toBe('X');
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });
 
 describe('flat fill classes', () => {
