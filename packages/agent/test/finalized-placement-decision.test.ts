@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
-import { finalizedPlacementAuthorityRevisionV1, resolveFinalizedPlacementDecisionV1, type PlacementLaneV1 } from '../src/internal/finalized-placement-decision.js';
+import { finalizedPlacementAuthorityRevisionV1, resolveFinalizedPlacementAdmissionDecisionV1, resolveFinalizedPlacementDecisionV1, type PlacementLaneV1 } from '../src/internal/finalized-placement-decision.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import { authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 import { privateRepair } from './support/catalog-repair-backoff-fixture.js';
@@ -29,6 +29,25 @@ describe('canonical placement decision', () => {
       else expect(decision.error.message).toBe(failure);
       expect(decision.capacityScope).toEqual({ ...repair.inventoryScope, bucketCount: '1' });
     });
+
+  it('retains only frozen admission fields rather than execution configuration', () => {
+    const repair = privateRepair();
+    const { authorAddress: _author, ...scopeBase } = repair.inventoryScope;
+    const lane = { kind: 'private' as const, acceptsFinalizedVmRepair: true, scopeBase,
+      executionOnly: { mustNotBeRetained: true } };
+    const ready = resolveFinalizedPlacementAdmissionDecisionV1(repair, () => ({ status: 'active', lane }));
+    expect(Object.keys(ready).sort()).toEqual(['capacityScope', 'status']);
+    expect(Object.isFrozen(ready)).toBe(true);
+    expect(ready).toEqual({ status: 'ready', capacityScope: { ...repair.inventoryScope, bucketCount: '1' } });
+    const inactive = resolveFinalizedPlacementAdmissionDecisionV1(repair, () => ({ status: 'inactive' }));
+    expect(Object.keys(inactive).sort()).toEqual(['capacityScope', 'status']);
+    expect(inactive.status).toBe('inactive');
+    const error = new Error('authority unavailable');
+    const unavailable = resolveFinalizedPlacementAdmissionDecisionV1(repair, () => ({ status: 'unavailable', error }));
+    expect(Object.keys(unavailable).sort()).toEqual(['capacityScope', 'error', 'status']);
+    expect(unavailable).toEqual({ status: 'unavailable', error, capacityScope: ready.capacityScope });
+    expect(Object.isFrozen(unavailable)).toBe(true);
+  });
 
   it('names in the lane revision everything the decision reads of the lane', async () => {
     const legacy = privateRepair();

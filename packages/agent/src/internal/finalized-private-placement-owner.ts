@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createOperationContext, type AuthorCatalogScopeV1, type ContextGraphIdV1, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, type ContextGraphIdV1, type OperationContext } from '@origintrail-official/dkg-core';
 import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
 import { CatalogRepairConditionErrorV1, CatalogRepairLaneInactiveErrorV1, catalogRepairDiagnosticV1 } from '../rfc64/catalog-repair-diagnostics-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1, Rfc64PrivatePlacementFailureWriteV1 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
 import { resetPrivatePlacementFailureStateV1, summarizePrivatePlacementFailuresV1, type PrivatePlacementFailureStateV1 } from '../rfc64/private-placement-failure-state-v1.js';
-import { finalizedPlacementAuthorityRevisionV1, readFinalizedPlacementAuthorityV1, resolveFinalizedPlacementDecisionV1, type FinalizedPlacementDecisionV1, type FinalizedPlacementAuthorityV1 } from './finalized-placement-decision.js';
+import { finalizedPlacementAuthorityRevisionV1, readFinalizedPlacementAuthorityV1, resolveFinalizedPlacementAdmissionDecisionV1, type FinalizedPlacementAdmissionDecisionV1, type FinalizedPlacementAuthorityV1 } from './finalized-placement-decision.js';
 import { FinalizedPrivateRepairRetryV1 } from './finalized-private-repair-retry.js';
 import { finalizedPrivateRepairKeyV1 } from './finalized-private-placement-key.js';
 import type { CatalogPlacementTimingV1, CatalogPlacementAttemptV1, CatalogPlacementWaiterObserverV1, FinalizedPrivatePlacementQueueStatusV1 } from './catalog-placement-timing.js';
@@ -14,10 +14,6 @@ import { FinalizedPrivatePlacementWaitersV1 } from './finalized-private-placemen
 import { createMainThreadTimeSlice } from '../main-thread-time-slice.js';
 import { NextTurnRecurringTaskV1 } from './next-turn-recurring-task.js';
 
-/** What admission reads of a marker's placement decision. */
-type MarkerDecisionV1 =
-  | Readonly<{ status: 'ready' | 'inactive'; capacityScope: Readonly<AuthorCatalogScopeV1> | undefined }>
-  | Readonly<{ status: 'unavailable'; error: Error; capacityScope: Readonly<AuthorCatalogScopeV1> | undefined }>;
 interface RetryEntry {
   readonly key: string;
   readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
@@ -25,7 +21,7 @@ interface RetryEntry {
   failureHistoryRead: boolean;
   attempts: number;
   /** GH#3134 — the decision under the available authority last read, and its lane revision. */
-  decided?: Readonly<{ revision: string; decision: MarkerDecisionV1 }>;
+  decided?: Readonly<{ revision: string; decision: FinalizedPlacementAdmissionDecisionV1 }>;
 }
 interface ResetPlan {
   readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
@@ -52,7 +48,7 @@ interface PassState {
   readonly graphs: Map<string, GraphRead>;
 }
 type LaneReconciliation =
-  | { readonly kind: 'decision'; readonly decision: MarkerDecisionV1; readonly resetCommitted: boolean }
+  | { readonly kind: 'decision'; readonly decision: FinalizedPlacementAdmissionDecisionV1; readonly resetCommitted: boolean }
   | { readonly kind: 'blocked'; readonly resetCommitted: false };
 const BLOCKED: LaneReconciliation = Object.freeze({ kind: 'blocked', resetCommitted: false });
 interface Dependencies {
@@ -137,9 +133,9 @@ export class FinalizedPrivatePlacementOwnerV1 {
     };
     if (this.closed) return rejected();
     let laneAccepts = false;
-    let decision: FinalizedPlacementDecisionV1;
+    let decision: FinalizedPlacementAdmissionDecisionV1;
     try {
-      decision = resolveFinalizedPlacementDecisionV1(repair, () => this.#readAuthority(repair.contextGraphId));
+      decision = resolveFinalizedPlacementAdmissionDecisionV1(repair, () => this.#readAuthority(repair.contextGraphId));
       if (decision.status === 'unavailable') throw decision.error;
       laneAccepts = decision.status === 'ready';
     }
@@ -279,10 +275,10 @@ export class FinalizedPrivatePlacementOwnerV1 {
   }
 
   /** The marker's decision under `read`; one made under an available authority is kept while the lane revision stays. */
-  #decision(entry: RetryEntry, repair: Rfc64FinalizedPrivatePlacementRepairV1, read: GraphRead): MarkerDecisionV1 {
+  #decision(entry: RetryEntry, repair: Rfc64FinalizedPrivatePlacementRepairV1, read: GraphRead): FinalizedPlacementAdmissionDecisionV1 {
     const { revision } = read;
     if (revision !== undefined && entry.decided?.revision === revision) return entry.decided.decision;
-    const decision = resolveFinalizedPlacementDecisionV1(repair, () => read.authority);
+    const decision = resolveFinalizedPlacementAdmissionDecisionV1(repair, () => read.authority);
     entry.decided = revision === undefined ? undefined : Object.freeze({ revision, decision });
     return decision;
   }
