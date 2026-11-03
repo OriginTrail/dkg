@@ -1,9 +1,10 @@
 // OT-RFC-27 script support: the contracts of the stack, resolved through the
-// Hub at the address the tracked deployments file records for it, with
-// typechain's types; revert decoding; typed events from a receipt.
+// Hub at the address the tracked deployments file records for it, each through
+// its generated factory, so its type comes from its ABI; revert decoding; typed
+// events from a receipt.
 
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
-import type { BaseContract, Interface, TransactionReceipt } from 'ethers';
+import type { BaseContract, ContractRunner, Interface, TransactionReceipt } from 'ethers';
 
 import type {
   Chronos,
@@ -31,6 +32,29 @@ import type {
   Token,
 } from '../../typechain';
 import type { TypedContractEvent, TypedLogDescription } from '../../typechain/common';
+import { DKGPublishingConvictionNFT__factory } from '../../typechain/factories/contracts/DKGPublishingConvictionNFT__factory';
+import { DKGStakingConvictionNFT__factory } from '../../typechain/factories/contracts/DKGStakingConvictionNFT__factory';
+import { PublishingConviction__factory } from '../../typechain/factories/contracts/PublishingConviction__factory';
+import { QueryInferenceSettlement__factory } from '../../typechain/factories/contracts/QueryInferenceSettlement__factory';
+import { ServiceSubscriptionsWallet__factory } from '../../typechain/factories/contracts/ServiceSubscriptionsWallet__factory';
+import { ServiceSubscriptions__factory } from '../../typechain/factories/contracts/ServiceSubscriptions__factory';
+import { StakingKPI__factory } from '../../typechain/factories/contracts/StakingKPI__factory';
+import { StakingV10Ledger__factory } from '../../typechain/factories/contracts/StakingV10Ledger__factory';
+import { StakingV10__factory } from '../../typechain/factories/contracts/StakingV10__factory';
+import { Token__factory } from '../../typechain/factories/contracts/Token__factory';
+import { Chronos__factory } from '../../typechain/factories/contracts/storage/Chronos__factory';
+import { ConvictionServiceStorage__factory } from '../../typechain/factories/contracts/storage/ConvictionServiceStorage__factory';
+import { ConvictionStakingStorage__factory } from '../../typechain/factories/contracts/storage/ConvictionStakingStorage__factory';
+import { ConvictionWithdrawalStorage__factory } from '../../typechain/factories/contracts/storage/ConvictionWithdrawalStorage__factory';
+import { EpochStorage__factory } from '../../typechain/factories/contracts/storage/EpochStorage__factory';
+import { Hub__factory } from '../../typechain/factories/contracts/storage/Hub__factory';
+import { IdentityStorage__factory } from '../../typechain/factories/contracts/storage/IdentityStorage__factory';
+import { ParametersStorage__factory } from '../../typechain/factories/contracts/storage/ParametersStorage__factory';
+import { ProfileStorage__factory } from '../../typechain/factories/contracts/storage/ProfileStorage__factory';
+import { PublishingConvictionStorage__factory } from '../../typechain/factories/contracts/storage/PublishingConvictionStorage__factory';
+import { QueryInferenceStorage__factory } from '../../typechain/factories/contracts/storage/QueryInferenceStorage__factory';
+import { RandomSamplingStorage__factory } from '../../typechain/factories/contracts/storage/RandomSamplingStorage__factory';
+import { ShardingTableStorage__factory } from '../../typechain/factories/contracts/storage/ShardingTableStorage__factory';
 
 /** The contracts that exist before the OT-RFC-27 deploy, as the Hub holds them. */
 export type BaseContracts = {
@@ -91,16 +115,33 @@ export const EXPECTED_VERSIONS: Readonly<Record<string, string>> = {
   StakingKPI: '10.1.0',
 };
 
+/** A generated factory: what it connects has the type of the ABI it holds. */
+export type FactoryOf<T> = { connect(address: string, runner?: ContractRunner | null): T };
+
 /** The stack behind one Hub. */
 export class Stack {
   private constructor(
     private readonly hre: HardhatRuntimeEnvironment,
     readonly hub: Hub,
+    private readonly runner: ContractRunner,
   ) {}
 
   static async at(hre: HardhatRuntimeEnvironment, hubAddress: string): Promise<Stack> {
     if ((await hre.ethers.provider.getCode(hubAddress)) === '0x') throw new Error(`no Hub at ${hubAddress} on this chain`);
-    return new Stack(hre, await typedAt<Hub>(hre, 'Hub', hubAddress));
+    // As hardhat's getContractAt: the first signer if there is one, otherwise read-only.
+    const [first] = await hre.ethers.getSigners();
+    const runner: ContractRunner = first ?? hre.ethers.provider;
+    return new Stack(hre, Hub__factory.connect(hubAddress, runner), runner);
+  }
+
+  /** The contract at `address`. */
+  connect<T>(factory: FactoryOf<T>, address: string): T {
+    return factory.connect(address, this.runner);
+  }
+
+  /** The contract the Hub holds under `hubName`, which may be an alias of the artifact's name, as `EpochStorageV8` is. */
+  async held<T>(factory: FactoryOf<T>, hubName: string): Promise<T> {
+    return this.connect(factory, await this.addr(hubName));
   }
 
   addr(name: string): Promise<string> {
@@ -127,47 +168,38 @@ export class Stack {
     return out;
   }
 
-  private async at<T>(name: string, hubName = name): Promise<T> {
-    return typedAt<T>(this.hre, name, await this.addr(hubName));
-  }
-
   async base(): Promise<BaseContracts> {
     return {
-      token: await this.at<Token>('Token'),
-      chronos: await this.at<Chronos>('Chronos'),
-      params: await this.at<ParametersStorage>('ParametersStorage'),
-      pcs: await this.at<PublishingConvictionStorage>('PublishingConvictionStorage'),
-      nft: await this.at<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-      css: await this.at<ConvictionStakingStorage>('ConvictionStakingStorage'),
-      rss: await this.at<RandomSamplingStorage>('RandomSamplingStorage'),
-      ids: await this.at<IdentityStorage>('IdentityStorage'),
-      ps: await this.at<ProfileStorage>('ProfileStorage'),
-      sts: await this.at<ShardingTableStorage>('ShardingTableStorage'),
-      snft: await this.at<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
-      es: await this.at<EpochStorage>('EpochStorage', 'EpochStorageV8'),
+      token: await this.held(Token__factory, 'Token'),
+      chronos: await this.held(Chronos__factory, 'Chronos'),
+      params: await this.held(ParametersStorage__factory, 'ParametersStorage'),
+      pcs: await this.held(PublishingConvictionStorage__factory, 'PublishingConvictionStorage'),
+      nft: await this.held(DKGPublishingConvictionNFT__factory, 'DKGPublishingConvictionNFT'),
+      css: await this.held(ConvictionStakingStorage__factory, 'ConvictionStakingStorage'),
+      rss: await this.held(RandomSamplingStorage__factory, 'RandomSamplingStorage'),
+      ids: await this.held(IdentityStorage__factory, 'IdentityStorage'),
+      ps: await this.held(ProfileStorage__factory, 'ProfileStorage'),
+      sts: await this.held(ShardingTableStorage__factory, 'ShardingTableStorage'),
+      snft: await this.held(DKGStakingConvictionNFT__factory, 'DKGStakingConvictionNFT'),
+      es: await this.held(EpochStorage__factory, 'EpochStorageV8'),
       randomSampling: await this.addr('RandomSampling'),
     };
   }
 
   async pool(): Promise<PoolContracts> {
     return {
-      pc: await this.at<PublishingConviction>('PublishingConviction'),
-      ss: await this.at<ServiceSubscriptions>('ServiceSubscriptions'),
-      ssw: await this.at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
-      cssvc: await this.at<ConvictionServiceStorage>('ConvictionServiceStorage'),
-      qis: await this.at<QueryInferenceStorage>('QueryInferenceStorage'),
-      qs: await this.at<QueryInferenceSettlement>('QueryInferenceSettlement'),
-      sv10: await this.at<StakingV10>('StakingV10'),
-      kpi: await this.at<StakingKPI>('StakingKPI'),
-      ledger: await this.at<StakingV10Ledger>('StakingV10Ledger'),
-      cws: await this.at<ConvictionWithdrawalStorage>('ConvictionWithdrawalStorage'),
+      pc: await this.held(PublishingConviction__factory, 'PublishingConviction'),
+      ss: await this.held(ServiceSubscriptions__factory, 'ServiceSubscriptions'),
+      ssw: await this.held(ServiceSubscriptionsWallet__factory, 'ServiceSubscriptionsWallet'),
+      cssvc: await this.held(ConvictionServiceStorage__factory, 'ConvictionServiceStorage'),
+      qis: await this.held(QueryInferenceStorage__factory, 'QueryInferenceStorage'),
+      qs: await this.held(QueryInferenceSettlement__factory, 'QueryInferenceSettlement'),
+      sv10: await this.held(StakingV10__factory, 'StakingV10'),
+      kpi: await this.held(StakingKPI__factory, 'StakingKPI'),
+      ledger: await this.held(StakingV10Ledger__factory, 'StakingV10Ledger'),
+      cws: await this.held(ConvictionWithdrawalStorage__factory, 'ConvictionWithdrawalStorage'),
     };
   }
-}
-
-/** A contract at `address` with the ABI of the artifact `name`, as typechain types it. */
-export async function typedAt<T>(hre: HardhatRuntimeEnvironment, name: string, address: string): Promise<T> {
-  return (await hre.ethers.getContractAt(name, address)) as unknown as T;
 }
 
 // Every interface whose errors a revert may carry.

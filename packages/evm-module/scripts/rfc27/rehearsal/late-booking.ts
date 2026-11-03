@@ -2,12 +2,56 @@
 // one settle: each window with its on-time curve, shifted to start in the
 // current epoch, as test/helpers' emission model books it.
 
-import { PoolModel, curveStart, scheduleModel } from '../../../test/helpers/emission-model';
+import { PoolModel, Range, curveStart, scheduleModel } from '../../../test/helpers/emission-model';
 import { eventsIn } from '../contracts';
-import { fmt, sum } from '../report';
+import { Report, fmt, sum } from '../report';
 import { Ctx, saveResults, send, withPool } from './context';
-import { sameRanges, stakerCredits } from './reads';
+import { WindowRange, closedWindows, sameRanges, stakerCredits } from './reads';
 import { loadCycle } from './results';
+
+/** What one settle had to book, worked out without it, and what it did. */
+export type LateBooking = {
+  /** The account's closed windows that were not booked yet, from its cursor and the settle block's time. */
+  expected: WindowRange;
+  /** The model of each expected window's booking. */
+  curves: Awaited<ReturnType<typeof scheduleModel>>['curves'];
+  /** Each window's budget. */
+  budget: bigint;
+  /** The epoch of the settle. */
+  epoch: bigint;
+  emitted: WindowRange & { scheduled: bigint };
+  cursorAfter: bigint;
+  credits: Range[];
+};
+
+/** The late booking's checks, each against what the settlement did not get to choose. */
+export function checkLateBooking(report: Report, b: LateBooking): void {
+  const { expected, emitted, credits, epoch: E } = b;
+  report.check(
+    `settle books every closed window, ${expected.fromWindow}..${expected.toWindow - 1n}, and moves the cursor past them`,
+    emitted.fromWindow === expected.fromWindow && emitted.toWindow === expected.toWindow && b.cursorAfter === expected.toWindow,
+    `emitted ${emitted.fromWindow}..${emitted.toWindow - 1n}, cursor ${b.cursorAfter}`,
+  );
+  const shapeKept = b.curves.every((cv) => {
+    const shift = curveStart(cv.anchorEpoch, E) - cv.anchorEpoch;
+    return (
+      cv.booked.length === cv.onTime.length &&
+      cv.booked.every((r, i) => r.amount === cv.onTime[i].amount && r.start - cv.onTime[i].start === shift && r.end - cv.onTime[i].end === shift)
+    );
+  });
+  report.check(
+    'each late window is booked with its on-time curve, shifted to start in the current epoch',
+    shapeKept && sameRanges(credits, b.curves.flatMap((cv) => cv.booked)),
+    `${credits.length} credits from epoch ${credits[0]?.start} to ${credits[credits.length - 1]?.end}`,
+  );
+  report.check('no late booking credits an epoch that has ended', credits.every((x) => x.start >= E));
+  const windows = expected.toWindow - expected.fromWindow;
+  report.check(
+    'the money is conserved: the closed windows\' whole budget, and nothing else',
+    sum(credits.map((x) => x.amount)) === emitted.scheduled && emitted.scheduled === b.budget * windows,
+    `${fmt(sum(credits.map((x) => x.amount)))} TRAC = ${windows} × ${fmt(b.budget)}`,
+  );
+}
 
 export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   const { report } = ctx;
@@ -30,38 +74,23 @@ export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   const settled = await send(ctx, `keeper: settle(${id})`, keeper, await c.pc.getAddress(), c.pc.interface.encodeFunctionData('settle', [id]));
   const [sched] = eventsIn(settled.receipt, c.pc, c.pc.getEvent('EmissionScheduled'));
   if (!sched) throw new Error(`settle(${id}) emitted no EmissionScheduled`);
-  const fromW = sched.fromWindow;
-  const toW = sched.toWindow;
+  const block = await ctx.hre.ethers.provider.getBlock(settled.receipt.blockNumber);
+  if (!block) throw new Error(`no block ${settled.receipt.blockNumber}`);
+  const expected = closedWindows({ cursor: acct.lastSettledWindow, createdAt: created, epLen, lock, at: BigInt(block.timestamp) });
   const credits = stakerCredits(settled.receipt, c);
   // The model of each window's booking: its budget less what it drew (and the
   // commitment's dust on the last), spread from the epoch it closed in with
   // the time left in that epoch, shifted to start in the current one.
   const spent = new Map<bigint, bigint>();
-  for (let w = fromW; w < toW; w++) spent.set(w, await c.pcs.windowSpent(id, w));
-  const model = await scheduleModel({ chronos: c.chronos, model: new PoolModel(0n), committed, createdAtTimestamp: created, lock, epLen, currentEpoch: E, fromWindow: fromW, toWindow: toW, spent });
+  for (let w = expected.fromWindow; w < expected.toWindow; w++) spent.set(w, await c.pcs.windowSpent(id, w));
+  const model = await scheduleModel({ chronos: c.chronos, model: new PoolModel(0n), committed, createdAtTimestamp: created, lock, epLen, currentEpoch: E, fromWindow: expected.fromWindow, toWindow: expected.toWindow, spent });
   const windows = model.curves.map((cv) => {
     const start = curveStart(cv.anchorEpoch, E);
     return { window: cv.window, closeEpoch: cv.anchorEpoch, startEpoch: start, shiftedBy: start - cv.anchorEpoch, remainder: sum(cv.booked.map((r) => r.amount)), ranges: cv.booked };
   });
-  const shapeKept = model.curves.every((cv) => {
-    const shift = curveStart(cv.anchorEpoch, E) - cv.anchorEpoch;
-    return (
-      cv.booked.length === cv.onTime.length &&
-      cv.booked.every((r, i) => r.amount === cv.onTime[i].amount && r.start - cv.onTime[i].start === shift && r.end - cv.onTime[i].end === shift)
-    );
-  });
-  const expected = model.curves.flatMap((cv) => cv.booked);
-  report.say(`  windows ${fromW}..${toW - 1n} booked, each closed in epochs ${windows.map((x) => x.closeEpoch).join(', ')}`);
-  check(
-    'each late window is booked with its on-time curve, shifted to start in the current epoch',
-    shapeKept && sameRanges(credits, expected),
-    `${credits.length} credits from epoch ${credits[0]?.start} to ${credits[credits.length - 1]?.end}`,
-  );
-  check('no late booking credits an epoch that has ended', credits.every((x) => x.start >= E));
-  check(
-    'the money is conserved: the booked windows\' whole budget, and nothing else',
-    sum(credits.map((x) => x.amount)) === sched.scheduled && sched.scheduled === B * (toW - fromW),
-    `${fmt(sum(credits.map((x) => x.amount)))} TRAC = ${toW - fromW} × ${fmt(B)}`,
-  );
-  saveResults(ctx, 'late-booking', { epoch: E, accountId: id, fromWindow: fromW, toWindow: toW, windows, credits, gasUsed: settled.gasUsed });
+  report.say(`  windows ${expected.fromWindow}..${expected.toWindow - 1n} closed, in epochs ${windows.map((x) => x.closeEpoch).join(', ')}`);
+  const cursorAfter = (await c.pcs.getAccount(id)).lastSettledWindow;
+  const emitted = { fromWindow: sched.fromWindow, toWindow: sched.toWindow, scheduled: sched.scheduled };
+  checkLateBooking(report, { expected, curves: model.curves, budget: B, epoch: E, emitted, cursorAfter, credits });
+  saveResults(ctx, 'late-booking', { epoch: E, accountId: id, fromWindow: expected.fromWindow, toWindow: expected.toWindow, emitted, cursorAfter, windows, credits, gasUsed: settled.gasUsed });
 }

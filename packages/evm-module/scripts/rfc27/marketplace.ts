@@ -7,30 +7,16 @@
 import type { HDNodeWallet, Signer } from 'ethers';
 
 import type { Domain, Terms } from '../../test/helpers/conviction-service';
-import {
-  CLASS_INFERENCE,
-  SERVICE_ASSIGNMENT_TYPES,
-  bucket,
-  bucketId,
-  domainOf,
-  requestOf,
-  walletRequestOf,
-} from '../../test/helpers/conviction-service';
+import { SERVICE_ASSIGNMENT_TYPES, domainOf, requestOf, walletRequestOf } from '../../test/helpers/conviction-service';
 import type { ReceiptGroup } from '../../test/helpers/query-inference';
 import { queryInferenceDomain, signedItems } from '../../test/helpers/query-inference';
 
 import type { Contracts } from './contracts';
+import { BUCKET0, UNIT_ASK, inference } from './plans';
 import { fmt } from './report';
 import { StepResult, TxRunner } from './tx';
 
-/** The seller's ask per unit, which the buyer accepts: 0.001 TRAC. */
-export const UNIT_ASK = 10n ** 15n;
-/** Each bucket's price cap per unit. */
-export const PRICE_CAP = 10n ** 16n;
-/** The one bucket of every period here: an inference bucket of index 0. */
-export const BUCKET0 = bucketId(0);
-
-const inference = (value: bigint) => [bucket(0, CLASS_INFERENCE, value, PRICE_CAP)];
+export { UNIT_ASK };
 
 /** Steps that need an earlier step, and what makes them done already on chain. */
 export type StepOpts = { needs?: string[]; done?: string };

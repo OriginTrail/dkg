@@ -138,6 +138,20 @@ export function eventNamesIn(receipt: TransactionReceipt, interfaces: Interface[
   return out;
 }
 
+/** Billing windows from `fromWindow` up to, not including, `toWindow`. */
+export type WindowRange = { fromWindow: bigint; toWindow: bigint };
+
+/**
+ * The windows a settle at time `at` must book on an account whose cursor is
+ * `cursor`, worked out without the settlement: every window closed by then,
+ * capped at the lock. Window w closes at createdAt + (w + 1) × epLen.
+ */
+export function closedWindows(o: { cursor: bigint; createdAt: bigint; epLen: bigint; lock: bigint; at: bigint }): WindowRange {
+  const current = o.at > o.createdAt ? (o.at - o.createdAt) / o.epLen : 0n;
+  const to = current < o.lock ? current : o.lock;
+  return { fromWindow: o.cursor, toWindow: to > o.cursor ? to : o.cursor };
+}
+
 export const sameRanges = (a: Range[], b: Range[]): boolean =>
   a.length === b.length && a.every((r, i) => r.start === b[i].start && r.end === b[i].end && r.amount === b[i].amount);
 
