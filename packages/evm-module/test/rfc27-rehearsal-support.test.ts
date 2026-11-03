@@ -44,7 +44,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
           },
         },
       };
-      return { hre, report, txs: [], tx: new TxRunner(hre as unknown as Ctx['hre'], report, true) } as unknown as Ctx;
+      return { hre, report, txs: [], tx: new TxRunner(hre as unknown as Ctx['hre'], report) } as unknown as Ctx;
     };
     const signer = { getAddress: async () => '0x00000000000000000000000000000000000000bb', sendTransaction: async () => ({ hash: HASH }) } as unknown as Parameters<typeof send>[2];
 

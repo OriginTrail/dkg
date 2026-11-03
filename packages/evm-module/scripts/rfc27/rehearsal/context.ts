@@ -55,7 +55,7 @@ export async function createContext(hre: HardhatRuntimeEnvironment, report: Repo
   const net = await guardNetwork(hre, report.redactor);
   if (!net.local) throw new Error(`refusing to run: the rehearsal runs on the local anvil fork only, and this is ${net.name}`);
   const stack = await Stack.at(hre, HUB);
-  return { hre, net, report, stack, base: await stack.base(), fork: new Fork(hre, net, report), tx: new TxRunner(hre, report, true), txs: [] };
+  return { hre, net, report, stack, base: await stack.base(), fork: new Fork(hre, net, report), tx: new TxRunner(hre, report), txs: [] };
 }
 
 /** The OT-RFC-27 contracts too, as the Hub holds them now. */
@@ -78,10 +78,9 @@ const FAIL_AT = process.env.REHEARSAL_FAIL_AT;
  */
 export async function send(ctx: Ctx, label: string, signer: Signer, to: string | undefined, data: string): Promise<Sent> {
   if (FAIL_AT && label.includes(FAIL_AT)) throw new Error(`REHEARSAL_FAIL_AT: stopping before "${label}"`);
-  const role = label.includes(':') ? label.slice(0, label.indexOf(':')) : label;
   let result;
   try {
-    result = await ctx.tx.run({ key: `tx-${ctx.txs.length}`, label, role, signer, to, data });
+    result = await ctx.tx.run({ label, signer, to, data });
   } catch (e: unknown) {
     const hash = e instanceof TxReverted ? e.receipt.hash : undefined;
     const why = hash ? await deepestFailure(ctx, hash) : errorMessage(e);
@@ -90,7 +89,6 @@ export async function send(ctx: Ctx, label: string, signer: Signer, to: string |
     throw e;
   }
   const { receipt, estimate, gasLimit } = result;
-  if (!receipt) throw new Error(`${label} was not sent`);
   const gasUsed = receipt.gasUsed;
   ctx.txs.push({
     label,
