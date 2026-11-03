@@ -1,0 +1,189 @@
+// The smoke test's settings: the environment, the amounts of a run, the gas it
+// plans for, and the parameters deployments/parameters.json sets on testnet.
+
+import * as fs from 'fs';
+import * as path from 'path';
+
+import { ethers } from 'ethers';
+
+import type { BaseContracts } from '../contracts';
+import { UNIT_ASK } from '../marketplace';
+import { fmt } from '../report';
+import { Amounts, PHASES, PhaseName, SmokeState } from './state';
+
+const TRAC = 10n ** 18n;
+
+export const LIVE_JSON = 'deployments/base_sepolia_v10_contracts.json';
+export const PARAMETERS_JSON = 'deployments/parameters.json';
+export const RESULTS_DIR = path.join('cache', 'rfc27-smoke');
+/** Setup and serve both land in E: setup starts with at least this much of E left. */
+export const MIN_EPOCH_LEFT = 3_600n;
+/** A withdrawal "in the middle of an epoch": not within 10 minutes of either end. */
+export const MID_EPOCH_MARGIN = 600n;
+
+/**
+ * The gas each role's transactions are planned at, for the balance check:
+ * about twice what the fork run measured (owner 3.79M over 18 transactions,
+ * buyer key 0.76M, edge buyer key 0.48M, seller 0.58M). The gas limits come
+ * from each transaction's own estimate.
+ */
+export const PLANNED_GAS = { owner: 7_600_000n, ownerTxs: 18n, buyer: 1_550_000n, edgeBuyer: 1_000_000n, seller: 1_200_000n };
+/** Per transaction: Base adds an L1 data fee to the gas. */
+export const L1_FEE_ALLOWANCE = 10n ** 13n;
+
+/** Twice the planned gas at the max fee, which the sender's balance must cover up front, and the L1 data fee. */
+export const gasCost = (gas: bigint, txs: bigint, maxFee: bigint): bigint => 2n * gas * maxFee + txs * L1_FEE_ALLOWANCE;
+
+export type SmokeEnv = {
+  phase: PhaseName;
+  send: boolean;
+  /** Fork-only: move the clock to the first moment a phase may run. */
+  warp: boolean;
+  /** Fork-only: write the seller's proofs where the real node would have proved. */
+  proofs: boolean;
+  run: string;
+  stateFile: string;
+};
+
+export function readEnv(): SmokeEnv {
+  const phase = PHASES.find((p) => p === (process.env.PHASE ?? 'check'));
+  if (!phase) throw new Error(`set PHASE to one of ${PHASES.join(', ')}`);
+  const run = process.env.RFC27_SMOKE_RUN ?? 'smoke';
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(run)) throw new Error('RFC27_SMOKE_RUN must be 1 to 64 letters, digits, dots, dashes or underscores');
+  return {
+    phase,
+    send: process.env.SEND === '1',
+    warp: process.env.FORK_WARP === '1',
+    proofs: process.env.FORK_PROOFS === '1',
+    run,
+    stateFile: path.join(RESULTS_DIR, `${run}.json`),
+  };
+}
+
+export function amountFromEnv(name: string, def: string): bigint {
+  const raw = process.env[name] ?? def;
+  let v: bigint;
+  try {
+    v = ethers.parseEther(raw);
+  } catch {
+    throw new Error(`${name} must be a decimal amount, got "${raw}"`);
+  }
+  if (v <= 0n) throw new Error(`${name} must be above 0`);
+  return v;
+}
+
+/**
+ * The amounts of a new run, from the environment and the lock on chain. A
+ * running one reads its own from the state. There is no contract minimum for
+ * a commitment: the floor is the lock times what the run draws in the first
+ * billing window, the account period, its top-up and the edge period, at no
+ * discount. The default rounds the draws up to whole TRAC and adds 1 TRAC a
+ * window, so the window keeps room for a funding the serve phase simulates.
+ */
+export async function plannedAmounts(c: BaseContracts, state: SmokeState | undefined, maxFee: bigint): Promise<Amounts> {
+  if (state) return state.amounts;
+  const lock = await c.params.publishingConvictionEpochs();
+  const caValue = amountFromEnv('RFC27_SMOKE_CA_VALUE', '3');
+  const caTopUp = amountFromEnv('RFC27_SMOKE_CA_TOPUP', '1');
+  const edgeValue = amountFromEnv('RFC27_SMOKE_EDGE_VALUE', '0.5');
+  const walletValue = amountFromEnv('RFC27_SMOKE_WALLET_VALUE', '2');
+  for (const [n, v, units] of [
+    ['RFC27_SMOKE_CA_VALUE', caValue, 2n],
+    ['RFC27_SMOKE_CA_TOPUP', caTopUp, 2n],
+    ['RFC27_SMOKE_EDGE_VALUE', edgeValue, 1n],
+    ['RFC27_SMOKE_WALLET_VALUE', walletValue, 4n],
+  ] as const) {
+    if (v < units * UNIT_ASK) throw new Error(`${n} must be at least ${fmt(units * UNIT_ASK)} TRAC: each request is at least one unit of ${fmt(UNIT_ASK)} TRAC`);
+  }
+  const draws = caValue + caTopUp + edgeValue;
+  const committedFloor = lock * draws;
+  const committed = process.env.RFC27_SMOKE_COMMITTED
+    ? amountFromEnv('RFC27_SMOKE_COMMITTED', '0')
+    : lock * (((draws + TRAC - 1n) / TRAC) * TRAC + TRAC);
+  if (committed < committedFloor) {
+    throw new Error(
+      `RFC27_SMOKE_COMMITTED is ${fmt(committed)} TRAC, under the ${fmt(committedFloor)} TRAC the run draws: the lock of ${lock} windows times the ${fmt(draws)} TRAC drawn in the first`,
+    );
+  }
+  if (committed >= 1n << 96n) throw new Error('RFC27_SMOKE_COMMITTED does not fit a uint96');
+  // Each derived buyer key's ETH: 0.0002, or what its gas needs at the current fee if that is more.
+  const need = gasCost(PLANNED_GAS.buyer > PLANNED_GAS.edgeBuyer ? PLANNED_GAS.buyer : PLANNED_GAS.edgeBuyer, 2n, maxFee);
+  const step = 10n ** 14n;
+  const keyEthDefault = need > 2n * step ? ((need + step - 1n) / step) * step : 2n * step;
+  return {
+    stake: amountFromEnv('RFC27_SMOKE_STAKE', '50'),
+    caValue,
+    caTopUp,
+    edgeValue,
+    walletValue,
+    keyEth: process.env.RFC27_SMOKE_KEY_ETH ? amountFromEnv('RFC27_SMOKE_KEY_ETH', '0') : keyEthDefault,
+    committed,
+    committedFloor,
+    lock,
+    discountBps: await c.nft.getDiscountBps(committed),
+  };
+}
+
+/** Units of UNIT_ASK each request carries, and how many requests: per batch group. */
+export type RequestPlan = { caFirst: { count: number; units: bigint }; caAfterTopUp: { count: number; units: bigint }; wallet: { count: number; units: bigint } };
+
+/**
+ * The requests the serve phase signs: two account requests up to the
+ * period's value before the top-up, one more after it, and two wallet
+ * requests of a quarter of the wallet period each.
+ */
+export function requestPlan(a: Amounts): RequestPlan {
+  return {
+    caFirst: { count: 2, units: a.caValue / 2n / UNIT_ASK },
+    caAfterTopUp: { count: 1, units: a.caTopUp / 2n / UNIT_ASK },
+    wallet: { count: 2, units: a.walletValue / 4n / UNIT_ASK },
+  };
+}
+
+export const planValue = (g: { count: number; units: bigint }): bigint => BigInt(g.count) * g.units * UNIT_ASK;
+
+// ---------------------------------------------------------------------------
+// deployments/parameters.json, as the deploy reads it
+// ---------------------------------------------------------------------------
+
+type ParameterValue = string | number | { setter?: string; setterArgs?: unknown[]; desiredValue?: unknown } | ParameterValue[];
+
+/** The parameters the deploy sets on `contract` on base_sepolia_v10: "testnet", with that network's overrides. */
+function testnetParameters(contract: string): Record<string, unknown> {
+  const all: unknown = JSON.parse(fs.readFileSync(PARAMETERS_JSON, 'utf8'));
+  const testnet = (all as { testnet?: Record<string, unknown> }).testnet ?? {};
+  const base = (testnet[contract] ?? {}) as Record<string, unknown>;
+  const overrides = ((testnet.overrides as Record<string, Record<string, unknown>> | undefined)?.base_sepolia_v10?.[contract] ?? {}) as Record<string, unknown>;
+  return { ...base, ...overrides };
+}
+
+/** The value a parameter entry asks for, as the deploy's helper reads it: a value, or `{ setter, setterArgs }`. */
+function desired(value: ParameterValue): bigint | undefined {
+  if (Array.isArray(value)) return value.length ? desired(value[value.length - 1]) : undefined;
+  if (typeof value === 'object' && value !== null) {
+    const v = value.setterArgs && value.setterArgs.length === 1 ? value.setterArgs[0] : value.desiredValue;
+    return typeof v === 'string' || typeof v === 'number' || typeof v === 'bigint' ? BigInt(v) : undefined;
+  }
+  return BigInt(value);
+}
+
+/**
+ * What parameters.json "testnet" sets for the first of `keys` it holds on
+ * `contract`. A key may name the getter the deploy compares, such as
+ * `latestLambdaBps`, or the parameter, such as `lambdaBps`.
+ */
+export function expectedParameter(contract: string, keys: string[]): { key: string; value: bigint } | undefined {
+  const p = testnetParameters(contract);
+  for (const key of keys) {
+    if (p[key] === undefined) continue;
+    const value = desired(p[key] as ParameterValue);
+    if (value !== undefined) return { key, value };
+  }
+  return undefined;
+}
+
+export function requireParameter(contract: string, keys: string[]): { key: string; value: bigint } {
+  const p = expectedParameter(contract, keys);
+  if (!p) throw new Error(`${PARAMETERS_JSON} "testnet" sets none of ${keys.join(', ')} on ${contract}`);
+  return p;
+}
