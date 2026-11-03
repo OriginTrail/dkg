@@ -56,6 +56,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     claimReceipts,
     finalizeIn,
     publishingPool,
+    valueIn,
     split,
     positionScore,
     claim,
@@ -67,24 +68,6 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
   // -------------------------------------------------------------------------
 
   describe('a withdrawal leaves the epoch in progress claimable', () => {
-    /**
-     * Value for the nodes of `values` in the epoch after `a`: one wallet
-     * period of `a`, whose receipts each node claims and finalizes there at
-     * its score, and a publishing pool of `pool` there. Ends inside that
-     * epoch, which it returns.
-     */
-    const valueIn = async (a: bigint, values: Array<[Seller, bigint, bigint]>, pool: bigint) => {
-      const p = await walletFund(f.accounts[20], a, 100n * TRAC);
-      for (const [s, value] of values) await claimReceipts(s, p, value);
-      await finalizeIn(
-        a,
-        [p],
-        values.map(([s, , score]) => [s, score] as [Seller, bigint]),
-      );
-      await publishingPool(a + 1n, pool);
-      return a + 1n;
-    };
-
     const claimWithdrawn = async (tokenId: bigint, to: SignerWithAddress) => {
       const before = await balanceOf(to.address);
       await f.StakingV10.connect(f.accounts[25]).claimWithdrawnEpoch(tokenId);

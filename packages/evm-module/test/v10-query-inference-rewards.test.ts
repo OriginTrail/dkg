@@ -15,6 +15,10 @@
 //     receives every wallet payment and holds every TRAC a claim credits;
 //   - StakingKPI.getNetNodeRewards equals what the claims pay, previewed for
 //     an ended epoch before its close;
+//   - a position that left a node by a redelegation, or its token by a relock,
+//     in an epoch with both pools takes its share of that node's reward at its
+//     next claim, through the reward carry, once, with the operator fee split
+//     once;
 //   - with the pool's activation epoch unset, claims read nothing from it;
 //   - a Conviction Account's money (PublishingConviction 10.2.0,
 //     ServiceSubscriptions 1.2.0) through claims over its whole lock: a plan
@@ -27,7 +31,7 @@
 // v10-query-inference-withdrawal.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import { ContractTransactionReceipt, ContractTransactionResponse } from 'ethers';
 import hre from 'hardhat';
@@ -45,7 +49,7 @@ import {
   signTerms,
   subscriptionIdOf,
 } from './helpers/conviction-service';
-import { hardhatWallet, queryInferenceDomain, signedItems } from './helpers/query-inference';
+import { SCALE18, hardhatWallet, queryInferenceDomain, signedItems } from './helpers/query-inference';
 import {
   RewardsContext,
   Seller,
@@ -96,6 +100,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     scoreEpoch,
     finalizeIn,
     publishingPool,
+    valueIn,
     split,
     positionScore,
     claim,
@@ -373,6 +378,154 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     expect(s.queryInference).to.equal(25n * TRAC);
     expect(s.publishing).to.equal(300n * TRAC);
     expect(paid).to.equal((score * s.net) / s.nodeScore);
+  });
+
+  // -------------------------------------------------------------------------
+  // Through reward carries
+  // -------------------------------------------------------------------------
+
+  describe("through reward carries, on scores the node's proofs left", () => {
+    const keyOf = (tokenId: bigint) => hre.ethers.toBeHex(tokenId, 32);
+
+    /** `node` proves once more in `e`: its score per stake doubles, over the stake now on it. */
+    const proveAgain = async (node: Seller, e: bigint) => {
+      const index = await f.RSS.getEpochLastScorePerStake(node.identityId, e);
+      const added = ((await f.Vault.getNodeEffectiveStake(node.identityId)) * index) / SCALE18;
+      await f.RSS.setNodeEpochScorePerStake(e, node.identityId, 2n * index);
+      await f.RSS.addToNodeEpochScore(e, node.identityId, added);
+      await f.RSS.addToAllNodesEpochScore(e, added);
+      return index;
+    };
+
+    /** A tier-0 position's score from the proof `proveAgain` added at `index`, which is all it holds on that node. */
+    const scoreSince = (raw: bigint, index: bigint) => (raw * index) / SCALE18;
+
+    /** A score's share of what `node` split for `e`. */
+    const shareOf = (score: bigint, s: { net: bigint; nodeScore: bigint }) => (score * s.net) / s.nodeScore;
+
+    it("a redelegation: the next claim pays the score on the node left through the carry, from both pools, whichever position splits that node first, with its fee once", async () => {
+      const a = await epochNow();
+      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
+      const n2 = await createSeller(900_000n * TRAC, 500n);
+      const d1 = f.accounts[10];
+      const raw = 300_000n * TRAC;
+      const t1 = await delegate(d1, n1.identityId, raw);
+      const e = await valueIn(
+        a,
+        [
+          [n1, 30n * TRAC, 300n * TRAC],
+          [n2, 20n * TRAC, 200n * TRAC],
+        ],
+        1_000n * TRAC,
+      );
+      // Every ended epoch claimed, which a redelegation needs.
+      expect(await claim(d1, t1)).to.equal(0n);
+
+      // Mid-epoch the position moves to n2, which then proves again.
+      const scoreOnN1 = await positionScore(t1, n1, e);
+      const operatorScore = await positionScore(n1.tokenId, n1, e);
+      await f.StakingNFT.connect(d1).redelegate(t1, n2.identityId);
+      const carries = await f.Vault.getRewardCarries(t1);
+      expect(carries.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([[n1.identityId, e, keyOf(t1)]]);
+      expect(await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, keyOf(t1))).to.equal(scoreOnN1);
+      const scoreOnN2 = scoreSince(raw, await proveAgain(n2, e));
+      await toEpoch(e + 1n);
+      const snapshot = await takeSnapshot();
+
+      const run = async (carryFirst: boolean) => {
+        // Claiming first, the carry itself splits n1's reward for e.
+        if (!carryFirst) await claim(n1.operational, n1.tokenId);
+        expect(await f.Vault.isOperatorFeeClaimedForEpoch(n1.identityId, e)).to.equal(!carryFirst);
+        const paid = await claim(d1, t1);
+        const operatorPaid = carryFirst ? await claim(n1.operational, n1.tokenId) : undefined;
+        return { paid, operatorPaid, s1: await split(n1, e), s2: await split(n2, e) };
+      };
+      const first = await run(true);
+      const { s1, s2 } = first;
+      expect(s1.publishing > 0n && s1.queryInference > 0n).to.equal(true);
+      expect(s2.publishing > 0n && s2.queryInference > 0n).to.equal(true);
+      expect(first.paid).to.equal(shareOf(scoreOnN1, s1) + shareOf(scoreOnN2, s2));
+      expect(first.operatorPaid).to.equal(shareOf(operatorScore, s1));
+      // One split per node, the fee in it once, and the carry gone.
+      expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(s1.net);
+      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s1.fee);
+      expect(await f.Vault.getNetNodeEpochRewards(n2.identityId, e)).to.equal(s2.net);
+      expect(await f.Vault.getOperatorFeeBalance(n2.identityId)).to.equal(s2.fee);
+      expect(await f.Vault.getRewardCarries(t1)).to.have.length(0);
+      // A later claim pays none of it again.
+      await toEpoch(e + 2n);
+      expect(await claim(d1, t1)).to.equal(0n);
+
+      await snapshot.restore();
+      const last = await run(false);
+      expect(last.paid).to.equal(first.paid);
+      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s1.fee);
+      expect(await f.Vault.getRewardCarries(t1)).to.have.length(0);
+    });
+
+    it("a relock: the new token's next claim pays the old token's score through the carry and its own as the position, from both pools, on one split", async () => {
+      const a = await epochNow();
+      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
+      const d1 = f.accounts[10];
+      const raw = 300_000n * TRAC;
+      const t1 = await delegate(d1, n1.identityId, raw);
+      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
+      expect(await claim(d1, t1)).to.equal(0n);
+
+      // Mid-epoch the position relocks to the rest state, under a new token,
+      // and the node then proves again.
+      const oldScore = await positionScore(t1, n1, e);
+      await f.StakingNFT.connect(d1).relock(t1, 0n);
+      const t2 = await f.StakingNFT.nextTokenId();
+      const carries = await f.Vault.getRewardCarries(t2);
+      expect(carries.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([[n1.identityId, e, keyOf(t1)]]);
+      expect(await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, keyOf(t1))).to.equal(oldScore);
+      const newScore = scoreSince(raw, await proveAgain(n1, e));
+      await toEpoch(e + 1n);
+
+      const paid = await claim(d1, t2);
+      const s = await split(n1, e);
+      expect(s.publishing > 0n && s.queryInference > 0n).to.equal(true);
+      expect(paid).to.equal(shareOf(oldScore, s) + shareOf(newScore, s));
+      expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(s.net);
+      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s.fee);
+      expect(await f.Vault.getRewardCarries(t2)).to.have.length(0);
+      await toEpoch(e + 2n);
+      expect(await claim(d1, t2)).to.equal(0n);
+    });
+
+    it("a relock and then a redelegation: the claim reads the node left only through the carries of both tokens, which split it with both pools", async () => {
+      const a = await epochNow();
+      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
+      const n2 = await createSeller(900_000n * TRAC, 500n);
+      const d1 = f.accounts[10];
+      const raw = 300_000n * TRAC;
+      const t1 = await delegate(d1, n1.identityId, raw);
+      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
+      expect(await claim(d1, t1)).to.equal(0n);
+
+      const oldScore = await positionScore(t1, n1, e);
+      await f.StakingNFT.connect(d1).relock(t1, 0n);
+      const t2 = await f.StakingNFT.nextTokenId();
+      const newScore = scoreSince(raw, await proveAgain(n1, e));
+      await f.StakingNFT.connect(d1).redelegate(t2, n2.identityId);
+      const carries = await f.Vault.getRewardCarries(t2);
+      expect(carries.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([
+        [n1.identityId, e, keyOf(t1)],
+        [n1.identityId, e, keyOf(t2)],
+      ]);
+      await toEpoch(e + 1n);
+
+      // n2 has no proof in e, so the claim's own walk does not touch n1.
+      expect(await f.Vault.isOperatorFeeClaimedForEpoch(n1.identityId, e)).to.equal(false);
+      const paid = await claim(d1, t2);
+      const s = await split(n1, e);
+      expect(s.publishing > 0n && s.queryInference > 0n).to.equal(true);
+      expect(paid).to.equal(shareOf(oldScore, s) + shareOf(newScore, s));
+      expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(s.net);
+      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s.fee);
+      expect(await f.Vault.getRewardCarries(t2)).to.have.length(0);
+    });
   });
 
   it('with the activation epoch unset, a claim reads nothing from the pool and needs no close', async () => {

@@ -31,7 +31,7 @@ import {
   StakingV10Ledger,
   Token,
 } from '../../typechain';
-import { ACCOUNT_STACK_TAGS, BPS, CLASS_INFERENCE, Domain, bucket, subscriptionIdOf, walletRequestOf } from './conviction-service';
+import { ACCOUNT_STACK_TAGS, BPS, CLASS_INFERENCE, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from './conviction-service';
 import { SCALE18, signedItems } from './query-inference';
 
 export const UNIT_ASK = 10n ** 15n;
@@ -173,6 +173,24 @@ export function rewardsHelpers(ctx: RewardsContext) {
     await ctx.f.Token.mint(await vault(), amount);
   };
 
+  /**
+   * Value for the nodes of `values` in the epoch after `a`: one wallet period
+   * of `a`, whose receipts each node claims and finalizes there at its score,
+   * and a publishing pool of `pool` there. Ends inside that epoch, which it
+   * returns.
+   */
+  const valueIn = async (a: bigint, values: Array<[Seller, bigint, bigint]>, pool: bigint) => {
+    const p = await walletFund(ctx.f.accounts[20], a, 100n * TRAC);
+    for (const [s, value] of values) await claimReceipts(s, p, value);
+    await finalizeIn(
+      a,
+      [p],
+      values.map(([s, , score]) => [s, score] as [Seller, bigint]),
+    );
+    await publishingPool(a + 1n, pool);
+    return a + 1n;
+  };
+
   /** What StakingV10 splits for `node` in a closed `epoch`: the gross, the operator fee and the delegators' net. */
   const split = async (node: Seller, epoch: bigint) => {
     const nodeScore = await ctx.f.RSS.getNodeEpochScore(epoch, node.identityId);
@@ -222,6 +240,7 @@ export function rewardsHelpers(ctx: RewardsContext) {
     scoreEpoch,
     finalizeIn,
     publishingPool,
+    valueIn,
     split,
     positionScore,
     claim,
