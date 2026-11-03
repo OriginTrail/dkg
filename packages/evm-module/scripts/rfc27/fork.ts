@@ -52,6 +52,23 @@ export class Fork {
     await rpc(this.hre, 'evm_mine', []);
   }
 
+  /** Mine a block, stamped with the fork's clock. */
+  async mine(): Promise<void> {
+    this.only('mining a block');
+    await rpc(this.hre, 'evm_mine', []);
+  }
+
+  /** The fork's state now, to return to with `revert`: the chain, its clock and every balance. */
+  async snapshot(): Promise<string> {
+    this.only('a snapshot');
+    return String(await rpc(this.hre, 'evm_snapshot', []));
+  }
+
+  async revert(snapshot: string): Promise<void> {
+    this.only('a revert');
+    if ((await rpc(this.hre, 'evm_revert', [snapshot])) !== true) throw new Error(`evm_revert(${snapshot}) failed`);
+  }
+
   /** A stand-in transaction from an impersonated address, its gas limit set by hand too. */
   async send(label: string, from: NodeSigner, to: string, data: string): Promise<void> {
     this.only(label);

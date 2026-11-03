@@ -36,7 +36,8 @@ export type Step = {
   label: string;
   role: string;
   signer: Signer;
-  to: string;
+  /** The contract called; without it, `data` is a contract's creation code, deployed. */
+  to?: string;
   data: string;
   value?: bigint;
   /** Earlier steps it needs: a dry run lists it, unsimulated, while one of them is unsent. */
@@ -45,7 +46,8 @@ export type Step = {
   done?: string;
 };
 
-export type StepResult = { sent: boolean; skipped: boolean; receipt?: TransactionReceipt };
+/** What a step did; a step that was estimated also gives its estimate and the gas limit set from it. */
+export type StepResult = { sent: boolean; skipped: boolean; receipt?: TransactionReceipt; estimate?: bigint; gasLimit?: bigint };
 
 /** The gas limit set by hand: the estimate plus a quarter and 50,000, always under 2^24. */
 export function gasLimitFor(estimate: bigint): bigint {
@@ -122,14 +124,14 @@ export class TxRunner {
       this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'over the gas cap', estimate });
       if (this.send) throw new Error(`${s.label}: its estimate of ${estimate} gas does not fit under 2^24; not sending`);
       this.unsent.add(s.key);
-      return { sent: false, skipped: false };
+      return { sent: false, skipped: false, estimate };
     }
     const gasLimit = gasLimitFor(estimate);
     if (!this.send) {
       this.unsent.add(s.key);
       this.report.note(`sim   ${s.label}: simulates; gas limit ${gasLimit}`);
       this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'simulated', estimate, gasLimit });
-      return { sent: false, skipped: false };
+      return { sent: false, skipped: false, estimate, gasLimit };
     }
     const tx = await s.signer.sendTransaction({ to: s.to, data: s.data, value: s.value ?? 0n, gasLimit });
     this.journal?.put(s.key, { status: 'sent', label: s.label, role: s.role, hash: tx.hash, estimate, gasLimit });
@@ -150,7 +152,7 @@ export class TxRunner {
     });
     this.report.note(`sent  ${s.label}: gas ${receipt.gasUsed} (estimate ${estimate}, limit ${gasLimit}), tx ${tx.hash}`);
     this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'mined', hash: tx.hash, block: receipt.blockNumber, estimate, gasLimit, gasUsed: receipt.gasUsed });
-    return { sent: true, skipped: false, receipt };
+    return { sent: true, skipped: false, receipt, estimate, gasLimit };
   }
 
   /** A call that must revert, simulated with eth_call from `from` and never sent: its decoded error. */
