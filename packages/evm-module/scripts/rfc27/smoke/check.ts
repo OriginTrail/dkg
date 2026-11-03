@@ -5,8 +5,9 @@
 import { ethers } from 'ethers';
 
 import { EXPECTED_VERSIONS, NEW_CONTRACTS } from '../contracts';
+import { requireParameter } from '../parameters';
 import { fmt, iso, span } from '../report';
-import { MIN_EPOCH_LEFT, PLANNED_GAS, gasCost, plannedAmounts, requestPlan, planValue, requireParameter } from './config';
+import { MIN_EPOCH_LEFT, PLANNED_GAS, gasCost, plannedAmounts, requestPlan, planValue } from './config';
 import { Ctx, PoolCtx, epochStart, now, withPool } from './context';
 import { Roles } from './roles';
 import { Amounts } from './state';

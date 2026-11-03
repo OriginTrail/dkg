@@ -5,9 +5,9 @@
 // from storage instead.
 
 import { eventsIn } from '../contracts';
+import { requireParameter } from '../parameters';
 import { fmt, iso, min, sum } from '../report';
 import { EpochCloseNumbers, EpochReward, claimPreview, claimsByOthers, closeFromStorage, kpiNets, poolShareOf } from '../reads';
-import { requireParameter } from './config';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
 import { need } from './roles';
 
