@@ -537,6 +537,21 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         return (activationEpoch, closedThrough, carry, maxCloseStepsPerClaim);
     }
 
+    /// @notice The latest λ accepted: the scheduled value while one is
+    ///         scheduled, in force or not, and `lambdaBps` otherwise. A deploy
+    ///         run compares the configured λ with it, so it never forwards the
+    ///         value already accepted, which a schedule in force could refuse.
+    function latestLambdaBps() external view returns (uint16) {
+        return nextLambdaFromEpoch != 0 ? nextLambdaBps : lambdaBps;
+    }
+
+    /// @notice The latest receipt grace accepted, as `latestLambdaBps` is for
+    ///         λ: the scheduled value while one is scheduled, in force or not,
+    ///         and `receiptGraceSeconds` otherwise.
+    function latestReceiptGraceSeconds() external view returns (uint32) {
+        return nextReceiptGraceFromEpoch != 0 ? nextReceiptGraceSeconds : receiptGraceSeconds;
+    }
+
     /// @notice λ in basis points for `epoch`, by the schedule. Exact for every
     ///         epoch that is still to close.
     function lambdaBpsAt(uint256 epoch) external view returns (uint16) {

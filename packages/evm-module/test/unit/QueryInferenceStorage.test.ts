@@ -416,6 +416,18 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.receiptGraceSecondsAt(e + 3n)).to.equal(1_200n);
     });
 
+    it('latestLambdaBps and latestReceiptGraceSeconds read the value last accepted: the base one until a change is scheduled, then the scheduled one, in force or not', async () => {
+      await QIS.setLambdaBps(5_000n);
+      expect([await QIS.latestLambdaBps(), await QIS.latestReceiptGraceSeconds()]).to.deep.equal([5_000n, 3_600n]);
+      await activateAt(await currentEpoch());
+      await QIS.setLambdaBps(2_000n);
+      await QIS.setReceiptGraceSeconds(600n);
+      expect([await QIS.lambdaBps(), await QIS.receiptGraceSeconds()]).to.deep.equal([5_000n, 3_600n]);
+      expect([await QIS.latestLambdaBps(), await QIS.latestReceiptGraceSeconds()]).to.deep.equal([2_000n, 600n]);
+      await time.increase(epLen);
+      expect([await QIS.latestLambdaBps(), await QIS.latestReceiptGraceSeconds()]).to.deep.equal([2_000n, 600n]);
+    });
+
     it('keeps every value at most half an epoch, scheduled or not', async () => {
       await activateAt(await currentEpoch());
       for (const bad of [epLen / 2n + 1n, epLen - 1n]) {

@@ -2,12 +2,14 @@
 // the real deploy steps 052c, 052d, 052e and 052f on the in-process network:
 //   - every contract is registered in the Hub and wired, in an order that lets
 //     each initialize as it is deployed;
-//   - the parameters of deployments/parameters.json are set, λ at once;
+//   - the parameters of deployments/parameters.json are set, λ at once, and a
+//     later run forwards no λ or grace equal to the latest one accepted;
 //   - the activation epoch is the deployment epoch, so a period can be funded
 //     right after the deploy, as the suites and the local devnet do.
 
-import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
+import { Contract } from 'ethers';
 import hre from 'hardhat';
 
 import {
@@ -94,6 +96,61 @@ describe('@integration The development deploy of the plan-period contracts', () 
     expect(await QIS.nextLambdaFromEpoch()).to.equal(0n);
     expect(await QIS.paused()).to.equal(false);
     expect(await CSS.maxBucketsPerPeriod()).to.equal(16n);
+  });
+
+  it('a later run forwards no λ or receipt grace equal to the latest accepted, scheduled or already in force', async () => {
+    const { Hub, Chronos, QIS } = await loadFixture(deployFixture);
+    const forward = async (fn: string, args: unknown[]) =>
+      Hub.forwardCall(await QIS.getAddress(), QIS.interface.encodeFunctionData(fn, args));
+    const helpers = hre.helpers as unknown as {
+      parametersConfig: Record<string, Record<string, Record<string, string>>>;
+      contractDeployments: { contracts: Record<string, { evmAddress: string }> };
+    };
+    const config = helpers.parametersConfig.development.QueryInferenceStorage;
+    const saved = { ...config };
+    const deployments = helpers.contractDeployments;
+    helpers.contractDeployments = {
+      contracts: { Hub: { evmAddress: await Hub.getAddress() }, QueryInferenceStorage: { evmAddress: await QIS.getAddress() } },
+    };
+    /** A run's parameter step for the storage, and what it logged of the setters it forwarded. */
+    const rerun = async () => {
+      const lines: string[] = [];
+      const original = console.log;
+      console.log = (...args: unknown[]) => lines.push(args.map(String).join(' '));
+      try {
+        await hre.helpers.updateContractParameters('QueryInferenceStorage', QIS as unknown as Contract);
+      } finally {
+        console.log = original;
+      }
+      return lines.filter((l) => l.includes('Setting parameter'));
+    };
+    try {
+      const c = await Chronos.getCurrentEpoch();
+      // Governance schedules λ 3,000 and a grace of 1,800 s for the next
+      // epoch, and the configuration follows.
+      await forward('setLambdaBps', [3_000n]);
+      await forward('setReceiptGraceSeconds', [1_800n]);
+      Object.assign(config, { lambdaBps: '3000', receiptGraceSeconds: '1800' });
+      const schedule = async () => [
+        await QIS.nextLambdaBps(),
+        await QIS.nextLambdaFromEpoch(),
+        await QIS.nextReceiptGraceSeconds(),
+        await QIS.nextReceiptGraceFromEpoch(),
+      ];
+
+      // Scheduled, not yet in force: nothing is forwarded.
+      expect(await rerun()).to.deep.equal([]);
+      // In force, in the epoch where it took effect, with the epoch before it
+      // still open: forwarding either value would revert the whole run.
+      await time.increaseTo(await Chronos.timestampForEpoch(c + 1n));
+      expect(await rerun()).to.deep.equal([]);
+      expect(await schedule()).to.deep.equal([3_000n, c + 1n, 1_800n, c + 1n]);
+      expect([await QIS.latestLambdaBps(), await QIS.latestReceiptGraceSeconds()]).to.deep.equal([3_000n, 1_800n]);
+    } finally {
+      for (const key of Object.keys(config)) delete config[key];
+      Object.assign(config, saved);
+      helpers.contractDeployments = deployments;
+    }
   });
 
   it('activates in the deployment epoch, so a wallet period is funded right after the deploy', async () => {
