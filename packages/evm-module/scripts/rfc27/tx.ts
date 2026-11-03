@@ -49,6 +49,18 @@ export type Step = {
 /** What a step did; a step that was estimated also gives its estimate and the gas limit set from it. */
 export type StepResult = { sent: boolean; skipped: boolean; receipt?: TransactionReceipt; estimate?: bigint; gasLimit?: bigint };
 
+/** A transaction the chain included and reverted: its receipt gives its hash and its gas. */
+export class TxReverted extends Error {
+  constructor(
+    readonly label: string,
+    readonly receipt: TransactionReceipt,
+    readonly gasLimit: bigint,
+  ) {
+    super(`${label}: transaction ${receipt.hash} reverted on chain, gas used ${receipt.gasUsed} of ${gasLimit}`);
+    this.name = 'TxReverted';
+  }
+}
+
 /** The gas limit set by hand: the estimate plus a quarter and 50,000, always under 2^24. */
 export function gasLimitFor(estimate: bigint): bigint {
   const limit = (estimate * 5n) / 4n + 50_000n;
@@ -138,7 +150,7 @@ export class TxRunner {
     const receipt = await this.receipt(tx.hash);
     if (receipt.status !== 1) {
       this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'reverted', hash: tx.hash, gasUsed: receipt.gasUsed, gasLimit });
-      throw new Error(`${s.label}: transaction ${tx.hash} reverted on chain, gas used ${receipt.gasUsed} of ${gasLimit}`);
+      throw new TxReverted(s.label, receipt, gasLimit);
     }
     this.journal?.put(s.key, {
       status: 'mined',

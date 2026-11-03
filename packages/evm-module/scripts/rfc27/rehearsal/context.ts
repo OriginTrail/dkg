@@ -13,7 +13,7 @@ import { BaseContracts, Contracts, Stack, errorMessage } from '../contracts';
 import { Fork } from '../fork';
 import { Net, guardNetwork } from '../network';
 import { Report } from '../report';
-import { TX_GAS_CAP, TxRunner } from '../tx';
+import { TX_GAS_CAP, TxReverted, TxRunner } from '../tx';
 import { deepestFailure } from './plumbing';
 import { CheckEntry, TxEntry, asNumber, asObject, asString, save } from './results';
 
@@ -79,7 +79,7 @@ export async function send(ctx: Ctx, label: string, signer: Signer, to: string |
   try {
     result = await ctx.tx.run({ key: `tx-${ctx.txs.length}`, label, role, signer, to, data });
   } catch (e: unknown) {
-    const hash = /transaction (0x[0-9a-fA-F]{64}) reverted on chain/.exec(errorMessage(e))?.[1];
+    const hash = e instanceof TxReverted ? e.receipt.hash : undefined;
     const why = hash ? await deepestFailure(ctx, hash) : errorMessage(e);
     ctx.txs.push(hash ? { label, hash, status: 0, error: why } : { label, status: 'reverted before inclusion', error: why });
     ctx.report.note(`✗ ${label}: ${hash ? `reverted on chain, ${why}` : why}`);
