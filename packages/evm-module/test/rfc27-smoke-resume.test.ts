@@ -306,6 +306,39 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(check.report.data.needs).to.include({ ownerTrac: String(a.committed + a.walletValue) });
     });
 
+    it('in a later epoch, after another caller claimed the position: a claim\'s own effects are no failure', async () => {
+      use(await loadFixture(deployFixture));
+      const { a } = await fundExactly();
+      const start = await fx.f.Chronos.getCurrentEpoch();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.stake' })));
+      const tokenId = await fx.f.StakingNFT.nextTokenId();
+      await scoreIn(start);
+      await fx.helpers.publishingPool(start, 10n * TRAC);
+      await toEpoch(start + 1n);
+      await fx.f.StakingV10.connect(fx.f.accounts[20]).claimFor(tokenId);
+      const claimed = await fx.f.Vault.getPosition(tokenId);
+      expect(claimed.raw).to.be.greaterThan(a.stake);
+      expect(claimed.lastClaimedEpoch).to.equal(start);
+
+      const resumed = await ctxOf('setup');
+      await phaseSetup(resumed);
+      passes(resumed);
+      expect(stateNow().E).to.equal(start + 1n);
+      expect(stateNow().stakeEpoch).to.equal(start);
+    });
+
+    it('PHASE=check on a run whose transaction is not on this chain answers at once, counting it unconfirmed', async () => {
+      use(await loadFixture(deployFixture));
+      const { needed } = await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.stake' })));
+      editState((raw) => {
+        raw.steps['setup.stake'].hash = `0x${'ab'.repeat(32)}`;
+      });
+      const check = await ctxOf('check', { send: false });
+      await phaseCheck(check);
+      expect(check.report.data.needs).to.include({ ownerTrac: String(needed) });
+    });
+
     it('with too little TRAC for what is left: it still stops, sending nothing', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
