@@ -87,3 +87,59 @@ Tests select the demo profile explicitly where needed and inject transports; the
 do not use the partner node. Coverage includes alternate-schema Read/Invoke/Write,
 profile defaults, revision changes, provenance, receipts, ambiguous retries and
 journal reopen. No service startup or external write is part of these tests.
+
+## Existing nOS publish adapter (server integration seam)
+
+`nos-publish-adapter.mjs` exports `createNosPublishAdapter({ db, accountId,
+publish })`. Its `publish(accountId, request)` dependency consumes the existing
+nOS `createWorkflowPublishService(controller).publish` contract. A host using the
+existing account-bound `createPublishClient` may inject
+`(account, request) => clientFor(account)(request)` instead. It must select that
+client from trusted account configuration, never a request-supplied URL.
+
+The authenticated host calls `adapter.execute(actor, input)`. `actor` contains
+`{ id, accountId, role }` resolved by the existing nOS identity/account boundary
+for that request. **Never construct actor from workflow parameters, browser JSON,
+kit selectors or unverified headers.** The adapter checks owner/account scope;
+it does not authenticate actors and is not a replacement identity provider.
+
+Input contains `invocationId` (UUID v4), `blockId`, `workflowRef`, `workflowHash`,
+`profileRevision`, `layer`, `graphName`, `assetName`, and approved `nquads` (up to
+64 KiB, also subject to the control plane's own limits). It cannot choose a node
+URL, SSH host, credential, principal or account. nOS's publisher chooses the
+account's supported node. This does not add support for selecting the JPB fleet
+host as a managed account job.
+
+The adapter commits the request before dispatch, derives a stable ID from
+account/invocation/block, and refuses changed content, profile, workflow or
+approving principal under that ID. Lost replies retry the same request through
+nOS's existing idempotency path. Completed receipts are cached; an authenticated
+host must still resolve the current actor/role before every replay. An uncertain
+request must be reconciled through the existing publisher, not restarted with a
+new invocation ID. The SQLite database and its lifecycle belong to the host.
+
+The receipt preserves nOS's actual `running`, `saved`, `published` or `failed`
+state, node/job, asset, action and content hash. **`saved` in Working Memory means
+a draft, not a sealed assertion.** It does not manufacture `readbackVerified`,
+`wm-sealed`, an assertion hash or a UAL. Consequently this adapter is not a drop-in
+replacement for the current JPB `transport(payload, 'write')` sealed receipt.
+A host integration must expose these distinct output semantics to its component.
+
+This seam is tested but is **not mounted into the current demo HTTP bridge or
+component registry**. The local demo must not receive the workflows service
+credential. Trusted host mounting, UI/component receipt support and the
+Read/Program runner contract remain outstanding. No new HTTP auth handlers or
+runner permissions have been added.
+
+For an offline cross-repository contract check against an nOS checkout:
+
+```sh
+node --import /path/to/tl-nos/node_modules/tsx/dist/loader.mjs \
+  examples/n8n-capability/verify-nos-publish.mjs /path/to/tl-nos
+```
+
+This executes the real nOS publish client and workflows HTTP handler in process,
+including service authentication and response handling, with a labelled publisher
+fixture. It checks lost-response retry identity, cross-account/wrong-secret
+refusal and no customer bearer forwarding. It starts no server and proves no live
+DKG write. The nOS publisher's own regression suite covers its node-action path.
