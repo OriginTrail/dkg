@@ -5,8 +5,9 @@
 //
 // Rehearses the testnet deploy of the OT-RFC-27 contract stack with the
 // repository's own deploy pipeline, against an anvil fork of Base Sepolia, then
-// drives one full marketplace cycle on the fork. Every write goes to the local
-// anvil; the upstream RPC is only ever read, by anvil.
+// drives one full marketplace cycle on the fork, and the emergency switch. Every
+// write goes to the local anvil; the upstream RPC is only ever read, by anvil.
+// The procedure it rehearses is scripts/RFC27_TESTNET_DEPLOY_RUNBOOK.md.
 //
 // The stack: ConvictionServiceStorage (052c), ServiceSubscriptions and
 // ServiceSubscriptionsWallet (052d), QueryInferenceStorage (052e),
@@ -47,18 +48,44 @@
 //   REDEPLOY=PublishingConviction,StakingV10,StakingKPI npx hardhat deploy --network base_sepolia_v10 \
 //     --config $CFG | tee cache/rfc27-fork/deploy.log
 //
-//   # 3. the activation refused before the Hub transaction (and, in a reverted
+//   # 3. optional: the Hub owner's two transactions sent with cast as the
+//   #    runbook sends them, from the impersonated Hub owner (`--unlocked` in
+//   #    place of the hardware wallet), inside a snapshot that is reverted, so
+//   #    the hub phase sends them again
+//   R=http://127.0.0.1:8545
+//   HUB=$(node -p "require('./deployments/base_sepolia_v10_contracts.json').contracts.Hub.evmAddress")
+//   OWNER=$(cast call $HUB 'owner()(address)' -r $R)
+//   DATA=$(sed -n 's/.*Hub owner transaction (JSON): //p' cache/rfc27-fork/deploy.log | node -p 'JSON.parse(require("fs").readFileSync(0)).data')
+//   SNAP=$(cast rpc evm_snapshot -r $R)
+//   cast rpc anvil_impersonateAccount $OWNER -r $R; cast rpc anvil_setBalance $OWNER 0x56BC75E2D63100000 -r $R
+//   cast call $HUB --data $DATA --from $OWNER -r $R
+//   cast send $HUB --data $DATA --from $OWNER --unlocked --gas-limit 4000000 -r $R
+//   QIS=$(cast call $HUB 'getContractAddress(string)(address)' QueryInferenceStorage -r $R)
+//   CHRONOS=$(cast call $HUB 'getContractAddress(string)(address)' Chronos -r $R)
+//   ACT=$(cast calldata 'setActivationEpoch(uint40)' $(( $(cast call $CHRONOS 'getCurrentEpoch()(uint256)' -r $R | cut -d' ' -f1) + 1 )))
+//   cast call $HUB 'forwardCall(address,bytes)' $QIS $ACT --from $OWNER -r $R
+//   cast send $HUB 'forwardCall(address,bytes)' $QIS $ACT --from $OWNER --unlocked --gas-limit 200000 -r $R
+//   cast rpc evm_revert $SNAP -r $R
+//
+//   # 4. the activation refused before the Hub transaction (and, in a reverted
 //   #    snapshot, while the settlement or StakingV10 does not read the pool),
-//   #    then the Hub owner's transaction 998 printed, then the activation
+//   #    then the Hub owner's transaction 998 printed, then the activation;
+//   #    each with its smallest gas limit, and the Hub's contract order after it
 //   PHASE=hub DEPLOY_LOG=cache/rfc27-fork/deploy.log $RUN
 //
-//   # 4. existing accounts and positions after the upgrade, with every
+//   # 5. the emergency switch, off and on again, inside a reverted snapshot:
+//   #    the settlement removed by name and the storage paused, then a fresh
+//   #    settlement registered; and a removal of the Hub's last entry, by
+//   #    address and by name
+//   PHASE=switch $RUN
+//
+//   # 6. existing accounts and positions after the upgrade, with every
 //   #    position's first-claim gas and the longest history's withdrawal gas;
-//   # 5. one full cycle, with a withdrawal in the middle of an epoch and its
+//   # 7. one full cycle, with a withdrawal in the middle of an epoch and its
 //   #    claimWithdrawnEpoch, and the settlement removed in a reverted snapshot;
-//   # 6. an account untouched for several epochs, booked late;
-//   # 7. the close falling more than maxCloseStepsPerClaim epochs behind;
-//   # 8. the unused share of every closed epoch, read from storage
+//   # 8. an account untouched for several epochs, booked late;
+//   # 9. the close falling more than maxCloseStepsPerClaim epochs behind;
+//   # 10. the unused share of every closed epoch, read from storage
 //   PHASE=existing $RUN
 //   PHASE=cycle $RUN
 //   PHASE=late-booking $RUN
@@ -66,7 +93,9 @@
 //   PHASE=unused $RUN
 //
 // Each phase writes cache/rfc27-fork/<phase>.json (REHEARSAL_DIR overrides the
-// directory) and reads what the earlier phases wrote.
+// directory) and reads what the earlier phases wrote. The switch phase follows
+// the hub phase directly, before the activation epoch ends, and reverts all it
+// does.
 //
 // Fork-only shortcuts, each named where it is taken:
 //   - the Hub owner, the KnowledgeAssetsLifecycle contract, RandomSampling,
@@ -216,6 +245,8 @@ async function interfaces() {
 
 async function decodeError(data: string | undefined): Promise<string> {
   if (!data || data === '0x') return 'revert (no data)';
+  // Panic(uint256), as `Panic(0x32)` for an array index out of bounds.
+  if (data.startsWith('0x4e487b71') && data.length === 74) return `Panic(0x${BigInt(ethers.dataSlice(data, 4)).toString(16)})`;
   for (const i of await interfaces()) {
     try {
       const e = i.parseError(data);
@@ -619,7 +650,12 @@ async function phasePre() {
 // ---------------------------------------------------------------------------
 
 async function phaseHub() {
-  const pre = load('pre');
+  // The versions the upgrade replaces, read at the addresses the tracked
+  // deployments file records for them.
+  const replaced: Record<string, string> = {};
+  for (const n of ['PublishingConviction', 'StakingV10', 'StakingKPI']) {
+    replaced[n] = await (await ethers.getContractAt(['function version() view returns (string)'], live[n].evmAddress)).version();
+  }
   const logFile = process.env.DEPLOY_LOG ?? path.join(DIR, 'deploy.log');
   const line = fs
     .readFileSync(logFile, 'utf8')
@@ -673,16 +709,42 @@ async function phaseHub() {
   await (await h.connect(owner).setContractAddress('QueryInferenceSettlement', qsNew)).wait();
   await (await h.connect(owner).forwardCall(qsNew, init)).wait();
   guards.stakingV10Old = await expectRevert(
-    `setActivationEpoch with the settlement registered and StakingV10 ${pre.versions.StakingV10}`,
+    `setActivationEpoch with the settlement registered and StakingV10 ${replaced.StakingV10}`,
     h.connect(owner).forwardCall.staticCall(qisNew, activateData(E0 + 1n)),
   );
   await rpc('evm_revert', [piecewise]);
   check('PoolNotWired while the Hub holds no settlement', guards.storageOnly === 'PoolNotWired(QueryInferenceSettlement)', guards.storageOnly);
-  check(`PoolNotWired while StakingV10 is ${pre.versions.StakingV10}`, guards.stakingV10Old === 'PoolNotWired(StakingV10)', guards.stakingV10Old);
+  check(`PoolNotWired while StakingV10 is ${replaced.StakingV10}`, guards.stakingV10Old === 'PoolNotWired(StakingV10)', guards.stakingV10Old);
 
   const estimate = big(await rpc('eth_estimateGas', [{ from: ownerAddr, to: HUB, data: hubTx.data }]));
   console.log(`estimated gas ${estimate}${estimate > TX_GAS_CAP ? ' ⚠ above the 2^24 transaction gas cap' : ''}`);
+  // The gas limit the Hub owner sets by hand: the smallest one the
+  // transaction goes through with, found in reverted snapshots.
+  const hubGas = await measureTx(ownerAddr, HUB, hubTx.data);
+  console.log(`  Hub transaction: gas used ${hubGas.gasUsed}, smallest gas limit ${hubGas.minGasLimit}`);
   const hubSend = await send('Hub owner: Hub.setAndReinitializeContracts (998)', owner.sendTransaction({ to: HUB, data: hubTx.data }));
+
+  // The Hub's contract set, in order. A registration appends, and the set's
+  // removal by address leaves the removed name pointing one past the end when
+  // the removed entry is the last one: then every lookup of that name panics,
+  // and StakingV10 looks up QueryInferenceSettlement on every claim.
+  const order = (await h.getAllContracts()).map((c: Any, index: number) => ({ index, name: c.name as string, addr: c.addr as string }));
+  const settlementIndex = order.findIndex((c: Any) => c.name === 'QueryInferenceSettlement');
+  const hubOrder = {
+    size: order.length,
+    settlementIndex,
+    settlementIsLast: settlementIndex === order.length - 1,
+    last: order[order.length - 1],
+    contracts: order,
+  };
+  console.log(`\nHub.getAllContracts() after the Hub transaction, ${order.length} entries in order:`);
+  for (let i = 0; i < order.length; i += 6) console.log(`  ${order.slice(i, i + 6).map((c: Any) => `${c.index} ${c.name}`).join(', ')}`);
+  console.log(
+    `QueryInferenceSettlement is entry ${settlementIndex} of 0..${order.length - 1}, and the last entry is ${hubOrder.last.name}` +
+      (hubOrder.settlementIsLast
+        ? ' ⚠ the settlement IS the last entry: a removal by address would stop every claim'
+        : ': the settlement is not the last entry'),
+  );
 
   let stateDiff: Any;
   try {
@@ -705,9 +767,15 @@ async function phaseHub() {
   const E = big(await chronos.getCurrentEpoch());
   const qis = await at('QueryInferenceStorage');
   const activation = E + 1n;
+  const activateCall = h.interface.encodeFunctionData('forwardCall', [
+    await qis.getAddress(),
+    qis.interface.encodeFunctionData('setActivationEpoch', [activation]),
+  ]);
+  const activationGas = await measureTx(ownerAddr, HUB, activateCall);
+  console.log(`  activation: gas used ${activationGas.gasUsed}, smallest gas limit ${activationGas.minGasLimit}`);
   await send(
     `Hub owner: Hub.forwardCall(QueryInferenceStorage, setActivationEpoch(${activation}))`,
-    h.connect(owner).forwardCall(await qis.getAddress(), qis.interface.encodeFunctionData('setActivationEpoch', [activation])),
+    owner.sendTransaction({ to: HUB, data: activateCall }),
   );
 
   // The wiring and parameters the rest of the rehearsal depends on.
@@ -755,6 +823,7 @@ async function phaseHub() {
     activationEpoch: big(await qis.activationEpoch()),
     closedThrough: big(await qis.closedThrough()),
     maxBucketsPerPeriod: big(await cssvc.maxBucketsPerPeriod()),
+    epochLength: big(await chronos.epochLength()),
   };
   console.log(params);
   check(
@@ -766,12 +835,18 @@ async function phaseHub() {
       params.lambdaBps === 5000n,
   );
   check('ConvictionServiceStorage.maxBucketsPerPeriod is 16', params.maxBucketsPerPeriod === 16n);
+  check(
+    `the receipt grace, ${params.receiptGraceSeconds} s, is at most half the ${params.epochLength} s epoch`,
+    params.receiptGraceSeconds * 2n <= params.epochLength,
+  );
   check(`activation epoch ${activation} = current + 1, closedThrough ${E}`, params.activationEpoch === activation && params.closedThrough === E);
   for (const n of ['PublishingConviction', 'StakingV10', 'StakingKPI']) {
-    check(`the old ${n} ${pre.versions[n]} left the Hub's contract set`, !(await h['isContract(address)'](live[n].evmAddress)));
+    check(`the old ${n} ${replaced[n]} left the Hub's contract set`, !(await h['isContract(address)'](live[n].evmAddress)));
   }
 
   save('hub', {
+    hubOwner: ownerAddr,
+    replaced,
     guards,
     hubTransaction: {
       to: hubTx.to,
@@ -780,15 +855,399 @@ async function phaseHub() {
       initializeCalls: reinit.length,
       forwardedCalls: forwards.map((f: Any) => ({ contract: f.contractName, calls: f.encodedData.length })),
       estimate,
+      gas: hubGas,
     },
+    hubOrder,
     stateDiff,
     epochAtActivation: E,
     activation,
+    activationGas,
     versions,
     params,
     txs: txLog,
     checks,
   });
+}
+
+// ---------------------------------------------------------------------------
+// PHASE switch — the emergency switch, off and on again, inside a snapshot
+// that is reverted
+// ---------------------------------------------------------------------------
+
+/** A placeholder entry for the Hub's contract set: an address with no code and no key. */
+const PLACEHOLDER_NAME = 'HubSetPlaceholder';
+const PLACEHOLDER = '0x000000000000000000000000000000000000dEaD';
+const SWITCH_SERVED_VALUE = 5n * TRAC; // a wallet period both sellers serve
+const SWITCH_UNSERVED_VALUE = 2n * TRAC; // a wallet period no one serves, so its due epoch carries it
+
+async function succeeds(p: Promise<Any>): Promise<boolean> {
+  try {
+    await p;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The switch the Hub owner pulls if the query/inference pool misbehaves and a
+ * fixed settlement cannot replace it at once: QueryInferenceSettlement removed
+ * from the Hub by name, so StakingV10 and StakingKPI read no pool, and
+ * QueryInferenceStorage paused, so no period is funded meanwhile. Then on
+ * again: a fresh deployment of the settlement, registered and initialized by
+ * one Hub transaction, as 998 registers contracts, which also unpauses. Last,
+ * what a removal by address does instead once the settlement is the Hub's last
+ * entry, as every registration leaves it, and why a removal by name of the last
+ * entry leaves its address unusable, so that switching on takes a fresh
+ * deployment.
+ *
+ * The pool needs value to show anything, so the phase first runs two epochs
+ * of it, from the activation epoch S: a wallet period of S that both sellers
+ * serve, finalized in S + 1, so S + 1 pools it, and a wallet period of S + 1
+ * that no one serves, so S + 2 closes into a carry. The switch goes off in
+ * S + 3 and on again in S + 4. It runs right after the hub phase, before S
+ * ends, and everything is reverted at the end, so the later phases find the
+ * chain as the hub phase left it.
+ */
+async function phaseSwitch() {
+  const chronos = await at('Chronos');
+  const qis = await at('QueryInferenceStorage');
+  const qisAddr = await qis.getAddress();
+  const qsDeployed = await at('QueryInferenceSettlement');
+  const qsDeployedAddr = await qsDeployed.getAddress();
+  const ss = await at('ServiceSubscriptions');
+  const ssw = await at('ServiceSubscriptionsWallet');
+  const nft = await at('DKGPublishingConvictionNFT');
+  const pcs = await at('PublishingConvictionStorage');
+  const cssvc = await at('ConvictionServiceStorage');
+  const css = await at('ConvictionStakingStorage');
+  const rss = await at('RandomSamplingStorage');
+  const kpi = await at('StakingKPI');
+  const sv10 = await at('StakingV10');
+  const snft = await at('DKGStakingConvictionNFT');
+  const ps = await at('ProfileStorage');
+  const token = await at('Token');
+  const es = await ethers.getContractAt('EpochStorage', await addr('EpochStorageV8'));
+  const h = await hubContract();
+  const owner = await impersonate(await h.owner());
+  const [deployer, walletBuyer, caOwner, buyerKey, caSession, , keeper, walletSession] = await ethers.getSigners();
+
+  const S = big(await qis.activationEpoch());
+  const C = big(await chronos.getCurrentEpoch());
+  const closed0 = big(await qis.closedThrough());
+  if (S === 0n || C > S || closed0 !== S - 1n) {
+    throw new Error(`run PHASE=switch right after PHASE=hub: activation ${S}, current epoch ${C}, closed through ${closed0}`);
+  }
+  const [nOn, nOff] = SELLERS; // nOff is claimed while the switch is off, nOn once it is on again
+  const ops = await operationalKeys();
+  const mirror: Record<string, bigint> = {};
+  for (const n of SELLERS) {
+    if (!ops[String(n)]) throw new Error(`no operational key seen for node ${n}`);
+    mirror[String(n)] = big(await rss.getNodeEpochScore(C - 1n, n));
+    if (mirror[String(n)] === 0n) throw new Error(`node ${n} scored nothing in epoch ${C - 1n}`);
+  }
+  const out: Any = { activation: S, sellers: SELLERS, epochLength: big(await chronos.epochLength()) };
+
+  const snap = await rpc('evm_snapshot', []);
+  const startBlock = await ethers.provider.getBlockNumber();
+  console.log(`\nsnapshot ${snap} at epoch ${C}, block ${startBlock}: the switch, then revert`);
+
+  // ---- epoch S: a wallet period both sellers serve; a Conviction Account to fund from later ----
+  await warpTo(big(await chronos.timestampForEpoch(S)) + 120n);
+  console.log(`\nEpoch ${await chronos.getCurrentEpoch()}: funding and serving`);
+  await send('fork-only: Hub owner sends TRAC to the wallet buyer', (token as Any).connect(owner).transfer(walletBuyer.address, 100n * TRAC));
+  await send('fork-only: Hub owner sends TRAC to the account owner', (token as Any).connect(owner).transfer(caOwner.address, COMMITTED));
+  await send('wallet buyer: approve ServiceSubscriptionsWallet', (token as Any).connect(walletBuyer).approve(await ssw.getAddress(), 100n * TRAC));
+  const bucket0 = ethers.toBeHex(1, 32);
+  const walletRequest = (epoch: bigint, value: bigint, plan: string) => ({
+    epoch,
+    sessionKey: walletSession.address,
+    planDigest: ethers.id(plan),
+    buckets: [{ bucketId: bucket0, serviceClass: CLASS_INFERENCE, value, maxAskWeiPerUnit: PRICE_CAP }],
+  });
+  await send(
+    `wallet buyer: fundFromWallet(epoch ${S}, ${fmt(SWITCH_SERVED_VALUE)} TRAC)`,
+    (ssw as Any).connect(walletBuyer).fundFromWallet(walletRequest(S, SWITCH_SERVED_VALUE, 'switch rehearsal: served')),
+  );
+  const servedPeriod = subscriptionIdOf(walletBuyer.address, S);
+
+  await send('account owner: approve the publishing NFT', (token as Any).connect(caOwner).approve(await nft.getAddress(), COMMITTED));
+  const created = await send(`account owner: createAccount(${fmt(COMMITTED)} TRAC)`, (nft as Any).connect(caOwner).createAccount(COMMITTED, 0));
+  const accountId = big(created.events.find((e) => e.name === 'AccountCreated')!.args.accountId);
+  await send(`account owner: setServiceSpending(${accountId}, true)`, (ss as Any).connect(caOwner).setServiceSpending(accountId, true));
+  const terms = {
+    accountId,
+    assignee: buyerKey.address,
+    maxCostPerPeriod: 1_000n * TRAC,
+    expiresAt: big((await pcs.getAccount(accountId)).expiresAtTimestamp),
+    nonce: big(await cssvc.assignmentNonce(accountId)),
+  };
+  const ssDomain = { name: 'DKGConvictionServices', version: '1', chainId: 84532n, verifyingContract: await ss.getAddress() };
+  const consent = await buyerKey.signTypedData(ssDomain, ASSIGNMENT_TYPES, terms);
+  await send('account owner: assign the buyer key', (ss as Any).connect(caOwner).assign(terms, '0x', consent));
+  const accountRequest = (epoch: bigint) => ({
+    accountId,
+    epoch,
+    sessionKey: caSession.address,
+    planDigest: ethers.id('switch rehearsal: account'),
+    buckets: [{ bucketId: bucket0, serviceClass: CLASS_INFERENCE, value: CA_PERIOD_VALUE, maxAskWeiPerUnit: PRICE_CAP }],
+  });
+  /** Whether each kind of funding would go through for `epoch` now. */
+  const fundingOpen = async (epoch: bigint) => ({
+    wallet: await succeeds((ssw as Any).connect(walletBuyer).fundFromWallet.staticCall(walletRequest(epoch, TRAC, 'switch rehearsal: probe'))),
+    account: await succeeds((ss as Any).connect(buyerKey).fundFromConviction.staticCall(accountRequest(epoch))),
+  });
+
+  const qiDomain = { name: 'DKGQueryInference', version: '1', chainId: 84532n, verifyingContract: qisAddr };
+  const issuedAt = await now();
+  const servedBy: Record<string, bigint[]> = { [String(nOn)]: [2n * TRAC], [String(nOff)]: [1n * TRAC] };
+  for (const seller of SELLERS) {
+    const groups = [
+      {
+        subscriptionId: servedPeriod,
+        bucketIndex: 0,
+        items: await signedItems({ domain: qiDomain, session: walletSession, subscriptionId: servedPeriod, bucketId: bucket0, seller, firstNonce: 0n, values: servedBy[String(seller)], issuedAt }),
+      },
+    ];
+    const opSigner = await impersonate(ops[String(seller)]);
+    await send(`node ${seller} operational key: submitReceiptBatch`, (qsDeployed as Any).connect(opSigner).submitReceiptBatch(groups));
+  }
+
+  // ---- epoch S + 1: finalization; a period no one serves ----
+  const deadline = big(await chronos.timestampForEpoch(S + 1n)) + big(await qis.receiptGraceSecondsAt(S));
+  await warpTo(deadline + 1n);
+  console.log(`\nEpoch ${await chronos.getCurrentEpoch()}: finalization`);
+  // FORK-ONLY: both sellers score in S + 1, as each scored in the last full epoch before the fork.
+  for (const n of SELLERS) await writeProofScore(n, mirror[String(n)]);
+  const fin = await send(
+    'keeper: finalizeClaims (2 claims)',
+    (qsDeployed as Any).connect(keeper).finalizeClaims(SELLERS.map((seller) => ({ subscriptionId: servedPeriod, bucketIndex: 0, seller }))),
+  );
+  check('both sellers\' claims are finalized', fin.events.filter((e) => e.name === 'ClaimsFinalized').length === 2);
+  await send(
+    `wallet buyer: fundFromWallet(epoch ${S + 1n}, ${fmt(SWITCH_UNSERVED_VALUE)} TRAC), which no one serves`,
+    (ssw as Any).connect(walletBuyer).fundFromWallet(walletRequest(S + 1n, SWITCH_UNSERVED_VALUE, 'switch rehearsal: unserved')),
+  );
+
+  // ---- epoch S + 3: the closes, then the switch goes off ----
+  await warpTo(big(await chronos.timestampForEpoch(S + 3n)) + 120n);
+  console.log(`\nEpoch ${await chronos.getCurrentEpoch()}: the closes, then the switch goes off`);
+  await send('keeper: closeEpochs(64)', (qsDeployed as Any).connect(keeper).closeEpochs(64));
+  const before = {
+    closedThrough: big(await qis.closedThrough()),
+    carry: big(await qis.carry()),
+    pool: big(await qsDeployed.epochPool(S + 1n)),
+    gross: {} as Record<string, bigint>,
+  };
+  for (const n of SELLERS) before.gross[String(n)] = big(await qsDeployed.queryInferenceGross(S + 1n, n));
+  check(
+    `epoch ${S + 1n} pools the served ${fmt(SWITCH_SERVED_VALUE)} TRAC; ${S + 2n} closes into a carry of the unserved ${fmt(SWITCH_UNSERVED_VALUE)}`,
+    before.pool === SWITCH_SERVED_VALUE && before.carry === SWITCH_UNSERVED_VALUE && before.closedThrough === S + 2n,
+    `closedThrough ${before.closedThrough}, carry ${fmt(before.carry)}, gross ${SELLERS.map((n) => `node ${n} ${fmt(before.gross[String(n)])}`).join(', ')}`,
+  );
+
+  // Each seller's net of S + 1 with the pool, as StakingKPI previews it, and
+  // without it: the publishing share less the operator fee.
+  const netWith: Record<string, bigint> = {};
+  const netWithout: Record<string, bigint> = {};
+  const allScore = big(await rss.getAllNodesEpochScore(S + 1n));
+  const stakerPool = big(await es.getEpochPool(1, S + 1n));
+  for (const n of SELLERS) {
+    netWith[String(n)] = big(await kpi.getNetNodeRewards(n, S + 1n));
+    const feeBps = big(await ps.getOperatorFeePercentageByTimestampReverse(n, big(await chronos.timestampForEpoch(S + 2n)) - 1n));
+    const pub = (stakerPool * big(await rss.getNodeEpochScore(S + 1n, n))) / allScore;
+    netWithout[String(n)] = pub - (pub * feeBps) / 10_000n;
+  }
+  const pos = await positions();
+  const pick = (n: bigint) => pos.filter((p: Any) => p.node === n).sort((a: Any, b: Any) => (a.raw < b.raw ? -1 : 1))[0];
+  const pOff = pick(nOff);
+  const pOn = pick(nOn);
+  const keyOff = `${nOff}:${S + 1n}`;
+  const shareWith = (await expectedReward(pOff, S + 1n, S + 1n, { [keyOff]: netWith[String(nOff)] })).total;
+  const shareWithout = (await expectedReward(pOff, S + 1n, S + 1n, { [keyOff]: netWithout[String(nOff)] })).total;
+
+  // The counterfactual: token pOff's claim with the switch on, reverted at once.
+  const counterfactual = await rpc('evm_snapshot', []);
+  const [claimOn] = await claimAll([pOff], 'counterfactual, switch on:');
+  await rpc('evm_revert', [counterfactual]);
+
+  // ---- off ----
+  const offTxs = txLog.length;
+  await send('Hub owner: Hub.removeContractByName("QueryInferenceSettlement")', h.connect(owner).removeContractByName('QueryInferenceSettlement'));
+  check(
+    'switch off: the Hub holds no QueryInferenceSettlement, and StakingV10 and StakingKPI read none',
+    !(await h['isContract(string)']('QueryInferenceSettlement')) &&
+      (await sv10.queryInferenceSettlement()) === ethers.ZeroAddress &&
+      (await kpi.queryInferenceSettlement()) === ethers.ZeroAddress,
+  );
+  const openRemoved = await fundingOpen(S + 3n);
+  check(
+    'with the settlement removed, wallet and Conviction Account funding both stay open, so the pause belongs with the removal',
+    openRemoved.wallet && openRemoved.account,
+  );
+  await send(
+    'Hub owner: Hub.forwardCall(QueryInferenceStorage, setPaused(true))',
+    h.connect(owner).forwardCall(qisAddr, qis.interface.encodeFunctionData('setPaused', [true])),
+  );
+  const pausedWallet = await expectRevert('switch off: fundFromWallet', (ssw as Any).connect(walletBuyer).fundFromWallet.staticCall(walletRequest(S + 3n, TRAC, 'switch rehearsal: probe')));
+  const pausedAccount = await expectRevert('switch off: fundFromConviction', (ss as Any).connect(buyerKey).fundFromConviction.staticCall(accountRequest(S + 3n)));
+  check('switch off: the pause refuses both kinds of funding', pausedWallet.startsWith('QueryInferencePaused') && pausedAccount.startsWith('QueryInferencePaused'), `${pausedWallet}, ${pausedAccount}`);
+  const kpiOff = big(await kpi.getNetNodeRewards(nOff, S + 1n));
+  check(
+    `switch off: StakingKPI's net of node ${nOff} in ${S + 1n} is the publishing share alone`,
+    kpiOff === netWithout[String(nOff)] && kpiOff < netWith[String(nOff)],
+    `${fmt(netWith[String(nOff)])} → ${fmt(kpiOff)} TRAC`,
+  );
+  const [claimOff] = await claimAll([pOff], 'switch off:');
+  const lost = big(claimOn.reward) - big(claimOff.reward);
+  check(
+    `switch off: token ${pOff.tokenId}'s claim pays the publishing pool alone, ${fmt(lost)} TRAC less than with the switch on: its share of node ${nOff}'s pool gross in ${S + 1n}`,
+    lost > 0n && lost === shareWith - shareWithout,
+    `${fmt(big(claimOff.reward))} TRAC (switch on: ${fmt(big(claimOn.reward))})`,
+  );
+  check(
+    `switch off: the claim split node ${nOff}'s ${S + 1n} without the pool`,
+    (await css.isOperatorFeeClaimedForEpoch(nOff, S + 1n)) && big(await css.getNetNodeEpochRewards(nOff, S + 1n)) === netWithout[String(nOff)],
+  );
+
+  // ---- epoch S + 4: still off across the epoch boundary ----
+  await warpTo(big(await chronos.timestampForEpoch(S + 4n)) + 120n);
+  console.log(`\nEpoch ${await chronos.getCurrentEpoch()}: the outage spans an epoch boundary, then the switch goes on again`);
+  const closeOff = await expectRevert(`switch off: closeEpochs, with epoch ${S + 3n} ended`, (qsDeployed as Any).connect(keeper).closeEpochs.staticCall(64));
+  check('switch off: no epoch closes, since the storage refuses a contract the Hub no longer holds', closeOff.startsWith('UnauthorizedAccess'), closeOff);
+  const during = { closedThrough: big(await qis.closedThrough()), carry: big(await qis.carry()) };
+
+  // ---- on: a fresh settlement, registered, initialized and unpaused in one Hub transaction ----
+  const onTxs = txLog.length;
+  const factory = await ethers.getContractFactory('QueryInferenceSettlement', deployer);
+  const deployed = await send('deployer: deploy a fresh QueryInferenceSettlement', factory.deploy(HUB).then((c: Any) => c.deploymentTransaction()));
+  const fresh = ethers.getAddress(deployed.receipt.contractAddress);
+  await send(
+    'Hub owner: Hub.setAndReinitializeContracts: register the fresh settlement, initialize it, unpause the storage',
+    h.connect(owner).setAndReinitializeContracts(
+      [{ name: 'QueryInferenceSettlement', addr: fresh }],
+      [],
+      [fresh],
+      [{ contractName: 'QueryInferenceStorage', encodedData: [qis.interface.encodeFunctionData('setPaused', [false])] }],
+    ),
+  );
+  const qsFresh = await ethers.getContractAt('QueryInferenceSettlement', fresh);
+  const orderOn = await h.getAllContracts();
+  check(
+    'switch on: the Hub holds the fresh settlement, StakingV10 and StakingKPI read it, it reads the same storage, and the storage is unpaused',
+    (await h.getContractAddress('QueryInferenceSettlement')) === fresh &&
+      (await sv10.queryInferenceSettlement()) === fresh &&
+      (await kpi.queryInferenceSettlement()) === fresh &&
+      (await (qsFresh as Any).queryInferenceStorage()) === qisAddr &&
+      !(await qis.paused()),
+  );
+  check(
+    `switch on: the registration appended the settlement as the Hub's last entry (${orderOn.length - 1})`,
+    orderOn[orderOn.length - 1].addr === fresh,
+  );
+  const grossSame = (
+    await Promise.all(SELLERS.map(async (n) => big(await qsFresh.queryInferenceGross(S + 1n, n)) === before.gross[String(n)]))
+  ).every(Boolean);
+  check(
+    `switch on: the pool's state is kept: closed through ${before.closedThrough}, a carry of ${fmt(before.carry)} TRAC, ${S + 1n}'s pool and each seller's gross`,
+    during.closedThrough === before.closedThrough &&
+      during.carry === before.carry &&
+      big(await qis.closedThrough()) === before.closedThrough &&
+      big(await qis.carry()) === before.carry &&
+      big(await qsFresh.epochPool(S + 1n)) === before.pool &&
+      grossSame,
+  );
+  const openOn = await fundingOpen(S + 4n);
+  check('switch on: both kinds of funding are open again', openOn.wallet && openOn.account);
+  const reclosed = await send('keeper: closeEpochs(64), on the fresh settlement', (qsFresh as Any).connect(keeper).closeEpochs(64));
+  const closedOn = reclosed.events.filter((e) => e.name === 'EpochClosed');
+  check(
+    `switch on: closeEpochs closes ${S + 3n}, which ended during the outage, with the kept carry carried in`,
+    closedOn.length === 1 &&
+      big(closedOn[0].args.epoch) === S + 3n &&
+      big(closedOn[0].args.carryIn) === before.carry &&
+      big(await qis.closedThrough()) === S + 3n,
+    `carry in ${fmt(big(closedOn[0]?.args.carryIn ?? 0n))} TRAC`,
+  );
+  const [claimAfter] = await claimAll([pOn], 'switch on again:');
+  check(
+    `switch on: token ${pOn.tokenId}'s claim splits node ${nOn}'s ${S + 1n} with the pool, as StakingKPI previewed before the switch`,
+    claimAfter.reward > 0n && big(await css.getNetNodeEpochRewards(nOn, S + 1n)) === netWith[String(nOn)],
+    `${fmt(claimAfter.reward)} TRAC; net ${fmt(netWith[String(nOn)])} TRAC`,
+  );
+  const stranded = netWith[String(nOff)] - netWithout[String(nOff)];
+  check(
+    `switch on: node ${nOff}'s ${S + 1n}, split while the switch was off, stays without the pool: ${fmt(stranded)} TRAC of its net is paid to no one`,
+    big(await css.getNetNodeEpochRewards(nOff, S + 1n)) === netWithout[String(nOff)] && big(await qsFresh.queryInferenceGross(S + 1n, nOff)) > 0n,
+  );
+
+  // ---- a removal by address of the Hub's last entry, the fresh settlement ----
+  const byAddressTxs = txLog.length;
+  await send('Hub owner: Hub.removeContractByAddress(the fresh settlement, the last entry)', h.connect(owner).removeContractByAddress(fresh));
+  const lookup = await expectRevert('Hub.isContract("QueryInferenceSettlement")', h['isContract(string)'].staticCall('QueryInferenceSettlement'));
+  const offOwner = await impersonate(pOff.owner);
+  const claimPanics = await expectRevert(`token ${pOff.tokenId} claim`, (snft as Any).connect(offOwner).claim.staticCall(pOff.tokenId));
+  const reRegister = await expectRevert(
+    'Hub.setContractAddress("QueryInferenceSettlement", the fresh settlement)',
+    h.connect(owner).setContractAddress.staticCall('QueryInferenceSettlement', fresh),
+  );
+  check(
+    'by address: the name points one past the end, so the lookup, a claim and registering the settlement under its name all panic',
+    lookup === 'Panic(0x32)' && claimPanics === 'Panic(0x32)' && reRegister === 'Panic(0x32)',
+  );
+  await send(
+    `Hub owner: Hub.setContractAddress("${PLACEHOLDER_NAME}", ${PLACEHOLDER}), an entry under another name`,
+    h.connect(owner).setContractAddress(PLACEHOLDER_NAME, PLACEHOLDER),
+  );
+  check(
+    'by address: an entry appended under another name restores the lookup, and claims go through again',
+    !(await h['isContract(string)']('QueryInferenceSettlement')) && (await succeeds((snft as Any).connect(offOwner).claim.staticCall(pOff.tokenId))),
+  );
+  await send('Hub owner: Hub.setContractAddress("QueryInferenceSettlement", the fresh settlement)', h.connect(owner).setContractAddress('QueryInferenceSettlement', fresh));
+  check('by address: then the settlement registers again', (await h.getContractAddress('QueryInferenceSettlement')) === fresh);
+
+  // ---- a removal by name of the last entry, which the settlement is again ----
+  // Claims go on, as the name lookup is sound, but the removed address keeps a
+  // pointer one past the end, so it can never be registered again: switching
+  // on takes a fresh deployment.
+  await send('Hub owner: Hub.removeContractByName("QueryInferenceSettlement"), the last entry', h.connect(owner).removeContractByName('QueryInferenceSettlement'));
+  const byNameClaims = await succeeds((snft as Any).connect(offOwner).claim.staticCall(pOff.tokenId));
+  const sameAddress = await expectRevert(
+    'Hub.setContractAddress("QueryInferenceSettlement", the removed address)',
+    h.connect(owner).setContractAddress.staticCall('QueryInferenceSettlement', fresh),
+  );
+  const addressLookup = await expectRevert('Hub.isContract(the removed address)', h['isContract(address)'].staticCall(fresh));
+  check(
+    'by name, the last entry: claims go through, but the removed address can never be registered again, so switching on takes a fresh deployment',
+    byNameClaims && sameAddress.startsWith('AddressAlreadyInSet') && addressLookup === 'Panic(0x32)',
+    `${sameAddress}; isContract(address) ${addressLookup}`,
+  );
+
+  const gasOf = (from: number, to: number) => txLog.slice(from, to).map((t: Any) => ({ label: t.label, gasUsed: t.gasUsed }));
+  out.switch = {
+    positions: { off: { tokenId: pOff.tokenId, node: nOff }, on: { tokenId: pOn.tokenId, node: nOn } },
+    before,
+    during,
+    funding: { removedOnly: openRemoved, paused: { wallet: pausedWallet, account: pausedAccount }, onAgain: openOn },
+    nets: { with: netWith, without: netWithout },
+    claims: { counterfactualOn: claimOn, off: claimOff, onAgain: claimAfter, lostByOffClaim: lost, strandedNet: stranded },
+    closeWhileOff: closeOff,
+    fresh,
+    byAddress: { lookup, claim: claimPanics, reRegister, placeholder: { name: PLACEHOLDER_NAME, addr: PLACEHOLDER } },
+    byNameLastEntry: { claims: byNameClaims, sameAddress, addressLookup },
+    gas: { off: gasOf(offTxs, onTxs), on: gasOf(onTxs, byAddressTxs), byAddress: gasOf(byAddressTxs, txLog.length) },
+  };
+
+  await rpc('evm_revert', [snap]);
+  check(
+    'the snapshot is reverted: the block, the epoch, the deployed settlement and the closes are as the hub phase left them',
+    (await ethers.provider.getBlockNumber()) === startBlock &&
+      big(await chronos.getCurrentEpoch()) === C &&
+      (await h.getContractAddress('QueryInferenceSettlement')) === qsDeployedAddr &&
+      !(await qis.paused()) &&
+      big(await qis.closedThrough()) === closed0,
+  );
+  save('switch', { ...out, txs: txLog, checks });
 }
 
 // ---------------------------------------------------------------------------
@@ -1686,12 +2145,13 @@ async function main() {
   padGasEstimates();
   if (PHASE === 'pre') await phasePre();
   else if (PHASE === 'hub') await phaseHub();
+  else if (PHASE === 'switch') await phaseSwitch();
   else if (PHASE === 'existing') await phaseExisting();
   else if (PHASE === 'cycle') await phaseCycle();
   else if (PHASE === 'late-booking') await phaseLateBooking();
   else if (PHASE === 'close-behind') await phaseCloseBehind();
   else if (PHASE === 'unused') await phaseUnused();
-  else throw new Error('set PHASE to pre, hub, existing, cycle, late-booking, close-behind or unused');
+  else throw new Error('set PHASE to pre, hub, switch, existing, cycle, late-booking, close-behind or unused');
   const failed = checks.filter(([, ok]) => !ok);
   console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`);
   if (failed.length) process.exitCode = 1;
