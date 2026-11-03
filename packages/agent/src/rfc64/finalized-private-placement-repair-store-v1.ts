@@ -30,6 +30,18 @@ import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
+/**
+ * GH#3134 — the snapshots made here, with their queue key once it is known (null before). A
+ * snapshot is frozen down to its last field, so its canonical bytes and their digest cannot
+ * change: a supervisor pass over thousands of parked markers neither encodes nor hashes them.
+ */
+const SNAPSHOT_KEYS = new WeakMap<object, string | null>();
+
+function snapshotMadeV1<T extends object>(snapshot: T): T {
+  SNAPSHOT_KEYS.set(snapshot, null);
+  return snapshot;
+}
+
 interface LegacyFinalizedPrivatePlacementRepairV1
   extends Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 {
   readonly version: 1;
@@ -146,10 +158,10 @@ export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
       || computeCanonicalGraphScopedAuthorSealDigestV1(seal) !== identity.sealDigest) {
       throw new TypeError('RFC-64 confirmed placement seal differs from its identity');
     }
-    return Object.freeze({ ...identity, version: 2, inventoryScope: null,
-      subGraphName: input.subGraphName, seal });
+    return snapshotMadeV1(Object.freeze({ ...identity, version: 2, inventoryScope: null,
+      subGraphName: input.subGraphName, seal }));
   }
-  return Object.freeze({
+  return snapshotMadeV1(Object.freeze({
     version: 1,
     contextGraphId: input.contextGraphId,
     authorAddress: input.authorAddress,
@@ -158,7 +170,7 @@ export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
     assertionVersion: input.assertionVersion,
     kaUal: canonicalUal.ual,
     sealDigest: input.sealDigest,
-  });
+  }));
 }
 
 /** Canonical row bytes and digest used as the SQLite queue identity. */
@@ -176,6 +188,45 @@ export function digestRfc64FinalizedPrivatePlacementRepairV1(
   repairBytes: Uint8Array,
 ): Uint8Array {
   return new Uint8Array(createHash('sha256').update(repairBytes).digest());
+}
+
+/** The queue key of `repair`: the hex digest of its canonical bytes. A snapshot keeps its own. */
+export function rfc64FinalizedPrivatePlacementRepairKeyV1(
+  repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
+): string {
+  const known = SNAPSHOT_KEYS.get(repair);
+  if (typeof known === 'string') return known;
+  const key = hexV1(digestRfc64FinalizedPrivatePlacementRepairV1(
+    encodeRfc64FinalizedPrivatePlacementRepairV1(repair),
+  ));
+  if (known === null) SNAPSHOT_KEYS.set(repair, key);
+  return key;
+}
+
+/**
+ * The marker a row stores as `bytes` under `digest`; undefined unless `digest` is the digest of
+ * `bytes` and `bytes` are the canonical encoding of what they parse to. Its key is that digest.
+ */
+export function decodeStoredRfc64FinalizedPrivatePlacementRepairV1(
+  bytes: Uint8Array,
+  digest: Uint8Array,
+): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> | undefined {
+  const repair = parseRfc64FinalizedPrivatePlacementRepairV1(bytes);
+  const stored = digestRfc64FinalizedPrivatePlacementRepairV1(bytes);
+  if (!bytesEqualV1(digest, stored)
+    || !bytesEqualV1(bytes, encodeRfc64FinalizedPrivatePlacementRepairV1(repair))) return undefined;
+  SNAPSHOT_KEYS.set(repair, hexV1(stored));
+  return repair;
+}
+
+function hexV1(bytes: Uint8Array): string {
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('hex');
+}
+
+function bytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength
+    && Buffer.from(left.buffer, left.byteOffset, left.byteLength)
+      .equals(Buffer.from(right.buffer, right.byteOffset, right.byteLength));
 }
 
 export function parseRfc64FinalizedPrivatePlacementRepairV1(
