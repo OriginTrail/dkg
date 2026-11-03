@@ -8,12 +8,12 @@ import { ethers } from 'ethers';
 import type { Signer } from 'ethers';
 
 import type { Domain, Request, Terms, WalletRequest } from '../../../test/helpers/conviction-service';
-import { CLASS_INFERENCE, DAY, SERVICE_ASSIGNMENT_TYPES, bucket, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
+import { DAY, SERVICE_ASSIGNMENT_TYPES, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
 import type { ReceiptGroup, ReceiptItem, ServiceRequest } from '../../../test/helpers/query-inference';
 import { REQUEST_TYPES, fullReceipt, itemOf, queryInferenceDomain } from '../../../test/helpers/query-inference';
 import type { PublishingConviction, PublishingConvictionStorage } from '../../../typechain';
 import { Contracts, eventsIn } from '../contracts';
-import { BUCKET0, PRICE_CAP, UNIT_ASK } from '../marketplace';
+import { BUCKET0, UNIT_ASK, inference } from '../plans';
 import { fmt } from '../report';
 import { Ctx, Sent, send } from './context';
 import { impersonate } from './plumbing';
@@ -131,8 +131,6 @@ export async function openServiceAccount(
   await send(ctx, o.assignLabel, o.owner, ss, c.ss.interface.encodeFunctionData('assign', [terms, '0x', consent]));
   return { ...a, terms };
 }
-
-const inference = (value: bigint) => [bucket(0, CLASS_INFERENCE, value, PRICE_CAP)];
 
 /** A wallet-funded request for the period of `epoch`: one inference bucket of `value`, under the plan named `plan`. */
 export const walletRequest = (epoch: bigint, sessionKey: string, value: bigint, plan: string): WalletRequest =>

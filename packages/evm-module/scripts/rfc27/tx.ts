@@ -30,16 +30,23 @@ export interface Journal {
   put(key: string, record: StepRecord): void;
 }
 
-/** One transaction of a phase. */
-export type Step = {
-  key: string;
+/** One transaction. */
+export type Tx = {
   label: string;
-  role: string;
   signer: Signer;
   /** The contract called; without it, `data` is a contract's creation code, deployed. */
   to?: string;
   data: string;
   value?: bigint;
+};
+
+/** A transaction's estimate, its smallest gas limit, and the gas limit set from it. */
+export type Sized = { estimate: bigint; gasLimit: bigint };
+
+/** One transaction of a phase. */
+export type Step = Tx & {
+  key: string;
+  role: string;
   /** Earlier steps it needs: a dry run lists it, unsimulated, while one of them is unsent. */
   needs?: string[];
   /** Why the step is done already on chain, if it is. */
@@ -48,6 +55,28 @@ export type Step = {
 
 /** What a step did; a step that was estimated also gives its estimate and the gas limit set from it. */
 export type StepResult = { sent: boolean; skipped: boolean; receipt?: TransactionReceipt; estimate?: bigint; gasLimit?: bigint };
+
+/** A transaction not sent, as its estimate reverts: `why` is the decoded error. */
+export class TxWouldRevert extends Error {
+  constructor(
+    readonly label: string,
+    readonly why: string,
+  ) {
+    super(`${label} would revert: ${why}`);
+    this.name = 'TxWouldRevert';
+  }
+}
+
+/** A transaction not sent, as its estimate does not fit under Base's gas cap. */
+export class TxOverGasCap extends Error {
+  constructor(
+    readonly label: string,
+    readonly estimate: bigint,
+  ) {
+    super(`${label}: its estimate of ${estimate} gas does not fit under 2^24; not sending`);
+    this.name = 'TxOverGasCap';
+  }
+}
 
 /** A transaction the chain included and reverted: its receipt gives its hash and its gas. */
 export class TxReverted extends Error {
@@ -71,9 +100,9 @@ export class TxRunner {
   private readonly unsent = new Set<string>();
 
   constructor(
-    private readonly hre: HardhatRuntimeEnvironment,
-    private readonly report: Report,
-    readonly send: boolean,
+    protected readonly hre: HardhatRuntimeEnvironment,
+    protected readonly report: Report,
+    readonly send: boolean = true,
     private readonly journal?: Journal,
   ) {}
 
@@ -84,6 +113,38 @@ export class TxRunner {
       await new Promise((res) => setTimeout(res, 1_000));
     }
     throw new Error(`no receipt for ${hash} after 15 minutes`);
+  }
+
+  /**
+   * The estimate, the transaction's smallest gas limit, as a check of its own
+   * against 2^24, and the gas limit set from it. A transaction whose estimate
+   * reverts, or does not fit, throws: it is not to be sent.
+   */
+  async size(s: Tx): Promise<Sized> {
+    const from = await s.signer.getAddress();
+    let estimate: bigint;
+    try {
+      estimate = await this.hre.ethers.provider.estimateGas({ from, to: s.to, data: s.data, value: s.value ?? 0n });
+    } catch (e: unknown) {
+      throw new TxWouldRevert(s.label, await decodeError(this.hre, errorData(e)));
+    }
+    const fits = this.report.check(`${s.label} fits the 2^24 gas cap`, estimate < TX_GAS_CAP, `smallest gas limit (the estimate) ${estimate} of ${TX_GAS_CAP}`);
+    if (!fits) throw new TxOverGasCap(s.label, estimate);
+    return { estimate, gasLimit: gasLimitFor(estimate) };
+  }
+
+  /** Sends the transaction with its gas limit set by hand: its hash. */
+  async broadcast(s: Tx, sized: Sized): Promise<string> {
+    const tx = await s.signer.sendTransaction({ to: s.to, data: s.data, value: s.value ?? 0n, gasLimit: sized.gasLimit });
+    return tx.hash;
+  }
+
+  /** The receipt of a transaction sent, which throws TxReverted if the chain reverted it. */
+  async mined(s: Tx, hash: string, sized: Sized): Promise<TransactionReceipt> {
+    const receipt = await this.receipt(hash);
+    if (receipt.status !== 1) throw new TxReverted(s.label, receipt, sized.gasLimit);
+    this.report.note(`sent  ${s.label}: gas ${receipt.gasUsed} (estimate ${sized.estimate}, limit ${sized.gasLimit}), tx ${hash}`);
+    return receipt;
   }
 
   /**
@@ -115,55 +176,52 @@ export class TxRunner {
       this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'planned' });
       return { sent: false, skipped: false };
     }
-    const from = await s.signer.getAddress();
-    let estimate: bigint;
+    let sized: Sized;
     try {
-      estimate = await this.hre.ethers.provider.estimateGas({ from, to: s.to, data: s.data, value: s.value ?? 0n });
+      sized = await this.size(s);
     } catch (e: unknown) {
-      const why = await decodeError(this.hre, errorData(e));
-      this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'would revert', error: why });
-      if (this.send) throw new Error(`${s.label} would revert: ${why}`);
-      this.unsent.add(s.key);
-      this.report.check(`${s.label} simulates`, false, why);
-      return { sent: false, skipped: false };
+      if (e instanceof TxWouldRevert) {
+        this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'would revert', error: e.why });
+        if (this.send) throw e;
+        this.unsent.add(s.key);
+        this.report.check(`${s.label} simulates`, false, e.why);
+        return { sent: false, skipped: false };
+      }
+      if (e instanceof TxOverGasCap) {
+        this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'over the gas cap', estimate: e.estimate });
+        if (this.send) throw e;
+        this.unsent.add(s.key);
+        return { sent: false, skipped: false, estimate: e.estimate };
+      }
+      throw e;
     }
-    const fits = this.report.check(
-      `${s.label} fits the 2^24 gas cap`,
-      estimate < TX_GAS_CAP,
-      `smallest gas limit (the estimate) ${estimate} of ${TX_GAS_CAP}`,
-    );
-    if (!fits) {
-      this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'over the gas cap', estimate });
-      if (this.send) throw new Error(`${s.label}: its estimate of ${estimate} gas does not fit under 2^24; not sending`);
-      this.unsent.add(s.key);
-      return { sent: false, skipped: false, estimate };
-    }
-    const gasLimit = gasLimitFor(estimate);
+    const { estimate, gasLimit } = sized;
     if (!this.send) {
       this.unsent.add(s.key);
       this.report.note(`sim   ${s.label}: simulates; gas limit ${gasLimit}`);
       this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'simulated', estimate, gasLimit });
       return { sent: false, skipped: false, estimate, gasLimit };
     }
-    const tx = await s.signer.sendTransaction({ to: s.to, data: s.data, value: s.value ?? 0n, gasLimit });
-    this.journal?.put(s.key, { status: 'sent', label: s.label, role: s.role, hash: tx.hash, estimate, gasLimit });
-    const receipt = await this.receipt(tx.hash);
-    if (receipt.status !== 1) {
-      this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'reverted', hash: tx.hash, gasUsed: receipt.gasUsed, gasLimit });
-      throw new TxReverted(s.label, receipt, gasLimit);
+    const hash = await this.broadcast(s, sized);
+    this.journal?.put(s.key, { status: 'sent', label: s.label, role: s.role, hash, estimate, gasLimit });
+    let receipt: TransactionReceipt;
+    try {
+      receipt = await this.mined(s, hash, sized);
+    } catch (e: unknown) {
+      if (e instanceof TxReverted) this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'reverted', hash, gasUsed: e.receipt.gasUsed, gasLimit });
+      throw e;
     }
     this.journal?.put(s.key, {
       status: 'mined',
       label: s.label,
       role: s.role,
-      hash: tx.hash,
+      hash,
       estimate,
       gasLimit,
       block: receipt.blockNumber,
       gasUsed: receipt.gasUsed,
     });
-    this.report.note(`sent  ${s.label}: gas ${receipt.gasUsed} (estimate ${estimate}, limit ${gasLimit}), tx ${tx.hash}`);
-    this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'mined', hash: tx.hash, block: receipt.blockNumber, estimate, gasLimit, gasUsed: receipt.gasUsed });
+    this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'mined', hash, block: receipt.blockNumber, estimate, gasLimit, gasUsed: receipt.gasUsed });
     return { sent: true, skipped: false, receipt, estimate, gasLimit };
   }
 
