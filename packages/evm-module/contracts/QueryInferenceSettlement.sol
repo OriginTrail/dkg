@@ -621,17 +621,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         (uint40 activation, uint256 closed, uint96 carryIn, ) = qis.closeState();
         // Epochs up to `closedThrough` that are not closed precede activation.
         if (activation == 0 || epoch <= closed) return (0, 0);
-        // The rule of `_closeEpoch`: an epoch's money is the wallet value and
-        // the Conviction Account cost due in it and the carry, its pool if a
-        // node finalized value in it, and the carry out otherwise.
         for (uint256 e = closed + 1; e <= epoch; e++) {
             (uint96 wallet, uint96 conviction) = _incoming(qis, e);
-            uint96 money = SafeCast.toUint96(uint256(wallet) + conviction + carryIn);
-            if (qis.getEpochTotals(e).sumR == 0) {
-                (pool, carryIn) = (0, money);
-            } else {
-                (pool, carryIn) = (money, 0);
-            }
+            (pool, carryIn) = _closeRule(wallet, conviction, carryIn, qis.getEpochTotals(e).sumR);
         }
         lambdaBps = qis.lambdaBpsAt(epoch);
     }
@@ -808,32 +800,47 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         // An epoch has ended once the current epoch is after it.
         uint256 last = chronos.getCurrentEpoch() - 1;
         if (through < last) last = through;
-        uint96 carryIn = carried;
-        for (uint256 steps; steps < maxSteps && closed < last; steps++) {
-            closed++;
-            carryIn = _closeEpoch(qis, closed, carryIn);
+        for (uint256 steps; steps < maxSteps && closed < last; ) {
+            // Neither overflows: the loop's own condition bounds both.
+            unchecked {
+                closed++;
+                steps++;
+            }
+            carried = _closeEpoch(qis, closed, carried);
         }
     }
 
-    /// @dev Close `epoch`: its money is its incoming money and `carryIn`,
-    ///      which become its pool if a node finalized value in it, and the
-    ///      carry out otherwise. A pool is paid out as its nodes' gross
-    ///      rewards, each term floored (`queryInferenceGross`), so less than
-    ///      2 wei per node with value is never claimed, and with a carry out
-    ///      of 0 it stays in the vault.
+    /// @dev Close `epoch` by `_closeRule`. A pool is paid out as its nodes'
+    ///      gross rewards, each term floored (`queryInferenceGross`), so less
+    ///      than 2 wei per node with value is never claimed, and with a carry
+    ///      out of 0 it stays in the vault.
     function _closeEpoch(QueryInferenceStorage qis, uint256 epoch, uint96 carryIn) internal returns (uint96 carryOut) {
         (uint96 wallet, uint96 conviction) = _incoming(qis, epoch);
         QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
         uint16 lambda = qis.lambdaBpsAt(epoch);
-        uint96 money = SafeCast.toUint96(uint256(wallet) + conviction + carryIn);
         uint96 pool;
-        if (t.sumR == 0) {
+        (pool, carryOut) = _closeRule(wallet, conviction, carryIn, t.sumR);
+        qis.closeEpoch(epoch, pool, lambda, carryOut);
+        emit EpochClosed(epoch, wallet, conviction, carryIn, pool, t.sumR, t.sumScore, lambda);
+    }
+
+    /// @dev The rule of an epoch's close, which `_closeEpoch` applies and
+    ///      `previewEpochClose` replays: its money is the wallet value and the
+    ///      Conviction Account cost due in it and the carry into it, all of it
+    ///      its pool if a node finalized value in it (`sumR`), and all of it
+    ///      the carry out otherwise.
+    function _closeRule(
+        uint96 wallet,
+        uint96 conviction,
+        uint96 carryIn,
+        uint128 sumR
+    ) internal pure returns (uint96 pool, uint96 carryOut) {
+        uint96 money = SafeCast.toUint96(uint256(wallet) + conviction + carryIn);
+        if (sumR == 0) {
             carryOut = money;
         } else {
             pool = money;
         }
-        qis.closeEpoch(epoch, pool, lambda, carryOut);
-        emit EpochClosed(epoch, wallet, conviction, carryIn, pool, t.sumR, t.sumScore, lambda);
     }
 
     /// @dev The money that joins `epoch`'s pool at its close, beside the
