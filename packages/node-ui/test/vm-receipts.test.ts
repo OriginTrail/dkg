@@ -3,7 +3,7 @@
 // One loader and one parser for VM publish receipts, shared by the VM header
 // facts and the VM graph anchors (review: normalise receipts once).
 
-import React, { act } from 'react';
+import React, { act, useLayoutEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { parseVmReceiptRows, buildVmReceiptQuery, buildKaGraphMemberQuery, addKaGraphMembers, kaGraphOf, useVmReceipts, useVmReceiptsResource, VmReceiptsProvider } from '../src/ui/hooks/useVmReceipts.js';
@@ -242,11 +242,18 @@ describe('useVmReceipts', () => {
 
     let state!: ReturnType<typeof useVmReceiptsResource>;
     let signers: string[] = [];
+    // Every COMMITTED render, including the first one after a switch, before
+    // any effect has run: that is the frame a stale snapshot would show in.
+    const commits: Array<{ id: string; signers: string[] }> = [];
     function Signers({ id }: { id: string }) {
       const { summary } = useVmReceiptSummary(id);
-      signers = summary ? [...summary.signers] : [];
+      const now = summary ? [...summary.signers] : [];
+      signers = now;
+      useLayoutEffect(() => { commits.push({ id, signers: now }); });
       return null;
     }
+    const leaked = () => commits.filter(c =>
+      (c.id === 'graph-b' && c.signers.includes('did:dkg:agent:alice')) || (c.id === 'graph-a' && c.signers.includes('did:dkg:agent:bob')));
     function Probe({ id }: { id: string }) {
       state = useVmReceiptsResource(id);
       return React.createElement(VmReceiptsProvider, { value: state }, React.createElement(Signers, { id }));
@@ -279,6 +286,26 @@ describe('useVmReceipts', () => {
     expect(signers).toEqual(['did:dkg:agent:bob']);
     await resolveGraph('graph-b', [bob, { ...bob, member: 'urn:b:2' }]);
     expect(state.receipts?.[0].members).toEqual(['urn:b:1', 'urn:b:2']);
+    // No committed frame ever showed one graph's signer under the other graph.
+    expect(commits.some(c => c.id === 'graph-b')).toBe(true);
+    expect(leaked()).toEqual([]);
+  });
+
+  it('reads empty on the very first render after a graph switch', async () => {
+    respond([{ asrt: 'did:dkg:context-graph:graph-a/assertion/0xaaa/one', tx: '0xa1', sealRoot: '"aa"', member: 'urn:a:1' }]);
+    const frames: Array<{ id: string; receipts: number | null }> = [];
+    function Probe({ id }: { id: string }) {
+      const r = useVmReceiptsResource(id);
+      useLayoutEffect(() => { frames.push({ id, receipts: r.receipts ? r.receipts.length : null }); });
+      return null;
+    }
+    await act(async () => { root.render(React.createElement(Probe, { id: 'graph-a' })); });
+    await settle();
+    expect(frames.at(-1)).toEqual({ id: 'graph-a', receipts: 1 });
+    globalThis.fetch = vi.fn(() => new Promise<Response>(() => {})) as any; // graph B never answers
+    await act(async () => { root.render(React.createElement(Probe, { id: 'graph-b' })); });
+    const firstB = frames.find(f => f.id === 'graph-b');
+    expect(firstB).toEqual({ id: 'graph-b', receipts: null });
   });
 
   it('reports loading, then an error without receipts when the query fails', async () => {

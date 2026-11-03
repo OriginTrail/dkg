@@ -4,6 +4,7 @@ import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAss
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
+import { VmReceiptsProvider, useVmReceiptsResource } from '../hooks/useVmReceipts.js';
 import { truncateMiddle } from '../lib/truncate.js';
 import { useGraphPalette } from '../hooks/useGraphPalette.js';
 import { dataSlotHex } from '../graph-palette.js';
@@ -65,6 +66,9 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   const [selectedPresetLabel, setSelectedPresetLabel] = useState('');
   const [draftQuery, setDraftQuery] = useState('');
   const [activeQuery, setActiveQuery] = useState('');
+  // The provenance card reads this graph's receipts; they load once a node is first selected.
+  const [receiptsWanted, setReceiptsWanted] = useState(false);
+  const vmReceipts = useVmReceiptsResource(receiptsWanted ? contextGraphId : undefined);
   const [draftSearch, setDraftSearch] = useState('');
   const [draftField, setDraftField] = useState<'any' | 'subject' | 'predicate' | 'object'>('any');
   const [draftLimit, setDraftLimit] = useState(50);
@@ -208,6 +212,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
 
   const handleNodeClick = useCallback((node: any) => {
     if (node?.id) {
+      setReceiptsWanted(true);
       setActiveQuery(`SELECT (<${node.id}> AS ?s) ?p ?o WHERE { <${node.id}> ?p ?o } LIMIT 100`);
     }
   }, []);
@@ -408,11 +413,13 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
                 showMetadata={false}
                 maxValueLength={150}
               />
-              <OnChainProvenanceCard
-                contextGraphId={contextGraphId}
-                layer={layer}
-                explorerUrl={explorerUrl}
-              />
+              <VmReceiptsProvider value={vmReceipts}>
+                <OnChainProvenanceCard
+                  contextGraphId={contextGraphId}
+                  layer={layer}
+                  explorerUrl={explorerUrl}
+                />
+              </VmReceiptsProvider>
             </RdfGraph>
           </Suspense>
         </div>

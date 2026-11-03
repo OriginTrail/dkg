@@ -32,6 +32,7 @@ import { kindColorForType } from '../entity-kind-colors.js';
 import { humanizeStatus, humanizeTypeName } from '../lib/formatLabels.js';
 import { LAYER_VAR } from '../layer-colors.js';
 import { Badge } from './ds/Badge.js';
+import { entityStatusTone } from '../lib/entity-status.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
 
@@ -324,7 +325,7 @@ function ActivityRow({
       </Badge>
       <span className="v10-activity-feed-title-text">{item.entity.label}</span>
       {status && (
-        <Badge tone={STATUS_BADGE_TONE[statusTone(status)]} size="sm" className={`v10-activity-feed-status status-${statusTone(status)}`}>
+        <Badge tone={entityStatusTone(status)} size="sm" className="v10-activity-feed-status">
           {humanizeStatus(status)}
         </Badge>
       )}
@@ -381,24 +382,3 @@ function findStatus(e: MemoryEntity): string | null {
   return null;
 }
 
-const STATUS_BADGE_TONE = { good: 'success', warn: 'warning', bad: 'danger', neutral: 'neutral' } as const;
-/** "in_progress" → "In progress". */
-function statusTone(status: string): 'good' | 'warn' | 'bad' | 'neutral' {
-  switch (status) {
-    case 'accepted':
-    case 'done':
-    case 'merged':
-      return 'good';
-    case 'proposed':
-    case 'in_progress':
-    case 'open':
-      return 'warn';
-    case 'rejected':
-    case 'superseded':
-    case 'blocked':
-    case 'cancelled':
-      return 'bad';
-    default:
-      return 'neutral';
-  }
-}
