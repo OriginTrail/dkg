@@ -219,7 +219,7 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
   say(`  withdraw  optional: in the middle of an epoch after close-claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 3n))})`);
   if (s) {
     const done = PHASES.filter((p) => ctx.file.done(p)).join(', ') || 'nothing yet';
-    say(`  progress  done: ${done}${s.withdrawal ? `; withdrawn in epoch ${s.withdrawal.epoch}${s.withdrawal.claimed ? ', its epoch claimed' : ''}` : ''}`);
+    say(`  progress  done: ${done}${s.withdrawal ? `; withdrawn in epoch ${s.withdrawal.epoch}${ctx.file.done('withdraw') ? ', its epoch claimed' : ''}` : ''}`);
   }
 }
 

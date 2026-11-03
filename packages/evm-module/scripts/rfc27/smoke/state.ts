@@ -25,7 +25,7 @@ export type Amounts = {
   discountBps: bigint;
 };
 
-export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint; ownerTracAfter: bigint; block?: number; claimed: boolean };
+export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint; ownerTracAfter: bigint; block?: number };
 
 export type SmokeState = {
   version: 1;
@@ -193,7 +193,6 @@ export function decodeState(raw: unknown): SmokeState {
       recordedScore: bi(w, 'recordedScore', 'withdrawal'),
       ownerTracAfter: bi(w, 'ownerTracAfter', 'withdrawal'),
       block: optNum(w, 'block', 'withdrawal'),
-      claimed: w.claimed === true,
     };
   }
   let fork: SmokeState['fork'];
