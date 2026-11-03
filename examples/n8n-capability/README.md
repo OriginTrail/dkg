@@ -1,3 +1,7 @@
+> DKG components now require an explicit operator-selected execution profile.
+> See [DKG execution profiles](./DKG-PROFILES.md) before installing or running them.
+> The JPB sections below describe the opt-in demo policy, not generic component defaults.
+
 # Invoke an n8n capability as a Program KA
 
 An agent invokes `urn:demo:n8n:normalize-text:1` through the ordinary signed Graph

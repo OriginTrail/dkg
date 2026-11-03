@@ -1,14 +1,8 @@
-import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { remote } from "./jpb-output.mjs";
+import { configuredDkgProfile, requireDkgProfile } from './dkg-profile.mjs';
 import { programRequest, programResult } from './dkg-program.mjs';
 
-export const JPB_SOURCE = "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data";
-export const JPB_TARGET =
-  "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study";
-export const JPB_WORKBOOK =
-  "2f0585064042668c4a854290a2e0ef365a24e57d58345881108067d397470fbf";
 export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
 export const needsExport = (d) => !!d.writes && d.id !== "dkg-write";
 const hash = (v) =>
@@ -18,16 +12,11 @@ const fail = (message) =>
     status: 409,
     code: "DKG_COMPONENT_UNCONFIRMED",
   });
-export function assertDkgEnabled(definition) {
-  for (const n of definition.nodes.filter((n) => isDkg(n.componentId))) {
-    if (
-      process.env[
-        n.componentId === 'invoke-dkg-program' ? 'NOS_JPB_PROGRAM_ENABLED' : n.componentId === "dkg-read"
-          ? "NOS_JPB_READ_ENABLED"
-          : "NOS_JPB_WRITE_ENABLED"
-      ] !== "1"
-    )
-      throw fail(n.componentId + " is not enabled for JPB.");
+export function assertDkgEnabled(definition, profile = configuredDkgProfile) {
+  for (const node of definition.nodes.filter(n => isDkg(n.componentId))) {
+    requireDkgProfile(profile);
+    if (!profile.enabled(node.componentId)) throw fail(node.componentId + ' is not enabled for this execution profile.');
+    if (node.params.profileRevision !== profile.revision) throw fail('Execution profile changed. Re-select and save the current component revision.');
   }
 }
 export function validateDkgTopology(definition) {
@@ -51,102 +40,22 @@ export function validateDkgTopology(definition) {
     )
   )
     throw fail(
-      "JPB components currently support bounded native manual workflows only.",
+      "DKG components currently support bounded native manual workflows only.",
     );
   if (writes.some((n) => definition.edges.some((e) => e.from === n.id)))
     throw fail("DKG Write must be the terminal output.");
 }
-export function componentEvidence(rows, context, read, workbook, programOutput) {
-  if (
-    !Array.isArray(rows) ||
-    !rows.length ||
-    rows.length > 20 ||
-    JSON.stringify(rows).length > 8192
-  )
-    throw fail("Use one bounded JPB evidence batch.");
-  for (const r of rows) {
-    if (!r || (!r.erp && !r.workbook))
-      throw fail("Write mapped ERP/workbook evidence records.");
-    if (r.erp && !read.records.some((v) => isDeepStrictEqual(v, r.erp)))
-      throw fail("ERP provenance differs from this execution DKG Read.");
-    if (
-      r.workbook &&
-      (!workbook.some((v) => isDeepStrictEqual(v, r.workbook)) ||
-        r.workbook.evidence?.contentDigest !== JPB_WORKBOOK ||
-        r.workbook.allocationStatus !== "unconfirmed")
-    )
-      throw fail("Workbook provenance differs from this execution input.");
-  }
-  const payload = JSON.stringify({
-    kind: programOutput ? 'PLCADemoResult' : "PLCAInputEvidence",
-    interpretation: "planned-routing-reference-only",
-    allocationStatus: "unconfirmed",
-    plcaCalculated: programOutput?.result?.assessment?.calculated === true,
-    ...(programOutput ? { assessment: programOutput.result.assessment, programExecution: programOutput.programExecution } : {}),
-    execution: { ...context, status: "running-at-write" },
-    source: read.source,
-    records: rows,
-  });
-  const digest = createHash("sha256").update(payload).digest("hex"),
-    subject = "urn:nos:jpb:input-evidence:" + digest;
-  const q = (predicate, object) => ({ subject, predicate, object, graph: "" });
-  const quads = [
-    q(
-      "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-      programOutput ? 'urn:nos:workflow:PLCADemoResult' : "urn:nos:workflow:PLCAInputEvidence",
-    ),
-    q("urn:nos:workflow:payload", JSON.stringify(payload)),
-    q("urn:nos:workflow:sha256", JSON.stringify(digest)),
-    q("urn:nos:workflow:allocationStatus", JSON.stringify("unconfirmed")),
-    q("http://www.w3.org/ns/prov#wasGeneratedBy", context.executionIri),
-    q("urn:nos:workflow:workflow", context.kaRef),
-  ];
-  if (programOutput) quads.push(q('http://www.w3.org/ns/prov#wasGeneratedBy', programOutput.programExecution.executionIri));
-  for (const r of rows)
-    for (const ref of [
-      r.erp?.recordId,
-      r.erp?.evidence?.sourceEvidence,
-      r.workbook && "urn:sha256:" + r.workbook.evidence.contentDigest,
-    ].filter(Boolean))
-      quads.push(q("http://www.w3.org/ns/prov#wasDerivedFrom", ref));
-  return {
-    name: "nos-input-" + digest,
-    digest,
-    quads: [...new Map(quads.map((q) => [JSON.stringify(q), q])).values()],
-  };
-}
-
-/** Transport journal only. Scheduling, mapping, joins and step errors belong to native n8n. */
-function configuredWorkbook() {
-  const file = process.env.NOS_JPB_WORKBOOK_INPUT_FILE;
-  if (!file) return [];
-  const rows = JSON.parse(readFileSync(file, "utf8"))[0]?.workbook;
-  if (
-    !Array.isArray(rows) ||
-    rows.length !== 4 ||
-    rows.some((r) => r.evidence?.contentDigest !== JPB_WORKBOOK)
-  )
-    throw fail(
-      "Configure the reviewed workbook revision before enabling JPB writes.",
-    );
-  return rows;
-}
-export function dkgComponentStore(
-  db,
-  remoteCall = remote,
-  approvedWorkbook = configuredWorkbook(),
-) {
+/** Transport journal only. Scheduling, transformations and joins remain in native n8n. */
+export function dkgComponentStore(db, transport, approvedInputs, profile = configuredDkgProfile) {
+  transport ??= profile?.transport;
+  approvedInputs ??= profile?.loadInputs() ?? [];
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT);`);
+  db.exec('CREATE TABLE IF NOT EXISTS dkg_component_profiles (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision TEXT NOT NULL)');
   const active = new Map();
   function grant(workflow, invocationId, input) {
-    if (workflow.definition.nodes.some((n) => n.componentId === "dkg-write")) {
-      const wb = JSON.parse(input.itemsJson)[0]?.workbook;
-      if (!approvedWorkbook.length || !isDeepStrictEqual(wb, approvedWorkbook))
-        throw fail(
-          "Use the reviewed workbook rows and revision for this JPB demo.",
-        );
-    }
+    assertDkgEnabled(workflow.definition, profile);
+    profile.validateInput(workflow.definition, input, approvedInputs);
     const encoded = JSON.stringify(input),
       old = db
         .prepare("SELECT * FROM dkg_component_runs WHERE id=?")
@@ -160,15 +69,20 @@ export function dkgComponentStore(
       throw fail(
         "Invocation identity belongs to different workflow or inputs.",
       );
-    db.prepare(
-      "INSERT INTO dkg_component_runs VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires",
-    ).run(
-      invocationId,
-      workflow.kaRef,
-      workflow.sourceHash,
-      encoded,
-      Date.now() + 600000,
-    );
+    const scope = db.prepare('SELECT * FROM dkg_component_profiles WHERE id=?').get(invocationId);
+    if (old && (!scope || scope.profile_id !== profile.id || scope.revision !== profile.revision))
+      throw fail('Invocation identity belongs to a different execution profile or an unscoped legacy run.');
+    db.exec('SAVEPOINT dkg_profile_grant');
+    try {
+      db.prepare('INSERT OR IGNORE INTO dkg_component_profiles VALUES (?,?,?)').run(invocationId, profile.id, profile.revision);
+      db.prepare('INSERT INTO dkg_component_runs VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires')
+        .run(invocationId, workflow.kaRef, workflow.sourceHash, encoded, Date.now() + 600000);
+      db.exec('RELEASE dkg_profile_grant');
+    } catch (error) {
+      db.exec('ROLLBACK TO dkg_profile_grant');
+      db.exec('RELEASE dkg_profile_grant');
+      throw error;
+    }
   }
   async function call(value, workflow, nativeId) {
     if (
@@ -198,7 +112,7 @@ export function dkgComponentStore(
     const id = match[1],
       run = db.prepare("SELECT * FROM dkg_component_runs WHERE id=?").get(id),
       definition = workflow.definition;
-    assertDkgEnabled(definition);
+    assertDkgEnabled(definition, profile);
     validateDkgTopology(definition);
     if (
       !run ||
@@ -207,7 +121,7 @@ export function dkgComponentStore(
       run.source_hash !== workflow.sourceHash
     )
       throw fail(
-        "Run the approved workflow as its account owner before accessing JPB.",
+        "Run the approved workflow as its account owner before accessing DKG.",
       );
     const node = definition.nodes.find(
       (n) => n.id === value.blockId && isDkg(n.componentId),
@@ -222,22 +136,10 @@ export function dkgComponentStore(
       JSON.stringify(rows).length > 8192
     )
       throw fail("Bounded DKG component input required.");
-    if (
-      node.params.node !== "JPB" || node.componentId !== 'invoke-dkg-program' &&
-      node.params.contextGraph !==
-        (node.componentId === "dkg-read" ? JPB_SOURCE : JPB_TARGET)
-    )
-      throw fail("JPB Context Graph scope mismatch.");
-    if (
-      node.componentId === "dkg-read" &&
-      (node.params.orderNo !== "62633" ||
-        !isDeepStrictEqual(rows, JSON.parse(input.itemsJson)) ||
-        rows.length !== 1 ||
-        Object.hasOwn(rows[0], "erp"))
-    )
-      throw fail(
-        "DKG Read takes one workbook batch and reads saved JPB order 62633. Do not supply ERP records.",
-      );
+    const scope = db.prepare('SELECT * FROM dkg_component_profiles WHERE id=?').get(id);
+    if (!scope || scope.profile_id !== profile.id || scope.revision !== profile.revision)
+      throw fail('Invocation execution profile mismatch.');
+    profile.validateNode(node, rows, input);
     const key = id + ":" + node.id,
       requestHash = hash(value),
       prior = db
@@ -250,7 +152,7 @@ export function dkgComponentStore(
     if (active.has(key)) return active.get(key);
     if (node.componentId === 'invoke-dkg-program' && prior?.result) return JSON.parse(prior.result);
     if (node.componentId === "dkg-read" && prior?.result)
-      return { items: [{ ...rows[0], erp: JSON.parse(prior.result).records }] };
+      return { items: profile.readItems(rows, JSON.parse(prior.result), node) };
     const pending = (async () => {
       if (!prior)
         db.prepare("INSERT INTO dkg_component_calls VALUES (?,?,NULL)").run(
@@ -258,28 +160,14 @@ export function dkgComponentStore(
           requestHash,
         );
       if (node.componentId === 'invoke-dkg-program') {
-        const request = programRequest(node, rows, id);
-        const result = programResult(await remoteCall(request, 'jpb-invoke-program.py'), request);
+        const request = programRequest(node, rows, id, profile);
+        const result = programResult(await transport(request, 'invoke'), request);
         db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(result), key);
         return result;
       }
       if (node.componentId === "dkg-read") {
-        const result = await remoteCall(
-          { orderNo: node.params.orderNo },
-          "jpb-read.py",
-        );
-        if (
-          result.source?.contextGraphId !== JPB_SOURCE ||
-          !Array.isArray(result.records) ||
-          result.records.length !== 3 ||
-          result.records.some(
-            (r) =>
-              r.orderNo !== "62633" ||
-              r.evidence?.contextGraphId !== JPB_SOURCE,
-          )
-        )
-          throw fail("JPB source response does not match the selected scope.");
-        const items = [{ ...rows[0], erp: result.records }];
+        const result = await transport(profile.readRequest(node, rows, input), 'read');
+        const items = profile.readItems(rows, result, node);
         if (JSON.stringify(items).length > 8192)
           throw fail("DKG Read result exceeds the workflow batch limit.");
         db.prepare("UPDATE dkg_component_calls SET result=? WHERE id=?").run(
@@ -304,29 +192,23 @@ export function dkgComponentStore(
         n8nExecutionId: value.executionId,
         blockId: node.id,
       };
-      let evidenceRows = rows, programOutput;
+      let programOutput;
       if (rows.length === 1 && rows[0]?.programExecution) {
         const incoming = definition.edges.find(e => e.to === node.id);
         const invoked = definition.nodes.find(n => n.id === incoming?.from && n.componentId === 'invoke-dkg-program');
         const completed = invoked && db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':' + invoked.id);
         if (!completed?.result || !isDeepStrictEqual(JSON.parse(completed.result).items, rows)) throw fail('Program output differs from this execution.');
-        programOutput = rows[0]; evidenceRows = programOutput.result?.records;
+        programOutput = rows[0];
       }
-      const payload = componentEvidence(
-        evidenceRows,
-        context,
-        JSON.parse(read.result),
-        JSON.parse(input.itemsJson)[0].workbook ?? [],
-        programOutput,
-      );
-      const result = await remoteCall({ ...payload, allowCreate: !prior });
+      const { payload, recordCount, summary = {} } = profile.evidence(rows, context, JSON.parse(read.result), input, programOutput);
+      const result = await transport({ ...payload, allowCreate: !prior }, 'write');
       if (
-        result.contextGraphId !== JPB_TARGET ||
+        result.contextGraphId !== profile.targetGraph ||
         result.digest !== payload.digest ||
         result.readbackVerified !== true ||
         result.metadata?.status !== "wm-sealed"
       )
-        throw fail("JPB write readback did not confirm this exact evidence.");
+        throw fail("DKG write readback did not confirm this exact evidence.");
       db.prepare("UPDATE dkg_component_calls SET result=? WHERE id=?").run(
         JSON.stringify(result),
         key,
@@ -334,19 +216,18 @@ export function dkgComponentStore(
       return {
         items: [
           {
-            node: "JPB",
-            contextGraphId: JPB_TARGET,
+            ...summary,
+            node: profile.node,
+            contextGraphId: profile.targetGraph,
             name: result.name,
             assetId: result.metadata.reservedUal,
             layer: "wm",
             status: "wm-sealed",
             readbackVerified: true,
             digest: payload.digest,
-            recordCount: evidenceRows.length,
+            recordCount,
             executionIri: context.executionIri,
             n8nExecutionId: value.executionId,
-            plcaCalculated: programOutput?.result?.assessment?.calculated === true,
-            ...(programOutput ? { assessment: programOutput.result.assessment, programExecution: programOutput.programExecution } : {}),
           },
         ],
       };

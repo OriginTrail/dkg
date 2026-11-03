@@ -1,11 +1,10 @@
+import { JPB_SOURCE, JPB_TARGET, JPB_WORKBOOK } from './profiles/jpb-evidence.mjs';
+import './test-support/select-jpb-profile.mjs';
 import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import {
   dkgComponentStore,
-  JPB_SOURCE,
-  JPB_TARGET,
-  JPB_WORKBOOK,
   validateDkgTopology,
 } from "./dkg-components.mjs";
 import { compileStudio } from "./studio-definition.mjs";
@@ -103,7 +102,7 @@ test("read is refreshed once per invocation; write and retry preserve exact prov
   const calls = [];
   const { store, db } = setup(async (p, script) => {
     calls.push({ p, script });
-    return script === "jpb-read.py" ? readResult : written(p);
+    return script === "read" ? readResult : written(p);
   });
   const read = request("read", JSON.parse(input.itemsJson));
   assert.deepEqual(
@@ -189,7 +188,7 @@ test("ambiguous write is journalled before dispatch and never silently recreated
   const allow = [];
   let attempts = 0;
   const { store, db } = setup(async (p, s) => {
-    if (s === "jpb-read.py") return readResult;
+    if (s === "read") return readResult;
     allow.push(p.allowCreate);
     if (++attempts === 1)
       throw new Error("transport lost after possible commit");
@@ -244,7 +243,7 @@ test("a reopened journal reuses its source and reconciles an ambiguous write wit
     const first = dkgComponentStore(
       db,
       async (p, script) => {
-        if (script === "jpb-read.py") return readResult;
+        if (script === "read") return readResult;
         assert.equal(p.allowCreate, true);
         throw new Error("lost reply after dispatch");
       },
@@ -267,7 +266,7 @@ test("a reopened journal reuses its source and reconciles an ambiguous write wit
       db,
       async (p, script) => {
         calls++;
-        assert.notEqual(script, "jpb-read.py");
+        assert.notEqual(script, "read");
         assert.equal(p.allowCreate, false);
         return written(p);
       },

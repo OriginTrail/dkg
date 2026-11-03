@@ -2,7 +2,7 @@
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
-import { jpbPrograms, jpbProgramCatalogRevision } from './dkg-program.mjs';
+import { configuredDkgProfile, profileParameters } from './dkg-profile.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -41,23 +41,17 @@ export const componentRegistry = [
     query: json('Query parameters', {}), headers: json('Request headers', {}),
     body: { ...json('JSON request body', {}), shape: 'any' },
   }, { sampleItems: [{}], version: 2 }),
-  entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', {
-    node: choice('Source node', 'JPB', ['JPB']),
-    contextGraph: choice('Source Context Graph', '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data', ['0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data']),
-    orderNo: choice('Saved ERP order · CUT, USILU, EBAVM', '62633', ['62633']),
-  }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{ workbook: [] }] }),
-  entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
-    node: choice('Execution node', 'JPB', ['JPB']),
-    program: choice('Approved JPB Program', 'JPB PLCA - Prepare inventory v1.0.0', jpbPrograms.map(p => p.id)),
-    catalogRevision: choice('Approved catalog revision', jpbProgramCatalogRevision, [jpbProgramCatalogRevision]),
-    inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
-    outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
-  }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
-  entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', {
-    node: choice('Destination node', 'JPB', ['JPB']),
-    contextGraph: choice('Destination Context Graph', '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study', ['0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study']),
-    outputKind: choice('Output · private Working Memory', 'PLCAInputEvidence', ['PLCAInputEvidence']),
-  }, { version: 2, connection: 'httpHeaderAuth', writes: true, sampleItems: [{}] }),
+  ...(configuredDkgProfile ? [
+    entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-read'),
+      { version: 2, connection: 'httpHeaderAuth', sampleItems: configuredDkgProfile.sampleItems?.['dkg-read'] ?? [{}] }),
+    entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
+      ...profileParameters(configuredDkgProfile, 'invoke-dkg-program'),
+      inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
+      outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
+    }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
+    entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-write'),
+      { version: 2, connection: 'httpHeaderAuth', writes: true, sampleItems: [{}] }),
+  ] : []),
   entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true }),
   entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),

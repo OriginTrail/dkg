@@ -1,3 +1,4 @@
+import './test-support/select-jpb-profile.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -44,7 +45,7 @@ test('remote call requires an owner grant, journals before dispatch and caches c
   const workflow = { definition:{entryId:node.id,nodes:[node],edges:[]},kaRef:'urn:workflow:test',sourceHash:'b'.repeat(64) };
   let count=0, attempts=[];
   const store=dkgComponentStore(db,async (r,script)=>{
-    assert.equal(script,'jpb-invoke-program.py'); attempts.push(r.invocationId);
+    assert.equal(script,'invoke'); attempts.push(r.invocationId);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_calls').get().n,1);
     if(++count===1) throw new Error('lost response');
     return receipt(r);
