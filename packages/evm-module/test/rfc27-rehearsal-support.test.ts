@@ -5,11 +5,14 @@
 import { expect } from 'chai';
 import hre from 'hardhat';
 
+import { PoolModel, scheduleModel } from './helpers/emission-model';
 import { Fork } from '../scripts/rfc27/fork';
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
+import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
 import { claimAll } from '../scripts/rfc27/rehearsal/operations';
+import { closedWindows } from '../scripts/rfc27/rehearsal/reads';
 import type { Position } from '../scripts/rfc27/rehearsal/results';
 
 /** A report that keeps its checks and prints nothing. */
@@ -176,6 +179,87 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(out.reward).to.equal(10n);
       expect(out.rawDelta).to.equal(0n);
       expect(report.failed).to.equal(1);
+    });
+  });
+
+  describe('a late booking', () => {
+    const DAY = 86_400n;
+    const LOCK = 12n;
+    const B = 1_000n * 10n ** 18n;
+    const CREATED = 100n * DAY + 3_000n;
+    /** A settle in the epoch that holds 5.5 billing windows after the account's creation. */
+    const AT = CREATED + 5n * DAY + DAY / 2n;
+    const E = AT / DAY;
+    const chronos = { epochAtTimestamp: async (t: bigint) => t / DAY, timestampForEpoch: async (e: bigint) => e * DAY };
+    const model = (fromWindow: bigint, toWindow: bigint) =>
+      scheduleModel({
+        chronos: chronos as unknown as Parameters<typeof scheduleModel>[0]['chronos'],
+        model: new PoolModel(0n),
+        committed: B * LOCK,
+        createdAtTimestamp: CREATED,
+        lock: LOCK,
+        epLen: DAY,
+        currentEpoch: E,
+        fromWindow,
+        toWindow,
+      });
+    const expected = closedWindows({ cursor: 0n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: AT });
+
+    it('works out the closed windows from the cursor, the creation, the epoch length, the lock and the time', () => {
+      expect(expected).to.deep.equal({ fromWindow: 0n, toWindow: 5n });
+      expect(closedWindows({ cursor: 2n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: AT })).to.deep.equal({ fromWindow: 2n, toWindow: 5n });
+      expect(closedWindows({ cursor: 0n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: CREATED + 100n * DAY })).to.deep.equal({ fromWindow: 0n, toWindow: LOCK });
+      expect(closedWindows({ cursor: 0n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: CREATED - 1n })).to.deep.equal({ fromWindow: 0n, toWindow: 0n });
+      expect(closedWindows({ cursor: 5n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: AT })).to.deep.equal({ fromWindow: 5n, toWindow: 5n });
+    });
+
+    it('passes when the settle books every closed window', async () => {
+      const report = new QuietReport();
+      const { curves } = await model(0n, 5n);
+      checkLateBooking(report, {
+        expected,
+        curves,
+        budget: B,
+        epoch: E,
+        emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
+        cursorAfter: 5n,
+        credits: curves.flatMap((cv) => cv.booked),
+      });
+      expect(report.failed).to.equal(0);
+      expect(report.checks).to.have.length(4);
+    });
+
+    it('fails when the settle books only one of the five closed windows, though its event and its credits agree', async () => {
+      const report = new QuietReport();
+      const { curves } = await model(0n, 5n);
+      const one = (await model(0n, 1n)).curves;
+      checkLateBooking(report, {
+        expected,
+        curves,
+        budget: B,
+        epoch: E,
+        emitted: { fromWindow: 0n, toWindow: 1n, scheduled: B },
+        cursorAfter: 1n,
+        credits: one.flatMap((cv) => cv.booked),
+      });
+      const failed = report.checks.filter((c) => !c.ok).map((c) => c.label);
+      expect(failed).to.have.length(3);
+      expect(failed[0]).to.contain('settle books every closed window, 0..4');
+    });
+
+    it('fails when the event names every window and the cursor stays behind', async () => {
+      const report = new QuietReport();
+      const { curves } = await model(0n, 5n);
+      checkLateBooking(report, {
+        expected,
+        curves,
+        budget: B,
+        epoch: E,
+        emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
+        cursorAfter: 1n,
+        credits: curves.flatMap((cv) => cv.booked),
+      });
+      expect(report.checks.filter((c) => !c.ok).map((c) => c.detail)).to.deep.equal(['emitted 0..4, cursor 1']);
     });
   });
 });

@@ -12,7 +12,7 @@ import { HUB, expectRevert, saveResults, send, succeeds } from './context';
 import type { CycleRun } from './cycle';
 import { approve, claimAll, walletRequest } from './operations';
 import { impersonate } from './plumbing';
-import { ExpectedReward, expectedReward, positions, stakerCredits } from './reads';
+import { ExpectedReward, closedWindows, expectedReward, positions, stakerCredits } from './reads';
 import { COMMITTED, LATE_COMMITTED, SELLERS, TRAC, WALLET_PERIOD_VALUE } from './scenario';
 
 export async function closeAndPay(run: CycleRun): Promise<void> {
@@ -210,13 +210,27 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   out.operatorFeeWithdrawal = { node: feeNode, amount: feePaid, gasUsed: feeWd.gasUsed };
 
   // Window booking: the account's closed windows, booked by anyone's settle.
+  const cursor0 = (await c.pcs.getAccount(accountId)).lastSettledWindow;
   const settled = await send(ctx, `keeper: settle(${accountId})`, keeper, await c.pc.getAddress(), c.pc.interface.encodeFunctionData('settle', [accountId]));
   const [sched] = eventsIn(settled.receipt, c.pc, c.pc.getEvent('EmissionScheduled'));
   if (!sched) throw new Error(`settle(${accountId}) emitted no EmissionScheduled`);
   const booking = stakerCredits(settled.receipt, c);
   const spent0 = await c.pcs.windowSpent(accountId, 0);
-  const fromW = sched.fromWindow;
-  const toW = sched.toWindow;
+  const settledBlock = await ctx.hre.ethers.provider.getBlock(settled.receipt.blockNumber);
+  if (!settledBlock) throw new Error(`no block ${settled.receipt.blockNumber}`);
+  const account = await c.pcs.getAccount(accountId);
+  const { fromWindow: fromW, toWindow: toW } = closedWindows({
+    cursor: cursor0,
+    createdAt: account.createdAtTimestamp,
+    epLen: await c.chronos.epochLength(),
+    lock: account.lockDurationEpochs,
+    at: BigInt(settledBlock.timestamp),
+  });
+  check(
+    `settle books every closed window, ${fromW}..${toW - 1n}, and moves the cursor past them`,
+    sched.fromWindow === fromW && sched.toWindow === toW && account.lastSettledWindow === toW,
+    `emitted ${sched.fromWindow}..${sched.toWindow - 1n}, cursor ${account.lastSettledWindow}`,
+  );
   let expectedBooked = 0n;
   for (let x = fromW; x < toW; x++) expectedBooked += B - (await c.pcs.windowSpent(accountId, x));
   check(
