@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import {
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
+  computeSwmAuthorInventoryScopeDigestV1,
   createOperationContext,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
@@ -187,7 +188,7 @@ describe('one attempt at an owed row', () => {
     [{ status: 'existing', attempts: 1, headObjectDigest: 'h', kaUal: 'u' }, 'written'],
     [{ status: 'dormant', dormantReason: 'vm-confirmed' }, 'vm-confirmed'],
     [{ status: 'dormant', dormantReason: 'policy-mismatch' }, 'policy-mismatch'],
-    [{ status: 'dormant', dormantReason: 'inactive-lane' }, 'waiting'],
+    [{ status: 'dormant', dormantReason: 'inactive-lane' }, 'lane-closed'],
     [{ status: 'dormant', dormantReason: 'authority-transition' }, 'waiting'],
     [{ status: 'superseded', reason: 'missing-seal' }, 'superseded'],
     [{ status: 'superseded', reason: 'workspace-mismatch' }, 'superseded'],
@@ -205,10 +206,32 @@ describe('one attempt at an owed row', () => {
     const { agent } = fakeAgent();
     agent.tryCommitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(new SwmInventoryWriteFailure('authority', null,
       new SwmCatalogAuthorityNotReady('service-unavailable')));
-    await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('waiting');
+    await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('lane-closed');
     const failure = new SwmInventoryWriteFailure('inventory-maintenance', 'u', new Error('database locked'));
     agent.tryCommitRfc64SwmAuthorInventoryV1.mockRejectedValueOnce(failure);
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).rejects.toBe(failure);
+  });
+
+  it.each([
+    ['a closed lane', () => Promise.resolve({ status: 'dormant', dormantReason: 'inactive-lane' })],
+    ['an authority that is not ready', () => Promise.reject(new SwmInventoryWriteFailure('authority', null,
+      new SwmCatalogAuthorityNotReady('policy-not-accepted')))],
+  ])('asks the writer once a pass while %s holds a whole backlog', async (_name, attempt) => {
+    const { agent, kept } = fakeAgent();
+    kept.push(...Array.from({ length: 200 }, (_, index) => ({ ...MARKER, assertionCoordinate: `asset-${index}`,
+      shareOperationId: `share-${index}` } as Rfc64OwedShareInventoryV1)));
+    agent.tryCommitRfc64SwmAuthorInventoryV1.mockImplementation(attempt);
+    const owner = agent.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 0 }));
+    owner.start(createOperationContext('system'));
+    try {
+      await owner.whenIdle();
+      expect(agent.tryCommitRfc64SwmAuthorInventoryV1).toHaveBeenCalledOnce();
+      owner.request();
+      await owner.whenIdle();
+      expect(agent.tryCommitRfc64SwmAuthorInventoryV1).toHaveBeenCalledTimes(2);
+      expect(kept).toHaveLength(200);
+      expect(agent.log.warn).not.toHaveBeenCalled();
+    } finally { await owner.close(); }
   });
 
   it('lets a ready graph drain while another graph settles, coalescing its waiting markers', async () => {
@@ -446,6 +469,136 @@ describe('owed share inventory on a started agent', () => {
       rows: [{ assertionCoordinate: seeded.assertionCoordinate, shareOperationId: seeded.shareOperationId, sealDigest }],
     });
   }, 60_000);
+
+  /**
+   * The real refresh fence of a local graph: the node is responsible for it, but its authority is
+   * not accepted while the owner metadata has not arrived. `owner.known` lifts it for the next refresh.
+   */
+  async function startBehindRefreshFence(name: string, dataDir: string, owner: { known: boolean }): Promise<DKGAgent> {
+    const agent = await startRepairAgentV1({ name, dataDir, storePath: join(dataDir, 'oxigraph'),
+      beforeStart: (started) => {
+        const internals = started as any;
+        vi.spyOn(started, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+        vi.spyOn(internals, 'isLocalFirstUnregisteredContextGraph').mockResolvedValue(true);
+        vi.spyOn(internals, 'getExplicitAccessPolicy').mockResolvedValue('public');
+        vi.spyOn(internals, 'getContextGraphOwner').mockImplementation(async () => (owner.known ? `did:dkg:agent:${AUTHOR}` : null));
+      } });
+    (agent as any).subscribedContextGraphs.set(CONTEXT_GRAPH_ID, { subscribed: true });
+    await expect(agent.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID)).resolves.toMatchObject({ active: true });
+    expect(agent.requiresRfc64ShareInventoryV1(CONTEXT_GRAPH_ID, undefined)).toBe(true);
+    expect(agent.requiresRfc64ShareInventoryHandoffV1(CONTEXT_GRAPH_ID, undefined)).toBe(false);
+    return agent;
+  }
+
+  async function shareBehindFence(author: DKGAgent, suffix: string, kaId: bigint) {
+    const seeded = await seedDurableWorkspaceAssetV1(author, suffix, kaId);
+    const sealDigest = computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal));
+    await author.afterDurableSwmPromotionV1(bound(seeded.shareOperationId, {
+      assertionCoordinate: seeded.assertionCoordinate,
+      recoveryBinding: { ...bound('x').recoveryBinding, sealDigest,
+        intent: { ...bound('x').recoveryBinding.intent, operationId: seeded.shareOperationId } },
+    }));
+    return { seeded, sealDigest, owed: { ...MARKER, assertionCoordinate: seeded.assertionCoordinate,
+      shareOperationId: seeded.shareOperationId, sealDigest } as Rfc64OwedShareInventoryV1 };
+  }
+
+  function inventoryRows(author: DKGAgent) {
+    const lane = (author as any).resolveRfc64CatalogAuthoringLaneV1(CONTEXT_GRAPH_ID, null);
+    return author.readRfc64SwmAuthorInventorySnapshotV1({ authorAddress: AUTHOR, inventoryScopeDigest:
+      computeSwmAuthorInventoryScopeDigestV1({ ...lane.scopeBase, authorAddress: AUTHOR }) })?.rows ?? [];
+  }
+
+  it('writes the row at authority acceptance for a share whose fence outlasts the observer window', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-long-fence-'));
+    tempDirs.push(dataDir);
+    const owner = { known: false };
+    const author = await startBehindRefreshFence('owed-long-fence', dataDir, owner);
+    const runtime = rfc64SwmInventoryShadowRuntimeV1(author);
+    const observer = vi.spyOn(runtime, 'scheduleInventoryObservation');
+    const writer = vi.spyOn(author, 'tryCommitRfc64SwmAuthorInventoryV1');
+    const observerWindowMs = runtime.responsibilitySettlementRetryDelaysMs.reduce((sum, delay) => sum + delay, 0);
+    expect(observerWindowMs).toBeGreaterThan(15_000);
+    // The owner arms its retry timer after the share's first pass, so under this clock.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    let shared: Awaited<ReturnType<typeof shareBehindFence>>;
+    try {
+      shared = await shareBehindFence(author, 'long-fence', 104n);
+      await vi.advanceTimersByTimeAsync(observerWindowMs + 2 * 5_000);
+    } finally { vi.useRealTimers(); }
+    const { owed, sealDigest, seeded } = shared;
+    // Past the window the retries still find the lane closed and the marker kept; the observer never took the share.
+    expect(writer.mock.calls.length).toBeGreaterThanOrEqual(4);
+    for (const { value } of writer.mock.results) {
+      await expect(value).resolves.toMatchObject({ status: 'dormant', dormantReason: 'inactive-lane' });
+    }
+    expect(observer).not.toHaveBeenCalled();
+    expect(markers(author)).toEqual([owed]);
+
+    // The owner metadata arrives: the refresh accepts the authority, and that alone wakes the owner.
+    owner.known = true;
+    await author.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID);
+    await vi.waitFor(() => expect(markers(author)).toEqual([]), { timeout: 10_000 });
+    expect(inventoryRows(author)).toMatchObject([{ assertionCoordinate: seeded.assertionCoordinate,
+      shareOperationId: seeded.shareOperationId, sealDigest }]);
+  }, 60_000);
+
+  it('writes the row at authority acceptance after a restart behind the same fence', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-restart-fence-'));
+    tempDirs.push(dataDir);
+    const owner = { known: false };
+    const author = await startBehindRefreshFence('owed-restart-fence', dataDir, owner);
+    const { owed, sealDigest, seeded } = await shareBehindFence(author, 'restart-fence', 105n);
+    expect(markers(author)).toEqual([owed]);
+    await author.stop();
+    agents.splice(agents.indexOf(author), 1);
+
+    const restarted = await startBehindRefreshFence('owed-restart-fence-restarted', dataDir, owner);
+    expect(markers(restarted)).toEqual([owed]);
+    owner.known = true;
+    await restarted.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID);
+    await vi.waitFor(() => expect(markers(restarted)).toEqual([]), { timeout: 10_000 });
+    expect(inventoryRows(restarted)).toMatchObject([{ assertionCoordinate: seeded.assertionCoordinate,
+      shareOperationId: seeded.shareOperationId, sealDigest }]);
+  }, 60_000);
+
+  it.each(['observer first', 'marker first', 'both at once'] as const)(
+    'keeps one row and one signed head when the detached observer and the marker both write it: %s', async (order) => {
+      const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-and-observer-'));
+      tempDirs.push(dataDir);
+      const author = await startAuthor('owed-and-observer', dataDir, false);
+      const internals = author as any;
+      const seeded = await seedDurableWorkspaceAssetV1(author, 'both', 103n);
+      const sealDigest = computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(seeded.seal));
+      const scope = { inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR };
+      const owed = { ...MARKER, assertionCoordinate: seeded.assertionCoordinate, shareOperationId: seeded.shareOperationId, sealDigest };
+      const writer = vi.spyOn(author, 'tryCommitRfc64SwmAuthorInventoryV1');
+      // An unbound share schedules the detached observer on the asset's queue, as a marker's attempt runs.
+      const observe = async () => {
+        await author.afterDurableSwmPromotionV1({ contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: seeded.assertionCoordinate,
+          lifecycleAgentAddress: AUTHOR, shareOperationId: seeded.shareOperationId, ctx: createOperationContext('share') });
+        await author.awaitInFlightRfc64SwmInventoryObserversV1();
+      };
+      const leaveMarker = async () => {
+        await internals.rfc64PersistenceV1.owedShareInventories.put(owed);
+        author.requestRfc64OwedShareInventoryDrainV1();
+        await vi.waitFor(() => expect(markers(author)).toEqual([]), { timeout: 10_000 });
+      };
+      if (order === 'observer first') {
+        await observe();
+        await leaveMarker();
+      } else if (order === 'marker first') {
+        await leaveMarker();
+        await observe();
+      } else {
+        await Promise.all([observe(), leaveMarker()]);
+      }
+      const outcomes = await Promise.all(writer.mock.results.map(result => result.value));
+      expect(outcomes.map(outcome => outcome.status).sort()).toEqual(['applied', 'existing']);
+      expect(author.readRfc64SwmAuthorInventorySnapshotV1(scope)).toMatchObject({
+        head: { objectDigest: outcomes.find(outcome => outcome.status === 'applied').headObjectDigest },
+        rows: [{ assertionCoordinate: seeded.assertionCoordinate, shareOperationId: seeded.shareOperationId, sealDigest }],
+      });
+    }, 60_000);
 
   it('drops markers whose share has moved on without writing a row', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-superseded-'));

@@ -1,7 +1,6 @@
 import { getBoundListenMultiaddrs } from './bound-listen-addresses.js';
-import { startCheckpointStartupStatus } from './public-checkpoint-status.js';
+import { PublicCheckpointStartup } from './public-checkpoint-startup.js';
 import { checkDaemonCheckpointEligibility, bindCheckpointNetwork } from './public-checkpoint-config.js';
-import { openDaemonCheckpointAgent } from './public-checkpoint-agent.js';
 import { buildCoreChainCacheConfig } from './core-chain-cache-config.js';
 // daemon/lifecycle.ts
 //
@@ -1157,16 +1156,7 @@ async function runDaemonInnerWithStartupOwnership(
   // edge seeds from the network file's relays, planned below from the
   // finished agent config.
   const checkpointMode = await checkDaemonCheckpointEligibility(dkgDir(), config);
-  let checkpointSession: Awaited<ReturnType<typeof openDaemonCheckpointAgent>> | undefined;
-  const checkpointAbort = new AbortController();
-  let checkpointApiPort: number | undefined;
-  let checkpointTimer: ReturnType<typeof setTimeout> | undefined;
-  let closeCheckpointStatus: (() => Promise<void>) | undefined;
-  const cancelCheckpoint = () => checkpointAbort.abort(new Error('Checkpoint startup interrupted'));
-  const detachCheckpointSignals = () => {
-    process.removeListener('SIGTERM', cancelCheckpoint);
-    process.removeListener('SIGINT', cancelCheckpoint);
-  };
+  let checkpointStartup: PublicCheckpointStartup | undefined;
   assertAuthorityIndexConfigPlacement(config);
   const authorityIndex = resolveAuthorityIndexConfig(config.authorityIndex, config.nodeRole ?? 'edge');
   configureKaPublishLifecycleDebugLogging(config);
@@ -1230,13 +1220,10 @@ async function runDaemonInnerWithStartupOwnership(
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
   // Stops what would start catch-up jobs later; replaced once they exist.
   let stopCatchupTriggers = (): void => {};
-  registerStartupFailureCleanup(async () => {
-    checkpointAbort.abort(new Error('Daemon startup failed'));
-    detachCheckpointSignals();
-    clearTimeout(checkpointTimer);
-    checkpointSession?.dispose();
+  let startupCleanup: Promise<void> | undefined;
+  const cleanupStartup = () => startupCleanup ??= (async () => {
     // A failed native shutdown must not prevent the daemon writer from retiring.
-    const stopped = await Promise.allSettled([closeCheckpointStatus?.(), checkpointSession?.agent.stop()]);
+    const stopped = await Promise.allSettled([checkpointStartup?.close()]);
     for (const result of stopped) if (result.status === 'rejected') log(`[bootstrap] Cleanup failed: ${String(result.reason)}`);
     try {
       stopCatchupTriggers();
@@ -1254,7 +1241,8 @@ async function runDaemonInnerWithStartupOwnership(
     }
     detachDaemonLogTee();
     await daemonLogFileWriter.shutdown();
-  });
+  })();
+  registerStartupFailureCleanup(cleanupStartup);
 
   function log(msg: string) {
     const line = `[${new Date().toISOString()}] ${msg}`;
@@ -2092,17 +2080,16 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const promoteQueuePolicy = resolveDaemonPromoteQueueConfig(config.promoteQueue);
+  let checkpointAgent: DKGAgent | undefined;
   if (checkpointMode) {
-    checkpointTimer = setTimeout(() => checkpointAbort.abort(new Error('Checkpoint job deadline exceeded')), 3_600_000);
-    process.once('SIGTERM', cancelCheckpoint);
-    process.once('SIGINT', cancelCheckpoint);
-    const startupStatus = await startCheckpointStartupStatus(config.apiPort, config.apiHost);
-    closeCheckpointStatus = startupStatus.close; checkpointApiPort = startupStatus.port;
-    await writeApiPort(checkpointApiPort);
+    checkpointStartup = new PublicCheckpointStartup(async () => {
+      try { await cleanupStartup(); } finally { process.exit(1); }
+    });
     log(`[bootstrap] ${checkpointMode === 'fresh' ? 'Preparing verified public data' : 'Opening retained native journal'}`);
-    checkpointSession = await openDaemonCheckpointAgent(agentConfig, config.publicSnapshotBootstrap!, checkpointMode, checkpointAbort.signal);
+    checkpointAgent = await checkpointStartup.open(agentConfig, config.publicSnapshotBootstrap!, checkpointMode,
+      config.apiPort, config.apiHost, writeApiPort);
   }
-  const agent = checkpointSession?.agent ?? await DKGAgent.create(agentConfig);
+  const agent = checkpointAgent ?? await DKGAgent.create(agentConfig);
   agent.configurePromoteQueue(promoteQueuePolicy);
   const publicSnapshotStore = agent.publicSnapshotStore;
 
@@ -2251,11 +2238,8 @@ async function runDaemonInnerWithStartupOwnership(
   registerJoinMetadataEmptyVmSettlement({ agent, dashboard: dashDb, log });
 
   await agent.start();
-  if (checkpointSession) {
-    const coverage = await checkpointSession.complete();
-    checkpointSession.dispose();
-    clearTimeout(checkpointTimer);
-    detachCheckpointSignals();
+  if (checkpointStartup) {
+    const coverage = await checkpointStartup.complete();
     log(`[bootstrap] Current public coverage: ${coverage.committed}/${coverage.assets}`);
   }
 
@@ -2271,6 +2255,8 @@ async function runDaemonInnerWithStartupOwnership(
     readinessStore: dashDb,
     log,
   });
+
+  checkpointStartup?.assertActive();
 
   // Rows written before per-plane provenance existed cannot distinguish a
   // complete catch-up from v10.0.6's clean-empty false-ready state. Migrate
@@ -3613,7 +3599,7 @@ async function runDaemonInnerWithStartupOwnership(
     headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
-  const apiPort = checkpointApiPort ?? (config.apiPort || 0);
+  const apiPort = checkpointStartup?.port ?? (config.apiPort || 0);
   const apiHost = config.apiHost || "127.0.0.1";
 
   // Route plugins: loaded before listen() so requests can't race the array; fail-soft per ADR 0001.
@@ -3631,7 +3617,9 @@ async function runDaemonInnerWithStartupOwnership(
     `route-plugins-loaded loaded=${routePlugins.length} configured=${configuredCount}`,
   );
 
-  await closeCheckpointStatus?.();
+  checkpointStartup?.assertActive();
+  await checkpointStartup?.closeStatus();
+  checkpointStartup?.assertActive();
   await new Promise<void>((resolve) => {
     server.listen(apiPort, apiHost, () => resolve());
   });
@@ -3799,6 +3787,8 @@ async function runDaemonInnerWithStartupOwnership(
     process.exit(forced ? encodeForcedShutdownExitCode(exitCode) : exitCode);
   }
 
+  checkpointStartup?.assertActive();
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+  checkpointStartup?.handoff();
 }

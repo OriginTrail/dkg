@@ -140,6 +140,7 @@ export default defineConfig({
           'test/context-graph-subscribe-readiness.test.ts',
           'test/approved-member-empty-graph-first-write.test.ts',
           'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-empty-vm-repeat.test.ts',
           'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
@@ -287,6 +288,7 @@ export default defineConfig({
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
           'test/daemon-publisher-startup-cancellation.test.ts',
+          'test/daemon-checkpoint-startup.test.ts',
           'test/publisher-availability.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
@@ -316,6 +318,8 @@ export default defineConfig({
           // (pending vs proven-absent vs inconclusive), and the two-state
           // resolver derived from it. Pure logic over stub adapters.
           'test/publisher-chain-proof-resolution.test.ts',
+          // #3591 — the claim gate's balance reads, through each wallet's own adapter.
+          'test/publisher-wallet-balances.test.ts',
           // #1836 — publisher.maxRetries must propagate through
           // createPublisherControlFromStore (incl. a literal 0). Pure logic.
           'test/publisher-maxretries-1836.test.ts',

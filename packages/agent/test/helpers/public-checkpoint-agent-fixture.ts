@@ -18,7 +18,11 @@ export async function checkpointAgentFixture() {
   });
   const full = f.initial.snapshot;
   let snapshot = full;
-  chain.readPublicGraphSnapshot = async () => sealPublicGraphSnapshot({ ...snapshot, observedAt: Date.now(), expiresAt: Date.now() + 120_000 });
+  chain.readPublicGraphSnapshot = async () => {
+    // One clock reading: two can be a millisecond apart, which is over the longest window a snapshot may declare.
+    const now = Date.now();
+    return sealPublicGraphSnapshot({ ...snapshot, observedAt: now, expiresAt: now + 120_000 });
+  };
   chain.getLatestMerkleRoot = async id => f.byId.get(id)!;
   chain.getMerkleRootCount = async () => 1n;
   chain.getKAContextGraphId = async () => 14n;
