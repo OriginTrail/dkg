@@ -167,7 +167,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   // 4. Gas for the derived buyer keys.
   for (const [k, w] of [['buyer', r.buyer], ['edge-buyer', r.edgeBuyer]] as const) {
     const bal = await ctx.hre.ethers.provider.getBalance(w.address);
-    await ctx.tx.run({
+    await ctx.tx.step({
       key: `setup.eth-${k}`,
       label: `owner: send ${fmt(a.keyEth)} ETH to the ${k} key ${w.address}`,
       role: 'owner',

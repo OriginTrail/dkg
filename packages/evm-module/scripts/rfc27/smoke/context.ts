@@ -6,13 +6,13 @@ import type { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 import { BaseContracts, Contracts, Stack } from '../contracts';
 import { Fork, notBefore } from '../fork';
-import { Marketplace } from '../marketplace';
 import { Net, chainNow } from '../network';
 import { Report } from '../report';
-import { TxRunner } from '../tx';
 import { LIVE_JSON, SmokeEnv } from './config';
+import { Marketplace } from './marketplace';
 import { Roles } from './roles';
 import { SmokeState, StateFile } from './state';
+import { SmokeTx } from './tx';
 
 export type Ctx = {
   hre: HardhatRuntimeEnvironment;
@@ -23,7 +23,7 @@ export type Ctx = {
   base: BaseContracts;
   fork: Fork;
   file: StateFile;
-  tx: TxRunner;
+  tx: SmokeTx;
   roles: Roles;
 };
 

@@ -39,7 +39,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
     const auto = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw);
     const score = await positionScore(c, tokenId, s.sellerId, current, pos.raw);
     const bal0 = await c.token.balanceOf(r.ownerAddr);
-    const w = await ctx.tx.run({
+    const w = await ctx.tx.step({
       key: 'withdraw.withdraw',
       label: `owner: DKGStakingConvictionNFT.withdraw(${tokenId})`,
       role: 'owner',
@@ -84,7 +84,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   let paid: bigint | undefined;
   if (record.epoch !== 0n) {
     const bal0 = await c.token.balanceOf(r.ownerAddr);
-    const res = await ctx.tx.run({ key: 'withdraw.claim-withdrawn-epoch', label: `owner: StakingV10.claimWithdrawnEpoch(${tokenId})`, role: 'owner', signer: r.owner, to: sv10, data: claimData });
+    const res = await ctx.tx.step({ key: 'withdraw.claim-withdrawn-epoch', label: `owner: StakingV10.claimWithdrawnEpoch(${tokenId})`, role: 'owner', signer: r.owner, to: sv10, data: claimData });
     if (!res.receipt) return { part: 'claim' };
     const ev = eventsIn(res.receipt, c.sv10, c.sv10.getEvent('WithdrawnEpochClaimed')).find((x) => x.tokenId === tokenId);
     paid = ev?.amount ?? 0n;

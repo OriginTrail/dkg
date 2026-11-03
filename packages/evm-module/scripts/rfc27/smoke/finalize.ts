@@ -132,7 +132,7 @@ export async function phaseFinalize(ctx: PoolCtx): Promise<void> {
     const data = c.qs.interface.encodeFunctionData('finalizeClaims', [pending.map(({ subscriptionId, bucketIndex, seller }) => ({ subscriptionId, bucketIndex, seller }))]);
     const [count] = c.qs.interface.decodeFunctionResult('finalizeClaims', await ctx.tx.call(r.ownerAddr, qs, data));
     report.check(`finalizeClaims would finalize all ${pending.length} pending claims`, BigInt(count) === BigInt(pending.length), `${count} of ${pending.length}`);
-    const result = await ctx.tx.run({
+    const result = await ctx.tx.step({
       key: `${PREFIX}${attempts.length + 1}`,
       label: `owner: finalizeClaims (${pending.length} claims: ${pending.map((x) => x.period).join(', ')})`,
       role: 'owner',

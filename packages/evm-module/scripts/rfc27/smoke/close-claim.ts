@@ -42,7 +42,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     const data = c.qs.interface.encodeFunctionData('closeEpochs', [steps]);
     const [through] = c.qs.interface.decodeFunctionResult('closeEpochs', await ctx.tx.call(r.ownerAddr, qs, data));
     report.check(`closeEpochs(${steps}) would close through epoch ${current - 1n}`, BigInt(through) === current - 1n, `closes through ${through}`);
-    const res = await ctx.tx.run({ key: 'close-claim.close-epochs', label: `owner: closeEpochs(${steps})`, role: 'owner', signer: r.owner, to: qs, data });
+    const res = await ctx.tx.step({ key: 'close-claim.close-epochs', label: `owner: closeEpochs(${steps})`, role: 'owner', signer: r.owner, to: qs, data });
     const ev = eventsIn(res.receipt, c.qs, c.qs.getEvent('EpochClosed')).find((x) => x.epoch === P);
     if (res.receipt) report.check(`the close emitted EpochClosed for epoch ${P}`, !!ev);
     // An event's Result exposes its fields by name, not as own properties: copied one by one.
@@ -118,7 +118,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     // The epochs the claim pays, as the preview gives them: what a dry run shows, and what the send checks.
     per.push(...expect.per);
     claimed = true;
-    const res = await ctx.tx.run({
+    const res = await ctx.tx.step({
       key: 'close-claim.claim',
       label: `owner: StakingV10.claimFor(${tokenId})`,
       role: 'owner',

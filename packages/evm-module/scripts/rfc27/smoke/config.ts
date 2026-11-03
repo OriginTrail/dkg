@@ -6,7 +6,7 @@ import * as path from 'path';
 import { ethers } from 'ethers';
 
 import type { BaseContracts } from '../contracts';
-import { UNIT_ASK } from '../marketplace';
+import { UNIT_ASK } from '../plans';
 import { fmt } from '../report';
 import { Amounts, PHASES, PhaseName, SmokeState } from './state';
 

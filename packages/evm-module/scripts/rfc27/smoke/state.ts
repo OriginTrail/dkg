@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 
 import { JsonObject, Redactor, toJson, writeJson } from '../report';
-import type { Journal, StepRecord } from '../tx';
+import type { Journal, StepRecord } from './tx';
 
 export const PHASES = ['check', 'setup', 'serve', 'finalize', 'close-claim', 'withdraw'] as const;
 export type PhaseName = (typeof PHASES)[number];
