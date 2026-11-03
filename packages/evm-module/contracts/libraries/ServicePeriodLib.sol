@@ -74,12 +74,6 @@ library ServicePeriodLib {
         return keccak256(abi.encode(buyer, epoch));
     }
 
-    /// @dev The epoch of a recorded period, which its funding stored as the
-    ///      period id. Its money is due in the epoch after it.
-    function epochOf(ConvictionServiceStorage.Subscription memory s) internal pure returns (uint256) {
-        return uint256(s.periodId);
-    }
-
     /**
      * @dev The buckets of a funding: 1 to `maxBuckets` of them, in strictly
      *      increasing id, each of a known class, with a non-zero value and a

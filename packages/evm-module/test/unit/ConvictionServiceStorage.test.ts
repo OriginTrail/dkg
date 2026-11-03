@@ -85,7 +85,7 @@ const subscriptionRecord = (accountId: bigint, overrides: Record<string, bigint 
   assignee: ASSIGNEE,
   assignmentNonce: 4n,
   sessionKey: SESSION_KEY,
-  periodId: ethers.id('period-1'),
+  epoch: 41n,
   planDigest: ethers.id('plan-1'),
   periodStart: 1_700_000_000n,
   periodEnd: 1_700_000_000n + 30n * DAY,
@@ -836,12 +836,12 @@ describe('@unit ConvictionServiceStorage', () => {
         ],
       ]);
 
-      // A period record keeps its 8 slots: the nonce of its assignment shares
-      // the assignee's.
+      // A period record takes 7 slots: the nonce of its assignment shares the
+      // assignee's, and its epoch the session key's.
       const subscription = Object.values(layout!.types).find(
         (t) => t.label === 'struct ConvictionServiceStorage.Subscription',
       )!;
-      expect(subscription.numberOfBytes).to.equal(String(8 * 32));
+      expect(subscription.numberOfBytes).to.equal(String(7 * 32));
       const member = (label: string) => subscription.members!.find((m) => m.label === label)!;
       expect([member('assignee').slot, member('assignee').offset]).to.deep.equal(['1', 0]);
       expect([member('assignmentNonce').slot, member('assignmentNonce').offset]).to.deep.equal(['1', 20]);

@@ -470,9 +470,9 @@
             "type": "address"
           },
           {
-            "internalType": "bytes32",
-            "name": "periodId",
-            "type": "bytes32"
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
           },
           {
             "internalType": "bytes32",
@@ -774,9 +774,9 @@
             "type": "address"
           },
           {
-            "internalType": "bytes32",
-            "name": "periodId",
-            "type": "bytes32"
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
           },
           {
             "internalType": "bytes32",
@@ -1346,9 +1346,9 @@
             "type": "address"
           },
           {
-            "internalType": "bytes32",
-            "name": "periodId",
-            "type": "bytes32"
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
           },
           {
             "internalType": "bytes32",

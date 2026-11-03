@@ -263,7 +263,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         assignee: buyer.address,
         assignmentNonce: 0n,
         sessionKey: SESSION_KEY,
-        periodId: ethers.toBeHex(epoch, 32),
+        epoch,
         planDigest: r.planDigest,
         periodStart: ts,
         periodEnd,

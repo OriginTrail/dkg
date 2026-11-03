@@ -145,7 +145,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         // 4. The value due in the epoch after the period.
         qis.addWalletDue(r.epoch + 1, value);
 
-        // 5. The record, under account 0. The period id is the period's epoch.
+        // 5. The record, under account 0.
         css.createSubscription(
             subscriptionId,
             ConvictionServiceStorage.Subscription({
@@ -153,7 +153,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
                 assignee: buyer,
                 assignmentNonce: 0,
                 sessionKey: r.sessionKey,
-                periodId: bytes32(r.epoch),
+                epoch: SafeCast.toUint40(r.epoch),
                 planDigest: r.planDigest,
                 periodStart: periodStart,
                 periodEnd: periodEnd,
@@ -223,7 +223,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         value = t.value;
 
         // 3. The value due in the epoch after the period, and the record.
-        qis.addWalletDue(ServicePeriodLib.epochOf(s) + 1, value);
+        qis.addWalletDue(uint256(s.epoch) + 1, value);
         css.applyTopUp(
             subscriptionId,
             ConvictionServiceStorage.TopUpAmounts({value: value, cost: value, drawnFromWindow: 0, drawnFromTopUp: 0}),

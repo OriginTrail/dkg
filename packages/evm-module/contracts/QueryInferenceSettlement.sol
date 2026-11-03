@@ -16,7 +16,6 @@ import {QueryInferenceStorage} from "./storage/QueryInferenceStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ProfileLib} from "./libraries/ProfileLib.sol";
-import {ServicePeriodLib} from "./libraries/ServicePeriodLib.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
@@ -521,7 +520,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
             ConvictionServiceStorage.Subscription memory s = convictionServiceStorage.getSubscription(
                 ref.subscriptionId
             );
-            uint256 epoch = ServicePeriodLib.epochOf(s);
+            uint256 epoch = s.epoch;
             if (s.periodStart != 0 && epoch != graceEpoch) {
                 grace = qis.receiptGraceSecondsAt(epoch);
                 graceEpoch = epoch;
@@ -723,7 +722,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     function batchDeadline(bytes32 subscriptionId) external view returns (uint256) {
         ConvictionServiceStorage.Subscription memory s = convictionServiceStorage.getSubscription(subscriptionId);
         if (s.periodStart == 0) return 0;
-        return uint256(s.periodEnd) + queryInferenceStorage.receiptGraceSecondsAt(ServicePeriodLib.epochOf(s));
+        return uint256(s.periodEnd) + queryInferenceStorage.receiptGraceSecondsAt(s.epoch);
     }
 
     /**
@@ -761,7 +760,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
             ref.seller
         );
         if (c.finalized) return Skip.AlreadyFinalized;
-        uint256 epoch = ServicePeriodLib.epochOf(s);
+        uint256 epoch = s.epoch;
         if (current > epoch + 1) return Skip.Void;
         if (current <= epoch || block.timestamp <= uint256(s.periodEnd) + grace) return Skip.TooEarly;
         if (c.claimed == 0) return Skip.NothingClaimed;
@@ -983,7 +982,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         t.assignmentEnd = type(uint256).max;
         if (s.accountId != 0) t.assignmentEnd = css.assignmentEnd(s.accountId, s.assignee, s.assignmentNonce);
 
-        uint256 epoch = ServicePeriodLib.epochOf(s);
+        uint256 epoch = s.epoch;
         if (epoch != b.graceEpoch) {
             b.grace = qis.receiptGraceSecondsAt(epoch);
             b.graceEpoch = epoch;

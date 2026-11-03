@@ -541,8 +541,7 @@ contract ServiceSubscriptions is
         css.recordUsage(r.accountId, assignee);
         qis.addConvictionDue(r.epoch + 1, d.cost);
 
-        // 8. The record. The period id is the period's epoch, and the record
-        //    names the assignment it is funded under.
+        // 8. The record, which names the assignment it is funded under.
         css.createSubscription(
             subscriptionId,
             ConvictionServiceStorage.Subscription({
@@ -550,7 +549,7 @@ contract ServiceSubscriptions is
                 assignee: assignee,
                 assignmentNonce: a.nonce,
                 sessionKey: r.sessionKey,
-                periodId: bytes32(r.epoch),
+                epoch: SafeCast.toUint40(r.epoch),
                 planDigest: r.planDigest,
                 periodStart: periodStart,
                 periodEnd: periodEnd,
@@ -661,7 +660,7 @@ contract ServiceSubscriptions is
         );
 
         // 6. The cost due in the epoch after the period, and the record.
-        qis.addConvictionDue(ServicePeriodLib.epochOf(s) + 1, d.cost);
+        qis.addConvictionDue(uint256(s.epoch) + 1, d.cost);
         css.applyTopUp(
             subscriptionId,
             ConvictionServiceStorage.TopUpAmounts({
