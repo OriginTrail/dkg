@@ -213,7 +213,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         BadSignature, // not signed by the session key, or for another seller, period or bucket
         InactiveAssignment, // issued once the Conviction Account assignment had ended
         DuplicateNonce, // the nonce is used, earlier or in this batch
-        OutsideTime, // outside the period, completed before issue, or after expiry
+        OutsideTime, // outside the period, completed before issue, after expiry, or after the batch
         AskOutOfRange, // a zero ask, or one above the bucket's price cap
         BadArithmetic, // zero or too many units, a value other than units × ask, or above the maximum
         ZeroResultCommitment // no result commitment
@@ -391,7 +391,12 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *              assignment ended (its expiry, or its revocation if sooner);
      *           3. its nonce is unused, earlier and in this batch;
      *           4. periodStart <= issuedAt < periodEnd, and
-     *              issuedAt <= completedAt <= min(expiry, periodEnd);
+     *              issuedAt <= completedAt <= min(expiry, periodEnd, the
+     *              block time): a batch claims only work already done, so
+     *              a request for a later time, as for a period of the next
+     *              epoch, lands once it is served, at that time's stake
+     *              factor, and a revocation before it is issued still
+     *              refuses it;
      *           5. 0 < acceptedAskWeiPerUnit <= the bucket's price cap;
      *           6. 0 < units <= maxUnits, valueWei == units × ask in 256 bits,
      *              and valueWei <= maxValueWei;
@@ -863,14 +868,16 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
             uint256 bit = uint256(1) << (nonce & 0xff);
             if ((stored | used) & bit != 0) _fault(g, j, Fault.DuplicateNonce);
             used |= bit;
-            // 4. Within the period, and completed between issue and expiry.
+            // 4. Within the period, and completed between issue and expiry,
+            //    by the time of the batch.
             uint256 completedAt = it.completedAt;
             if (
                 issuedAt < t.periodStart ||
                 issuedAt >= t.periodEnd ||
                 completedAt < issuedAt ||
                 completedAt > it.expiry ||
-                completedAt > t.periodEnd
+                completedAt > t.periodEnd ||
+                completedAt > block.timestamp
             ) _fault(g, j, Fault.OutsideTime);
             // 5. An ask within the bucket's price cap.
             uint256 ask = it.acceptedAskWeiPerUnit;
