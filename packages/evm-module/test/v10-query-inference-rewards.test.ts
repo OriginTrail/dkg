@@ -981,6 +981,45 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       expect(paid).to.equal(onN1 + onN2);
     });
 
+    it('pays the carry of a relock earlier in the epoch too, which moved the position to a new token', async () => {
+      const a = await epochNow();
+      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
+      const d1 = f.accounts[10];
+      const t1 = await delegate(d1, n1.identityId, 300_000n * TRAC);
+      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
+      await claim(d1, t1);
+      // Mid-epoch the position relocks to the rest state, under a new token,
+      // and the node then proves again.
+      await f.StakingNFT.connect(d1).relock(t1, 0n);
+      const t2 = await f.StakingNFT.nextTokenId();
+      const [oldKey, newKey] = [hre.ethers.toBeHex(t1, 32), hre.ethers.toBeHex(t2, 32)];
+      const carries = await f.Vault.getRewardCarries(t2);
+      expect(carries.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([[n1.identityId, e, oldKey]]);
+      const index = await f.RSS.getEpochLastScorePerStake(n1.identityId, e);
+      const effective = await f.Vault.getNodeEffectiveStake(n1.identityId);
+      await f.RSS.setNodeEpochScorePerStake(e, n1.identityId, 2n * index);
+      await f.RSS.addToNodeEpochScore(e, n1.identityId, (effective * index) / SCALE18);
+      await f.RSS.addToAllNodesEpochScore(e, (effective * index) / SCALE18);
+      const snapshot = await takeSnapshot();
+
+      await toEpoch(e + 1n);
+      const stayed = await claim(d1, t2);
+
+      await snapshot.restore();
+      await f.StakingNFT.connect(d1).withdraw(t2);
+      await toEpoch(e + 1n);
+      const paid = await claimWithdrawn(t2, d1);
+      expect(paid).to.equal(stayed);
+      // Both keys paid on the node: the old token's score through the carry, the new one's as the position.
+      const s = await split(n1, e);
+      const scores = [
+        await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, oldKey),
+        await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, newKey),
+      ];
+      expect(scores.map((x) => x > 0n)).to.deep.equal([true, true]);
+      expect(paid).to.equal((scores[0] * s.net) / s.nodeScore + (scores[1] * s.net) / s.nodeScore);
+    });
+
     it("leaves the node's other positions as they were: each claims what it would have", async () => {
       const a = await epochNow();
       const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
