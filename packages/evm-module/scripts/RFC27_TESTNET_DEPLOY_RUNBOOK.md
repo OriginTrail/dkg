@@ -64,20 +64,23 @@ transaction.
      Redeploy it all the same.
 2. From `packages/evm-module`, run `npm run deploy:testnet`, which is
    `hardhat deploy --network base_sepolia_v10 --config hardhat.node.config.ts`.
-3. The run deploys 10 contracts from the deployer, 26,987,387 gas in all:
+   Run every step, and never redeploy by `--tags` on testnet: a run by tag leaves
+   out step 998, so what it deploys is recorded as deployed but never registered
+   in the Hub, and a later full run does not register it either.
+3. The run deploys 10 contracts from the deployer, 26,998,505 gas in all:
 
    | Contract | Gas |
    |---|---|
    | `StakingV10` | 5,040,216 |
    | `PublishingConviction` | 4,285,448 |
-   | `ServiceSubscriptions` | 3,848,916 |
-   | `QueryInferenceSettlement` | 3,790,599 |
-   | `ConvictionServiceStorage` | 2,130,714 |
+   | `ServiceSubscriptions` | 3,846,600 |
+   | `QueryInferenceSettlement` | 3,791,511 |
+   | `ConvictionServiceStorage` | 2,142,540 |
    | `QueryInferenceStorage` | 2,073,536 |
    | `StakingV10Ledger` | 1,855,388 |
-   | `ServiceSubscriptionsWallet` | 1,845,093 |
+   | `ServiceSubscriptionsWallet` | 1,845,801 |
    | `StakingKPI` | 1,426,976 |
-   | `ConvictionWithdrawalStorage` | 690,501 |
+   | `ConvictionWithdrawalStorage` | 690,489 |
 
 4. At the end, 998 checks whether the deployer may call
    `Hub.setAndReinitializeContracts`:
@@ -105,7 +108,7 @@ From the Hub owner's wallet, one after the other, in the same epoch:
 
 | | Transaction | Gas used | Smallest gas limit | Gas limit to set |
 |---|---|---|---|---|
-| 1 | The Hub transaction 998 printed: `Hub.setAndReinitializeContracts`, 3,972 bytes of calldata | 3,140,159 | 3,155,399 | 4,000,000 |
+| 1 | The Hub transaction 998 printed: `Hub.setAndReinitializeContracts`, 3,972 bytes of calldata | 3,140,194 | 3,155,399 | 4,000,000 |
 | 2 | `Hub.forwardCall(QueryInferenceStorage, setActivationEpoch(currentEpoch + 1))` | 120,692 | 122,551 | 200,000 |
 
 - Transaction 1 registers the 7 new contracts, points the Hub at the 3
@@ -234,7 +237,7 @@ All of them are permissionless.
      reverts `QueryInferenceCloseBehind` until someone calls `closeEpochs`.
    - Call it each epoch, after the epoch starts, with `maxSteps` of 32 or
      more.
-   - Rehearsal: 94,749 gas for 1 epoch, and 1,456,577 gas for 34.
+   - Rehearsal: 94,695 gas for 1 epoch, and 1,455,412 gas for 34.
 2. `PublishingConviction.settleMany(accountIds)`, new in 10.2.0: each epoch,
    over the Conviction Accounts.
    - It books every billing window that has closed. A window booked late keeps
@@ -259,7 +262,7 @@ All of them are permissionless.
      has proved, before e + 1 ends. After that the claim is `Void`: a later
      call skips it with that reason (5), and the seller's R for that work is
      lost.
-   - Rehearsal: 298,524 gas for 4 claims, and 145,428 gas for a first call, in
+   - Rehearsal: 294,488 gas for 4 claims, and 141,336 gas for a first call, in
      e + 1 before the sellers' proofs, that skipped all 4 `NoScore`; the retry
      after the proofs finalized them.
 4. `StakingV10.claimFor(tokenId)`: each position at least every 100 scored
@@ -271,7 +274,7 @@ All of them are permissionless.
      at its withdrawal, in TRAC, to the staker.
    - Before the epoch ends it reverts `WithdrawnEpochInProgress`; a second
      call reverts `NoWithdrawnEpoch`.
-   - Rehearsal: 156,543 gas.
+   - Rehearsal: 156,546 gas.
 
 ## 6. Emergency: switching the pool off
 
@@ -326,7 +329,7 @@ So keep the outage short.
 ### Switching on again
 
 1. Any wallet deploys a fresh `QueryInferenceSettlement`, with the Hub's
-   address as its only constructor argument: 3,790,599 gas.
+   address as its only constructor argument: 3,791,511 gas.
    - A fresh deployment registers whatever the Hub's order.
    - The removed address cannot be registered again if it was the Hub's last
      entry when it was removed (`AddressAlreadyInSet`). After any earlier
@@ -352,7 +355,7 @@ the carry and every frozen epoch are kept. In the rehearsal:
 
 - closed through epoch 662 with a carry of 2 TRAC, before the switch, during
   the outage and after it;
-- the next `closeEpochs` (94,731 gas) closed the epoch that ended during the
+- the next `closeEpochs` (94,688 gas) closed the epoch that ended during the
   outage, with that carry carried in;
 - a claim on node 3 then split the pool epoch with node 3's pool share, while
   node 1's net of that epoch stayed without its 2.331 TRAC.

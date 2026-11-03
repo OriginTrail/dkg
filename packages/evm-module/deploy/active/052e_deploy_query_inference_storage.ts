@@ -18,13 +18,12 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
  * epoch is unset applies at once.
  *
  * StakingV10 pays the pool, so a run that would keep a StakingV10 below 10.1.0
- * is refused before it deploys anything (000): the deployments file marks it
- * deployed, and the run reuses it, but that build splits every node's epoch
- * without the pool, so from activation on each epoch's share of the pool would
- * stay in the vault for good. Set that entry's `deployed` to false, so the run
- * redeploys it (055), and run the deploy again. A StakingKPI below 10.1.0 only
- * reports rewards without the pool, and moves no TRAC, so the run goes on with
- * a loud warning.
+ * is refused by 000: the deployments file marks it deployed, and the run reuses
+ * it, but that build splits every node's epoch without the pool, so from
+ * activation on each epoch's share of the pool would stay in the vault for good.
+ * Set that entry's `deployed` to false, so the run redeploys it (055), and run
+ * the deploy again. A StakingKPI below 10.1.0 only reports rewards without the
+ * pool, and moves no TRAC, so the run goes on with a loud warning.
  *
  * Activation. A period funded from a wallet, and its top-ups, are refused
  * until `activationEpoch` is set and reached, and `setActivationEpoch` itself
