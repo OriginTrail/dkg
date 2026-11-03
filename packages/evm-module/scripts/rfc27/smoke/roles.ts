@@ -56,8 +56,9 @@ async function operationalAddressOf(hre: HardhatRuntimeEnvironment, c: BaseContr
   const topic = ethers.id('ChallengeGenerated(uint72,uint256,uint256,uint256,uint256,uint256)');
   const nodeTopic = ethers.zeroPadValue(ethers.toBeHex(node), 32);
   const head = await hre.ethers.provider.getBlockNumber();
-  for (let to = head; to > head - blocks; to -= 500) {
-    const logs = await hre.ethers.provider.getLogs({ address: c.randomSampling, topics: [topic, nodeTopic], fromBlock: to - 499, toBlock: to });
+  // A public endpoint limits eth_getLogs to a range of 200 blocks.
+  for (let to = head; to > head - blocks; to -= 199) {
+    const logs = await hre.ethers.provider.getLogs({ address: c.randomSampling, topics: [topic, nodeTopic], fromBlock: to - 198, toBlock: to });
     for (const l of logs.reverse()) {
       const tx = await hre.ethers.provider.getTransaction(l.transactionHash);
       if (tx && (await c.ids.getIdentityId(tx.from)) === node) return tx.from;
