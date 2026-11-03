@@ -102,7 +102,8 @@ export function validateStudioCapabilities(definition, capabilities) {
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {
   const definition = normalizeStudio(value);
   if (definition.nodes.some(n => n.componentId === 'run-program')) return compileProgramWorkflow(definition);
-  const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
+  const compiler = definition.nodes.some(n => n.componentId === 'invoke-dkg-program') ? 3 : 2;
+  const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
   const kaRef = STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20), workflowName = 'nOS Studio ' + revision;
   const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, 2, definition])).digest('hex').slice(0, 32);
   const scopeName = n8nObservationScope(graphId, owner, workflowId);
@@ -173,7 +174,8 @@ export function readStudio(source) {
   if (typeof source !== 'string' || !source.startsWith(marker) || source.length > 65536) fail('Saved Studio source is invalid.');
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
   const definition = normalizeStudio(data.definition);
-  const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
+  const compiler = definition.nodes.some(n => n.componentId === 'invoke-dkg-program') ? 3 : 2;
+  const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
   const compiled = { definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
     requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
   if (studioProgramSource(compiled) !== source) fail('Saved Studio source differs from its reviewed definition.');

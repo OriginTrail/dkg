@@ -28,13 +28,13 @@ export function componentPiece(id, name, param, { credentials = {}, subworkflowI
   const condition = () => ({ options: { caseSensitive: true, leftValue: '', typeValidation: 'loose', version: 2 },
     conditions: [{ id: 'equals', leftValue: value('field'), rightValue: p('equals'), operator: { type: 'string', operation: 'equals' } }], combinator: 'and' });
   switch (id) {
-    case 'dkg-read': case 'dkg-write': {
+    case 'dkg-read': case 'dkg-write': case 'invoke-dkg-program': {
       const request = nativeNode(name + ' request', 'httpRequest', {
         method: 'POST', url: 'http://127.0.0.1:4631/spike/ka/internal/dkg-component',
         authentication: 'genericCredentialType', genericAuthType: 'httpHeaderAuth',
         sendBody: true, specifyBody: 'json',
         jsonBody: expression(`({ effectId: $('Receive input').first().json.body.invocationId, workflowId: String($workflow.id), executionId: String($execution.id), blockId: ${JSON.stringify(name.replace(/^Block /,''))}, items: $input.all().map(i => i.json) })`),
-        options: { timeout: 14000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } },
+        options: { timeout: id === 'invoke-dkg-program' ? 45000 : 14000, redirect: { redirect: { followRedirects: false } }, response: { response: { responseFormat: 'json' } } },
       }, { executeOnce: true, retryOnFail: true, maxTries: 2, waitBetweenTries: 1000, credentials: { httpHeaderAuth: credentials.httpHeaderAuth } });
       const split = nativeNode(name + ' records', 'splitOut', { fieldToSplitOut: 'items', include: 'noOtherFields', options: { destinationFieldName: 'value' } });
       const result = editNode(name, '$json.value');

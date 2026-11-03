@@ -2,6 +2,7 @@
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
+import { jpbPrograms, jpbProgramCatalogRevision } from './dkg-program.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -45,6 +46,13 @@ export const componentRegistry = [
     contextGraph: choice('Source Context Graph', '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data', ['0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data']),
     orderNo: choice('Saved ERP order · CUT, USILU, EBAVM', '62633', ['62633']),
   }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{ workbook: [] }] }),
+  entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
+    node: choice('Execution node', 'JPB', ['JPB']),
+    program: choice('Approved JPB Program', 'JPB PLCA - Prepare inventory v1.0.0', jpbPrograms.map(p => p.id)),
+    catalogRevision: choice('Approved catalog revision', jpbProgramCatalogRevision, [jpbProgramCatalogRevision]),
+    inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
+    outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
+  }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
   entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', {
     node: choice('Destination node', 'JPB', ['JPB']),
     contextGraph: choice('Destination Context Graph', '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study', ['0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study']),

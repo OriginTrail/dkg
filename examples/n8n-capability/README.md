@@ -429,3 +429,30 @@ Renaming or regrouping creates a saved revision; it does not execute the workflo
 
 Run `node --test examples/n8n-capability/studio-presentation.test.mjs` to check old-source
 compatibility, presentation readback, validation and unchanged native execution definitions.
+# Invoke DKG Program (JPB local demo)
+
+The DKG palette includes **Invoke DKG Program**. It remains a native n8n HTTP
+step and can follow branches and a Merge by fields step. It does not switch to
+the separate linear Program-workflow executor.
+
+Select the execution node and a reviewed remote Program. **Program arguments**
+is a JSON array of positional arguments; `$json` is the complete incoming batch.
+For one argument containing all rows, use `["{{ $json }}"]`. For the first row,
+use `["{{ $json[0] }}"]`. **Returned result** maps the remote output array using
+the same references. The next step receives `result` and `programExecution`,
+including the remote execution IRI, source hash, binding digest and output hash.
+
+Programs are pinned in `jpb-programs.json`. The adapter checks the selected
+node, current approval and stored source before invoking and checks approval
+again afterward. Remote credentials remain on JPB. Calls require an owner-run,
+approved saved workflow and a matching native execution. Retry uses the same
+deterministic remote invocation ID; a changed request cannot reuse that ID.
+The operator enables this adapter with `NOS_JPB_PROGRAM_ENABLED=1`.
+
+The current reviewed Programs are **JPB PLCA - Run study pipeline v1.0.0** and
+**JPB PLCA - Prepare inventory v1.0.0**. The former accepts a study request and
+reads its stored snapshot; the latter accepts `[reader, request]`. They do not
+yet accept arbitrary joined ERP/Excel rows as a calculated impact assessment.
+That requires the mapped-input revision of the existing PLCA Program, followed
+by a result-aware DKG Write. This component does not alter or deploy those
+remote Programs. The existing evidence workflow remains available separately.

@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { remote } from "./jpb-output.mjs";
+import { programRequest, programResult } from './dkg-program.mjs';
 
 export const JPB_SOURCE = "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data";
 export const JPB_TARGET =
   "0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study";
 export const JPB_WORKBOOK =
   "2f0585064042668c4a854290a2e0ef365a24e57d58345881108067d397470fbf";
-export const isDkg = (id) => ["dkg-read", "dkg-write"].includes(id);
+export const isDkg = (id) => ["dkg-read", "dkg-write", "invoke-dkg-program"].includes(id);
 export const needsExport = (d) => !!d.writes && d.id !== "dkg-write";
 const hash = (v) =>
   createHash("sha256").update(JSON.stringify(v)).digest("hex");
@@ -21,7 +22,7 @@ export function assertDkgEnabled(definition) {
   for (const n of definition.nodes.filter((n) => isDkg(n.componentId))) {
     if (
       process.env[
-        n.componentId === "dkg-read"
+        n.componentId === 'invoke-dkg-program' ? 'NOS_JPB_PROGRAM_ENABLED' : n.componentId === "dkg-read"
           ? "NOS_JPB_READ_ENABLED"
           : "NOS_JPB_WRITE_ENABLED"
       ] !== "1"
@@ -30,6 +31,9 @@ export function assertDkgEnabled(definition) {
   }
 }
 export function validateDkgTopology(definition) {
+  if (definition.nodes.some(n => n.componentId === 'invoke-dkg-program') &&
+    definition.nodes.some(n => ['loop-items', 'schedule', 'webhook', 'run-program'].includes(n.componentId)))
+    throw fail('Remote Programs support bounded native manual workflows only.');
   const reads = definition.nodes.filter((n) => n.componentId === "dkg-read");
   const writes = definition.nodes.filter((n) => n.componentId === "dkg-write");
   if (!reads.length && !writes.length) return;
@@ -217,7 +221,7 @@ export function dkgComponentStore(
     )
       throw fail("Bounded DKG component input required.");
     if (
-      node.params.node !== "JPB" ||
+      node.params.node !== "JPB" || node.componentId !== 'invoke-dkg-program' &&
       node.params.contextGraph !==
         (node.componentId === "dkg-read" ? JPB_SOURCE : JPB_TARGET)
     )
@@ -242,6 +246,7 @@ export function dkgComponentStore(
         "This DKG step already belongs to different inputs or native execution.",
       );
     if (active.has(key)) return active.get(key);
+    if (node.componentId === 'invoke-dkg-program' && prior?.result) return JSON.parse(prior.result);
     if (node.componentId === "dkg-read" && prior?.result)
       return { items: [{ ...rows[0], erp: JSON.parse(prior.result).records }] };
     const pending = (async () => {
@@ -250,6 +255,12 @@ export function dkgComponentStore(
           key,
           requestHash,
         );
+      if (node.componentId === 'invoke-dkg-program') {
+        const request = programRequest(node, rows, id);
+        const result = programResult(await remoteCall(request, 'jpb-invoke-program.py'), request);
+        db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(result), key);
+        return result;
+      }
       if (node.componentId === "dkg-read") {
         const result = await remoteCall(
           { orderNo: node.params.orderNo },
