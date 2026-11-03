@@ -551,6 +551,60 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     expect(await fresh.closedThrough()).to.equal(0n);
   });
 
+  it('a settlement replaced in the Hub serves claims, withdrawals and StakingKPI with neither StakingV10 nor StakingKPI re-initialized', async () => {
+    // A new settlement over the same storage, registered and initialized as a
+    // logic upgrade is; StakingV10 and StakingKPI are left as they are.
+    const fresh = (await (
+      await hre.ethers.getContractFactory('QueryInferenceSettlement')
+    ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceSettlement;
+    await fresh.waitForDeployment();
+    await f.Hub.setContractAddress('QueryInferenceSettlement', await fresh.getAddress());
+    await forward(fresh, 'initialize');
+
+    const a = await epochNow();
+    const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
+    const d1 = f.accounts[10];
+    const t1 = await delegate(d1, n1.identityId, 200_000n * TRAC);
+    const p = await walletFund(f.accounts[20], a, 100n * TRAC);
+    const { items } = signedItems({
+      domain,
+      wallet: key,
+      subscriptionId: p,
+      bucketId: (await f.CSS.getBucket(p, 0n)).bucketId,
+      seller: n1.identityId,
+      count: 1,
+      units: (30n * TRAC) / UNIT_ASK,
+      ask: UNIT_ASK,
+      issuedAt: await latest(),
+    });
+    await fresh.connect(n1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, items }]);
+    await time.increaseTo((await f.Chronos.timestampForEpoch(a + 1n)) + (await f.QIS.receiptGraceSecondsAt(a)) + 1n);
+    await scoreEpoch(a + 1n, n1, 300n * TRAC);
+    await fresh.finalizeClaims([{ subscriptionId: p, bucketIndex: 0n, seller: n1.identityId }]);
+    const e = a + 1n;
+    await publishingPool(e, 1_000n * TRAC);
+    await toEpoch(e + 1n);
+
+    // The claim closes the pool through the new settlement and pays both pools.
+    const previewed = await f.KPI.getNetNodeRewards(n1.identityId, e);
+    const score = await positionScore(t1, n1, e);
+    const paid = await claim(d1, t1);
+    expect(await f.QIS.closedThrough()).to.equal(e);
+    const s = await split(n1, e);
+    expect(s.queryInference).to.equal(100n * TRAC);
+    expect(previewed).to.equal(s.net);
+    expect(paid).to.equal((score * s.net) / s.nodeScore);
+
+    // A withdrawal an epoch later closes the next epoch through it too.
+    await toEpoch(e + 2n);
+    await f.StakingNFT.connect(d1).withdraw(t1);
+    expect(await f.QIS.closedThrough()).to.equal(e + 1n);
+    expect([await f.StakingV10.queryInferenceSettlement(), await f.KPI.queryInferenceSettlement()]).to.deep.equal([
+      await fresh.getAddress(),
+      await fresh.getAddress(),
+    ]);
+  });
+
   it("pays a Conviction Account's money through claims over its whole lock: the commitment is booked once, and the vault keeps only the floors", async () => {
     // A lock of three windows, so the account's whole life and every booking
     // it makes fall inside the run, and a stand-in for KnowledgeAssetsLifecycle,

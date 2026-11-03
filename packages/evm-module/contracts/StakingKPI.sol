@@ -35,8 +35,8 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     //           to the publishing pool's score share before the operator fee,
     //           read through `QueryInferenceSettlement.previewQueryInferenceGross`,
     //           which is the frozen gross of a closed epoch and the previewed
-    //           close of an ended one still open. `initialize()` wires the
-    //           settlement where the Hub holds it.
+    //           close of an ended one still open. The settlement is read from
+    //           the Hub at each use, where the Hub holds it.
     string private constant _VERSION = "10.1.0";
     uint256 public constant SCALE18 = 1e18;
 
@@ -58,9 +58,6 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     RandomSamplingStorage public randomSamplingStorage;
     EpochStorage public epochStorage;
     ParametersStorage public parametersStorage;
-    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0); 0
-    ///         where the Hub holds none.
-    QueryInferenceSettlement public queryInferenceSettlement;
 
     /**
      * @dev Initializes the StakingKPI contract with the Hub address for access control
@@ -88,10 +85,14 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
-        // 10.1.0 — the query/inference pool is not deployed on every network.
-        queryInferenceSettlement = hub.isContract("QueryInferenceSettlement")
-            ? QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"))
-            : QueryInferenceSettlement(address(0));
+    }
+
+    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0), read
+    ///         from the Hub at each use, as `StakingV10` reads it; 0 where the
+    ///         Hub holds none, as on a network without the pool.
+    function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
+        if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
+        return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
     }
 
     /**
@@ -246,7 +247,7 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 epocRewardsPool = epochStorage.getEpochPool(1, epoch);
 
         uint256 totalNodeRewards = (epocRewardsPool * nodeScore18) / allNodesScore18;
-        QueryInferenceSettlement settlement = queryInferenceSettlement;
+        QueryInferenceSettlement settlement = queryInferenceSettlement();
         if (address(settlement) != address(0)) {
             totalNodeRewards += settlement.previewQueryInferenceGross(epoch, identityId);
         }

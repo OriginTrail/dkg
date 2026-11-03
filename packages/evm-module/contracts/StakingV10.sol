@@ -175,10 +175,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             most `maxCloseStepsPerClaim` of them, or reverts
     //             `QueryInferenceCloseBehind`; the permissionless
     //             `closeEpochs` clears that.
-    //           * `initialize()` wires `QueryInferenceSettlement` and
-    //             `QueryInferenceStorage` where the Hub holds the settlement,
-    //             and leaves both 0 where it does not, as on a network without
-    //             the pool, whose rewards are those of 10.0.6.
+    //           * A claim reads `QueryInferenceSettlement` from the Hub, as
+    //             the NFT gate reads its caller, and the activation epoch from
+    //             the storage that settlement uses, so a settlement replaced
+    //             in the Hub serves the next claim without a
+    //             re-initialization. Where the Hub holds no settlement, as on
+    //             a network without the pool, the rewards are those of 10.0.6.
     string private constant _VERSION = "10.1.0";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
@@ -224,13 +226,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /// @dev Runs the operator-fee withdrawal and the V8 drains (10.0.6).
     ///      Internal, so the ABI is unchanged.
     StakingV10Ledger internal ledger;
-    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
-    ///         close and each node's gross from it. 0 where the Hub holds no
-    ///         settlement.
-    QueryInferenceSettlement public queryInferenceSettlement;
-    /// @notice The query/inference pool's storage, for its activation epoch.
-    ///         0 where the Hub holds no settlement.
-    QueryInferenceStorage public queryInferenceStorage;
 
     // ========================================================================
     // Events
@@ -311,14 +306,24 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         token = IERC20(hub.getContractAddress("Token"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
-        // 10.1.0 — the query/inference pool is not deployed on every network.
-        if (hub.isContract("QueryInferenceSettlement")) {
-            queryInferenceSettlement = QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
-            queryInferenceStorage = QueryInferenceStorage(hub.getContractAddress("QueryInferenceStorage"));
-        } else {
-            queryInferenceSettlement = QueryInferenceSettlement(address(0));
-            queryInferenceStorage = QueryInferenceStorage(address(0));
-        }
+    }
+
+    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
+    ///         close and each node's gross from it, read from the Hub at each
+    ///         claim, so a replaced settlement serves the next claim. 0 where
+    ///         the Hub holds no settlement.
+    function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
+        if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
+        return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
+    }
+
+    /// @notice The query/inference pool's storage, for its activation epoch:
+    ///         the one the settlement the Hub holds closes and reads. 0 where
+    ///         the Hub holds no settlement.
+    function queryInferenceStorage() public view returns (QueryInferenceStorage) {
+        QueryInferenceSettlement settlement = queryInferenceSettlement();
+        if (address(settlement) == address(0)) return QueryInferenceStorage(address(0));
+        return settlement.queryInferenceStorage();
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -885,8 +890,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         _prepareForStakeChangeV10(currentEpoch, tokenId, pos.identityId);
 
         // 10.1.0 — the query/inference pool closes through the window before
-        // any epoch of it is read; the epochs from `qiFromEpoch` on take it.
-        uint256 qiFromEpoch = _closeQueryInference(claimToEpoch);
+        // any epoch of it is read; the epochs from `qiFromEpoch` on take it,
+        // through the settlement the Hub holds now.
+        (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _closeQueryInference(claimToEpoch);
 
         // Local cache.
         uint256 rawU = uint256(pos.raw);
@@ -935,7 +941,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
-            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18, qiFromEpoch);
+            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18, qiFromEpoch, settlement);
         }
 
         // v10.0.3 — integrate matured reward carries (pointers to RSS score
@@ -964,7 +970,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                     uint256(carries[i].epoch),
                     carries[i].identityId,
                     carryScore18,
-                    qiFromEpoch
+                    qiFromEpoch,
+                    settlement
                 );
             }
             if (carriesMatured) {
@@ -1147,16 +1154,18 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      to collect and no reward.
      *
      *      10.1.0 — for `e >= qiFromEpoch` the node's gross from the
-     *      query/inference pool joins the publishing pool's share before the
-     *      operator fee and the delegator split. A node finalizes receipt
-     *      value in an epoch only with a positive node score in it, so a node
-     *      with such a gross never takes the early return above.
+     *      query/inference pool, read from `settlement`, joins the publishing
+     *      pool's share before the operator fee and the delegator split. A
+     *      node finalizes receipt value in an epoch only with a positive node
+     *      score in it, so a node with such a gross never takes the early
+     *      return above.
      */
     function _nodeEpochReward(
         uint256 e,
         uint72 identityId,
         uint256 delegatorScore18,
-        uint256 qiFromEpoch
+        uint256 qiFromEpoch,
+        QueryInferenceSettlement settlement
     ) internal returns (uint256 epochReward) {
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
         if (nodeScore18 == 0) return 0;
@@ -1168,7 +1177,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
                     * nodeScore18) / allNodesScore18;
                 if (e >= qiFromEpoch) {
-                    grossNodeRewards += queryInferenceSettlement.queryInferenceGross(e, identityId);
+                    grossNodeRewards += settlement.queryInferenceGross(e, identityId);
                 }
                 uint96 operatorFeeAmount = uint96(
                     (grossNodeRewards
@@ -1193,22 +1202,25 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /**
      * @dev 10.1.0 — make sure the query/inference pool (OT-RFC-27) has closed
      *      through `throughEpoch`, the last epoch a claim reads, and return
-     *      the first epoch whose rewards take it: its activation epoch. With
-     *      no settlement wired, the activation epoch unset, or a window that
-     *      ends before it, no epoch of the window takes the pool: it returns
-     *      `type(uint256).max` and calls nothing. Otherwise `ensureClosed`
-     *      closes the pool's epochs up to `throughEpoch`, at most
-     *      `maxCloseStepsPerClaim` of them, or reverts
-     *      `QueryInferenceCloseBehind` while it cannot, which the
+     *      the first epoch whose rewards take it, its activation epoch, with
+     *      the settlement the Hub holds now, which the claim then reads each
+     *      epoch's gross from. With no settlement in the Hub, the activation
+     *      epoch unset, or a window that ends before it, no epoch of the
+     *      window takes the pool: it returns `type(uint256).max` and calls
+     *      nothing more. Otherwise `ensureClosed` closes the pool's epochs up
+     *      to `throughEpoch`, at most `maxCloseStepsPerClaim` of them, or
+     *      reverts `QueryInferenceCloseBehind` while it cannot, which the
      *      permissionless `closeEpochs` clears. Epochs before activation never
      *      close and take nothing from the pool.
      */
-    function _closeQueryInference(uint256 throughEpoch) internal returns (uint256 qiFromEpoch) {
-        QueryInferenceStorage qis = queryInferenceStorage;
-        if (address(qis) == address(0)) return type(uint256).max;
-        qiFromEpoch = qis.activationEpoch();
-        if (qiFromEpoch == 0 || throughEpoch < qiFromEpoch) return type(uint256).max;
-        queryInferenceSettlement.ensureClosed(throughEpoch);
+    function _closeQueryInference(
+        uint256 throughEpoch
+    ) internal returns (uint256 qiFromEpoch, QueryInferenceSettlement settlement) {
+        settlement = queryInferenceSettlement();
+        if (address(settlement) == address(0)) return (type(uint256).max, settlement);
+        qiFromEpoch = settlement.queryInferenceStorage().activationEpoch();
+        if (qiFromEpoch == 0 || throughEpoch < qiFromEpoch) return (type(uint256).max, settlement);
+        settlement.ensureClosed(throughEpoch);
     }
 
     /**
