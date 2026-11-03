@@ -59,11 +59,14 @@ export async function publishingConvictionAfterRun(
  *     from activation on each epoch's share of the pool would stay in the vault
  *     for good.
  * Set the entry's `deployed` to false, so the run redeploys it, and run the
- * deploy again. On a mainnet network, where 052c to 052f deploy nothing, it
- * reads nothing.
+ * deploy again. It reads nothing on a mainnet network, where 052c to 052f deploy
+ * nothing, or on a development network, where a run reuses nothing: step 001
+ * clears the record, which until then holds whatever file an earlier run left,
+ * at addresses where a new chain has no code.
  */
 export async function requireServiceSpendingBuilds(hre: HardhatRuntimeEnvironment): Promise<void> {
-  if (hre.network.config.environment === 'mainnet') return;
+  const { environment } = hre.network.config;
+  if (environment === 'mainnet' || environment === 'development') return;
 
   const publishing = await reusedDeployment(hre, 'PublishingConviction');
   if (publishing && versionAtLeast(publishing.version, [10, 1, 0]) && !versionAtLeast(publishing.version, [10, 2, 0])) {

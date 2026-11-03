@@ -20,7 +20,8 @@ import { requireServiceSpendingBuilds } from '../../utils/conviction-service-dep
  *     998b.
  *
  * What each build would do is in `requireServiceSpendingBuilds`. On a mainnet
- * network the check is skipped, as 052c to 052f are.
+ * network the check is skipped, as 052c to 052f are, and on a development
+ * network too, where a run reuses nothing.
  */
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   await requireServiceSpendingBuilds(hre);
