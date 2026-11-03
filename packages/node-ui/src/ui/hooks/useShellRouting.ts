@@ -45,7 +45,13 @@ export function useShellRouting(): void {
     const isFirst = firstLoad.current;
     firstLoad.current = false;
     if (!route) return;
-    if (pathname === lastPushed.current) return; // our own push, nothing to do
+    // Our own push arriving: nothing to sync. Clear the marker so a later
+    // Back/Forward to the same address is treated as the user's navigation.
+    if (pathname === lastPushed.current) {
+      lastPushed.current = null;
+      return;
+    }
+    lastPushed.current = null;
     if (route.id === 'dashboard') {
       // On first load "/" is just the app's root: keep the restored active tab.
       if (!isFirst) setActiveTab('dashboard');

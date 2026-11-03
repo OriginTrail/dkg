@@ -3,7 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
+import { MemoryRouter, Routes, Route, useLocation, useNavigate, type NavigateFunction } from 'react-router-dom';
 
 import {
   TAB_TO_URL_PATH,
@@ -21,14 +21,16 @@ const mountedContainers: HTMLElement[] = [];
  * out-parameter. We render it inside a `MemoryRouter` so React Router
  * is fully functional in the test environment.
  */
-function ShellRoutingHarness({ pathnameRef }: { pathnameRef: { current: string } }) {
+function ShellRoutingHarness({ pathnameRef, navRef }: { pathnameRef: { current: string }; navRef?: { current: NavigateFunction | null } }) {
   const loc = useLocation();
+  const navigate = useNavigate();
   pathnameRef.current = loc.pathname;
+  if (navRef) navRef.current = navigate;
   useShellRouting();
   return null;
 }
 
-function mountAtPath(initialPath: string, pathnameRef: { current: string }): void {
+function mountAtPath(initialPath: string, pathnameRef: { current: string }, navRef?: { current: NavigateFunction | null }): void {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -42,7 +44,7 @@ function mountAtPath(initialPath: string, pathnameRef: { current: string }): voi
           null,
           React.createElement(Route, {
             path: '*',
-            element: React.createElement(ShellRoutingHarness, { pathnameRef }),
+            element: React.createElement(ShellRoutingHarness, { pathnameRef, navRef }),
           }),
         ),
       ),
@@ -180,6 +182,82 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       await act(async () => {
         useTabsStore.getState().setActiveTab('settings');
       });
+      expect(ref.current).toBe('/settings');
+    });
+  });
+
+  describe('Back and Forward step through the tabs you visited', () => {
+    async function settle() {
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    }
+
+    it('Back returns to the previous tab and Forward restores the next one', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/settings', ref, nav);
+      await settle();
+      await act(async () => {
+        useTabsStore.getState().openTab({ id: 'project:foo', label: 'Foo', closable: true });
+      });
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect(ref.current).toBe('/settings');
+      expect(useTabsStore.getState().activeTabId).toBe('settings');
+
+      await act(async () => { nav.current!(1); });
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+      expect(useTabsStore.getState().activeTabId).toBe('project:foo');
+    });
+
+    it('repeated Back and Forward keep the address and the active tab in step', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/settings', ref, nav);
+      await settle();
+      for (const id of ['project:a', 'operations', 'project:b']) {
+        await act(async () => { useTabsStore.getState().openTab({ id, label: id, closable: true }); });
+        await settle();
+      }
+      expect(ref.current).toBe('/graph/b');
+
+      const expectAt = (path: string, tab: string) => {
+        expect(ref.current).toBe(path);
+        expect(useTabsStore.getState().activeTabId).toBe(tab);
+      };
+      for (const [step, path, tab] of [
+        [-1, '/observability', 'operations'],
+        [-1, '/graph/a', 'project:a'],
+        [1, '/observability', 'operations'],
+        [1, '/graph/b', 'project:b'],
+        [-1, '/observability', 'operations'],
+        [1, '/graph/b', 'project:b'],
+      ] as const) {
+        await act(async () => { nav.current!(step); });
+        await settle();
+        expectAt(path, tab);
+      }
+    });
+
+    it('switching tabs pushes history entries instead of replacing them', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/settings', ref, nav);
+      await settle();
+      await act(async () => { useTabsStore.getState().openTab({ id: 'project:foo', label: 'Foo', closable: true }); });
+      await settle();
+      await act(async () => { useTabsStore.getState().setActiveTab('settings'); });
+      await settle();
+      expect(ref.current).toBe('/settings');
+      // Two Backs: /graph/foo, then the original /settings entry.
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+      await act(async () => { nav.current!(-1); });
+      await settle();
       expect(ref.current).toBe('/settings');
     });
   });
