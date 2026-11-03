@@ -67,7 +67,7 @@ export async function bindState(ctx: PoolCtx): Promise<SmokeState | undefined> {
 
 /**
  * The gate of a phase: the state of a run bound to this network, in which the
- * phase `after` completed. What that phase must have
+ * phase `after` completed with no failed check. What that phase must have
  * recorded is validated here, once, and the state comes back typed as holding
  * it. It is the same object as the file's, so what a phase writes to it is saved.
  */
@@ -76,6 +76,8 @@ export async function runState(ctx: PoolCtx, after: 'serve' | 'close-claim'): Pr
 export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-claim'): Promise<SetupState> {
   const s = await bindState(ctx);
   if (!s) throw new Error(`${ctx.file.file} is missing: run PHASE=setup SEND=1 first`);
+  const failed = ctx.file.failedChecks(after);
+  if (failed) throw new Error(`PHASE=${after} ended with ${failed} failed check${failed > 1 ? 's' : ''}: run it again first, which sends nothing it sent already`);
   if (!ctx.file.done(after)) throw new Error(`run PHASE=${after} SEND=1 first`);
   const lacks = (what: string[]) => new Error(`${ctx.file.file} says ${after} completed, but holds no ${what.join(', ')}: start a new run`);
   if (!isSetup(s)) throw lacks(setupMissing(s));
@@ -84,17 +86,23 @@ export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-c
   return s;
 }
 
-/** A phase that completed earlier: say so, and keep the results it wrote then. */
+/**
+ * A phase that completed earlier: say so, and keep the results it wrote then.
+ * One whose checks failed did not: it runs again, and its failure stands until
+ * they pass.
+ */
 export function doneEarlier(ctx: Ctx, what: string): boolean {
+  const failed = ctx.file.failedChecks(ctx.env.phase);
+  if (failed) ctx.report.note(`${ctx.env.phase} ended with ${failed} failed check${failed > 1 ? 's' : ''} when it last ran: running it again, which sends nothing it sent already`);
   if (!ctx.file.done(ctx.env.phase)) return false;
   ctx.report.note(`${ctx.env.phase} is done${what ? `: ${what}` : ''}`);
   ctx.report.status = 'done earlier';
   return true;
 }
 
-/** Marks the phase done once it ran to its end with SEND=1. */
+/** Records the phase's outcome once it ran to its end with SEND=1: done, or failed if any check did. */
 export function complete(ctx: Ctx): void {
-  if (ctx.env.send && !ctx.report.stopped && ctx.report.status === 'ran') ctx.file.markDone(ctx.env.phase, ctx.report.failed);
+  if (ctx.env.send && !ctx.report.stopped && ctx.report.status === 'ran') ctx.file.finish(ctx.env.phase, ctx.report.failed);
 }
 
 /** FORK-ONLY: the seller's next proof, where the real node would have proved, with FORK_PROOFS=1. */

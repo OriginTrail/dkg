@@ -59,7 +59,8 @@ export type SmokeState = {
   /** Fork-only: the score each stand-in proof writes, and the epochs that have one. */
   fork?: { mirrorScore?: bigint; proofs: string[] };
   steps: Record<string, StepRecord>;
-  phases: Partial<Record<PhaseName, { status: 'done'; failedChecks: number }>>;
+  /** A phase that ran to its end: done, or failed when any of its checks did, and then to be run again. */
+  phases: Partial<Record<PhaseName, { status: 'done' | 'failed'; failedChecks: number }>>;
 };
 
 /** A run once setup has completed: what every later phase takes for granted. */
@@ -176,7 +177,9 @@ export function decodeState(raw: unknown): SmokeState {
   for (const [k, v] of Object.entries(obj(o.phases ?? {}, 'phases'))) {
     const p = obj(v, `phases.${k}`);
     const name = oneOf({ name: k }, 'name', PHASES, 'phases');
-    phases[name] = { status: oneOf(p, 'status', ['done'] as const, `phases.${k}`), failedChecks: optNum(p, 'failedChecks', `phases.${k}`) ?? 0 };
+    const failedChecks = optNum(p, 'failedChecks', `phases.${k}`) ?? 0;
+    const status = oneOf(p, 'status', ['done', 'failed'] as const, `phases.${k}`);
+    phases[name] = { status: failedChecks > 0 ? 'failed' : status, failedChecks };
   }
   const refs = o.refs === undefined ? undefined : (Array.isArray(o.refs) ? o.refs : []).map((x, i): RefRecord => {
     const r = obj(x, `refs[${i}]`);
@@ -286,10 +289,16 @@ export class StateFile implements Journal {
     return this.state?.phases[phase]?.status === 'done';
   }
 
-  /** The phase completed, with this many failed checks. */
-  markDone(phase: PhaseName, failedChecks: number): void {
+  /** How many checks failed when the phase last ran to its end, if any did. */
+  failedChecks(phase: PhaseName): number {
+    const p = this.state?.phases[phase];
+    return p?.status === 'failed' ? p.failedChecks : 0;
+  }
+
+  /** The phase ran to its end, with this many failed checks: with any, it is not done, and is run again. */
+  finish(phase: PhaseName, failedChecks: number): void {
     if (!this.state) return;
-    this.state.phases[phase] = { status: 'done', failedChecks };
+    this.state.phases[phase] = { status: failedChecks > 0 ? 'failed' : 'done', failedChecks };
     this.save();
   }
 

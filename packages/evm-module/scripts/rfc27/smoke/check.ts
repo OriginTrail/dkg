@@ -10,7 +10,7 @@ import { fmt, iso, span } from '../report';
 import { MIN_EPOCH_LEFT, PLANNED_GAS, gasCost, plannedAmounts, requestPlan, planValue } from './config';
 import { Ctx, PoolCtx, epochStart, now, withPool } from './context';
 import { Roles } from './roles';
-import { Amounts } from './state';
+import { Amounts, PHASES } from './state';
 
 /** Whether the Hub holds the OT-RFC-27 stack; reports "not deployed yet" when it does not. */
 export async function deployed(ctx: Ctx): Promise<boolean> {
@@ -198,7 +198,7 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
   say(`  close-claim from the start of E+2, ${iso(await ts(E + 2n))}: closeEpochs, then claimFor against StakingKPI's preview`);
   say(`  withdraw  optional: in the middle of an epoch after close-claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 3n))})`);
   if (s) {
-    const done = Object.keys(s.phases).join(', ') || 'nothing yet';
+    const done = PHASES.filter((p) => ctx.file.done(p)).join(', ') || 'nothing yet';
     say(`  progress  done: ${done}${s.withdrawal ? `; withdrawn in epoch ${s.withdrawal.epoch}${s.withdrawal.claimed ? ', its epoch claimed' : ''}` : ''}`);
   }
 }
@@ -223,6 +223,10 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
   if (!s && isDeployed) {
     const left = (await epochStart(ctx, current + 1n)) - (await now(ctx));
     ctx.report.check(`epoch ${current} has at least ${span(MIN_EPOCH_LEFT)} left for setup and serve`, left >= MIN_EPOCH_LEFT || activation > current, `${span(left)} left`);
+  }
+  for (const p of PHASES) {
+    const failed = ctx.file.failedChecks(p);
+    if (failed) ctx.report.check(`PHASE=${p} of this run has no failed check`, false, `${failed} failed when it last ran: run it again`);
   }
   ctx.report.set('amounts', a);
   await printPlan(ctx, ctx.roles, a, current, grace, activation);
