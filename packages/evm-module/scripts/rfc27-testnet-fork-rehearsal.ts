@@ -81,9 +81,10 @@
 //
 //   # 6. existing accounts and positions after the upgrade, with every
 //   #    position's first-claim gas and the longest history's withdrawal gas;
-//   # 7. one full cycle, with a withdrawal in the middle of an epoch, its payout
-//   #    against the views, and its claimWithdrawnEpoch, and the settlement
-//   #    removed in a reverted snapshot;
+//   # 7. one full cycle: claims skipped NoScore before their sellers prove,
+//   #    then finalized once they have; a withdrawal in the middle of an epoch,
+//   #    its payout against the views, and its claimWithdrawnEpoch; and the
+//   #    settlement removed in a reverted snapshot;
 //   # 8. an account untouched for several epochs, booked late;
 //   # 9. the close falling more than maxCloseStepsPerClaim epochs behind;
 //   # 10. the unused share of every closed epoch, read from storage

@@ -2,9 +2,10 @@
 // activation epoch A. In A: an operator fee for the first seller, a
 // wallet-funded period, a new Conviction Account opened for services and a
 // period funded from it, a second account left untouched, a publish, and the
-// sellers' receipt batches. In A + 1: the finalization, and a withdrawal in the
-// middle of the epoch. In A + 2 (cycle-pay.ts): the close, the claims, the
-// withdrawn epoch, the operator fee, the window booking.
+// sellers' receipt batches. In A + 1: the finalization, first while the sellers
+// have not proved in A + 1 (every claim skipped NoScore), then once they have;
+// and a withdrawal in the middle of the epoch. In A + 2 (cycle-pay.ts): the
+// close, the claims, the withdrawn epoch, the operator fee, the window booking.
 
 import { ethers } from 'ethers';
 import type { Signer } from 'ethers';
@@ -202,6 +203,22 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     { subscriptionId: walletPeriod, bucketIndex: 0n, seller },
   ]);
   const finalizeData = c.qs.interface.encodeFunctionData('finalizeClaims', [refs]);
+  const skipsIn = (r: Awaited<ReturnType<typeof send>>) =>
+    eventsIn(r.receipt, c.qs, c.qs.getEvent('ClaimSkipped')).map((e) => ({ subscriptionId: e.subscriptionId, bucketIndex: e.bucketIndex, seller: e.seller, reason: skipReasonOf(e.reason) }));
+  // A keeper that runs at the deadline, before the sellers' first proof in
+  // A + 1: finalizeClaims skips a claim while its seller has no node score in
+  // the current epoch, with ClaimSkipped(NoScore), and the transaction goes
+  // through. The claims stay as they were, to be finalized by a retry once
+  // the sellers have proved, before A + 1 ends.
+  const early = await send(ctx, `keeper: finalizeClaims (4 claims), before the sellers prove in epoch ${A + 1n}`, keeper, qsAddr, finalizeData);
+  const noScore = skipsIn(early);
+  const finalizedEarly = eventsIn(early.receipt, c.qs, c.qs.getEvent('ClaimsFinalized')).length;
+  const untouched = (await Promise.all(refs.map(async (r) => !(await c.qis.getSellerClaim(r.subscriptionId, r.bucketIndex, r.seller)).finalized))).every(Boolean);
+  check(
+    `before the sellers prove in epoch ${A + 1n}, finalizeClaims goes through and skips each claim NoScore, leaving it unfinalized`,
+    early.receipt.status === 1 && finalizedEarly === 0 && noScore.length === refs.length && noScore.every((s) => s.reason === 'NoScore') && untouched,
+    noScore.map((s) => `${s.subscriptionId === caPeriod ? 'account' : 'wallet'} claim of node ${s.seller}: ${s.reason}`).join(', '),
+  );
   for (const n of activeNodes) await prove(n, `node ${n} scores in epoch ${A + 1n} what it scored in ${E0 - 1n}`);
   const fin = await send(ctx, 'keeper: finalizeClaims (4 claims)', keeper, qsAddr, finalizeData);
   const finalized = eventsIn(fin.receipt, c.qs, c.qs.getEvent('ClaimsFinalized')).map((e) => ({
@@ -211,10 +228,15 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     value: e.value,
     score: e.score,
   }));
-  const skipped = eventsIn(fin.receipt, c.qs, c.qs.getEvent('ClaimSkipped')).map((e) => ({ subscriptionId: e.subscriptionId, bucketIndex: e.bucketIndex, seller: e.seller, reason: skipReasonOf(e.reason) }));
+  const skipped = skipsIn(fin);
   out.finalized = finalized;
   out.skipped = skipped;
   check('all four claims finalized', finalized.length === 4 && skipped.length === 0);
+  check(
+    'the retry after the sellers\' proofs finalizes every claim the first call skipped NoScore',
+    noScore.every((s) => finalized.some((f) => f.seller === s.seller && (f.sub === 'account') === (s.subscriptionId === caPeriod))),
+  );
+  out.noScoreRetry = { skipped: noScore, gasUsed: early.gasUsed };
   const caFinal = sum(finalized.filter((f) => f.sub === 'account').map((f) => f.value));
   check(`the account bucket's claims shrank to its funded cap ${fmt(fundedCap.ca)}`, caFinal <= fundedCap.ca && caFinal >= fundedCap.ca - 2n);
 
