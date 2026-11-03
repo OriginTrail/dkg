@@ -1,15 +1,16 @@
 // Unit tests for the deploy steps of service plan periods (OT-RFC-27) and for
 // the Hub transaction step they end in:
+//   - deploy/active/000_check_service_spending_builds.ts, which refuses, ahead
+//     of every deployment of a run, to keep a PublishingConviction 10.1.x, which
+//     would count an account funding twice, or a StakingV10 below 10.1.0, which
+//     would split every epoch without the pool, so a refused run strands nothing;
 //   - deploy/active/052c_deploy_conviction_service_storage.ts, which deploys
 //     ConvictionServiceStorage and sets its parameters everywhere but on
 //     mainnet;
 //   - deploy/active/052d_deploy_service_subscriptions.ts, which deploys
-//     ServiceSubscriptions and ServiceSubscriptionsWallet, and refuses to run
-//     against PublishingConviction 10.1.x, which would count an account
-//     funding twice;
-//   - deploy/active/052e_deploy_query_inference_storage.ts, which refuses to
-//     run against a StakingV10 below 10.1.0, which would split every epoch
-//     without the pool, and warns loudly against such a StakingKPI;
+//     ServiceSubscriptions and ServiceSubscriptionsWallet;
+//   - deploy/active/052e_deploy_query_inference_storage.ts, which deploys the
+//     storage and warns loudly against a StakingKPI below 10.1.0;
 //   - deploy/active/052f_deploy_query_inference_settlement.ts, which deploys
 //     QueryInferenceSettlement everywhere but on mainnet;
 //   - deploy/active/998_initialize_contracts.ts, which sends
@@ -23,17 +24,21 @@
 // does: no chain, no real deploy.
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 import { expect } from 'chai';
 import { ethers, Interface } from 'ethers';
+import { DeployFunction } from 'hardhat-deploy/types';
 
+import checkBuilds from '../deploy/active/000_check_service_spending_builds';
 import deployStorage from '../deploy/active/052c_deploy_conviction_service_storage';
 import deployServiceSubscriptions from '../deploy/active/052d_deploy_service_subscriptions';
 import deployQueryInferenceStorage from '../deploy/active/052e_deploy_query_inference_storage';
 import deployQueryInferenceSettlement from '../deploy/active/052f_deploy_query_inference_settlement';
 import initializeContracts from '../deploy/active/998_initialize_contracts';
 import activateQueryInference from '../deploy/active/998b_activate_query_inference';
+import { Helpers } from '../utils/helpers';
 
 const abiOf = (name: string) =>
   JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'abi', `${name}.json`), 'utf-8'));
@@ -91,6 +96,221 @@ function storageHre(opts: { network?: string; environment?: string }) {
   };
   return { hre, deployed, updates };
 }
+
+describe('@unit deploy/000 — the builds service spending needs, checked ahead of every deployment', () => {
+  const STAKING_V10 = '0x1000000000000000000000000000000000000009';
+  const addressOf: Record<string, string> = { PublishingConviction: PUBLISHING_CONVICTION, StakingV10: STAKING_V10 };
+
+  /** A run on `network` that reuses the recorded contracts of `reused`, at those versions. */
+  const buildsHre = (reused: Record<string, string>, opts: { network?: string; environment?: string } = {}) => {
+    const read: string[] = [];
+    const hre = {
+      network: { name: opts.network ?? 'base_sepolia_v10', config: { environment: opts.environment ?? 'testnet' } },
+      ethers: {
+        getContractAt: async (name: string, address: string) => {
+          read.push(name);
+          if (name in reused && address === addressOf[name]) return { version: async () => reused[name] };
+          throw new Error(`unexpected getContractAt(${name}, ${address})`);
+        },
+      },
+      helpers: {
+        isDeployed: (name: string) => name in reused,
+        contractDeployments: {
+          contracts: Object.fromEntries(Object.keys(reused).map((name) => [name, { evmAddress: addressOf[name], deployed: true }])),
+        },
+      },
+    };
+    return { hre, read };
+  };
+
+  it('lets a run through that deploys both, or keeps a PublishingConviction below 10.1.0 or from 10.2.0 on and a StakingV10 from 10.1.0 on', async () => {
+    for (const reused of [
+      {},
+      { PublishingConviction: '10.0.8' },
+      { PublishingConviction: '10.2.0' },
+      { PublishingConviction: '11.0.0', StakingV10: '10.1.0' },
+      { StakingV10: '10.2.3' },
+    ]) {
+      const { hre, read } = buildsHre(reused);
+      expect(await failureOf(() => checkBuilds(hre as never))).to.equal(undefined);
+      expect(read).to.have.members(Object.keys(reused));
+    }
+  });
+
+  it('refuses a run that would leave PublishingConviction 10.1.x, which would count an account funding twice, and names the redeploy flag', async () => {
+    for (const version of ['10.1.0', '10.1.3']) {
+      const { hre } = buildsHre({ PublishingConviction: version });
+      const error = await failureOf(() => checkBuilds(hre as never));
+      expect(error?.message).to.match(/needs PublishingConviction 10\.2\.0 or later on base_sepolia_v10/);
+      expect(error?.message).to.match(/counted twice/);
+      expect(error?.message).to.match(/contracts\.PublishingConviction\.deployed to false/);
+    }
+  });
+
+  it('refuses a run that would keep a StakingV10 below 10.1.0, which splits epochs without the pool, and names the redeploy flag', async () => {
+    for (const version of ['10.0.4', '10.0.6']) {
+      const { hre } = buildsHre({ StakingV10: version });
+      const error = await failureOf(() => checkBuilds(hre as never));
+      expect(error?.message).to.match(/needs StakingV10 10\.1\.0 or later on base_sepolia_v10/);
+      expect(error?.message).to.contain(`${version} at ${STAKING_V10}`);
+      expect(error?.message).to.match(/stays in the vault/);
+      expect(error?.message).to.match(/contracts\.StakingV10\.deployed to false/);
+    }
+  });
+
+  it('on a mainnet network, refuses nothing and reads nothing', async () => {
+    for (const network of ['base_mainnet', 'gnosis_mainnet']) {
+      const { hre, read } = buildsHre({ PublishingConviction: '10.1.0', StakingV10: '10.0.5' }, { network, environment: 'mainnet' });
+      expect(await failureOf(() => checkBuilds(hre as never))).to.equal(undefined);
+      expect(read).to.have.length(0);
+    }
+  });
+
+  // The steps of deploy/active, in the order hardhat-deploy runs them: its
+  // DeploymentsManager takes the tagged files in file order, each after its
+  // dependencies, in the order they are listed.
+  const scriptsDir = path.join(__dirname, '..', 'deploy', 'active');
+  const steps = () =>
+    fs
+      .readdirSync(scriptsDir)
+      .filter((file) => file.endsWith('.ts'))
+      .sort()
+      .map((file) => {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const loaded = require(path.join(scriptsDir, file)) as { default: DeployFunction };
+        return { file, func: loaded.default, tags: (loaded.default.tags ?? []) as string[] };
+      });
+  const orderOf = (all: ReturnType<typeof steps>, tags: string[] = []) => {
+    const order: typeof all = [];
+    const atTheEnd: typeof all = [];
+    const seen = new Set<string>();
+    const visit = (step: (typeof all)[number]) => {
+      if (seen.has(step.file)) return;
+      for (const dependency of step.func.dependencies ?? []) {
+        for (const other of all) if (other.tags.includes(dependency)) visit(other);
+      }
+      if (seen.has(step.file)) return;
+      seen.add(step.file);
+      (step.func.runAtTheEnd ? atTheEnd : order).push(step);
+    };
+    for (const step of all) if (tags.length === 0 || tags.some((tag) => step.tags.includes(tag))) visit(step);
+    return [...order, ...atTheEnd];
+  };
+
+  it('runs first in a run of every step, and in every run by a tag that reaches the steps that need these builds', () => {
+    const all = steps();
+    const needing = (order: typeof all) => order.some((s) => /^052[de]_/.test(s.file));
+    const first = (order: typeof all) => order[0].file;
+    const check = '000_check_service_spending_builds.ts';
+
+    const everyStep = orderOf(all);
+    expect(first(everyStep)).to.equal(check);
+    expect(everyStep.some((s) => s.file.startsWith('052e_'))).to.equal(true);
+
+    const tags = [...new Set(all.flatMap((s) => s.tags))];
+    const reaching = tags.filter((tag) => needing(orderOf(all, [tag])));
+    expect(reaching).to.include.members(['QueryInferenceStorage', 'ServiceSubscriptions', 'QueryInferenceSettlement', 'StakingKPI', 'v10']);
+    for (const tag of reaching) expect(first(orderOf(all, [tag])), `--tags ${tag}`).to.equal(check);
+  });
+
+  // Each recorded build is flagged as the operator left it. Whatever else the run
+  // redeploys, Ask comes before 052e and 052e's storages before 052d, so a
+  // refusal in either step would have left a contract recorded and unregistered.
+  const OLD_ASK = '0x3000000000000000000000000000000000000001';
+  const OLD_PUBLISHING = '0x3000000000000000000000000000000000000002';
+  const OLD_STAKING = '0x3000000000000000000000000000000000000003';
+  for (const { refused, flag, publishing, staking } of [
+    {
+      refused: /needs StakingV10 10\.1\.0 or later/,
+      flag: 'StakingV10',
+      publishing: { version: '10.0.8', deployed: false },
+      staking: { version: '10.0.4', deployed: true },
+    },
+    {
+      refused: /needs PublishingConviction 10\.2\.0 or later/,
+      flag: 'PublishingConviction',
+      publishing: { version: '10.1.3', deployed: true },
+      staking: { version: '10.0.4', deployed: false },
+    },
+  ]) {
+    it(`a run refused over ${flag} deploys and records nothing, so the corrected retry registers every contract in the Hub transaction`, async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-retry-'));
+      const file = path.join(dir, 'base_sepolia_v10_contracts.json');
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          contracts: {
+            Hub: { evmAddress: HUB, version: '1.0.0', deployed: true },
+            Ask: { evmAddress: OLD_ASK, version: '10.0.0', deployed: false },
+            PublishingConviction: { evmAddress: OLD_PUBLISHING, ...publishing },
+            StakingV10: { evmAddress: OLD_STAKING, ...staking },
+          },
+        }),
+      );
+
+      // One process of `hardhat deploy`, over the real Helpers and the real steps
+      // that deploy these contracts, in the order of a run of every step.
+      const run = async () => {
+        const sent: string[] = [];
+        const versionAt: Record<string, string> = { [OLD_PUBLISHING]: publishing.version, [OLD_STAKING]: staking.version };
+        const hre = {
+          network: { name: 'base_sepolia_v10', config: { environment: 'testnet' } },
+          config: { paths: { deployments: dir } },
+          getNamedAccounts: async () => ({ deployer: DEPLOYER }),
+          deployments: {
+            deploy: async (name: string) => {
+              sent.push(name);
+              return { address: ethers.zeroPadValue(ethers.toBeHex(0x4000n + BigInt(sent.length)), 20), receipt: { blockNumber: 1 } };
+            },
+          },
+          ethers: {
+            provider: { getTransactionCount: async () => 0 },
+            getContractAt: async (_: unknown, address: string) => ({ version: async () => versionAt[address] ?? '10.2.0' }),
+          },
+          helpers: undefined as unknown as Helpers,
+        };
+        hre.helpers = new Helpers(hre as never);
+        hre.helpers.updateContractParameters = async () => undefined;
+        const wanted = /^(000|020|052b|052c|052d|052e|052f|055)_/;
+        const order = orderOf(steps()).filter((s) => wanted.test(s.file));
+        expect(order.map((s) => s.file.split('_')[0])).to.deep.equal(['000', '020', '052e', '052c', '052f', '052b', '052d', '055']);
+        const error = await failureOf(async () => {
+          for (const step of order) await step.func(hre as never);
+        });
+        return { error, sent, helpers: hre.helpers };
+      };
+
+      try {
+        const before = fs.readFileSync(file, 'utf-8');
+        const first = await run();
+        expect(first.error?.message).to.match(refused);
+        expect(first.sent).to.have.length(0);
+        expect(first.helpers.newContracts).to.have.length(0);
+        expect(fs.readFileSync(file, 'utf-8')).to.equal(before);
+
+        // The operator corrects the flag and runs the deploy again.
+        const corrected = JSON.parse(before);
+        corrected.contracts[flag].deployed = false;
+        fs.writeFileSync(file, JSON.stringify(corrected));
+        const retried = await run();
+        expect(retried.error).to.equal(undefined);
+        expect(retried.helpers.newContracts.map((c) => c.name)).to.deep.equal(retried.sent);
+        expect(retried.sent).to.have.members([
+          'Ask',
+          'QueryInferenceStorage',
+          'ConvictionServiceStorage',
+          'QueryInferenceSettlement',
+          'PublishingConviction',
+          'ServiceSubscriptions',
+          'ServiceSubscriptionsWallet',
+          'StakingV10',
+        ]);
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+});
 
 describe('@unit deploy/052c — ConvictionServiceStorage', () => {
   it('on a mainnet network, deploys nothing and sets no parameters', async () => {
@@ -154,17 +374,6 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
     }
   });
 
-  it('refuses a run that would leave 10.1.x, which would count an account funding twice, and names the redeploy flag', async () => {
-    for (const version of ['10.1.0', '10.1.3']) {
-      const { hre, deployed } = ssHre(version);
-      const error = await failureOf(() => deployServiceSubscriptions(hre as never));
-      expect(error?.message).to.match(/needs PublishingConviction 10\.2\.0 or later on base_sepolia_v10/);
-      expect(error?.message).to.match(/counted twice/);
-      expect(error?.message).to.match(/contracts\.PublishingConviction\.deployed to false/);
-      expect(deployed).to.have.length(0);
-    }
-  });
-
   it('on a mainnet network, deploys nothing, whatever build the run leaves', async () => {
     for (const version of ['10.0.7', '10.1.0', '10.2.0']) {
       for (const network of ['base_mainnet', 'gnosis_mainnet']) {
@@ -184,9 +393,8 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
         const { hre, deployed } = ssHre(version, { network, environment: 'testnet' });
         const lines = await captured(() => deployServiceSubscriptions(hre as never));
         expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
-        expect(lines.join('\n')).to.match(
-          new RegExp(`${network} keeps PublishingConviction ${version.replace(/\./g, '\\.')}.*stay off`),
-        );
+        const note = lines.find((line) => line.includes(`${network} keeps PublishingConviction ${version},`));
+        expect(note, lines.join('\n')).to.contain('stay off');
       }
     }
   });
@@ -239,18 +447,6 @@ describe('@unit deploy/052e — QueryInferenceStorage, and the StakingV10 and St
         expect(updates).to.deep.equal(['QueryInferenceStorage']);
         expect(lines).to.have.length(0);
       }
-    }
-  });
-
-  it('refuses a run that would keep a StakingV10 below 10.1.0, which splits epochs without the pool, and names the redeploy flag', async () => {
-    for (const version of ['10.0.4', '10.0.6']) {
-      const { hre, deployed } = qisHre({ network: 'base_sepolia_v10', environment: 'testnet', reused: { StakingV10: version } });
-      const error = await failureOf(() => deployQueryInferenceStorage(hre as never));
-      expect(error?.message).to.match(/needs StakingV10 10\.1\.0 or later on base_sepolia_v10/);
-      expect(error?.message).to.contain(`${version} at ${STAKING_V10}`);
-      expect(error?.message).to.match(/stays in the vault/);
-      expect(error?.message).to.match(/contracts\.StakingV10\.deployed to false/);
-      expect(deployed).to.have.length(0);
     }
   });
 

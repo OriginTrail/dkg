@@ -144,7 +144,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         address assignee; // the buyer key that funded it
         uint64 assignmentNonce; // the nonce of the assignment it was funded under; unused for a wallet period
         address sessionKey; // the buyer's request-signing key; the funding contracts refuse zero
-        bytes32 periodId; // the period's epoch; the id is keccak256(abi.encode(assignee, periodId))
+        uint40 epoch; // the period's epoch; the id is keccak256(abi.encode(assignee, epoch))
         bytes32 planDigest; // the buyer's commitment to its plan, opaque here; a top-up replaces it
         uint40 periodStart; // the later of the funding's block time and the epoch's start; 0 = no record
         uint40 periodEnd; // the start of the next epoch

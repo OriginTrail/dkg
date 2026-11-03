@@ -31,22 +31,8 @@ import { expect } from 'chai';
 import { ContractTransactionReceipt, ContractTransactionResponse } from 'ethers';
 import hre from 'hardhat';
 
+import { STAKER_SHARD_ID, TREASURY_SHARD_ID, deployAccountStack } from './helpers/account-stack';
 import {
-  Chronos,
-  ConvictionServiceStorage,
-  ConvictionStakingStorage,
-  DKGPublishingConvictionNFT,
-  EpochStorage,
-  Hub,
-  ParametersStorage,
-  PublishingConviction,
-  PublishingConvictionStorage,
-  QueryInferenceStorage,
-  ServiceSubscriptions,
-  Token,
-} from '../typechain';
-import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   DAY,
   TRAC,
@@ -61,48 +47,16 @@ import {
   writeLegacyAccount,
 } from './helpers/conviction-service';
 
-const STAKER_SHARD_ID = 1n;
-const TREASURY_SHARD_ID = 2n;
 const BUYER_KEYS = 6;
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  ES: EpochStorage;
-  Params: ParametersStorage;
-  Vault: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS } = await registerServiceContracts(Hub);
-  await Hub.setContractAddress('KnowledgeAssetsLifecycle', accounts[5].address);
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    ES: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-    QIS,
-    CSS,
-    SS,
-  };
+async function deployFixture() {
+  const stack = await deployAccountStack();
+  const { QIS, CSS, SS } = await registerServiceContracts(stack.Hub);
+  await stack.Hub.setContractAddress('KnowledgeAssetsLifecycle', stack.accounts[5].address);
+  return { ...stack, QIS, CSS, SS };
 }
+
+type Fixture = Awaited<ReturnType<typeof deployFixture>>;
 
 /** A small seeded PRNG (mulberry32), so every sequence replays exactly. */
 function prng(seed: number): () => number {

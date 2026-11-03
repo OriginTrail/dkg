@@ -13,36 +13,31 @@ import { Contract } from 'ethers';
 import hre from 'hardhat';
 
 import {
-  Chronos,
   ConvictionServiceStorage,
-  Hub,
   QueryInferenceSettlement,
   QueryInferenceStorage,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
-  Token,
 } from '../typechain';
+import { deployAccountStack } from './helpers/account-stack';
 import { ACCOUNT_STACK_TAGS, TRAC, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 
 async function deployFixture() {
-  await hre.deployments.fixture([
+  const stack = await deployAccountStack([
     ...ACCOUNT_STACK_TAGS,
     'ServiceSubscriptions',
     'QueryInferenceSettlement',
     'QueryInferenceActivation',
   ]);
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const at = async <T>(name: string) => (await hre.ethers.getContractAt(name, await Hub.getContractAddress(name))) as T;
+  const at = async <T>(name: string) =>
+    (await hre.ethers.getContractAt(name, await stack.Hub.getContractAddress(name))) as T;
   return {
-    Hub,
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Token: await hre.ethers.getContract<Token>('Token'),
+    ...stack,
     QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
     CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
     SS: await at<ServiceSubscriptions>('ServiceSubscriptions'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
     QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
-    accounts: await hre.ethers.getSigners(),
   };
 }
 

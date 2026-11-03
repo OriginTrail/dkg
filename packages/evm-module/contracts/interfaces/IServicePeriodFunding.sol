@@ -2,10 +2,12 @@
 
 pragma solidity ^0.8.20;
 
+import {ConvictionServiceStorage} from "../storage/ConvictionServiceStorage.sol";
+
 /**
  * @title IServicePeriodFunding
- * @notice The bucket shape, events and errors of plan-period funding
- *         (OT-RFC-27, "NeuroSymbolic Marketplace") that both funding
+ * @notice The events and errors of plan-period funding (OT-RFC-27,
+ *         "NeuroSymbolic Marketplace") that both funding
  *         contracts share: `ServiceSubscriptions`, which funds and tops up
  *         periods from a Conviction Account's allowance, and
  *         `ServiceSubscriptionsWallet`, which funds and tops up periods from
@@ -18,14 +20,6 @@ pragma solidity ^0.8.20;
  *         pattern of {IConvictionServiceErrors}.
  */
 interface IServicePeriodFunding {
-    /// @notice One service bucket of a funding or a top-up.
-    struct BucketInput {
-        bytes32 bucketId; // a canonical model or service
-        uint8 serviceClass; // 1 = inference (units: tokens), 2 = query (units: query units)
-        uint96 value; // the funded bucket value before the discount, TRAC wei
-        uint96 maxAskWeiPerUnit; // the buyer's price cap per unit
-    }
-
     /// @notice A plan period was funded: the period of `epoch`, from
     ///         `periodStart` to `periodEnd`. `accountId` is 0 for a period
     ///         funded from a wallet, whose cost is its value. Sellers verify
@@ -42,7 +36,7 @@ interface IServicePeriodFunding {
         uint96 value,
         uint96 cost,
         uint16 discountBps,
-        BucketInput[] buckets
+        ConvictionServiceStorage.Bucket[] buckets
     );
 
     /// @notice A funded period was topped up: `value` more before the
@@ -56,7 +50,7 @@ interface IServicePeriodFunding {
         uint96 value,
         uint96 cost,
         bytes32 planDigest,
-        BucketInput[] additions
+        ConvictionServiceStorage.Bucket[] additions
     );
 
     /// @notice A request outside the funding rules; `reason` names the rule.

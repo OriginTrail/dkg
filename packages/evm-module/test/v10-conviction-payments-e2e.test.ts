@@ -7,10 +7,11 @@
 
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import { EpochStorage, PublishingConviction, PublishingConvictionStorage } from '../typechain';
+import { STAKER_SHARD_ID, eventsOf } from './helpers/account-stack';
 import { CLASS_INFERENCE, TRAC, bucket, costOf, requestOf, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 import {
   SettlementStack,
@@ -25,7 +26,6 @@ import {
 
 const UNIT_ASK = 10n ** 15n;
 const PRICE_CAP = 10n ** 16n;
-const STAKER_SHARD_ID = 1n;
 // The 30 % tier.
 const COMMITTED = 100_000n * TRAC;
 const BPS = 3_000n;
@@ -45,27 +45,12 @@ describe('@integration A Conviction Account period reaches the query/inference p
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
     f = await loadFixture(deployFixture);
-    ES = await hre.ethers.getContract<EpochStorage>('EpochStorageV8');
-    PC = await hre.ethers.getContract<PublishingConviction>('PublishingConviction');
-    PCS = await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage');
+    ({ ES, PC, PCS } = f);
   });
 
   const latest = async () => BigInt(await time.latest());
   const epochNow = async () => f.Chronos.getCurrentEpoch();
   const epochStart = async (e: bigint) => f.Chronos.timestampForEpoch(e);
-
-  const eventsOf = (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      try {
-        const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === name) out.push(parsed.args);
-      } catch {
-        // another contract's log
-      }
-    }
-    return out;
-  };
 
   const stakerCredits = (receipt: ContractTransactionReceipt) =>
     eventsOf(receipt, ES, 'TokensAddedToEpochRange').filter((a) => a.shardId === STAKER_SHARD_ID);
