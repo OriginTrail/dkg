@@ -1,3 +1,4 @@
+import { isDkg } from './dkg-components.mjs';
 import { canonicalizeJson } from '../../packages/core/dist/index.js';
 import { loadExecutionOutputs } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { iriValue, resultRows } from '../../packages/cli/dist/semantic-runtime-values.js';
@@ -82,6 +83,16 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   }
   async function handle(req, res, path) {
     if (!path.startsWith('/spike/ka/')) return false;
+    if(path === '/spike/ka/internal/dkg-component') {
+      try {
+        const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
+        const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
+        if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
+        let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
+        json(res,200,await studio.dkgComponent(JSON.parse(body)));
+      } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
+      return true;
+    }
     if (path === '/spike/ka/demo-data' && ['GET', 'POST'].includes(req.method)) {
       let body = '', size = 0;
       for await (const chunk of req) { size += chunk.length; if (size > 4096) { json(res, 413, { error: 'Small JSON only.' }); return true; } body += chunk; }
@@ -97,7 +108,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     if (origin && !['http://127.0.0.1:4620', 'http://localhost:4620'].includes(origin)) { json(res, 403, { error: 'Local console origin required' }); return true; }
     const identity = req.headers.authorization;
     const routes = [prefix, prefix + '/invoke', prefix + '/inspect', prefix + '/workflows', prefix + '/workflows/save', prefix + '/workflows/run',
-      ...['', '/save', '/run', '/invoke', '/activation', '/history', '/jpb-output'].map(s => prefix + '/studio' + s)];
+      ...['', '/save', '/run', '/invoke', '/activation', '/history'].map(s => prefix + '/studio' + s)];
     if (!['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(identity)
       || !routes.includes(path)) { json(res, 403, { error: 'Account access denied' }); return true; }
     try {
@@ -106,17 +117,17 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         if (route === '' && req.method === 'GET') json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: identity === 'Bearer l1-owner-a' });
         else if (route === '/history' && req.method === 'GET') {
           const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams; json(res, 200, await studio.history(params.get('kaRef')));
-        } else if (['/save', '/run', '/invoke', '/activation', '/jpb-output'].includes(route) && req.method === 'POST') {
+        } else if (['/save', '/run', '/invoke', '/activation'].includes(route) && req.method === 'POST') {
           if (identity !== 'Bearer l1-owner-a') { json(res, 403, { error: 'Owner access required.' }); return true; }
           let body = '', size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new Error('Request too large'); body += chunk; }
           const value = JSON.parse(body);
-          if (route === '/jpb-output') json(res, 200, await studio.writeJpb(value));
-          else if (route === '/save') json(res, 200, await studio.save(value, authorize));
+          if (route === '/save') json(res, 200, await studio.save(value, authorize));
           else if (route === '/run') json(res, 200, await studio.run(value, authorize));
           else if (route === '/activation') json(res, 200, await studio.activate(value, authorize));
           else {
             const selected = (await list()).find(c => c.kind === 'component' && c.kaRef === value.kaRef && c.sourceHash === value.sourceHash && c.available);
             if (!selected) throw Object.assign(new Error('Component revision unavailable.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
+            if (isDkg(selected.descriptor.id)) throw Object.assign(new Error('Compose DKG Read / Write inside a saved native workflow.'), {status:400});
             if (selected.requiresExportAuthorization) authorize();
             let input; try { input = normalizeComponentInput(selected.descriptor, value.input); }
             catch (e) { throw Object.assign(selected.retired ? new Error('This older component version does not accept these inputs. Choose Use current component version, then invoke it again. Your URL and field settings are kept.') : e, { code: 'INVALID_WORKFLOW', status: 400 }); }

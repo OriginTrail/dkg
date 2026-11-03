@@ -40,6 +40,16 @@ export const componentRegistry = [
     query: json('Query parameters', {}), headers: json('Request headers', {}),
     body: { ...json('JSON request body', {}), shape: 'any' },
   }, { sampleItems: [{}], version: 2 }),
+  entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', {
+    node: choice('Source node', 'JPB', ['JPB']),
+    contextGraph: choice('Source Context Graph', '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data', ['0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-data']),
+    orderNo: choice('Saved ERP order · CUT, USILU, EBAVM', '62633', ['62633']),
+  }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{ workbook: [] }] }),
+  entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', {
+    node: choice('Destination node', 'JPB', ['JPB']),
+    contextGraph: choice('Destination Context Graph', '0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study', ['0xf77258a965ba13adc77bca85da7c6a287272959a/jpb-plca-study']),
+    outputKind: choice('Output · private Working Memory', 'PLCAInputEvidence', ['PLCAInputEvidence']),
+  }, { version: 2, connection: 'httpHeaderAuth', writes: true, sampleItems: [{}] }),
   entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true }),
   entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),

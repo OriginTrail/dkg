@@ -371,22 +371,49 @@ redispatched. A successful completed retry returns the persisted result after
 current authorization checks. Private KA receipts establish provenance and
 matching content, not independently verified execution of an external service.
 
-### JPB output for the reviewed local demo
+### JPB DKG Read and DKG Write components
 
-`NOS_JPB_WRITE_ENABLED=1` and `NOS_JPB_WORKFLOW_REF=<exact saved KA>` enable the
-owner-only `/studio/jpb-output` action. It accepts an invocation ID already
-read back from DKG, uses the existing SSH access to the fixed JPB owner host,
-and calls the node's knowledge-asset create/write/finalize API. Credentials stay
-on that host. No JPB service is installed or restarted.
+Install `dkg-read,dkg-write` with `setup-components-local.mjs --install --only` in the isolated
+local n8n instance, using the same `httpHeaderAuth` connection as the native bridge. Restart that
+local n8n instance after offline installation. The fixed callback is
+`http://127.0.0.1:4631/spike/ka/internal/dkg-component`; allow loopback for this isolated n8n
+instance with `N8N_SSRF_ALLOWED_IP_RANGES=127.0.0.1/32`, keeping SSRF protection enabled.
+The general HTTP component still rejects arbitrary private destinations.
 
-The target is the existing private `jpb-plca-study` Context Graph. The output is
-explicitly non-calculated PLCA input evidence with unconfirmed allocation; the
-receipt and both input provenances are retained. Sharing and VM publishing are
-explicitly false. Readback checks every RDF term, decodes Unicode literal escapes,
-verifies the payload SHA-256, and requires `wm-sealed` status.
+Configure the companion:
 
-A durable pending row is recorded before dispatch. Retry checks the same named
-asset; an uncertain missing asset requires reconciliation rather than automatic
-recreation. Successful retries also perform remote readback. Concurrent calls for
-one execution share the same in-flight request. Only the configured workflow
-revision may write. EPCIS emission remains disabled.
+- `NOS_JPB_READ_ENABLED=1`
+- `NOS_JPB_WRITE_ENABLED=1`
+- `NOS_JPB_WORKBOOK_INPUT_FILE=/absolute/path/to/JPB-recorded-inputs.json`
+
+The last file contains the reviewed original four workbook rows at `[0].workbook`. Input must
+match them exactly before a workflow containing DKG Write can execute. The JPB connection uses
+existing SSH access to `adminuser@100.113.215.1`; node credentials remain on that host.
+No remote services are installed or restarted. These flags authorize only this fixed demo scope.
+
+Use **DKG Read** as the first block. It accepts one `{workbook:[...]}` item and reads saved order
+62633 (CUT, USILU, EBAVM) through the JPB DKG query API in `jpb-data`. The selected evidence
+snapshot was captured on 2026-10-18. Four fixed assertion graphs bound the query; missing,
+duplicate, oversized or unavailable source results fail the step. No fresh SQL extraction runs.
+
+Connect ordinary native n8n mapping/split/join components, followed by terminal **DKG Write**.
+Both DKG blocks compile to native HTTP Request nodes with explicit credential references and
+native result unpacking. The transport validates the approved workflow digest and native execution,
+then uses fixed JPB adapters. Mapping, joins, scheduling and step errors stay in n8n. DKG blocks
+currently support bounded manual native workflows only, with at most one read and one write.
+The standalone `/studio/jpb-output` action has been removed: Run executes the write component.
+
+The write target is the existing private `jpb-plca-study` Context Graph. Output is non-calculated
+PLCA input evidence with unconfirmed allocation. It retains both input provenances, source
+snapshot and execution identity. The payload marks its execution `running-at-write`; the final
+local workflow receipt records completion. Sharing and VM publishing are false. Readback checks
+every RDF term, payload SHA-256 and `wm-sealed` status before reporting success.
+
+The component journal binds invocation, native execution, block, input and workflow source hash.
+A pending write is persisted before dispatch. The native HTTP step retries at most once; retry
+reconciles the same named asset, never recreates an ambiguous missing asset. Reads are reused
+within one invocation. Completed workflow replay returns the same persisted receipt. A new Run
+has a new identity and may create a new evidence asset. No EPCIS or calculated footprint is implied.
+
+Validation: `node --test examples/n8n-capability/dkg-components.test.mjs
+examples/n8n-capability/jpb-output.test.mjs examples/n8n-capability/program-workflow.test.mjs`.

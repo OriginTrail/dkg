@@ -1,3 +1,4 @@
+import { needsExport, validateDkgTopology } from './dkg-components.mjs';
 import { createHash } from 'node:crypto';
 import { component, normalizeComponentInput, componentContract, componentValidationSource } from './component-registry.mjs';
 import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
@@ -16,7 +17,7 @@ const identifier = v => { if (typeof v !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$
 export function normalizeStudio(value) {
   closed(value, ['id', 'name', 'entryId', 'nodes', 'edges']);
   if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 80) fail('Name this workflow (up to 80 characters).');
-  if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 8) fail('Add between one and eight component KAs.');
+  if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 12) fail('Add between one and twelve component KAs.');
   if (!Array.isArray(value.edges) || value.edges.length > 20) fail('Too many connections.');
   const nodes = value.nodes.map(n => {
     closed(n, ['id', 'componentId', 'kaRef', 'sourceHash', 'params', 'x', 'y']);
@@ -72,6 +73,7 @@ export function normalizeStudio(value) {
     if (n.id !== entryId && ['schedule', 'webhook'].includes(n.componentId)) fail('Place event triggers first.');
   }
   if (component(byId.get(entryId).componentId).inputs === 2) fail('A join needs two upstream blocks.');
+  validateDkgTopology({ entryId, nodes, edges });
   return { id: workflowUuid(value.id), name: value.name.trim(), entryId, nodes, edges };
 }
 
@@ -94,7 +96,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const nodes = [], connections = {}, pieces = new Map();
   for (const n of definition.nodes) {
     const descriptor = component(n.componentId), name = 'Block ' + n.id;
-    const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { credentials });
+    const piece = componentPiece(n.componentId, name, key => n.componentId === 'schedule' ? JSON.stringify(n.params[key]) : nativeLiteral(n.params[key]), { credentials: { ...credentials, httpHeaderAuth: headerCredential } });
     Object.assign(connections, piece.connections); nodes.push(...piece.nodes);
     if (n.componentId === 'schedule') {
       const event = editNode(name + ' event', '$json'); nodes.push(event);
@@ -137,8 +139,8 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
   const grant = { toolIri: 'urn:dkg:tool:n8n', workflowId, workflowSha256: n8nWorkflowSha256(workflow),
     ...componentContract, outputSchema: { ...componentContract.outputSchema, properties: { ...componentContract.outputSchema.properties, traceJson: { type: 'string', maxLength: 8192 } },
       required: [...componentContract.outputSchema.required, 'traceJson'] },
-    result: { nodes: [...new Set(sinks.map(s => s.node))], sinks, traceNodes: definition.nodes.map(n => pieces.get(n.id).resultNode), allowObservation: false } };
-  return { definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+    result: { nodes: [...new Set(sinks.map(s => s.node))], sinks, traceNodes: definition.nodes.map(n => pieces.get(n.id).traceNode ?? pieces.get(n.id).resultNode), allowObservation: false } };
+  return { definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
 }
 
 export function studioProgramSource(compiled, grant = compiled.grant) {
@@ -159,7 +161,7 @@ export function readStudio(source) {
   const definition = normalizeStudio(data.definition);
   const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
   const compiled = { definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
-    requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+    requiresExportAuthorization: definition.nodes.some(n => needsExport(component(n.componentId))) };
   if (studioProgramSource(compiled) !== source) fail('Saved Studio source differs from its reviewed definition.');
   return compiled;
 }
