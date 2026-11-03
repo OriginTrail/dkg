@@ -61,6 +61,8 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *     cleared. The close record and the cursor `closedThrough` are written
  *     only by `closeEpoch`, one epoch at a time and in order, with whatever
  *     pool, λ and carry the logic passes, so a close never moves once made.
+ *     The writes of several fields remain the normal path: a writer that
+ *     calls a narrow setter keeps in step the fields its NatSpec names.
  *   - The parameter setters are `onlyHub`, so governance reaches them through
  *     `Hub.forwardCall` (the Hub owner may also call them directly). The
  *     setters that need the current epoch or the epoch length read them from
@@ -531,13 +533,23 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     // ============================================================
     //            Narrow setters (onlyContracts), one field each
+    //
+    // `addClaim`, `finalizeClaim` and `closeEpoch` remain the normal path:
+    // they keep related fields in step. A setter here writes its own field and
+    // leaves the others, so a later logic version can ship without a new
+    // storage, and its caller keeps in step the fields its NatSpec names.
     // ============================================================
 
     /// @notice Set `seller`'s claim in a bucket, which `addClaim` adds to and
     ///         `finalizeClaim` finalizes, and nothing else: the bucket's
     ///         total, the node's and the epoch's are left as they are.
     /// @dev    A finalized claim never moves, so one is refused
-    ///         (`ClaimFinalized`).
+    ///         (`ClaimFinalized`). The caller keeps in step the bucket's total
+    ///         (`setBucketClaimed`), the sum of its sellers' `claimed`, and,
+    ///         for a claim set as finalized, the node's and the epoch's values
+    ///         (`setNodeEpoch`, `setEpochTotals`), to which `finalizeClaim`
+    ///         adds its value. `addClaim` and `finalizeClaim` remain the normal
+    ///         path.
     function setSellerClaim(
         bytes32 subscriptionId,
         uint8 bucketIndex,
@@ -551,6 +563,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     /// @notice Set the value claimed in a bucket over all sellers, which
     ///         `addClaim` adds to.
+    /// @dev    The caller keeps it the sum of the sellers' `claimed` in the
+    ///         bucket (`setSellerClaim`): a claim over the funded cap finalizes
+    ///         as `claimed × cap / total`, so a total below the sum finalizes
+    ///         more than the cap. `addClaim` remains the normal path.
     function setBucketClaimed(bytes32 subscriptionId, uint8 bucketIndex, uint128 value) external onlyContracts {
         _bucketClaimed[subscriptionId][bucketIndex] = value;
     }
@@ -558,6 +574,12 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /// @notice Set a node's R and QueryInferenceScore in `epoch`, which
     ///         `finalizeClaim` adds to. It refuses a closed epoch, whose
     ///         inputs are frozen (`EpochClosed`).
+    /// @dev    The caller keeps in step the epoch's totals (`setEpochTotals`),
+    ///         the sums of its nodes' `r` and `score`, and a node's `score` at
+    ///         most its `r`, as the stake factor leaves it. The node's gross is
+    ///         a share of the pool by these over the totals, so totals below
+    ///         the sums pay out more than the pool. `finalizeClaim` remains the
+    ///         normal path.
     function setNodeEpoch(uint72 identityId, uint256 epoch, NodeEpoch calldata n) external onlyContracts {
         _requireOpen(epoch);
         _nodeEpoch[identityId][epoch] = n;
@@ -566,6 +588,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /// @notice Set `epoch`'s ΣR and ΣQueryInferenceScore, which
     ///         `finalizeClaim` adds to. It refuses a closed epoch, whose
     ///         inputs are frozen (`EpochClosed`).
+    /// @dev    The caller keeps them the sums of the epoch's nodes' `r` and
+    ///         `score` (`setNodeEpoch`), and the close reads `sumR`: 0 carries
+    ///         the epoch's money, anything else makes it the pool.
+    ///         `finalizeClaim` remains the normal path.
     function setEpochTotals(uint256 epoch, EpochTotals calldata t) external onlyContracts {
         _requireOpen(epoch);
         _epochTotals[epoch] = t;
@@ -573,6 +599,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     /// @notice Set the pool carried into the next epoch to close, which
     ///         `closeEpoch` sets to its carry out.
+    /// @dev    The next close adds it to that epoch's money, so the caller keeps
+    ///         it in step with the money due and the closes before it: the
+    ///         money due in closed epochs stays their pools plus the carry.
+    ///         `closeEpoch` remains the normal path.
     function setCarry(uint96 value) external onlyContracts {
         carry = value;
     }

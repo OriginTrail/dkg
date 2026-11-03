@@ -8,7 +8,9 @@
 // its withdrawal over the node's score at the end of the epoch, so with no
 // proof after it exactly what staying would have paid, while proofs after
 // it, which RandomSampling scores over the stake left, add to the positions
-// still staked alone; and the node's other positions are as they were.
+// still staked alone; a position whose only reward of the epoch is in a carry
+// is recorded and paid all the same; and the node's other positions are as
+// they were.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, mine, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -356,6 +358,66 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       expect(scores.map((x) => x > 0n)).to.deep.equal([true, true]);
       expect(paid).to.equal((scores[0] * s.net) / s.nodeScore + (scores[1] * s.net) / s.nodeScore);
     });
+
+    for (const move of ['relock', 'redelegation'] as const) {
+      it(`records and pays a position withdrawn right after a ${move}, with no score on its current slot and all of its reward in the carry`, async () => {
+        const a = await h.epochNow();
+        const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
+        const n2 = await h.createSeller(900_000n * TRAC, 500n);
+        const d1 = f.accounts[10];
+        const t1 = await h.delegate(d1, n1.identityId, 300_000n * TRAC);
+        const e = await h.valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
+        await h.claim(d1, t1);
+        const carriedKey = hre.ethers.toBeHex(t1, 32);
+        const carried = await h.positionScore(t1, n1, e);
+        expect(carried).to.be.greaterThan(0n);
+
+        // The move, and no proof after it.
+        let token = t1;
+        let node = n1;
+        if (move === 'relock') {
+          await f.StakingNFT.connect(d1).relock(t1, 0n);
+          token = await f.StakingNFT.nextTokenId();
+        } else {
+          await f.StakingNFT.connect(d1).redelegate(t1, n2.identityId);
+          node = n2;
+        }
+        const carries = await f.Vault.getRewardCarries(token);
+        expect(carries.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([[n1.identityId, e, carriedKey]]);
+        expect(await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, carriedKey)).to.equal(carried);
+        const snapshot = await takeSnapshot();
+
+        await h.toEpoch(e + 1n);
+        const stayed = await h.claim(d1, token);
+        await snapshot.restore();
+
+        // The withdrawal records the carry, though the current slot holds no score.
+        await expect(f.StakingNFT.connect(d1).withdraw(token))
+          .to.emit(f.StakingV10, 'WithdrawnEpochRecorded')
+          .withArgs(token, d1.address, e);
+        expect(await f.RSS.getEpochNodeDelegatorScore(e, node.identityId, hre.ethers.toBeHex(token, 32))).to.equal(0n);
+        const [record, held] = await f.CWS.getWithdrawal(token);
+        expect([record.staker, record.identityId, record.epoch]).to.deep.equal([d1.address, node.identityId, e]);
+        expect(held.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([[n1.identityId, e, carriedKey]]);
+        await expect(f.StakingV10.claimWithdrawnEpoch(token))
+          .to.be.revertedWithCustomError(f.StakingV10, 'WithdrawnEpochInProgress')
+          .withArgs(token, e);
+
+        // Once the epoch has ended: the carry's share of both pools, what staying would have paid, once.
+        await h.toEpoch(e + 1n);
+        const paid = await claimWithdrawn(token, d1);
+        const s = await h.split(n1, e);
+        expect(s.publishing > 0n && s.queryInference > 0n).to.equal(true);
+        expect(paid).to.be.greaterThan(0n);
+        expect(paid).to.equal((carried * s.net) / s.nodeScore);
+        expect(paid).to.equal(stayed);
+        expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s.fee);
+        expect((await f.CWS.getWithdrawal(token))[0].epoch).to.equal(0n);
+        await expect(f.StakingV10.claimWithdrawnEpoch(token))
+          .to.be.revertedWithCustomError(f.StakingV10, 'NoWithdrawnEpoch')
+          .withArgs(token);
+      });
+    }
 
     it("leaves the node's other positions as they were: each claims what it would have", async () => {
       const a = await h.epochNow();
