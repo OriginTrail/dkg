@@ -9,9 +9,9 @@ import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-servi
 import { eventsIn } from '../contracts';
 import { FORK_ETH } from '../fork';
 import { fmt, iso } from '../report';
-import { MIN_EPOCH_LEFT, plannedAmounts } from './config';
+import { MIN_EPOCH_LEFT, needsOf, plannedAmounts } from './config';
 import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt } from './context';
-import { checkBalances, checkDeployment, maxFeePerGas, verifySeller } from './check';
+import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
 import { Amounts, SmokeState, setupMissing } from './state';
 import { movedBy, movement } from './tx';
@@ -94,7 +94,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     file.save();
     s = file.state;
   }
-  await fundOnFork(ctx, a.committed + a.walletValue + a.stake);
+  await fundOnFork(ctx, needsOf(a, 0n, await progressOf(ctx)).ownerTrac);
   await checkBalances(ctx, a);
   if (report.failed) throw new Error('a check failed: see above');
 
