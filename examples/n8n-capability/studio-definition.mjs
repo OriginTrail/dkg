@@ -15,12 +15,14 @@ const closed = (v, keys) => { if (!record(v) || Object.keys(v).some(k => !keys.i
 const identifier = v => { if (typeof v !== 'string' || !/^[a-z][a-z0-9_-]{0,39}$/i.test(v)) fail('Invalid block identity.'); return v; };
 
 export function normalizeStudio(value) {
-  closed(value, ['id', 'name', 'entryId', 'nodes', 'edges']);
+  closed(value, ['id', 'name', 'entryId', 'nodes', 'edges', 'groups']);
   if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 80) fail('Name this workflow (up to 80 characters).');
   if (!Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 12) fail('Add between one and twelve component KAs.');
   if (!Array.isArray(value.edges) || value.edges.length > 20) fail('Too many connections.');
   const nodes = value.nodes.map(n => {
-    closed(n, ['id', 'componentId', 'kaRef', 'sourceHash', 'params', 'x', 'y']);
+    closed(n, ['id', 'componentId', 'kaRef', 'sourceHash', 'params', 'x', 'y', 'label', 'groupId']);
+    if (n.label !== undefined && (typeof n.label !== 'string' || !n.label.trim() || n.label.length > 80)) fail('Name each step using up to 80 characters.');
+    if (n.groupId !== undefined) identifier(n.groupId);
     const descriptor = component(n.componentId);
     if (typeof n.kaRef !== 'string' || (n.componentId === 'run-program' ? !/^[a-z][a-z0-9+.-]*:[^\s<>"{}\\]{1,220}$/i.test(n.kaRef) : !/^urn:demo:n8n:component:[a-z0-9:-]{1,100}$/.test(n.kaRef))
       || typeof n.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(n.sourceHash)) fail('Choose a pinned component KA.');
@@ -28,7 +30,8 @@ export function normalizeStudio(value) {
     let params;
     try { params = JSON.parse(normalizeComponentInput(descriptor, { itemsJson: JSON.stringify(descriptor.sampleItems), paramsJson: JSON.stringify(n.params), executionId: '1' }).paramsJson); }
     catch (e) { fail(e.message); }
-    return { id: identifier(n.id), componentId: descriptor.id, kaRef: n.kaRef, sourceHash: n.sourceHash, params, x: n.x, y: n.y };
+    return { id: identifier(n.id), componentId: descriptor.id, kaRef: n.kaRef, sourceHash: n.sourceHash, params, x: n.x, y: n.y,
+      ...(n.label !== undefined ? { label: n.label } : {}), ...(n.groupId !== undefined ? { groupId: n.groupId } : {}) };
   }).sort((a, b) => a.id.localeCompare(b.id));
   if (new Set(nodes.map(n => n.id)).size !== nodes.length) fail('Block identities must be unique.');
   if (nodes.filter(n => n.componentId === 'loop-items').length > 1) fail('This PoC supports one Loop Over Items block per workflow.');
@@ -74,7 +77,18 @@ export function normalizeStudio(value) {
   }
   if (component(byId.get(entryId).componentId).inputs === 2) fail('A join needs two upstream blocks.');
   validateDkgTopology({ entryId, nodes, edges });
-  return { id: workflowUuid(value.id), name: value.name.trim(), entryId, nodes, edges };
+  let groups;
+  if (value.groups !== undefined) {
+    if (!Array.isArray(value.groups) || value.groups.length > 12) fail('Use up to twelve visual groups.');
+    groups = value.groups.map(g => {
+      closed(g, ['id', 'name', 'tone']);
+      if (typeof g.name !== 'string' || !g.name.trim() || g.name.length > 80 || !['purple', 'teal', 'amber', 'neutral'].includes(g.tone)) fail('Name each visual group and choose its color.');
+      return { id: identifier(g.id), name: g.name, tone: g.tone };
+    });
+    if (new Set(groups.map(g => g.id)).size !== groups.length) fail('Visual group identities must be unique.');
+  }
+  if (nodes.some(n => n.groupId !== undefined && !groups?.some(g => g.id === n.groupId))) fail('Choose an existing visual group.');
+  return { id: workflowUuid(value.id), name: value.name.trim(), entryId, nodes, edges, ...(groups !== undefined ? { groups } : {}) };
 }
 
 export function validateStudioCapabilities(definition, capabilities) {

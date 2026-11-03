@@ -417,3 +417,15 @@ has a new identity and may create a new evidence asset. No EPCIS or calculated f
 
 Validation: `node --test examples/n8n-capability/dkg-components.test.mjs
 examples/n8n-capability/jpb-output.test.mjs examples/n8n-capability/program-workflow.test.mjs`.
+
+### Studio presentation metadata
+
+Studio blocks optionally carry `label` (up to 80 characters) and `groupId`. The definition may
+include up to twelve `groups`, each with a unique `id`, a `name` and a `tone` selected from
+`purple`, `teal`, `amber`, `neutral`. Membership must reference an existing group. These fields
+persist in the immutable workflow source but never enter native node parameters or control flow.
+Definitions without these fields retain their original normalization and source identity.
+Renaming or regrouping creates a saved revision; it does not execute the workflow.
+
+Run `node --test examples/n8n-capability/studio-presentation.test.mjs` to check old-source
+compatibility, presentation readback, validation and unchanged native execution definitions.
