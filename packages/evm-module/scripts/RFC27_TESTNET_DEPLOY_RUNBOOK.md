@@ -385,3 +385,77 @@ reverts.
   deploy wrote: the 10 new addresses and versions, with `deployed: true`.
 - The rehearsal never writes that file. It works on a scratch copy under
   `cache/rfc27-fork/`.
+
+## 9. After the deploy: the smoke test
+
+`scripts/rfc27-testnet-smoke.ts` runs one marketplace cycle on the live
+contracts, with real signers and real time, and plays every role. It makes no
+Hub owner call. Its header lists every setting; its phases live in
+`scripts/rfc27/smoke/`.
+
+```sh
+cd packages/evm-module
+export RFC27_SMOKE_OWNER_KEY=...    # never printed or stored
+export RFC27_SMOKE_SELLER_KEY=...
+export RFC27_SMOKE_RUN=smoke-1
+SMOKE="npx hardhat run scripts/rfc27-testnet-smoke.ts --network base_sepolia_v10 --config hardhat.node.config.ts"
+PHASE=check $SMOKE                  # read-only; prints the plan
+PHASE=setup $SMOKE                  # a dry run, as every phase is without SEND=1
+PHASE=setup SEND=1 $SMOKE
+```
+
+The roles:
+
+- **The owner**: a hot testnet wallet. It opens a new Conviction Account
+  under PublishingConviction 10.2.0, opts it in, and assigns a buyer key. It
+  funds a wallet-paid period, and stakes a small tier-0 position on the
+  seller's node. It also makes the upkeep calls.
+- **The buyer keys and the session keys**: derived from the owner key and
+  the run label, so no key is stored. The owner sends each buyer key a little
+  ETH.
+- **The seller**: one of our testnet Core Nodes, by its operational key. Its
+  node also sends proofs from that key. A dedicated second operational key on
+  the same identity avoids nonce clashes with them.
+
+What a run needs:
+
+| Variable or balance | Default |
+|---|---|
+| `RFC27_SMOKE_OWNER_KEY` | required, from the owner wallet |
+| `RFC27_SMOKE_SELLER_KEY` | required, an operational key of the seller node |
+| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run |
+| `RPC_BASE_SEPOLIA_V10` | `https://sepolia.base.org` |
+| The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet period and a 50 TRAC stake |
+| The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer key; `PHASE=check` prints it at the current fee |
+| The seller key's ETH | about 0.0001: two receipt batches, about 0.6M gas |
+
+The amounts are configurable: `RFC27_SMOKE_STAKE`, `RFC27_SMOKE_CA_VALUE`,
+`RFC27_SMOKE_CA_TOPUP`, `RFC27_SMOKE_EDGE_VALUE`, `RFC27_SMOKE_WALLET_VALUE`,
+`RFC27_SMOKE_COMMITTED` and `RFC27_SMOKE_KEY_ETH`.
+
+The phases, with `SEND=1`, about two days apart in all:
+
+| Phase | When |
+|---|---|
+| `setup`, then `serve` | epoch E, with at least an hour of it left |
+| `finalize` | E+1, after end(E) + 3,600 s, once the seller has proved in E+1 |
+| `close-claim` | from the start of E+2 |
+| `withdraw`, optional | in the middle of an epoch, then again once it has ended: a third day |
+
+- A phase run too early stops, deferred, and prints when it opens.
+- `finalize` reads each claim's outcome. While the seller has no node score
+  in E+1, it waits and says so (`NoScore`). Run it again after the node's next
+  proof, before E+1 ends; after that the claims are void.
+- Every transaction's gas estimate must fit under 2^24, or its check fails.
+- Each phase prints every check as PASS or FAIL, and writes
+  `cache/rfc27-smoke/<run>.<phase>.json`. The run resumes from
+  `cache/rfc27-smoke/<run>.json`.
+
+The upkeep cron may run `closeEpochs`, `finalizeClaims`, `claimFor` or
+`claimWithdrawnEpoch` first. The phase then checks what the cron did, from
+storage, and does not fail.
+
+The smoke test also runs on the fork, before the deploy reaches testnet, with
+`--config scripts/rfc27-testnet-fork.config.ts`. Its header lists the fork-only
+switches: `FORK_WARP=1` moves the clock, and `FORK_PROOFS=1` stands in for
+the seller's proofs.
