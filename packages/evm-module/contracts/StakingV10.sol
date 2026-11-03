@@ -864,8 +864,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *         first, then the position's score and each carry's take their
      *         share of their node's reward for the epoch (`_nodeEpochReward`),
      *         the publishing pool's and the query/inference pool's, net of
-     *         the operator fee, which is what the position would have been
-     *         paid had it stayed to the end of the epoch. With no position
+     *         the operator fee. The score is the one the position had earned
+     *         by its withdrawal: a later proof on the node in that epoch adds
+     *         to the positions still staked, not to it. With no position
      *         left to compound into, the share is paid in TRAC from the
      *         vault. The record is deleted before the payment.
      * @return amount The TRAC paid.
