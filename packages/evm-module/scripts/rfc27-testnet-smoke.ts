@@ -149,7 +149,7 @@ main()
   .catch(async (e: unknown) => {
     const data = errorData(e);
     // A revert reads by its decoded error; a provider's message can carry raw return bytes.
-    report.fail(data ? `reverted: ${await decodeError(hre, data)}` : errorMessage(e).replace(/[\u0000-\u001f]+/g, ' '));
+    report.fail(data ? `reverted: ${await decodeError(hre, data)}` : errorMessage(e).replace(/\p{Cc}+/gu, ' '));
   })
   .finally(() => {
     report.say(`\n${report.summary()}`);
