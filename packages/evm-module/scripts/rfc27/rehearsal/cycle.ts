@@ -11,8 +11,8 @@ import { ethers } from 'ethers';
 import type { Signer } from 'ethers';
 
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
-import type { Profile } from '../../../typechain';
-import { Contracts, eventsIn, typedAt } from '../contracts';
+import { Profile__factory } from '../../../typechain/factories/contracts/Profile__factory';
+import { Contracts, eventsIn } from '../contracts';
 import type { NodeSigner } from '../fork';
 import { chainNow } from '../network';
 import { ClaimRef, claimPreview, delegatorKey, positionScore, skipReasonOf } from '../reads';
@@ -95,7 +95,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   const splitOwner = await impersonate(ctx, firstPos.owner);
   await send(ctx, `token ${firstPos.tokenId} owner: claim (splits epoch ${A - 1n} on node ${feeNode})`, splitOwner, snftAddr, c.snft.interface.encodeFunctionData('claim', [firstPos.tokenId]));
   const feeBalance0 = await c.css.getOperatorFeeBalance(feeNode);
-  const profile = await typedAt<Profile>(ctx.hre, 'Profile', await ctx.stack.addr('Profile'));
+  const profile = await ctx.stack.held(Profile__factory, 'Profile');
   await send(ctx, `node ${feeNode} admin: Profile.updateOperatorFee(${OPERATOR_FEE})`, nodeAdmin, await profile.getAddress(), profile.interface.encodeFunctionData('updateOperatorFee', [feeNode, OPERATOR_FEE]));
   const feeAt = async (e: bigint) => c.ps.getOperatorFeePercentageByTimestampReverse(feeNode, (await c.chronos.timestampForEpoch(e + 1n)) - 1n);
   check(`node ${feeNode}'s 10 % fee applies to epoch ${A + 1n} and not to ${A}`, (await feeAt(A + 1n)) === OPERATOR_FEE && (await feeAt(A)) === 0n);
