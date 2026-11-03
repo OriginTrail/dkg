@@ -17,14 +17,14 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
  * all in one `Hub.setAndReinitializeContracts`. A λ set while the activation
  * epoch is unset applies at once.
  *
- * StakingV10 pays the pool, so this script refuses a run that would keep a
- * StakingV10 below 10.1.0: the deployments file marks it deployed, and the run
- * reuses it, but that build splits every node's epoch without the pool, so
- * from activation on each epoch's share of the pool would stay in the vault
- * for good. Set that entry's `deployed` to false, so the run redeploys it
- * (055), and run the deploy again. A StakingKPI below 10.1.0 only reports
- * rewards without the pool, and moves no TRAC, so the run goes on with a loud
- * warning.
+ * StakingV10 pays the pool, so a run that would keep a StakingV10 below 10.1.0
+ * is refused before it deploys anything (000): the deployments file marks it
+ * deployed, and the run reuses it, but that build splits every node's epoch
+ * without the pool, so from activation on each epoch's share of the pool would
+ * stay in the vault for good. Set that entry's `deployed` to false, so the run
+ * redeploys it (055), and run the deploy again. A StakingKPI below 10.1.0 only
+ * reports rewards without the pool, and moves no TRAC, so the run goes on with
+ * a loud warning.
  *
  * Activation. A period funded from a wallet, and its top-ups, are refused
  * until `activationEpoch` is set and reached, and `setActivationEpoch` itself
@@ -49,15 +49,6 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     return;
   }
 
-  const staking = await reusedDeployment(hre, 'StakingV10');
-  if (staking && !versionAtLeast(staking.version, [10, 1, 0])) {
-    throw new Error(
-      `QueryInferenceStorage needs StakingV10 10.1.0 or later on ${hre.network.name}, but this run would keep ` +
-        `${staking.version} at ${staking.address}, which splits every epoch without the query/inference pool, so ` +
-        "each epoch's share of the pool stays in the vault for good. Set contracts.StakingV10.deployed to false in " +
-        `deployments/${hre.network.name}_contracts.json, so this run redeploys it, and run the deploy again.`,
-    );
-  }
   const kpi = await reusedDeployment(hre, 'StakingKPI');
   if (kpi && !versionAtLeast(kpi.version, [10, 1, 0])) {
     console.log(
@@ -76,4 +67,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ['QueryInferenceStorage', 'v10'];
-func.dependencies = ['Hub', 'Chronos'];
+func.dependencies = ['ServiceSpendingBuilds', 'Hub', 'Chronos'];
