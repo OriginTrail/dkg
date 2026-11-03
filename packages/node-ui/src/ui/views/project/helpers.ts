@@ -14,7 +14,7 @@ import {
 import { memoryGraphLabels } from '../../lib/memoryLabels.js';
 import { LAYER_CONFIG } from './layer-presentation.js';
 import { VM_ANCHOR_RING_WIDTH } from '../../layer-colors.js';
-import { kindSlot, type EntityKind } from '../../entity-kind-colors.js';
+import { ENTITY_TYPE_KINDS, kindSlot } from '../../entity-kind-colors.js';
 import { dataSlotHex, type GraphPalette } from '../../graph-palette.js';
 import { agentHexForUri } from '../../hooks/useAgents.js';
 export { LAYER_CONFIG, layerNoun, VM_TRIPLE_STAT } from './layer-presentation.js';
@@ -177,22 +177,14 @@ export function entityMeta(e: MemoryEntity, profile?: { forType: (iri: string) =
 // default color (WM gray / SWM amber / VM green).
 export const CODE = 'http://dkg.io/ontology/code/';
 // C9: code classes take their entity-kind data colour (same as the generated
-// cards); external modules are neutral. C10: anchors in deep VM purple
-// (ringed, see graphClassAppearance); agents neutral.
-const CODE_CLASS_KINDS: ReadonlyArray<[string, EntityKind]> = [
-  [CODE + 'Package', 'package'],
-  [CODE + 'File', 'file'],
-  [CODE + 'Class', 'class'],
-  [CODE + 'Interface', 'interface'],
-  [CODE + 'Function', 'function'],
-  [CODE + 'TypeAlias', 'typeAlias'],
-  [CODE + 'Enum', 'enum'],
-];
+// cards; type identity comes from ENTITY_TYPE_KINDS); external modules are
+// neutral. C10: anchors in deep VM purple (ringed, see graphClassAppearance);
+// agents neutral.
 
 /** Node colours for code classes and VM decoration types. */
 export function codeClassColors(p: GraphPalette): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const [iri, kind] of CODE_CLASS_KINDS) out[iri] = dataSlotHex(p, kindSlot(kind));
+  for (const [iri, kind] of Object.entries(ENTITY_TYPE_KINDS)) if (iri.startsWith(CODE)) out[iri] = dataSlotHex(p, kindSlot(kind));
   out[CODE + 'ExternalModule'] = p.neutral.node;
   out[VIZ_ANCHOR_TYPE] = p.anchor.fill;
   out[VIZ_AGENT_TYPE] = p.neutral.node;

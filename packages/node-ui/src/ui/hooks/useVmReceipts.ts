@@ -237,6 +237,7 @@ export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsSta
   const [state, setState] = useState<VmReceiptsState>({ receipts: null, complete: true, loading: false, error: null });
   const [reloads, setReloads] = useState(0);
   const versionRef = useRef(0);
+  const loadedGraphRef = useRef<string | undefined>(undefined);
   const reload = useCallback(() => setReloads(n => n + 1), []);
   useMemoryGraphEvents(contextGraphId ?? '', reload, { layers: ['vm'] });
   useEffect(() => {
@@ -251,10 +252,17 @@ export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsSta
       setState({ receipts: null, complete: true, loading: false, error: null });
       return;
     }
-    // Keep the last receipts while reloading so facts and anchors don't flicker.
-    setState(prev => ({ ...prev, loading: true, error: null }));
+    // Reloading the same graph keeps its receipts on screen (no flicker);
+    // another graph starts from nothing, so its facts and anchors never show
+    // the previous graph's members or signers.
+    const sameGraph = loadedGraphRef.current === contextGraphId;
+    setState(prev => (sameGraph ? { ...prev, loading: true, error: null } : { receipts: null, complete: true, loading: true, error: null }));
     loadVmReceipts(contextGraphId).then(
-      ({ receipts, complete }) => { if (version === versionRef.current) setState({ receipts, complete, loading: false, error: null }); },
+      ({ receipts, complete }) => {
+        if (version !== versionRef.current) return;
+        loadedGraphRef.current = contextGraphId;
+        setState({ receipts, complete, loading: false, error: null });
+      },
       (err: unknown) => {
         if (version !== versionRef.current) return;
         const message = err instanceof Error ? err.message : 'Failed to load publish receipts';

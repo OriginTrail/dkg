@@ -84,6 +84,16 @@ describe('per-type appearance (classAppearance)', () => {
       .toEqual({ border: { color: '#111' }, fill: 'flat', shape: 'avatar' });
   });
 
+  it('resolves a compact key whose prefix arrives later (declared by loaded Turtle)', () => {
+    const pm = new PrefixManager();
+    const se = new StyleEngine({ classAppearance: { 'ex:Agent': { shape: 'avatar' } } }, pm);
+    const agent = { id: 'a', types: ['https://example.org/Agent'] } as any;
+    expect(se.getAppearance(agent)).toEqual({});
+    pm.addPrefix('ex', 'https://example.org/');
+    expect(se.getAppearance(agent).shape).toBe('avatar');
+    expect(se.getAppearance({ id: 'b', types: ['https://example.org/Other'] } as any)).toEqual({});
+  });
+
   it('is empty when none of the node\'s types is configured', () => {
     const { node } = graph();
     expect(new StyleEngine({}, new PrefixManager()).getAppearance(node)).toEqual({});

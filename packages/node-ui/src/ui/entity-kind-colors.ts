@@ -29,7 +29,9 @@ const KIND_SLOT: Record<EntityKind, number> = {
   interface: 7, // sky
 };
 
-const TYPE_KIND: Record<string, EntityKind> = {
+/** The rdf:type IRIs that have a kind. The one registry of type identity:
+ *  DOM (badges, cards) and canvas (graph nodes) both read it. */
+export const ENTITY_TYPE_KINDS: Readonly<Record<string, EntityKind>> = {
   'http://dkg.io/ontology/decisions/Decision': 'decision',
   'http://dkg.io/ontology/tasks/Task': 'task',
   'http://dkg.io/ontology/github/PullRequest': 'pr',
@@ -51,7 +53,7 @@ export function kindColor(kind: EntityKind): string {
 
 /** CSS colour for an rdf:type IRI, or null when the type isn't a known kind. */
 export function kindColorForType(typeIri: string | undefined): string | null {
-  const kind = typeIri ? TYPE_KIND[typeIri] : undefined;
+  const kind = typeIri ? ENTITY_TYPE_KINDS[typeIri] : undefined;
   return kind ? kindColor(kind) : null;
 }
 

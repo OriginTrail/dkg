@@ -5,11 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter, Routes, Route, useLocation, useNavigate, type NavigateFunction } from 'react-router-dom';
 
-import {
-  TAB_TO_URL_PATH,
-  URL_PATH_TO_TAB,
-  useShellRouting,
-} from '../src/ui/hooks/useShellRouting.js';
+import { useShellRouting } from '../src/ui/hooks/useShellRouting.js';
+import { pathToTab, tabIdToPath } from '../src/ui/lib/tab-routes.js';
 import { useTabsStore } from '../src/ui/stores/tabs.js';
 import { useProjectsStore } from '../src/ui/stores/projects.js';
 
@@ -79,22 +76,19 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
     resetTabsStore();
   });
 
-  describe('mapping table integrity', () => {
-    it('every URL path maps to a tab id that has a corresponding URL back-mapping', () => {
-      // Round-trip /settings -> settings -> /settings is the
-      // contract Step 2 of the hook depends on. If a path ever maps
-      // to a tab id that has no back-mapping the URL would never
-      // sync after a tab click.
-      for (const path of Object.keys(URL_PATH_TO_TAB)) {
-        const tabId = URL_PATH_TO_TAB[path].id;
-        expect(TAB_TO_URL_PATH).toHaveProperty(tabId);
+  describe('tab-routes is the one route registry', () => {
+    it('round-trips every place and typed tab: path → tab id → the same path', () => {
+      for (const path of ['/', '/observability', '/settings', '/conviction', '/primer', '/memory-stack', '/agent-hub', '/graph/foo', '/pca/12', '/agent/cg/slug', '/open/doc:abc']) {
+        const tab = pathToTab(path);
+        expect(tab, path).not.toBeNull();
+        expect(tabIdToPath(tab!.id), path).toBe(path);
       }
     });
 
-    it('TAB_TO_URL_PATH covers the canonical tabs (operations, settings, dashboard)', () => {
-      expect(TAB_TO_URL_PATH.operations).toBeDefined();
-      expect(TAB_TO_URL_PATH.settings).toBeDefined();
-      expect(TAB_TO_URL_PATH.dashboard).toBeDefined();
+    it('keeps the legacy /operations alias landing on Observability at its canonical address', () => {
+      expect(pathToTab('/operations')).toEqual({ id: 'operations', label: 'Observability' });
+      expect(tabIdToPath('operations')).toBe('/observability');
+      expect(pathToTab('/network')).toBeNull();
     });
   });
 

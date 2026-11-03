@@ -2,21 +2,8 @@ import { useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
+import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
-
-// Kept for callers and tests that read the place table directly.
-export const URL_PATH_TO_TAB: Record<string, { id: string; label: string }> = {
-  '/observability': { id: 'operations', label: 'Observability' },
-  '/operations': { id: 'operations', label: 'Observability' },
-  '/settings': { id: 'settings', label: 'Settings' },
-  '/conviction': { id: 'conviction', label: 'Publisher Conviction' },
-};
-export const TAB_TO_URL_PATH: Record<string, string> = {
-  operations: '/observability',
-  settings: '/settings',
-  conviction: '/conviction',
-  dashboard: '/',
-};
 
 /**
  * The address owns the active centre tab.
@@ -74,15 +61,21 @@ export function useShellRouting(): void {
   // Active tab → active graph. Back/Forward, a refreshed or bookmarked graph
   // address and the tab bar all establish the same context as picking the
   // graph in the sidebar, so the agent panel's chat and attachments target
-  // the graph on screen. The dashboard clears it, like its sidebar entry;
+  // the graph on screen. A graph only browsed from the catalogue clears the
+  // target instead, like the sidebar's Browse; it's re-checked once the graph
+  // list arrives (a bookmark can load before it). The dashboard clears it too;
   // other places (Settings, Observability) leave it as it was.
+  const activeGraphPassive = useProjectsStore((s) => {
+    const graph = activeTabId.startsWith('project:') ? s.contextGraphs.find((cg) => `project:${cg.id}` === activeTabId) : undefined;
+    return graph ? isPassiveCatalogueGraph(graph) : false;
+  });
   useEffect(() => {
     const { setActiveProject, activeProjectId } = useProjectsStore.getState();
     if (activeTabId.startsWith('project:')) {
-      const graphId = activeTabId.slice('project:'.length);
-      if (graphId && graphId !== activeProjectId) setActiveProject(graphId);
+      const graphId = activeGraphPassive ? null : activeTabId.slice('project:'.length) || null;
+      if (graphId !== activeProjectId) setActiveProject(graphId);
     } else if (activeTabId === 'dashboard' && activeProjectId !== null) {
       setActiveProject(null);
     }
-  }, [activeTabId]);
+  }, [activeTabId, activeGraphPassive]);
 }

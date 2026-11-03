@@ -2,11 +2,51 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HexagonPainter } from '../src/core/hexagon-painter.js';
 import { PrefixManager } from '../src/core/prefix-manager.js';
+import { StyleEngine } from '../src/core/style-engine.js';
 import { canvasContext, config, edge, node } from './rendering-support.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('hexagon visual contracts', () => {
+  describe('per-type appearance reaches the canvas', () => {
+    const AGENT = 'urn:t:Agent', ANCHOR = 'urn:t:Anchor';
+    const painterWith = (classAppearance: Record<string, any>) => {
+      const pm = new PrefixManager();
+      return new HexagonPainter({ scaleWithDegree: false }, new StyleEngine({ classAppearance, gradient: true }, pm), pm);
+    };
+    // Scale 0.3: below the label threshold, so any fillText is the avatar's initials.
+    it("draws avatar types as a full circle with the label's initials, and ordinary nodes as hexagons without", () => {
+      const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
+      const { ctx } = canvasContext();
+      painter.paint(ctx, node('agent', { types: [AGENT], label: 'Claude Code' }), 10, 20, 0.3);
+      expect(ctx.arc).toHaveBeenCalledWith(10, 20, 36, 0, 2 * Math.PI);
+      expect(ctx.fillText).toHaveBeenCalledWith('CC', 10, expect.any(Number));
+      const plain = canvasContext();
+      painter.paint(plain.ctx, node('thing', { types: ['urn:t:Thing'], label: 'Thing' }), 10, 20, 0.3);
+      expect(plain.ctx.arc).not.toHaveBeenCalled();
+      expect(plain.ctx.moveTo).toHaveBeenCalled();
+      expect(plain.ctx.fillText).not.toHaveBeenCalled();
+    });
+    it('fills flat types with their exact colour and keeps the gradient for the rest', () => {
+      const painter = painterWith({ [ANCHOR]: { fill: 'flat' } });
+      const flat = canvasContext();
+      painter.paint(flat.ctx, node('anchor', { types: [ANCHOR] }), 0, 0, 0.3);
+      expect(flat.ctx.createRadialGradient).not.toHaveBeenCalled();
+      const shaded = canvasContext();
+      painter.paint(shaded.ctx, node('thing', { types: ['urn:t:Thing'] }), 0, 0, 0.3);
+      expect(shaded.ctx.createRadialGradient).toHaveBeenCalled();
+    });
+    it('strokes a configured outline in its colour and width, zoom-independent', () => {
+      const painter = painterWith({ [ANCHOR]: { border: { color: '#d9d0ff', width: 4 } } });
+      const { ctx, paints } = canvasContext();
+      painter.paint(ctx, node('anchor', { types: [ANCHOR] }), 0, 0, 2);
+      expect(paints.find(p => p.method === 'stroke')).toMatchObject({ stroke: '#d9d0ff', width: 2 });
+      const plain = canvasContext();
+      painter.paint(plain.ctx, node('thing', { types: ['urn:t:Thing'] }), 0, 0, 2);
+      expect(plain.paints.find(p => p.method === 'stroke')?.stroke).not.toBe('#d9d0ff');
+    });
+  });
+
   it('scales degree, image minimum and explicit/risk multipliers independently', () => {
     const { styleEngine } = config(); const painter = new HexagonPainter(undefined, styleEngine);
     painter.setMaxDegree(10);

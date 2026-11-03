@@ -80,11 +80,11 @@ test.describe('Dashboard (rc.12)', () => {
       const row = dashboard.cgRows.nth(i);
       const text = (await row.textContent())?.replace(/\s+/g, ' ') ?? '';
       expect(text, `row ${i} should show an entities·triples size`).toMatch(/\d+ entities · \d+ triples/);
-      // Each row carries a role badge — CURATOR (this node created it) or JOINED
-      // (member). Which one depends on identity resolution, so assert the badge
-      // exists and reads one of the two valid labels rather than a fixed value.
+      // Each row carries a role badge — Curator (this node created it) or Joined
+      // (member), in sentence case (DESIGN.md · Type). Which one depends on
+      // identity resolution, so assert the badge exists and reads one of the two.
       const badge = (await row.locator('.v10-cg-role .v10-cg-badge, .v10-cg-badge').first().textContent())?.trim();
-      expect(badge, `row ${i} should show a role badge`).toMatch(/^(CURATOR|JOINED)$/);
+      expect(badge, `row ${i} should show a role badge`).toMatch(/^(Curator|Joined)$/);
     }
   });
 

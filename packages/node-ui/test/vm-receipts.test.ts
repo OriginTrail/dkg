@@ -6,7 +6,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { parseVmReceiptRows, buildVmReceiptQuery, buildKaGraphMemberQuery, addKaGraphMembers, kaGraphOf, useVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
+import { parseVmReceiptRows, buildVmReceiptQuery, buildKaGraphMemberQuery, addKaGraphMembers, kaGraphOf, useVmReceipts, refreshVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
 import { useVmReceiptSummary } from '../src/ui/hooks/useVmReceiptSummary.js';
 import { useVerifiableMemoryAnchors } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
 import { invalidateQueryCache } from '../src/ui/query-api.js';
@@ -102,6 +102,55 @@ describe('useVmReceipts', () => {
     expect(body).toMatchObject({ contextGraphId: CG, sparql: buildVmReceiptQuery(CG) });
     expect([...seen.summary.members]).toEqual(['urn:x:a']);
     expect(seen.anchors).toEqual([expect.objectContaining({ tx: '0x9f2c', assertion: A, members: ['urn:x:a'], signers: ['did:dkg:agent:0x1'] })]);
+  });
+
+  it("never shows one graph's receipts for another, whatever order responses arrive in", async () => {
+    // One deferred response per context graph, resolved by hand.
+    const pending = new Map<string, (rows: unknown[]) => void>();
+    globalThis.fetch = vi.fn((_url: any, init: any) => new Promise<Response>((resolve) => {
+      const cg = JSON.parse(String(init?.body ?? '{}')).contextGraphId as string;
+      pending.set(cg, (bindings) => resolve(new Response(JSON.stringify({ result: { bindings } }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
+    })) as any;
+    const resolveGraph = async (cg: string, rows: unknown[]) => { pending.get(cg)!(rows); pending.delete(cg); await settle(); await settle(); };
+    const alice = { asrt: 'did:dkg:context-graph:graph-a/assertion/0xaaa/one', tx: '0xa1', member: 'urn:a:1', agent: 'did:dkg:agent:alice' };
+    const bob = { asrt: 'did:dkg:context-graph:graph-b/assertion/0xbbb/one', tx: '0xb1', member: 'urn:b:1', agent: 'did:dkg:agent:bob' };
+
+    let state!: ReturnType<typeof useVmReceipts>;
+    let signers: string[] = [];
+    function Probe({ id }: { id: string }) {
+      state = useVmReceipts(id);
+      const { summary } = useVmReceiptSummary(id);
+      signers = summary ? [...summary.signers] : [];
+      return null;
+    }
+    // Graph A loads Alice.
+    await act(async () => { root.render(React.createElement(Probe, { id: 'graph-a' })); });
+    await resolveGraph('graph-a', [alice]);
+    expect(signers).toEqual(['did:dkg:agent:alice']);
+
+    // Switch to graph B while its request is pending: nothing of A is shown.
+    await act(async () => { root.render(React.createElement(Probe, { id: 'graph-b' })); });
+    await settle();
+    expect(state).toMatchObject({ receipts: null, loading: true });
+    expect(signers).toEqual([]);
+
+    // Back to A (pending again), then to B; resolve B first...
+    await act(async () => { root.render(React.createElement(Probe, { id: 'graph-a' })); });
+    await act(async () => { root.render(React.createElement(Probe, { id: 'graph-b' })); });
+    await resolveGraph('graph-b', [bob]);
+    expect(signers).toEqual(['did:dkg:agent:bob']);
+    expect(state.receipts?.map(r => r.members)).toEqual([['urn:b:1']]);
+    // ...then the late A response: it must not replace B's results.
+    await resolveGraph('graph-a', [alice]);
+    expect(signers).toEqual(['did:dkg:agent:bob']);
+
+    // A same-graph refresh keeps B's receipts on screen while it reloads.
+    await act(async () => { refreshVmReceipts('graph-b'); });
+    await settle();
+    expect(state).toMatchObject({ loading: true });
+    expect(signers).toEqual(['did:dkg:agent:bob']);
+    await resolveGraph('graph-b', [bob, { ...bob, member: 'urn:b:2' }]);
+    expect(state.receipts?.[0].members).toEqual(['urn:b:1', 'urn:b:2']);
   });
 
   it('reports loading, then an error without receipts when the query fails', async () => {

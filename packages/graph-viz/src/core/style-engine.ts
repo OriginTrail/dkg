@@ -32,8 +32,11 @@ export class StyleEngine {
   private _palette: ColorPalette;
   private _hasExplicitDefaultNodeColor: boolean;
   private _hasExplicitDefaultEdgeColor: boolean;
-  /** classAppearance keyed by full type IRI (compact keys expanded once). */
+  /** classAppearance by its configured keys plus their expansions at
+   *  construction. Compact keys whose prefix arrives later (a Turtle
+   *  document's @prefix) are matched through `compact()` at lookup time. */
   private _appearance: Map<string, ClassAppearance>;
+  private _hasCompactKeys = false;
 
   constructor(config: StyleConfig | undefined, prefixManager: PrefixManager, palette?: ColorPalette) {
     this._prefixManager = prefixManager;
@@ -61,6 +64,7 @@ export class StyleEngine {
     for (const [type, appearance] of Object.entries(this._config.classAppearance)) {
       this._appearance.set(type, appearance);
       this._appearance.set(prefixManager.expand(type), appearance);
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(type) && type.includes(':')) this._hasCompactKeys = true;
     }
   }
 
@@ -127,7 +131,7 @@ export class StyleEngine {
     const out: ClassAppearance = {};
     let found = false;
     for (const type of node.types) {
-      const a = this._appearance.get(type);
+      const a = this._appearance.get(type) ?? this._compactAppearance(type);
       if (!a) continue;
       found = true;
       out.border ??= a.border;
@@ -135,6 +139,14 @@ export class StyleEngine {
       out.shape ??= a.shape;
     }
     return found ? out : NO_APPEARANCE;
+  }
+
+  /** A compact-keyed rule for a full type IRI, resolved against the prefixes
+   *  known now (so a prefix declared by loaded Turtle counts). */
+  private _compactAppearance(type: string): ClassAppearance | undefined {
+    if (!this._hasCompactKeys) return undefined;
+    const compact = this._prefixManager.compact(type);
+    return compact ? this._appearance.get(compact) : undefined;
   }
 
   /** Get the color for an edge */

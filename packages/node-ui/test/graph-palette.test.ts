@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { graphPalette, dataSlotHex } from '../src/ui/graph-palette.js';
+import { ENTITY_TYPE_KINDS, kindColorForType, kindSlot } from '../src/ui/entity-kind-colors.js';
 import {
   buildLayerGraphOptions,
   codeClassColors,
@@ -41,6 +42,19 @@ describe('graph palette', () => {
 
   it('uses the --text-tertiary grey as the neutral node, so DOM fallbacks (the token) and canvas fallbacks (the palette) match', () => {
     for (const t of ['dark', 'light'] as const) expect(graphPalette(t).neutral.node, t).toBe(tokens(t)['--text-tertiary']);
+  });
+
+  it('gives DOM badges and canvas nodes the same palette slot for every code type, from one registry', () => {
+    const codeTypes = Object.entries(ENTITY_TYPE_KINDS).filter(([iri]) => iri.startsWith(CODE));
+    expect(codeTypes.length).toBeGreaterThanOrEqual(7);
+    for (const t of ['dark', 'light'] as const) {
+      const p = graphPalette(t);
+      const canvas = codeClassColors(p);
+      for (const [iri, kind] of codeTypes) {
+        expect(kindColorForType(iri), iri).toBe(`var(--data-${kindSlot(kind)})`);
+        expect(canvas[iri], iri).toBe(dataSlotHex(p, kindSlot(kind)));
+      }
+    }
   });
 
   it('is resolved without the DOM, and stable per theme', () => {
