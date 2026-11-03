@@ -16,9 +16,10 @@
 //   - conservation over a seeded run of fundings, top-ups, batches,
 //     finalizations and void claims: the money due in closed epochs equals
 //     their pools plus the carry;
-//   - queryInferenceGross: OT-RFC-27's formula at λ 0, 0.5 and 1, the R share
-//     when ΣQueryInferenceScore is 0, and 0 for an open epoch, an empty pool
-//     or a node with no value;
+//   - queryInferenceGross: OT-RFC-27's formula at λ 0, 0.5 and 1, its sum
+//     over the nodes, short of the pool by under 2 wei per node at every λ,
+//     the R share when ΣQueryInferenceScore is 0, and 0 for an open epoch, an
+//     empty pool or a node with no value;
 //   - the preview: previewEpochClose and previewQueryInferenceGross read an
 //     ended epoch's pool, λ and gross before its close exactly as the close
 //     then freezes them, replaying the rollover of the epochs before it, for
@@ -502,6 +503,46 @@ describe('@integration The epoch close of the query/inference pool', function ()
       // 0.5 × 5,000 × 0.2 + 0.5 × 5,000 × 180 / 700
       expect(results['5000'][0]).to.equal(500n * TRAC + (2_500n * TRAC * 180n) / 700n);
       expect(results['10000'][0]).to.equal((5_000n * TRAC * 180n) / 700n);
+    });
+
+    it('sums over the nodes to the pool less under 2 wei per node, at every λ, and the close carries none of it', async () => {
+      // Five nodes at five stake factors, claims that divide no total evenly,
+      // and a pool that is no round number of wei.
+      const stakes = [4_050_000n, 2_112_500n, 1_250_000n, 500_000n, 123_457n].map((s) => s * TRAC);
+      const sellers: Seller[] = [];
+      for (const stake of stakes) sellers.push(await seller(stake));
+      const amounts = [13n, 17n, 19n, 23n, 29n].map((n) => n * 1_000n * UNIT_ASK);
+      const pool = 1_000n * TRAC + 7n;
+      const e = await epochNow();
+      const snapshot = await takeSnapshot();
+      let dusty = 0;
+      for (const lambda of [0n, 1n, 3_333n, 5_000n, 9_999n, 10_000n]) {
+        await snapshot.restore();
+        await forward(QIS, 'setLambdaBps', [lambda]);
+        const p = await walletFund(f.accounts[21], e, pool);
+        for (const [i, s] of sellers.entries()) await claim(s, p, amounts[i]);
+        await finalizeIn(e, [p], sellers);
+        await toEpoch(e + 2n);
+        await closeAll();
+        expect(await f.QS.epochPool(e + 1n)).to.equal(pool);
+        expect(await QIS.carry()).to.equal(0n);
+
+        const t = await QIS.getEpochTotals(e + 1n);
+        let paid = 0n;
+        for (const s of sellers) {
+          const n = await QIS.getNodeEpoch(s.identityId, e + 1n);
+          const gross = await f.QS.queryInferenceGross(e + 1n, s.identityId);
+          expect(gross).to.equal(formula(pool, lambda, n.r, t.sumR, n.score, t.sumScore));
+          paid += gross;
+        }
+        // Each node's two terms are floored apart, so each leaves under 1 wei,
+        // and a λ of 0 or 1 has one term only.
+        const dust = pool - paid;
+        const perTerm = lambda === 0n || lambda === BPS ? 1n : 2n;
+        expect(dust >= 0n && dust < perTerm * BigInt(sellers.length), `λ ${lambda}: ${dust} wei`).to.equal(true);
+        if (dust > 0n) dusty++;
+      }
+      expect(dusty).to.be.greaterThan(0);
     });
 
     it('takes the R share for the stake-weighted term when ΣQIS is 0', async () => {

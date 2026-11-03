@@ -73,8 +73,12 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * The close (`closeEpochs`, `ensureClosed`). Epochs close in order, from the
  * activation epoch, once they have ended. An epoch's money B is what is due in
  * it (the wallet-funded value and the Conviction Account cost of the periods
- * of the epoch before) plus the carry. If no node finalized value in it, the carry becomes B and its pool is
- * 0 (rollover); otherwise its pool is B and the carry 0. The close freezes the
+ * of the epoch before) plus the carry. If no node finalized value in it, the
+ * carry becomes B and its pool is 0 (rollover); otherwise its pool is B and
+ * the carry 0. The pool is paid out as the nodes' gross rewards, each of its
+ * two terms floored, so less than 2 wei per node with value stays in the
+ * vault and is never carried: the same kind of remainder as the floors of
+ * `StakingV10`'s split of a node's reward. The close freezes the
  * pool and λ beside the epoch's totals ΣR and ΣQueryInferenceScore, which
  * nothing writes once it has ended, so `queryInferenceGross`, a node's gross
  * reward from the pool, reads only frozen values. `previewEpochClose` and
@@ -557,7 +561,13 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         not, which needs every seller's stake factor to be 0, the second
      *         term takes the R share. 0 for an epoch still open, an empty pool
      *         or a node with no finalized value. Over all nodes it sums to at
-     *         most the pool.
+     *         most the pool, and to more than the pool less 2 wei per node
+     *         with value: each term is floored on its own, so a node's gross
+     *         falls short of its exact share by less than 1 wei per term
+     *         (one term at a λ of 0 or 1). That remainder is never paid out:
+     *         the close of an epoch with value carries nothing, so it stays in
+     *         the vault, as the floors of `StakingV10`'s split of a node's
+     *         reward between its operator fee and its delegators do.
      */
     function queryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256 gross) {
         QueryInferenceStorage qis = queryInferenceStorage;
@@ -779,7 +789,10 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
 
     /// @dev Close `epoch`: its money is its incoming money and `carryIn`,
     ///      which become its pool if a node finalized value in it, and the
-    ///      carry out otherwise.
+    ///      carry out otherwise. A pool is paid out as its nodes' gross
+    ///      rewards, each term floored (`queryInferenceGross`), so less than
+    ///      2 wei per node with value is never claimed, and with a carry out
+    ///      of 0 it stays in the vault.
     function _closeEpoch(QueryInferenceStorage qis, uint256 epoch, uint96 carryIn) internal returns (uint96 carryOut) {
         (uint96 wallet, uint96 conviction) = _incoming(qis, epoch);
         QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
@@ -803,7 +816,11 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     }
 
     /// @dev Node `identityId`'s pool × QIF in `epoch`, for a pool `pool` and λ
-    ///      `lambda`, over the epoch's totals; see `queryInferenceGross`.
+    ///      `lambda`, over the epoch's totals; see `queryInferenceGross`. Each
+    ///      term is one `mulDiv`, floored on its own, which leaves its dust
+    ///      bound: one floor over both terms would divide by
+    ///      BPS × ΣR × ΣQueryInferenceScore, two uint128 totals and λ's
+    ///      denominator, which does not fit 256 bits.
     function _gross(
         QueryInferenceStorage qis,
         uint256 epoch,
