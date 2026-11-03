@@ -107,11 +107,23 @@ export function receiptAgent(row: Record<string, unknown>): string | null {
 }
 export const receiptValue = (v: unknown) => unwrapIri(bv(v));
 
-/** Is this entity covered by a receipted assertion (member row or URI prefix)? */
+/** Is this entity covered by a receipted assertion? Either a member row
+ *  names it, or it is the assertion itself or lives under it (the assertion
+ *  URI followed by "/" or "#"). A bare prefix is not enough: a receipt for
+ *  …/assertion/0xabc/note must not cover …/assertion/0xabc/notebook/…. */
 export function hasReceipt(entityUri: string, s: VmReceiptSummary): boolean {
   if (s.members.has(entityUri)) return true;
-  for (const a of s.assertions) if (entityUri.startsWith(a)) return true;
+  for (const a of s.assertions) if (isAtOrUnder(entityUri, a)) return true;
   return false;
+}
+
+function isAtOrUnder(uri: string, base: string): boolean {
+  if (uri === base) return true;
+  if (!uri.startsWith(base)) return false;
+  // A base that already ends in a separator is its own boundary.
+  if (base.endsWith('/') || base.endsWith('#')) return true;
+  const next = uri[base.length];
+  return next === '/' || next === '#';
 }
 
 export function useVmReceiptSummary(contextGraphId: string | undefined): VmReceiptSummaryState {

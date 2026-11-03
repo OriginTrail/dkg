@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildVmFacts } from '../src/ui/views/project/vm-facts.js';
-import { summariseVmReceipts, buildVmReceiptSummaryQuery, isSafeIriPart } from '../src/ui/hooks/useVmReceiptSummary.js';
+import { summariseVmReceipts, buildVmReceiptSummaryQuery, isSafeIriPart, hasReceipt } from '../src/ui/hooks/useVmReceiptSummary.js';
 
 const ent = (uri: string) => ({ uri, label: uri, types: [], trustLevel: 'verified', layers: new Set(), subGraphs: new Set(), properties: new Map(), connections: [] }) as any;
 const A = 'did:dkg:context-graph:cg/assertion/0xabc/';
@@ -50,6 +50,17 @@ describe('Verifiable Memory hero facts (C11)', () => {
     const facts = buildVmFacts([ent('urn:x:a'), ent('urn:x:b'), ent('urn:x:c')], s, ok);
     expect(facts[0]).toMatchObject({ value: '1 / 3 anchored', tone: 'warn' });
     expect(facts[0]!.tooltip).toContain('2 Knowledge Assets have no on-chain receipt');
+  });
+
+  it('matches receipts on assertion boundaries, not bare prefixes', () => {
+    const s = summariseVmReceipts([{ asrt: A + 'note', agent: 'did:dkg:agent:0xabc' }]);
+    expect(hasReceipt(A + 'note', s)).toBe(true);
+    expect(hasReceipt(A + 'note/entity/1', s)).toBe(true);
+    expect(hasReceipt(A + 'note#e1', s)).toBe(true);
+    expect(hasReceipt(A + 'notebook', s)).toBe(false);
+    expect(hasReceipt(A + 'notebook/entity/1', s)).toBe(false);
+    const facts = buildVmFacts([ent(A + 'note/entity/1'), ent(A + 'notebook/entity/1')], s, ok);
+    expect(facts[0]).toMatchObject({ value: '1 / 2 anchored', tone: 'warn' });
   });
 
   it('never claims consensus, and stays neutral while loading or on error', () => {
