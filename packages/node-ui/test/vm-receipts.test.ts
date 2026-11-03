@@ -24,11 +24,11 @@ const B = `did:dkg:context-graph:${CG}/research/assertion/0xdef/batch`;
 describe('parseVmReceiptRows', () => {
   it('folds rows into one typed receipt per assertion', () => {
     const receipts = parseVmReceiptRows([
-      { asrt: A, tx: '"0x9f2c"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-30T10:00:00Z"' },
-      { asrt: A, tx: '"0x9f2c"', member: 'urn:x:b', agent: 'did:dkg:agent:0x2', finalizedAt: '"2026-10-31T10:00:00Z"' },
-      { asrt: A, tx: '"0x9f2c"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
+      { asrt: A, tx: '"0x9f2c"', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-30T10:00:00Z"' },
+      { asrt: A, tx: '"0x9f2c"', sealRoot: '"aa"', member: 'urn:x:b', agent: 'did:dkg:agent:0x2', finalizedAt: '"2026-10-31T10:00:00Z"' },
+      { asrt: A, tx: '"0x9f2c"', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
       // SPARQL JSON binding objects are read the same way.
-      { asrt: { type: 'uri', value: B }, tx: { type: 'literal', value: '0x41ab' }, member: { type: 'uri', value: 'urn:x:c' } },
+      { asrt: { type: 'uri', value: B }, tx: { type: 'literal', value: '0x41ab' }, sealRoot: { type: 'literal', value: 'cc' }, member: { type: 'uri', value: 'urn:x:c' } },
       // Not receipts: no assertion, or no transaction.
       { tx: '0xdead' },
       { asrt: `did:dkg:context-graph:${CG}/assertion/0xabc/no-tx` },
@@ -59,8 +59,8 @@ describe('parseVmReceiptRows', () => {
   it('names no transaction when a named assertion was published more than once, whatever the row order', () => {
     // Append-only receipts: nothing pairs a hash with its block, so neither is "current".
     const rows = [
-      { asrt: A, tx: '0xff01', member: 'urn:x:a' },
-      { asrt: A, tx: '0x1102', member: 'urn:x:a' },
+      { asrt: A, tx: '0xff01', sealRoot: '"aa"', member: 'urn:x:a' },
+      { asrt: A, tx: '0x1102', sealRoot: '"aa"', member: 'urn:x:a' },
     ];
     for (const order of [rows, [...rows].reverse()]) {
       const [r] = parseVmReceiptRows(order, CG);
@@ -71,9 +71,9 @@ describe('parseVmReceiptRows', () => {
   it('takes the transaction from the UAL metadata over any named receipt', () => {
     const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
     const rows = [
-      { asrt: A, tx: '0xold', kaUal: UAL, finalizedAt: '"2026-10-30T10:00:00Z"' },
-      { asrt: A, tx: '0xolder', kaUal: UAL },
-      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xcurrent', kind: 'transaction' },
+      { asrt: A, tx: '0xold', kaUal: UAL, sealRoot: '"aa"', scope: '"2"', finalizedAt: '"2026-10-30T10:00:00Z"' },
+      { asrt: A, tx: '0xolder', kaUal: UAL, sealRoot: '"aa"', scope: '"2"' },
+      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xcurrent', ualRoot: '"0xaa"', kind: 'transaction' },
     ];
     for (const order of [rows, [...rows].reverse()]) {
       const receipts = parseVmReceiptRows(order, CG);
@@ -87,6 +87,44 @@ describe('parseVmReceiptRows', () => {
       { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xb', kind: 'transaction' },
     ], CG);
     expect(r).toMatchObject({ tx: '0xnamed', confirmation: 'receipt' });
+  });
+
+  it('keeps one record for a reopened assertion, through its lifecycle record', () => {
+    const AUTHOR = '0x' + 'ab'.repeat(20);
+    const NAMED = `did:dkg:context-graph:${CG}/assertion/${AUTHOR}/notes`;
+    const UAL = `did:dkg:hardhat:31337/${AUTHOR}/9`;
+    const LIFE = `urn:dkg:assertion:${CG}:${AUTHOR.toUpperCase().replace('0X', '0x')}:notes`; // caller spelling kept
+    // Reopened: the seal (root, kaUal, finalize time) is gone; only the receipt remains.
+    const receipts = parseVmReceiptRows([
+      { asrt: NAMED, tx: '0xv1' },
+      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xv1', ualRoot: '"0xAA"', kind: 'transaction' },
+      { life: LIFE, reservedUal: `"${UAL}"` },
+    ], CG);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ assertion: NAMED, ual: UAL, tx: '0xv1', confirmation: 'transaction', finalizedAt: null, members: [] });
+  });
+
+  it("never shows an unpublished draft's finalize time or members on the published version", () => {
+    const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
+    const published = { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xv1', ualRoot: '"0xaa"', kind: 'transaction' };
+    // Version 2 finalized but not published: the seal's root is not the confirmed root.
+    const [draft] = parseVmReceiptRows([
+      { asrt: A, tx: '0xv1', kaUal: UAL, sealRoot: '"bb"', scope: '"2"', finalizedAt: '"2026-11-01T10:00:00Z"', member: 'urn:x:draft' },
+      published,
+    ], CG);
+    expect(draft).toMatchObject({ tx: '0xv1', finalizedAt: null, members: [] });
+    // The seal of the confirmed version (same root, any 0x/case spelling) is trusted.
+    const [current] = parseVmReceiptRows([
+      { asrt: A, tx: '0xv1', kaUal: UAL, sealRoot: '"AA"', scope: '"2"', finalizedAt: '"2026-10-30T10:00:00Z"' },
+      published,
+    ], CG);
+    expect(current).toMatchObject({ tx: '0xv1', finalizedAt: '2026-10-30T10:00:00.000Z' });
+    // A graph-scoped seal with no confirmed metadata to compare against proves nothing.
+    const [unbound] = parseVmReceiptRows([{ asrt: A, tx: '0xv1', sealRoot: '"bb"', scope: '"2"', finalizedAt: '"2026-11-01T10:00:00Z"' }], CG);
+    expect(unbound.finalizedAt).toBeNull();
+    // A legacy root-scoped seal is never a newer draft (new seals are graph-scoped).
+    const [legacy] = parseVmReceiptRows([{ asrt: A, tx: '0xv1', sealRoot: '"bb"', finalizedAt: '"2026-11-01T10:00:00Z"', member: 'urn:x:a' }], CG);
+    expect(legacy).toMatchObject({ finalizedAt: '2026-11-01T10:00:00.000Z', members: ['urn:x:a'] });
   });
 
   it('folds confirmed KA metadata on the UAL: transaction-confirmed and receiptless finalized materialization', () => {
@@ -110,7 +148,7 @@ describe('parseVmReceiptRows', () => {
   });
 
   it('treats an unparseable finalize time as unknown', () => {
-    const [r] = parseVmReceiptRows([{ asrt: A, tx: '0x1', finalizedAt: '"soon"' }], CG);
+    const [r] = parseVmReceiptRows([{ asrt: A, tx: '0x1', sealRoot: '"aa"', finalizedAt: '"soon"' }], CG);
     expect(r.finalizedAt).toBeNull();
   });
 });
@@ -140,16 +178,20 @@ describe('useVmReceipts', () => {
     })) as any;
   };
   const settle = async () => { await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
+  /** The graph-boundary owner, as ProjectView does it. */
+  function Owner({ id, children }: { id?: string; children?: React.ReactNode }) {
+    return React.createElement(VmReceiptsProvider, { value: useVmReceiptsResource(id) }, children);
+  }
 
   it('header facts and graph anchors share one request and the same records', async () => {
-    respond([{ asrt: A, tx: '0x9f2c', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' }]);
+    respond([{ asrt: A, tx: '0x9f2c', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' }]);
     const seen: { summary?: any; anchors?: any } = {};
     function Both() {
       seen.summary = useVmReceiptSummary(CG).summary;
       seen.anchors = useVerifiableMemoryAnchors(CG, new Set(['urn:x:a'])).anchors;
       return null;
     }
-    await act(async () => { root.render(React.createElement(Both)); });
+    await act(async () => { root.render(React.createElement(Owner, { id: CG }, React.createElement(Both))); });
     await settle();
 
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
@@ -160,7 +202,7 @@ describe('useVmReceipts', () => {
   });
 
   it('one provider load serves both consumers, and one refresh updates both', async () => {
-    respond([{ asrt: A, tx: '0x9f2c', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' }]);
+    respond([{ asrt: A, tx: '0x9f2c', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' }]);
     const seen: { summary?: any; anchors?: any; resource?: ReturnType<typeof useVmReceiptsResource> } = {};
     function Summary() { seen.summary = useVmReceiptSummary(CG).summary; return null; }
     function Anchors() { seen.anchors = useVerifiableMemoryAnchors(CG, null).anchors; return null; }
@@ -177,8 +219,8 @@ describe('useVmReceipts', () => {
 
     invalidateQueryCache();
     respond([
-      { asrt: A, tx: '0x9f2c', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
-      { asrt: A, tx: '0x9f2c', member: 'urn:x:b', agent: 'did:dkg:agent:0x1' },
+      { asrt: A, tx: '0x9f2c', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
+      { asrt: A, tx: '0x9f2c', sealRoot: '"aa"', member: 'urn:x:b', agent: 'did:dkg:agent:0x1' },
     ]);
     await act(async () => { seen.resource!.refresh(); });
     await settle();
@@ -195,16 +237,19 @@ describe('useVmReceipts', () => {
       pending.set(cg, (bindings) => resolve(new Response(JSON.stringify({ result: { bindings } }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
     })) as any;
     const resolveGraph = async (cg: string, rows: unknown[]) => { pending.get(cg)!(rows); pending.delete(cg); await settle(); await settle(); };
-    const alice = { asrt: 'did:dkg:context-graph:graph-a/assertion/0xaaa/one', tx: '0xa1', member: 'urn:a:1', agent: 'did:dkg:agent:alice' };
-    const bob = { asrt: 'did:dkg:context-graph:graph-b/assertion/0xbbb/one', tx: '0xb1', member: 'urn:b:1', agent: 'did:dkg:agent:bob' };
+    const alice = { asrt: 'did:dkg:context-graph:graph-a/assertion/0xaaa/one', tx: '0xa1', sealRoot: '"aa"', member: 'urn:a:1', agent: 'did:dkg:agent:alice' };
+    const bob = { asrt: 'did:dkg:context-graph:graph-b/assertion/0xbbb/one', tx: '0xb1', sealRoot: '"bb"', member: 'urn:b:1', agent: 'did:dkg:agent:bob' };
 
-    let state!: ReturnType<typeof useVmReceipts>;
+    let state!: ReturnType<typeof useVmReceiptsResource>;
     let signers: string[] = [];
-    function Probe({ id }: { id: string }) {
-      state = useVmReceipts(id);
+    function Signers({ id }: { id: string }) {
       const { summary } = useVmReceiptSummary(id);
       signers = summary ? [...summary.signers] : [];
       return null;
+    }
+    function Probe({ id }: { id: string }) {
+      state = useVmReceiptsResource(id);
+      return React.createElement(VmReceiptsProvider, { value: state }, React.createElement(Signers, { id }));
     }
     // Graph A loads Alice.
     await act(async () => { root.render(React.createElement(Probe, { id: 'graph-a' })); });
@@ -238,9 +283,9 @@ describe('useVmReceipts', () => {
 
   it('reports loading, then an error without receipts when the query fails', async () => {
     respond([], 500);
-    const states: Array<ReturnType<typeof useVmReceipts>> = [];
+    const states: Array<ReturnType<typeof useVmReceiptsResource>> = [];
     function Probe() {
-      states.push(useVmReceipts(CG));
+      states.push(useVmReceiptsResource(CG));
       return null;
     }
     await act(async () => { root.render(React.createElement(Probe)); });
@@ -254,13 +299,30 @@ describe('useVmReceipts', () => {
   it('does not query for a missing or unsafe graph id', async () => {
     respond([]);
     function Probe({ id }: { id?: string }) {
-      useVmReceipts(id);
+      useVmReceiptsResource(id);
       return null;
     }
     await act(async () => { root.render(React.createElement(Probe, { id: undefined })); });
     await act(async () => { root.render(React.createElement(Probe, { id: 'x> } DROP' })); });
     await settle();
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+
+  it('a reader owns nothing: no provider, another graph or no id reads empty and loads nothing', async () => {
+    respond([{ asrt: A, tx: '0x9f2c', sealRoot: '"aa"', member: 'urn:x:a' }]);
+    const seen: Record<string, ReturnType<typeof useVmReceipts>> = {};
+    function Reader({ tag, id }: { tag: string; id?: string }) { seen[tag] = useVmReceipts(id); return null; }
+    await act(async () => { root.render(React.createElement(React.Fragment, null,
+      React.createElement(Reader, { tag: 'alone', id: CG }),
+      React.createElement(Owner, { id: 'cg-other' },
+        React.createElement(Reader, { tag: 'otherGraph', id: CG }),
+        React.createElement(Reader, { tag: 'disabled', id: undefined })),
+    )); });
+    await settle();
+    // Only the owner for cg-other queried.
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body)).contextGraphId).toBe('cg-other');
+    for (const tag of ['alone', 'otherGraph', 'disabled']) expect(seen[tag], tag).toMatchObject({ receipts: null, loading: false, error: null });
   });
 });
 

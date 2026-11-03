@@ -2,27 +2,30 @@
  * Verifiable Memory publish receipts for a context graph — loaded and
  * normalised in one place.
  *
- * Confirmed Knowledge Assets leave two kinds of record in
+ * Confirmed Knowledge Assets leave these records in
  * `did:dkg:context-graph:<cg>/_meta`:
  *
- *   Named-assertion receipt (local publishes; append-only):
- *     <assertionUri>  dkg:publishedAtTx        "0x…"   (one per publish)
- *     <assertionUri>  dkg:assertionFinalizedAt "…"     (seal time, optional)
- *     <assertionUri>  dkg:assertionRootEntity | dkg:assertionEntity <member>  (legacy)
- *     <assertionUri>  dkg:kaUal                <ual>   (graph-scoped KAs)
- *     <assertionUri>  prov:wasAttributedTo     <did:dkg:agent:0x…>
+ *   Named-assertion publish receipt (append-only, one per publish):
+ *     <assertionUri>  dkg:publishedAtTx  "0x…"
+ *
+ *   The assertion's active seal, on the same subject (MUTABLE: cleared when
+ *   the assertion is reopened, rewritten for the next version on finalize):
+ *     <assertionUri>  dkg:assertionMerkleRoot, dkg:assertionFinalizedAt,
+ *                     dkg:contentScopeVersion, dkg:kaUal,
+ *                     dkg:assertionRootEntity | dkg:assertionEntity (legacy members)
+ *
+ *   The assertion's lifecycle record (durable across reopen and re-finalize):
+ *     <urn:dkg:assertion:<cg>:[<sub>:]<addr>:<name>>  dkg:reservedUal "<ual>"
  *
  *   Confirmed KA metadata on the UAL (version-bound: rewritten per version;
  *   also written for assets that arrived through sync):
  *     <ual>  dkg:status "confirmed" ; dkg:kaUal <ual> ; dkg:assertionGraph <per-KA VM graph>
- *     <ual>  dkg:confirmationKind "transaction" | "finalized-materialization"
+ *     <ual>  dkg:merkleRoot "…" ; dkg:confirmationKind "transaction" | "finalized-materialization"
  *     <ual>  dkg:transactionHash "0x…"   (transaction kind only)
  *
- * Both kinds fold into one `VmReceipt` per Knowledge Asset (keyed by UAL
- * when there is one, else by assertion URI). Members come from legacy
- * member rows plus the subjects of the per-KA graph (`dkg:assertionGraph`,
- * else derived from the UAL), read with a second, VALUES-bounded query over
- * the context graph's partitions.
+ * Everything folds into one `VmReceipt` per Knowledge Asset, keyed by its UAL
+ * when known (the lifecycle record's reservedUal, else the seal's kaUal), else
+ * by assertion URI. A reopened assertion therefore stays one record.
  *
  * Which transaction anchors the current content:
  *   1. The UAL metadata's single `dkg:transactionHash`: it belongs to the
@@ -30,30 +33,42 @@
  *   2. Otherwise a named receipt with exactly one distinct transaction.
  *   3. Otherwise none. A finalized materialization carries no local hash,
  *      and a named assertion published more than once keeps several hashes
- *      and blocks with nothing pairing them, so the current one can't be
- *      told apart. Either way the asset is anchored; `tx` is null rather
- *      than a guess.
+ *      and blocks with nothing pairing them. Either way the asset is
+ *      anchored; `tx` is null rather than a guess.
  *
- * `finalizedAt` is the seal time (`dkg:assertionFinalizedAt`) only; publish
- * and sync times are different events and never stand in for it.
+ * Seal facts (finalize time, legacy member rows) describe whatever version
+ * was last sealed, which may be an unpublished draft. They are used only
+ * when the seal is the confirmed content: its merkle root equals the UAL
+ * metadata's root, or, with no UAL metadata, it is a legacy root-scoped seal
+ * (new finalizes only write graph-scoped seals, so a legacy seal is never a
+ * newer draft). Otherwise the finalize time is unknown. `finalizedAt` never
+ * comes from publish or sync times.
  *
- * Storage identities are parsed and built with core's helpers; rows they
- * don't recognise are skipped, never thrown. Both reads are capped; when a
- * read hits its cap the result is marked incomplete, so callers never treat
- * an omitted receipt as a missing one.
+ * Members come from trusted legacy member rows plus the subjects of the
+ * per-KA graph (`dkg:assertionGraph`, else derived from the UAL), read with a
+ * second, VALUES-bounded query over the context graph's partitions.
  *
- * One resource per graph: `VmReceiptsProvider` (ProjectView) owns the load,
- * reload on Verifiable Memory changes and `refresh()`; the VM header facts
- * (`useVmReceiptSummary`) and graph anchors (`useVerifiableMemoryAnchors`)
- * read it through `useVmReceipts` and project it. Outside a provider for
- * that graph, `useVmReceipts` owns a resource of its own.
+ * IRIs are validated and serialised with core's SPARQL helpers. Rows the
+ * parser doesn't recognise are skipped, never thrown. Both reads are capped;
+ * when a read hits its cap the result is marked incomplete, so callers never
+ * treat an omitted receipt as a missing one.
+ *
+ * Ownership: `useVmReceiptsResource` owns one graph's load (ProjectView),
+ * and shares it through `VmReceiptsProvider`. `useVmReceipts` only reads
+ * that provider; the VM header facts and graph anchors project it.
  *
  * Read-only over `/api/query`.
  */
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { contextGraphLayerUri, parseContextGraphAssertionStorageUri } from '@origintrail-official/dkg-core/dist/constants.js';
+import {
+  assertionLifecycleUri,
+  contextGraphLayerUri,
+  contextGraphMetaUri,
+  parseContextGraphAssertionStorageUri,
+} from '@origintrail-official/dkg-core/dist/constants.js';
 import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-core/dist/ka-content-scope.js';
 import { MemoryLayer } from '@origintrail-official/dkg-core/dist/memory-model.js';
+import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core/sparql-safe';
 import { executeQuery, type QueryExecutionOptions } from '../api.js';
 import { decodeAssertionIdentity } from '../assertion-identity.js';
 import { bindingLexicalValue } from '../query-bindings.js';
@@ -79,10 +94,10 @@ export interface VmReceipt {
    *  records don't identify one (see the module comment). */
   tx: string | null;
   confirmation: VmConfirmation;
-  /** Seal (finalize) time as ISO, or null when unknown. */
+  /** Seal (finalize) time of the confirmed content as ISO, or null when unknown. */
   finalizedAt: string | null;
-  /** Entities the KA covers: seal member rows, plus the subjects of its
-   *  per-KA graph for graph-scoped KAs. */
+  /** Entities the KA covers: trusted seal member rows, plus the subjects of
+   *  its per-KA graph for graph-scoped KAs. */
   members: string[];
   /** Agents that published it: attribution rows when present, otherwise the
    *  author address in the assertion URI (…/assertion/<addr>/<name>). */
@@ -109,22 +124,27 @@ export interface VmReceiptsState {
   error: string | null;
 }
 
-/** A context graph id is embedded in an IRI ref; refuse anything that could break out of it. */
-export function isSafeIriPart(value: string): boolean {
-  return value.length > 0 && !/[\s<>"{}|^`\\]/.test(value);
-}
-
 /** Row caps for the two reads; a read that returns this many rows may be cut short. */
 export const RECEIPT_ROW_LIMIT = 20000;
 export const MEMBER_ROW_LIMIT = 20000;
 
+/** The graph's `_meta` IRI, or undefined when the id can't form a safe IRI. */
+export function receiptMetaGraph(cgId: string | undefined): string | undefined {
+  if (!cgId) return undefined;
+  const meta = contextGraphMetaUri(cgId);
+  return isSafeIri(meta) ? meta : undefined;
+}
+
+/** Throws (via core's helpers) when `cgId` can't form a safe graph IRI. */
 export function buildVmReceiptQuery(cgId: string): string {
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?asrt ?ual ?tx ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph WHERE {
-  GRAPH <did:dkg:context-graph:${cgId}/_meta> {
+SELECT ?asrt ?ual ?life ?tx ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph ?sealRoot ?scope ?ualRoot ?reservedUal WHERE {
+  GRAPH ${sparqlIri(contextGraphMetaUri(cgId))} {
     {
       ?asrt dkg:publishedAtTx ?tx .
+      OPTIONAL { ?asrt dkg:assertionMerkleRoot ?sealRoot . }
+      OPTIONAL { ?asrt dkg:contentScopeVersion ?scope . }
       OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
       OPTIONAL { ?asrt prov:wasAttributedTo ?agent . }
       OPTIONAL { ?asrt dkg:kaUal ?kaUal . }
@@ -132,8 +152,12 @@ SELECT ?asrt ?ual ?tx ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph WHERE {
     } UNION {
       ?ual dkg:status "confirmed" ; dkg:kaUal ?ual ; dkg:assertionGraph ?kaGraph .
       OPTIONAL { ?ual dkg:transactionHash ?tx . }
+      OPTIONAL { ?ual dkg:merkleRoot ?ualRoot . }
       OPTIONAL { ?ual dkg:confirmationKind ?kind . }
       OPTIONAL { ?ual prov:wasAttributedTo ?agent . }
+    } UNION {
+      ?life dkg:reservedUal ?reservedUal .
+      FILTER(STRSTARTS(STR(?life), ${sparqlString(`urn:dkg:assertion:${cgId}:`)}))
     }
   }
 } LIMIT ${RECEIPT_ROW_LIMIT}`;
@@ -142,9 +166,10 @@ SELECT ?asrt ?ual ?tx ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph WHERE {
 /** Most per-KA graphs read by one membership query. */
 export const KA_GRAPH_BATCH = 100;
 
-/** Subjects of exact per-KA graphs: the members of graph-scoped KAs. */
+/** Subjects of exact per-KA graphs: the members of graph-scoped KAs.
+ *  Graphs that aren't safe IRIs are skipped. */
 export function buildKaGraphMemberQuery(kaGraphs: readonly string[]): string {
-  const values = kaGraphs.filter(isSafeIriPart).map(g => `<${g}>`).join(' ');
+  const values = kaGraphs.filter(isSafeIri).map(sparqlIri).join(' ');
   return `SELECT DISTINCT ?g ?member WHERE {
   VALUES ?g { ${values} }
   GRAPH ?g { ?member ?p ?o . }
@@ -160,10 +185,22 @@ export const memberQueryOptions = (cgId: string): QueryExecutionOptions => ({ co
 
 const term = (v: unknown): string => (bindingLexicalValue(v) ?? '').trim();
 
+/** Ethereum addresses in identifiers compare case-insensitively. */
+const normaliseAddresses = (s: string): string => s.replace(/0x[0-9a-fA-F]{40}/g, (m) => m.toLowerCase());
+const normaliseRoot = (s: string): string => s.replace(/^0x/i, '').toLowerCase();
+
 /** The author DID encoded in an assertion URI, if any. */
 function authorOf(assertion: string): string | null {
   const addr = parseContextGraphAssertionStorageUri(assertion)?.agentAddress;
   return addr ? `did:dkg:agent:${addr}` : null;
+}
+
+/** The lifecycle record URN for a named assertion, address-normalised. */
+function lifecycleKeyOf(assertion: string, cgId: string): string | undefined {
+  const coordinate = parseContextGraphAssertionStorageUri(assertion);
+  const identity = decodeAssertionIdentity(assertion, cgId);
+  if (!coordinate || !identity) return undefined;
+  return normaliseAddresses(assertionLifecycleUri(cgId, coordinate.agentAddress, identity.name, identity.subGraph));
 }
 
 /** did:dkg:<chain>/<0x-author>/<n> → that KA's Verifiable Memory graph in
@@ -192,56 +229,88 @@ interface Folding {
   ualTxs: string[];
   /** The UAL's confirmed metadata was read. */
   ualConfirmed: boolean;
+  ualRoots: string[];
   kind?: string;
-  finalizedAt: string | null;
-  members: string[];
+  /** Active-seal facts on the named assertion; trusted only after `sealIsConfirmed`. */
+  sealRoots: string[];
+  sealScopes: string[];
+  sealFinalizedAt: string | null;
+  sealMembers: string[];
   attributed: string[];
   kaGraph?: string;
   subGraph?: string;
+}
+
+/** The active seal describes the confirmed content (see the module comment). */
+function sealIsConfirmed(f: Folding): boolean {
+  if (f.sealRoots.length !== 1) return false;
+  if (f.ualConfirmed) return f.ualRoots.length === 1 && f.ualRoots[0] === f.sealRoots[0];
+  const legacy = f.sealScopes.length === 0 || f.sealScopes.every((s) => s === '1');
+  return legacy;
 }
 
 /** Fold query rows into one receipt per Knowledge Asset (by UAL, else by
  *  assertion URI). Rows that name neither a receipted assertion nor a
  *  confirmed UAL are skipped. */
 export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>, cgId: string): VmReceipt[] {
-  const byKey = new Map<string, Folding>();
   const add = (list: string[], v: string) => { if (v && !list.includes(v)) list.push(v); };
+  // The durable assertion → UAL links, from the lifecycle records.
+  const reserved = new Map<string, string>();
   for (const row of rows) {
+    const life = term(row.life);
+    const ual = term(row.reservedUal);
+    if (life && ual) reserved.set(normaliseAddresses(life), ual);
+  }
+  const byKey = new Map<string, Folding>();
+  const keyOf = (ual: string) => normaliseAddresses(ual);
+  for (const row of rows) {
+    if (term(row.life)) continue;
     const assertion = term(row.asrt);
-    const ual = term(row.ual) || term(row.kaUal);
     const tx = term(row.tx);
     if (assertion && !tx) continue; // a seal without a receipt
+    const lifecycleKey = assertion ? lifecycleKeyOf(assertion, cgId) : undefined;
+    const ual = assertion
+      ? (lifecycleKey && reserved.get(lifecycleKey)) || term(row.kaUal)
+      : term(row.ual);
     if (!assertion && !ual) continue;
-    const key = ual || assertion;
+    const key = ual ? keyOf(ual) : assertion;
     let f = byKey.get(key);
-    if (!f) { f = { receiptTxs: [], ualTxs: [], ualConfirmed: false, finalizedAt: null, members: [], attributed: [] }; byKey.set(key, f); }
+    if (!f) {
+      f = { receiptTxs: [], ualTxs: [], ualConfirmed: false, ualRoots: [], sealRoots: [], sealScopes: [], sealFinalizedAt: null, sealMembers: [], attributed: [] };
+      byKey.set(key, f);
+    }
     if (assertion) {
-      f.assertion = assertion;
+      f.assertion ??= assertion;
       f.subGraph ??= decodeAssertionIdentity(assertion, cgId)?.subGraph;
       add(f.receiptTxs, tx);
-      // Seal time comes from the named assertion only.
+      const sealRoot = term(row.sealRoot);
+      if (sealRoot) add(f.sealRoots, normaliseRoot(sealRoot));
+      add(f.sealScopes, term(row.scope));
       const finalizedAt = isoOrNull(term(row.finalizedAt));
-      if (finalizedAt && (!f.finalizedAt || finalizedAt > f.finalizedAt)) f.finalizedAt = finalizedAt;
+      if (finalizedAt && (!f.sealFinalizedAt || finalizedAt > f.sealFinalizedAt)) f.sealFinalizedAt = finalizedAt;
+      add(f.sealMembers, term(row.member));
     } else {
       f.ualConfirmed = true;
       add(f.ualTxs, tx);
+      const root = term(row.ualRoot);
+      if (root) add(f.ualRoots, normaliseRoot(root));
       const kind = term(row.kind);
       if (kind) f.kind = kind;
     }
     if (ual) {
-      f.ual = ual;
+      f.ual ??= ual;
       // The UAL's own dkg:assertionGraph is authoritative; otherwise derive it from the UAL.
       const explicit = term(row.kaGraph);
       if (explicit) f.kaGraph = explicit;
-      else f.kaGraph ??= kaGraphOf(ual, cgId, f.subGraph);
     }
-    add(f.members, term(row.member));
     add(f.attributed, term(row.agent));
   }
   const out: VmReceipt[] = [];
   for (const f of byKey.values()) {
     const resolved = resolveTx(f);
     if (!resolved) continue;
+    const kaGraph = f.kaGraph ?? (f.ual ? kaGraphOf(f.ual, cgId, f.subGraph) : undefined);
+    const trusted = sealIsConfirmed(f);
     const assertion = f.assertion ?? f.ual!;
     const author = f.assertion ? authorOf(f.assertion) : null;
     out.push({
@@ -249,11 +318,11 @@ export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>,
       ...(f.ual ? { ual: f.ual } : {}),
       tx: resolved.tx,
       confirmation: resolved.confirmation,
-      finalizedAt: f.finalizedAt,
-      members: f.members,
+      finalizedAt: trusted ? f.sealFinalizedAt : null,
+      members: trusted ? f.sealMembers : [],
       signers: f.attributed.length ? f.attributed : author ? [author] : [],
       subGraph: f.subGraph,
-      ...(f.kaGraph ? { kaGraph: f.kaGraph } : {}),
+      ...(kaGraph ? { kaGraph } : {}),
     });
   }
   return out;
@@ -302,7 +371,7 @@ export async function loadVmReceiptsWith(cgId: string, run: VmQueryRunner): Prom
   const rows = await run(buildVmReceiptQuery(cgId), receiptQueryOptions(cgId));
   let complete = rows.length < RECEIPT_ROW_LIMIT;
   const receipts = parseVmReceiptRows(rows, cgId);
-  const kaGraphs = [...new Set(receipts.flatMap(r => (r.kaGraph ? [r.kaGraph] : [])))];
+  const kaGraphs = [...new Set(receipts.flatMap(r => (r.kaGraph && isSafeIri(r.kaGraph) ? [r.kaGraph] : [])))];
   if (kaGraphs.length === 0) return { receipts, complete };
   const memberRows: Array<Record<string, unknown>> = [];
   for (let i = 0; i < kaGraphs.length; i += KA_GRAPH_BATCH) {
@@ -325,29 +394,31 @@ export interface VmReceiptsResource extends VmReceiptsState {
 }
 
 /** Load and own the receipts of one graph. Reloads when the graph changes,
- *  when its Verifiable Memory changes (a publish), and on `refresh()`. */
+ *  when its Verifiable Memory changes (a publish), and on `refresh()`.
+ *  A missing id, or one that can't form a safe graph IRI, loads nothing. */
 export function useVmReceiptsResource(contextGraphId: string | undefined): VmReceiptsResource {
-  const [state, setState] = useState<VmReceiptsState>({ receipts: null, complete: true, loading: false, error: null });
+  const [state, setState] = useState<VmReceiptsState>(EMPTY_STATE);
   const [reloads, setReloads] = useState(0);
   const versionRef = useRef(0);
   const loadedGraphRef = useRef<string | undefined>(undefined);
   const refresh = useCallback(() => setReloads(n => n + 1), []);
-  useMemoryGraphEvents(contextGraphId ?? '', refresh, { layers: ['vm'] });
+  const loadable = receiptMetaGraph(contextGraphId) ? contextGraphId : undefined;
+  useMemoryGraphEvents(loadable ?? '', refresh, { layers: ['vm'] });
   useEffect(() => {
     const version = ++versionRef.current;
-    if (!contextGraphId || !isSafeIriPart(contextGraphId)) {
-      setState({ receipts: null, complete: true, loading: false, error: null });
+    if (!loadable) {
+      setState(EMPTY_STATE);
       return;
     }
     // Reloading the same graph keeps its receipts on screen (no flicker);
     // another graph starts from nothing, so its facts and anchors never show
     // the previous graph's members or signers.
-    const sameGraph = loadedGraphRef.current === contextGraphId;
-    setState(prev => (sameGraph ? { ...prev, loading: true, error: null } : { receipts: null, complete: true, loading: true, error: null }));
-    loadVmReceipts(contextGraphId).then(
+    const sameGraph = loadedGraphRef.current === loadable;
+    setState(prev => (sameGraph ? { ...prev, loading: true, error: null } : { ...EMPTY_STATE, loading: true }));
+    loadVmReceipts(loadable).then(
       ({ receipts, complete }) => {
         if (version !== versionRef.current) return;
-        loadedGraphRef.current = contextGraphId;
+        loadedGraphRef.current = loadable;
         setState({ receipts, complete, loading: false, error: null });
       },
       (err: unknown) => {
@@ -356,9 +427,12 @@ export function useVmReceiptsResource(contextGraphId: string | undefined): VmRec
         setState({ receipts: null, complete: true, loading: false, error: message });
       },
     );
-  }, [contextGraphId, reloads]);
+  }, [loadable, reloads]);
   return { ...state, contextGraphId, refresh };
 }
+
+const EMPTY_STATE: VmReceiptsState = { receipts: null, complete: true, loading: false, error: null };
+const noop = () => {};
 
 const VmReceiptsContext = createContext<VmReceiptsResource | null>(null);
 
@@ -367,11 +441,11 @@ export function VmReceiptsProvider({ value, children }: { value: VmReceiptsResou
   return React.createElement(VmReceiptsContext.Provider, { value }, children);
 }
 
-/** A graph's receipts: the provider's when it holds this graph, otherwise a
- *  resource of this hook's own. */
+/** Read a graph's receipts from the nearest `VmReceiptsProvider`. Owns
+ *  nothing: with no id (a disabled consumer), no provider, or a provider for
+ *  another graph, it returns an empty result. */
 export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsResource {
   const shared = useContext(VmReceiptsContext);
-  const useShared = !!shared && shared.contextGraphId === contextGraphId;
-  const own = useVmReceiptsResource(useShared ? undefined : contextGraphId);
-  return useShared ? shared : own;
+  if (contextGraphId && shared && shared.contextGraphId === contextGraphId) return shared;
+  return { ...EMPTY_STATE, contextGraphId, refresh: noop };
 }

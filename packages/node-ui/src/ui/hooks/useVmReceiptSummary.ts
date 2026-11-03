@@ -8,8 +8,6 @@
 import { useMemo } from 'react';
 import { useVmReceipts, type VmReceipt } from './useVmReceipts.js';
 
-export { isSafeIriPart } from './useVmReceipts.js';
-
 export interface VmReceiptSummary {
   /** Assertion URIs that have a real publish tx. Member entities are also
    *  namespaced under their assertion URI (see `hasReceipt`). */

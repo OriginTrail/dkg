@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { buildVmFacts } from '../src/ui/views/project/vm-facts.js';
 import { summariseVmReceipts as summarise, hasReceipt } from '../src/ui/hooks/useVmReceiptSummary.js';
-import { buildVmReceiptQuery, isSafeIriPart, parseVmReceiptRows } from '../src/ui/hooks/useVmReceipts.js';
+import { buildVmReceiptQuery, parseVmReceiptRows, receiptMetaGraph } from '../src/ui/hooks/useVmReceipts.js';
 
-// Raw query rows → typed receipts → summary, as the hooks do. Every receipt row has a tx.
+// Raw query rows → typed receipts → summary, as the hooks do. Every receipt
+// row has a tx and a legacy root-scoped seal (root, no scope version).
 const summariseVmReceipts = (rows: Array<Record<string, unknown>>) =>
-  summarise(parseVmReceiptRows(rows.map(r => ({ tx: '0x1', ...r })), 'cg'));
+  summarise(parseVmReceiptRows(rows.map(r => ({ tx: '0x1', sealRoot: '"ab"', ...r })), 'cg'));
 
 const ent = (uri: string) => ({ uri, label: uri, types: [], trustLevel: 'verified', layers: new Set(), subGraphs: new Set(), properties: new Map(), connections: [] }) as any;
 const A = 'did:dkg:context-graph:cg/assertion/0xabc/';
@@ -31,8 +32,10 @@ describe('VM receipt summary', () => {
   });
 
   it('refuses context graph ids that would break the IRI', () => {
-    expect(isSafeIriPart('agent-context')).toBe(true);
-    expect(isSafeIriPart('x> } DROP')).toBe(false);
+    expect(receiptMetaGraph('agent-context')).toBe('did:dkg:context-graph:agent-context/_meta');
+    expect(receiptMetaGraph('x> } DROP')).toBeUndefined();
+    expect(receiptMetaGraph(undefined)).toBeUndefined();
+    expect(() => buildVmReceiptQuery('x> } DROP')).toThrow();
   });
 });
 

@@ -22,6 +22,7 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -708,7 +709,7 @@ function OperationStatsSection() {
   );
 }
 
-function HardwareTab() {
+export function HardwareTab() {
   const [period, setPeriod] = useState('3h');
   const pMs = periodToMs(period);
   const timeFmt = useMemo((): Intl.DateTimeFormatOptions => {
@@ -721,56 +722,24 @@ function HardwareTab() {
     [pMs], 10_000,
   );
 
-  const hwChartData = useMemo(() => (hwData?.snapshots ?? []).map((s: any) => ({
-    time: new Date(s.ts).toLocaleString(undefined, timeFmt),
-    cpu: s.cpu_percent ?? 0,
-    memGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(2) : 0,
-    memPct: s.mem_total_bytes ? Math.round((s.mem_used_bytes / s.mem_total_bytes) * 100) : 0,
-    heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(1) : 0,
-    diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : 0,
-    peers: s.peer_count ?? 0,
-    rpcMs: s.rpc_latency_ms ?? 0,
-  })), [hwData, timeFmt]);
-
-  const hw = useMemo(() => {
-    const snaps = hwData?.snapshots ?? [];
-    if (!snaps.length) return null;
-    const s = snaps[snaps.length - 1];
-    return {
-      cpu: s.cpu_percent ?? 0,
-      memUsedGB: s.mem_used_bytes ? +(s.mem_used_bytes / (1024 ** 3)).toFixed(1) : 0,
-      memTotalGB: s.mem_total_bytes ? +(s.mem_total_bytes / (1024 ** 3)).toFixed(1) : 0,
-      memPct: s.mem_total_bytes ? Math.round((s.mem_used_bytes / s.mem_total_bytes) * 100) : 0,
-      heapMB: s.heap_used_bytes ? +(s.heap_used_bytes / (1024 ** 2)).toFixed(0) : 0,
-      diskUsedGB: s.disk_used_bytes ? +(s.disk_used_bytes / (1024 ** 3)).toFixed(1) : null,
-      diskTotalGB: s.disk_total_bytes ? +(s.disk_total_bytes / (1024 ** 3)).toFixed(1) : null,
-      diskPct: s.disk_total_bytes ? Math.round((s.disk_used_bytes / s.disk_total_bytes) * 100) : null,
-      peers: s.peer_count ?? 0,
-      rpcMs: s.rpc_latency_ms ?? null,
-    };
-  }, [hwData]);
+  const hwChartData = useMemo(() => (hwData?.snapshots ?? []).map((s: MetricsSnapshot) => hardwareChartRow(s, timeFmt)), [hwData, timeFmt]);
+  const hw = useMemo(() => latestHardwareReading(hwData?.snapshots ?? []), [hwData]);
 
   const loading = !hw;
-  // C7: one colour per metric; amber / red only past a threshold, with ⚠.
-  type Level = 'ok' | 'warn' | 'crit';
-  const level = (v: number | null | undefined, warn: number, crit: number): Level =>
-    v == null ? 'ok' : v > crit ? 'crit' : v > warn ? 'warn' : 'ok';
+  type Level = MetricLevel;
   const LEVEL_COLOR: Record<Level, string> = { ok: 'var(--data-1)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
   const LEVEL_TEXT: Record<Level, string> = { ok: 'var(--text-primary)', warn: 'var(--text-warning)', crit: 'var(--text-danger)' };
   const IDLE = 'var(--text-tertiary)';
-  // Thresholds shared by the cards and the chart reference lines.
-  const TH = { cpu: [60, 80], mem: [70, 85], disk: [70, 85], rpcMs: 500 } as const;
-  const cpuLv = level(hw?.cpu, ...TH.cpu);
-  const memLv = level(hw?.memPct, ...TH.mem);
-  const diskLv = level(hw?.diskPct, ...TH.disk);
+  const TH = HW_THRESHOLDS;
+  const levels = hardwareLevels(hw);
   const statCards = [
-    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, lv: cpuLv },
-    { label: 'RAM', value: hw ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : '—', sub: hw ? `${hw.memPct}% used` : 'waiting…', pct: hw ? hw.memPct : null, lv: memLv },
+    { label: 'CPU', value: hw ? `${hw.cpu.toFixed(1)}%` : '—', sub: hw ? 'utilisation' : 'waiting…', pct: hw ? hw.cpu : null, lv: levels.cpu },
+    { label: 'RAM', value: hw ? (hw.memPct !== null ? `${hw.memUsedGB} / ${hw.memTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.memPct !== null ? `${hw.memPct}% used` : 'not reported') : 'waiting…', pct: hw ? hw.memPct : null, lv: levels.mem },
     { label: 'Heap', value: hw ? `${hw.heapMB} MB` : '—', sub: hw ? 'Node.js heap' : 'waiting…', pct: null, lv: 'ok' as Level },
-    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, lv: diskLv },
+    { label: 'Disk', value: hw ? (hw.diskPct !== null ? `${hw.diskUsedGB} / ${hw.diskTotalGB} GB` : 'n/a') : '—', sub: hw ? (hw.diskPct !== null ? `${hw.diskPct}% used` : 'not configured') : 'waiting…', pct: hw ? hw.diskPct : null, lv: levels.disk },
   ];
-  const peersLv: Level = hw && hw.peers === 0 ? 'crit' : 'ok';
-  const rpcLv: Level = hw && hw.rpcMs !== null && hw.rpcMs > TH.rpcMs ? 'crit' : 'ok';
+  const peersLv = levels.peers;
+  const rpcLv = levels.rpc;
   const warnIcon = (lv: Level) => lv === 'ok' ? null : <span aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6, fontSize: 13 }}>⚠</span>;
   const s1 = 'var(--data-1)';
   const grid = 'var(--border-subtle)', tick = 'var(--text-tertiary)';

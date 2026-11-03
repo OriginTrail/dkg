@@ -16,6 +16,10 @@ import {
 import { parseVmReceiptRows, useVmReceiptsResource, VmReceiptsProvider, type VmReceiptsResource } from '../src/ui/hooks/useVmReceipts.js';
 
 const anchorsFromReceiptRows = (rows: Array<Record<string, unknown>>, cg: string) => newestFirst(parseVmReceiptRows(rows, cg));
+/** Render `child` under the graph's receipt owner, as ProjectView does. */
+const owned = (id: string, child: React.ReactElement) => React.createElement(function Owner() {
+  return React.createElement(VmReceiptsProvider, { value: useVmReceiptsResource(id) }, child);
+});
 const AUTHOR = '0x' + 'ab'.repeat(20);
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -55,7 +59,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       return null;
     }
     await act(async () => {
-      root.render(React.createElement(Probe, { id: 'cg-1' }));
+      root.render(owned('cg-1', React.createElement(Probe, { id: 'cg-1' })));
     });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
@@ -75,11 +79,11 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       status: 200,
       json: async () => ({ result: { bindings: [
         // Dated receipt with a member row and an explicit signer.
-        { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+        { asrt: A, tx: '0x9f2c7a1d', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
         // No finalize time, no attribution row: signer from the author address.
-        { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', member: 'urn:x:b' },
+        { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', sealRoot: '"aa"', member: 'urn:x:b' },
         // Receipt whose only member is not visible in this layer.
-        { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/hidden', tx: '0x77', member: 'urn:x:not-visible', finalizedAt: '"2026-10-29T10:00:00Z"' },
+        { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/hidden', tx: '0x77', sealRoot: '"aa"', member: 'urn:x:not-visible', finalizedAt: '"2026-10-29T10:00:00Z"' },
       ] } }),
     } as any));
     let result: VerifiableMemoryAnchorsResult | null = null;
@@ -89,7 +93,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       result = useVerifiableMemoryAnchors('cg-1', visible);
       return null;
     }
-    await act(async () => { root.render(React.createElement(Probe)); });
+    await act(async () => { root.render(owned('cg-1', React.createElement(Probe))); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     const r = result as unknown as VerifiableMemoryAnchorsResult;
@@ -124,7 +128,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       const bindings = sparql.includes('VALUES ?g')
         ? [{ g: KA_GRAPH, member: 'urn:member-one:note' }]
         // A v2 seal: no member rows, the content lives in the KA graph.
-        : [{ asrt: A, tx: '0x5555', kaUal: `did:dkg:hardhat:31337/${AUTHOR}/7`, finalizedAt: '"2026-10-31T10:00:00Z"' }];
+        : [{ asrt: A, tx: '0x5555', sealRoot: '"aa"', kaUal: `did:dkg:hardhat:31337/${AUTHOR}/7`, finalizedAt: '"2026-10-31T10:00:00Z"' }];
       return { ok: true, status: 200, json: async () => ({ result: { bindings } }) } as any;
     });
     let result: VerifiableMemoryAnchorsResult | null = null;
@@ -133,7 +137,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       result = useVerifiableMemoryAnchors('cg-1', visible);
       return null;
     }
-    await act(async () => { root.render(React.createElement(Probe)); });
+    await act(async () => { root.render(owned('cg-1', React.createElement(Probe))); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
 
     const r = result as unknown as VerifiableMemoryAnchorsResult;
@@ -150,7 +154,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       ok: true,
       status: 200,
       json: async () => ({ result: { bindings: published
-        ? [{ asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/new', tx: '0x6666', member: 'urn:x:new' }]
+        ? [{ asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/new', tx: '0x6666', sealRoot: '"aa"', member: 'urn:x:new' }]
         : [] } }),
     } as any));
     let result: VerifiableMemoryAnchorsResult | null = null;
@@ -178,9 +182,9 @@ describe('anchors from receipts', () => {
   it('builds one anchor per receipted assertion with its members, agents and sub-graph', () => {
     const A = 'did:dkg:context-graph:cg-1/research/assertion/0xabc/batch-1';
     const anchors = anchorsFromReceiptRows([
-      { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
-      { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:b', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
-      { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', finalizedAt: '"2026-10-30T10:00:00Z"' },
+      { asrt: A, tx: '0x9f2c7a1d', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+      { asrt: A, tx: '0x9f2c7a1d', sealRoot: '"aa"', member: 'urn:x:b', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+      { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', sealRoot: '"aa"', finalizedAt: '"2026-10-30T10:00:00Z"' },
       { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/no-tx' },
     ], 'cg-1');
     expect(anchors).toHaveLength(2);
@@ -191,9 +195,9 @@ describe('anchors from receipts', () => {
 
 describe('receipts without a finalize time', () => {
   const rows = [
-    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/undated', tx: '0x1111', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
-    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/garbled', tx: '0x2222', member: 'urn:x:b', finalizedAt: '"not a date"' },
-    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/dated', tx: '0x3333', member: 'urn:x:c', finalizedAt: '"2026-10-31T10:00:00Z"' },
+    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/undated', tx: '0x1111', sealRoot: '"aa"', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
+    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/garbled', tx: '0x2222', sealRoot: '"aa"', member: 'urn:x:b', finalizedAt: '"not a date"' },
+    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/dated', tx: '0x3333', sealRoot: '"aa"', member: 'urn:x:c', finalizedAt: '"2026-10-31T10:00:00Z"' },
   ];
 
   it('keeps the anchor with an unknown time and sorts it after dated ones', () => {
@@ -214,14 +218,14 @@ describe('receipts without a finalize time', () => {
 
   it('links entities under the assertion URI, but not siblings that share a prefix', () => {
     const A = 'did:dkg:context-graph:cg-1/assertion/0xabc/note';
-    const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x4444', finalizedAt: '"2026-10-31T10:00:00Z"' }], 'cg-1');
+    const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x4444', sealRoot: '"aa"', finalizedAt: '"2026-10-31T10:00:00Z"' }], 'cg-1');
     const triples = buildDecorationTriples(anchors, new Set([`${A}/entity/1`, `${A}book/entity/1`]));
     expect(triples.filter(t => t.predicate === VIZ_PRED_ANCHORED_IN).map(t => t.subject)).toEqual([`${A}/entity/1`]);
   });
 
   it('says why an anchor has no transaction', () => {
     const A = 'did:dkg:context-graph:cg-1/assertion/0xabc/twice';
-    const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x1', member: 'urn:x:t' }, { asrt: A, tx: '0x2', member: 'urn:x:t' }], 'cg-1');
+    const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x1', sealRoot: '"aa"', member: 'urn:x:t' }, { asrt: A, tx: '0x2', sealRoot: '"aa"', member: 'urn:x:t' }], 'cg-1');
     expect(anchors[0].tx).toBeNull();
     const desc = buildDecorationTriples(anchors, null).find(t => t.predicate === 'http://schema.org/description')?.object;
     expect(desc).toContain('published more than once; the current transaction is not recorded');
