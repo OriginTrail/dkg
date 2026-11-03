@@ -440,7 +440,7 @@ What a run needs:
 | `RFC27_SMOKE_SELLER_KEY` | required, an operational key of the seller node |
 | `RFC27_SMOKE_RUN` | `smoke`; a new label for each run |
 | `RPC_BASE_SEPOLIA_V10` | `https://sepolia.base.org` |
-| The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet period and a 50 TRAC stake |
+| The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet period and a 50 TRAC stake. A resumed run needs only what its remaining steps spend |
 | The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer key; `PHASE=check` prints it at the current fee |
 | The seller key's ETH | about 0.0001: two receipt batches, about 0.6M gas |
 
@@ -458,9 +458,19 @@ The phases, with `SEND=1`, about two days apart in all:
 | `withdraw`, optional | in the middle of an epoch, then again once it has ended: a third day |
 
 - A phase run too early stops, deferred, and prints when it opens.
-- `finalize` reads each claim's outcome. While the seller has no node score
-  in E+1, it waits and says so (`NoScore`). Run it again after the node's next
-  proof, before E+1 ends; after that the claims are void.
+- `finalize` reads each claim's outcome from the chain. While the seller has no
+  node score in E+1, it waits and says so (`NoScore`). Run it again after the
+  node's next proof, before E+1 ends; after that the claims still unfinalized
+  are void, and it fails. Claims another caller finalized count, whenever
+  `finalize` first runs.
+- `withdraw` waits until the position holds score in the epoch: without it, a
+  withdrawal burns the position and records nothing to claim.
+- A phase stopped at any point is run again as it was: it sends nothing the
+  journal holds, and its checks keep what each transaction moved when it was
+  first mined.
+- A phase with a failed check is not done. It exits nonzero, the phases after it
+  refuse to start, and running it again sends nothing it sent already, until its
+  checks pass.
 - Every transaction's gas estimate must fit under 2^24, or its check fails.
 - Each phase prints every check as PASS or FAIL, and writes
   `cache/rfc27-smoke/<run>.<phase>.json`. The run resumes from
@@ -473,4 +483,8 @@ storage, and does not fail.
 The smoke test also runs on the fork, before the deploy reaches testnet, with
 `--config scripts/rfc27-testnet-fork.config.ts`. Its header lists the fork-only
 switches: `FORK_WARP=1` moves the clock, and `FORK_PROOFS=1` stands in for
-the seller's proofs.
+the seller's proofs, both with `SEND=1` only; `FORK_STOP_AFTER=<step>` stops a
+run as a crash would.
+
+`test/rfc27-smoke-resume.test.ts` runs the phases, interrupted and resumed, on
+the development deploy on the in-process chain, with no fork.
