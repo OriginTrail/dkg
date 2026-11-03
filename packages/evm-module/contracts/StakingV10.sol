@@ -731,6 +731,15 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      before the position is deleted; once the epoch has ended,
      *      `claimWithdrawnEpoch` pays its share of both pools to `staker`.
      *      Nothing is recorded when there is nothing to claim.
+     *
+     *      So a withdrawal pays in two parts. This call pays the stake and
+     *      every epoch that has ended. The epoch in progress is paid later,
+     *      by `claimWithdrawnEpoch`, which anyone may call once that epoch
+     *      has ended and which pushes TRAC to `staker` in a transaction of
+     *      its own. A contract that stakes, such as a vault, must expect TRAC
+     *      it did not call for. Someone, a keeper or the staker, has to call
+     *      it: nothing claims the record by itself. No view previews the
+     *      amount.
      */
     function withdraw(
         address staker,
@@ -913,6 +922,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *         to the positions still staked, not to it. With no position
      *         left to compound into, the share is paid in TRAC from the
      *         vault. The record is deleted before the payment.
+     *
+     *         It is the second part of a withdrawal's payment: the payment
+     *         goes to `staker`, whoever calls, so a contract that staked
+     *         receives TRAC it did not call for. Nothing calls this by
+     *         itself, so a keeper or the staker does, and no view previews
+     *         the amount (`StakingKPI` has none).
      * @return amount The TRAC paid.
      */
     function claimWithdrawnEpoch(uint256 tokenId) external returns (uint96 amount) {
