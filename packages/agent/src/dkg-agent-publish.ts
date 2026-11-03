@@ -936,19 +936,12 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   graphOwnerRoutePortsV1(this: DKGAgent): GraphOwnerRoutePorts {
-    const owners = graphOwnerPeersOf(this, async (contextGraphId, signal) => {
-      const lookUp = () => this.resolveCuratorPeerIdsForCg(contextGraphId, { maxPeerIds: 16, signal });
-      let resolution = await lookUp();
-      const ownerDid = deriveCuratorDidFromCgId(contextGraphId);
-      if (resolution.peerIds.length === 0 && !resolution.curatorIsLocal && ownerDid !== null) {
-        // An Edge keeps no `agents` phonebook: fetch the owner's profile from a
-        // Core's, then look the owner's peers up again.
-        await this.ensureAgentsInOnDemandPhonebook([ownerDid.slice('did:dkg:agent:'.length)], signal);
-        resolution = await lookUp();
-      }
-      return resolution.peerIds.filter((peerId) => peerId !== this.peerId);
-    });
     const isConnected = (peerId: string): boolean => this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId);
+    const owners = graphOwnerPeersOf(this, (contextGraphId, signal) => this.lookUpGraphOwnerPeers(
+      contextGraphId,
+      { isConnected, failedRecently: (peerId) => owners.failedRecently(peerId) },
+      signal,
+    ));
     return {
       ownerPeerIds: (contextGraphId, signal) => owners.of(contextGraphId, signal),
       isConnected,
@@ -960,7 +953,10 @@ export class PublishMethods extends DKGAgentBase {
         return waitForPeerProtocol(this.node.libp2p.peerStore, { toString: () => peerId }, PROTOCOL_SWM_UPDATE, 20, 250, signal);
       },
       mayConnect: (peerId) => owners.mayConnect(peerId),
+      failedRecently: (peerId) => owners.failedRecently(peerId),
+      inConnectOrder: (peerIds) => owners.inConnectOrder(peerIds),
       connectFailed: (peerId) => owners.connectFailed(peerId),
+      connectSucceeded: (peerId) => owners.connectSucceeded(peerId),
       noteFollower: (contextGraphId, peerId) => sharedMemoryFollowersOf(this).note(contextGraphId, peerId),
     };
   }

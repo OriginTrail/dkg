@@ -11,6 +11,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
+  GRAPH_OWNER_FAILURE_MEMORY_MS,
   GRAPH_OWNER_PEERS_TTL_MS,
   GRAPH_OWNER_RETRY_AFTER_MS,
   GraphOwnerPeers,
@@ -71,10 +72,38 @@ describe('the route of a share to the graph\'s owner', () => {
         return true;
       },
       mayConnect: (peerId) => !failed.has(peerId),
+      failedRecently: (peerId) => failed.has(peerId),
+      inConnectOrder: (peerIds) => peerIds,
       connectFailed: (peerId) => { failed.add(peerId); },
+      connectSucceeded: (peerId) => { failed.delete(peerId); },
       noteFollower: (contextGraphId, peerId) => { followers.push([contextGraphId, peerId]); },
     };
     return { route, followers, connects, failed };
+  }
+
+  /** The route on the real failure memory, over passes `gapMs` apart. */
+  function passes(owners: readonly string[], reachable: readonly string[], gapMs: number) {
+    let now = 1_000_000;
+    const peers = new GraphOwnerPeers(async () => owners, () => now);
+    const { route, followers, connects } = ports({ owners, reachable });
+    const onRealMemory: GraphOwnerRoutePorts = {
+      ...route,
+      mayConnect: (peerId) => peers.mayConnect(peerId),
+      failedRecently: (peerId) => peers.failedRecently(peerId),
+      inConnectOrder: (peerIds) => peers.inConnectOrder(peerIds),
+      connectFailed: (peerId) => peers.connectFailed(peerId),
+      connectSucceeded: (peerId) => peers.connectSucceeded(peerId),
+    };
+    return {
+      followers,
+      connects,
+      peers,
+      pass: async () => {
+        const routed = await routeShareToGraphOwner(onRealMemory, GRAPH);
+        now += gapMs;
+        return routed;
+      },
+    };
   }
 
   it('makes a connected owner a follower without connecting again', async () => {
@@ -103,6 +132,37 @@ describe('the route of a share to the graph\'s owner', () => {
     expect(none.connects).toEqual([OWNER_1, OWNER_2]);
     expect(none.followers).toEqual([]);
     expect([...none.failed]).toEqual([OWNER_1, OWNER_2]);
+  });
+
+  it('tries the owner\'s peers in the order it is given them, newest first, so the live one needs no dead one ahead of it', async () => {
+    const { route, connects, followers } = ports({ owners: [OWNER_3, OWNER_1, OWNER_2], reachable: [OWNER_3] });
+    await expect(routeShareToGraphOwner(route, GRAPH)).resolves.toEqual([OWNER_3]);
+    expect(connects).toEqual([OWNER_3]);
+    expect(followers).toEqual([[GRAPH, OWNER_3]]);
+  });
+
+  it('reaches a live peer listed after any number of dead ones, however far apart the passes are', async () => {
+    const dead = ['12D3KooWDeadOne', '12D3KooWDeadTwo', '12D3KooWDeadThree', '12D3KooWDeadFour', '12D3KooWDeadFive'];
+    const live = '12D3KooWZLive';
+    // Longer than the retry pause, so that every dead peer may be tried again at every pass.
+    const { pass, connects } = passes([...dead, live], [live], GRAPH_OWNER_RETRY_AFTER_MS + 1);
+    await expect(pass()).resolves.toEqual([]);
+    expect(connects).toEqual([dead[0], dead[1]]);
+    await expect(pass()).resolves.toEqual([]);
+    expect(connects).toEqual(dead.slice(0, 4));
+    await expect(pass()).resolves.toEqual([live]);
+    expect(connects).toEqual([...dead, live]);
+  });
+
+  it('forgets the failure of a peer it then reached', async () => {
+    const { pass, peers, connects } = passes([OWNER_1], [OWNER_1], GRAPH_OWNER_RETRY_AFTER_MS + 1);
+    peers.connectFailed(OWNER_1);
+    expect(peers.failedRecently(OWNER_1)).toBe(true);
+    await expect(pass()).resolves.toEqual([]);
+    expect(connects).toEqual([]);
+    await expect(pass()).resolves.toEqual([OWNER_1]);
+    expect(connects).toEqual([OWNER_1]);
+    expect(peers.failedRecently(OWNER_1)).toBe(false);
   });
 
   it('does not try a peer a connection recently failed to, so that the share does not wait for it', async () => {
@@ -211,6 +271,47 @@ describe('the owner peers of a graph', () => {
     for (let index = 0; index <= 256; index += 1) owners.connectFailed(`peer-${index}`);
     expect(owners.mayConnect('peer-0')).toBe(true);
     expect(owners.mayConnect('peer-256')).toBe(false);
+  });
+
+  it('are looked up again after the pause once every one of them failed', async () => {
+    let now = 1_000;
+    const resolve = vi.fn(async () => [OWNER_1, OWNER_2]);
+    const peers = new GraphOwnerPeers(resolve, () => now);
+    await peers.of(GRAPH);
+
+    peers.connectFailed(OWNER_1);
+    now += GRAPH_OWNER_RETRY_AFTER_MS + 1;
+    await peers.of(GRAPH);
+    expect(resolve, 'a peer that did not fail keeps the answer for its whole lifetime').toHaveBeenCalledTimes(1);
+
+    peers.connectFailed(OWNER_2);
+    now += GRAPH_OWNER_RETRY_AFTER_MS - 1;
+    await peers.of(GRAPH);
+    expect(resolve, 'looked up at most once per pause').toHaveBeenCalledTimes(2);
+    now += GRAPH_OWNER_RETRY_AFTER_MS;
+    await peers.of(GRAPH);
+    expect(resolve).toHaveBeenCalledTimes(3);
+  });
+
+  it('count as failed lately for longer than the pause before they may be tried again', () => {
+    let now = 1_000;
+    const peers = new GraphOwnerPeers(async () => [], () => now);
+    expect(peers.failedRecently(OWNER_1)).toBe(false);
+    peers.connectFailed(OWNER_1);
+    now += GRAPH_OWNER_RETRY_AFTER_MS;
+    expect(peers.mayConnect(OWNER_1)).toBe(true);
+    expect(peers.failedRecently(OWNER_1)).toBe(true);
+    now += GRAPH_OWNER_FAILURE_MEMORY_MS - GRAPH_OWNER_RETRY_AFTER_MS;
+    expect(peers.failedRecently(OWNER_1)).toBe(false);
+  });
+
+  it('go in their order ahead of those a connection failed to, the longest-failed first', () => {
+    let now = 1_000;
+    const peers = new GraphOwnerPeers(async () => [], () => now);
+    peers.connectFailed(OWNER_2);
+    now += 1;
+    peers.connectFailed(OWNER_1);
+    expect(peers.inConnectOrder([OWNER_1, OWNER_2, OWNER_3, 'never-tried'])).toEqual([OWNER_3, 'never-tried', OWNER_2, OWNER_1]);
   });
 
   it('keep at most 256 graphs and let the oldest go', async () => {

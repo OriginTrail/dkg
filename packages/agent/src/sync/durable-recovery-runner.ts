@@ -1,8 +1,8 @@
 import type { GraphOwnedRecoveryInput } from './requester/graph-owned-recovery.js';
 import { recoveryActionDiagnostics, exactRecoveryActionOutcome, type DurableRecoveryDiagnostics, type ExactRecoveryActionOutcome } from './durable-recovery-action.js';
 import { accountDurableRecoveryAction, type DurableRecoveryAccounting, type MutableDurableRecoveryPeerHealth } from './durable-recovery-peer-health.js';
-import type { DurableRecoveryRoundOutcome } from './durable-recovery-round.js';
-import { HeldAssetsConfirmationRun } from './requester/durable-data-holdings.js';
+import type { DurableRecoverySlice } from './durable-recovery-round.js';
+import { HeldAssetsConfirmationRun, type MissingDurableAsset } from './requester/durable-data-holdings.js';
 import type { DurableSyncResult } from '../dkg-agent-types.js';
 import {
   createDurableSyncAccumulator,
@@ -83,7 +83,7 @@ export interface DurableRecoveryRunnerDependencies {
   executeSlice(
     peerId: string,
     recovery: GraphOwnedRecoveryInput,
-  ): Promise<DurableRecoveryRoundOutcome>;
+  ): Promise<DurableRecoverySlice>;
   /**
    * Fetch a selection with one exact request and report its disposition separately
    * from diagnostics. Without it, rounds pull the full graph.
@@ -384,6 +384,9 @@ export class DurableRecoveryRunner {
     };
 
     type ActionOutcome = { readonly diagnostics: DurableRecoveryDiagnostics; readonly next: 'terminal' | 'continue' | 'next-peer' | 'deferred'; readonly accounting: DurableRecoveryAccounting };
+    type RoundStep =
+      | { readonly kind: 'missing-assets'; readonly batches: readonly (readonly MissingDurableAsset[])[] }
+      | { readonly kind: DurableRecoveryContinuationOutcome };
     // No free local sync slot: the slice never started, so it says nothing about the peer.
     const deferredAction = (diagnostics: DurableRecoveryDiagnostics): ActionOutcome => (
       { diagnostics, next: 'deferred', accounting: 'unchanged' }
@@ -396,9 +399,9 @@ export class DurableRecoveryRunner {
     const executeExactAction = async (action: Extract<DurableRecoveryAction, { kind: 'exact-batch' }>): Promise<ActionOutcome> => {
       let exact: ExactRecoveryActionOutcome;
       try { exact = await deps.executeExactSlice!(action.peerId, action.assets.map(asset => asset.ual)); }
-      catch (error) { exact = exactRecoveryActionOutcome(failedSlice(action.peerId, error)); }
+      catch (error) { exact = exactRecoveryActionOutcome(failedSlice(action.peerId, error), true, 'not-started'); }
+      if (exact.admission === 'local-admission-deferred') return deferredAction(exact.diagnostics);
       const selectionComplete = exact.selection === 'complete';
-      if (!selectionComplete && (exact.diagnostics.deferredBackpressure ?? 0) > 0) return deferredAction(exact.diagnostics);
       fetchPolicy.recordExact(selectionComplete);
       if (selectionComplete) {
         attemptedWithoutProgress.clear();
@@ -420,7 +423,7 @@ export class DurableRecoveryRunner {
         deps.logInfo(`Durable recovery for "${contextGraphId}" offers ${action.peerId.slice(-8)} verified offset ${seed.boundary.offset}`);
       }
       const before = deps.checkpointStore.get(checkpointKey);
-      let round: DurableRecoveryRoundOutcome;
+      let round: DurableRecoverySlice;
       try {
         let metaContinuation = metaContinuations.get(action.peerId);
         if (!metaContinuation) {
@@ -434,11 +437,11 @@ export class DurableRecoveryRunner {
           confirmation,
         };
         round = await deps.executeSlice(action.peerId, recovery);
-      } catch (error) { round = { result: failedSlice(action.peerId, error), decision: { strategy: 'not-started' } }; }
-      const result = round.result;
-      if (round.decision.strategy === 'not-started' && (result.deferredBackpressure ?? 0) > 0) {
-        return deferredAction(recoveryActionDiagnostics(result));
+      } catch (error) {
+        round = { result: failedSlice(action.peerId, error), decision: { strategy: 'not-started' }, admission: 'not-started' };
       }
+      const result = round.result;
+      if (round.admission === 'local-admission-deferred') return deferredAction(recoveryActionDiagnostics(result));
       const after = deps.checkpointStore.get(checkpointKey);
       resume.recordSlice({ peerId: action.peerId, checkpointKey, before, after,
         rejectedOffset: round.decision.rejectedResumeOffset, candidate: seed?.kind === 'candidate' ? seed.boundary : undefined });
@@ -451,19 +454,6 @@ export class DurableRecoveryRunner {
         safeOffset = Math.max(safeOffset, checkpointOffset);
       }
 
-      // The round found this node holding the rest of the generation and left these assets to us.
-      const missingAssetBatches = round.decision.strategy === 'exact-missing' ? round.decision.batches : undefined;
-      if (missingAssetBatches && deps.executeExactSlice) {
-        const stillMissing = fetchPolicy.queueMissing(action.peerId, missingAssetBatches);
-        if (stillMissing > 0) {
-          deps.logWarn(`Durable recovery for "${contextGraphId}" still lacks ${stillMissing} asset version(s) it fetched with exact requests; continuing with full-graph rounds`);
-        } else {
-          deps.logInfo(`Durable recovery for "${contextGraphId}" fetches ${missingAssetBatches.flat().length} missing asset(s) from ${action.peerId.slice(-8)} in ${missingAssetBatches.length} exact request(s)`);
-        }
-        // The next round confirms the generation is held, or pulls what is still missing.
-        return { diagnostics: recoveryActionDiagnostics(result), next: 'continue', accounting: 'success' };
-      }
-
       const checkpointAdvanced = (after?.offset ?? 0) > (before?.offset ?? 0);
       const manifestRebound = after?.manifestDigest !== undefined
         && after.manifestDigest !== before?.manifestDigest
@@ -473,47 +463,59 @@ export class DurableRecoveryRunner {
         metaContinuations.get(action.peerId)?.state !== undefined
         && (result.checkpointAdvances ?? 0) > 0
       );
-      const outcome = classifyDurableRecoverySlice({
-        terminalPersisted: result.complete === true
-          && (round.decision.strategy === 'legacy' || (after?.terminal === true
-            && after.manifestDigest !== undefined && after.manifestPrefixDigest !== undefined)),
-        checkpointAdvanced,
-        manifestRebound,
-        metadataContinuationAdvanced,
-        deniedPhases: result.deniedPhases ?? 0,
-        rejectedKcs: result.rejectedKcs ?? 0,
-        dataRejectedMissingMeta: result.dataRejectedMissingMeta ?? 0,
-      });
-
-      if (outcome === 'terminal') {
-        deps.logInfo(
-          `Durable recovery for "${contextGraphId}" reached its terminal verified boundary after ${slices} slice(s) via ${action.peerId.slice(-8)}`,
-        );
-        return { diagnostics: recoveryActionDiagnostics(result), next: 'terminal', accounting: 'terminal' };
-      }
-
-      if (result.complete === true) {
+      // One step per slice, acted on in one place. A round that found this node holding the rest
+      // of the generation and left the missing assets to the owner comes before the slice classes.
+      const step: RoundStep = round.decision.strategy === 'exact-missing' && deps.executeExactSlice
+        ? { kind: 'missing-assets', batches: round.decision.batches }
+        : { kind: classifyDurableRecoverySlice({
+          terminalPersisted: result.complete === true
+            && (round.decision.strategy === 'legacy' || (after?.terminal === true
+              && after.manifestDigest !== undefined && after.manifestPrefixDigest !== undefined)),
+          checkpointAdvanced,
+          manifestRebound,
+          metadataContinuationAdvanced,
+          deniedPhases: result.deniedPhases ?? 0,
+          rejectedKcs: result.rejectedKcs ?? 0,
+          dataRejectedMissingMeta: result.dataRejectedMissingMeta ?? 0,
+        }) };
+      if (step.kind !== 'terminal' && step.kind !== 'missing-assets' && result.complete === true) {
         deps.logWarn(
           `Durable recovery for "${contextGraphId}" refused an unpersisted terminal result from ${action.peerId.slice(-8)}`,
         );
       }
-      if (outcome === 'partial-progress') {
-        fetchPolicy.recordRound(round.decision, checkpointAdvanced || manifestRebound);
-        attemptedWithoutProgress.clear();
-        incompatiblePeers.delete(action.peerId);
-        deps.logInfo(
-          `Durable recovery partial-progress for "${contextGraphId}" via ${action.peerId.slice(-8)}: safeOffset=${safeOffset}; scheduling one continuation after releasing admission`,
-        );
-        return { diagnostics: recoveryActionDiagnostics(result), next: 'continue', accounting: 'partial-progress' };
+      switch (step.kind) {
+        case 'missing-assets': {
+          const stillMissing = fetchPolicy.queueMissing(action.peerId, step.batches);
+          if (stillMissing > 0) {
+            deps.logWarn(`Durable recovery for "${contextGraphId}" still lacks ${stillMissing} asset version(s) it fetched with exact requests; continuing with full-graph rounds`);
+          } else {
+            deps.logInfo(`Durable recovery for "${contextGraphId}" fetches ${step.batches.flat().length} missing asset(s) from ${action.peerId.slice(-8)} in ${step.batches.length} exact request(s)`);
+          }
+          // The next round confirms the generation is held, or pulls what is still missing.
+          return { diagnostics: recoveryActionDiagnostics(result), next: 'continue', accounting: 'success' };
+        }
+        case 'terminal':
+          deps.logInfo(
+            `Durable recovery for "${contextGraphId}" reached its terminal verified boundary after ${slices} slice(s) via ${action.peerId.slice(-8)}`,
+          );
+          return { diagnostics: recoveryActionDiagnostics(result), next: 'terminal', accounting: 'terminal' };
+        case 'partial-progress':
+          fetchPolicy.recordRound(round.decision, checkpointAdvanced || manifestRebound);
+          attemptedWithoutProgress.clear();
+          incompatiblePeers.delete(action.peerId);
+          deps.logInfo(
+            `Durable recovery partial-progress for "${contextGraphId}" via ${action.peerId.slice(-8)}: safeOffset=${safeOffset}; scheduling one continuation after releasing admission`,
+          );
+          return { diagnostics: recoveryActionDiagnostics(result), next: 'continue', accounting: 'partial-progress' };
+        default:
+          if (resume.retryRejectedSlice(action.peerId)) {
+            // Its round discarded the checkpoint: retry the peer once, from its own state, without the boundary.
+            return { diagnostics: recoveryActionDiagnostics(result), next: 'continue', accounting: 'unchanged' };
+          }
+          attemptedWithoutProgress.add(action.peerId);
+          if (step.kind === 'incompatible') incompatiblePeers.add(action.peerId);
+          return { diagnostics: recoveryActionDiagnostics(result), next: 'next-peer', accounting: 'failure' };
       }
-
-      if (resume.retryRejectedSlice(action.peerId)) {
-        // Its round discarded the checkpoint: retry the peer once, from its own state, without the boundary.
-        return { diagnostics: recoveryActionDiagnostics(result), next: 'continue', accounting: 'unchanged' };
-      }
-      attemptedWithoutProgress.add(action.peerId);
-      if (outcome === 'incompatible') incompatiblePeers.add(action.peerId);
-      return { diagnostics: recoveryActionDiagnostics(result), next: 'next-peer', accounting: 'failure' };
     };
 
     for (;;) {
