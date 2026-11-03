@@ -66,7 +66,14 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     assignment is checked against the owner at the time of `assign`. The
  *     opt-in and each assignment record the owner who made them and fund
  *     only while that owner holds the account: a sale of the account NFT
- *     leaves both inert, and the new owner opts in and assigns afresh.
+ *     leaves both inert, and the new owner opts in and assigns afresh
+ *     (`setServiceSpending` says what an inherited opt-in does).
+ *   - A period keeps the assignment it was funded under: it takes requests,
+ *     and top-ups, only until that assignment ends, at its expiry or its
+ *     revocation if sooner, whatever later assignment the buyer key gets.
+ *     So assigning a key again after a revocation or an expiry serves it
+ *     only from its next period not yet funded, and an assignment replaced
+ *     while still live keeps its periods open until its own expiry.
  *   - An assignment needs the consent of both the owner and the assignee over
  *     one EIP-712 digest that carries the account's current nonce. A party
  *     consents by sending the transaction, or by a signature: ERC-1271 for an
@@ -82,11 +89,19 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     earlier epoch would never reach a pool. Every funding needs a non-zero
  *     session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
- *     protocol treasury is wired: a service draw carries no treasury fee.
+ *     protocol treasury is wired: a service draw carries no treasury fee. So
+ *     `ParametersStorage.protocolTreasury` must stay 0 wherever this contract
+ *     runs: wiring one stops every Conviction Account funding and top-up, and
+ *     the opt-in, until it is unset again. Wallet periods take no fee and go
+ *     on. `protocolTreasuryFee`, already set at 300 bps, takes effect only
+ *     once a treasury is wired.
  *   - An account that `PublishingConviction` 10.0.8 or 10.1.0 scheduled in
  *     full cannot switch service spending on, and its draws are refused
  *     (`EmissionAlreadyScheduled`): its base allowance is already the staker
- *     pool's.
+ *     pool's. The refusal covers the whole account, even a draw its top-up
+ *     buffer alone would pay, though the buffer was never scheduled: so the
+ *     accounts 10.0.8 scheduled, testnet's among them, get no services at
+ *     all, and still publish.
  */
 contract ServiceSubscriptions is
     INamed,
@@ -121,7 +136,8 @@ contract ServiceSubscriptions is
     //           opt-in needed (`ExactScheduleFromUnset`). The opt-in refuses an
     //           account scheduled in full (`EmissionAlreadyScheduled`). A
     //           funded period records the nonce of its assignment, whose end
-    //           a later assignment of the buyer key does not move. The opt-in
+    //           a later assignment of the buyer key does not move, and takes a
+    //           top-up only while that assignment is live. The opt-in
     //           and each assignment record the owner who made them, and fund
     //           or top up nothing once another owner holds the account
     //           (`ServiceSpendingDisabled`, `AssignedByFormerOwner`).
@@ -224,11 +240,16 @@ contract ServiceSubscriptions is
     ///         account: it funds nothing, and the current owner assigns afresh.
     error AssignedByFormerOwner(uint256 accountId, address assignee);
     error AssignmentRevoked(uint256 accountId, address assignee);
+    /// @notice The assignment has expired. A top-up also reverts with it once
+    ///         the assignment the period was funded under has ended, by its
+    ///         expiry or its revocation, whatever later assignment the buyer
+    ///         key holds: the period takes no request issued after that end.
     error AssignmentExpired(uint256 accountId, address assignee);
     /// @notice The assignment expires at or before the start of the period,
     ///         which it could then never serve: no request issued in the
     ///         period would be from a live assignment, and a period is
-    ///         non-refundable.
+    ///         non-refundable. A top-up checks the assignment the period was
+    ///         funded under too.
     error AssignmentEndsBeforePeriod(uint256 accountId, address assignee, uint40 expiresAt, uint40 periodStart);
     error CapsUnchanged(uint256 accountId, address assignee);
     error CapExceeded(string cap, uint256 limit, uint256 attempted);
@@ -273,6 +294,14 @@ contract ServiceSubscriptions is
      *      while that owner holds the account: after a sale it reads as off,
      *      the new owner switches it on afresh, and the former owner's
      *      assignments stay inert whatever the new owner switches.
+     *
+     *      An inherited opt-in, one an earlier owner made, reads as off, so a
+     *      new owner cannot switch it off as such: `false` reverts
+     *      `ServiceSpendingUnchanged`. Switching it on and then off clears it.
+     *      An assignment recorded for an owner applies again if the account
+     *      returns to that owner, unless an owner in between revoked it, as
+     *      long as that owner's opt-in was not overwritten in between; if it
+     *      was, the assignment applies again once that owner opts in again.
      */
     function setServiceSpending(uint256 accountId, bool enabled) external {
         _requireOwner(accountId);
@@ -315,6 +344,13 @@ contract ServiceSubscriptions is
      *      under the earlier one keep its end, its expiry or its revocation if
      *      sooner, so a new assignment never admits a request issued once the
      *      earlier one had ended; the periods funded under this one follow it.
+     *      So assigning a key again after a revocation or an expiry restores
+     *      its service only from its next period not yet funded: a period
+     *      already funded keeps its ended assignment and takes no request
+     *      issued after that end, and no top-up, and the key funds no second
+     *      period for that epoch. Replacing a live assignment leaves the
+     *      periods funded under it open until its own expiry, which revoking
+     *      the new assignment does not bring forward.
      *      The assignment records the owner who consented, and funds only
      *      while that owner holds the account. It consumes the account's
      *      nonce, so the same terms never assign twice.
@@ -365,7 +401,10 @@ contract ServiceSubscriptions is
      *      key, while one served before it is settled as before: the
      *      revocation moves no period's batch deadline, so it cannot withhold
      *      a seller's receipt. It also consumes the account's nonce, so terms
-     *      signed but not yet submitted no longer assign.
+     *      signed but not yet submitted no longer assign. A new assignment of
+     *      the key afterwards serves it from its next period not yet funded:
+     *      the periods funded under this one take no request issued after the
+     *      revocation, and no top-up.
      */
     function revoke(uint256 accountId, address assignee) external {
         _requireOwner(accountId);
@@ -556,9 +595,22 @@ contract ServiceSubscriptions is
      *      period was funded from an account by `msg.sender` and has not
      *      ended. An addition to a stored bucket repeats its class and price
      *      cap, which never change within a period; a new bucket is appended
-     *      under the funding rules. The opt-in, a live assignment that does not
-     *      expire before the period starts, and its limit are checked as for a
-     *      funding, the limit against the period's cost with this top-up added.
+     *      under the funding rules. The opt-in, a live assignment of the buyer
+     *      key that does not expire before the period starts, and its limit
+     *      are checked as for a funding, the limit against the period's cost
+     *      with this top-up added.
+     *
+     *      The assignment the period was funded under must be live too, and
+     *      must not end before the period starts: it decides which of the
+     *      period's requests count, so once it has ended no request issued
+     *      after the top-up could use what the top-up buys. A later assignment
+     *      of the buyer key does not reopen the period. After a revocation or
+     *      an expiry, the key is served again only from its next period not
+     *      yet funded, and refused here with `AssignmentExpired`. An
+     *      assignment replaced while still live keeps its period open, to
+     *      requests and top-ups alike, until its own expiry
+     *      (`ConvictionServiceStorage.assignmentEnd`).
+     *
      *      The draw and the cost due in the epoch after the period follow as
      *      for a funding, at the account's own tier; a top-up funds no new
      *      period, so the usage is unchanged, and the period keeps the
@@ -580,10 +632,12 @@ contract ServiceSubscriptions is
         ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
 
         // 2. The opt-in and a live assignment, both made by the account's
-        //    current owner, the assignment still live when the period starts.
+        //    current owner, the assignment still live when the period starts,
+        //    and the assignment the period was funded under live too.
         address accountOwner = _requireSpendingOn(css, s.accountId);
         ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee, accountOwner);
         _requireLiveAtStart(s.accountId, assignee, a, s.periodStart);
+        _requireFundedUnderLive(css, s.accountId, assignee, s.assignmentNonce, s.periodStart);
 
         // 3. The additions, merged into the stored buckets.
         ServicePeriodLib.TopUp memory t = ServicePeriodLib.mergeTopUp(
@@ -753,6 +807,27 @@ contract ServiceSubscriptions is
         if (a.expiresAt <= periodStart) {
             revert AssignmentEndsBeforePeriod(accountId, assignee, a.expiresAt, periodStart);
         }
+    }
+
+    /// @dev The assignment of `assignee` that consumed `nonce`, the one a
+    ///      period was funded under, has not ended and does not end at or
+    ///      before the period's start, as `_liveAssignment` and
+    ///      `_requireLiveAtStart` check the current one: its end is when its
+    ///      period stops taking requests. For the current assignment that
+    ///      holds already; for one a later assignment replaced, it is the end
+    ///      it had then, its expiry or its revocation if sooner. A revocation
+    ///      is never after the block time, so the second check meets only an
+    ///      expiry.
+    function _requireFundedUnderLive(
+        ConvictionServiceStorage css,
+        uint256 accountId,
+        address assignee,
+        uint64 nonce,
+        uint40 periodStart
+    ) internal view {
+        uint40 end = css.assignmentEnd(accountId, assignee, nonce);
+        if (block.timestamp >= end) revert AssignmentExpired(accountId, assignee);
+        if (end <= periodStart) revert AssignmentEndsBeforePeriod(accountId, assignee, end, periodStart);
     }
 
     /**

@@ -45,6 +45,17 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * and top-up is refused while `QueryInferenceStorage` is paused, before its
  * activation epoch and while that is unset. Every funding needs a non-zero
  * session key.
+ *
+ * The session key. A wallet period's session key is fixed at its funding and
+ * cannot be rotated or revoked on-chain: a wallet period has no assignment to
+ * revoke. Whoever holds a leaked key can sign the period's requests for any
+ * seller, a node they run included, and so direct the period's R to it. The
+ * loss is bounded by that one period: its claims finalize to at most its
+ * buckets' funded value, top-ups included, and the key signs for no other
+ * period. Only the buyer key tops a period up, so it can add nothing more and
+ * fund its next period under a new key. (A Conviction Account period's key is
+ * fixed too, but revoking its assignment refuses every request issued after
+ * the revocation.) This is a known limitation, accepted for testnet.
  */
 contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInitializable, IServicePeriodFunding {
     string private constant _NAME = "ServiceSubscriptionsWallet";

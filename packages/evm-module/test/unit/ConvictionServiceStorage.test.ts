@@ -12,6 +12,10 @@
 //     keeps, cap updates that keep everything but the two limits, the period
 //     count, period records, each written once and never with a start of 0,
 //     and top-ups of a recorded period at its bucket indexes;
+//   - the narrow setters, one field each, and the views beside them: round
+//     trips of each, with the other fields left as they were, and the rules
+//     of the period records kept (no record created, none left reading as
+//     absent, and buckets only for a recorded period);
 //   - the compiler's storage layout against the documented one: the mapping
 //     slots of 1.1.0, with the label slots held empty, and the ends of
 //     replaced assignments last;
@@ -250,6 +254,42 @@ describe('@unit ConvictionServiceStorage', () => {
           const id = ethers.toBeHex(1_000n + s, 32);
           await CSS.connect(logic).createSubscription(id, subscriptionRecord(s), [bucketOf('m', 1n, 1n, 1n)]);
           return c.applyTopUp(id, topUpOf(), ethers.id('plan-2'), [1n], []);
+        },
+      ],
+      ['setAssignmentRecord', (c, s) => c.setAssignmentRecord(s, assignee, assignmentTerms())],
+      ['setReplacedAssignmentEnd', (c, s) => c.setReplacedAssignmentEnd(s, assignee, 0n, 5_000n)],
+      ['listAssignee', (c, s) => c.listAssignee(s, assignee)],
+      ['setUsage', (c, s) => c.setUsage(s, assignee, { periods: 3n })],
+      [
+        'setSubscription',
+        async (c, s) => {
+          const id = ethers.toBeHex(2_000n + s, 32);
+          await CSS.connect(logic).createSubscription(id, subscriptionRecord(s), []);
+          return c.setSubscription(id, subscriptionRecord(s, { cost: 1n }));
+        },
+      ],
+      [
+        'setBucket',
+        async (c, s) => {
+          const id = ethers.toBeHex(3_000n + s, 32);
+          await CSS.connect(logic).createSubscription(id, subscriptionRecord(s), [bucketOf('m', 1n, 1n, 1n)]);
+          return c.setBucket(id, 0n, bucketOf('n', 2n, 2n, 2n));
+        },
+      ],
+      [
+        'appendBucket',
+        async (c, s) => {
+          const id = ethers.toBeHex(4_000n + s, 32);
+          await CSS.connect(logic).createSubscription(id, subscriptionRecord(s), []);
+          return c.appendBucket(id, bucketOf('n', 2n, 2n, 2n));
+        },
+      ],
+      [
+        'appendAccountSubscription',
+        async (c, s) => {
+          const id = ethers.toBeHex(5_000n + s, 32);
+          await CSS.connect(logic).createSubscription(id, subscriptionRecord(s), []);
+          return c.appendAccountSubscription(s + 100n, id);
         },
       ],
     ];
@@ -596,6 +636,158 @@ describe('@unit ConvictionServiceStorage', () => {
       await expect(
         CSS.connect(logic).applyTopUp(id, topUpOf({ value: MAX_UINT96 }), ethers.id('p'), [], []),
       ).to.be.revertedWithPanic(0x11);
+    });
+  });
+
+  describe('narrow setters and the views beside them', () => {
+    const accountId = 7n;
+    const a = ASSIGNEE;
+    const b = ethers.getAddress('0x00000000000000000000000000000000000000a2');
+    const OTHER_OWNER = ethers.getAddress('0x00000000000000000000000000000000000000c4');
+
+    it('every new view reads empty for keys never written', async () => {
+      expect(await CSS.isAssigneeListed(accountId, a)).to.equal(false);
+      expect(await CSS.replacedAssignmentEnd(accountId, a, 0n)).to.equal(0n);
+      expect(await CSS.storedBucketCount(ethers.id('never-recorded'))).to.equal(0n);
+    });
+
+    it('setAssignmentRecord stores the assignment alone: no end is kept for the one it overwrites, nothing is listed, and the usage stays', async () => {
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ expiresAt: 5_000n, nonce: 0n }));
+      await CSS.connect(logic).recordUsage(accountId, a);
+      const next = assignmentTerms({ assignedAt: 2_000n, expiresAt: 9_000n, revokedAt: 8_000n, nonce: 3n, owner: OTHER_OWNER });
+      await CSS.connect(logic).setAssignmentRecord(accountId, a, next);
+      expect(plain(await CSS.getAssignment(accountId, a))).to.deep.equal(next);
+      expect(await CSS.replacedAssignmentEnd(accountId, a, 0n)).to.equal(0n);
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(0n);
+      expect(await CSS.assignmentEnd(accountId, a, 3n)).to.equal(8_000n);
+      expect((await CSS.getUsage(accountId, a)).periods).to.equal(1n);
+
+      // A key never listed stays unlisted.
+      await CSS.connect(logic).setAssignmentRecord(accountId, b, next);
+      expect(await CSS.isAssigneeListed(accountId, b)).to.equal(false);
+      expect(await CSS.assigneeCount(accountId)).to.equal(1n);
+    });
+
+    it('setReplacedAssignmentEnd sets the end kept for a nonce: replacedAssignmentEnd reads it as stored, assignmentEnd once another assignment is current', async () => {
+      // setAssignment keeps the end of the assignment it replaces, and the view reads it.
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ expiresAt: 5_000n, nonce: 0n }));
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ expiresAt: 9_000n, nonce: 2n }));
+      expect(await CSS.replacedAssignmentEnd(accountId, a, 0n)).to.equal(5_000n);
+
+      // Set alone, for the replaced nonce and for the current one.
+      await CSS.connect(logic).setReplacedAssignmentEnd(accountId, a, 0n, 4_500n);
+      await CSS.connect(logic).setReplacedAssignmentEnd(accountId, a, 2n, 7_000n);
+      expect(await CSS.replacedAssignmentEnd(accountId, a, 0n)).to.equal(4_500n);
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(4_500n);
+      // The current assignment's end is its own terms'; the stored value waits for its replacement.
+      expect(await CSS.replacedAssignmentEnd(accountId, a, 2n)).to.equal(7_000n);
+      expect(await CSS.assignmentEnd(accountId, a, 2n)).to.equal(9_000n);
+
+      // Nothing else moves.
+      expect(plain(await CSS.getAssignment(accountId, a))).to.deep.equal(assignmentTerms({ expiresAt: 9_000n, nonce: 2n }));
+      expect(await CSS.replacedAssignmentEnd(accountId, b, 0n)).to.equal(0n);
+      expect(await CSS.replacedAssignmentEnd(accountId + 1n, a, 0n)).to.equal(0n);
+    });
+
+    it('listAssignee lists a key once, in order, as setAssignment lists it, and isAssigneeListed reads the listing', async () => {
+      await CSS.connect(logic).listAssignee(accountId, a);
+      await CSS.connect(logic).listAssignee(accountId, a);
+      await CSS.connect(logic).setAssignment(accountId, b, assignmentTerms());
+      await CSS.connect(logic).listAssignee(accountId, b);
+      expect(await CSS.assigneeCount(accountId)).to.equal(2n);
+      expect([await CSS.assigneeAt(accountId, 0n), await CSS.assigneeAt(accountId, 1n)]).to.deep.equal([a, b]);
+      expect([await CSS.isAssigneeListed(accountId, a), await CSS.isAssigneeListed(accountId, b)]).to.deep.equal([
+        true,
+        true,
+      ]);
+      expect(await CSS.isAssigneeListed(accountId + 1n, a)).to.equal(false);
+      // A listing stores no assignment.
+      expect((await CSS.getAssignment(accountId, a)).assignedAt).to.equal(0n);
+    });
+
+    it('setUsage sets the period count, which recordUsage adds to and setAssignment resets', async () => {
+      await CSS.connect(logic).setUsage(accountId, a, { periods: 41n });
+      expect((await CSS.getUsage(accountId, a)).periods).to.equal(41n);
+      await CSS.connect(logic).recordUsage(accountId, a);
+      expect((await CSS.getUsage(accountId, a)).periods).to.equal(42n);
+      expect((await CSS.getUsage(accountId, b)).periods).to.equal(0n);
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms());
+      expect((await CSS.getUsage(accountId, a)).periods).to.equal(0n);
+    });
+
+    describe('of a recorded period', () => {
+      const id = ethers.id('recorded-period');
+      const unknown = ethers.id('never-recorded');
+      const buckets = [bucketOf('model-a', 1n, 10n * TRAC, 1_000n), bucketOf('query-b', 2n, 4n * TRAC, 50n)];
+
+      beforeEach(async () => {
+        await CSS.connect(logic).createSubscription(id, subscriptionRecord(accountId, { bucketCount: 2n }), buckets);
+      });
+
+      it('setSubscription overwrites the record alone, and refuses an id with no record and a start of 0', async () => {
+        const next = subscriptionRecord(accountId, {
+          sessionKey: ethers.getAddress('0x00000000000000000000000000000000000000b3'),
+          cost: 9n * TRAC,
+          bucketCount: 2n,
+        });
+        await CSS.connect(logic).setSubscription(id, next);
+        expect(plain(await CSS.getSubscription(id))).to.deep.equal(next);
+        expect((await CSS.getBuckets(id)).map(plain)).to.deep.equal(buckets);
+        expect(await CSS.accountSubscriptionCount(accountId)).to.equal(1n);
+
+        // No record is created, and none is left reading as absent.
+        await expect(CSS.connect(logic).setSubscription(unknown, next))
+          .to.be.revertedWithCustomError(CSS, 'SubscriptionNotFound')
+          .withArgs(unknown);
+        expect(await CSS.subscriptionExists(unknown)).to.equal(false);
+        await expect(CSS.connect(logic).setSubscription(id, { ...next, periodStart: 0n }))
+          .to.be.revertedWithCustomError(CSS, 'ZeroPeriodStart')
+          .withArgs(id);
+        expect(plain(await CSS.getSubscription(id))).to.deep.equal(next);
+        // The id is still written once.
+        await expect(CSS.connect(logic).createSubscription(id, next, []))
+          .to.be.revertedWithCustomError(CSS, 'SubscriptionExists')
+          .withArgs(id);
+      });
+
+      it('setBucket overwrites a stored bucket and appendBucket appends one, each alone, and storedBucketCount counts them; both refuse an id with no record', async () => {
+        const replaced = bucketOf('model-c', 1n, 7n * TRAC, 900n);
+        await CSS.connect(logic).setBucket(id, 1n, replaced);
+        expect(plain(await CSS.getBucket(id, 1n))).to.deep.equal(replaced);
+        expect(plain(await CSS.getBucket(id, 0n))).to.deep.equal(buckets[0]);
+        await expect(CSS.connect(logic).setBucket(id, 2n, replaced)).to.be.revertedWithPanic(0x32);
+
+        const extra = bucketOf('model-d', 2n, TRAC, 10n);
+        await CSS.connect(logic).appendBucket(id, extra);
+        expect(await CSS.storedBucketCount(id)).to.equal(3n);
+        expect((await CSS.getBuckets(id)).map(plain)).to.deep.equal([buckets[0], replaced, extra]);
+        // The record's own count, which setSubscription sets, is left as it was.
+        expect((await CSS.getSubscription(id)).bucketCount).to.equal(2n);
+
+        for (const call of [CSS.connect(logic).setBucket(unknown, 0n, extra), CSS.connect(logic).appendBucket(unknown, extra)]) {
+          await expect(call).to.be.revertedWithCustomError(CSS, 'SubscriptionNotFound').withArgs(unknown);
+        }
+        expect(await CSS.storedBucketCount(unknown)).to.equal(0n);
+        // The refused writes left no bucket under the id, so it is recorded afresh.
+        await expect(CSS.connect(logic).createSubscription(unknown, subscriptionRecord(accountId), [extra])).to.not.be
+          .reverted;
+      });
+
+      it('appendAccountSubscription lists a recorded id under an account, after the ones listed, and refuses an id with no record', async () => {
+        await CSS.connect(logic).appendAccountSubscription(accountId + 1n, id);
+        await CSS.connect(logic).appendAccountSubscription(accountId, id);
+        expect(await CSS.accountSubscriptionCount(accountId + 1n)).to.equal(1n);
+        expect(await CSS.accountSubscriptionAt(accountId + 1n, 0n)).to.equal(id);
+        expect(await CSS.accountSubscriptionCount(accountId)).to.equal(2n);
+        expect([await CSS.accountSubscriptionAt(accountId, 0n), await CSS.accountSubscriptionAt(accountId, 1n)]).to.deep.equal([
+          id,
+          id,
+        ]);
+        await expect(CSS.connect(logic).appendAccountSubscription(accountId, unknown))
+          .to.be.revertedWithCustomError(CSS, 'SubscriptionNotFound')
+          .withArgs(unknown);
+        expect(await CSS.accountSubscriptionCount(accountId)).to.equal(2n);
+      });
     });
   });
 

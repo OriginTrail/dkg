@@ -12,7 +12,11 @@
 //   - the objective faults F1 to F8 of OT-RFC-27, one by one, each reverting
 //     the whole batch with its group, its item and its code, high s included;
 //   - the group checks: an unknown period or bucket, an empty group, the
-//     batch deadline, and a Conviction Account period's earlier deadline;
+//     batch deadline, and a Conviction Account period's deadline, which no
+//     revocation or expiry moves;
+//   - a period keeps the assignment it was funded under: a new assignment of
+//     the buyer key revives no request, and one replaced while still live
+//     keeps its period open to requests and top-ups until its own expiry;
 //   - the nonce bitmap's words, and the bounds of a batch, the pause and
 //     activation.
 
@@ -937,6 +941,40 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       // Each period keeps the end of its own assignment.
       expect(await CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(firstEnd);
       expect(await CSS.assignmentEnd(accountId, buyer2.address, secondNonce)).to.equal(secondEnd);
+    });
+
+    it("an assignment replaced while still live keeps its period open, to requests and top-ups alike, until its own expiry", async () => {
+      const { accountId } = await openConvictionAccount({
+        ...f,
+        owner,
+        assignee: buyer2,
+        committed: 100_000n * TRAC,
+        limit: 1_000n * TRAC,
+      });
+      const p = await fundFrom(accountId, epoch);
+      const firstNonce = (await CSS.getAssignment(accountId, buyer2.address)).nonce;
+      // Set to expire inside the period, then replaced while still live.
+      const expiresAt = (await latest()) + 3_600n;
+      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, { maxCostPerPeriod: 1_000n * TRAC, expiresAt });
+      await reassign(accountId, expiresAt + 400n * DAY);
+      expect(await CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(expiresAt);
+
+      // Before it, the period is topped up, and a request issued after the
+      // top-up lands, against the bucket's raised cap.
+      await SS.connect(buyer2).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, 5n * TRAC, CAP)], ethers.ZeroHash);
+      const s = await CSS.getSubscription(p);
+      expect(await QS.fundedCap(p, 0n)).to.equal((15n * TRAC * (10_000n - s.discountBps)) / 10_000n);
+      const served = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: expiresAt - 1n }));
+      await time.setNextBlockTimestamp(expiresAt - 1n);
+      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served] }]);
+      expect(await QIS.bucketClaimed(p, 0n)).to.equal(served.valueWei);
+
+      // From its expiry on, neither: the key's new assignment reopens nothing.
+      await time.setNextBlockTimestamp(expiresAt);
+      await refusedAs(p, itemFor(await requestFor(p, 0, s1, { nonce: 1n, issuedAt: expiresAt })), Fault.InactiveAssignment);
+      await expect(SS.connect(buyer2).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, TRAC, CAP)], ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
+        .withArgs(accountId, buyer2.address);
     });
   });
 

@@ -24,9 +24,10 @@
 //     keeps only the floors once everything is withdrawn;
 //   - a withdrawal mid-epoch: once the epoch in progress has ended, the
 //     withdrawn position's share of both pools, its carries of that epoch
-//     included, is claimed for the staker the withdrawal paid, exactly what
-//     staying would have paid, once, and the node's other positions are as
-//     they were.
+//     included, is claimed for the staker the withdrawal paid, once, for the
+//     score the position had earned by its withdrawal (with no proof after
+//     it, exactly what staying would have paid), and the node's other
+//     positions are as they were.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -916,7 +917,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       expect(left >= 0n && left < 10n ** 9n, `left ${left}`).to.equal(true);
     });
 
-    it('pays exactly what the position would have earned staying to the end of the epoch and claiming then, in both pools', async () => {
+    it('with no proof after the withdrawal, pays exactly what staying to the end of the epoch and claiming then would have, in both pools', async () => {
       const a = await epochNow();
       const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
       const d1 = f.accounts[10];

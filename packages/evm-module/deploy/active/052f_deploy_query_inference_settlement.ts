@@ -21,6 +21,33 @@ import { DeployFunction } from 'hardhat-deploy/types';
  * and the replay bitmap. It has no parameters of its own: the batch bounds and
  * the receipt grace live in `QueryInferenceStorage`.
  *
+ * Replacing it. A fixed settlement is registered under the same name and
+ * initialized; `StakingV10` and `StakingKPI` read it from the Hub at their
+ * next call, and it reads the same `QueryInferenceStorage`, so nothing is
+ * stranded. Prefer this to the emergency switch.
+ *
+ * The emergency switch. Removing this contract from the Hub turns the pool
+ * off for `StakingV10`'s claims, and strands money; the procedure and what it
+ * strands are in the NatSpec of `StakingV10.queryInferenceSettlement()`. In
+ * short:
+ *   - pause `QueryInferenceStorage` too (`setPaused(true)`), or wallet and
+ *     Conviction Account funding go on;
+ *   - stop your own keepers and auto-claims first: any claim while it is out,
+ *     `claimFor` and `claimWithdrawnEpoch` included, splits its node-epochs
+ *     without the pool for good, closed ones included;
+ *   - keep the outage short: batches, finalization and closes revert, and
+ *     sellers lose the R of work whose batch deadline passes meanwhile;
+ *   - remove it with `Hub.removeContractByName` only, never
+ *     `removeContractByAddress`, which on the Hub's last entry makes every
+ *     claim and withdrawal revert until a contract under another name is
+ *     added;
+ *   - switch back on with a fresh deployment of this contract and its
+ *     `initialize()`, not the removed address, which can revert
+ *     `AddressAlreadyInSet`;
+ *   - after more than `maxCloseStepsPerClaim` epochs out, call `closeEpochs`
+ *     until the closes have caught up, or claims revert
+ *     `QueryInferenceCloseBehind`.
+ *
  * On a mainnet network the step is skipped, as are 052c, 052d and 052e.
  */
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {

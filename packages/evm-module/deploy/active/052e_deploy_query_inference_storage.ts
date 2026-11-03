@@ -32,6 +32,12 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
  * this storage. So the activation comes once every contract is registered and
  * initialized, in `998b_activate_query_inference.ts`.
  *
+ * Replacing it. Once the pool is active, a new `QueryInferenceStorage` starts
+ * empty: node-epochs not yet claimed lose their share of the old pool, and
+ * the old carry and money due are stranded. So a redeploy of this storage
+ * needs a migration, which no step here runs; the contract's NatSpec says
+ * what one must do. Redeploy the settlement instead to change the logic.
+ *
  * On a mainnet network the step is skipped, as are 052c and 052d.
  */
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {

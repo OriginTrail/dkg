@@ -95,6 +95,12 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * Gates: every batch and finalization is refused while
  * `QueryInferenceStorage` is paused, before its activation epoch and while that
  * is unset.
+ *
+ * Out of the Hub. `QueryInferenceStorage` takes writes only from Hub
+ * contracts, so while this contract is out of the Hub, which is the emergency
+ * switch (`StakingV10.queryInferenceSettlement`), every batch, finalization
+ * and close reverts. A fresh deployment, registered and initialized, takes
+ * over the same storage, its closes, claims and carry.
  */
 contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "QueryInferenceSettlement";
@@ -285,6 +291,19 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     ///         share, by ΣR `sumR`, ΣQueryInferenceScore `sumScore` and λ
     ///         `lambdaBps`. The carry out is
     ///         `walletDue + convictionDue + carryIn − pool`.
+    ///
+    ///         The unused share of the epoch's money, the allowance OT-RFC-27
+    ///         shares out as margin, reads off the event:
+    ///           - money  = `walletDue + convictionDue + carryIn`;
+    ///           - served = `sumR`, the finalized receipt value, in TRAC wei
+    ///             as the pool is;
+    ///           - unused = money − `sumR`.
+    ///         With `sumR` non-zero all of the money is the pool, the unused
+    ///         share included; with `sumR` 0 all of it carries. The unused
+    ///         share falls below 0 by at most 1 wei per top-up of a
+    ///         Conviction Account period of the epoch before, and otherwise
+    ///         never: a bucket's funded cap is floored once over all its
+    ///         value, and each draw's cost apart.
     event EpochClosed(
         uint256 indexed epoch,
         uint96 walletDue,
@@ -317,7 +336,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     error QueryInferenceNotActive(uint40 activationEpoch, uint256 currentEpoch);
     /// @notice `epoch` is still open after a bounded close, which reached
     ///         `closedThrough`. Anyone clears it with `closeEpochs`, and an
-    ///         epoch that has not ended yet cannot be closed.
+    ///         epoch that has not ended yet cannot be closed. Wallets and
+    ///         staking UIs should recognise it and offer `closeEpochs`, then
+    ///         the claim or withdrawal again.
     error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
 
     // ============================================================
@@ -480,6 +501,13 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         sellers, the seller's claim c and weighted claim w count as
      *         c × min(1, F / C) and w × min(1, F / C), floored, in the current
      *         epoch.
+     *
+     *         C counts every seller's claim in the bucket, a claim that is
+     *         never finalized included: one whose seller has no node score in
+     *         the due epoch, or that goes void. It still shrinks the others
+     *         by F / C, and what it would have taken counts as no one's R.
+     *         That moves R shares only: the pool is the epoch's money all the
+     *         same.
      * @return finalized How many refs were finalized.
      */
     function finalizeClaims(ClaimRef[] calldata refs) external returns (uint256 finalized) {

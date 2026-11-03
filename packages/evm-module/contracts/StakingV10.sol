@@ -289,7 +289,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         `maxCloseStepsPerClaim` steps from `closedThrough`; the
     ///         permissionless `QueryInferenceSettlement.closeEpochs` clears it.
     ///         Raised by `QueryInferenceSettlement.ensureClosed` and declared
-    ///         here so it stays in this contract's ABI (10.1.0).
+    ///         here so it stays in this contract's ABI (10.1.0). Wallets and
+    ///         staking UIs should recognise it and offer `closeEpochs`, then
+    ///         the claim or withdrawal again.
     error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
     /// @notice `tokenId` holds no withdrawn epoch to claim: none was
     ///         recorded, or it has been claimed (10.1.0).
@@ -328,10 +330,54 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
     }
 
-    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
-    ///         close and each node's gross from it, read from the Hub at each
-    ///         claim, so a replaced settlement serves the next claim. 0 where
-    ///         the Hub holds no settlement.
+    /**
+     * @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
+     *         close and each node's gross from it, read from the Hub at each
+     *         claim, so a replaced settlement serves the next claim. 0 where
+     *         the Hub holds no settlement.
+     * @dev    Replacing the settlement in the Hub with a fixed one
+     *         (`Hub.setContractAddress`, then its `initialize()`) strands
+     *         nothing, and comes first: the new one reads the same
+     *         `QueryInferenceStorage`, so the frozen closes, the claims and
+     *         the carry are all kept.
+     *
+     *         Removing it from the Hub is the emergency switch: with no
+     *         settlement, a claim pays the rewards of 10.0.6, without the
+     *         pool. It strands money, so:
+     *           1. Funding goes on. Wallet and Conviction Account periods are
+     *              still funded and topped up until `QueryInferenceStorage` is
+     *              paused too; `setPaused(true)` stops both.
+     *           2. While the settlement is out, any one claim fixes the split
+     *              of each node-epoch it passes without the pool, closed
+     *              epochs included, and for good: the pool's share stays in
+     *              the vault, and registering a settlement again does not
+     *              restore it. `claimFor` is permissionless, a withdrawal
+     *              claims first, and `claimWithdrawnEpoch` spends its record
+     *              the same way. So stop your own upkeep calls before pulling
+     *              the switch, and keep the outage short.
+     *           3. Sellers stop. `submitReceiptBatch`, `finalizeClaims` and
+     *              `closeEpochs` revert, because `QueryInferenceStorage`
+     *              takes writes only from Hub contracts. Work delivered but
+     *              not yet batched loses its R if its batch deadline,
+     *              `periodEnd + grace`, passes during the outage, and a claim
+     *              not finalized within its due epoch is void. The money
+     *              itself is not lost: an epoch with no finalized value
+     *              carries it forward.
+     *           4. Pull the switch only with `Hub.removeContractByName`. On
+     *              the Hub's last entry, `removeContractByAddress` leaves the
+     *              name's pointer dangling in
+     *              `UnorderedNamedContractDynamicSet`, so this lookup, and
+     *              every claim and withdrawal with it, reverts until a
+     *              contract under another name is added. Switch back on with
+     *              a fresh deployment of the settlement and its
+     *              `initialize()`: removing the last entry by name leaves its
+     *              address's pointer dangling instead, and a settlement
+     *              registered again is always the last entry, so registering
+     *              the same address again can revert `AddressAlreadyInSet`.
+     *           5. Coming back after more than `maxCloseStepsPerClaim` epochs
+     *              (32 by default), claims revert `QueryInferenceCloseBehind`
+     *              until `closeEpochs` has caught the closes up.
+     */
     function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
         if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
         return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
@@ -687,6 +733,15 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      before the position is deleted; once the epoch has ended,
      *      `claimWithdrawnEpoch` pays its share of both pools to `staker`.
      *      Nothing is recorded when there is nothing to claim.
+     *
+     *      So a withdrawal pays in two parts. This call pays the stake and
+     *      every epoch that has ended. The epoch in progress is paid later,
+     *      by `claimWithdrawnEpoch`, which anyone may call once that epoch
+     *      has ended and which pushes TRAC to `staker` in a transaction of
+     *      its own. A contract that stakes, such as a vault, must expect TRAC
+     *      it did not call for. Someone, a keeper or the staker, has to call
+     *      it: nothing claims the record by itself. No view previews the
+     *      amount.
      */
     function withdraw(
         address staker,
@@ -864,10 +919,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *         first, then the position's score and each carry's take their
      *         share of their node's reward for the epoch (`_nodeEpochReward`),
      *         the publishing pool's and the query/inference pool's, net of
-     *         the operator fee, which is what the position would have been
-     *         paid had it stayed to the end of the epoch. With no position
+     *         the operator fee. The score is the one the position had earned
+     *         by its withdrawal: a later proof on the node in that epoch adds
+     *         to the positions still staked, not to it. With no position
      *         left to compound into, the share is paid in TRAC from the
      *         vault. The record is deleted before the payment.
+     *
+     *         It is the second part of a withdrawal's payment: the payment
+     *         goes to `staker`, whoever calls, so a contract that staked
+     *         receives TRAC it did not call for. Nothing calls this by
+     *         itself, so a keeper or the staker does, and no view previews
+     *         the amount (`StakingKPI` has none).
      * @return amount The TRAC paid.
      */
     function claimWithdrawnEpoch(uint256 tokenId) external returns (uint96 amount) {

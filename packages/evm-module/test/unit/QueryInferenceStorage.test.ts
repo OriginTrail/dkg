@@ -20,6 +20,9 @@
 //   - the settlement mutators: nonce bits are only ever set, a claim takes no
 //     value once finalized and is finalized once, never into a closed epoch,
 //     and epochs close one at a time, in order, from activation on;
+//   - the narrow setters, one field each: their gates, round trips with the
+//     other fields left as they were, and the storage's rules kept (a
+//     finalized claim never moves, a closed epoch's totals take no write);
 //   - the views over the settlement state, and the compiler's storage layout
 //     against the documented one.
 
@@ -32,6 +35,8 @@ import hre from 'hardhat';
 import { Chronos, Hub, QueryInferenceStorage } from '../../typechain';
 
 const MAX_UINT96 = (1n << 96n) - 1n;
+/** The setters that write one field of the settlement state, onlyContracts as the other mutators are. */
+const NARROW_SETTERS = ['setSellerClaim', 'setBucketClaimed', 'setNodeEpoch', 'setEpochTotals', 'setCarry'];
 
 type Fixture = {
   Hub: Hub;
@@ -158,10 +163,12 @@ describe('@unit QueryInferenceStorage', () => {
       ['setLambdaBps', [5_000n]],
     ];
 
-    it('the list below covers every setter', () => {
+    it('the list below covers every setter but the narrow ones, which are onlyContracts', () => {
       const found: string[] = [];
       QIS.interface.forEachFunction((f) => {
-        if (f.stateMutability === 'nonpayable' && f.name.startsWith('set')) found.push(f.name);
+        if (f.stateMutability === 'nonpayable' && f.name.startsWith('set') && !NARROW_SETTERS.includes(f.name)) {
+          found.push(f.name);
+        }
       });
       expect(found.sort()).to.deep.equal(setters.map(([n]) => n).sort());
     });
@@ -635,6 +642,119 @@ describe('@unit QueryInferenceStorage', () => {
       await activateAt(now);
       expect(await QIS.batchState()).to.deep.equal([now, true, 9n, 99n]);
       expect(await QIS.closeState()).to.deep.equal([now, now - 1n, 0n, 7n]);
+    });
+  });
+
+  describe('the narrow setters (onlyContracts)', () => {
+    const id = ethers.id('period');
+    type Call = (...a: unknown[]) => Promise<unknown>;
+    const calls = (): Array<[string, unknown[]]> => [
+      ['setSellerClaim', [id, 0n, 5n, { claimed: 10n, weighted: 7n, finalized: false }]],
+      ['setBucketClaimed', [id, 0n, 10n]],
+      ['setNodeEpoch', [5n, 1_000n, { r: 10n, score: 7n }]],
+      ['setEpochTotals', [1_000n, { sumR: 10n, sumScore: 7n }]],
+      ['setCarry', [77n]],
+    ];
+
+    it('with the parameter setters and the mutators, they are every state-changing function', () => {
+      const found: string[] = [];
+      QIS.interface.forEachFunction((f) => {
+        if (f.stateMutability === 'nonpayable') found.push(f.name);
+      });
+      const parameters = [
+        'initialize',
+        'setActivationEpoch',
+        'setReceiptGraceSeconds',
+        'setMaxItemsPerBatch',
+        'setMaxGroupsPerBatch',
+        'setMaxCloseStepsPerClaim',
+        'setPaused',
+        'setLambdaBps',
+      ];
+      const mutators = ['addClaim', 'addConvictionDue', 'addWalletDue', 'closeEpoch', 'finalizeClaim', 'useNonces'];
+      expect(calls().map(([n]) => n).sort()).to.deep.equal([...NARROW_SETTERS].sort());
+      expect(found.sort()).to.deep.equal([...parameters, ...mutators, ...NARROW_SETTERS].sort());
+    });
+
+    it('each refuses a caller outside the Hub, and admits a Hub contract and the Hub owner', async () => {
+      for (const [fn, args] of calls()) {
+        await expect((QIS.connect(stranger) as unknown as Record<string, Call>)[fn](...args), fn)
+          .to.be.revertedWithCustomError(QIS, 'UnauthorizedAccess')
+          .withArgs('Only Contracts in Hub');
+        await (QIS.connect(logic) as unknown as Record<string, Call>)[fn](...args);
+        await (QIS.connect(owner) as unknown as Record<string, Call>)[fn](...args);
+      }
+    });
+
+    it('setSellerClaim and setBucketClaimed write the claim and the bucket total alone, which addClaim adds to, and a finalized claim never moves', async () => {
+      await QIS.connect(logic).addClaim(id, 3n, 5n, 100n, 40n);
+      await QIS.connect(logic).setSellerClaim(id, 3n, 5n, { claimed: 70n, weighted: 20n, finalized: false });
+      expect(await QIS.getSellerClaim(id, 3n, 5n)).to.deep.equal([70n, 20n, false]);
+      expect(await QIS.bucketClaimed(id, 3n)).to.equal(100n);
+      await QIS.connect(logic).setBucketClaimed(id, 3n, 70n);
+      expect(await QIS.bucketClaimed(id, 3n)).to.equal(70n);
+      expect(await QIS.getSellerClaim(id, 3n, 5n)).to.deep.equal([70n, 20n, false]);
+      expect(await QIS.bucketClaimed(id, 4n)).to.equal(0n);
+      expect(await QIS.getSellerClaim(id, 3n, 6n)).to.deep.equal([0n, 0n, false]);
+
+      await QIS.connect(logic).addClaim(id, 3n, 5n, 5n, 1n);
+      expect(await QIS.getSellerClaim(id, 3n, 5n)).to.deep.equal([75n, 21n, false]);
+      expect(await QIS.bucketClaimed(id, 3n)).to.equal(75n);
+
+      // Finalized through the setter, the claim takes no write and no value; no node or epoch is credited.
+      await QIS.connect(logic).setSellerClaim(id, 3n, 5n, { claimed: 75n, weighted: 21n, finalized: true });
+      for (const call of [
+        QIS.connect(logic).setSellerClaim(id, 3n, 5n, { claimed: 1n, weighted: 1n, finalized: false }),
+        QIS.connect(logic).addClaim(id, 3n, 5n, 1n, 1n),
+      ]) {
+        await expect(call).to.be.revertedWithCustomError(QIS, 'ClaimFinalized').withArgs(id, 3n, 5n);
+      }
+      expect(await QIS.getSellerClaim(id, 3n, 5n)).to.deep.equal([75n, 21n, true]);
+      expect(await QIS.getNodeEpoch(5n, await currentEpoch())).to.deep.equal([0n, 0n]);
+    });
+
+    it("setNodeEpoch and setEpochTotals write a node's and an epoch's values alone, which finalizeClaim adds to, and never a closed epoch's", async () => {
+      const now = await currentEpoch();
+      await activateAt(now);
+      await QIS.connect(logic).setNodeEpoch(5n, now, { r: 120n, score: 45n });
+      await QIS.connect(logic).setEpochTotals(now, { sumR: 150n, sumScore: 75n });
+      expect(await QIS.getNodeEpoch(5n, now)).to.deep.equal([120n, 45n]);
+      expect(await QIS.getEpochTotals(now)).to.deep.equal([150n, 75n]);
+      expect(await QIS.getNodeEpoch(6n, now)).to.deep.equal([0n, 0n]);
+      expect(await QIS.getNodeEpoch(5n, now + 1n)).to.deep.equal([0n, 0n]);
+      expect(await QIS.getEpochTotals(now + 1n)).to.deep.equal([0n, 0n]);
+
+      await QIS.connect(logic).addClaim(id, 0n, 5n, 10n, 10n);
+      await QIS.connect(logic).finalizeClaim(id, 0n, 5n, now, 10n, 4n);
+      expect(await QIS.getNodeEpoch(5n, now)).to.deep.equal([130n, 49n]);
+      expect(await QIS.getEpochTotals(now)).to.deep.equal([160n, 79n]);
+
+      await QIS.connect(logic).closeEpoch(now, 0n, 0n, 0n);
+      for (const call of [
+        QIS.connect(logic).setNodeEpoch(5n, now, { r: 1n, score: 1n }),
+        QIS.connect(logic).setEpochTotals(now, { sumR: 1n, sumScore: 1n }),
+      ]) {
+        await expect(call).to.be.revertedWithCustomError(QIS, 'EpochClosed').withArgs(now, now);
+      }
+      expect(await QIS.getNodeEpoch(5n, now)).to.deep.equal([130n, 49n]);
+      expect(await QIS.getEpochTotals(now)).to.deep.equal([160n, 79n]);
+      // The next epoch is open.
+      await QIS.connect(logic).setEpochTotals(now + 1n, { sumR: 1n, sumScore: 1n });
+    });
+
+    it('setCarry sets the pool carried into the next close, which closeState reads and closeEpoch sets to its carry out', async () => {
+      await QIS.connect(logic).setCarry(77n);
+      expect(await QIS.carry()).to.equal(77n);
+      expect((await QIS.closeState())[2]).to.equal(77n);
+      const now = await currentEpoch();
+      await activateAt(now);
+      await QIS.connect(logic).closeEpoch(now, 77n, 0n, 5n);
+      expect([await QIS.carry(), await QIS.closedThrough()]).to.deep.equal([5n, now]);
+      await QIS.connect(owner).setCarry(MAX_UINT96);
+      expect(await QIS.carry()).to.equal(MAX_UINT96);
+      // The close record and its cursor are left as they were.
+      expect(await QIS.getEpochClose(now)).to.deep.equal([77n, 0n, true]);
+      expect(await QIS.closedThrough()).to.equal(now);
     });
   });
 
