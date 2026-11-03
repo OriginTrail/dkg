@@ -1,10 +1,10 @@
 import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 // Shared by the deploy steps of Conviction Account service spending
-// (OT-RFC-27): 000 refuses, before a run deploys anything, a run that would keep
-// a PublishingConviction or a StakingV10 these contracts cannot run on, 052d
-// (ServiceSubscriptions) reads the PublishingConviction build a run leaves, and
-// 052e (QueryInferenceStorage) the StakingKPI build a run keeps.
+// (OT-RFC-27): 000 refuses a run that would keep a PublishingConviction or a
+// StakingV10 these contracts cannot run on, 052d (ServiceSubscriptions) reads the
+// PublishingConviction build a run leaves, and 052e (QueryInferenceStorage) the
+// StakingKPI build a run keeps.
 
 /** Whether a `major.minor.patch` version is at least `minimum`. */
 export function versionAtLeast(version: string, minimum: [number, number, number]): boolean {
@@ -47,9 +47,10 @@ export async function publishingConvictionAfterRun(
 
 /**
  * Refuse a run that would keep a build service spending and the
- * query/inference pool cannot run on. It only reads, and it runs ahead of every
- * deployment of the run (000), so a refused run has deployed nothing, and the
- * corrected retry registers all it deploys.
+ * query/inference pool cannot run on. It only reads. In a run of every step or
+ * by any single tag it runs ahead of every deployment (000), so a refused run
+ * has deployed nothing, and the corrected retry of every step registers all it
+ * deploys.
  *   - `PublishingConviction` 10.1.x has `coverServiceCost` but books every
  *     account's whole budget to the staker pool up front, so an account funding
  *     through it would be counted in both pools. A build older than 10.1.0 has

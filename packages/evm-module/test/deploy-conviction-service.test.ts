@@ -1,9 +1,10 @@
 // Unit tests for the deploy steps of service plan periods (OT-RFC-27) and for
 // the Hub transaction step they end in:
 //   - deploy/active/000_check_service_spending_builds.ts, which refuses, ahead
-//     of every deployment of a run, to keep a PublishingConviction 10.1.x, which
-//     would count an account funding twice, or a StakingV10 below 10.1.0, which
-//     would split every epoch without the pool, so a refused run strands nothing;
+//     of every deployment of a run of every step or by any single tag, to keep a
+//     PublishingConviction 10.1.x, which would count an account funding twice, or
+//     a StakingV10 below 10.1.0, which would split every epoch without the pool,
+//     so such a refused run strands nothing;
 //   - deploy/active/052c_deploy_conviction_service_storage.ts, which deploys
 //     ConvictionServiceStorage and sets its parameters everywhere but on
 //     mainnet;
@@ -97,7 +98,7 @@ function storageHre(opts: { network?: string; environment?: string }) {
   return { hre, deployed, updates };
 }
 
-describe('@unit deploy/000 — the builds service spending needs, checked ahead of every deployment', () => {
+describe("@unit deploy/000 — the builds service spending needs, checked ahead of a run's deployments", () => {
   const STAKING_V10 = '0x1000000000000000000000000000000000000009';
   const addressOf: Record<string, string> = { PublishingConviction: PUBLISHING_CONVICTION, StakingV10: STAKING_V10 };
 

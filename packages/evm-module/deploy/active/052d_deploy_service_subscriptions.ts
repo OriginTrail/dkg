@@ -42,12 +42,12 @@ import { publishingConvictionAfterRun, versionAtLeast } from '../../utils/convic
  * funding, top-up and opt-in is refused, a service draw carrying no treasury
  * fee. Wallet periods take no fee and go on.
  *
- * A run that would leave `PublishingConviction` 10.1.x is refused before it
- * deploys anything (000): that build has `coverServiceCost` but books every
- * account's whole budget to the staker pool up front, so an account funding
- * through it would be counted in both pools. A build older than 10.1.0 has no
- * `coverServiceCost`, so account fundings revert until 10.2.0 is registered,
- * and the script deploys with a note, so other deploys go on.
+ * A run that would leave `PublishingConviction` 10.1.x is refused by 000: that
+ * build has `coverServiceCost` but books every account's whole budget to the
+ * staker pool up front, so an account funding through it would be counted in
+ * both pools. A build older than 10.1.0 has no `coverServiceCost`, so account
+ * fundings revert until 10.2.0 is registered, and the script deploys with a
+ * note, so other deploys go on.
  */
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   if (hre.network.config.environment === 'mainnet') {
