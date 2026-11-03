@@ -184,9 +184,8 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
         const { hre, deployed } = ssHre(version, { network, environment: 'testnet' });
         const lines = await captured(() => deployServiceSubscriptions(hre as never));
         expect(deployed).to.deep.equal(['ServiceSubscriptions', 'ServiceSubscriptionsWallet']);
-        expect(lines.join('\n')).to.match(
-          new RegExp(`${network} keeps PublishingConviction ${version.replace(/\./g, '\\.')}.*stay off`),
-        );
+        const note = lines.find((line) => line.includes(`${network} keeps PublishingConviction ${version},`));
+        expect(note, lines.join('\n')).to.contain('stay off');
       }
     }
   });
