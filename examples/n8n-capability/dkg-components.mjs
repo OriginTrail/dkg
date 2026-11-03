@@ -52,8 +52,16 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
   db.exec(`CREATE TABLE IF NOT EXISTS dkg_component_runs(id TEXT PRIMARY KEY, ka_ref TEXT NOT NULL, source_hash TEXT NOT NULL, input TEXT NOT NULL, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS dkg_component_calls(id TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result TEXT);`);
   db.exec('CREATE TABLE IF NOT EXISTS dkg_component_profiles (id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, revision TEXT NOT NULL)');
+  db.exec('CREATE TABLE IF NOT EXISTS dkg_component_actors (id TEXT PRIMARY KEY, actor TEXT NOT NULL)');
   const active = new Map();
-  function grant(workflow, invocationId, input) {
+  function grant(workflow, invocationId, input, actor) {
+    if (profile?.requiresNosActor && (!actor || actor.role !== 'owner' || actor.accountId !== profile.accountId))
+      throw fail('Authenticated nOS owner required.');
+    const actorText = JSON.stringify(actor ?? null);
+    const existingActor = db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(invocationId);
+    const existingRun = db.prepare('SELECT id FROM dkg_component_runs WHERE id=?').get(invocationId);
+    if ((existingActor && existingActor.actor !== actorText) || (profile?.requiresNosActor && existingRun && !existingActor))
+      throw fail('This invocation belongs to a different account or principal.');
     assertDkgEnabled(workflow.definition, profile);
     profile.validateInput(workflow.definition, input, approvedInputs);
     const encoded = JSON.stringify(input),
@@ -74,6 +82,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw fail('Invocation identity belongs to a different execution profile or an unscoped legacy run.');
     db.exec('SAVEPOINT dkg_profile_grant');
     try {
+      db.prepare('INSERT OR IGNORE INTO dkg_component_actors VALUES (?,?)').run(invocationId, actorText);
       db.prepare('INSERT OR IGNORE INTO dkg_component_profiles VALUES (?,?,?)').run(invocationId, profile.id, profile.revision);
       db.prepare('INSERT INTO dkg_component_runs VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET expires=excluded.expires')
         .run(invocationId, workflow.kaRef, workflow.sourceHash, encoded, Date.now() + 600000);
@@ -123,6 +132,12 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       throw fail(
         "Run the approved workflow as its account owner before accessing DKG.",
       );
+    const savedActor = db.prepare('SELECT actor FROM dkg_component_actors WHERE id=?').get(id);
+    const actor = savedActor ? JSON.parse(savedActor.actor) : null;
+    if (profile.requiresNosActor) {
+      if (!actor || actor.accountId !== profile.accountId || actor.role !== 'owner') throw fail('No authenticated execution owner.');
+      await profile.authorize(actor);
+    }
     const node = definition.nodes.find(
       (n) => n.id === value.blockId && isDkg(n.componentId),
     );
@@ -161,12 +176,12 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         );
       if (node.componentId === 'invoke-dkg-program') {
         const request = programRequest(node, rows, id, profile);
-        const result = programResult(await transport(request, 'invoke'), request);
+        const result = programResult(await transport(request, 'invoke', { actor }), request);
         db.prepare('UPDATE dkg_component_calls SET result=? WHERE id=?').run(JSON.stringify(result), key);
         return result;
       }
       if (node.componentId === "dkg-read") {
-        const result = await transport(profile.readRequest(node, rows, input), 'read');
+        const result = await transport(profile.readRequest(node, rows, input), 'read', { actor });
         const items = profile.readItems(rows, result, node);
         if (JSON.stringify(items).length > 8192)
           throw fail("DKG Read result exceeds the workflow batch limit.");
@@ -201,7 +216,7 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         programOutput = rows[0];
       }
       const { payload, recordCount, summary = {} } = profile.evidence(rows, context, JSON.parse(read.result), input, programOutput);
-      const result = prior?.result ? JSON.parse(prior.result) : await transport({ ...payload, allowCreate: !prior }, 'write');
+      const result = prior?.result ? JSON.parse(prior.result) : await transport({ ...payload, allowCreate: !prior }, 'write', { actor });
       if (
         result.contextGraphId !== profile.targetGraph ||
         result.digest !== payload.digest ||

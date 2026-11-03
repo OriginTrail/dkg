@@ -143,3 +143,66 @@ including service authentication and response handling, with a labelled publishe
 fixture. It checks lost-response retry identity, cross-account/wrong-secret
 refusal and no customer bearer forwarding. It starts no server and proves no live
 DKG write. The nOS publisher's own regression suite covers its node-action path.
+
+## Authenticated nOS development transport
+
+`profiles/jpb-nos.mjs` keeps the reviewed JPB/HOLOS mapping but runs Read, Invoke
+and sealed WM Write through nOS's existing `NodeClient` and node-runner proxy.
+It has no SSH execution fallback. The original `jpb.mjs` remains an explicitly
+selected legacy demo transport; an authenticated companion refuses that profile.
+
+Set `NOS_STUDIO_SESSION_FILE` to an absolute operator-owned JSON file:
+
+```json
+{
+  "accountId": "account-example",
+  "controlPlaneUrl": "http://127.0.0.1:4610",
+  "secretFile": "/private/studio.secret"
+}
+```
+
+Configure the same account and service secret in nOS's development `--studio-file`
+option. The console sends its real dev bearer only to nOS. The companion accepts
+trusted nOS account/principal/role headers, rejects fixture bearers in this mode,
+and records the authenticated owner with each invocation. Every component call,
+including a cached retry, rechecks owner membership through nOS. Neither the
+workflow document nor n8n can supply the approving identity.
+
+Each companion state belongs to one account. A persisted `nos-account.json`
+prevents rebinding or reopening it as a kit-only service. To deliberately migrate
+an existing operator-owned demo state, set `adoptExistingState: true` once; legacy
+active schedules must first be deactivated. Do not use this flag to move tenant
+state between accounts. This integration exposes manual execution only.
+
+Install the current native component profile and explicitly save a new workflow
+revision after switching transports. Old invocations cannot be rebound to a new
+account, principal or profile. The JPB nOS example exposes the reviewed mapped
+PLCA demo calculator; its assumptions remain explicit and are not measured LCA
+factors or a certified impact assessment.
+
+For managed nodes nOS checks the existing job/account/ready state. An existing
+external demo node uses an explicit development runner binding, not an inferred
+permission from fleet monitoring. Its node-host credential remains held by the
+runner. An SSH tunnel may carry HTTP to the loopback runner, but no workflow step
+executes scripts over SSH or exports the node credential. See nOS
+`docs/l1/STUDIO-DKG-ACCESS.md` for configuration and the standalone bundle.
+
+The Write transport requests private WM creation/finalization, verifies exact
+quads and digest, and requires `wm-sealed`. It never requests VM publication or
+SWM sharing. After an uncertain creation, retry reads/reconciles the existing
+name and refuses another create. This differs intentionally from the existing
+Workflows release publisher's `saved` draft contract; `nos-publish-adapter.mjs`
+continues to expose that contract and is not used to manufacture a sealed receipt.
+
+Local integration verification (fictional HTTP node, no JPB data or connection):
+
+```sh
+node --import /path/to/tl-nos/node_modules/tsx/dist/loader.mjs \
+  examples/n8n-capability/verify-nos-runner.mjs /path/to/tl-nos
+node --test examples/n8n-capability/*test.mjs
+```
+
+The verifier traverses nOS identity/role checks, trusted companion headers,
+service callbacks, the real NodeClient and the real HTTP node proxy, then checks
+Program execution, sealed readback, stable retries, source-pin refusal and owner
+revocation. Live JPB activation and results must be reported separately.

@@ -102,8 +102,6 @@ export function createNosPublishAdapter({ db, accountId, publish }) {
       if (!old)
         db.prepare('INSERT INTO nos_studio_publish_requests VALUES (?,?,?,?,?,NULL)').run(
           requestId,
-          invocationId: value.invocationId,
-          blockId: value.blockId,
           accountId,
           actor.id,
           fingerprint,

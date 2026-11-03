@@ -71,6 +71,30 @@ test('another profile runs Read -> Invoke -> Write with its own schema, cached P
     assert.deepEqual(calls.filter(c => c.operation === 'write').map(c => c.payload.allowCreate), [true, false]);
   } finally { db.close(); }
 });
+test('authenticated execution pins its principal and rechecks revocation before cached results or effects', async () => {
+  const db = new DatabaseSync(':memory:'), calls = [];
+  let revoked = false, checks = 0;
+  const owner = { id: 'person-1', accountId: 'account-real', role: 'owner' };
+  const scoped = { ...profile, requiresNosActor: true, accountId: owner.accountId,
+    async authorize(actor) { assert.deepEqual(actor, owner); checks++; if (revoked) throw new Error('owner revoked'); } };
+  try {
+    const remote = transport(calls);
+    const store = dkgComponentStore(db, (p, op, context) => { assert.deepEqual(context.actor, owner); return remote(p, op); }, [], scoped);
+    assert.throws(() => store.grant(workflow, id, input), /owner/);
+    assert.throws(() => store.grant(workflow, id, input, { ...owner, accountId: 'other' }), /owner/);
+    store.grant(workflow, id, input, owner);
+    assert.throws(() => store.grant(workflow, id, input, { ...owner, id: 'person-2' }), /different account or principal/);
+    const source = await store.call(request('read', [{}]), workflow, 'native');
+    const calculated = await store.call(request('invoke', source.items), workflow, 'native');
+    const saved = await store.call(request('write', calculated.items), workflow, 'native');
+    assert.equal(saved.items[0].status, 'wm-sealed');
+    assert.equal(calls.length, 3);
+    revoked = true;
+    await assert.rejects(store.call(request('write', calculated.items), workflow, 'native'), /revoked/);
+    await assert.rejects(store.call(request('invoke', source.items), workflow, 'native'), /revoked/);
+    assert.equal(checks, 5); assert.equal(calls.length, 3);
+  } finally { db.close(); }
+});
 test('profile switch and changed revisions cannot reuse an invocation or its cached results', async () => {
   const db = new DatabaseSync(':memory:'), calls = [];
   try {

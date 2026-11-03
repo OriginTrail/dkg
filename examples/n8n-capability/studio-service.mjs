@@ -79,7 +79,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
   }
-  async function run(value, authorize) {
+  async function run(value, authorize, actor) {
     if (!value || Object.keys(value).some(k => !['kaRef', 'sourceHash', 'itemsJson', 'invocationId'].includes(k))) throw reject('Invalid graph invocation.');
     const invocationId = workflowUuid(value.invocationId), { compiled, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
@@ -92,7 +92,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
     assertDkgEnabled(compiled.definition);
-    if (compiled.definition.nodes.some(n => isDkg(n.componentId))) dkg.grant(workflow, invocationId, input);
+    if (compiled.definition.nodes.some(n => isDkg(n.componentId))) dkg.grant(workflow, invocationId, input, actor);
     const invoke = () => client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
     let result;
     try { result = await invoke(); }
