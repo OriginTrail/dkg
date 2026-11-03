@@ -1,9 +1,10 @@
 // Unit tests for the deploy steps of service plan periods (OT-RFC-27) and for
 // the Hub transaction step they end in:
 //   - deploy/active/000_check_service_spending_builds.ts, which refuses, ahead
-//     of every deployment of a run, to keep a PublishingConviction 10.1.x, which
-//     would count an account funding twice, or a StakingV10 below 10.1.0, which
-//     would split every epoch without the pool, so a refused run strands nothing;
+//     of every deployment of a run of every step or by any single tag, to keep a
+//     PublishingConviction 10.1.x, which would count an account funding twice, or
+//     a StakingV10 below 10.1.0, which would split every epoch without the pool,
+//     so such a refused run strands nothing;
 //   - deploy/active/052c_deploy_conviction_service_storage.ts, which deploys
 //     ConvictionServiceStorage and sets its parameters everywhere but on
 //     mainnet;
@@ -97,7 +98,7 @@ function storageHre(opts: { network?: string; environment?: string }) {
   return { hre, deployed, updates };
 }
 
-describe('@unit deploy/000 — the builds service spending needs, checked ahead of every deployment', () => {
+describe("@unit deploy/000 — the builds service spending needs, checked ahead of a run's deployments", () => {
   const STAKING_V10 = '0x1000000000000000000000000000000000000009';
   const addressOf: Record<string, string> = { PublishingConviction: PUBLISHING_CONVICTION, StakingV10: STAKING_V10 };
 
@@ -166,6 +167,14 @@ describe('@unit deploy/000 — the builds service spending needs, checked ahead 
     }
   });
 
+  it('on a development network, refuses nothing and reads nothing, whatever a leftover file records: that run reuses nothing', async () => {
+    for (const network of ['hardhat', 'localhost']) {
+      const { hre, read } = buildsHre({ PublishingConviction: '10.1.0', StakingV10: '10.0.5' }, { network, environment: 'development' });
+      expect(await failureOf(() => checkBuilds(hre as never))).to.equal(undefined);
+      expect(read).to.have.length(0);
+    }
+  });
+
   // The steps of deploy/active, in the order hardhat-deploy runs them: its
   // DeploymentsManager takes the tagged files in file order, each after its
   // dependencies, in the order they are listed.
@@ -211,6 +220,60 @@ describe('@unit deploy/000 — the builds service spending needs, checked ahead 
     const reaching = tags.filter((tag) => needing(orderOf(all, [tag])));
     expect(reaching).to.include.members(['QueryInferenceStorage', 'ServiceSubscriptions', 'QueryInferenceSettlement', 'StakingKPI', 'v10']);
     for (const tag of reaching) expect(first(orderOf(all, [tag])), `--tags ${tag}`).to.equal(check);
+  });
+
+  it('a development run goes past a leftover file, whose addresses hold no code on a new chain, and step 001 then clears its record', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deploy-leftover-'));
+    const LEFT = '0x3000000000000000000000000000000000000004';
+    const NEW_HUB = '0x4000000000000000000000000000000000000001';
+    fs.writeFileSync(
+      path.join(dir, 'hardhat_contracts.json'),
+      JSON.stringify({
+        contracts: {
+          Hub: { evmAddress: LEFT, version: '1.0.0', deployed: true },
+          PublishingConviction: { evmAddress: LEFT, version: '10.2.0', deployed: true },
+          StakingV10: { evmAddress: LEFT, version: '10.1.0', deployed: true },
+        },
+      }),
+    );
+    const sent: string[] = [];
+    const hre = {
+      network: { name: 'hardhat', config: { environment: 'development' } },
+      config: { paths: { deployments: dir } },
+      getNamedAccounts: async () => ({ deployer: DEPLOYER }),
+      deployments: {
+        deploy: async (name: string) => {
+          sent.push(name);
+          return { address: NEW_HUB, receipt: { blockNumber: 1 } };
+        },
+      },
+      ethers: {
+        // As a chain with no code at an address answers a call there.
+        getContractAt: async (_: unknown, address: string) => ({
+          version: async () => {
+            if (address === LEFT) throw new Error('could not decode result data (value="0x")');
+            return '1.0.0';
+          },
+        }),
+      },
+      helpers: undefined as unknown as Helpers,
+    };
+    hre.helpers = new Helpers(hre as never);
+    try {
+      // The check comes first, so it is what sees the file, not what 001 leaves.
+      const order = orderOf(steps()).filter((s) => /^00[01]_/.test(s.file));
+      expect(order.map((s) => s.file.split('_')[0])).to.deep.equal(['000', '001']);
+      expect(hre.helpers.isDeployed('StakingV10')).to.equal(true);
+      const error = await failureOf(async () => {
+        for (const step of order) await step.func(hre as never);
+      });
+      expect(error).to.equal(undefined);
+      expect(sent).to.deep.equal(['Hub']);
+      expect(Object.keys(hre.helpers.contractDeployments.contracts)).to.deep.equal(['Hub']);
+      expect(hre.helpers.contractDeployments.contracts.Hub.evmAddress).to.equal(NEW_HUB);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // Each recorded build is flagged as the operator left it. Whatever else the run
