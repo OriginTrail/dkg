@@ -64,11 +64,11 @@ transaction.
      Redeploy it all the same.
 2. From `packages/evm-module`, run `npm run deploy:testnet`, which is
    `hardhat deploy --network base_sepolia_v10 --config hardhat.node.config.ts`.
-3. The run deploys 10 contracts from the deployer, 27,012,970 gas in all:
+3. The run deploys 10 contracts from the deployer, 26,987,387 gas in all:
 
    | Contract | Gas |
    |---|---|
-   | `StakingV10` | 5,065,799 |
+   | `StakingV10` | 5,040,216 |
    | `PublishingConviction` | 4,285,448 |
    | `ServiceSubscriptions` | 3,848,916 |
    | `QueryInferenceSettlement` | 3,790,599 |
@@ -208,19 +208,19 @@ the same claim as `claimFor`:
 
 | Node | Tokens | Scored epochs | Gas used | Smallest gas limit |
 |---|---|---|---|---|
-| 1 | 3, 5 | 133 | 12,518,656 | 12,716,878 |
-| 4 | 1 | 128 | 12,023,836 | 12,214,606 |
-| 5 | 4 | 125 | 11,746,066 | 11,932,820 |
-| 3 | 2, 6 | 117 | 11,151,222 | 11,328,081 |
-| 12 | 11 | 34 | 3,850,242 | 3,911,096 |
-| 13 | 10 | 14 | 2,115,384 | 2,149,025 |
-| 11 | 9 | 0 | 693,423 | 704,418 |
+| 1 | 3, 5 | 133 | 12,517,944 | 12,716,878 |
+| 4 | 1 | 128 | 12,023,134 | 12,213,691 |
+| 5 | 4 | 125 | 11,745,370 | 11,931,905 |
+| 3 | 2, 6 | 117 | 11,150,542 | 11,327,166 |
+| 12 | 11 | 34 | 3,849,768 | 3,911,096 |
+| 13 | 10 | 14 | 2,114,950 | 2,148,110 |
+| 11 | 9 | 0 | 693,005 | 703,503 |
 
 - For a node with two positions, the row gives the larger of the two.
 - Node 1, the longest history, had about 4.06M gas of room under the cap:
   about 43 more scored epochs, at one epoch a day.
-- Its withdrawal, which claims first, took 12,838,969 gas, with a smallest gas
-  limit of 13,109,364.
+- Its withdrawal, which claims first, took 12,838,278 gas, with a smallest gas
+  limit of 13,108,449.
 
 ## 5. Upkeep
 
@@ -271,7 +271,7 @@ All of them are permissionless.
      at its withdrawal, in TRAC, to the staker.
    - Before the epoch ends it reverts `WithdrawnEpochInProgress`; a second
      call reverts `NoWithdrawnEpoch`.
-   - Rehearsal: 156,676 gas.
+   - Rehearsal: 156,543 gas.
 
 ## 6. Emergency: switching the pool off
 

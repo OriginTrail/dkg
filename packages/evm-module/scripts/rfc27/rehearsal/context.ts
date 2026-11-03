@@ -127,6 +127,7 @@ export function saveResults(ctx: Ctx, name: string, data: { [key: string]: unkno
   const out: { [key: string]: unknown } = { ...data };
   if (o.txs !== false) out.txs = ctx.txs;
   if (o.checks !== false) out.checks = checksOf(ctx.report);
+  if (ctx.report.forkOnly.length) out.forkOnly = ctx.report.forkOnly;
   const file = save(name, out, ctx.report.redactor);
   ctx.report.say(`\n→ wrote ${file}`);
 }
