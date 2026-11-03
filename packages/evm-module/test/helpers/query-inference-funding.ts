@@ -3,8 +3,8 @@
 // ConvictionServiceStorage, ServiceSubscriptions and
 // ServiceSubscriptionsWallet registered in the Hub, on the real account
 // stack. Each suite wraps the deploy in a fixture function of its own, so
-// loadFixture keeps a snapshot per suite, and its beforeEach fills the
-// context its helpers read.
+// loadFixture keeps a snapshot per suite, and its beforeEach builds the helpers
+// from that fixture.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { time } from '@nomicfoundation/hardhat-network-helpers';
@@ -75,26 +75,25 @@ export async function deployFundingStack(): Promise<FundingStack> {
   };
 }
 
-/**
- * What the helpers read, which a suite's beforeEach sets for each test: the
- * fixture, the account owner and the buyer key assigned by default.
- */
+/** What the helpers read: the fixture, the account owner and the buyer key assigned by default. */
 export type FundingContext = { f: FundingStack; owner: SignerWithAddress; buyer: SignerWithAddress };
 
-export function fundingHelpers(ctx: FundingContext) {
+export type FundingHelpers = ReturnType<typeof fundingHelpers>;
+
+export function fundingHelpers({ f, owner, buyer }: FundingContext) {
   const latest = async () => BigInt(await time.latest());
-  const epochNow = async () => ctx.f.Chronos.getCurrentEpoch();
-  const epochStart = async (e: bigint) => ctx.f.Chronos.timestampForEpoch(e);
+  const epochNow = async () => f.Chronos.getCurrentEpoch();
+  const epochStart = async (e: bigint) => f.Chronos.timestampForEpoch(e);
 
   /** An opted-in account of `owner` with `assignee` assigned, under a per-period limit. */
   const openAccount = async (opts: { limit?: bigint; assignee?: SignerWithAddress; committed?: bigint } = {}) => {
     const committed = opts.committed ?? COMMITTED;
-    await ctx.f.Token.mint(ctx.owner.address, committed);
-    await ctx.f.Token.connect(ctx.owner).approve(await ctx.f.NFT.getAddress(), committed);
-    await (await ctx.f.NFT.connect(ctx.owner).createAccount(committed, 0)).wait();
-    const accountId = await ctx.f.NFT.totalSupply();
-    await ctx.f.SS.connect(ctx.owner).setServiceSpending(accountId, true);
-    await assign(accountId, opts.assignee ?? ctx.buyer, opts.limit ?? 1_000n * TRAC);
+    await f.Token.mint(owner.address, committed);
+    await f.Token.connect(owner).approve(await f.NFT.getAddress(), committed);
+    await (await f.NFT.connect(owner).createAccount(committed, 0)).wait();
+    const accountId = await f.NFT.totalSupply();
+    await f.SS.connect(owner).setServiceSpending(accountId, true);
+    await assign(accountId, opts.assignee ?? buyer, opts.limit ?? 1_000n * TRAC);
     return accountId;
   };
 
@@ -104,15 +103,15 @@ export function fundingHelpers(ctx: FundingContext) {
       assignee: assignee.address,
       maxCostPerPeriod: limit,
       expiresAt: (await latest()) + 400n * DAY,
-      nonce: await ctx.f.CSS.assignmentNonce(accountId),
+      nonce: await f.CSS.assignmentNonce(accountId),
     };
-    await ctx.f.SS.connect(ctx.owner).assign(terms, '0x', await signTerms(assignee, ctx.f.SS, terms));
+    await f.SS.connect(owner).assign(terms, '0x', await signTerms(assignee, f.SS, terms));
     return terms;
   };
 
-  const caFund = async (accountId: bigint, epoch: bigint, value: bigint, sender: SignerWithAddress = ctx.buyer) => {
+  const caFund = async (accountId: bigint, epoch: bigint, value: bigint, sender: SignerWithAddress = buyer) => {
     const r = requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value)] });
-    const receipt = (await (await ctx.f.SS.connect(sender).fundFromConviction(r)).wait())!;
+    const receipt = (await (await f.SS.connect(sender).fundFromConviction(r)).wait())!;
     return { subscriptionId: subscriptionIdOf(sender.address, epoch), receipt, r };
   };
 

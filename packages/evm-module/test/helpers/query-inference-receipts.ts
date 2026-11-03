@@ -3,7 +3,7 @@
 // staking stacks, with wallet and Conviction Account periods, Core Node
 // sellers and session keys that sign requests. Each suite wraps the deploy in
 // a fixture function of its own, so loadFixture keeps a snapshot per suite,
-// and its beforeEach fills the context its helpers read.
+// and its beforeEach builds the helpers from that fixture.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { time } from '@nomicfoundation/hardhat-network-helpers';
@@ -65,25 +65,26 @@ export type ReceiptsStack = Awaited<ReturnType<typeof deployReceiptsStack>>;
 export type Seller = { identityId: bigint; operational: SignerWithAddress; admin: SignerWithAddress };
 
 /**
- * What the helpers read, which a suite's beforeEach sets for each test: the
- * fixture and the EIP-712 domain of requests; `key` is the buyer's session
- * key.
+ * What the helpers read: the fixture and the EIP-712 domain of requests; `key`
+ * is the buyer's session key.
  */
 export type ReceiptsContext = { f: ReceiptsStack; domain: Domain; key: ethers.HDNodeWallet };
 
-export function receiptsHelpers(ctx: ReceiptsContext) {
+export type ReceiptsHelpers = ReturnType<typeof receiptsHelpers>;
+
+export function receiptsHelpers({ f, domain, key }: ReceiptsContext) {
   const latest = async () => BigInt(await time.latest());
-  const epochNow = async () => ctx.f.Chronos.getCurrentEpoch();
-  const epochStart = async (e: bigint) => ctx.f.Chronos.timestampForEpoch(e);
+  const epochNow = async () => f.Chronos.getCurrentEpoch();
+  const epochStart = async (e: bigint) => f.Chronos.timestampForEpoch(e);
 
   async function seller(index: number, stake: bigint): Promise<Seller> {
-    const operational = ctx.f.accounts[index];
-    const admin = ctx.f.accounts[index + 1];
-    const identityId = await createNode({ ...ctx.f, operational, admin, stake });
+    const operational = f.accounts[index];
+    const admin = f.accounts[index + 1];
+    const identityId = await createNode({ ...f, operational, admin, stake });
     return { identityId, operational, admin };
   }
 
-  const submit = (by: Seller, groups: ReceiptGroup[]) => ctx.f.QS.connect(by.operational).submitReceiptBatch(groups);
+  const submit = (by: Seller, groups: ReceiptGroup[]) => f.QS.connect(by.operational).submitReceiptBatch(groups);
   const accept = async (by: Seller, groups: ReceiptGroup[]) => (await (await submit(by, groups)).wait())!;
 
   /** One request for `by` on a period's bucket, with `overrides`, and its full receipt. */
@@ -93,7 +94,7 @@ export function receiptsHelpers(ctx: ReceiptsContext) {
     by: Seller,
     overrides: Partial<ServiceRequest> = {},
   ): Promise<ServiceRequest> => {
-    const b = await ctx.f.CSS.getBucket(subscriptionId, bucketIndex);
+    const b = await f.CSS.getBucket(subscriptionId, bucketIndex);
     const issuedAt = overrides.issuedAt ?? (await latest());
     return {
       subscriptionId,
@@ -110,8 +111,8 @@ export function receiptsHelpers(ctx: ReceiptsContext) {
   };
 
   /** An item claiming `r`, signed by `wallet`, with `receipt` overrides. */
-  const itemFor = (r: ServiceRequest, receipt: Partial<Receipt> = {}, wallet = ctx.key): ReceiptItem =>
-    itemOf(r, fullReceipt(r, receipt), signCompact(wallet, requestDigestOf(ctx.domain, r)));
+  const itemFor = (r: ServiceRequest, receipt: Partial<Receipt> = {}, wallet = key): ReceiptItem =>
+    itemOf(r, fullReceipt(r, receipt), signCompact(wallet, requestDigestOf(domain, r)));
 
   return { latest, epochNow, epochStart, seller, submit, accept, requestFor, itemFor };
 }
