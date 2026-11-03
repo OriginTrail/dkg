@@ -71,8 +71,16 @@ function anchorLabel(r: VmReceipt): string {
   return r.finalizedAt ? `anchor ${short} · ${r.finalizedAt.slice(11, 16)}UTC` : `anchor ${short}`;
 }
 
+/** Why an anchored KA shows no transaction, if it doesn't. */
+function noTxNote(r: VmReceipt): string {
+  if (r.tx) return '';
+  return r.confirmation === 'finalized-materialization'
+    ? ' · confirmed by finalized materialization (no local transaction hash)'
+    : ' · published more than once; the current transaction is not recorded';
+}
+
 /** One synthetic node per Knowledge Asset: by its tx, else by its UAL or
- *  assertion (a finalized materialization carries no local tx hash). */
+ *  assertion when no single transaction is known. */
 function anchorUriFor(r: VmReceipt): string {
   return `urn:dkg:viz:anchor:${r.tx ?? encodeURIComponent(r.ual ?? r.assertion)}`;
 }
@@ -124,7 +132,7 @@ export function buildDecorationTriples(
     out.push({
       subject: anchorUri,
       predicate: SCHEMA_DESC,
-      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · finalized ${r.finalizedAt}` : ' · finalize time unknown'}${r.tx ? '' : ' · confirmed by finalized materialization (no local transaction hash)'}"`,
+      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · finalized ${r.finalizedAt}` : ' · finalize time unknown'}${noTxNote(r)}"`,
       subGraph: r.subGraph,
     });
 

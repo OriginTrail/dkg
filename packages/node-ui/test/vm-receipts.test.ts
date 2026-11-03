@@ -6,7 +6,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { parseVmReceiptRows, buildVmReceiptQuery, buildKaGraphMemberQuery, addKaGraphMembers, kaGraphOf, useVmReceipts, refreshVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
+import { parseVmReceiptRows, buildVmReceiptQuery, buildKaGraphMemberQuery, addKaGraphMembers, kaGraphOf, useVmReceipts, useVmReceiptsResource, VmReceiptsProvider } from '../src/ui/hooks/useVmReceipts.js';
 import { useVmReceiptSummary } from '../src/ui/hooks/useVmReceiptSummary.js';
 import { useVerifiableMemoryAnchors } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
 import { invalidateQueryCache } from '../src/ui/query-api.js';
@@ -56,52 +56,57 @@ describe('parseVmReceiptRows', () => {
     ]);
   });
 
-  it('binds a repeatedly published assertion to its latest transaction, whatever the row order', () => {
+  it('names no transaction when a named assertion was published more than once, whatever the row order', () => {
+    // Append-only receipts: nothing pairs a hash with its block, so neither is "current".
     const rows = [
-      { asrt: A, tx: '0xold', block: '"41"^^<http://www.w3.org/2001/XMLSchema#integer>', member: 'urn:x:a' },
-      { asrt: A, tx: '0xnew', block: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>', member: 'urn:x:a' },
+      { asrt: A, tx: '0xff01', member: 'urn:x:a' },
+      { asrt: A, tx: '0x1102', member: 'urn:x:a' },
     ];
     for (const order of [rows, [...rows].reverse()]) {
       const [r] = parseVmReceiptRows(order, CG);
-      expect(r).toMatchObject({ assertion: A, tx: '0xnew', confirmation: 'receipt', members: ['urn:x:a'] });
+      expect(r).toMatchObject({ assertion: A, tx: null, confirmation: 'receipt', members: ['urn:x:a'] });
     }
-    // Without block numbers the choice is still deterministic (greatest hash).
-    const noBlocks = [{ asrt: A, tx: '0xaaa' }, { asrt: A, tx: '0xbbb' }];
-    expect(parseVmReceiptRows(noBlocks, CG)[0].tx).toBe('0xbbb');
-    expect(parseVmReceiptRows([...noBlocks].reverse(), CG)[0].tx).toBe('0xbbb');
+  });
+
+  it('takes the transaction from the UAL metadata over any named receipt', () => {
+    const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
+    const rows = [
+      { asrt: A, tx: '0xold', kaUal: UAL, finalizedAt: '"2026-10-30T10:00:00Z"' },
+      { asrt: A, tx: '0xolder', kaUal: UAL },
+      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xcurrent', kind: 'transaction' },
+    ];
+    for (const order of [rows, [...rows].reverse()]) {
+      const receipts = parseVmReceiptRows(order, CG);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({ assertion: A, ual: UAL, tx: '0xcurrent', confirmation: 'transaction', kaGraph: 'urn:g:ka9', finalizedAt: '2026-10-30T10:00:00.000Z' });
+    }
+    // UAL metadata with more than one hash proves nothing; a single named receipt still does.
+    const [r] = parseVmReceiptRows([
+      { asrt: A, tx: '0xnamed', kaUal: UAL },
+      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xa', kind: 'transaction' },
+      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0xb', kind: 'transaction' },
+    ], CG);
+    expect(r).toMatchObject({ tx: '0xnamed', confirmation: 'receipt' });
   });
 
   it('folds confirmed KA metadata on the UAL: transaction-confirmed and receiptless finalized materialization', () => {
     const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
     const KA_GRAPH = `did:dkg:context-graph:${CG}/_verifiable_memory/${'0x' + 'ab'.repeat(20)}/9`;
     const receipts = parseVmReceiptRows([
-      // Transaction-confirmed, two versions: the newest version's tx wins, in either order.
-      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv2', version: '2', kind: 'transaction', finalizedAt: '"2026-10-31T10:00:00Z"', agent: 'did:dkg:agent:0x9' },
-      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv1', version: '1', kind: 'transaction' },
+      // A publish or sync time on the UAL is not a seal time: finalizedAt stays unknown.
+      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv2', kind: 'transaction', finalizedAt: '"2026-10-31T10:00:00Z"', agent: 'did:dkg:agent:0x9' },
       // Synced, finalized materialization: anchored, but no local transaction hash.
       { ual: 'did:dkg:hardhat:31337/0x' + 'cd'.repeat(20) + '/3', kaGraph: 'urn:g:synced', kind: 'finalized-materialization', agent: 'peer-1' },
       // A confirmed status with no provenance at all is not anchored.
       { ual: 'did:dkg:hardhat:31337/0x' + 'ef'.repeat(20) + '/4', kaGraph: 'urn:g:bare' },
+      // Nor is a transaction kind with two hashes and no named receipt.
+      { ual: 'did:dkg:hardhat:31337/0x' + '12'.repeat(20) + '/5', kaGraph: 'urn:g:two', tx: '0x1', kind: 'transaction' },
+      { ual: 'did:dkg:hardhat:31337/0x' + '12'.repeat(20) + '/5', kaGraph: 'urn:g:two', tx: '0x2', kind: 'transaction' },
     ], CG);
     expect(receipts).toEqual([
-      { assertion: UAL, ual: UAL, tx: '0xv2', confirmation: 'transaction', finalizedAt: '2026-10-31T10:00:00.000Z', members: [], signers: ['did:dkg:agent:0x9'], subGraph: undefined, kaGraph: KA_GRAPH },
+      { assertion: UAL, ual: UAL, tx: '0xv2', confirmation: 'transaction', finalizedAt: null, members: [], signers: ['did:dkg:agent:0x9'], subGraph: undefined, kaGraph: KA_GRAPH },
       { assertion: 'did:dkg:hardhat:31337/0x' + 'cd'.repeat(20) + '/3', ual: 'did:dkg:hardhat:31337/0x' + 'cd'.repeat(20) + '/3', tx: null, confirmation: 'finalized-materialization', finalizedAt: null, members: [], signers: ['peer-1'], subGraph: undefined, kaGraph: 'urn:g:synced' },
     ]);
-    const reversed = parseVmReceiptRows([
-      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv1', version: '1', kind: 'transaction' },
-      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv2', version: '2', kind: 'transaction' },
-    ], CG);
-    expect(reversed[0].tx).toBe('0xv2');
-  });
-
-  it('merges a named receipt and its UAL metadata into one Knowledge Asset', () => {
-    const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
-    const receipts = parseVmReceiptRows([
-      { asrt: A, tx: '0x9f2c', kaUal: UAL },
-      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0x9f2c', kind: 'transaction' },
-    ], CG);
-    expect(receipts).toHaveLength(1);
-    expect(receipts[0]).toMatchObject({ assertion: A, ual: UAL, tx: '0x9f2c', confirmation: 'receipt', kaGraph: 'urn:g:ka9' });
   });
 
   it('treats an unparseable finalize time as unknown', () => {
@@ -154,6 +159,34 @@ describe('useVmReceipts', () => {
     expect(seen.anchors).toEqual([expect.objectContaining({ tx: '0x9f2c', assertion: A, members: ['urn:x:a'], signers: ['did:dkg:agent:0x1'] })]);
   });
 
+  it('one provider load serves both consumers, and one refresh updates both', async () => {
+    respond([{ asrt: A, tx: '0x9f2c', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' }]);
+    const seen: { summary?: any; anchors?: any; resource?: ReturnType<typeof useVmReceiptsResource> } = {};
+    function Summary() { seen.summary = useVmReceiptSummary(CG).summary; return null; }
+    function Anchors() { seen.anchors = useVerifiableMemoryAnchors(CG, null).anchors; return null; }
+    function Owner() {
+      const resource = useVmReceiptsResource(CG);
+      seen.resource = resource;
+      return React.createElement(VmReceiptsProvider, { value: resource }, React.createElement(Summary), React.createElement(Anchors));
+    }
+    await act(async () => { root.render(React.createElement(Owner)); });
+    await settle();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect([...seen.summary.members]).toEqual(['urn:x:a']);
+    expect(seen.anchors.map((a: any) => a.members)).toEqual([['urn:x:a']]);
+
+    invalidateQueryCache();
+    respond([
+      { asrt: A, tx: '0x9f2c', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
+      { asrt: A, tx: '0x9f2c', member: 'urn:x:b', agent: 'did:dkg:agent:0x1' },
+    ]);
+    await act(async () => { seen.resource!.refresh(); });
+    await settle();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+    expect([...seen.summary.members].sort()).toEqual(['urn:x:a', 'urn:x:b']);
+    expect(seen.anchors.map((a: any) => a.members)).toEqual([['urn:x:a', 'urn:x:b']]);
+  });
+
   it("never shows one graph's receipts for another, whatever order responses arrive in", async () => {
     // One deferred response per context graph, resolved by hand.
     const pending = new Map<string, (rows: unknown[]) => void>();
@@ -195,7 +228,7 @@ describe('useVmReceipts', () => {
     expect(signers).toEqual(['did:dkg:agent:bob']);
 
     // A same-graph refresh keeps B's receipts on screen while it reloads.
-    await act(async () => { refreshVmReceipts('graph-b'); });
+    await act(async () => { state.refresh(); });
     await settle();
     expect(state).toMatchObject({ loading: true });
     expect(signers).toEqual(['did:dkg:agent:bob']);

@@ -13,7 +13,7 @@ import {
   VIZ_AGENT_TYPE,
   type VerifiableMemoryAnchorsResult,
 } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
-import { parseVmReceiptRows, refreshVmReceipts } from '../src/ui/hooks/useVmReceipts.js';
+import { parseVmReceiptRows, useVmReceiptsResource, VmReceiptsProvider, type VmReceiptsResource } from '../src/ui/hooks/useVmReceipts.js';
 
 const anchorsFromReceiptRows = (rows: Array<Record<string, unknown>>, cg: string) => newestFirst(parseVmReceiptRows(rows, cg));
 const AUTHOR = '0x' + 'ab'.repeat(20);
@@ -144,7 +144,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       .toEqual(['urn:member-one:note → urn:dkg:viz:anchor:0x5555']);
   });
 
-  it('reloads receipts on refreshVmReceipts without remounting', async () => {
+  it("reloads through the graph's receipt provider without remounting", async () => {
     let published = false;
     vi.mocked(fetch).mockImplementation(async () => ({
       ok: true,
@@ -154,19 +154,21 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
         : [] } }),
     } as any));
     let result: VerifiableMemoryAnchorsResult | null = null;
+    let resource!: VmReceiptsResource;
     function Probe() {
       result = useVerifiableMemoryAnchors('cg-1');
       return null;
     }
-    await act(async () => { root.render(React.createElement(Probe)); });
+    function Owner() {
+      resource = useVmReceiptsResource('cg-1');
+      return React.createElement(VmReceiptsProvider, { value: resource }, React.createElement(Probe));
+    }
+    await act(async () => { root.render(React.createElement(Owner)); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect((result as unknown as VerifiableMemoryAnchorsResult).anchors).toEqual([]);
 
     published = true;
-    refreshVmReceipts('cg-2'); // another graph: nothing reloads
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-    expect((result as unknown as VerifiableMemoryAnchorsResult).anchors).toEqual([]);
-    await act(async () => { refreshVmReceipts('cg-1'); });
+    await act(async () => { resource.refresh(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect((result as unknown as VerifiableMemoryAnchorsResult).anchors.map(a => a.tx)).toEqual(['0x6666']);
   });
@@ -215,5 +217,14 @@ describe('receipts without a finalize time', () => {
     const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x4444', finalizedAt: '"2026-10-31T10:00:00Z"' }], 'cg-1');
     const triples = buildDecorationTriples(anchors, new Set([`${A}/entity/1`, `${A}book/entity/1`]));
     expect(triples.filter(t => t.predicate === VIZ_PRED_ANCHORED_IN).map(t => t.subject)).toEqual([`${A}/entity/1`]);
+  });
+
+  it('says why an anchor has no transaction', () => {
+    const A = 'did:dkg:context-graph:cg-1/assertion/0xabc/twice';
+    const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x1', member: 'urn:x:t' }, { asrt: A, tx: '0x2', member: 'urn:x:t' }], 'cg-1');
+    expect(anchors[0].tx).toBeNull();
+    const desc = buildDecorationTriples(anchors, null).find(t => t.predicate === 'http://schema.org/description')?.object;
+    expect(desc).toContain('published more than once; the current transaction is not recorded');
+    expect(desc).not.toContain('finalized materialization');
   });
 });

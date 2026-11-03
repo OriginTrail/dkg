@@ -10,7 +10,9 @@
  *   - a legacy root-scoped seal (members on the seal),
  *   - a graph-scoped seal whose entity is not under the assertion URI,
  *   - a graph-scoped seal inside a registered sub-graph,
- *   - an assertion with no receipt, and a receipt in another context graph.
+ *   - an assertion with no receipt, and a receipt in another context graph,
+ *   - republished assertions (with and without the UAL's current metadata),
+ *   - UAL-only confirmed metadata (transaction and finalized materialization).
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -51,11 +53,21 @@ const SUB_KA_GRAPH = contextGraphLayerUri(CG, MemoryLayer.VerifiableMemory, AUTH
 const SUB_ENTITY = 'urn:note:1';
 const UNRECEIPTED_ASRT = contextGraphAssertionUri(CG, AUTHOR, 'draft');
 const UNRECEIPTED_ENTITY = 'urn:contract:draft:1';
-// Republished twice: receipts at blocks 42 and 43 on the same assertion.
+// Republished twice: receipts at blocks 42 and 43 on the same assertion, with
+// hash order opposite to block order (the older hash sorts last), stored in
+// both insertion orders. Nothing pairs a receipt's hash with its block.
 const REPUB_ASRT = contextGraphAssertionUri(CG, AUTHOR, 'republished');
 const REPUB_ENTITY = 'urn:contract:repub:1';
-const TX_OLD = '0x' + '55'.repeat(32);
-const TX_NEW = '0x' + '66'.repeat(32);
+const REPUB_REV_ASRT = contextGraphAssertionUri(CG, AUTHOR, 'republished-reversed');
+const REPUB_REV_ENTITY = 'urn:contract:repub:2';
+const TX_OLD = '0x' + 'fe'.repeat(32);
+const TX_NEW = '0x' + '01'.repeat(32);
+// Republished graph-scoped KA whose confirmed UAL metadata names the current transaction.
+const CURRENT_ASRT = contextGraphAssertionUri(CG, AUTHOR, 'current-note');
+const CURRENT_UAL = `did:dkg:hardhat:31337/${AUTHOR}/13`;
+const CURRENT_KA_GRAPH = contextGraphLayerUri(CG, MemoryLayer.VerifiableMemory, AUTHOR, 13n);
+const CURRENT_ENTITY = 'urn:contract:current:1';
+const TX_CURRENT = '0x' + '88'.repeat(32);
 // Confirmed KA metadata on the UAL only (no named receipt): one that arrived
 // through sync as a finalized materialization, one confirmed by transaction.
 const SYNCED_UAL = `did:dkg:hardhat:31337/${AUTHOR}/11`;
@@ -114,10 +126,22 @@ async function seed(): Promise<OxigraphStore> {
   await store.insert(graphScoped(SUB_ASRT, 8n));
   await store.insert(receipt(SUB_ASRT, META, '0x' + '44'.repeat(32)));
   await store.insert(content(SUB_ENTITY, SUB_KA_GRAPH));
-  // Republished: two receipts for one assertion, inserted oldest-last so row order can't help.
+  // Republished: two receipts for one assertion, newest first here and oldest first below.
   await store.insert(buildAssertionSealQuads({ ...sealBase(REPUB_ASRT, META, 10n), rootEntities: [REPUB_ENTITY] }));
   await store.insert(receipt(REPUB_ASRT, META, TX_NEW, 43n));
   await store.insert(receipt(REPUB_ASRT, META, TX_OLD, 42n));
+  await store.insert(buildAssertionSealQuads({ ...sealBase(REPUB_REV_ASRT, META, 14n), rootEntities: [REPUB_REV_ENTITY] }));
+  await store.insert(receipt(REPUB_REV_ASRT, META, TX_OLD, 42n));
+  await store.insert(receipt(REPUB_REV_ASRT, META, TX_NEW, 43n));
+  // Republished graph-scoped KA: two named receipts, and the UAL's metadata for the current version.
+  await store.insert(graphScoped(CURRENT_ASRT, 13n));
+  await store.insert(receipt(CURRENT_ASRT, META, TX_OLD, 42n));
+  await store.insert(receipt(CURRENT_ASRT, META, TX_NEW, 43n));
+  await store.insert(confirmedKa(CURRENT_UAL, CURRENT_KA_GRAPH, 13n, {
+    status: 'confirmed',
+    confirmation: { kind: 'transaction', provenance: { txHash: TX_CURRENT, blockNumber: 44, blockTimestamp: 0, publisherAddress: AUTHOR, batchId: 13n, chainId: 'hardhat:31337' } },
+  }));
+  await store.insert(content(CURRENT_ENTITY, CURRENT_KA_GRAPH));
   // Synced through finalized materialization: confirmed KA metadata, no transaction hash.
   await store.insert(confirmedKa(SYNCED_UAL, SYNCED_KA_GRAPH, 11n, {
     status: 'confirmed',
@@ -156,8 +180,10 @@ describe('VM receipt loader against writer-shaped RDF through the scoped engine'
   it('loads one receipt per published assertion in this context graph only', async () => {
     const { receipts, complete } = await load();
     expect(complete).toBe(true);
-    expect(receipts.map(r => r.assertion).sort()).toEqual([LEGACY_ASRT, SUB_ASRT, V2_ASRT, REPUB_ASRT, SYNCED_UAL, TXCONF_UAL].sort());
-    for (const r of receipts) expect(r.finalizedAt, r.assertion).toBe(FINALIZED);
+    expect(receipts.map(r => r.assertion).sort()).toEqual([LEGACY_ASRT, SUB_ASRT, V2_ASRT, REPUB_ASRT, REPUB_REV_ASRT, CURRENT_ASRT, SYNCED_UAL, TXCONF_UAL].sort());
+    // The seal time is the finalize time; UAL-only records have no seal, so it is unknown
+    // (their publish/sync time is a different event).
+    for (const r of receipts) expect(r.finalizedAt, r.assertion).toBe(r.assertion.startsWith('did:dkg:hardhat') ? null : FINALIZED);
   });
 
   it('reads members from the seal, the root per-KA graph and the sub-graph per-KA graph', async () => {
@@ -171,19 +197,28 @@ describe('VM receipt loader against writer-shaped RDF through the scoped engine'
     expect(byAssertion.get(TXCONF_UAL)).toMatchObject({ ual: TXCONF_UAL, tx: TX_CONF, confirmation: 'transaction', kaGraph: TXCONF_KA_GRAPH, members: [TXCONF_ENTITY] });
   });
 
-  it('binds a republished assertion to the transaction at the highest block', async () => {
+  it('names no transaction for a named assertion published more than once, in either insertion order', async () => {
     const { receipts } = await load();
-    expect(receipts.find(r => r.assertion === REPUB_ASRT)).toMatchObject({ tx: TX_NEW, members: [REPUB_ENTITY] });
+    expect(receipts.find(r => r.assertion === REPUB_ASRT)).toMatchObject({ tx: null, confirmation: 'receipt', members: [REPUB_ENTITY] });
+    expect(receipts.find(r => r.assertion === REPUB_REV_ASRT)).toMatchObject({ tx: null, confirmation: 'receipt', members: [REPUB_REV_ENTITY] });
+  });
+
+  it("takes the current transaction from the UAL's confirmed metadata over the named receipts", async () => {
+    const { receipts } = await load();
+    expect(receipts.filter(r => r.ual === CURRENT_UAL)).toHaveLength(1);
+    expect(receipts.find(r => r.ual === CURRENT_UAL)).toMatchObject({
+      assertion: CURRENT_ASRT, tx: TX_CURRENT, confirmation: 'transaction', kaGraph: CURRENT_KA_GRAPH, members: [CURRENT_ENTITY], finalizedAt: FINALIZED,
+    });
   });
 
   it('counts every confirmed kind as anchored and leaves the unreceipted entity out', async () => {
     const { receipts, complete } = await load();
     const summary = summariseVmReceipts(receipts, complete);
-    for (const uri of [LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY]) expect(hasReceipt(uri, summary), uri).toBe(true);
+    for (const uri of [LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, REPUB_REV_ENTITY, CURRENT_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY]) expect(hasReceipt(uri, summary), uri).toBe(true);
     expect(hasReceipt(UNRECEIPTED_ENTITY, summary)).toBe(false);
     expect(hasReceipt('urn:contract:other:1', summary)).toBe(false);
-    const facts = buildVmFacts([LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY, UNRECEIPTED_ENTITY].map(entity), summary, { loading: false, error: null });
-    expect(facts.find(f => f.id === 'onchain')?.value).toBe('6 / 7 anchored');
+    const facts = buildVmFacts([LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, REPUB_REV_ENTITY, CURRENT_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY, UNRECEIPTED_ENTITY].map(entity), summary, { loading: false, error: null });
+    expect(facts.find(f => f.id === 'onchain')?.value).toBe('8 / 9 anchored');
   });
 
   it('marks the load incomplete when a capped read comes back full, and the facts stop claiming missing receipts', async () => {

@@ -17,6 +17,7 @@ import { VM_ANCHOR_RING_WIDTH } from '../../layer-colors.js';
 import { ENTITY_TYPE_KINDS, kindSlot } from '../../entity-kind-colors.js';
 import { dataSlotHex, type GraphPalette } from '../../graph-palette.js';
 import { agentHexForUri } from '../../hooks/useAgents.js';
+import type { ClassAppearance } from '@origintrail-official/dkg-graph-viz';
 export { LAYER_CONFIG, layerNoun, VM_TRIPLE_STAT } from './layer-presentation.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
@@ -205,7 +206,6 @@ export function codePredicateColors(p: GraphPalette): Record<string, string> {
 
 /** Node types' look beyond colour. C10: the anchor is the only outlined VM node and keeps
  *  its exact deep purple (flat fill); agents draw as initials avatars, like their chips. */
-type ClassAppearance = { border?: { color: string; width?: number }; fill?: 'flat'; shape?: 'avatar' }; // graph-viz ClassAppearance
 export function graphClassAppearance(p: GraphPalette): Record<string, ClassAppearance> {
   const out: Record<string, ClassAppearance> = { [VIZ_ANCHOR_TYPE]: { border: { color: p.anchor.ring, width: VM_ANCHOR_RING_WIDTH }, fill: 'flat' } };
   for (const t of AGENT_GRAPH_TYPES) out[t] = { shape: 'avatar' };

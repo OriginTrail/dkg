@@ -5,45 +5,52 @@
  * Confirmed Knowledge Assets leave two kinds of record in
  * `did:dkg:context-graph:<cg>/_meta`:
  *
- *   Named-assertion receipt (local publishes):
- *     <assertionUri>  dkg:publishedAtTx        "0x…"   (real tx hash)
- *     <assertionUri>  dkg:publishedAtBlock     42      (block of that tx)
+ *   Named-assertion receipt (local publishes; append-only):
+ *     <assertionUri>  dkg:publishedAtTx        "0x…"   (one per publish)
  *     <assertionUri>  dkg:assertionFinalizedAt "…"     (seal time, optional)
  *     <assertionUri>  dkg:assertionRootEntity | dkg:assertionEntity <member>  (legacy)
  *     <assertionUri>  dkg:kaUal                <ual>   (graph-scoped KAs)
  *     <assertionUri>  prov:wasAttributedTo     <did:dkg:agent:0x…>
  *
- *   Confirmed KA metadata on the UAL (also written for assets that arrived
- *   through sync and were never published locally):
+ *   Confirmed KA metadata on the UAL (version-bound: rewritten per version;
+ *   also written for assets that arrived through sync):
  *     <ual>  dkg:status "confirmed" ; dkg:kaUal <ual> ; dkg:assertionGraph <per-KA VM graph>
  *     <ual>  dkg:confirmationKind "transaction" | "finalized-materialization"
  *     <ual>  dkg:transactionHash "0x…"   (transaction kind only)
- *     <ual>  dkg:assertionVersion 3 ; dkg:publishedAt "…" ; prov:wasAttributedTo …
  *
  * Both kinds fold into one `VmReceipt` per Knowledge Asset (keyed by UAL
  * when there is one, else by assertion URI). Members come from legacy
- * member rows plus the subjects of the per-KA graph, read with a second,
- * VALUES-bounded query over the context graph's partitions. A finalized
- * materialization has no transaction hash: it is still anchored, and `tx`
- * is null rather than invented.
+ * member rows plus the subjects of the per-KA graph (`dkg:assertionGraph`,
+ * else derived from the UAL), read with a second, VALUES-bounded query over
+ * the context graph's partitions.
  *
- * Transaction selection is order-independent: for repeated publishes of one
- * assertion the receipt at the highest block wins (then the lexically
- * greatest hash); for UAL records the highest assertion version wins.
+ * Which transaction anchors the current content:
+ *   1. The UAL metadata's single `dkg:transactionHash`: it belongs to the
+ *      confirmed version, so it wins over any named receipt.
+ *   2. Otherwise a named receipt with exactly one distinct transaction.
+ *   3. Otherwise none. A finalized materialization carries no local hash,
+ *      and a named assertion published more than once keeps several hashes
+ *      and blocks with nothing pairing them, so the current one can't be
+ *      told apart. Either way the asset is anchored; `tx` is null rather
+ *      than a guess.
+ *
+ * `finalizedAt` is the seal time (`dkg:assertionFinalizedAt`) only; publish
+ * and sync times are different events and never stand in for it.
  *
  * Storage identities are parsed and built with core's helpers; rows they
  * don't recognise are skipped, never thrown. Both reads are capped; when a
  * read hits its cap the result is marked incomplete, so callers never treat
  * an omitted receipt as a missing one.
  *
- * The VM header facts (`useVmReceiptSummary`) and the VM graph anchors
- * (`useVerifiableMemoryAnchors`) are pure projections of these records and
- * never read raw query rows. Both go through `executeQuery`, which shares an
- * identical in-flight request.
+ * One resource per graph: `VmReceiptsProvider` (ProjectView) owns the load,
+ * reload on Verifiable Memory changes and `refresh()`; the VM header facts
+ * (`useVmReceiptSummary`) and graph anchors (`useVerifiableMemoryAnchors`)
+ * read it through `useVmReceipts` and project it. Outside a provider for
+ * that graph, `useVmReceipts` owns a resource of its own.
  *
  * Read-only over `/api/query`.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { contextGraphLayerUri, parseContextGraphAssertionStorageUri } from '@origintrail-official/dkg-core/dist/constants.js';
 import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-core/dist/ka-content-scope.js';
 import { MemoryLayer } from '@origintrail-official/dkg-core/dist/memory-model.js';
@@ -68,10 +75,11 @@ export interface VmReceipt {
   assertion: string;
   /** The KA's UAL, when known. */
   ual?: string;
-  /** Publish transaction hash, or null when the confirmation carries none. */
+  /** The transaction anchoring the current content, or null when the
+   *  records don't identify one (see the module comment). */
   tx: string | null;
   confirmation: VmConfirmation;
-  /** Latest finalize (seal) time as ISO, or null when the receipt has none. */
+  /** Seal (finalize) time as ISO, or null when unknown. */
   finalizedAt: string | null;
   /** Entities the KA covers: seal member rows, plus the subjects of its
    *  per-KA graph for graph-scoped KAs. */
@@ -113,11 +121,10 @@ export const MEMBER_ROW_LIMIT = 20000;
 export function buildVmReceiptQuery(cgId: string): string {
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?asrt ?ual ?tx ?block ?version ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph WHERE {
+SELECT ?asrt ?ual ?tx ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph WHERE {
   GRAPH <did:dkg:context-graph:${cgId}/_meta> {
     {
       ?asrt dkg:publishedAtTx ?tx .
-      OPTIONAL { ?asrt dkg:publishedAtBlock ?block . }
       OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
       OPTIONAL { ?asrt prov:wasAttributedTo ?agent . }
       OPTIONAL { ?asrt dkg:kaUal ?kaUal . }
@@ -125,9 +132,7 @@ SELECT ?asrt ?ual ?tx ?block ?version ?kind ?finalizedAt ?agent ?member ?kaUal ?
     } UNION {
       ?ual dkg:status "confirmed" ; dkg:kaUal ?ual ; dkg:assertionGraph ?kaGraph .
       OPTIONAL { ?ual dkg:transactionHash ?tx . }
-      OPTIONAL { ?ual dkg:assertionVersion ?version . }
       OPTIONAL { ?ual dkg:confirmationKind ?kind . }
-      OPTIONAL { ?ual dkg:publishedAt ?finalizedAt . }
       OPTIONAL { ?ual prov:wasAttributedTo ?agent . }
     }
   }
@@ -178,31 +183,15 @@ function isoOrNull(value: string): string | null {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 
-const bigOrNull = (value: string): bigint | null => {
-  if (!/^\d+$/.test(value)) return null;
-  try { return BigInt(value); } catch { return null; }
-};
-
-/** A transaction candidate with its ordering key (block or version). */
-interface TxCandidate { tx: string; rank: bigint | null }
-
-/** The candidate at the highest rank; without ranks, the lexically greatest
- *  hash. Independent of row order. */
-function pickTx(candidates: readonly TxCandidate[]): string | null {
-  let best: TxCandidate | null = null;
-  for (const c of candidates) {
-    if (!best) { best = c; continue; }
-    const byRank = c.rank === null || best.rank === null ? 0 : c.rank > best.rank ? 1 : c.rank < best.rank ? -1 : 0;
-    if (byRank > 0 || (byRank === 0 && c.rank !== null && best.rank === null) || (byRank === 0 && (c.rank === null) === (best.rank === null) && c.tx > best.tx)) best = c;
-  }
-  return best?.tx ?? null;
-}
-
 interface Folding {
   assertion?: string;
   ual?: string;
-  receiptTxs: TxCandidate[];
-  ualTxs: TxCandidate[];
+  /** Distinct transactions on the named assertion (append-only receipts). */
+  receiptTxs: string[];
+  /** Distinct transaction hashes on the UAL's confirmed metadata. */
+  ualTxs: string[];
+  /** The UAL's confirmed metadata was read. */
+  ualConfirmed: boolean;
   kind?: string;
   finalizedAt: string | null;
   members: string[];
@@ -216,11 +205,6 @@ interface Folding {
  *  confirmed UAL are skipped. */
 export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>, cgId: string): VmReceipt[] {
   const byKey = new Map<string, Folding>();
-  const get = (key: string): Folding => {
-    let f = byKey.get(key);
-    if (!f) { f = { receiptTxs: [], ualTxs: [], finalizedAt: null, members: [], attributed: [] }; byKey.set(key, f); }
-    return f;
-  };
   const add = (list: string[], v: string) => { if (v && !list.includes(v)) list.push(v); };
   for (const row of rows) {
     const assertion = term(row.asrt);
@@ -228,13 +212,21 @@ export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>,
     const tx = term(row.tx);
     if (assertion && !tx) continue; // a seal without a receipt
     if (!assertion && !ual) continue;
-    const f = get(ual || assertion);
+    const key = ual || assertion;
+    let f = byKey.get(key);
+    if (!f) { f = { receiptTxs: [], ualTxs: [], ualConfirmed: false, finalizedAt: null, members: [], attributed: [] }; byKey.set(key, f); }
     if (assertion) {
       f.assertion = assertion;
       f.subGraph ??= decodeAssertionIdentity(assertion, cgId)?.subGraph;
-      f.receiptTxs.push({ tx, rank: bigOrNull(term(row.block)) });
-    } else if (tx) {
-      f.ualTxs.push({ tx, rank: bigOrNull(term(row.version)) });
+      add(f.receiptTxs, tx);
+      // Seal time comes from the named assertion only.
+      const finalizedAt = isoOrNull(term(row.finalizedAt));
+      if (finalizedAt && (!f.finalizedAt || finalizedAt > f.finalizedAt)) f.finalizedAt = finalizedAt;
+    } else {
+      f.ualConfirmed = true;
+      add(f.ualTxs, tx);
+      const kind = term(row.kind);
+      if (kind) f.kind = kind;
     }
     if (ual) {
       f.ual = ual;
@@ -243,27 +235,20 @@ export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>,
       if (explicit) f.kaGraph = explicit;
       else f.kaGraph ??= kaGraphOf(ual, cgId, f.subGraph);
     }
-    const kind = term(row.kind);
-    if (kind) f.kind = kind;
-    const finalizedAt = isoOrNull(term(row.finalizedAt));
-    if (finalizedAt && (!f.finalizedAt || finalizedAt > f.finalizedAt)) f.finalizedAt = finalizedAt;
     add(f.members, term(row.member));
     add(f.attributed, term(row.agent));
   }
   const out: VmReceipt[] = [];
   for (const f of byKey.values()) {
-    const receiptTx = pickTx(f.receiptTxs);
-    const ualTx = pickTx(f.ualTxs);
-    const tx = receiptTx ?? ualTx;
-    const confirmation: VmConfirmation = receiptTx ? 'receipt' : ualTx ? 'transaction' : f.kind === 'finalized-materialization' ? 'finalized-materialization' : 'transaction';
-    if (!tx && confirmation !== 'finalized-materialization') continue; // confirmed status without any provenance: not anchored
+    const resolved = resolveTx(f);
+    if (!resolved) continue;
     const assertion = f.assertion ?? f.ual!;
     const author = f.assertion ? authorOf(f.assertion) : null;
     out.push({
       assertion,
       ...(f.ual ? { ual: f.ual } : {}),
-      tx,
-      confirmation,
+      tx: resolved.tx,
+      confirmation: resolved.confirmation,
       finalizedAt: f.finalizedAt,
       members: f.members,
       signers: f.attributed.length ? f.attributed : author ? [author] : [],
@@ -272,6 +257,18 @@ export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>,
     });
   }
   return out;
+}
+
+/** The transaction anchoring the current content (see the module comment),
+ *  or null when the KA isn't anchored at all. */
+function resolveTx(f: Folding): { tx: string | null; confirmation: VmConfirmation } | null {
+  if (f.ualConfirmed) {
+    if (f.ualTxs.length === 1) return { tx: f.ualTxs[0], confirmation: 'transaction' };
+    if (f.ualTxs.length === 0 && f.kind === 'finalized-materialization') return { tx: null, confirmation: 'finalized-materialization' };
+  }
+  if (f.receiptTxs.length === 1) return { tx: f.receiptTxs[0], confirmation: 'receipt' };
+  if (f.receiptTxs.length > 1) return { tx: null, confirmation: 'receipt' };
+  return null; // confirmed status without usable provenance: not anchored
 }
 
 /** Add the subjects of each graph-scoped receipt's KA graph to its members. */
@@ -320,29 +317,22 @@ export function loadVmReceipts(cgId: string): Promise<VmReceiptLoad> {
   return loadVmReceiptsWith(cgId, async (sparql, options) => bindingsOf(await executeQuery(sparql, options)));
 }
 
-// Explicit reloads (a Refresh button) reach every mounted reader of a graph.
-const refreshListeners = new Set<(cgId: string) => void>();
-
-/** Reload receipts for a context graph wherever they're shown. */
-export function refreshVmReceipts(contextGraphId: string): void {
-  for (const listener of refreshListeners) listener(contextGraphId);
+/** A graph's receipts plus the way to reload them. */
+export interface VmReceiptsResource extends VmReceiptsState {
+  contextGraphId: string | undefined;
+  /** Reload now (a Refresh button); also happens on Verifiable Memory changes. */
+  refresh: () => void;
 }
 
-/** Receipts for a context graph. Reloads when the graph changes, when its
- *  Verifiable Memory changes (a publish), and on `refreshVmReceipts`. */
-export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsState {
+/** Load and own the receipts of one graph. Reloads when the graph changes,
+ *  when its Verifiable Memory changes (a publish), and on `refresh()`. */
+export function useVmReceiptsResource(contextGraphId: string | undefined): VmReceiptsResource {
   const [state, setState] = useState<VmReceiptsState>({ receipts: null, complete: true, loading: false, error: null });
   const [reloads, setReloads] = useState(0);
   const versionRef = useRef(0);
   const loadedGraphRef = useRef<string | undefined>(undefined);
-  const reload = useCallback(() => setReloads(n => n + 1), []);
-  useMemoryGraphEvents(contextGraphId ?? '', reload, { layers: ['vm'] });
-  useEffect(() => {
-    if (!contextGraphId) return undefined;
-    const listener = (cgId: string) => { if (cgId === contextGraphId) reload(); };
-    refreshListeners.add(listener);
-    return () => { refreshListeners.delete(listener); };
-  }, [contextGraphId, reload]);
+  const refresh = useCallback(() => setReloads(n => n + 1), []);
+  useMemoryGraphEvents(contextGraphId ?? '', refresh, { layers: ['vm'] });
   useEffect(() => {
     const version = ++versionRef.current;
     if (!contextGraphId || !isSafeIriPart(contextGraphId)) {
@@ -367,5 +357,21 @@ export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsSta
       },
     );
   }, [contextGraphId, reloads]);
-  return state;
+  return { ...state, contextGraphId, refresh };
+}
+
+const VmReceiptsContext = createContext<VmReceiptsResource | null>(null);
+
+/** Shares one graph's receipts with everything below it (ProjectView). */
+export function VmReceiptsProvider({ value, children }: { value: VmReceiptsResource; children?: React.ReactNode }) {
+  return React.createElement(VmReceiptsContext.Provider, { value }, children);
+}
+
+/** A graph's receipts: the provider's when it holds this graph, otherwise a
+ *  resource of this hook's own. */
+export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsResource {
+  const shared = useContext(VmReceiptsContext);
+  const useShared = !!shared && shared.contextGraphId === contextGraphId;
+  const own = useVmReceiptsResource(useShared ? undefined : contextGraphId);
+  return useShared ? shared : own;
 }

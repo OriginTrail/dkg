@@ -3,7 +3,7 @@ import { useFetch } from '../hooks.js';
 import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
-import { refreshVmReceipts } from '../hooks/useVmReceipts.js';
+import { VmReceiptsProvider, useVmReceiptsResource } from '../hooks/useVmReceipts.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
@@ -104,6 +104,8 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     [],
     30_000,
   );
+  // One receipt load per graph, shared by the VM header facts and graph anchors.
+  const vmReceipts = useVmReceiptsResource(contextGraphId);
   const [showImport, setShowImport] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [activeLayer, setActiveLayer] = useState<LayerView>('overview');
@@ -740,6 +742,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
 
   return (
     <ProjectProfileContext.Provider value={profile}>
+    <VmReceiptsProvider value={vmReceipts}>
     <AgentsContext.Provider value={agentsContextValue}>
     <div className="v10-memory-explorer">
       <MemoryReadStatus memory={rawMemory} />
@@ -786,7 +789,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onSwitch={handleLayerSwitch}
         onShare={() => setShowShare(true)}
         onImport={() => setShowImport(true)}
-        onRefresh={() => { rawMemory.refresh(); refreshVmReceipts(contextGraphId); }}
+        onRefresh={() => { rawMemory.refresh(); vmReceipts.refresh(); }}
       />
 
       <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
@@ -808,7 +811,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           onNavigate={handleNavigate}
           onClose={handleDetailClose}
           contextGraphId={contextGraphId}
-          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); refreshVmReceipts(contextGraphId); }}
+          onRefresh={() => { rawMemory.refresh(); detailRead.refresh(); vmReceipts.refresh(); }}
         />
       )}
 
@@ -973,6 +976,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
       />
     </div>
     </AgentsContext.Provider>
+    </VmReceiptsProvider>
     </ProjectProfileContext.Provider>
   );
 }
