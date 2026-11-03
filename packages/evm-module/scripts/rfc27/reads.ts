@@ -21,12 +21,46 @@ export type ClaimPreview = { total: bigint; per: EpochReward[] };
 /** A position's delegator key in RandomSamplingStorage. */
 export const delegatorKey = (tokenId: bigint): string => ethers.zeroPadValue(ethers.toBeHex(tokenId), 32);
 
+/** What a claim reads of one epoch: the score-per-stake inputs of the position, the node's score, the net. */
+type EpochInputs = { epoch: bigint; cur: bigint; settled: bigint; last: bigint; nodeScore: bigint; net: bigint };
+
+/** Each epoch's inputs from views; `nets` overrides StakingKPI's net, by epoch, with nets read earlier. */
+async function inputsOf(c: Contracts, tokenId: bigint, node: bigint, from: bigint, to: bigint, nets?: ReadonlyMap<bigint, bigint>): Promise<EpochInputs[]> {
+  const key = delegatorKey(tokenId);
+  const out: EpochInputs[] = [];
+  for (let e = from; e <= to; e++) {
+    const cur = await c.rss.getEpochLastScorePerStake(node, e);
+    if (cur === 0n) {
+      out.push({ epoch: e, cur, settled: 0n, last: 0n, nodeScore: 0n, net: 0n });
+      continue;
+    }
+    out.push({
+      epoch: e,
+      cur,
+      settled: await c.rss.getEpochNodeDelegatorScore(e, node, key),
+      last: await c.rss.getDelegatorLastSettledNodeEpochScorePerStake(e, node, key),
+      nodeScore: await c.rss.getNodeEpochScore(e, node),
+      net: nets?.get(e) ?? (await c.kpi.getNetNodeRewards(node, e)),
+    });
+  }
+  return out;
+}
+
 /**
- * What `StakingV10._claim` pays tier-0 position `tokenId`, of raw stake
- * `raw`, on `node` for epochs from..to: in each epoch its settled score plus
- * raw × the score per stake since it last settled, times StakingKPI's net of
- * the node over the node's score. `nets` overrides StakingKPI's net, by
- * epoch, with nets read earlier.
+ * An epoch's reward to a tier-0 position of raw stake `raw`, as
+ * `StakingV10._claim` computes it: its settled score plus raw × the score
+ * per stake since it last settled, times the node's net over its score.
+ */
+const rewardIn = (x: EpochInputs, raw: bigint): EpochReward => {
+  if (x.cur === 0n) return { epoch: x.epoch, scored: false, score: 0n, nodeScore: 0n, net: 0n, reward: 0n };
+  const score = x.settled + (x.cur > x.last ? (raw * (x.cur - x.last)) / SCALE18 : 0n);
+  const reward = x.nodeScore === 0n || score === 0n ? 0n : (score * x.net) / x.nodeScore;
+  return { epoch: x.epoch, scored: true, score, nodeScore: x.nodeScore, net: x.net, reward };
+};
+
+/**
+ * What one claim pays tier-0 position `tokenId`, of raw stake `raw`, on
+ * `node` for epochs from..to, with StakingKPI's nets, or `nets` read earlier.
  */
 export async function claimPreview(
   c: Contracts,
@@ -37,25 +71,58 @@ export async function claimPreview(
   raw: bigint,
   nets?: ReadonlyMap<bigint, bigint>,
 ): Promise<ClaimPreview> {
-  const key = delegatorKey(tokenId);
-  const per: EpochReward[] = [];
-  let total = 0n;
-  for (let e = from; e <= to; e++) {
-    const cur = await c.rss.getEpochLastScorePerStake(node, e);
-    if (cur === 0n) {
-      per.push({ epoch: e, scored: false, score: 0n, nodeScore: 0n, net: 0n, reward: 0n });
-      continue;
+  const per = (await inputsOf(c, tokenId, node, from, to, nets)).map((x) => rewardIn(x, raw));
+  return { total: per.reduce((a, r) => a + r.reward, 0n), per };
+}
+
+/** Every way to cut epochs from..to into consecutive claim windows, at most 2^15 of them. */
+function* windowSplits(from: bigint, to: bigint): Generator<[bigint, bigint][]> {
+  const n = Number(to - from) + 1;
+  if (n <= 0 || n > 16) return;
+  for (let cuts = 0; cuts < 1 << (n - 1); cuts++) {
+    const out: [bigint, bigint][] = [];
+    let start = from;
+    for (let i = 0; i < n - 1; i++) {
+      if (cuts & (1 << i)) {
+        out.push([start, from + BigInt(i)]);
+        start = from + BigInt(i) + 1n;
+      }
     }
-    const settled = await c.rss.getEpochNodeDelegatorScore(e, node, key);
-    const last = await c.rss.getDelegatorLastSettledNodeEpochScorePerStake(e, node, key);
-    const score = settled + (cur > last ? (raw * (cur - last)) / SCALE18 : 0n);
-    const nodeScore = await c.rss.getNodeEpochScore(e, node);
-    const net = nets?.get(e) ?? (await c.kpi.getNetNodeRewards(node, e));
-    const reward = nodeScore === 0n || score === 0n ? 0n : (score * net) / nodeScore;
-    per.push({ epoch: e, scored: true, score, nodeScore, net, reward });
-    total += reward;
+    out.push([start, to]);
+    yield out;
   }
-  return { total, per };
+}
+
+/**
+ * Other callers' claims of tier-0 position `tokenId` over epochs from..to,
+ * reconstructed from views: the claim windows, each claim compounding into
+ * the raw stake the next one reads, whose rewards sum to `paid`, the
+ * position's cumulative rewards claimed. Exact, since a claim settles only
+ * the epoch it runs in, and leaves the score inputs of every ended epoch as
+ * the later claims read them. Undefined when no split of the epochs matches.
+ */
+export async function claimsByOthers(
+  c: Contracts,
+  tokenId: bigint,
+  node: bigint,
+  from: bigint,
+  to: bigint,
+  stakeRaw: bigint,
+  paid: bigint,
+): Promise<(ClaimPreview & { windows: [bigint, bigint][] }) | undefined> {
+  const inputs = await inputsOf(c, tokenId, node, from, to);
+  for (const windows of windowSplits(from, to)) {
+    let raw = stakeRaw;
+    const per: EpochReward[] = [];
+    for (const [w0, w1] of windows) {
+      const rewards = inputs.filter((x) => x.epoch >= w0 && x.epoch <= w1).map((x) => rewardIn(x, raw));
+      per.push(...rewards);
+      raw += rewards.reduce((a, r) => a + r.reward, 0n);
+    }
+    const total = raw - stakeRaw;
+    if (total === paid) return { total, per, windows };
+  }
+  return undefined;
 }
 
 /** The score tier-0 position `tokenId` holds so far in `epoch` on `node`. */

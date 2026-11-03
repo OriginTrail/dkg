@@ -78,7 +78,7 @@ export function amountFromEnv(name: string, def: string): bigint {
  * a commitment: the floor is the lock times what the run draws in the first
  * billing window, the account period, its top-up and the edge period, at no
  * discount. The default rounds the draws up to whole TRAC and adds 1 TRAC a
- * window, so the window keeps room for a funding the serve phase simulates.
+ * window, so the first window keeps room beyond the run's own draws.
  */
 export async function plannedAmounts(c: BaseContracts, state: SmokeState | undefined, maxFee: bigint): Promise<Amounts> {
   if (state) return state.amounts;
@@ -148,13 +148,12 @@ export const planValue = (g: { count: number; units: bigint }): bigint => BigInt
 
 type ParameterValue = string | number | { setter?: string; setterArgs?: unknown[]; desiredValue?: unknown } | ParameterValue[];
 
-/** The parameters the deploy sets on `contract` on base_sepolia_v10: "testnet", with that network's overrides. */
-function testnetParameters(contract: string): Record<string, unknown> {
-  const all: unknown = JSON.parse(fs.readFileSync(PARAMETERS_JSON, 'utf8'));
-  const testnet = (all as { testnet?: Record<string, unknown> }).testnet ?? {};
-  const base = (testnet[contract] ?? {}) as Record<string, unknown>;
-  const overrides = ((testnet.overrides as Record<string, Record<string, unknown>> | undefined)?.base_sepolia_v10?.[contract] ?? {}) as Record<string, unknown>;
-  return { ...base, ...overrides };
+const record = (x: unknown): Record<string, unknown> => (typeof x === 'object' && x !== null && !Array.isArray(x) ? (x as Record<string, unknown>) : {});
+
+/** The parameters the deploy sets on `contract` on base_sepolia_v10, from parameters.json as parsed: "testnet", with that network's overrides. */
+function testnetParameters(all: unknown, contract: string): Record<string, unknown> {
+  const testnet = record(record(all).testnet);
+  return { ...record(testnet[contract]), ...record(record(record(testnet.overrides).base_sepolia_v10)[contract]) };
 }
 
 /** The value a parameter entry asks for, as the deploy's helper reads it: a value, or `{ setter, setterArgs }`. */
@@ -168,12 +167,13 @@ function desired(value: ParameterValue): bigint | undefined {
 }
 
 /**
- * What parameters.json "testnet" sets for the first of `keys` it holds on
- * `contract`. A key may name the getter the deploy compares, such as
- * `latestLambdaBps`, or the parameter, such as `lambdaBps`.
+ * What parameters.json, as parsed, sets on base_sepolia_v10 for the first of
+ * `keys` it holds on `contract`. A key may name the getter the deploy
+ * compares, such as `latestLambdaBps`, or the parameter, such as `lambdaBps`;
+ * its value is a value, `{ setter, setterArgs }`, or a list of them.
  */
-export function expectedParameter(contract: string, keys: string[]): { key: string; value: bigint } | undefined {
-  const p = testnetParameters(contract);
+export function expectedParameterIn(all: unknown, contract: string, keys: string[]): { key: string; value: bigint } | undefined {
+  const p = testnetParameters(all, contract);
   for (const key of keys) {
     if (p[key] === undefined) continue;
     const value = desired(p[key] as ParameterValue);
@@ -182,8 +182,9 @@ export function expectedParameter(contract: string, keys: string[]): { key: stri
   return undefined;
 }
 
+/** expectedParameterIn over deployments/parameters.json; it must set one of `keys`. */
 export function requireParameter(contract: string, keys: string[]): { key: string; value: bigint } {
-  const p = expectedParameter(contract, keys);
+  const p = expectedParameterIn(JSON.parse(fs.readFileSync(PARAMETERS_JSON, 'utf8')), contract, keys);
   if (!p) throw new Error(`${PARAMETERS_JSON} "testnet" sets none of ${keys.join(', ')} on ${contract}`);
   return p;
 }
