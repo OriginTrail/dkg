@@ -518,14 +518,12 @@ describe('@integration Receipt batches of the query/inference pool', function ()
     });
 
     it('F3, an inactive Conviction Account assignment: a request issued at or after its revocation, or its expiry', async () => {
-      const expiresAt = (await epochStart(epoch + 1n)) - 1_000n;
       const { accountId } = await openConvictionAccount({
         ...f,
         owner,
         assignee: buyer2,
         committed: 100_000n * TRAC,
         limit: 1_000n * TRAC,
-        expiresAt,
       });
       const r0 = requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)], sessionKey: key.address });
       await SS.connect(buyer2).fundFromConviction(r0);
@@ -543,23 +541,28 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         .to.be.revertedWithCustomError(QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
 
-      // A new assignment clears the revocation; its expiry, inside the period, then ends it.
-      const terms = {
-        accountId,
-        assignee: buyer2.address,
-        maxCostPerPeriod: 1_000n * TRAC,
+      // An assignment that expires inside its period: refused from the expiry on.
+      const buyer3 = f.accounts[23];
+      const expiresAt = (await epochStart(epoch + 1n)) - 1_000n;
+      const second = await openConvictionAccount({
+        ...f,
+        owner,
+        assignee: buyer3,
+        committed: 100_000n * TRAC,
+        limit: 1_000n * TRAC,
         expiresAt,
-        nonce: await CSS.assignmentNonce(accountId),
-      };
-      await SS.connect(owner).assign(terms, '0x', await signTerms(buyer2, SS, terms));
-      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [at] }]);
-      const afterExpiry = itemFor(await requestFor(p, 0, s1, { nonce: 2n, issuedAt: expiresAt }));
-      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [afterExpiry] }]))
+      });
+      await SS.connect(buyer3).fundFromConviction(
+        requestOf(second.accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)], sessionKey: key.address }),
+      );
+      const q = subscriptionIdOf(buyer3.address, epoch);
+      const afterExpiry = itemFor(await requestFor(q, 0, s1, { nonce: 0n, issuedAt: expiresAt }));
+      await expect(submit(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [afterExpiry] }]))
         .to.be.revertedWithCustomError(QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
-      const justBefore = itemFor(await requestFor(p, 0, s1, { nonce: 3n, issuedAt: expiresAt - 1n }));
+      const justBefore = itemFor(await requestFor(q, 0, s1, { nonce: 1n, issuedAt: expiresAt - 1n }));
       await time.setNextBlockTimestamp(expiresAt - 1n);
-      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [justBefore] }]);
+      await accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [justBefore] }]);
     });
 
     it('F4, a duplicate: a nonce from an earlier batch, twice in one group, or in two buckets of the period', async () => {
@@ -712,7 +715,8 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         .withArgs(0n, Fault.PastDeadline);
     });
 
-    it("a Conviction Account period revoked mid-epoch takes the revocation plus the grace, and an expiry the same", async () => {
+    /** An opted-in account whose buyer key, buyer2, funds a one-bucket period of `e`. */
+    const convictionPeriod = async (e: bigint) => {
       const { accountId } = await openConvictionAccount({
         ...f,
         owner,
@@ -721,22 +725,218 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         limit: 1_000n * TRAC,
       });
       await SS.connect(buyer2).fundFromConviction(
-        requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)], sessionKey: key.address }),
+        requestOf(accountId, e, { buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)], sessionKey: key.address }),
       );
-      const p = subscriptionIdOf(buyer2.address, epoch);
+      return { accountId, p: subscriptionIdOf(buyer2.address, e) };
+    };
+
+    it("a revocation does not cut a funded period short: a request served before it lands until the period's deadline, one issued after it never does", async () => {
+      const { accountId, p } = await convictionPeriod(epoch);
       const served = await items(p, 0, s1, 2);
+      // Revoked ten minutes after the requests were served.
+      await time.setNextBlockTimestamp(served.requests[0].issuedAt + 600n);
       await SS.connect(owner).revoke(accountId, buyer2.address);
       const revokedAt = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
-      const grace = await QIS.receiptGraceSecondsAt(epoch);
-      expect(await QS.batchDeadline(p)).to.equal(revokedAt + grace);
 
-      await time.setNextBlockTimestamp(revokedAt + grace);
+      // Two hours after the revocation, past it plus the grace, the seller's batch lands.
+      await time.setNextBlockTimestamp(revokedAt + 7_200n);
       await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served.items[0]] }]);
-      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served.items[1]] }]))
+      expect(await QIS.bucketClaimed(p, 0n)).to.equal(served.items[0].valueWei);
+      // The period keeps the deadline of every period of its epoch.
+      const deadline = (await epochStart(epoch + 1n)) + (await QIS.receiptGraceSecondsAt(epoch));
+      expect(await QS.batchDeadline(p)).to.equal(deadline);
+      expect(await QS.batchDeadline(a)).to.equal(deadline);
+      // A request issued at the revocation or later is refused, item by item.
+      const after = itemFor(await requestFor(p, 0, s1, { nonce: 9n, issuedAt: revokedAt }));
+      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [after] }]))
+        .to.be.revertedWithCustomError(QS, 'ReceiptFault')
+        .withArgs(0n, 0n, Fault.InactiveAssignment);
+      // The other served request lands at the period's deadline, and a second later nothing does.
+      const third = itemFor(await requestFor(p, 0, s1, { nonce: 8n, issuedAt: served.requests[0].issuedAt }));
+      await time.setNextBlockTimestamp(deadline);
+      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served.items[1]] }]);
+      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [third] }]))
         .to.be.revertedWithCustomError(QS, 'GroupFault')
         .withArgs(0n, Fault.PastDeadline);
-      // The wallet period of the same epoch still takes batches.
-      await accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: (await items(a, 0, s1, 1)).items }]);
+    });
+
+    it('an expiry the owner brings forward does not cut the period short either', async () => {
+      const { accountId, p } = await convictionPeriod(epoch);
+      const served = await items(p, 0, s1, 1);
+      const expiresAt = served.requests[0].issuedAt + 600n;
+      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, {
+        maxCostPerPeriod: 1_000n * TRAC,
+        expiresAt,
+      });
+
+      await time.setNextBlockTimestamp(expiresAt + 7_200n);
+      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: served.items }]);
+      expect(await QIS.bucketClaimed(p, 0n)).to.equal(served.items[0].valueWei);
+      const deadline = (await epochStart(epoch + 1n)) + (await QIS.receiptGraceSecondsAt(epoch));
+      expect(await QS.batchDeadline(p)).to.equal(deadline);
+      const after = itemFor(await requestFor(p, 0, s1, { nonce: 9n, issuedAt: expiresAt }));
+      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [after] }]))
+        .to.be.revertedWithCustomError(QS, 'ReceiptFault')
+        .withArgs(0n, 0n, Fault.InactiveAssignment);
+    });
+
+    it('a period funded ahead and revoked before it starts takes no request, keeps its deadline, and its epochs close', async () => {
+      const next = epoch + 1n;
+      const { accountId, p } = await convictionPeriod(next);
+      await SS.connect(owner).revoke(accountId, buyer2.address);
+      const revokedAt = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
+      const s = await CSS.getSubscription(p);
+      expect(revokedAt).to.be.lessThan(s.periodStart);
+
+      // A request in the period was issued once the assignment had ended; one
+      // issued before the revocation lies before the period. Each is refused
+      // item by item, the period's deadline still ahead.
+      await time.setNextBlockTimestamp(s.periodStart + 60n);
+      const inPeriod = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: s.periodStart }));
+      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [inPeriod] }]))
+        .to.be.revertedWithCustomError(QS, 'ReceiptFault')
+        .withArgs(0n, 0n, Fault.InactiveAssignment);
+      const early = itemFor(await requestFor(p, 0, s1, { nonce: 1n, issuedAt: revokedAt - 1n }));
+      await expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [early] }]))
+        .to.be.revertedWithCustomError(QS, 'ReceiptFault')
+        .withArgs(0n, 0n, Fault.OutsideTime);
+      const deadline = s.periodEnd + (await QIS.receiptGraceSecondsAt(next));
+      expect(await QS.batchDeadline(p)).to.equal(deadline);
+
+      // Nothing breaks: there is no claim to finalize, and the epochs close,
+      // the period's cost carried forward with the rest.
+      await time.increaseTo(deadline + 1n);
+      const receipt = (await (await QS.finalizeClaims([{ subscriptionId: p, bucketIndex: 0n, seller: s1.identityId }])).wait())!;
+      expect(eventsOf(receipt, QS, 'ClaimSkipped').map((e) => e.reason)).to.deep.equal([6n]); // NothingClaimed
+      await time.increaseTo(await epochStart(next + 2n));
+      await QS.closeEpochs(10n);
+      expect(await QIS.closedThrough()).to.equal(next + 1n);
+      expect(await QS.epochPool(next + 1n)).to.equal(0n);
+      expect(await QIS.carry()).to.equal((await QIS.walletDue(next)) + s.cost);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // A period and the assignment it was funded under
+  // -------------------------------------------------------------------------
+
+  describe('a period keeps the assignment it was funded under', () => {
+    let epoch: bigint;
+
+    beforeEach(async () => {
+      epoch = await epochNow();
+    });
+
+    const fundFrom = async (accountId: bigint, e: bigint): Promise<string> => {
+      await SS.connect(buyer2).fundFromConviction(
+        requestOf(accountId, e, { buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)], sessionKey: key.address }),
+      );
+      return subscriptionIdOf(buyer2.address, e);
+    };
+
+    /** A new assignment of buyer2 over `accountId`, with both parties' consent. */
+    const reassign = async (accountId: bigint, expiresAt: bigint) => {
+      const terms = {
+        accountId,
+        assignee: buyer2.address,
+        maxCostPerPeriod: 1_000n * TRAC,
+        expiresAt,
+        nonce: await CSS.assignmentNonce(accountId),
+      };
+      await SS.connect(owner).assign(terms, '0x', await signTerms(buyer2, SS, terms));
+    };
+
+    const refusedAs = async (p: string, item: ReceiptItem, fault: bigint) =>
+      expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [item] }]))
+        .to.be.revertedWithCustomError(QS, 'ReceiptFault')
+        .withArgs(0n, 0n, fault);
+
+    it('a request issued while the assignment was revoked is refused before a new assignment of the buyer key, and after it', async () => {
+      const { accountId } = await openConvictionAccount({
+        ...f,
+        owner,
+        assignee: buyer2,
+        committed: 100_000n * TRAC,
+        limit: 1_000n * TRAC,
+      });
+      const p = await fundFrom(accountId, epoch);
+      await SS.connect(owner).revoke(accountId, buyer2.address);
+      const revokedAt = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
+      const during = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: revokedAt + 60n }));
+      await time.setNextBlockTimestamp(revokedAt + 120n);
+      await refusedAs(p, during, Fault.InactiveAssignment);
+
+      await reassign(accountId, (await latest()) + 400n * DAY);
+      expect(await CSS.isAssignmentActive(accountId, buyer2.address)).to.equal(true);
+      await refusedAs(p, during, Fault.InactiveAssignment);
+      // Nor does a request issued under the new assignment count in the period funded under the old one.
+      await refusedAs(p, itemFor(await requestFor(p, 0, s1, { nonce: 1n })), Fault.InactiveAssignment);
+      expect(await QIS.bucketClaimed(p, 0n)).to.equal(0n);
+    });
+
+    it('a request issued after the assignment expired is refused before a renewal and after it, and one served before the expiry lands', async () => {
+      const expiresAt = (await epochStart(epoch + 1n)) - DAY;
+      const { accountId } = await openConvictionAccount({
+        ...f,
+        owner,
+        assignee: buyer2,
+        committed: 100_000n * TRAC,
+        limit: 1_000n * TRAC,
+        expiresAt,
+      });
+      const p = await fundFrom(accountId, epoch);
+      const served = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: expiresAt - 1n }));
+      const late = itemFor(await requestFor(p, 0, s1, { nonce: 1n, issuedAt: expiresAt }));
+      await time.setNextBlockTimestamp(expiresAt + 60n);
+      await refusedAs(p, late, Fault.InactiveAssignment);
+
+      // Renewed after it expired, by a new assignment: the period keeps the expiry it was funded under.
+      await reassign(accountId, expiresAt + 400n * DAY);
+      await refusedAs(p, late, Fault.InactiveAssignment);
+      await time.setNextBlockTimestamp(expiresAt + 7_200n);
+      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served] }]);
+      expect(await QIS.bucketClaimed(p, 0n)).to.equal(served.valueWei);
+    });
+
+    it('a period funded under the new assignment follows it, beside the period of the old one', async () => {
+      const { accountId } = await openConvictionAccount({
+        ...f,
+        owner,
+        assignee: buyer2,
+        committed: 100_000n * TRAC,
+        limit: 1_000n * TRAC,
+      });
+      const p = await fundFrom(accountId, epoch);
+      const firstNonce = (await CSS.getAssignment(accountId, buyer2.address)).nonce;
+      await SS.connect(owner).revoke(accountId, buyer2.address);
+      const firstEnd = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
+      await reassign(accountId, (await latest()) + 400n * DAY);
+      const q = await fundFrom(accountId, epoch + 1n);
+      const secondNonce = (await CSS.getAssignment(accountId, buyer2.address)).nonce;
+
+      // The old period takes no request issued now; the new one, from its start, does.
+      await refusedAs(p, itemFor(await requestFor(p, 0, s1, { nonce: 0n })), Fault.InactiveAssignment);
+      expect([(await CSS.getSubscription(p)).assignmentNonce, (await CSS.getSubscription(q)).assignmentNonce]).to.deep.equal([
+        firstNonce,
+        secondNonce,
+      ]);
+      const start = await epochStart(epoch + 1n);
+      await time.setNextBlockTimestamp(start);
+      await accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [itemFor(await requestFor(q, 0, s1, { nonce: 0n, issuedAt: start }))] }]);
+
+      // Revoking the new assignment ends the new period's requests from then
+      // on, and its request served before lands later.
+      const served = itemFor(await requestFor(q, 0, s1, { nonce: 1n, issuedAt: start + 10n }));
+      await time.setNextBlockTimestamp(start + 20n);
+      await SS.connect(owner).revoke(accountId, buyer2.address);
+      const secondEnd = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
+      await time.setNextBlockTimestamp(secondEnd + 7_200n);
+      await refusedAs(q, itemFor(await requestFor(q, 0, s1, { nonce: 2n, issuedAt: secondEnd })), Fault.InactiveAssignment);
+      await accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [served] }]);
+
+      // Each period keeps the end of its own assignment.
+      expect(await CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(firstEnd);
+      expect(await CSS.assignmentEnd(accountId, buyer2.address, secondNonce)).to.equal(secondEnd);
     });
   });
 

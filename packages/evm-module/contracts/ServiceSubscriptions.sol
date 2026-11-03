@@ -116,7 +116,9 @@ contract ServiceSubscriptions is
     //           the views `scheduledEmission`, `emissionSpan` and
     //           `baseLabelCapacity`), and with them the schedule cut-over the
     //           opt-in needed (`ExactScheduleFromUnset`). The opt-in refuses an
-    //           account scheduled in full (`EmissionAlreadyScheduled`).
+    //           account scheduled in full (`EmissionAlreadyScheduled`). A
+    //           funded period records the nonce of its assignment, whose end
+    //           a later assignment of the buyer key does not move.
     string private constant _VERSION = "1.2.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -290,8 +292,12 @@ contract ServiceSubscriptions is
      * @dev Anyone may submit. A party consents by sending the transaction, in
      *      which case its signature argument must be empty, or by a signature
      *      over the digest. The assignment replaces any earlier one of the
-     *      same assignee and starts its usage from zero. It consumes the
-     *      account's nonce, so the same terms never assign twice.
+     *      same assignee and starts its usage from zero. The periods funded
+     *      under the earlier one keep its end, its expiry or its revocation if
+     *      sooner, so a new assignment never admits a request issued once the
+     *      earlier one had ended; the periods funded under this one follow it.
+     *      It consumes the account's nonce, so the same terms never assign
+     *      twice.
      */
     function assign(
         AssignmentTerms calldata t,
@@ -333,7 +339,11 @@ contract ServiceSubscriptions is
     /**
      * @notice Revoke `assignee`'s assignment over `accountId`. Owner only.
      * @dev Immediate for new periods; funded periods are non-refundable and
-     *      run to their end. It also consumes the account's nonce, so terms
+     *      run to their end. A request issued under this assignment from the
+     *      revocation on is refused, also after a new assignment of the same
+     *      key, while one served before it is settled as before: the
+     *      revocation moves no period's batch deadline, so it cannot withhold
+     *      a seller's receipt. It also consumes the account's nonce, so terms
      *      signed but not yet submitted no longer assign.
      */
     function revoke(uint256 accountId, address assignee) external {
@@ -359,8 +369,11 @@ contract ServiceSubscriptions is
      *      no consent from the assignee. The usage, `assignedAt`, the
      *      assignment's nonce and the account's nonce stay as they are. A
      *      limit below a period's cost so far is allowed, and refuses every
-     *      top-up of that period. An expired assignment is renewed only by a
-     *      new `assign`, so a later `expiresAt` here never revives one. Terms
+     *      top-up of that period. An earlier `expiresAt` refuses, from then
+     *      on, the requests of the periods funded under this assignment, as a
+     *      revocation does, and moves no batch deadline. An expired
+     *      assignment is renewed only by a new `assign`, so a later
+     *      `expiresAt` here never revives one. Terms
      *      signed at the current nonce stay valid; an owner who tightens the
      *      limit and wants to rule them out also calls
      *      `advanceAssignmentNonce`.
@@ -410,7 +423,10 @@ contract ServiceSubscriptions is
      *      `coverServiceCost` draws the cost (window allowance first, then the
      *      top-up buffer); a period funded ahead draws from the window the
      *      funding runs in. Last, the usage, the cost due in the epoch after
-     *      the period and the period record are written.
+     *      the period and the period record are written. The record names
+     *      the assignment by its nonce: the period accepts requests issued
+     *      before that assignment ends, its expiry or its revocation,
+     *      whatever later assignment the buyer key gets.
      *
      *      The period runs to the start of the next epoch, from the later of
      *      the block time and its epoch's start, which is never 0, and an id
@@ -468,12 +484,14 @@ contract ServiceSubscriptions is
         css.recordUsage(r.accountId, assignee);
         qis.addConvictionDue(r.epoch + 1, d.cost);
 
-        // 8. The record. The period id is the period's epoch.
+        // 8. The record. The period id is the period's epoch, and the record
+        //    names the assignment it is funded under.
         css.createSubscription(
             subscriptionId,
             ConvictionServiceStorage.Subscription({
                 accountId: r.accountId,
                 assignee: assignee,
+                assignmentNonce: a.nonce,
                 sessionKey: r.sessionKey,
                 periodId: bytes32(r.epoch),
                 planDigest: r.planDigest,
@@ -521,7 +539,8 @@ contract ServiceSubscriptions is
      *      funding, the limit against the period's cost with this top-up added.
      *      The draw and the cost due in the epoch after the period follow as
      *      for a funding, at the account's own tier; a top-up funds no new
-     *      period, so the usage is unchanged.
+     *      period, so the usage is unchanged, and the period keeps the
+     *      assignment it was funded under.
      * @return cost The cost drawn from the allowance.
      */
     function topUpFromConviction(

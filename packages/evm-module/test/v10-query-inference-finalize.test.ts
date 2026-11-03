@@ -13,8 +13,9 @@
 //   - skips with a reason, never a revert: an unscored seller beside scored
 //     ones, a double finalization, unknown periods and buckets, nothing
 //     claimed; the pause and activation refuse the whole call;
-//   - the receipt grace schedule and a re-assignment after revocation: neither
-//     lets a batch land once a claim of its bucket is finalized.
+//   - the receipt grace schedule, a revocation and a re-assignment: none moves
+//     a period's deadline or lets a batch land once a claim of its bucket is
+//     finalized.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -618,7 +619,7 @@ describe('@integration Finalization of receipt claims against the funded cap', f
       expect(await f.QIS.bucketClaimed(p, 0n)).to.equal(late.items[0].valueWei);
     });
 
-    it('a re-assignment after revocation reopens batches only before the window opens, never after a claim is final', async () => {
+    it("a revocation and a re-assignment move no deadline: a request served before the revocation lands until the epoch's, one issued after it never does", async () => {
       const s1 = await seller(1_250_000n * TRAC);
       const e = await epochNow();
       const { accountId, terms } = await openConvictionAccount({
@@ -633,36 +634,42 @@ describe('@integration Finalization of receipt claims against the funded cap', f
       );
       const p = subscriptionIdOf(buyer2.address, e);
       await claim(s1, p, 0, TRAC);
-      // Revoked in the last half hour of e: the period's deadline falls in
-      // e + 1, before the epoch's.
+      // A request served just before the revocation, in the last half hour of
+      // e; its batch comes later.
+      const servedAt = (await epochStart(e + 1n)) - 1_900n;
       await time.increaseTo((await epochStart(e + 1n)) - 1_800n);
       await f.SS.connect(owner).revoke(accountId, buyer2.address);
       const revokedAt = (await f.CSS.getAssignment(accountId, buyer2.address)).revokedAt;
-      expect(await f.QS.batchDeadline(p)).to.equal(revokedAt + 3_600n);
-      expect(revokedAt + 3_600n).to.be.lessThan(await deadlineOf(e));
 
-      // In e + 1, past the period's own deadline but not the epoch's: too early.
+      // In e + 1, past the revocation plus the grace but not the epoch's
+      // deadline: too early to finalize, and the served request still lands.
       await time.increaseTo(revokedAt + 3_601n);
       expect(await epochNow()).to.equal(e + 1n);
       await scoreNode(f.RSS, e + 1n, s1.identityId);
       let receipt = await finalize([ref(p, 0, s1)]);
       expect(skipped(receipt)).to.deep.equal([[p, 0n, s1.identityId, Skip.TooEarly]]);
+      await claim(s1, p, 0, TRAC, { firstNonce: 1n, issuedAt: servedAt });
+      expect(await f.QS.batchDeadline(p)).to.equal(await deadlineOf(e));
 
-      // A new assignment moves the period's deadline back out, and a batch lands.
+      // A new assignment of the buyer key admits no request issued since the revocation.
       const again = { ...terms, nonce: await f.CSS.assignmentNonce(accountId), expiresAt: terms.expiresAt };
       await f.SS.connect(owner).assign(again, '0x', await signTerms(buyer2, f.SS, again));
-      await claim(s1, p, 0, TRAC, { firstNonce: 1n, issuedAt: (await epochStart(e + 1n)) - 100n });
+      const issuedAfter = await lateItem(p, s1, 2n, (await epochStart(e + 1n)) - 100n);
+      await expect(f.QS.connect(s1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, items: issuedAfter }]))
+        .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
+        .withArgs(0n, 0n, Fault.InactiveAssignment);
 
       await openWindow(e);
       receipt = await finalize([ref(p, 0, s1)]);
       expect(skipped(receipt)).to.have.length(0);
       expect((await nodeEpoch(s1, e + 1n))[0]).to.equal(2n * TRAC);
 
-      // Once the window is open, no batch lands, whatever the assignment.
+      // Once the window is open, no batch lands, not even of a request served
+      // before the revocation, whatever the assignment.
       await f.SS.connect(owner).revoke(accountId, buyer2.address);
       const third = { ...terms, nonce: await f.CSS.assignmentNonce(accountId), expiresAt: (await latest()) + 400n * DAY };
       await f.SS.connect(owner).assign(third, '0x', await signTerms(buyer2, f.SS, third));
-      const late = await lateItem(p, s1, 2n, (await epochStart(e + 1n)) - 100n);
+      const late = await lateItem(p, s1, 3n, servedAt);
       await expect(f.QS.connect(s1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, items: late }]))
         .to.be.revertedWithCustomError(f.QS, 'GroupFault')
         .withArgs(0n, Fault.PastDeadline);

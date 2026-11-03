@@ -143,6 +143,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
             ConvictionServiceStorage.Subscription({
                 accountId: 0,
                 assignee: buyer,
+                assignmentNonce: 0,
                 sessionKey: r.sessionKey,
                 periodId: bytes32(r.epoch),
                 planDigest: r.planDigest,

@@ -1047,6 +1047,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         expect(plain(s)).to.deep.equal({
           accountId,
           assignee: buyer.address,
+          assignmentNonce: (await CSS.getAssignment(accountId, buyer.address)).nonce,
           sessionKey: SESSION_KEY,
           periodId: ethers.toBeHex(r.epoch, 32),
           planDigest: r.planDigest,
@@ -1392,6 +1393,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const record = {
         accountId: 1n,
         assignee: buyer.address,
+        assignmentNonce: 0n,
         sessionKey: SESSION_KEY,
         periodId: ethers.id('ghost-period'),
         planDigest: ethers.ZeroHash,

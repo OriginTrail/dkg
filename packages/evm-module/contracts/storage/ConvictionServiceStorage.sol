@@ -24,7 +24,10 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * Architecture (the pattern of `PublishingConvictionStorage`):
  *   - This contract holds every byte of service-spending state: the opt-in
  *     switch per account, the assignments and the periods counted under
- *     them, and the period records with their buckets, which top-ups grow.
+ *     them, the end of each assignment a new one replaced, and the period
+ *     records with their buckets, which top-ups grow. A period record names
+ *     the assignment it was funded under by its nonce, so the period keeps
+ *     that assignment's end whatever later assignment its buyer key gets.
  *     It never holds or moves TRAC; the money due is in
  *     `QueryInferenceStorage`.
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
@@ -44,7 +47,8 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * below IS the layout: slot 0 packs the inherited `hub` with
  * `maxBucketsPerPeriod` (21 of 32 bytes); slots 1 to 6 and 13 to 15 hold the
  * mappings in order, at the slots 1.0.0 and 1.1.0 gave them; slots 7 to 12,
- * where 1.1.0 kept the service labels, stay empty.
+ * where 1.1.0 kept the service labels, stay empty; slot 16, last, holds the
+ * ends of replaced assignments.
  */
 contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "ConvictionServiceStorage";
@@ -65,6 +69,11 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //           which only the labels read. Slots 7 to 12 stay empty
     //           (`_retiredLabelSlots`), so every remaining mapping keeps its
     //           slot; `maxBucketsPerPeriod` moves to offset 20 of slot 0.
+    //           A period records the nonce of the assignment it is funded
+    //           under (`Subscription.assignmentNonce`, beside the assignee),
+    //           and a new assignment keeps the end of the one it replaces
+    //           (`assignmentEnd`, slot 16), so a period keeps the assignment
+    //           it was funded under.
     string private constant _VERSION = "1.2.0";
 
     uint8 internal constant _DEFAULT_MAX_BUCKETS_PER_PERIOD = 16;
@@ -106,6 +115,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     struct Subscription {
         uint256 accountId; // 0 = funded from the buyer key's wallet
         address assignee; // the buyer key that funded it
+        uint64 assignmentNonce; // the nonce of the assignment it was funded under; unused for a wallet period
         address sessionKey; // the buyer's request-signing key; the funding contracts refuse zero
         bytes32 periodId; // the period's epoch; the id is keccak256(abi.encode(assignee, periodId))
         bytes32 planDigest; // the buyer's commitment to its plan, opaque here; a top-up replaces it
@@ -190,6 +200,11 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     mapping(bytes32 => Bucket[]) internal _buckets;
     /// @dev accountId => period ids, in funding order.
     mapping(uint256 => bytes32[]) internal _accountSubscriptions;
+    /// @dev accountId => assignee => assignment nonce => when that assignment
+    ///      ended or ends, its expiry or its revocation if sooner, kept when a
+    ///      new assignment of the assignee replaced it, for the periods funded
+    ///      under it. Nothing writes it again.
+    mapping(uint256 => mapping(address => mapping(uint64 => uint40))) internal _replacedAssignmentEnd;
 
     constructor(address hubAddress) HubDependent(hubAddress) {}
 
@@ -239,8 +254,15 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     /// @notice Store an assignment, list its assignee once, and reset the
     ///         assignee's usage: a new assignment is new terms both parties
-    ///         signed, so its usage counts from nothing.
+    ///         signed, so its usage counts from nothing. The assignment it
+    ///         replaces keeps its end (`assignmentEnd`), for the periods funded
+    ///         under it: a new assignment never reopens a time in which the old
+    ///         one had ended.
     function setAssignment(uint256 accountId, address assignee, Assignment calldata a) external onlyContracts {
+        Assignment storage replaced = _assignments[accountId][assignee];
+        if (replaced.assignedAt != 0) {
+            _replacedAssignmentEnd[accountId][assignee][replaced.nonce] = _endOf(replaced);
+        }
         _assignments[accountId][assignee] = a;
         if (!_listed[accountId][assignee]) {
             _listed[accountId][assignee] = true;
@@ -359,6 +381,17 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         return a.assignedAt != 0 && a.revokedAt == 0 && block.timestamp < a.expiresAt;
     }
 
+    /// @notice When the assignment of `assignee` over `accountId` that
+    ///         consumed `nonce` ended or ends: its expiry, or its revocation
+    ///         if sooner. For the current assignment its terms as they stand;
+    ///         for one a later assignment replaced, the end it had then. 0 if
+    ///         no assignment of `assignee` consumed `nonce`.
+    function assignmentEnd(uint256 accountId, address assignee, uint64 nonce) external view returns (uint40) {
+        Assignment storage a = _assignments[accountId][assignee];
+        if (a.assignedAt != 0 && a.nonce == nonce) return _endOf(a);
+        return _replacedAssignmentEnd[accountId][assignee][nonce];
+    }
+
     function assigneeCount(uint256 accountId) external view returns (uint256) {
         return _assignees[accountId].length;
     }
@@ -391,5 +424,18 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     function accountSubscriptionAt(uint256 accountId, uint256 index) external view returns (bytes32) {
         return _accountSubscriptions[accountId][index];
+    }
+
+    // ============================================================
+    //                         Internal
+    // ============================================================
+
+    /// @dev An assignment's end: its expiry, or its revocation if that is
+    ///      sooner. `ServiceSubscriptions.revoke` does not check the expiry,
+    ///      so a revocation can come after it.
+    function _endOf(Assignment storage a) internal view returns (uint40 end) {
+        end = a.expiresAt;
+        uint40 revokedAt = a.revokedAt;
+        if (revokedAt != 0 && revokedAt < end) end = revokedAt;
     }
 }

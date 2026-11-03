@@ -319,6 +319,35 @@
     "inputs": [
       {
         "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "nonce",
+        "type": "uint64"
+      }
+    ],
+    "name": "assignmentEnd",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
         "name": "",
         "type": "uint256"
       }
@@ -371,6 +400,11 @@
             "internalType": "address",
             "name": "assignee",
             "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "assignmentNonce",
+            "type": "uint64"
           },
           {
             "internalType": "address",
@@ -634,6 +668,11 @@
             "internalType": "address",
             "name": "assignee",
             "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "assignmentNonce",
+            "type": "uint64"
           },
           {
             "internalType": "address",

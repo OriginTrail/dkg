@@ -60,11 +60,11 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *
  * Finalization (`finalizeClaims`). An epoch e has one batch deadline, its end
  * plus the receipt grace of e, which falls in the first half of e + 1, the
- * due epoch of its periods, since the grace is at most half an epoch; a
- * Conviction Account period whose assignment ended sooner has an earlier
- * deadline of its own. A seller's claims in a bucket are finalized in e + 1
- * and only there, after the epoch's deadline, so in at least the second half
- * of e + 1 less a second, and are void once e + 1 has ended. Anyone may finalize, and the value goes to the seller the claim
+ * due epoch of its periods, since the grace is at most half an epoch. It is
+ * the deadline of every period of e: a Conviction Account assignment that
+ * ends sooner moves none. A seller's claims in a bucket are finalized in
+ * e + 1 and only there, after the epoch's deadline, so in at least the
+ * second half of e + 1 less a second, and are void once e + 1 has ended. Anyone may finalize, and the value goes to the seller the claim
  * names, who must have a positive node score in e + 1. A bucket's claims
  * above its funded cap all shrink by the same ratio, so the order of batches
  * gives no priority, and the result counts as R and QueryInferenceScore in
@@ -212,7 +212,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         EmptyGroup, // no items
         // An item's: the faults OT-RFC-27 lists.
         BadSignature, // not signed by the session key, or for another seller, period or bucket
-        InactiveAssignment, // issued once the Conviction Account assignment had ended
+        InactiveAssignment, // issued once the assignment the period was funded under had ended
         DuplicateNonce, // the nonce is used, earlier or in this batch
         OutsideTime, // outside the period, completed before issue, after expiry, or after the batch
         AskOutOfRange, // a zero ask, or one above the bucket's price cap
@@ -337,7 +337,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         address sessionKey;
         uint256 periodStart;
         uint256 periodEnd;
-        uint256 assignmentEnd; // when a Conviction Account assignment ended; max for a wallet period
+        uint256 assignmentEnd; // when the period's own assignment ended or ends; max for a wallet period
         bytes32 bucketId;
         uint256 maxAsk;
     }
@@ -382,14 +382,17 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *
      *         A group names a recorded period and one of its buckets, has
      *         items, and lands by the period's batch deadline: the period's
-     *         end, or for a Conviction Account period the end of its
-     *         assignment if that comes sooner, plus the receipt grace of the
-     *         period's epoch. Each item then passes, in order:
+     *         end plus the receipt grace of the period's epoch, whatever
+     *         becomes of a Conviction Account assignment, so a request served
+     *         before the assignment ends is settled however soon it ends.
+     *         Each item then passes, in order:
      *           1. its request, rebuilt with the group's period and bucket and
      *              the sender's identity, recovers with a low `s` to the
      *              period's session key;
      *           2. for a Conviction Account period, it was issued before the
-     *              assignment ended (its expiry, or its revocation if sooner);
+     *              assignment the period was funded under ended (its expiry,
+     *              or its revocation if sooner), an end that a later
+     *              assignment of the buyer key does not move;
      *           3. its nonce is unused, earlier and in this batch;
      *           4. periodStart <= issuedAt < periodEnd, and
      *              issuedAt <= completedAt <= min(expiry, periodEnd, the
@@ -461,12 +464,12 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         `Void`); something was claimed; and the seller has a positive
      *         node score in the current epoch.
      *
-     *         The window opens at the epoch's batch deadline even for a
-     *         Conviction Account period whose own deadline came sooner: a new
-     *         assignment of its buyer key clears a revocation, which could
-     *         otherwise let batches for it land again after some of its claims
-     *         were finalized. No period's deadline is later than its epoch's,
-     *         so no batch lands once the window is open, and a bucket needs no
+     *         The window opens at the epoch's batch deadline, which is the
+     *         deadline of every period of the epoch: the expiry, revocation or
+     *         replacement of a Conviction Account assignment moves no period's
+     *         deadline, and only decides which of its requests count, those
+     *         issued before the assignment the period was funded under ended.
+     *         So no batch lands once the window is open, and a bucket needs no
      *         close time.
      *
      *         With F the bucket's funded cap and C its claims over all
@@ -679,21 +682,18 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
 
     /**
      * @notice The batch deadline of a period: the last time a batch for it
-     *         lands. It is the period's end plus the receipt grace of its
-     *         epoch, or, for a Conviction Account period whose assignment has
-     *         ended sooner (its expiry, or its revocation), that end plus the
-     *         grace. 0 for an unknown period.
+     *         lands, the period's end plus the receipt grace of its epoch,
+     *         the same for every period of the epoch. A Conviction Account
+     *         assignment that ends sooner, by its expiry or a revocation,
+     *         moves no deadline: a request issued once it has ended is
+     *         refused item by item, and a request served before lands until
+     *         the deadline, so ending an assignment cannot withhold a
+     *         seller's receipt. 0 for an unknown period.
      */
     function batchDeadline(bytes32 subscriptionId) external view returns (uint256) {
-        ConvictionServiceStorage css = convictionServiceStorage;
-        ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
+        ConvictionServiceStorage.Subscription memory s = convictionServiceStorage.getSubscription(subscriptionId);
         if (s.periodStart == 0) return 0;
-        uint256 end = s.periodEnd;
-        if (s.accountId != 0) {
-            uint256 assignmentEnd = _assignmentEnd(css.getAssignment(s.accountId, s.assignee));
-            if (assignmentEnd < end) end = assignmentEnd;
-        }
-        return end + queryInferenceStorage.receiptGraceSecondsAt(ServicePeriodLib.epochOf(s));
+        return uint256(s.periodEnd) + queryInferenceStorage.receiptGraceSecondsAt(ServicePeriodLib.epochOf(s));
     }
 
     /**
@@ -910,8 +910,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     }
 
     /// @dev A group's period and bucket exist, and the batch lands by the
-    ///      period's batch deadline. Returns what its items are checked
-    ///      against.
+    ///      period's batch deadline, its end plus the grace of its epoch.
+    ///      Returns what its items are checked against: for a Conviction
+    ///      Account period, the end of the assignment it was funded under.
     function _termsOf(
         QueryInferenceStorage qis,
         Batch memory b,
@@ -928,30 +929,18 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         t.periodStart = s.periodStart;
         t.periodEnd = s.periodEnd;
         t.assignmentEnd = type(uint256).max;
-        uint256 usableUntil = s.periodEnd;
-        if (s.accountId != 0) {
-            t.assignmentEnd = _assignmentEnd(css.getAssignment(s.accountId, s.assignee));
-            if (t.assignmentEnd < usableUntil) usableUntil = t.assignmentEnd;
-        }
+        if (s.accountId != 0) t.assignmentEnd = css.assignmentEnd(s.accountId, s.assignee, s.assignmentNonce);
 
         uint256 epoch = ServicePeriodLib.epochOf(s);
         if (epoch != b.graceEpoch) {
             b.grace = qis.receiptGraceSecondsAt(epoch);
             b.graceEpoch = epoch;
         }
-        if (block.timestamp > usableUntil + b.grace) revert GroupFault(g, Fault.PastDeadline);
+        if (block.timestamp > t.periodEnd + b.grace) revert GroupFault(g, Fault.PastDeadline);
 
         ConvictionServiceStorage.Bucket memory bucket = css.getBucket(subscriptionId, bucketIndex);
         t.bucketId = bucket.bucketId;
         t.maxAsk = bucket.maxAskWeiPerUnit;
-    }
-
-    /// @dev When a Conviction Account assignment ended or ends: its expiry, or
-    ///      its revocation if that is sooner. The built revocation does not
-    ///      check the expiry, so a revocation can come after it.
-    function _assignmentEnd(ConvictionServiceStorage.Assignment memory a) internal pure returns (uint256 end) {
-        end = a.expiresAt;
-        if (a.revokedAt != 0 && a.revokedAt < end) end = a.revokedAt;
     }
 
     /// @dev The EIP-712 digest of the request an item answers, hashed in

@@ -173,10 +173,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /// @notice The first epoch whose rewards include this pool, and the first
     ///         in which periods can be funded. Set once; 0 means unset.
     uint40 public activationEpoch;
-    /// @notice The time after a period's end, or its Conviction Account
-    ///         assignment's end, within which receipt batches still land, for
-    ///         the periods of epochs before `nextReceiptGraceFromEpoch` (all
-    ///         epochs while that is 0). At most half the epoch length.
+    /// @notice The time after a period's end within which receipt batches
+    ///         still land, for the periods of epochs before
+    ///         `nextReceiptGraceFromEpoch` (all epochs while that is 0). At
+    ///         most half the epoch length.
     uint32 public receiptGraceSeconds;
     /// @notice While true, no period is funded or topped up, and no receipt is
     ///         batched or finalized. Closes and claims go on.
@@ -528,11 +528,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     }
 
     /// @notice The receipt grace of the periods of `epoch`, by the schedule:
-    ///         their batch deadline is the epoch's end plus this grace, or the
-    ///         end of a Conviction Account assignment that ends sooner plus
-    ///         it. Exact for the periods of the previous epoch, the current
-    ///         one and every later one; the batches and claims of older
-    ///         periods are past.
+    ///         their batch deadline is the epoch's end plus this grace. Exact
+    ///         for the periods of the previous epoch, the current one and
+    ///         every later one; the batches and claims of older periods are
+    ///         past.
     function receiptGraceSecondsAt(uint256 epoch) external view returns (uint32) {
         uint256 from = nextReceiptGraceFromEpoch;
         return from != 0 && epoch >= from ? nextReceiptGraceSeconds : receiptGraceSeconds;

@@ -280,6 +280,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect(plain(await CSS.getSubscription(subscriptionId))).to.deep.equal({
         accountId: 0n,
         assignee: buyer.address,
+        assignmentNonce: 0n,
         sessionKey: SESSION_KEY,
         periodId: ethers.toBeHex(epoch, 32),
         planDigest: r.planDigest,

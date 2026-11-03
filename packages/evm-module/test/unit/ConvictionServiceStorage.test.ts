@@ -7,12 +7,14 @@
 //     forwardCall, or the Hub owner), and the two never admit each other's
 //     callers;
 //   - the parameters: defaults and bounds;
-//   - the mutators' semantics: assignment listing and usage reset, cap
-//     updates that keep everything but the two limits, the period count,
-//     period records, each written once and never with a start of 0, and
-//     top-ups of a recorded period at its bucket indexes;
+//   - the mutators' semantics: assignment listing and usage reset, the end a
+//     replaced assignment keeps, cap updates that keep everything but the two
+//     limits, the period count, period records, each written once and never
+//     with a start of 0, and top-ups of a recorded period at its bucket
+//     indexes;
 //   - the compiler's storage layout against the documented one: the mapping
-//     slots of 1.1.0, with the label slots held empty;
+//     slots of 1.1.0, with the label slots held empty, and the ends of
+//     replaced assignments last;
 //   - no label state, label view or schedule cut-over is left (1.2.0).
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -74,6 +76,7 @@ const SESSION_KEY = ethers.getAddress('0x00000000000000000000000000000000000000b
 const subscriptionRecord = (accountId: bigint, overrides: Record<string, bigint | string> = {}) => ({
   accountId,
   assignee: ASSIGNEE,
+  assignmentNonce: 4n,
   sessionKey: SESSION_KEY,
   periodId: ethers.id('period-1'),
   planDigest: ethers.id('plan-1'),
@@ -312,6 +315,41 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(await CSS.assigneeCount(accountId)).to.equal(2n);
       expect(await CSS.assigneeAt(accountId, 1n)).to.equal(b);
       expect(await CSS.assigneeCount(accountId + 1n)).to.equal(0n);
+    });
+
+    it('assignmentEnd reads the current assignment as it stands, and a replaced one as it ended', async () => {
+      const [a, b] = [accounts[10].address, accounts[11].address];
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(0n);
+
+      // The current assignment: its expiry, or its revocation if sooner.
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ expiresAt: 5_000n, nonce: 0n }));
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(5_000n);
+      await CSS.connect(logic).setAssignmentRevokedAt(accountId, a, 4_000n);
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(4_000n);
+
+      // A new assignment keeps the end of the one it replaces.
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ expiresAt: 9_000n, nonce: 2n }));
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(4_000n);
+      expect(await CSS.assignmentEnd(accountId, a, 2n)).to.equal(9_000n);
+
+      // Changes to the current one move only its own end; a revocation after
+      // its expiry leaves the expiry.
+      await CSS.connect(logic).setAssignmentCaps(accountId, a, capsOf({ expiresAt: 8_000n }));
+      expect(await CSS.assignmentEnd(accountId, a, 2n)).to.equal(8_000n);
+      await CSS.connect(logic).setAssignmentRevokedAt(accountId, a, 8_500n);
+      expect(await CSS.assignmentEnd(accountId, a, 2n)).to.equal(8_000n);
+      expect(await CSS.assignmentEnd(accountId, a, 0n)).to.equal(4_000n);
+
+      // Replaced unrevoked, an assignment keeps its expiry.
+      await CSS.connect(logic).setAssignmentRevokedAt(accountId, a, 0n);
+      await CSS.connect(logic).setAssignment(accountId, a, assignmentTerms({ expiresAt: 12_000n, nonce: 3n }));
+      expect(await CSS.assignmentEnd(accountId, a, 2n)).to.equal(8_000n);
+      expect(await CSS.assignmentEnd(accountId, a, 3n)).to.equal(12_000n);
+
+      // A nonce no assignment of the key consumed, and another key or account, read 0.
+      expect(await CSS.assignmentEnd(accountId, a, 1n)).to.equal(0n);
+      expect(await CSS.assignmentEnd(accountId, b, 0n)).to.equal(0n);
+      expect(await CSS.assignmentEnd(accountId + 1n, a, 0n)).to.equal(0n);
     });
 
     it('setAssignmentRevokedAt writes only the revocation time', async () => {
@@ -560,7 +598,7 @@ describe('@unit ConvictionServiceStorage', () => {
     type LayoutType = { label: string; numberOfBytes: string; members?: LayoutEntry[] };
     type StorageLayout = { storage: LayoutEntry[]; types: Record<string, LayoutType> };
 
-    it('matches the documented layout: slot 0 packs the hub with the bucket bound, the mappings keep slots 1 to 6 and 13 to 15', async () => {
+    it('matches the documented layout: slot 0 packs the hub with the bucket bound, the mappings keep slots 1 to 6 and 13 to 15, and slot 16 the ends of replaced assignments', async () => {
       const sourceName = 'contracts/storage/ConvictionServiceStorage.sol';
       const buildInfo = await hre.artifacts.getBuildInfo(`${sourceName}:ConvictionServiceStorage`);
       const output = buildInfo?.output.contracts[sourceName]?.ConvictionServiceStorage as
@@ -592,7 +630,24 @@ describe('@unit ConvictionServiceStorage', () => {
         ['13', 0, '_subscriptions', 'mapping(bytes32 => struct ConvictionServiceStorage.Subscription)'],
         ['14', 0, '_buckets', 'mapping(bytes32 => struct ConvictionServiceStorage.Bucket[])'],
         ['15', 0, '_accountSubscriptions', 'mapping(uint256 => bytes32[])'],
+        [
+          '16',
+          0,
+          '_replacedAssignmentEnd',
+          'mapping(uint256 => mapping(address => mapping(uint64 => uint40)))',
+        ],
       ]);
+
+      // A period record keeps its 8 slots: the nonce of its assignment shares
+      // the assignee's.
+      const subscription = Object.values(layout!.types).find(
+        (t) => t.label === 'struct ConvictionServiceStorage.Subscription',
+      )!;
+      expect(subscription.numberOfBytes).to.equal(String(8 * 32));
+      const member = (label: string) => subscription.members!.find((m) => m.label === label)!;
+      expect([member('assignee').slot, member('assignee').offset]).to.deep.equal(['1', 0]);
+      expect([member('assignmentNonce').slot, member('assignmentNonce').offset]).to.deep.equal(['1', 20]);
+      expect(member('sessionKey').slot).to.equal('2');
 
       // Slot 0 uses 21 of its 32 bytes, and the retired slots are 6 words.
       const maxBuckets = layout!.storage.find((s) => s.label === 'maxBucketsPerPeriod')!;
