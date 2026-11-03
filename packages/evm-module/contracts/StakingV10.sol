@@ -673,7 +673,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      re-stake the remainder, which gives the same economic
      *      result (tier-0 with 1x multiplier is effectively liquid
      *      stake). Q3 — rewards are auto-claimed inside this call so
-     *      the user sees a single button in the UI.
+     *      the user sees a single button in the UI. That auto-claim walks
+     *      every unclaimed epoch in this one transaction, under Base's
+     *      per-transaction cap of 2^24 gas, at the cost `claim` states
+     *      (about 92k gas per scored epoch before the query/inference pool,
+     *      about 107k after): a position claimed at least every 100 scored
+     *      epochs withdraws within it.
      *
      *      10.1.0 — the auto-claim covers every epoch that has ended. The
      *      position's score in the epoch in progress counts in its node's
@@ -810,6 +815,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *           statistic-only lifetime counter.
      *        4. `cs.setLastClaimedEpoch(tokenId, toEpoch)` — advance cursor.
      *      No StakingStorage writes.
+     *
+     *      Gas: a claim walks every unclaimed epoch of the position in this
+     *      one transaction, and Base caps a transaction at 2^24 gas
+     *      (16,777,216). The first claim on a node in an epoch costs about
+     *      92k gas per scored epoch before the query/inference pool and about
+     *      107k once the pool is active, more when the claim also closes the
+     *      pool's epochs on its way, so a position is to be claimed at least
+     *      every 100 scored epochs.
      */
     // The first arg (the staker address) is intentionally UNNAMED: it is
     // retained only for ABI compatibility with the DEPLOYED DKGStakingConvictionNFT
@@ -830,6 +843,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         the per-epoch operator fee) without touching the stateful ERC-721
     ///         wrapper. `_claim` reverts `PositionNotFound` for a nonexistent or
     ///         already-withdrawn position, so no extra guard is required.
+    ///         As `claim`, it walks every unclaimed epoch in one transaction,
+    ///         under Base's per-transaction cap of 2^24 gas: about 92k gas per
+    ///         scored epoch before the query/inference pool and about 107k
+    ///         after, so a position is to be claimed at least every 100 scored
+    ///         epochs.
     function claimFor(uint256 tokenId) external {
         _claim(tokenId);
     }
