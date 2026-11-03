@@ -20,10 +20,11 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { BaseContract, ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import { QueryInferenceStorage } from '../typechain';
+import { eventsOf } from './helpers/account-stack';
 import {
   Bucket,
   CLASS_INFERENCE,
@@ -165,19 +166,6 @@ describe('@integration Finalization of receipt claims against the funded cap', f
 
   const finalize = async (refs: ReturnType<typeof ref>[], from: SignerWithAddress = keeper) =>
     (await (await f.QS.connect(from).finalizeClaims(refs)).wait())!;
-
-  const eventsOf = (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      try {
-        const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === name) out.push(parsed.args);
-      } catch {
-        // another contract's log
-      }
-    }
-    return out;
-  };
 
   const skipped = (receipt: ContractTransactionReceipt) =>
     eventsOf(receipt, f.QS, 'ClaimSkipped').map((e) => [e.subscriptionId, e.bucketIndex, e.seller, e.reason]);

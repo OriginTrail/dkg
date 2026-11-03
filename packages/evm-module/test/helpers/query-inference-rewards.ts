@@ -11,26 +11,15 @@ import { BaseContract, ethers } from 'ethers';
 import hre from 'hardhat';
 
 import {
-  Chronos,
   ConvictionServiceStorage,
-  ConvictionStakingStorage,
-  DKGPublishingConvictionNFT,
-  DKGStakingConvictionNFT,
-  EpochStorage,
-  Hub,
-  ParametersStorage,
-  Profile,
-  PublishingConvictionStorage,
   QueryInferenceSettlement,
   QueryInferenceStorage,
-  RandomSamplingStorage,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
   StakingKPI,
-  StakingV10,
   StakingV10Ledger,
-  Token,
 } from '../../typechain';
+import { deployAccountStack } from './account-stack';
 import { ACCOUNT_STACK_TAGS, BPS, CLASS_INFERENCE, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from './conviction-service';
 import { SCALE18, signedItems } from './query-inference';
 
@@ -38,37 +27,25 @@ export const UNIT_ASK = 10n ** 15n;
 export const TIER_12 = 12n; // 366 days at 6x: no boost expiry within these runs
 
 export async function deployRewardsStack() {
-  await hre.deployments.fixture([
+  const { ES: EpochStorage, ...stack } = await deployAccountStack([
     ...ACCOUNT_STACK_TAGS,
     'ServiceSubscriptions',
     'QueryInferenceSettlement',
     'StakingKPI',
     'QueryInferenceActivation',
   ]);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const at = async <T>(name: string) => (await hre.ethers.getContractAt(name, await Hub.getContractAddress(name))) as T;
+  const at = async <T>(name: string) =>
+    (await hre.ethers.getContractAt(name, await stack.Hub.getContractAddress(name))) as T;
   return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
+    ...stack,
+    EpochStorage,
     Ledger: await hre.ethers.getContract<StakingV10Ledger>('StakingV10Ledger'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
     KPI: await hre.ethers.getContract<StakingKPI>('StakingKPI'),
-    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
     QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
     CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
     QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
     SS: await at<ServiceSubscriptions>('ServiceSubscriptions'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
   };
 }
 

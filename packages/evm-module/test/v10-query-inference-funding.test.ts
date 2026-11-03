@@ -32,10 +32,11 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, ethers, Result } from 'ethers';
+import { BaseContract, ethers, Result } from 'ethers';
 import hre from 'hardhat';
 
 import { FalseReturnERC20, QueryInferenceStorage } from '../typechain';
+import { blockTime, eventsOf } from './helpers/account-stack';
 import {
   CLASS_INFERENCE,
   CLASS_QUERY,
@@ -91,23 +92,10 @@ describe('@integration Plan-period funding for the query/inference pool', functi
   // Helpers
   // -------------------------------------------------------------------------
 
-  const blockTime = async (receipt: ContractTransactionReceipt) =>
-    BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
   const plain = (r: unknown) => (r as Result).toObject();
   const vaultBalance = async () => f.Token.balanceOf(await f.Vault.getAddress());
   const forward = async (contract: BaseContract, fn: string, args: unknown[] = []) =>
     f.Hub.forwardCall(await contract.getAddress(), contract.interface.encodeFunctionData(fn, args));
-
-  const eventsOf = async (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const address = (await contract.getAddress()).toLowerCase();
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== address) continue;
-      const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === name) out.push(parsed.args);
-    }
-    return out;
-  };
 
   /**
    * Point the Hub at a fresh QueryInferenceStorage whose activation epoch is

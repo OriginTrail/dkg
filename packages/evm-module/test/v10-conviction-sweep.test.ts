@@ -24,60 +24,40 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import {
   Chronos,
   DKGPublishingConvictionNFT,
   EpochStorage,
-  Hub,
   ParametersStorage,
   PublishingConviction,
   PublishingConvictionScheduleHarness,
   PublishingConvictionStorage,
   Token,
 } from '../typechain';
-import { ACCOUNT_STACK_TAGS, TRAC, costOf } from './helpers/conviction-service';
+import {
+  STAKER_SHARD_ID,
+  TREASURY_SHARD_ID,
+  blockTime,
+  deployAccountStack,
+  eventsOf,
+  poolCredits,
+  poolsOver,
+} from './helpers/account-stack';
+import { TRAC, costOf } from './helpers/conviction-service';
 import { PoolModel, feeOf, largestSlice, prorateActiveSink, scheduleModel } from './helpers/emission-model';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
-const STAKER_SHARD_ID = 1n;
-const TREASURY_SHARD_ID = 2n;
 // The 20 % tier, with `committed mod lock` dust.
 const COMMITTED = 50_000n * TRAC + 7n;
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  ES: EpochStorage;
-  Params: ParametersStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  Harness: PublishingConvictionScheduleHarness;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const Harness = await deployScheduleHarness(Hub);
-  await Hub.setContractAddress('KnowledgeAssetsLifecycle', accounts[5].address);
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    ES: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-    Harness,
-  };
+async function deployFixture() {
+  const stack = await deployAccountStack();
+  const Harness = await deployScheduleHarness(stack.Hub);
+  await stack.Hub.setContractAddress('KnowledgeAssetsLifecycle', stack.accounts[5].address);
+  return { ...stack, Harness };
 }
 
 describe('@integration Window bookings of a use-time Conviction Account (PublishingConviction 10.2.0)', function () {
@@ -107,9 +87,6 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
   // Helpers
   // -------------------------------------------------------------------------
 
-  const blockTime = async (receipt: ContractTransactionReceipt) =>
-    BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
-
   const createAccount = async (holder: SignerWithAddress, committed: bigint = COMMITTED) => {
     await Token.mint(holder.address, committed);
     await Token.connect(holder).approve(await NFT.getAddress(), committed);
@@ -119,31 +96,13 @@ describe('@integration Window bookings of a use-time Conviction Account (Publish
 
   const settle = async (accountId: bigint) => (await (await PC.settle(accountId)).wait())!;
 
-  const eventsOf = async (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const address = (await contract.getAddress()).toLowerCase();
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== address) continue;
-      const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === name) out.push(parsed.args);
-    }
-    return out;
-  };
-
   /** The ranges a receipt credited to `shard`, as [start, end, amount], in order. */
-  const credits = async (receipt: ContractTransactionReceipt, shard: bigint = STAKER_SHARD_ID): Promise<bigint[][]> =>
-    (await eventsOf(receipt, ES, 'TokensAddedToEpochRange'))
-      .filter((a) => a.shardId === shard)
-      .map((a) => [a.startEpoch, a.endEpoch, a.tokenAmount]);
+  const credits = (receipt: ContractTransactionReceipt, shard?: bigint) => poolCredits(ES, receipt, shard);
 
   const asTuples = (ranges: Array<{ start: bigint; end: bigint; amount: bigint }>) =>
     ranges.map((r) => [r.start, r.end, r.amount]);
 
-  const poolSnapshot = async (from: bigint, to: bigint, shard: bigint = STAKER_SHARD_ID) => {
-    const out = new Map<bigint, bigint>();
-    for (let e = from; e <= to; e++) out.set(e, await ES.getEpochPool(shard, e));
-    return out;
-  };
+  const poolSnapshot = (from: bigint, to: bigint, shard?: bigint) => poolsOver(ES, from, to, shard);
 
   /** The epoch a transaction ran in. */
   const epochOf = async (receipt: ContractTransactionReceipt) => ChronosContract.epochAtTimestamp(await blockTime(receipt));

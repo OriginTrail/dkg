@@ -8,26 +8,16 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { time } from '@nomicfoundation/hardhat-network-helpers';
 import { ethers } from 'ethers';
-import hre from 'hardhat';
 
-import {
-  Chronos,
-  DKGPublishingConvictionNFT,
-  DKGStakingConvictionNFT,
-  Hub,
-  ParametersStorage,
-  Profile,
-  RandomSamplingStorage,
-  StakingV10,
-  Token,
-} from '../../typechain';
-import { ACCOUNT_STACK_TAGS, DAY, Domain, TRAC, registerServiceContracts } from './conviction-service';
+import { DAY, Domain, TRAC } from './conviction-service';
 import {
   Receipt,
   ReceiptGroup,
   ReceiptItem,
   ServiceRequest,
+  SettlementStack,
   createNode,
+  deploySettlementStack,
   fullReceipt,
   itemOf,
   requestDigestOf,
@@ -38,30 +28,9 @@ export const SELLER_STAKE = 500_000n * TRAC; // a tenth of the 5M cap: S = sqrt(
 export const ASK = 10n ** 9n;
 export const CAP = 10n ** 12n; // the buckets' price cap
 
-export async function deployReceiptsStack() {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS, SSW, QS } = await registerServiceContracts(Hub, { wallet: true, settlement: true });
-  return {
-    accounts: await hre.ethers.getSigners(),
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
-    QIS,
-    CSS,
-    SS,
-    SSW: SSW!,
-    QS: QS!,
-  };
-}
+export const deployReceiptsStack = deploySettlementStack;
 
-export type ReceiptsStack = Awaited<ReturnType<typeof deployReceiptsStack>>;
+export type ReceiptsStack = SettlementStack;
 export type Seller = { identityId: bigint; operational: SignerWithAddress; admin: SignerWithAddress };
 
 /**

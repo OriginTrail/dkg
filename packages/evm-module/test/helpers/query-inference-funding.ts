@@ -8,23 +8,9 @@
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { time } from '@nomicfoundation/hardhat-network-helpers';
-import hre from 'hardhat';
 
+import { deployAccountStack } from './account-stack';
 import {
-  Chronos,
-  ConvictionServiceStorage,
-  ConvictionStakingStorage,
-  DKGPublishingConvictionNFT,
-  Hub,
-  ParametersStorage,
-  PublishingConviction,
-  QueryInferenceStorage,
-  ServiceSubscriptions,
-  ServiceSubscriptionsWallet,
-  Token,
-} from '../../typechain';
-import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   DAY,
   TRAC,
@@ -39,41 +25,13 @@ import {
 export const COMMITTED = 100_000n * TRAC + 11n; // the 30 % tier
 export const COMMITTED_TIER_BPS = 3_000n; // that tier's discount, in basis points
 
-export type FundingStack = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  Params: ParametersStorage;
-  Vault: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-  SSW: ServiceSubscriptionsWallet;
-};
-
-export async function deployFundingStack(): Promise<FundingStack> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS, SSW } = await registerServiceContracts(Hub, { wallet: true });
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    QIS,
-    CSS,
-    SS,
-    SSW: SSW!,
-  };
+export async function deployFundingStack() {
+  const stack = await deployAccountStack();
+  const { QIS, CSS, SS, SSW } = await registerServiceContracts(stack.Hub, { wallet: true });
+  return { ...stack, QIS, CSS, SS, SSW: SSW! };
 }
+
+export type FundingStack = Awaited<ReturnType<typeof deployFundingStack>>;
 
 /** What the helpers read: the fixture, the account owner and the buyer key assigned by default. */
 export type FundingContext = { f: FundingStack; owner: SignerWithAddress; buyer: SignerWithAddress };

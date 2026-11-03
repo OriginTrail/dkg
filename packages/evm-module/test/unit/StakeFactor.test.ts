@@ -15,43 +15,20 @@ import { loadFixture, takeSnapshot } from '@nomicfoundation/hardhat-network-help
 import { expect } from 'chai';
 import hre from 'hardhat';
 
-import {
-  AskStorage,
-  Chronos,
-  ConvictionStakingStorage,
-  DKGStakingConvictionNFT,
-  EpochStorage,
-  Hub,
-  ParametersStorage,
-  Profile,
-  ProfileStorage,
-  RandomSampling,
-  RandomSamplingStorage,
-  StakingV10,
-  Token,
-} from '../../typechain';
+import { AskStorage, ProfileStorage, RandomSampling } from '../../typechain';
+import { deployAccountStack } from '../helpers/account-stack';
 import { ACCOUNT_STACK_TAGS, TRAC, registerServiceContracts } from '../helpers/conviction-service';
 import { SCALE18, createNode, stakeFactorOf, stakeOn } from '../helpers/query-inference';
 
 async function deployFixture() {
-  await hre.deployments.fixture([...ACCOUNT_STACK_TAGS, 'RandomSampling']);
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QS } = await registerServiceContracts(Hub, { settlement: true });
+  const stack = await deployAccountStack([...ACCOUNT_STACK_TAGS, 'RandomSampling']);
+  const { QS } = await registerServiceContracts(stack.Hub, { settlement: true });
   return {
-    accounts: await hre.ethers.getSigners(),
+    ...stack,
     QS: QS!,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
-    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
     RS: await hre.ethers.getContract<RandomSampling>('RandomSampling'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    ES: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
     Ask: await hre.ethers.getContract<AskStorage>('AskStorage'),
     ProfileStorage: await hre.ethers.getContract<ProfileStorage>('ProfileStorage'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
   };
 }
 

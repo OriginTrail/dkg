@@ -30,10 +30,11 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { BaseContract, ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import { QueryInferenceStorage } from '../typechain';
+import { eventsOf } from './helpers/account-stack';
 import { CLASS_INFERENCE, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 import {
   SCALE18,
@@ -125,19 +126,6 @@ describe('@integration The epoch close of the query/inference pool', function ()
   };
 
   const closeAll = async () => (await (await f.QS.closeEpochs(255n)).wait())!;
-
-  const eventsOf = (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      try {
-        const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === name) out.push(parsed.args);
-      } catch {
-        // another contract's log
-      }
-    }
-    return out;
-  };
 
   const closedEvents = (receipt: ContractTransactionReceipt) =>
     eventsOf(receipt, f.QS, 'EpochClosed').map((e) => [

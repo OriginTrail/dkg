@@ -23,10 +23,11 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, ethers, Result } from 'ethers';
+import { BaseContract, ethers, Result } from 'ethers';
 import hre from 'hardhat';
 
 import { QueryInferenceStorage } from '../typechain';
+import { eventsOf } from './helpers/account-stack';
 import {
   Bucket,
   CLASS_INFERENCE,
@@ -109,21 +110,6 @@ describe('@integration Receipt batches of the query/inference pool', function ()
   const plain = (r: unknown) => (r as Result).toObject();
   const forward = async (contract: BaseContract, fn: string, args: unknown[] = []) =>
     f.Hub.forwardCall(await contract.getAddress(), contract.interface.encodeFunctionData(fn, args));
-
-  const eventsOf = (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      const parsed = (() => {
-        try {
-          return contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-        } catch {
-          return null;
-        }
-      })();
-      if (parsed?.name === name) out.push(parsed.args);
-    }
-    return out;
-  };
 
   /** Fund a wallet period of `epoch` for `who`, signed for by `sessionKey`. */
   const walletFund = async (

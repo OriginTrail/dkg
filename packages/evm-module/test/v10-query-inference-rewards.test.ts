@@ -37,6 +37,7 @@ import { ContractTransactionReceipt, ContractTransactionResponse } from 'ethers'
 import hre from 'hardhat';
 
 import { QueryInferenceSettlement, QueryInferenceStorage } from '../typechain';
+import { STAKER_SHARD_ID, TREASURY_SHARD_ID } from './helpers/account-stack';
 import {
   CLASS_INFERENCE,
   DAY,
@@ -58,9 +59,6 @@ import {
   deployRewardsStack,
   rewardsHelpers,
 } from './helpers/query-inference-rewards';
-
-const STAKER_SHARD_ID = 1n;
-const TREASURY_SHARD_ID = 2n;
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {

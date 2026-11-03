@@ -39,69 +39,31 @@ import {
   PublishingConvictionStorage,
   Token,
 } from '../typechain';
+import { STAKER_SHARD_ID, blockTime, deployAccountStack, poolCredits, poolsOver } from './helpers/account-stack';
 import { prorateActiveSink } from './helpers/emission-model';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
-const STAKER_SHARD_ID = 1n;
 const BPS = 10_000n;
 const TRAC = 10n ** 18n;
 // 20% discount tier + 7 wei so the `committedTRAC % lock` dust path is live.
 const COMMITTED_TRAC = ethers.parseEther('50000') + 7n;
 const SUBSCRIPTION_ID = ethers.id('subscription-1');
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  EpochStorage: EpochStorage;
-  ParametersStorage: ParametersStorage;
-  ConvictionStakingStorage: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PublishingConviction: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  Stub: MockServiceSubscriptions;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture([
-    'Token',
-    'AskStorage',
-    'EpochStorage',
-    'Chronos',
-    'Profile',
-    'Identity',
-    'KnowledgeAssetsLifecycle',
-    'ContextGraphStorage',
-    'ContextGraphs',
-    'ContextGraphValueStorage',
-    'ContextGraphWaiverStorage',
-    'DKGPublishingConvictionNFT',
-    'DKGStakingConvictionNFT',
-    'StakingV10',
-  ]);
-
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
+async function deployFixture() {
+  const {
+    ES: EpochStorage,
+    Params: ParametersStorage,
+    Vault: ConvictionStakingStorage,
+    PC: PublishingConviction,
+    ...stack
+  } = await deployAccountStack();
 
   const StubFactory = await hre.ethers.getContractFactory('MockServiceSubscriptions');
   const Stub = (await StubFactory.deploy()) as unknown as MockServiceSubscriptions;
   await Stub.waitForDeployment();
-  await Hub.setContractAddress('ServiceSubscriptions', await Stub.getAddress());
+  await stack.Hub.setContractAddress('ServiceSubscriptions', await Stub.getAddress());
 
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    ParametersStorage: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    ConvictionStakingStorage: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PublishingConviction: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-    Stub,
-  };
+  return { ...stack, EpochStorage, ParametersStorage, ConvictionStakingStorage, PublishingConviction, Stub };
 }
 
 describe('@integration PublishingConviction 10.2.0 coverServiceCost', function () {
@@ -185,33 +147,15 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     return hre.ethers.getImpersonatedSigner(nftAddress);
   };
 
-  const blockTimestamp = async (receipt: ContractTransactionReceipt): Promise<bigint> =>
-    BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
-
   /** The staker-shard ranges a receipt credited, as [start, end, amount]. */
-  const creditedRanges = async (receipt: ContractTransactionReceipt): Promise<bigint[][]> => {
-    const esAddress = (await ES.getAddress()).toLowerCase();
-    const out: bigint[][] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== esAddress) continue;
-      const parsed = ES.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === 'TokensAddedToEpochRange' && BigInt(parsed.args.shardId) === STAKER_SHARD_ID) {
-        out.push([BigInt(parsed.args.startEpoch), BigInt(parsed.args.endEpoch), BigInt(parsed.args.tokenAmount)]);
-      }
-    }
-    return out;
-  };
+  const creditedRanges = (receipt: ContractTransactionReceipt) => poolCredits(ES, receipt);
 
   const tokenLogCount = async (receipt: ContractTransactionReceipt): Promise<number> => {
     const tokenAddress = (await Token.getAddress()).toLowerCase();
     return receipt.logs.filter((l) => l.address.toLowerCase() === tokenAddress).length;
   };
 
-  const poolSnapshot = async (from: bigint, to: bigint): Promise<Map<bigint, bigint>> => {
-    const out = new Map<bigint, bigint>();
-    for (let e = from; e <= to; e++) out.set(e, await ES.getEpochPool(STAKER_SHARD_ID, e));
-    return out;
-  };
+  const poolSnapshot = (from: bigint, to: bigint) => poolsOver(ES, from, to);
 
   const costOf = (value: bigint, bps: bigint): bigint => {
     const cost = (value * (BPS - bps)) / BPS;
@@ -546,7 +490,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
 
       // The publish books the whole cost over the KA's epochs from the current
       // epoch, as a wallet publish spreads its payment; the service draw none.
-      const timeRemaining = (await ChronosContract.timestampForEpoch(e0 + 1n)) - (await blockTimestamp(publishRc));
+      const timeRemaining = (await ChronosContract.timestampForEpoch(e0 + 1n)) - (await blockTime(publishRc));
       expect(await creditedRanges(publishRc)).to.deep.equal(
         prorateActiveSink(draw.cost, e0, kaEpochs, epLen, timeRemaining).map((r) => [r.start, r.end, r.amount]),
       );

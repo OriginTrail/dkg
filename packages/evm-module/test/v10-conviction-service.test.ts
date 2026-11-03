@@ -35,7 +35,7 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, ContractTransactionResponse, ethers, Result } from 'ethers';
+import { ContractTransactionReceipt, ContractTransactionResponse, ethers, Result } from 'ethers';
 import hre from 'hardhat';
 
 import {
@@ -61,7 +61,6 @@ import {
   Token,
 } from '../typechain';
 import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   CLASS_QUERY,
   Caps,
@@ -82,12 +81,12 @@ import {
   valueFor,
   writeLegacyAccount,
 } from './helpers/conviction-service';
+import { STAKER_SHARD_ID, blockTime, deployAccountStack, eventsOf, poolCredits, poolsOver } from './helpers/account-stack';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 import { createProfile, createProfiles } from './helpers/profile-helpers';
 import { getDefaultKACreator, getDefaultPublishingNode, getDefaultReceivingNodes } from './helpers/setup-helpers';
 import { DEFAULT_CHAIN_ID, buildPublishParams, packReservedKaId } from './helpers/v10-ka-helpers';
 
-const STAKER_SHARD_ID = 1n;
 const MIN_STAKE = ethers.parseEther('50000');
 const MAX_UINT96 = (1n << 96n) - 1n;
 // The 30 % tier, with `committed mod lock` dust.
@@ -107,51 +106,15 @@ const TIERS: Array<[bigint, bigint]> = [
 // A limit that no test of the draw itself reaches.
 const WIDE: Partial<Terms> = { maxCostPerPeriod: 50_000n * TRAC };
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  ES: EpochStorage;
-  Params: ParametersStorage;
-  Vault: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-  KAL: KnowledgeAssetsLifecycle;
-  Profile: Profile;
-  StakingV10: StakingV10;
-  StakingNFT: DKGStakingConvictionNFT;
-  ContextGraphs: ContextGraphs;
-  ContextGraphStorage: ContextGraphStorage;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS } = await registerServiceContracts(Hub);
+async function deployFixture() {
+  const stack = await deployAccountStack();
+  const { QIS, CSS, SS } = await registerServiceContracts(stack.Hub);
   return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    ES: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
+    ...stack,
     QIS,
     CSS,
     SS,
     KAL: await hre.ethers.getContract<KnowledgeAssetsLifecycle>('KnowledgeAssetsLifecycle'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
     ContextGraphs: await hre.ethers.getContract<ContextGraphs>('ContextGraphs'),
     ContextGraphStorage: await hre.ethers.getContract<ContextGraphStorage>('ContextGraphStorage'),
   };
@@ -227,9 +190,6 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // -------------------------------------------------------------------------
 
   const latest = async () => BigInt(await time.latest());
-  const blockTime = async (receipt: ContractTransactionReceipt): Promise<bigint> =>
-    BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
-
   const createAccountFor = async (holder: SignerWithAddress = owner, committed: bigint = COMMITTED) => {
     await Token.mint(holder.address, committed);
     await Token.connect(holder).approve(await NFT.getAddress(), committed);
@@ -293,23 +253,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   /** A struct read back from a contract, as a plain object. */
   const plain = (r: unknown) => (r as Result).toObject();
 
-  /** The parsed events `name` that `contract` emitted in a receipt. */
-  const eventsOf = async (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const address = (await contract.getAddress()).toLowerCase();
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== address) continue;
-      const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === name) out.push(parsed.args);
-    }
-    return out;
-  };
-
   /** The staker-shard ranges a receipt credited, as [start, end, amount]. */
-  const creditedRanges = async (receipt: ContractTransactionReceipt): Promise<bigint[][]> =>
-    (await eventsOf(receipt, ES, 'TokensAddedToEpochRange'))
-      .filter((a) => a.shardId === STAKER_SHARD_ID)
-      .map((a) => [a.startEpoch, a.endEpoch, a.tokenAmount]);
+  const creditedRanges = (receipt: ContractTransactionReceipt) => poolCredits(ES, receipt);
 
   /** The epochs a scheduled account's emission spans, from its first window's close. */
   const spanOf = async (createdAt: bigint) => {
@@ -317,11 +262,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     return { first, last: first + 2n * lock - 1n };
   };
 
-  const poolSnapshot = async (from: bigint, to: bigint) => {
-    const out = new Map<bigint, bigint>();
-    for (let e = from; e <= to; e++) out.set(e, await ES.getEpochPool(STAKER_SHARD_ID, e));
-    return out;
-  };
+  const poolSnapshot = (from: bigint, to: bigint) => poolsOver(ES, from, to);
 
   /** Everything a refused funding must leave as it was. */
   const fundingState = async (accountId: bigint, assignee: string, window: bigint) => {

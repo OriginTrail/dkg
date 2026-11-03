@@ -18,13 +18,12 @@ import {
   Chronos,
   ConvictionServiceStorage,
   DKGPublishingConvictionNFT,
-  Hub,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
   Token,
 } from '../../typechain';
+import { deployAccountStack } from '../helpers/account-stack';
 import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   CLASS_QUERY,
   DAY,
@@ -39,19 +38,9 @@ import {
 } from '../helpers/conviction-service';
 
 async function deployFixture() {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { CSS, SS, SSW } = await registerServiceContracts(Hub, { wallet: true });
-  return {
-    accounts,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    CSS,
-    SS,
-    SSW: SSW!,
-  };
+  const stack = await deployAccountStack();
+  const { CSS, SS, SSW } = await registerServiceContracts(stack.Hub, { wallet: true });
+  return { ...stack, CSS, SS, SSW: SSW! };
 }
 
 // Instrumented coverage runs say nothing about deployed gas.
