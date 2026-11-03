@@ -66,7 +66,14 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     assignment is checked against the owner at the time of `assign`. The
  *     opt-in and each assignment record the owner who made them and fund
  *     only while that owner holds the account: a sale of the account NFT
- *     leaves both inert, and the new owner opts in and assigns afresh.
+ *     leaves both inert, and the new owner opts in and assigns afresh
+ *     (`setServiceSpending` says what an inherited opt-in does).
+ *   - A period keeps the assignment it was funded under: it takes requests,
+ *     and top-ups, only until that assignment ends, at its expiry or its
+ *     revocation if sooner, whatever later assignment the buyer key gets.
+ *     So assigning a key again after a revocation or an expiry serves it
+ *     only from its next period not yet funded, and an assignment replaced
+ *     while still live keeps its periods open until its own expiry.
  *   - An assignment needs the consent of both the owner and the assignee over
  *     one EIP-712 digest that carries the account's current nonce. A party
  *     consents by sending the transaction, or by a signature: ERC-1271 for an
@@ -279,6 +286,14 @@ contract ServiceSubscriptions is
      *      while that owner holds the account: after a sale it reads as off,
      *      the new owner switches it on afresh, and the former owner's
      *      assignments stay inert whatever the new owner switches.
+     *
+     *      An inherited opt-in, one an earlier owner made, reads as off, so a
+     *      new owner cannot switch it off as such: `false` reverts
+     *      `ServiceSpendingUnchanged`. Switching it on and then off clears it.
+     *      An assignment recorded for an owner applies again if the account
+     *      returns to that owner, unless an owner in between revoked it, as
+     *      long as that owner's opt-in was not overwritten in between; if it
+     *      was, the assignment applies again once that owner opts in again.
      */
     function setServiceSpending(uint256 accountId, bool enabled) external {
         _requireOwner(accountId);
@@ -321,6 +336,13 @@ contract ServiceSubscriptions is
      *      under the earlier one keep its end, its expiry or its revocation if
      *      sooner, so a new assignment never admits a request issued once the
      *      earlier one had ended; the periods funded under this one follow it.
+     *      So assigning a key again after a revocation or an expiry restores
+     *      its service only from its next period not yet funded: a period
+     *      already funded keeps its ended assignment and takes no request
+     *      issued after that end, and no top-up, and the key funds no second
+     *      period for that epoch. Replacing a live assignment leaves the
+     *      periods funded under it open until its own expiry, which revoking
+     *      the new assignment does not bring forward.
      *      The assignment records the owner who consented, and funds only
      *      while that owner holds the account. It consumes the account's
      *      nonce, so the same terms never assign twice.
@@ -371,7 +393,10 @@ contract ServiceSubscriptions is
      *      key, while one served before it is settled as before: the
      *      revocation moves no period's batch deadline, so it cannot withhold
      *      a seller's receipt. It also consumes the account's nonce, so terms
-     *      signed but not yet submitted no longer assign.
+     *      signed but not yet submitted no longer assign. A new assignment of
+     *      the key afterwards serves it from its next period not yet funded:
+     *      the periods funded under this one take no request issued after the
+     *      revocation, and no top-up.
      */
     function revoke(uint256 accountId, address assignee) external {
         _requireOwner(accountId);
