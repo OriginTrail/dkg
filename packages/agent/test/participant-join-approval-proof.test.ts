@@ -6,7 +6,6 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphMetaGraphUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { signAgentDelegation } from '../src/auth/agent-delegation.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
@@ -61,7 +60,7 @@ describe('approved metadata for an existing registered participant', () => {
       const notify = vi.fn(async () => {});
       // Keep only delivery outside this unit boundary; admission, writes, flush and proof are real.
       agent.notifyJoinApproval = notify;
-      const store = (agent as unknown as { store: TripleStore }).store;
+      const store = agent.store;
       const graph = contextGraphMetaGraphUri(contextGraphId);
       const readRoot = async () => {
         const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
@@ -118,7 +117,7 @@ describe('approved metadata for an existing registered participant', () => {
     });
     await agent.registerContextGraph(contextGraphId, { callerAgentAddress: owner.agentAddress });
     const addParticipant = vi.spyOn(chain, 'addContextGraphParticipantAgent');
-    const store = (agent as unknown as { store: TripleStore }).store;
+    const store = agent.store;
     const graph = contextGraphMetaGraphUri(contextGraphId);
     const allowedRows = async () => {
       const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
