@@ -55,10 +55,10 @@ transaction.
 1. In `deployments/base_sepolia_v10_contracts.json`, set `"deployed": false`
    for `PublishingConviction`, `StakingV10` and `StakingKPI`, so that the run
    redeploys them.
-   - If `StakingV10` is left deployed, 052e stops the run before any
-     transaction. StakingV10 10.0.4 splits every epoch without the
-     query/inference pool, so each epoch's share of the pool would stay in the
-     vault for good.
+   - If `StakingV10` is left deployed, the run's first step, 000, stops it
+     before it deploys anything. StakingV10 10.0.4 splits every epoch without
+     the query/inference pool, so each epoch's share of the pool would stay in
+     the vault for good.
    - If `StakingKPI` is left deployed, 052e only warns. StakingKPI 10.0.2's
      reward views leave the pool out, so they read low; no TRAC is at risk.
      Redeploy it all the same.

@@ -168,7 +168,7 @@ export async function predictSkip(c: Contracts, ref: ClaimRef, now: bigint): Pro
   if (ref.bucketIndex >= s.bucketCount) return 'UnknownBucket';
   const claim = await c.qis.getSellerClaim(ref.subscriptionId, ref.bucketIndex, ref.seller);
   if (claim.finalized) return 'AlreadyFinalized';
-  const epoch = BigInt(s.periodId);
+  const { epoch } = s;
   const current = await c.chronos.getCurrentEpoch();
   if (current > epoch + 1n) return 'Void';
   if (current <= epoch || now <= s.periodEnd + (await c.qis.receiptGraceSecondsAt(epoch))) return 'TooEarly';

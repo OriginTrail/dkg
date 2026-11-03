@@ -5,7 +5,8 @@
 //
 // Groups:
 //   - frozen inputs: the pool, λ, ΣR and ΣQueryInferenceScore of a closed
-//     epoch, which no later change moves;
+//     epoch, which no later change moves, and a further change of λ, which
+//     waits for closeEpochs to close the epochs before the last one;
 //   - the epoch's money: what is due in it from wallets and from Conviction
 //     Accounts, both reported by EpochClosed, plus the carry;
 //   - rollover: epochs with no finalized value, empty ones included, carry
@@ -29,10 +30,11 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { BaseContract, ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import { QueryInferenceStorage } from '../typechain';
+import { eventsOf } from './helpers/account-stack';
 import { CLASS_INFERENCE, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 import {
   SCALE18,
@@ -125,19 +127,6 @@ describe('@integration The epoch close of the query/inference pool', function ()
 
   const closeAll = async () => (await (await f.QS.closeEpochs(255n)).wait())!;
 
-  const eventsOf = (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      try {
-        const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-        if (parsed?.name === name) out.push(parsed.args);
-      } catch {
-        // another contract's log
-      }
-    }
-    return out;
-  };
-
   const closedEvents = (receipt: ContractTransactionReceipt) =>
     eventsOf(receipt, f.QS, 'EpochClosed').map((e) => [
       e.epoch,
@@ -197,6 +186,42 @@ describe('@integration The epoch close of the query/inference pool', function ()
       );
       expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([6n * TRAC, score]);
       expect([await f.QS.queryInferenceGross(e + 1n, s1.identityId), await f.QS.queryInferenceGross(e + 1n, s2.identityId)]).to.deep.equal(gross);
+    });
+
+    it('λ changes again and again as closeEpochs closes the epochs before the last change: refused while one is open, and no closed epoch moves', async () => {
+      const e = await epochNow();
+      expect(await QIS.closedThrough()).to.equal(e - 1n);
+      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
+
+      // In force, with e still open: folding it in would hand e the new λ.
+      await toEpoch(e + 1n);
+      await expect(forward(QIS, 'setLambdaBps', [2_000n]))
+        .to.be.revertedWithCustomError(QIS, 'LambdaScheduleAheadOfCloses')
+        .withArgs(e - 1n, e + 1n);
+
+      // Anyone closes e through the settlement, and the change goes on.
+      await f.QS.connect(f.accounts[25]).closeEpochs(10n);
+      expect(await QIS.closedThrough()).to.equal(e);
+      await expect(forward(QIS, 'setLambdaBps', [2_000n])).to.emit(QIS, 'LambdaBpsSet').withArgs(2_000n, e + 2n);
+      expect(await record(e)).to.deep.equal([0n, 0n, true]);
+      expect(await QIS.lambdaBpsAt(e + 1n)).to.equal(5_000n);
+      expect(await QIS.lambdaBpsAt(e + 2n)).to.equal(2_000n);
+
+      // The same in the next epoch: a third change waits for e + 1 to close, at its own λ.
+      await toEpoch(e + 2n);
+      await expect(forward(QIS, 'setLambdaBps', [7_000n]))
+        .to.be.revertedWithCustomError(QIS, 'LambdaScheduleAheadOfCloses')
+        .withArgs(e, e + 2n);
+      await f.QS.connect(f.accounts[25]).closeEpochs(10n);
+      await expect(forward(QIS, 'setLambdaBps', [7_000n])).to.emit(QIS, 'LambdaBpsSet').withArgs(7_000n, e + 3n);
+
+      // Each epoch closes at the λ scheduled for it; the changes after its close leave it.
+      await toEpoch(e + 4n);
+      await closeAll();
+      expect(await record(e)).to.deep.equal([0n, 0n, true]);
+      expect(await record(e + 1n)).to.deep.equal([0n, 5_000n, true]);
+      expect(await record(e + 2n)).to.deep.equal([0n, 2_000n, true]);
+      expect(await record(e + 3n)).to.deep.equal([0n, 7_000n, true]);
     });
   });
 

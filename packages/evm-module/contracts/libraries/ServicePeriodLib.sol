@@ -74,34 +74,25 @@ library ServicePeriodLib {
         return keccak256(abi.encode(buyer, epoch));
     }
 
-    /// @dev The epoch of a recorded period, which its funding stored as the
-    ///      period id. Its money is due in the epoch after it.
-    function epochOf(ConvictionServiceStorage.Subscription memory s) internal pure returns (uint256) {
-        return uint256(s.periodId);
-    }
-
     /**
      * @dev The buckets of a funding: 1 to `maxBuckets` of them, in strictly
      *      increasing id, each of a known class, with a non-zero value and a
-     *      non-zero price cap. Returns them as stored, and their value, which
-     *      must fit a uint96.
+     *      non-zero price cap. Returns their value, which must fit a uint96.
      */
-    function fundingBuckets(
-        IServicePeriodFunding.BucketInput[] calldata inputs,
+    function fundingValue(
+        ConvictionServiceStorage.Bucket[] calldata buckets,
         uint256 maxBuckets
-    ) internal pure returns (ConvictionServiceStorage.Bucket[] memory buckets, uint96 value) {
-        uint256 n = inputs.length;
+    ) internal pure returns (uint96 value) {
+        uint256 n = buckets.length;
         if (n == 0 || n > maxBuckets) revert IServicePeriodFunding.InvalidFundingRequest("bucketCount");
-        buckets = new ConvictionServiceStorage.Bucket[](n);
         uint256 total;
         for (uint256 i; i < n; i++) {
-            IServicePeriodFunding.BucketInput calldata b = inputs[i];
-            if (i > 0 && b.bucketId <= inputs[i - 1].bucketId) {
+            ConvictionServiceStorage.Bucket calldata b = buckets[i];
+            if (i > 0 && b.bucketId <= buckets[i - 1].bucketId) {
                 revert IServicePeriodFunding.InvalidFundingRequest("bucketOrder");
             }
             _requireNewBucketTerms(b);
             total += b.value;
-            buckets[i] = _stored(b);
         }
         value = toValue(total);
     }
@@ -146,7 +137,7 @@ library ServicePeriodLib {
      */
     function mergeTopUp(
         ConvictionServiceStorage.Bucket[] memory stored,
-        IServicePeriodFunding.BucketInput[] calldata additions,
+        ConvictionServiceStorage.Bucket[] calldata additions,
         uint256 maxBuckets,
         uint96 periodValue
     ) internal pure returns (TopUp memory t) {
@@ -159,7 +150,7 @@ library ServicePeriodLib {
         uint256 total;
 
         for (uint256 j; j < m; j++) {
-            IServicePeriodFunding.BucketInput calldata b = additions[j];
+            ConvictionServiceStorage.Bucket calldata b = additions[j];
             if (j > 0 && b.bucketId <= additions[j - 1].bucketId) {
                 revert IServicePeriodFunding.InvalidFundingRequest("bucketOrder");
             }
@@ -185,29 +176,17 @@ library ServicePeriodLib {
         t.appended = new ConvictionServiceStorage.Bucket[](newCount);
         uint256 k;
         for (uint256 j; j < m; j++) {
-            if (isNew[j]) t.appended[k++] = _stored(additions[j]);
+            if (isNew[j]) t.appended[k++] = additions[j];
         }
     }
 
     /// @dev A new bucket's terms: a known class, a non-zero value and a
     ///      non-zero price cap.
-    function _requireNewBucketTerms(IServicePeriodFunding.BucketInput calldata b) private pure {
+    function _requireNewBucketTerms(ConvictionServiceStorage.Bucket calldata b) private pure {
         if (b.serviceClass != CLASS_INFERENCE && b.serviceClass != CLASS_QUERY) {
             revert IServicePeriodFunding.InvalidFundingRequest("serviceClass");
         }
         if (b.value == 0) revert IServicePeriodFunding.InvalidFundingRequest("bucketValue");
         if (b.maxAskWeiPerUnit == 0) revert IServicePeriodFunding.InvalidFundingRequest("maxAskWeiPerUnit");
-    }
-
-    function _stored(
-        IServicePeriodFunding.BucketInput calldata b
-    ) private pure returns (ConvictionServiceStorage.Bucket memory) {
-        return
-            ConvictionServiceStorage.Bucket({
-                bucketId: b.bucketId,
-                serviceClass: b.serviceClass,
-                value: b.value,
-                maxAskWeiPerUnit: b.maxAskWeiPerUnit
-            });
     }
 }

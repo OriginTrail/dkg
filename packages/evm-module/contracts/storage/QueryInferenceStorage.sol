@@ -695,14 +695,14 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         return chronos.epochLength() / 2;
     }
 
-    /// @dev Whether the contract the Hub holds as `name` reads this storage:
-    ///      its `queryInferenceStorage()` names it. A name the Hub does not
-    ///      hold, a contract without the view, and one that reverts or names
+    /// @dev Whether the contract the Hub holds as `contractName` reads this
+    ///      storage: its `queryInferenceStorage()` names it. A name the Hub does
+    ///      not hold, a contract without the view, and one that reverts or names
     ///      anything else, do not.
-    function _readsThisPool(string memory name) internal view returns (bool) {
-        if (!hub.isContract(name)) return false;
+    function _readsThisPool(string memory contractName) internal view returns (bool) {
+        if (!hub.isContract(contractName)) return false;
         // solhint-disable-next-line avoid-low-level-calls
-        (bool ok, bytes memory answer) = hub.getContractAddress(name).staticcall(
+        (bool ok, bytes memory answer) = hub.getContractAddress(contractName).staticcall(
             abi.encodeWithSignature("queryInferenceStorage()")
         );
         return ok && answer.length >= 32 && abi.decode(answer, (uint256)) == uint256(uint160(address(this)));

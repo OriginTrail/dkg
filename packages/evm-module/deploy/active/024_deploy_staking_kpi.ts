@@ -10,6 +10,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 export default func;
 func.tags = ['StakingKPI'];
 func.dependencies = [
+  'ServiceSpendingBuilds',
   'Hub',
   'IdentityStorage',
   'ProfileStorage',
