@@ -201,10 +201,11 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
         programOutput = rows[0];
       }
       const { payload, recordCount, summary = {} } = profile.evidence(rows, context, JSON.parse(read.result), input, programOutput);
-      const result = await transport({ ...payload, allowCreate: !prior }, 'write');
+      const result = prior?.result ? JSON.parse(prior.result) : await transport({ ...payload, allowCreate: !prior }, 'write');
       if (
         result.contextGraphId !== profile.targetGraph ||
         result.digest !== payload.digest ||
+        result.name !== payload.name ||
         result.readbackVerified !== true ||
         result.metadata?.status !== "wm-sealed"
       )

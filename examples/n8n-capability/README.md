@@ -460,3 +460,28 @@ yet accept arbitrary joined ERP/Excel rows as a calculated impact assessment.
 That requires the mapped-input revision of the existing PLCA Program, followed
 by a result-aware DKG Write. This component does not alter or deploy those
 remote Programs. The existing evidence workflow remains available separately.
+
+### Account access integration status
+
+The JPB SSH adapter remains an explicit local-demo transport. It is not an account
+or runner authorization contract. nOS already implements account/job node access,
+runner-held node credentials and workflow publishing via its node-action journal
+(`tl-nos` PR #1076 and the current `workflow-publish.ts` / `workflows-access.ts`).
+Production integration must consume that path. It must not forward a customer's
+session bearer to this companion, n8n or DKG, or replace account checks with an
+SSH administrator credential.
+
+Read and Write can reuse the existing query/publish foundations once trusted
+account/principal context and a checked managed-node selector reach the component.
+Program bindings/source/execute still need an agreed runner operation contract;
+those routes are not currently on the nOS runner allowlist. JPB fleet visibility
+alone does not establish a corresponding account-owned launched node. See
+`tl-nos/docs/l1/STUDIO-DKG-ACCESS.md` for the specific reuse points and acceptance
+criteria. This change does not expand runner permissions or deploy an adapter.
+
+The demo transport now pins Python script bytes at profile load and hashes those
+same bytes into the profile revision. Both Program invocation and Write require
+the approved workbook input. Confirmed Write retries reuse their durable receipt;
+only an unconfirmed write calls the transport again with `allowCreate: false`.
+The transport owns actual DKG content readback; the generic component additionally
+checks graph, asset name, content digest and sealed status before retaining it.

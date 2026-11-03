@@ -65,6 +65,8 @@ test('another profile runs Read -> Invoke -> Write with its own schema, cached P
     assert.equal(saved.items[0].measurementTotal, 7);
     assert.equal(saved.items[0].recordCount, 2);
     assert.equal(saved.items[0].readbackVerified, true);
+    assert.deepEqual(await store.call(request('write', calculated.items), workflow, 'native'), saved);
+    // A completed replay uses its durable receipt, even when the node is unavailable.
     assert.deepEqual(calls.map(c => c.operation), ['read', 'invoke', 'write', 'write']);
     assert.deepEqual(calls.filter(c => c.operation === 'write').map(c => c.payload.allowCreate), [true, false]);
   } finally { db.close(); }
@@ -126,4 +128,19 @@ test('wrong destination or digest never produces a successful write receipt', as
 test('core runtime and editor registry contain no domain-specific imports or constants', () => {
   for (const file of ['dkg-components.mjs', 'dkg-program.mjs', 'dkg-profile.mjs', 'component-registry.mjs', 'studio-service.mjs'])
     assert.doesNotMatch(readFileSync(new URL(file, import.meta.url), 'utf8'), /jpb|dmaast|holos|62633|100\.113\.215\.1|PLCA/i, file);
+});
+
+test('write receipts must identify the exact requested asset name', async () => {
+  const db = new DatabaseSync(':memory:'), calls = [];
+  try {
+    const base = transport(calls);
+    const store = dkgComponentStore(db, async (payload, op) => {
+      const result = await base(payload, op);
+      return op === 'write' ? { ...result, name: 'different-asset' } : result;
+    }, [], profile);
+    store.grant(workflow, id, input);
+    const source = await store.call(request('read', [{}]), workflow, 'native');
+    const calculated = await store.call(request('invoke', source.items), workflow, 'native');
+    await assert.rejects(store.call(request('write', calculated.items), workflow, 'native'), /exact evidence/);
+  } finally { db.close(); }
 });

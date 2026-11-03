@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { remote } from '../jpb-output.mjs';
+import { remote, remoteScripts } from '../jpb-output.mjs';
 import { componentEvidence, JPB_SOURCE, JPB_TARGET, JPB_WORKBOOK } from './jpb-evidence.mjs';
 const fail = message => { throw Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' }); };
 const programs = JSON.parse(readFileSync(new URL('../jpb-programs.json', import.meta.url), 'utf8'));
@@ -10,7 +10,7 @@ const catalogRevision = createHash('sha256').update(JSON.stringify(programs)).di
 const choice = (label, value, options = [value]) => ({ type: 'string', label, default: value, maxLength: 256, options });
 const revision = createHash('sha256');
 for (const file of ['./jpb.mjs', './jpb-evidence.mjs', '../jpb-programs.json', '../jpb-output.mjs', '../jpb-read.py', '../jpb-write.py', '../jpb-invoke-program.py'])
-  revision.update(readFileSync(new URL(file, import.meta.url)));
+  revision.update(file.endsWith('.py') ? remoteScripts[file.slice(3)] : readFileSync(new URL(file, import.meta.url)));
 export default {
   id: 'dmaast-jpb', revision: revision.digest('hex'), node: 'JPB', targetGraph: JPB_TARGET,
   programs, catalogRevision,
@@ -28,11 +28,11 @@ export default {
     if (!file) return [];
     const rows = JSON.parse(readFileSync(file, 'utf8'))[0]?.workbook;
     if (!Array.isArray(rows) || rows.length !== 4 || rows.some(r => r.evidence?.contentDigest !== JPB_WORKBOOK))
-      fail('Configure the reviewed workbook revision before enabling JPB writes.');
+      fail('Configure the reviewed workbook revision before enabling JPB effects.');
     return rows;
   },
   validateInput(definition, input, approvedWorkbook) {
-    if (definition.nodes.some(n => n.componentId === 'dkg-write') &&
+    if (definition.nodes.some(n => ['dkg-write', 'invoke-dkg-program'].includes(n.componentId)) &&
       (!approvedWorkbook.length || !isDeepStrictEqual(JSON.parse(input.itemsJson)[0]?.workbook, approvedWorkbook)))
       fail('Use the reviewed workbook rows and revision for this JPB demo.');
   },

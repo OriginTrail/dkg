@@ -117,7 +117,7 @@ test("read is refreshed once per invocation; write and retry preserve exact prov
     second = await store.call(write, workflow, "native1");
   assert.equal(first.items[0].assetId, second.items[0].assetId);
   assert.equal(calls[1].p.allowCreate, true);
-  assert.equal(calls[2].p.allowCreate, false);
+  assert.equal(calls.length, 2); // completed write replay is entirely local
   const payload = JSON.parse(
     JSON.parse(
       calls[1].p.quads.find((q) => q.predicate === "urn:nos:workflow:payload")

@@ -49,10 +49,12 @@ test('remote call requires an owner grant, journals before dispatch and caches c
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM dkg_component_calls').get().n,1);
     if(++count===1) throw new Error('lost response');
     return receipt(r);
-  },[]);
+  },rows);
   const value={effectId:'urn:sr:effect:'+id+':0',workflowId:'native',executionId:'23',blockId:node.id,items:rows};
   await assert.rejects(store.call(value,workflow,'native'),/owner/);
-  store.grant(workflow,id,{itemsJson:JSON.stringify(rows),paramsJson:'{}',executionId:''});
+  assert.throws(() => store.grant(workflow,id,{itemsJson:JSON.stringify(rows),paramsJson:'{}',executionId:''}), /reviewed workbook/);
+  assert.equal(count, 0);
+  store.grant(workflow,id,{itemsJson:JSON.stringify([{workbook: rows}]),paramsJson:'{}',executionId:''});
   await assert.rejects(store.call(value,workflow,'native'),/lost response/);
   const result=await store.call(value,workflow,'native');
   assert.deepEqual(await store.call(value,workflow,'native'),result);

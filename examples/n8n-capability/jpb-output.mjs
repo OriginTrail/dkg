@@ -16,15 +16,25 @@ export function evidencePayload(receipt) {
   for (const row of rows) for (const ref of [row.erp?.recordId, row.erp?.evidence?.sourceEvidence, row.workbook && 'urn:sha256:'+row.workbook.evidence.contentDigest].filter(Boolean)) quads.push(q('http://www.w3.org/ns/prov#wasDerivedFrom',ref));
   return { name, digest, quads: [...new Map(quads.map(v=>[JSON.stringify(v),v])).values()] };
 }
-export function remote(payload, scriptName = 'jpb-write.py') {
-  const script = 'import base64,json\nPAYLOAD=json.loads(base64.b64decode("'+Buffer.from(JSON.stringify(payload)).toString('base64')+'"))\n'+readFileSync(new URL('./'+scriptName,import.meta.url),'utf8');
-  return new Promise((resolve,reject)=>{
-    const p=spawn('ssh',['-o','BatchMode=yes','-o','ConnectTimeout=8','adminuser@100.113.215.1','python3','-'],{stdio:['pipe','pipe','pipe']});let out='',size=0;
-    const timer=setTimeout(()=>p.kill(),scriptName === 'jpb-invoke-program.py' ? 40000 : 14000);
-    p.stdout.on('data',b=>{size+=b.length;if(size>2097152)p.kill();else out+=b;});p.stderr.resume();p.on('error',()=>{clearTimeout(timer);reject(fail('JPB SSH connection unavailable.'));});
-    p.on('close',code=>{clearTimeout(timer);if(code!==0)return reject(fail(scriptName === 'jpb-invoke-program.py' ? 'JPB Program invocation is unconfirmed. Retry uses the same invocation identity; check its arguments, approval and remote execution.' : scriptName === 'jpb-read.py' ? 'JPB read unavailable or incomplete; no source rows were accepted.' : 'JPB write/readback is unconfirmed. Retry checks the same asset; it does not create another.'));try{resolve(JSON.parse(out));}catch{reject(fail('Invalid JPB receipt.'));}});p.stdin.on('error',()=>{});p.stdin.end(script);
-  });
+// Load once: the reviewed profile revision and every execution use the same script bytes.
+export const remoteScripts = Object.freeze(Object.fromEntries(
+  ['jpb-read.py', 'jpb-write.py', 'jpb-invoke-program.py'].map(name =>
+    [name, readFileSync(new URL('./' + name, import.meta.url), 'utf8')]),
+));
+export function createRemote(scripts = remoteScripts, spawnProcess = spawn) {
+  const pinned = Object.freeze({ ...scripts });
+  return function remote(payload, scriptName = 'jpb-write.py') {
+    if (!Object.hasOwn(pinned, scriptName)) throw fail('Unknown JPB script.');
+    const script = 'import base64,json\nPAYLOAD=json.loads(base64.b64decode("'+Buffer.from(JSON.stringify(payload)).toString('base64')+'"))\n'+pinned[scriptName];
+    return new Promise((resolve,reject)=>{
+      const p=spawnProcess('ssh',['-o','BatchMode=yes','-o','ConnectTimeout=8','adminuser@100.113.215.1','python3','-'],{stdio:['pipe','pipe','pipe']});let out='',size=0;
+      const timer=setTimeout(()=>p.kill(),scriptName === 'jpb-invoke-program.py' ? 40000 : 14000);
+      p.stdout.on('data',b=>{size+=b.length;if(size>2097152)p.kill();else out+=b;});p.stderr.resume();p.on('error',()=>{clearTimeout(timer);reject(fail('JPB SSH connection unavailable.'));});
+      p.on('close',code=>{clearTimeout(timer);if(code!==0)return reject(fail(scriptName === 'jpb-invoke-program.py' ? 'JPB Program invocation is unconfirmed. Retry uses the same invocation identity; check its arguments, approval and remote execution.' : scriptName === 'jpb-read.py' ? 'JPB read unavailable or incomplete; no source rows were accepted.' : 'JPB write/readback is unconfirmed. Retry checks the same asset; it does not create another.'));try{resolve(JSON.parse(out));}catch{reject(fail('Invalid JPB receipt.'));}});p.stdin.on('error',()=>{});p.stdin.end(script);
+    });
+  }
 }
+export const remote = createRemote();
 export function jpbOutputStore(db) {
   db.exec('CREATE TABLE IF NOT EXISTS studio_output_receipts (id TEXT PRIMARY KEY, receipt TEXT NOT NULL); CREATE TABLE IF NOT EXISTS studio_jpb_writes (id TEXT PRIMARY KEY, result TEXT)');
   const active=new Map();
