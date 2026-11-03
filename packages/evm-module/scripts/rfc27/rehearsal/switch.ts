@@ -24,7 +24,6 @@ import { ethers } from 'ethers';
 
 import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
 import type { QueryInferenceSettlement } from '../../../typechain';
-import { QueryInferenceSettlement__factory } from '../../../typechain/factories/contracts/QueryInferenceSettlement__factory';
 import { Contracts, eventsIn } from '../contracts';
 import { chainNow } from '../network';
 import { poolShareOf } from '../reads';
@@ -255,7 +254,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
       [{ contractName: 'QueryInferenceStorage', encodedData: [c.qis.interface.encodeFunctionData('setPaused', [false])] }],
     ]),
   );
-  const qsFresh = stack.connect(QueryInferenceSettlement__factory, fresh);
+  const qsFresh = await stack.connect('QueryInferenceSettlement', fresh);
   const orderOn = await h.getAllContracts();
   check(
     'switch on: the Hub holds the fresh settlement, StakingV10 and StakingKPI read it, it reads the same storage, and the storage is unpaused',

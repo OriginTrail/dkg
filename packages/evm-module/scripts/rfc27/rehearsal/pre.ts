@@ -4,8 +4,6 @@
 // claim, and StakingKPI's nets, which the existing phase compares the upgraded
 // contracts with.
 
-import { PublishingConviction__factory } from '../../../typechain/factories/contracts/PublishingConviction__factory';
-import { StakingKPI__factory } from '../../../typechain/factories/contracts/StakingKPI__factory';
 import { Ctx, saveResults, send } from './context';
 import { claimAll, publishAs } from './operations';
 import { operationalKeys } from './plumbing';
@@ -33,12 +31,12 @@ export async function phasePre(ctx: Ctx): Promise<void> {
   const from = pos.reduce((m, p) => (p.lastClaimedEpoch + 1n < m ? p.lastClaimedEpoch + 1n : m), E);
 
   report.say(`\nStakingKPI ${versions.StakingKPI} nets for nodes ${nodes.join(',')} over epochs ${from}..${E - 1n}`);
-  const kpi = await stack.held(StakingKPI__factory, 'StakingKPI');
+  const kpi = await stack.held('StakingKPI');
   const kpiBefore = await nodeEpochNets(c, kpi, nodes, from, E - 1n);
 
   report.say('\nin a snapshot: the 10.0.8 / 10.0.4 behaviour, then revert');
   const old = await ctx.fork.inSnapshot(async () => {
-    const pc = await stack.held(PublishingConviction__factory, 'PublishingConviction');
+    const pc = await stack.held('PublishingConviction');
     const [agent] = await c.pcs.getRegisteredAgents(SCHEDULED_ACCOUNT);
     const publish = await publishAs(ctx, pc, SCHEDULED_ACCOUNT, agent, 10n * TRAC, 2n, '10.0.8');
     const [anyone] = await ctx.hre.ethers.getSigners();
