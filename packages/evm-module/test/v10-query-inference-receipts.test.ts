@@ -14,11 +14,11 @@
 //   - the group checks: an unknown period or bucket, an empty group, the
 //     batch deadline, and a Conviction Account period's deadline, which no
 //     revocation or expiry moves;
-//   - a period keeps the assignment it was funded under: a new assignment of
-//     the buyer key revives no request, and one replaced while still live
-//     keeps its period open to requests and top-ups until its own expiry;
 //   - the nonce bitmap's words, and the bounds of a batch, the pause and
 //     activation.
+//
+// A period and the assignment it was funded under is in
+// v10-query-inference-assignment-lifetime.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -29,21 +29,13 @@ import hre from 'hardhat';
 import {
   Chronos,
   ConvictionServiceStorage,
-  DKGPublishingConvictionNFT,
-  DKGStakingConvictionNFT,
-  Hub,
-  ParametersStorage,
-  Profile,
   QueryInferenceSettlement,
   QueryInferenceStorage,
-  RandomSamplingStorage,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
-  StakingV10,
   Token,
 } from '../typechain';
 import {
-  ACCOUNT_STACK_TAGS,
   Bucket,
   CLASS_INFERENCE,
   CLASS_QUERY,
@@ -51,9 +43,7 @@ import {
   Domain,
   TRAC,
   bucket,
-  registerServiceContracts,
   requestOf,
-  signTerms,
   subscriptionIdOf,
   walletRequestOf,
 } from './helpers/conviction-service';
@@ -66,7 +56,6 @@ import {
   SECP256K1_HALF_N,
   SECP256K1_N,
   ServiceRequest,
-  createNode,
   digestOfDigests,
   fullReceipt,
   hardhatWallet,
@@ -80,36 +69,22 @@ import {
   stakeFactorOf,
   stakeOn,
 } from './helpers/query-inference';
+import {
+  ASK,
+  CAP,
+  ReceiptsContext,
+  SELLER_STAKE,
+  Seller,
+  deployReceiptsStack,
+  receiptsHelpers,
+} from './helpers/query-inference-receipts';
 
-const SELLER_STAKE = 500_000n * TRAC; // a tenth of the 5M cap: S = sqrt(0.1)
-const ASK = 10n ** 9n;
-const CAP = 10n ** 12n; // the buckets' price cap
-
+/** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS, SSW, QS } = await registerServiceContracts(Hub, { wallet: true, settlement: true });
-  return {
-    accounts: await hre.ethers.getSigners(),
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
-    QIS,
-    CSS,
-    SS,
-    SSW: SSW!,
-    QS: QS!,
-  };
+  return deployReceiptsStack();
 }
 
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
-type Seller = { identityId: bigint; operational: SignerWithAddress; admin: SignerWithAddress };
 
 describe('@integration Receipt batches of the query/inference pool', function () {
   let f: Fixture;
@@ -128,12 +103,13 @@ describe('@integration Receipt batches of the query/inference pool', function ()
   let s2: Seller;
   const key = hardhatWallet(60); // the buyer's session key
   const otherKey = hardhatWallet(61);
+  const ctx = { key } as ReceiptsContext;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    f = await loadFixture(deployFixture);
+    f = ctx.f = await loadFixture(deployFixture);
     ({ Token, Chronos: ChronosContract, QIS, CSS, SS, SSW, QS } = f);
-    domain = await queryInferenceDomain(QIS);
+    domain = ctx.domain = await queryInferenceDomain(QIS);
     owner = f.accounts[20];
     buyer = f.accounts[21];
     buyer2 = f.accounts[22];
@@ -145,19 +121,10 @@ describe('@integration Receipt batches of the query/inference pool', function ()
   // Helpers
   // -------------------------------------------------------------------------
 
-  const latest = async () => BigInt(await time.latest());
-  const epochNow = async () => ChronosContract.getCurrentEpoch();
-  const epochStart = async (e: bigint) => ChronosContract.timestampForEpoch(e);
+  const { latest, epochNow, epochStart, seller, submit, accept, requestFor, itemFor } = receiptsHelpers(ctx);
   const plain = (r: unknown) => (r as Result).toObject();
   const forward = async (contract: BaseContract, fn: string, args: unknown[] = []) =>
     f.Hub.forwardCall(await contract.getAddress(), contract.interface.encodeFunctionData(fn, args));
-
-  async function seller(index: number, stake: bigint): Promise<Seller> {
-    const operational = f.accounts[index];
-    const admin = f.accounts[index + 1];
-    const identityId = await createNode({ ...f, operational, admin, stake });
-    return { identityId, operational, admin };
-  }
 
   const eventsOf = (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
     const out: Result[] = [];
@@ -188,9 +155,6 @@ describe('@integration Receipt batches of the query/inference pool', function ()
     return subscriptionIdOf(who.address, epoch);
   };
 
-  const submit = (by: Seller, groups: ReceiptGroup[]) => QS.connect(by.operational).submitReceiptBatch(groups);
-  const accept = async (by: Seller, groups: ReceiptGroup[]) => (await (await submit(by, groups)).wait())!;
-
   /** `count` signed items of a period's bucket for `by`, from nonce `firstNonce`, issued now. */
   const items = async (
     subscriptionId: string,
@@ -213,33 +177,6 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       issuedAt: opts.issuedAt ?? (await latest()),
     });
   };
-
-  /** One request for `by` on a period's bucket, with `overrides`, and its full receipt. */
-  const requestFor = async (
-    subscriptionId: string,
-    bucketIndex: number,
-    by: Seller,
-    overrides: Partial<ServiceRequest> = {},
-  ): Promise<ServiceRequest> => {
-    const b = await CSS.getBucket(subscriptionId, bucketIndex);
-    const issuedAt = overrides.issuedAt ?? (await latest());
-    return {
-      subscriptionId,
-      bucketId: b.bucketId,
-      seller: by.identityId,
-      nonce: 100n,
-      acceptedAskWeiPerUnit: ASK,
-      maxUnits: 1_000n,
-      maxValueWei: 1_000n * ASK,
-      issuedAt,
-      expiry: issuedAt + DAY,
-      ...overrides,
-    };
-  };
-
-  /** An item claiming `r`, signed by `wallet`, with `receipt` overrides. */
-  const itemFor = (r: ServiceRequest, receipt: Partial<Receipt> = {}, wallet = key): ReceiptItem =>
-    itemOf(r, fullReceipt(r, receipt), signCompact(wallet, requestDigestOf(domain, r)));
 
   // -------------------------------------------------------------------------
   // A happy batch
@@ -817,164 +754,6 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       expect(await QIS.closedThrough()).to.equal(next + 1n);
       expect(await QS.epochPool(next + 1n)).to.equal(0n);
       expect(await QIS.carry()).to.equal((await QIS.walletDue(next)) + s.cost);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // A period and the assignment it was funded under
-  // -------------------------------------------------------------------------
-
-  describe('a period keeps the assignment it was funded under', () => {
-    let epoch: bigint;
-
-    beforeEach(async () => {
-      epoch = await epochNow();
-    });
-
-    const fundFrom = async (accountId: bigint, e: bigint): Promise<string> => {
-      await SS.connect(buyer2).fundFromConviction(
-        requestOf(accountId, e, { buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)], sessionKey: key.address }),
-      );
-      return subscriptionIdOf(buyer2.address, e);
-    };
-
-    /** A new assignment of buyer2 over `accountId`, with both parties' consent. */
-    const reassign = async (accountId: bigint, expiresAt: bigint) => {
-      const terms = {
-        accountId,
-        assignee: buyer2.address,
-        maxCostPerPeriod: 1_000n * TRAC,
-        expiresAt,
-        nonce: await CSS.assignmentNonce(accountId),
-      };
-      await SS.connect(owner).assign(terms, '0x', await signTerms(buyer2, SS, terms));
-    };
-
-    const refusedAs = async (p: string, item: ReceiptItem, fault: bigint) =>
-      expect(submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [item] }]))
-        .to.be.revertedWithCustomError(QS, 'ReceiptFault')
-        .withArgs(0n, 0n, fault);
-
-    it('a request issued while the assignment was revoked is refused before a new assignment of the buyer key, and after it', async () => {
-      const { accountId } = await openConvictionAccount({
-        ...f,
-        owner,
-        assignee: buyer2,
-        committed: 100_000n * TRAC,
-        limit: 1_000n * TRAC,
-      });
-      const p = await fundFrom(accountId, epoch);
-      await SS.connect(owner).revoke(accountId, buyer2.address);
-      const revokedAt = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
-      const during = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: revokedAt + 60n }));
-      await time.setNextBlockTimestamp(revokedAt + 120n);
-      await refusedAs(p, during, Fault.InactiveAssignment);
-
-      await reassign(accountId, (await latest()) + 400n * DAY);
-      expect(await CSS.isAssignmentActive(accountId, buyer2.address)).to.equal(true);
-      await refusedAs(p, during, Fault.InactiveAssignment);
-      // Nor does a request issued under the new assignment count in the period funded under the old one.
-      await refusedAs(p, itemFor(await requestFor(p, 0, s1, { nonce: 1n })), Fault.InactiveAssignment);
-      expect(await QIS.bucketClaimed(p, 0n)).to.equal(0n);
-    });
-
-    it('a request issued after the assignment expired is refused before a renewal and after it, and one served before the expiry lands', async () => {
-      const expiresAt = (await epochStart(epoch + 1n)) - DAY;
-      const { accountId } = await openConvictionAccount({
-        ...f,
-        owner,
-        assignee: buyer2,
-        committed: 100_000n * TRAC,
-        limit: 1_000n * TRAC,
-        expiresAt,
-      });
-      const p = await fundFrom(accountId, epoch);
-      const served = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: expiresAt - 1n }));
-      const late = itemFor(await requestFor(p, 0, s1, { nonce: 1n, issuedAt: expiresAt }));
-      await time.setNextBlockTimestamp(expiresAt + 60n);
-      await refusedAs(p, late, Fault.InactiveAssignment);
-
-      // Renewed after it expired, by a new assignment: the period keeps the expiry it was funded under.
-      await reassign(accountId, expiresAt + 400n * DAY);
-      await refusedAs(p, late, Fault.InactiveAssignment);
-      await time.setNextBlockTimestamp(expiresAt + 7_200n);
-      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served] }]);
-      expect(await QIS.bucketClaimed(p, 0n)).to.equal(served.valueWei);
-    });
-
-    it('a period funded under the new assignment follows it, beside the period of the old one', async () => {
-      const { accountId } = await openConvictionAccount({
-        ...f,
-        owner,
-        assignee: buyer2,
-        committed: 100_000n * TRAC,
-        limit: 1_000n * TRAC,
-      });
-      const p = await fundFrom(accountId, epoch);
-      const firstNonce = (await CSS.getAssignment(accountId, buyer2.address)).nonce;
-      await SS.connect(owner).revoke(accountId, buyer2.address);
-      const firstEnd = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
-      await reassign(accountId, (await latest()) + 400n * DAY);
-      const q = await fundFrom(accountId, epoch + 1n);
-      const secondNonce = (await CSS.getAssignment(accountId, buyer2.address)).nonce;
-
-      // The old period takes no request issued now; the new one, from its start, does.
-      await refusedAs(p, itemFor(await requestFor(p, 0, s1, { nonce: 0n })), Fault.InactiveAssignment);
-      expect([(await CSS.getSubscription(p)).assignmentNonce, (await CSS.getSubscription(q)).assignmentNonce]).to.deep.equal([
-        firstNonce,
-        secondNonce,
-      ]);
-      const start = await epochStart(epoch + 1n);
-      await time.setNextBlockTimestamp(start);
-      await accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [itemFor(await requestFor(q, 0, s1, { nonce: 0n, issuedAt: start }))] }]);
-
-      // Revoking the new assignment ends the new period's requests from then
-      // on, and its request served before lands later.
-      const served = itemFor(await requestFor(q, 0, s1, { nonce: 1n, issuedAt: start + 10n }));
-      await time.setNextBlockTimestamp(start + 20n);
-      await SS.connect(owner).revoke(accountId, buyer2.address);
-      const secondEnd = (await CSS.getAssignment(accountId, buyer2.address)).revokedAt;
-      await time.setNextBlockTimestamp(secondEnd + 7_200n);
-      await refusedAs(q, itemFor(await requestFor(q, 0, s1, { nonce: 2n, issuedAt: secondEnd })), Fault.InactiveAssignment);
-      await accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [served] }]);
-
-      // Each period keeps the end of its own assignment.
-      expect(await CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(firstEnd);
-      expect(await CSS.assignmentEnd(accountId, buyer2.address, secondNonce)).to.equal(secondEnd);
-    });
-
-    it("an assignment replaced while still live keeps its period open, to requests and top-ups alike, until its own expiry", async () => {
-      const { accountId } = await openConvictionAccount({
-        ...f,
-        owner,
-        assignee: buyer2,
-        committed: 100_000n * TRAC,
-        limit: 1_000n * TRAC,
-      });
-      const p = await fundFrom(accountId, epoch);
-      const firstNonce = (await CSS.getAssignment(accountId, buyer2.address)).nonce;
-      // Set to expire inside the period, then replaced while still live.
-      const expiresAt = (await latest()) + 3_600n;
-      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, { maxCostPerPeriod: 1_000n * TRAC, expiresAt });
-      await reassign(accountId, expiresAt + 400n * DAY);
-      expect(await CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(expiresAt);
-
-      // Before it, the period is topped up, and a request issued after the
-      // top-up lands, against the bucket's raised cap.
-      await SS.connect(buyer2).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, 5n * TRAC, CAP)], ethers.ZeroHash);
-      const s = await CSS.getSubscription(p);
-      expect(await QS.fundedCap(p, 0n)).to.equal((15n * TRAC * (10_000n - s.discountBps)) / 10_000n);
-      const served = itemFor(await requestFor(p, 0, s1, { nonce: 0n, issuedAt: expiresAt - 1n }));
-      await time.setNextBlockTimestamp(expiresAt - 1n);
-      await accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served] }]);
-      expect(await QIS.bucketClaimed(p, 0n)).to.equal(served.valueWei);
-
-      // From its expiry on, neither: the key's new assignment reopens nothing.
-      await time.setNextBlockTimestamp(expiresAt);
-      await refusedAs(p, itemFor(await requestFor(p, 0, s1, { nonce: 1n, issuedAt: expiresAt })), Fault.InactiveAssignment);
-      await expect(SS.connect(buyer2).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, TRAC, CAP)], ethers.ZeroHash))
-        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
-        .withArgs(accountId, buyer2.address);
     });
   });
 
