@@ -10,6 +10,7 @@ import { fmt, iso, min, sum } from '../report';
 import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
 import { rewardClaims } from './reward-claims';
+import { finalizedValue } from './finalize';
 import { need } from './roles';
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
@@ -85,7 +86,8 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       close.walletDue >= ours.wallet && close.convictionDue >= ours.conviction,
       close.walletDue === ours.wallet && close.convictionDue === ours.conviction ? 'ours alone, beside the carry' : 'others funded periods too',
     );
-    if (s.finalizedValue !== undefined) report.check(`served includes our finalized ${fmt(s.finalizedValue)} TRAC`, close.sumR >= s.finalizedValue);
+    const finalized = await finalizedValue(ctx, s);
+    if (finalized > 0n) report.check(`served includes our finalized ${fmt(finalized)} TRAC`, close.sumR >= finalized);
     const lambda = requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps']);
     report.check(`λ in force in epoch ${P} is ${lambda.value} bps`, close.lambdaBps === lambda.value);
     const gross = await c.qs.queryInferenceGross(P, s.sellerId);

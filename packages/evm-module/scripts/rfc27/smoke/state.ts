@@ -1,7 +1,8 @@
 // The smoke test's run state: cache/rfc27-smoke/<run>.json, which git
 // ignores. Ids, epochs, addresses and transaction hashes, never a key, bound
 // to the network it ran on. Numeric fields are kept as decimal strings in the
-// file and decoded to bigint where it is loaded.
+// file and decoded to bigint where it is loaded. What the chain and the journal
+// already tell is not kept: what became of a seller's claims is read from them.
 
 import * as fs from 'fs';
 
@@ -23,10 +24,6 @@ export type Amounts = {
   lock: bigint;
   discountBps: bigint;
 };
-
-export type RefStatus = 'finalized' | 'finalized by another caller' | 'waiting on the seller' | 'void' | 'skipped';
-/** A seller's claim in one bucket of one period, and what became of it. */
-export type RefRecord = { subscriptionId: string; bucketIndex: bigint; seller: bigint; period: string; status?: RefStatus; reason?: string; value?: bigint };
 
 export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint; ownerTracAfter: bigint; block?: number; claimed: boolean };
 
@@ -53,8 +50,6 @@ export type SmokeState = {
   edgeNonce?: bigint;
   periods: { ca?: string; wallet?: string; edge?: string };
   costs: { ca?: bigint; topUp?: bigint; edge?: bigint };
-  refs?: RefRecord[];
-  finalizedValue?: bigint;
   withdrawal?: Withdrawal;
   /** Fork-only: the score each stand-in proof writes, and the epochs that have one. */
   fork?: { mirrorScore?: bigint; proofs: string[] };
@@ -147,7 +142,6 @@ function oneOf<T extends string>(o: Obj, k: string, values: readonly T[], where:
 }
 
 const AMOUNT_KEYS = ['stake', 'caValue', 'caTopUp', 'edgeValue', 'walletValue', 'keyEth', 'committed', 'committedFloor', 'lock', 'discountBps'] as const;
-const REF_STATUSES: readonly RefStatus[] = ['finalized', 'finalized by another caller', 'waiting on the seller', 'void', 'skipped'];
 
 function optReads(o: Obj, k: string, where: string): Reads | undefined {
   if (o[k] === undefined || o[k] === null) return undefined;
@@ -190,19 +184,6 @@ export function decodeState(raw: unknown): SmokeState {
     const status = oneOf(p, 'status', ['done', 'failed'] as const, `phases.${k}`);
     phases[name] = { status: failedChecks > 0 ? 'failed' : status, failedChecks };
   }
-  const refs = o.refs === undefined ? undefined : (Array.isArray(o.refs) ? o.refs : []).map((x, i): RefRecord => {
-    const r = obj(x, `refs[${i}]`);
-    const status = r.status === undefined ? undefined : oneOf(r, 'status', REF_STATUSES, `refs[${i}]`);
-    return {
-      subscriptionId: str(r, 'subscriptionId', `refs[${i}]`),
-      bucketIndex: bi(r, 'bucketIndex', `refs[${i}]`),
-      seller: bi(r, 'seller', `refs[${i}]`),
-      period: str(r, 'period', `refs[${i}]`),
-      status,
-      reason: optStr(r, 'reason', `refs[${i}]`),
-      value: optBi(r, 'value', `refs[${i}]`),
-    };
-  });
   let withdrawal: Withdrawal | undefined;
   if (o.withdrawal !== undefined) {
     const w = obj(o.withdrawal, 'withdrawal');
@@ -250,8 +231,6 @@ export function decodeState(raw: unknown): SmokeState {
     edgeNonce: optBi(o, 'edgeNonce', 'state'),
     periods: { ca: optStr(periods, 'ca', 'periods'), wallet: optStr(periods, 'wallet', 'periods'), edge: optStr(periods, 'edge', 'periods') },
     costs: { ca: optBi(costs, 'ca', 'costs'), topUp: optBi(costs, 'topUp', 'costs'), edge: optBi(costs, 'edge', 'costs') },
-    refs,
-    finalizedValue: optBi(o, 'finalizedValue', 'state'),
     withdrawal,
     fork,
     steps,
