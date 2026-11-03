@@ -37,6 +37,11 @@ import { publishingConvictionAfterRun, versionAtLeast } from '../../utils/convic
  * initializes it with this contract and the storage, as the repository
  * upgrades any Hub-registered logic contract.
  *
+ * `ParametersStorage.protocolTreasury` must stay 0 on a network that runs
+ * these contracts: while a treasury is wired, every Conviction Account
+ * funding, top-up and opt-in is refused, a service draw carrying no treasury
+ * fee. Wallet periods take no fee and go on.
+ *
  * This script refuses a run that would leave `PublishingConviction` 10.1.x:
  * that build has `coverServiceCost` but books every account's whole budget to
  * the staker pool up front, so an account funding through it would be counted

@@ -323,7 +323,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     error QueryInferenceNotActive(uint40 activationEpoch, uint256 currentEpoch);
     /// @notice `epoch` is still open after a bounded close, which reached
     ///         `closedThrough`. Anyone clears it with `closeEpochs`, and an
-    ///         epoch that has not ended yet cannot be closed.
+    ///         epoch that has not ended yet cannot be closed. Wallets and
+    ///         staking UIs should recognise it and offer `closeEpochs`, then
+    ///         the claim or withdrawal again.
     error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
 
     // ============================================================
@@ -486,6 +488,13 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         sellers, the seller's claim c and weighted claim w count as
      *         c × min(1, F / C) and w × min(1, F / C), floored, in the current
      *         epoch.
+     *
+     *         C counts every seller's claim in the bucket, a claim that is
+     *         never finalized included: one whose seller has no node score in
+     *         the due epoch, or that goes void. It still shrinks the others
+     *         by F / C, and what it would have taken counts as no one's R.
+     *         That moves R shares only: the pool is the epoch's money all the
+     *         same.
      * @return finalized How many refs were finalized.
      */
     function finalizeClaims(ClaimRef[] calldata refs) external returns (uint256 finalized) {

@@ -88,6 +88,19 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *   - slot 2 `closedThrough`, slot 3 `carry`;
  *   - slots 4 to 11 the mappings, in order; `convictionDue` came last, so
  *     that no earlier slot moved.
+ *
+ * Replacing it needs a migration, which no deploy step runs. A replacement
+ * starts empty, and `StakingV10` takes the activation epoch from the storage
+ * its settlement uses, so at the swap:
+ *   - every node-epoch before the replacement's activation that no claim has
+ *     split yet is split without its share of this pool, which stays in the
+ *     vault for good;
+ *   - the carry, and the money due in epochs still open, stay here, unpaid;
+ *   - requests signed for this address do not verify against another.
+ * A migration claims every position first (`StakingV10.claimFor`), swaps at
+ * an epoch boundary, and books the carry and the money due into the
+ * replacement (`setCarry`, `addWalletDue`, `addConvictionDue`). The pause is
+ * no substitute: closes and claims go on while paused.
  */
 contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "QueryInferenceStorage";

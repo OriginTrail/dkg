@@ -289,7 +289,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         `maxCloseStepsPerClaim` steps from `closedThrough`; the
     ///         permissionless `QueryInferenceSettlement.closeEpochs` clears it.
     ///         Raised by `QueryInferenceSettlement.ensureClosed` and declared
-    ///         here so it stays in this contract's ABI (10.1.0).
+    ///         here so it stays in this contract's ABI (10.1.0). Wallets and
+    ///         staking UIs should recognise it and offer `closeEpochs`, then
+    ///         the claim or withdrawal again.
     error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
     /// @notice `tokenId` holds no withdrawn epoch to claim: none was
     ///         recorded, or it has been claimed (10.1.0).

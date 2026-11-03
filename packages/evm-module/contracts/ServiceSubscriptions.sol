@@ -89,11 +89,19 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     earlier epoch would never reach a pool. Every funding needs a non-zero
  *     session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
- *     protocol treasury is wired: a service draw carries no treasury fee.
+ *     protocol treasury is wired: a service draw carries no treasury fee. So
+ *     `ParametersStorage.protocolTreasury` must stay 0 wherever this contract
+ *     runs: wiring one stops every Conviction Account funding and top-up, and
+ *     the opt-in, until it is unset again. Wallet periods take no fee and go
+ *     on. `protocolTreasuryFee`, already set at 300 bps, takes effect only
+ *     once a treasury is wired.
  *   - An account that `PublishingConviction` 10.0.8 or 10.1.0 scheduled in
  *     full cannot switch service spending on, and its draws are refused
  *     (`EmissionAlreadyScheduled`): its base allowance is already the staker
- *     pool's.
+ *     pool's. The refusal covers the whole account, even a draw its top-up
+ *     buffer alone would pay, though the buffer was never scheduled: so the
+ *     accounts 10.0.8 scheduled, testnet's among them, get no services at
+ *     all, and still publish.
  */
 contract ServiceSubscriptions is
     INamed,
