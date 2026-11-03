@@ -291,6 +291,19 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     ///         share, by ΣR `sumR`, ΣQueryInferenceScore `sumScore` and λ
     ///         `lambdaBps`. The carry out is
     ///         `walletDue + convictionDue + carryIn − pool`.
+    ///
+    ///         The unused share of the epoch's money, the allowance OT-RFC-27
+    ///         shares out as margin, reads off the event:
+    ///           - money  = `walletDue + convictionDue + carryIn`;
+    ///           - served = `sumR`, the finalized receipt value, in TRAC wei
+    ///             as the pool is;
+    ///           - unused = money − `sumR`.
+    ///         With `sumR` non-zero all of the money is the pool, the unused
+    ///         share included; with `sumR` 0 all of it carries. The unused
+    ///         share falls below 0 by at most 1 wei per top-up of a
+    ///         Conviction Account period of the epoch before, and otherwise
+    ///         never: a bucket's funded cap is floored once over all its
+    ///         value, and each draw's cost apart.
     event EpochClosed(
         uint256 indexed epoch,
         uint96 walletDue,
