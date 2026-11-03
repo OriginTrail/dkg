@@ -598,6 +598,59 @@ describe('@integration Finalization of receipt claims against the funded cap', f
         .withArgs(0n, Fault.PastDeadline);
     });
 
+    it("a grace scheduled during e times the finalization of e + 1's periods, and leaves e's on their own: no share is fixed while a batch of its bucket can still land", async () => {
+      const s1 = await seller(1_250_000n * TRAC); // S = 0.5
+      const s2 = await seller(1_250_000n * TRAC);
+      const e = await epochNow();
+      const ofE = await walletFund(buyer, e, [bucket(0, CLASS_INFERENCE, 10n * TRAC, PRICE_CAP)]);
+      await claim(s1, ofE, 0, 2n * TRAC);
+      const ofNext = await walletFund(buyer, e + 1n, [bucket(0, CLASS_INFERENCE, 10n * TRAC, PRICE_CAP)]);
+      await forward(f.QIS, 'setReceiptGraceSeconds', [7_200n]);
+
+      // e's periods keep the grace of e: their claims finalize past 3,600
+      // seconds, though the current epoch's periods take 7,200.
+      const nextStart = await epochStart(e + 1n);
+      await time.increaseTo(nextStart);
+      await claim(s1, ofNext, 0, 8n * TRAC);
+      await scoreNode(f.RSS, e + 1n, s1.identityId);
+      await time.setNextBlockTimestamp(nextStart + 3_601n);
+      let receipt = await finalize([ref(ofE, 0, s1)]);
+      expect(skipped(receipt)).to.have.length(0);
+      expect(await nodeEpoch(s1, e + 1n)).to.deep.equal([2n * TRAC, TRAC]);
+
+      const periodEnd = (await f.CSS.getSubscription(ofNext)).periodEnd;
+      expect(periodEnd).to.equal(await epochStart(e + 2n));
+      expect(await f.QS.batchDeadline(ofNext)).to.equal(periodEnd + 7_200n);
+      await time.increaseTo(periodEnd);
+      await scoreNode(f.RSS, e + 2n, s1.identityId);
+      await scoreNode(f.RSS, e + 2n, s2.identityId);
+
+      // Past where the grace of e would end, but within e + 1's: too early, and nothing moves.
+      await time.setNextBlockTimestamp(periodEnd + 3_601n);
+      receipt = await finalize([ref(ofNext, 0, s1)]);
+      expect(skipped(receipt)).to.deep.equal([[ofNext, 0n, s1.identityId, Skip.TooEarly]]);
+      expect((await f.QIS.getSellerClaim(ofNext, 0n, s1.identityId)).finalized).to.equal(false);
+      expect(await f.QIS.bucketClaimed(ofNext, 0n)).to.equal(8n * TRAC);
+      expect(await nodeEpoch(s1, e + 2n)).to.deep.equal([0n, 0n]);
+      expect(await totals(f.QIS, e + 2n)).to.deep.equal([0n, 0n]);
+
+      // A batch still lands here, and shrinks s1's share with s2's.
+      await claim(s2, ofNext, 0, 8n * TRAC, { issuedAt: periodEnd - 10n });
+      expect(await f.QIS.bucketClaimed(ofNext, 0n)).to.equal(16n * TRAC);
+
+      await time.setNextBlockTimestamp(periodEnd + 7_200n);
+      receipt = await finalize([ref(ofNext, 0, s1)]);
+      expect(skipped(receipt)).to.deep.equal([[ofNext, 0n, s1.identityId, Skip.TooEarly]]);
+
+      // A second past the deadline both finalize, at the funded cap: 8 of 16 of 10.
+      await time.setNextBlockTimestamp(periodEnd + 7_201n);
+      receipt = await finalize([ref(ofNext, 0, s1), ref(ofNext, 0, s2)]);
+      expect(skipped(receipt)).to.have.length(0);
+      expect(await nodeEpoch(s1, e + 2n)).to.deep.equal([5n * TRAC, (5n * TRAC) / 2n]);
+      expect(await nodeEpoch(s2, e + 2n)).to.deep.equal([5n * TRAC, (5n * TRAC) / 2n]);
+      expect(await totals(f.QIS, e + 2n)).to.deep.equal([10n * TRAC, 5n * TRAC]);
+    });
+
     it('the epoch keeps its own grace while a later one is scheduled', async () => {
       const s1 = await seller(1_250_000n * TRAC);
       const e = await epochNow();
