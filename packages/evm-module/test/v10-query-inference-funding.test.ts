@@ -19,13 +19,13 @@
 //     only while the assignment the period was funded under is live, so a new
 //     assignment of the key after a revocation or an expiry reopens nothing,
 //     while one replaced still live tops up until its own expiry;
-//   - a Conviction Account period funded ahead, or topped up before it
-//     starts, is refused if its assignment expires before the period starts,
-//     the assignment it was funded under included;
 //   - refusals: a zero key, before activation or while it is unset (from a
 //     wallet and from an account alike), paused, an unknown or ended period, a
 //     wrong source or buyer, a changed cap, and the bucket rules; each without
 //     partial effect.
+//
+// A Conviction Account period funded ahead, and its assignment, is in
+// v10-query-inference-assignment-lifetime.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -37,7 +37,6 @@ import {
   Chronos,
   ConvictionServiceStorage,
   ConvictionStakingStorage,
-  DKGPublishingConvictionNFT,
   Hub,
   ParametersStorage,
   PublishingConviction,
@@ -47,62 +46,31 @@ import {
   Token,
 } from '../typechain';
 import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   CLASS_QUERY,
-  DAY,
   SESSION_KEY,
   TRAC,
-  Terms,
   WalletRequest,
   activateQueryInference,
   bucket,
   costOf,
-  registerServiceContracts,
   requestOf,
-  signTerms,
   subscriptionIdOf,
   walletRequestOf,
 } from './helpers/conviction-service';
+import {
+  COMMITTED_TIER_BPS as BPS,
+  FundingContext,
+  deployFundingStack,
+  fundingHelpers,
+} from './helpers/query-inference-funding';
 
-const COMMITTED = 100_000n * TRAC + 11n; // the 30 % tier
-const BPS = 3_000n;
-
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  Params: ParametersStorage;
-  Vault: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-  SSW: ServiceSubscriptionsWallet;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS, SSW } = await registerServiceContracts(Hub, { wallet: true });
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    QIS,
-    CSS,
-    SS,
-    SSW: SSW!,
-  };
+/** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
+async function deployFixture() {
+  return deployFundingStack();
 }
+
+type Fixture = Awaited<ReturnType<typeof deployFixture>>;
 
 describe('@integration Plan-period funding for the query/inference pool', function () {
   let accounts: SignerWithAddress[];
@@ -111,7 +79,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
   let ChronosContract: Chronos;
   let Params: ParametersStorage;
   let Vault: ConvictionStakingStorage;
-  let NFT: DKGPublishingConvictionNFT;
   let PC: PublishingConviction;
   let QIS: QueryInferenceStorage;
   let CSS: ConvictionServiceStorage;
@@ -124,6 +91,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
   let buyer2: SignerWithAddress;
   let stranger: SignerWithAddress;
   let treasury: SignerWithAddress;
+  const ctx = {} as FundingContext;
 
   const use = (f: Fixture) => {
     ({
@@ -133,7 +101,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       Chronos: ChronosContract,
       Params,
       Vault,
-      NFT,
       PC,
       QIS,
       CSS,
@@ -145,6 +112,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     buyer2 = accounts[22];
     stranger = accounts[23];
     treasury = accounts[28];
+    Object.assign(ctx, { f, owner, buyer });
   };
 
   beforeEach(async () => {
@@ -157,11 +125,9 @@ describe('@integration Plan-period funding for the query/inference pool', functi
   // Helpers
   // -------------------------------------------------------------------------
 
-  const latest = async () => BigInt(await time.latest());
+  const { latest, epochNow, epochStart, openAccount, assign, caFund } = fundingHelpers(ctx);
   const blockTime = async (receipt: ContractTransactionReceipt) =>
     BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
-  const epochNow = async () => ChronosContract.getCurrentEpoch();
-  const epochStart = async (e: bigint) => ChronosContract.timestampForEpoch(e);
   const plain = (r: unknown) => (r as Result).toObject();
   const vaultBalance = async () => Token.balanceOf(await Vault.getAddress());
   const forward = async (contract: BaseContract, fn: string, args: unknown[] = []) =>
@@ -228,36 +194,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
   ) => {
     await allow(sender, additions.reduce((a, b) => a + b.value, 0n));
     return (await (await SSW.connect(sender).topUpFromWallet(subscriptionId, additions, planDigest)).wait())!;
-  };
-
-  /** An opted-in account of `owner` with `assignee` assigned, under a per-period limit. */
-  const openAccount = async (opts: { limit?: bigint; assignee?: SignerWithAddress; committed?: bigint } = {}) => {
-    const committed = opts.committed ?? COMMITTED;
-    await Token.mint(owner.address, committed);
-    await Token.connect(owner).approve(await NFT.getAddress(), committed);
-    await (await NFT.connect(owner).createAccount(committed, 0)).wait();
-    const accountId = await NFT.totalSupply();
-    await SS.connect(owner).setServiceSpending(accountId, true);
-    await assign(accountId, opts.assignee ?? buyer, opts.limit ?? 1_000n * TRAC);
-    return accountId;
-  };
-
-  const assign = async (accountId: bigint, assignee: SignerWithAddress, limit: bigint) => {
-    const terms: Terms = {
-      accountId,
-      assignee: assignee.address,
-      maxCostPerPeriod: limit,
-      expiresAt: (await latest()) + 400n * DAY,
-      nonce: await CSS.assignmentNonce(accountId),
-    };
-    await SS.connect(owner).assign(terms, '0x', await signTerms(assignee, SS, terms));
-    return terms;
-  };
-
-  const caFund = async (accountId: bigint, epoch: bigint, value: bigint, sender: SignerWithAddress = buyer) => {
-    const r = requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value)] });
-    const receipt = (await (await SS.connect(sender).fundFromConviction(r)).wait())!;
-    return { subscriptionId: subscriptionIdOf(sender.address, epoch), receipt, r };
   };
 
   // -------------------------------------------------------------------------
@@ -816,95 +752,6 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await expect(SS.connect(buyer).topUpFromConviction(unknown, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
         .to.be.revertedWithCustomError(SS, 'PeriodNotFound')
         .withArgs(unknown);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // A Conviction Account period funded ahead
-  // -------------------------------------------------------------------------
-
-  describe('a Conviction Account period funded ahead', () => {
-    let accountId: bigint;
-    let now: bigint;
-    let nextStart: bigint;
-
-    beforeEach(async () => {
-      accountId = await openAccount({ limit: 100n * TRAC });
-      now = await epochNow();
-      nextStart = await epochStart(now + 1n);
-    });
-
-    const expireAt = async (expiresAt: bigint) =>
-      SS.connect(owner).updateAssignmentCaps(accountId, buyer.address, { maxCostPerPeriod: 100n * TRAC, expiresAt });
-
-    it('is refused if the assignment expires at or before the next epoch starts, and accepted a second later', async () => {
-      for (const expiresAt of [nextStart - 1n, nextStart]) {
-        await expireAt(expiresAt);
-        await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, now + 1n)))
-          .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
-          .withArgs(accountId, buyer.address, expiresAt, nextStart);
-        expect(await CSS.subscriptionExists(subscriptionIdOf(buyer.address, now + 1n))).to.equal(false);
-        expect(await QIS.convictionDue(now + 2n)).to.equal(0n);
-      }
-      await expireAt(nextStart + 1n);
-      await caFund(accountId, now + 1n, 10n * TRAC);
-    });
-
-    it("the same assignment still funds the current epoch's period, which it serves until it expires", async () => {
-      await expireAt(nextStart - 1n);
-      const { subscriptionId } = await caFund(accountId, now, 10n * TRAC);
-      expect((await CSS.getSubscription(subscriptionId)).periodEnd).to.equal(nextStart);
-    });
-
-    it('a period funded ahead is not topped up once its assignment is set to expire before it starts', async () => {
-      const ahead = await caFund(accountId, now + 1n, 10n * TRAC);
-      await expireAt(nextStart);
-      await expect(SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
-        .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
-        .withArgs(accountId, buyer.address, nextStart, nextStart);
-      // A running period of the current epoch, under an assignment that
-      // expires before the next epoch, is topped up as before.
-      await assign(accountId, buyer2, 100n * TRAC);
-      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, {
-        maxCostPerPeriod: 100n * TRAC,
-        expiresAt: nextStart - 1n,
-      });
-      const running = await caFund(accountId, now, 10n * TRAC, buyer2);
-      await SS.connect(buyer2).topUpFromConviction(running.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
-      await expireAt(nextStart + 1n);
-      await SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
-    });
-
-    it('a period funded ahead takes no top-up once its own assignment ends before it starts, though the buyer key is assigned again', async () => {
-      const add = [bucket(0, CLASS_INFERENCE, TRAC)];
-      const due = async () => QIS.convictionDue(now + 2n);
-
-      // Revoked before the period starts, then assigned again.
-      const ahead = await caFund(accountId, now + 1n, 10n * TRAC);
-      await SS.connect(owner).revoke(accountId, buyer.address);
-      await assign(accountId, buyer, 100n * TRAC);
-      const before = await due();
-      await expect(SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, add, ethers.ZeroHash))
-        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
-        .withArgs(accountId, buyer.address);
-
-      // Set to expire before the period starts, then replaced while still
-      // live: the period could never take a request.
-      await assign(accountId, buyer2, 100n * TRAC);
-      const second = await caFund(accountId, now + 1n, 10n * TRAC, buyer2);
-      const expiresAt = nextStart - 60n;
-      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, { maxCostPerPeriod: 100n * TRAC, expiresAt });
-      await assign(accountId, buyer2, 100n * TRAC);
-      const funded = await due();
-      await expect(SS.connect(buyer2).topUpFromConviction(second.subscriptionId, add, ethers.ZeroHash))
-        .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
-        .withArgs(accountId, buyer2.address, expiresAt, nextStart);
-      expect([before, funded, await due()]).to.deep.equal([
-        costOf(10n * TRAC, BPS),
-        2n * costOf(10n * TRAC, BPS),
-        2n * costOf(10n * TRAC, BPS),
-      ]);
-      expect((await CSS.getSubscription(second.subscriptionId)).value).to.equal(10n * TRAC);
     });
   });
 

@@ -21,44 +21,19 @@
 //     period's cost due beside a wallet period, a period's cost alone rolled
 //     over, a publishing draw and the closed windows' unused budget in the
 //     publishing pool; the commitment is booked exactly once, and the vault
-//     keeps only the floors once everything is withdrawn;
-//   - a withdrawal mid-epoch: once the epoch in progress has ended, the
-//     withdrawn position's share of both pools, its carries of that epoch
-//     included, is claimed for the staker the withdrawal paid, once, for the
-//     score the position had earned by its withdrawal (with no proof after
-//     it, exactly what staying would have paid), and the node's other
-//     positions are as they were.
+//     keeps only the floors once everything is withdrawn.
+//
+// A withdrawal mid-epoch, and the epoch in progress it leaves to claim, is in
+// v10-query-inference-withdrawal.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, ContractTransactionResponse } from 'ethers';
+import { ContractTransactionReceipt, ContractTransactionResponse } from 'ethers';
 import hre from 'hardhat';
 
+import { QueryInferenceSettlement, QueryInferenceStorage } from '../typechain';
 import {
-  Chronos,
-  ConvictionServiceStorage,
-  ConvictionStakingStorage,
-  DKGPublishingConvictionNFT,
-  DKGStakingConvictionNFT,
-  EpochStorage,
-  Hub,
-  ParametersStorage,
-  Profile,
-  PublishingConvictionStorage,
-  QueryInferenceSettlement,
-  QueryInferenceStorage,
-  RandomSamplingStorage,
-  ServiceSubscriptions,
-  ServiceSubscriptionsWallet,
-  StakingKPI,
-  StakingV10,
-  StakingV10Ledger,
-  Token,
-} from '../typechain';
-import {
-  ACCOUNT_STACK_TAGS,
-  BPS,
   CLASS_INFERENCE,
   DAY,
   Domain,
@@ -69,194 +44,63 @@ import {
   requestOf,
   signTerms,
   subscriptionIdOf,
-  walletRequestOf,
 } from './helpers/conviction-service';
-import { SCALE18, hardhatWallet, queryInferenceDomain, signedItems } from './helpers/query-inference';
+import { hardhatWallet, queryInferenceDomain, signedItems } from './helpers/query-inference';
+import {
+  RewardsContext,
+  Seller,
+  TIER_12,
+  UNIT_ASK,
+  deployRewardsStack,
+  rewardsHelpers,
+} from './helpers/query-inference-rewards';
 
-const UNIT_ASK = 10n ** 15n;
-const TIER_12 = 12n; // 366 days at 6x: no boost expiry within these runs
 const STAKER_SHARD_ID = 1n;
 const TREASURY_SHARD_ID = 2n;
 
+/** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {
-  await hre.deployments.fixture([
-    ...ACCOUNT_STACK_TAGS,
-    'ServiceSubscriptions',
-    'QueryInferenceSettlement',
-    'StakingKPI',
-    'QueryInferenceActivation',
-  ]);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const at = async <T>(name: string) => (await hre.ethers.getContractAt(name, await Hub.getContractAddress(name))) as T;
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
-    Ledger: await hre.ethers.getContract<StakingV10Ledger>('StakingV10Ledger'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
-    KPI: await hre.ethers.getContract<StakingKPI>('StakingKPI'),
-    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
-    CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
-    SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
-    QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
-    SS: await at<ServiceSubscriptions>('ServiceSubscriptions'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-  };
+  return deployRewardsStack();
 }
 
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
-type Seller = { identityId: bigint; operational: SignerWithAddress; admin: SignerWithAddress; feeBps: bigint; tokenId: bigint };
 
 describe('@integration Query/inference rewards through StakingV10 claims', function () {
   let f: Fixture;
   let domain: Domain;
-  let nextAccount: number;
   const key = hardhatWallet(60);
+  const ctx = { key } as RewardsContext;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    f = await loadFixture(deployFixture);
-    domain = await queryInferenceDomain(f.QIS);
-    nextAccount = 30;
+    f = ctx.f = await loadFixture(deployFixture);
+    domain = ctx.domain = await queryInferenceDomain(f.QIS);
+    ctx.nextAccount = 30;
   });
 
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
 
-  const latest = async () => BigInt(await time.latest());
-  const epochNow = async () => f.Chronos.getCurrentEpoch();
-  const toEpoch = async (e: bigint) => time.increaseTo(await f.Chronos.timestampForEpoch(e));
-  const forward = async (contract: BaseContract, fn: string, args: unknown[] = []) =>
-    f.Hub.forwardCall(await contract.getAddress(), contract.interface.encodeFunctionData(fn, args));
-  const vault = async () => f.Vault.getAddress();
-  const balanceOf = async (who: string | BaseContract) =>
-    f.Token.balanceOf(typeof who === 'string' ? who : await who.getAddress());
-
-  /** A conviction position of `amount` TRAC at `tier` on `identityId`, held by `staker`; returns its token id. */
-  const delegate = async (staker: SignerWithAddress, identityId: bigint, amount: bigint, tier = 0n) => {
-    await f.Token.mint(staker.address, amount);
-    await f.Token.connect(staker).approve(await f.StakingV10.getAddress(), amount);
-    await f.StakingNFT.connect(staker).createConviction(identityId, amount, tier);
-    return f.StakingNFT.nextTokenId();
-  };
-
-  /** A Core Node with an operator fee of `feeBps`, its operational key staking `stake` at tier 0, which puts it in the sharding table. */
-  const createSeller = async (stake: bigint, feeBps: bigint): Promise<Seller> => {
-    const operational = f.accounts[nextAccount++];
-    const admin = f.accounts[nextAccount++];
-    const label = `query/inference seller ${nextAccount}`;
-    const receipt = await (
-      await f.Profile.connect(operational).createProfile(
-        admin.address,
-        [],
-        label,
-        hre.ethers.keccak256(hre.ethers.toUtf8Bytes(label)),
-        feeBps,
-      )
-    ).wait();
-    const identityId = BigInt(receipt!.logs[0].topics[1]);
-    const tokenId = await delegate(operational, identityId, stake);
-    return { identityId, operational, admin, feeBps, tokenId };
-  };
-
-  /** A wallet period of `epoch` for buyer `who`, one bucket of `value`: the payment moves into the vault. */
-  const walletFund = async (who: SignerWithAddress, epoch: bigint, value: bigint): Promise<string> => {
-    await f.Token.mint(who.address, value);
-    await f.Token.connect(who).approve(await f.SSW.getAddress(), value);
-    await f.SSW.connect(who).fundFromWallet(
-      walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
-    );
-    return subscriptionIdOf(who.address, epoch);
-  };
-
-  /** A receipt batch from `by` claiming `amount` of the period's bucket. */
-  const claimReceipts = async (by: Seller, subscriptionId: string, amount: bigint) => {
-    const { items } = signedItems({
-      domain,
-      wallet: key,
-      subscriptionId,
-      bucketId: (await f.CSS.getBucket(subscriptionId, 0n)).bucketId,
-      seller: by.identityId,
-      count: 1,
-      units: amount / UNIT_ASK,
-      ask: UNIT_ASK,
-      issuedAt: await latest(),
-    });
-    await f.QS.connect(by.operational).submitReceiptBatch([{ subscriptionId, bucketIndex: 0n, items }]);
-  };
-
-  /**
-   * Proofs in `epoch` as RandomSampling leaves them: `score` for the node and
-   * in the all-nodes total, and a score per stake over the node's effective
-   * stake, so its positions' scores add up to the node's.
-   */
-  const scoreEpoch = async (epoch: bigint, node: Seller, score: bigint) => {
-    await f.RSS.addToNodeEpochScore(epoch, node.identityId, score);
-    await f.RSS.addToAllNodesEpochScore(epoch, score);
-    const effective = await f.Vault.getNodeEffectiveStake(node.identityId);
-    await f.RSS.setNodeEpochScorePerStake(epoch, node.identityId, (score * SCALE18) / effective);
-  };
-
-  /** Into `epoch + 1` past the batch deadline of `epoch`'s periods: score `sellers` there and finalize their claims on `periods`. */
-  const finalizeIn = async (epoch: bigint, periods: string[], sellers: Array<[Seller, bigint]>) => {
-    const deadline = (await f.Chronos.timestampForEpoch(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
-    if ((await latest()) <= deadline) await time.increaseTo(deadline + 1n);
-    for (const [s, score] of sellers) await scoreEpoch(epoch + 1n, s, score);
-    await f.QS.finalizeClaims(
-      periods.flatMap((p) => sellers.map(([s]) => ({ subscriptionId: p, bucketIndex: 0n, seller: s.identityId }))),
-    );
-  };
-
-  /** The epoch's publishing pool, backed by TRAC in the vault as publishing leaves it. */
-  const publishingPool = async (epoch: bigint, amount: bigint) => {
-    await f.EpochStorage.addTokensToEpochRange(1, epoch, epoch, amount);
-    await f.Token.mint(await vault(), amount);
-  };
-
-  /** What StakingV10 splits for `node` in a closed `epoch`: the gross, the operator fee and the delegators' net. */
-  const split = async (node: Seller, epoch: bigint) => {
-    const nodeScore = await f.RSS.getNodeEpochScore(epoch, node.identityId);
-    const allScore = await f.RSS.getAllNodesEpochScore(epoch);
-    const publishing = allScore === 0n ? 0n : ((await f.EpochStorage.getEpochPool(1, epoch)) * nodeScore) / allScore;
-    const queryInference = await f.QS.queryInferenceGross(epoch, node.identityId);
-    const gross = publishing + queryInference;
-    const fee = (gross * node.feeBps) / BPS;
-    return { nodeScore, publishing, queryInference, gross, fee, net: gross - fee };
-  };
-
-  /** A position's score in `epoch` when it was not settled there: its effective stake times the node's score per stake. */
-  const positionScore = async (tokenId: bigint, node: Seller, epoch: bigint) => {
-    const p = await f.Vault.getPosition(tokenId);
-    const effective = (p.raw * p.multiplier18) / SCALE18;
-    return (effective * (await f.RSS.getEpochLastScorePerStake(node.identityId, epoch))) / SCALE18;
-  };
-
-  /** Claim `tokenId` through the wrapper as `owner`; returns the TRAC it compounded. */
-  const claim = async (owner: SignerWithAddress, tokenId: bigint) => {
-    const before = (await f.Vault.getPosition(tokenId)).raw;
-    await f.StakingNFT.connect(owner).claim(tokenId);
-    return (await f.Vault.getPosition(tokenId)).raw - before;
-  };
-
-  /** What the vault owes: every position's raw stake, and every node's operator-fee balance and queued withdrawal. */
-  const owed = async (nodes: Seller[]) => {
-    let total = await f.Vault.getTotalStakeV10();
-    for (const n of nodes) {
-      total += await f.Vault.getOperatorFeeBalance(n.identityId);
-      total += await f.Vault.getOperatorFeeWithdrawalRequestAmount(n.identityId);
-    }
-    return total;
-  };
+  const {
+    latest,
+    epochNow,
+    toEpoch,
+    forward,
+    vault,
+    balanceOf,
+    delegate,
+    createSeller,
+    walletFund,
+    claimReceipts,
+    scoreEpoch,
+    finalizeIn,
+    publishingPool,
+    split,
+    positionScore,
+    claim,
+    owed,
+  } = rewardsHelpers(ctx);
 
   // -------------------------------------------------------------------------
 
@@ -846,221 +690,5 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     for (const c of [f.SSW, f.SS, f.QS, f.QIS, f.StakingV10, f.Ledger, f.StakingNFT, f.NFT]) {
       expect(await balanceOf(c), await c.getAddress()).to.equal(0n);
     }
-  });
-
-  // -------------------------------------------------------------------------
-  // A withdrawal mid-epoch: the epoch in progress, claimed once it has ended
-  // -------------------------------------------------------------------------
-
-  describe('a withdrawal leaves the epoch in progress claimable', () => {
-    /**
-     * Value for the nodes of `values` in the epoch after `a`: one wallet
-     * period of `a`, whose receipts each node claims and finalizes there at
-     * its score, and a publishing pool of `pool` there. Ends inside that
-     * epoch, which it returns.
-     */
-    const valueIn = async (a: bigint, values: Array<[Seller, bigint, bigint]>, pool: bigint) => {
-      const p = await walletFund(f.accounts[20], a, 100n * TRAC);
-      for (const [s, value] of values) await claimReceipts(s, p, value);
-      await finalizeIn(
-        a,
-        [p],
-        values.map(([s, , score]) => [s, score] as [Seller, bigint]),
-      );
-      await publishingPool(a + 1n, pool);
-      return a + 1n;
-    };
-
-    const claimWithdrawn = async (tokenId: bigint, to: SignerWithAddress) => {
-      const before = await balanceOf(to.address);
-      await f.StakingV10.connect(f.accounts[25]).claimWithdrawnEpoch(tokenId);
-      return (await balanceOf(to.address)) - before;
-    };
-
-    it("pays a node's only position, withdrawn mid-epoch, its share of both pools once the epoch has ended, and once only", async () => {
-      const a = await epochNow();
-      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
-      const slack = async () => (await balanceOf(await vault())) - (await owed([n1]));
-      const start = await slack();
-      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
-      const score = await positionScore(n1.tokenId, n1, e);
-      expect(score).to.be.greaterThan(0n);
-
-      // The withdrawal pays the stake and every ended epoch now.
-      const raw = (await f.Vault.getPosition(n1.tokenId)).raw;
-      await expect(f.StakingNFT.connect(n1.operational).withdraw(n1.tokenId)).to.changeTokenBalances(
-        f.Token,
-        [n1.operational.address],
-        [raw],
-      );
-      // The epoch in progress is claimed once it has ended, not before.
-      await expect(f.StakingV10.claimWithdrawnEpoch(n1.tokenId))
-        .to.be.revertedWithCustomError(f.StakingV10, 'WithdrawnEpochInProgress')
-        .withArgs(n1.tokenId, e);
-      await toEpoch(e + 1n);
-      const paid = await claimWithdrawn(n1.tokenId, n1.operational);
-      const s = await split(n1, e);
-      expect([s.publishing, s.queryInference]).to.deep.equal([1_000n * TRAC, 100n * TRAC]);
-      expect(paid).to.equal((score * s.net) / s.nodeScore);
-      expect(paid).to.be.greaterThan(0n);
-      await expect(f.StakingV10.claimWithdrawnEpoch(n1.tokenId))
-        .to.be.revertedWithCustomError(f.StakingV10, 'NoWithdrawnEpoch')
-        .withArgs(n1.tokenId);
-
-      // The operator takes its fee; of both pools the vault keeps only the floors of the split.
-      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s.fee);
-      await f.StakingV10.connect(n1.admin).requestOperatorFeeWithdrawal(n1.identityId, s.fee);
-      await time.increase(3_600n);
-      await f.StakingV10.connect(n1.admin).finalizeOperatorFeeWithdrawal(n1.identityId);
-      expect(await owed([n1])).to.equal(0n);
-      const left = (await slack()) - start;
-      expect(left >= 0n && left < 10n ** 9n, `left ${left}`).to.equal(true);
-    });
-
-    it('with no proof after the withdrawal, pays exactly what staying to the end of the epoch and claiming then would have, in both pools', async () => {
-      const a = await epochNow();
-      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
-      const d1 = f.accounts[10];
-      const t1 = await delegate(d1, n1.identityId, 300_000n * TRAC);
-      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
-      // Every ended epoch claimed, so a claim after e reads e alone.
-      await claim(d1, t1);
-      const snapshot = await takeSnapshot();
-
-      await toEpoch(e + 1n);
-      const stayed = await claim(d1, t1);
-      const s = await split(n1, e);
-      expect(s.publishing > 0n && s.queryInference > 0n).to.equal(true);
-      expect(stayed).to.be.greaterThan(0n);
-
-      await snapshot.restore();
-      await f.StakingNFT.connect(d1).withdraw(t1);
-      await toEpoch(e + 1n);
-      expect(await claimWithdrawn(t1, d1)).to.equal(stayed);
-    });
-
-    it('pays the carries of the epoch too: the score on a node the position left by a redelegation earlier in it', async () => {
-      const a = await epochNow();
-      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
-      const n2 = await createSeller(900_000n * TRAC, 500n);
-      const d1 = f.accounts[10];
-      const t1 = await delegate(d1, n1.identityId, 300_000n * TRAC);
-      const e = await valueIn(
-        a,
-        [
-          [n1, 30n * TRAC, 300n * TRAC],
-          [n2, 20n * TRAC, 200n * TRAC],
-        ],
-        1_000n * TRAC,
-      );
-      await claim(d1, t1);
-      // Mid-epoch the position moves to n2, which then proves again.
-      await f.StakingNFT.connect(d1).redelegate(t1, n2.identityId);
-      const carries = await f.Vault.getRewardCarries(t1);
-      expect(carries.map((c) => [c.identityId, c.epoch])).to.deep.equal([[n1.identityId, e]]);
-      const index = await f.RSS.getEpochLastScorePerStake(n2.identityId, e);
-      const effective = await f.Vault.getNodeEffectiveStake(n2.identityId);
-      await f.RSS.setNodeEpochScorePerStake(e, n2.identityId, 2n * index);
-      await f.RSS.addToNodeEpochScore(e, n2.identityId, (effective * index) / SCALE18);
-      await f.RSS.addToAllNodesEpochScore(e, (effective * index) / SCALE18);
-      const snapshot = await takeSnapshot();
-
-      await toEpoch(e + 1n);
-      const stayed = await claim(d1, t1);
-
-      await snapshot.restore();
-      await f.StakingNFT.connect(d1).withdraw(t1);
-      await toEpoch(e + 1n);
-      const paid = await claimWithdrawn(t1, d1);
-      expect(paid).to.equal(stayed);
-      // Its share on each node: n1 through the carry, n2 as the position.
-      const key = hre.ethers.toBeHex(t1, 32);
-      const [s1, s2] = [await split(n1, e), await split(n2, e)];
-      const onN1 = ((await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, key)) * s1.net) / s1.nodeScore;
-      const onN2 = ((await f.RSS.getEpochNodeDelegatorScore(e, n2.identityId, key)) * s2.net) / s2.nodeScore;
-      expect([onN1 > 0n, onN2 > 0n]).to.deep.equal([true, true]);
-      expect(paid).to.equal(onN1 + onN2);
-    });
-
-    it('pays the carry of a relock earlier in the epoch too, which moved the position to a new token', async () => {
-      const a = await epochNow();
-      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
-      const d1 = f.accounts[10];
-      const t1 = await delegate(d1, n1.identityId, 300_000n * TRAC);
-      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
-      await claim(d1, t1);
-      // Mid-epoch the position relocks to the rest state, under a new token,
-      // and the node then proves again.
-      await f.StakingNFT.connect(d1).relock(t1, 0n);
-      const t2 = await f.StakingNFT.nextTokenId();
-      const [oldKey, newKey] = [hre.ethers.toBeHex(t1, 32), hre.ethers.toBeHex(t2, 32)];
-      const carries = await f.Vault.getRewardCarries(t2);
-      expect(carries.map((c) => [c.identityId, c.epoch, c.delegatorKey])).to.deep.equal([[n1.identityId, e, oldKey]]);
-      const index = await f.RSS.getEpochLastScorePerStake(n1.identityId, e);
-      const effective = await f.Vault.getNodeEffectiveStake(n1.identityId);
-      await f.RSS.setNodeEpochScorePerStake(e, n1.identityId, 2n * index);
-      await f.RSS.addToNodeEpochScore(e, n1.identityId, (effective * index) / SCALE18);
-      await f.RSS.addToAllNodesEpochScore(e, (effective * index) / SCALE18);
-      const snapshot = await takeSnapshot();
-
-      await toEpoch(e + 1n);
-      const stayed = await claim(d1, t2);
-
-      await snapshot.restore();
-      await f.StakingNFT.connect(d1).withdraw(t2);
-      await toEpoch(e + 1n);
-      const paid = await claimWithdrawn(t2, d1);
-      expect(paid).to.equal(stayed);
-      // Both keys paid on the node: the old token's score through the carry, the new one's as the position.
-      const s = await split(n1, e);
-      const scores = [
-        await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, oldKey),
-        await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, newKey),
-      ];
-      expect(scores.map((x) => x > 0n)).to.deep.equal([true, true]);
-      expect(paid).to.equal((scores[0] * s.net) / s.nodeScore + (scores[1] * s.net) / s.nodeScore);
-    });
-
-    it("leaves the node's other positions as they were: each claims what it would have", async () => {
-      const a = await epochNow();
-      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
-      const [d1, d2] = [f.accounts[10], f.accounts[11]];
-      const t1 = await delegate(d1, n1.identityId, 300_000n * TRAC);
-      const t2 = await delegate(d2, n1.identityId, 120_000n * TRAC, TIER_12);
-      const e = await valueIn(a, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
-      for (const [owner, tokenId] of [
-        [d1, t1],
-        [d2, t2],
-        [n1.operational, n1.tokenId],
-      ] as Array<[SignerWithAddress, bigint]>) {
-        await claim(owner, tokenId);
-      }
-      const snapshot = await takeSnapshot();
-
-      await toEpoch(e + 1n);
-      const stayed = [await claim(d1, t1), await claim(d2, t2), await claim(n1.operational, n1.tokenId)];
-      const fee = await f.Vault.getOperatorFeeBalance(n1.identityId);
-
-      await snapshot.restore();
-      await f.StakingNFT.connect(d1).withdraw(t1);
-      await toEpoch(e + 1n);
-      const left = [await claimWithdrawn(t1, d1), await claim(d2, t2), await claim(n1.operational, n1.tokenId)];
-      expect(left).to.deep.equal(stayed);
-      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(fee);
-    });
-
-    it('records nothing for a position with no score in the epoch in progress', async () => {
-      const a = await epochNow();
-      const n1 = await createSeller(1_250_000n * TRAC, 1_000n);
-      const d1 = f.accounts[10];
-      const t1 = await delegate(d1, n1.identityId, 300_000n * TRAC);
-      // No proof on the node yet in the epoch it withdraws in.
-      await toEpoch(a + 1n);
-      await f.StakingNFT.connect(d1).withdraw(t1);
-      await toEpoch(a + 2n);
-      await expect(f.StakingV10.claimWithdrawnEpoch(t1))
-        .to.be.revertedWithCustomError(f.StakingV10, 'NoWithdrawnEpoch')
-        .withArgs(t1);
-    });
   });
 });

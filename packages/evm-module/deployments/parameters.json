@@ -35,11 +35,17 @@
             "maxBucketsPerPeriod": "16"
         },
         "QueryInferenceStorage": {
-            "receiptGraceSeconds": "3600",
+            "latestReceiptGraceSeconds": {
+                "setter": "setReceiptGraceSeconds",
+                "setterArgs": ["3600"]
+            },
             "maxItemsPerBatch": "256",
             "maxGroupsPerBatch": "32",
             "maxCloseStepsPerClaim": "32",
-            "lambdaBps": "5000"
+            "latestLambdaBps": {
+                "setter": "setLambdaBps",
+                "setterArgs": ["5000"]
+            }
         }
     },
     "devnet": {
@@ -122,11 +128,17 @@
             "maxBucketsPerPeriod": "16"
         },
         "QueryInferenceStorage": {
-            "receiptGraceSeconds": "3600",
+            "latestReceiptGraceSeconds": {
+                "setter": "setReceiptGraceSeconds",
+                "setterArgs": ["3600"]
+            },
             "maxItemsPerBatch": "256",
             "maxGroupsPerBatch": "32",
             "maxCloseStepsPerClaim": "32",
-            "lambdaBps": "5000"
+            "latestLambdaBps": {
+                "setter": "setLambdaBps",
+                "setterArgs": ["5000"]
+            }
         }
     },
     "mainnet": {
