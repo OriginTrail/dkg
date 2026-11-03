@@ -104,6 +104,17 @@
   {
     "inputs": [
       {
+        "internalType": "string",
+        "name": "reader",
+        "type": "string"
+      }
+    ],
+    "name": "PoolNotWired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint256",
         "name": "fromEpoch",
         "type": "uint256"

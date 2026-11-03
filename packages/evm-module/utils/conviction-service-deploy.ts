@@ -2,7 +2,8 @@ import { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 // Shared by the deploy steps of Conviction Account service spending
 // (OT-RFC-27): 052d (ServiceSubscriptions) reads the PublishingConviction
-// build a run leaves.
+// build a run leaves, and 052e (QueryInferenceStorage) the StakingV10 and
+// StakingKPI builds a run keeps.
 
 /** Whether a `major.minor.patch` version is at least `minimum`. */
 export function versionAtLeast(version: string, minimum: [number, number, number]): boolean {
@@ -12,6 +13,22 @@ export function versionAtLeast(version: string, minimum: [number, number, number
     if (v !== minimum[i]) return v > minimum[i];
   }
   return true;
+}
+
+/**
+ * The address and on-chain version of `name` when this run reuses the
+ * deployment the deployments file records (`deployed: true`), and undefined
+ * when this run deploys it from this repository, at its current version: the
+ * decision `hre.helpers.deploy` takes, known before `name`'s own step runs.
+ */
+export async function reusedDeployment(
+  hre: HardhatRuntimeEnvironment,
+  name: string,
+): Promise<{ address: string; version: string } | undefined> {
+  if (!hre.helpers.isDeployed(name)) return undefined;
+  const address = hre.helpers.contractDeployments.contracts[name].evmAddress;
+  const contract = await hre.ethers.getContractAt(name, address);
+  return { address, version: await contract.version() };
 }
 
 /**

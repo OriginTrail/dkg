@@ -339,7 +339,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
     /// @notice The query/inference pool's storage, for its activation epoch:
     ///         the one the settlement the Hub holds closes and reads. 0 where
-    ///         the Hub holds no settlement.
+    ///         the Hub holds no settlement. `QueryInferenceStorage` activates
+    ///         only once this names it, so no epoch from activation on is
+    ///         split without the pool.
     function queryInferenceStorage() public view returns (QueryInferenceStorage) {
         QueryInferenceSettlement settlement = queryInferenceSettlement();
         if (address(settlement) == address(0)) return QueryInferenceStorage(address(0));

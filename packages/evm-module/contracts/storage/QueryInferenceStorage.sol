@@ -59,7 +59,9 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * Activation: `activationEpoch` is the first epoch whose rewards include this
  * pool, and the first in which periods can be funded from a wallet. It is set
  * once, to the current epoch or a later one, never to an epoch that has
- * already ended. Until it is set and reached, the logic contracts refuse every
+ * already ended, and only once the Hub's `QueryInferenceSettlement` and
+ * `StakingV10` both read this storage, so every claim from activation on pays
+ * the pool. Until it is set and reached, the logic contracts refuse every
  * wallet funding and top-up, every receipt batch and every finalization, so no
  * epoch that may already have been claimed changes. Epochs close from it on,
  * in order.
@@ -147,6 +149,14 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     error InvalidParameter(string name);
     error ActivationEpochAlreadySet(uint40 current);
+    /// @notice The pool cannot be activated yet: `reader`, the Hub's
+    ///         `QueryInferenceSettlement` or its `StakingV10`, is missing or
+    ///         does not read this storage. Every epoch from activation on pays
+    ///         the pool through `StakingV10`'s claims, so both come first: a
+    ///         `StakingV10` that does not read the pool, as before 10.1.0,
+    ///         splits each epoch without it, and that share stays in the vault
+    ///         for good.
+    error PoolNotWired(string reader);
     /// @notice `epoch` is closed: its inputs are frozen and take no booking.
     error EpochClosed(uint256 epoch, uint256 closedThrough);
     /// @notice The λ scheduled from `fromEpoch` is in force, but an epoch
@@ -276,11 +286,18 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
      *         one, never to an epoch that has already ended: no epoch at or
      *         after it can have been claimed. `closedThrough` starts at the
      *         epoch before it.
+     * @dev    Refused (`PoolNotWired`) until every contract that pays the pool
+     *         reads this storage: the Hub holds a `QueryInferenceSettlement`
+     *         over it, and a `StakingV10` whose `queryInferenceStorage()`,
+     *         which 10.1.0 added, names it. A `StakingV10` without that view,
+     *         such as 10.0.4, or one that reverts, is not ready.
      */
     function setActivationEpoch(uint40 epoch) external onlyHub {
         uint40 current = activationEpoch;
         if (current != 0) revert ActivationEpochAlreadySet(current);
         if (epoch == 0 || epoch < _chronos().getCurrentEpoch()) revert InvalidParameter("activationEpoch");
+        if (!_readsThisPool("QueryInferenceSettlement")) revert PoolNotWired("QueryInferenceSettlement");
+        if (!_readsThisPool("StakingV10")) revert PoolNotWired("StakingV10");
         activationEpoch = epoch;
         closedThrough = epoch - 1;
         emit ActivationEpochSet(epoch);
@@ -585,5 +602,18 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     ///      due epoch's other half for finalization.
     function _maxReceiptGrace(Chronos chronos) internal view returns (uint256) {
         return chronos.epochLength() / 2;
+    }
+
+    /// @dev Whether the contract the Hub holds as `name` reads this storage:
+    ///      its `queryInferenceStorage()` names it. A name the Hub does not
+    ///      hold, a contract without the view, and one that reverts or names
+    ///      anything else, do not.
+    function _readsThisPool(string memory name) internal view returns (bool) {
+        if (!hub.isContract(name)) return false;
+        // solhint-disable-next-line avoid-low-level-calls
+        (bool ok, bytes memory answer) = hub.getContractAddress(name).staticcall(
+            abi.encodeWithSignature("queryInferenceStorage()")
+        );
+        return ok && answer.length >= 32 && abi.decode(answer, (uint256)) == uint256(uint160(address(this)));
     }
 }

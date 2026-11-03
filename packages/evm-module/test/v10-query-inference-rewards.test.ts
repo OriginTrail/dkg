@@ -83,6 +83,7 @@ async function deployFixture() {
     'ServiceSubscriptions',
     'QueryInferenceSettlement',
     'StakingKPI',
+    'QueryInferenceActivation',
   ]);
   const accounts = await hre.ethers.getSigners();
   const Hub = await hre.ethers.getContract<Hub>('Hub');
@@ -554,6 +555,31 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const paid = await claim(d1, t1);
     expect(paid).to.equal((score * s.net) / s.nodeScore);
     expect(await fresh.closedThrough()).to.equal(0n);
+  });
+
+  it('the pool activates only once StakingV10 reads it: refused under a StakingV10 without that view, as 10.0.4 is, accepted under 10.1.0', async () => {
+    const fresh = (await (
+      await hre.ethers.getContractFactory('QueryInferenceStorage')
+    ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceStorage;
+    await fresh.waitForDeployment();
+    await f.Hub.setContractAddress('QueryInferenceStorage', await fresh.getAddress());
+    await forward(fresh, 'initialize');
+    await forward(f.QS, 'initialize');
+    const now = await epochNow();
+    const staking = await f.StakingV10.getAddress();
+    expect(await f.StakingV10.queryInferenceStorage()).to.equal(await fresh.getAddress());
+
+    // A StakingV10 with no queryInferenceStorage(), as 10.0.4: it would split
+    // every epoch from activation on without the pool. A Chronos stands in.
+    const epLen = await f.Chronos.epochLength();
+    const noView = await (await (await hre.ethers.getContractFactory('Chronos')).deploy(1n, epLen)).getAddress();
+    await f.Hub.setContractAddress('StakingV10', noView);
+    await expect(forward(fresh, 'setActivationEpoch', [now]))
+      .to.be.revertedWithCustomError(fresh, 'PoolNotWired')
+      .withArgs('StakingV10');
+    await f.Hub.setContractAddress('StakingV10', staking);
+    await forward(fresh, 'setActivationEpoch', [now]);
+    expect(await fresh.activationEpoch()).to.equal(now);
   });
 
   it('a settlement replaced in the Hub serves claims, withdrawals and StakingKPI with neither StakingV10 nor StakingKPI re-initialized', async () => {

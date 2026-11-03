@@ -188,6 +188,12 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     await forward(fresh, 'initialize');
     await forward(SS, 'initialize');
     await forward(SSW, 'initialize');
+    // The settlement too, which the activation needs reading this storage.
+    const settlement = await hre.ethers.getContractAt(
+      'QueryInferenceSettlement',
+      await HubContract.getContractAddress('QueryInferenceSettlement'),
+    );
+    await forward(settlement, 'initialize');
     QIS = fresh;
   };
 

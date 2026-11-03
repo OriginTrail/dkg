@@ -7,7 +7,8 @@
 //     forwardCall, or the Hub owner), and neither admits the other's callers;
 //   - the parameters: defaults, bounds (a receipt grace of at most half an
 //     epoch, the default included), the pause, and an activation epoch set
-//     once and never to an ended epoch;
+//     once, never to an ended epoch, and only once the Hub's settlement and
+//     StakingV10 read this storage;
 //   - the λ schedule: a change applies from the next epoch, at once while no
 //     epoch from activation on has started, and a scheduled value is folded in
 //     only once every epoch before it is closed;
@@ -54,6 +55,13 @@ async function deployFixture(): Promise<Fixture> {
   // A Hub-registered contract stands in for the logic contracts.
   await Hub.setContractAddress('QueryInferenceLogicStandIn', accounts[1].address);
   await Hub.forwardCall(await QIS.getAddress(), QIS.interface.encodeFunctionData('initialize'));
+  // The settlement and StakingV10 the activation needs reading this storage.
+  const Reader = await hre.ethers.getContractFactory('MockQueryInferenceReader');
+  for (const name of ['QueryInferenceSettlement', 'StakingV10']) {
+    const reader = await Reader.deploy(await QIS.getAddress());
+    await reader.waitForDeployment();
+    await Hub.setContractAddress(name, await reader.getAddress());
+  }
 
   return { Hub, Chronos, QIS, owner: accounts[0], logic: accounts[1], stranger: accounts[2] };
 }
@@ -243,6 +251,37 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.activationEpoch()).to.equal(now);
       expect(await QIS.closedThrough()).to.equal(now - 1n);
       expect(await QIS.fundingState()).to.deep.equal([now, false]);
+    });
+
+    it('refuses until the Hub holds a settlement over this storage and a StakingV10 that reads it, as 10.0.4 does not', async () => {
+      const now = await currentEpoch();
+      const settlement = await HubContract.getContractAddress('QueryInferenceSettlement');
+      const staking = await HubContract.getContractAddress('StakingV10');
+      const Reader = await hre.ethers.getContractFactory('MockQueryInferenceReader');
+      const elsewhere = async () => (await Reader.deploy(stranger.address)).getAddress();
+      // A contract with no queryInferenceStorage(), as StakingV10 10.0.4 has none.
+      const noView = await (await (await hre.ethers.getContractFactory('Chronos')).deploy(1n, epLen)).getAddress();
+      const refused = async (reason: string) =>
+        expect(activateAt(now)).to.be.revertedWithCustomError(QIS, 'PoolNotWired').withArgs(reason);
+
+      // No settlement in the Hub, then one over another storage.
+      await HubContract.removeContractByName('QueryInferenceSettlement');
+      await refused('QueryInferenceSettlement');
+      await HubContract.setContractAddress('QueryInferenceSettlement', await elsewhere());
+      await refused('QueryInferenceSettlement');
+      await HubContract.setContractAddress('QueryInferenceSettlement', settlement);
+
+      // No StakingV10; one without the view; one that reads another storage.
+      await HubContract.removeContractByName('StakingV10');
+      await refused('StakingV10');
+      await HubContract.setContractAddress('StakingV10', noView);
+      await refused('StakingV10');
+      await HubContract.setContractAddress('StakingV10', await elsewhere());
+      await refused('StakingV10');
+      expect(await QIS.activationEpoch()).to.equal(0n);
+
+      await HubContract.setContractAddress('StakingV10', staking);
+      await expect(activateAt(now)).to.emit(QIS, 'ActivationEpochSet').withArgs(now);
     });
 
     it('accepts a later epoch, and is set once: neither an earlier nor a later epoch replaces it', async () => {

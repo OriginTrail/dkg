@@ -23,7 +23,12 @@ import {
 import { ACCOUNT_STACK_TAGS, TRAC, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 
 async function deployFixture() {
-  await hre.deployments.fixture([...ACCOUNT_STACK_TAGS, 'ServiceSubscriptions', 'QueryInferenceSettlement']);
+  await hre.deployments.fixture([
+    ...ACCOUNT_STACK_TAGS,
+    'ServiceSubscriptions',
+    'QueryInferenceSettlement',
+    'QueryInferenceActivation',
+  ]);
   const Hub = await hre.ethers.getContract<Hub>('Hub');
   const at = async <T>(name: string) => (await hre.ethers.getContractAt(name, await Hub.getContractAddress(name))) as T;
   return {

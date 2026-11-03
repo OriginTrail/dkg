@@ -7,13 +7,17 @@
 //     ServiceSubscriptions and ServiceSubscriptionsWallet, and refuses to run
 //     against PublishingConviction 10.1.x, which would count an account
 //     funding twice;
-//   - deploy/active/052e_deploy_query_inference_storage.ts, which sets the
-//     activation epoch to the deployment epoch on development only;
+//   - deploy/active/052e_deploy_query_inference_storage.ts, which refuses to
+//     run against a StakingV10 below 10.1.0, which would split every epoch
+//     without the pool, and warns loudly against such a StakingKPI;
 //   - deploy/active/052f_deploy_query_inference_settlement.ts, which deploys
 //     QueryInferenceSettlement everywhere but on mainnet;
 //   - deploy/active/998_initialize_contracts.ts, which sends
 //     Hub.setAndReinitializeContracts only when the deployer may, and
-//     otherwise prints the transaction for the Hub owner.
+//     otherwise prints the transaction for the Hub owner;
+//   - deploy/active/998b_activate_query_inference.ts, which sets the
+//     activation epoch to the deployment epoch on development only, once
+//     every contract is registered and initialized.
 // These paths run only on live networks, so each script is exercised here in
 // isolation against a mocked HRE, as deploy-998a-registration-deposit.test.ts
 // does: no chain, no real deploy.
@@ -29,6 +33,7 @@ import deployServiceSubscriptions from '../deploy/active/052d_deploy_service_sub
 import deployQueryInferenceStorage from '../deploy/active/052e_deploy_query_inference_storage';
 import deployQueryInferenceSettlement from '../deploy/active/052f_deploy_query_inference_settlement';
 import initializeContracts from '../deploy/active/998_initialize_contracts';
+import activateQueryInference from '../deploy/active/998b_activate_query_inference';
 
 const abiOf = (name: string) =>
   JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'abi', `${name}.json`), 'utf-8'));
@@ -187,22 +192,103 @@ describe('@unit deploy/052d — ServiceSubscriptions and PublishingConviction 10
   });
 });
 
-describe('@unit deploy/052e — QueryInferenceStorage and its activation', () => {
-  const qisInterface = new Interface(abiOf('QueryInferenceStorage'));
+describe('@unit deploy/052e — QueryInferenceStorage, and the StakingV10 and StakingKPI that will read it', () => {
+  const STAKING_V10 = '0x1000000000000000000000000000000000000009';
+  const STAKING_KPI = '0x100000000000000000000000000000000000000a';
 
-  const qisHre = (opts: { network?: string; environment?: string; activation?: bigint; currentEpoch?: bigint } = {}) => {
+  /** A run on `network` that reuses the recorded contracts of `reused`, at those versions, and deploys the rest. */
+  const qisHre = (opts: { network?: string; environment?: string; reused?: Record<string, string> } = {}) => {
     const deployed: string[] = [];
     const updates: string[] = [];
-    const forwarded: Array<[string, string]> = [];
-    const qis = {
-      interface: qisInterface,
-      getAddress: async () => QIS,
-      activationEpoch: async () => opts.activation ?? 0n,
-    };
+    const reused = opts.reused ?? {};
+    const addressOf: Record<string, string> = { StakingV10: STAKING_V10, StakingKPI: STAKING_KPI };
     const hre = {
       network: { name: opts.network ?? 'hardhat', config: { environment: opts.environment ?? 'development' } },
       ethers: {
         getContractAt: async (name: string, address: string) => {
+          if (name in reused && address === addressOf[name]) return { version: async () => reused[name] };
+          throw new Error(`unexpected getContractAt(${name}, ${address})`);
+        },
+      },
+      helpers: {
+        isDeployed: (name: string) => name in reused,
+        deploy: async ({ newContractName }: { newContractName: string }) => {
+          deployed.push(newContractName);
+          return {};
+        },
+        updateContractParameters: async (name: string) => {
+          updates.push(name);
+        },
+        contractDeployments: {
+          contracts: Object.fromEntries(Object.keys(reused).map((name) => [name, { evmAddress: addressOf[name], deployed: true }])),
+        },
+      },
+    };
+    return { hre, deployed, updates };
+  };
+
+  it('deploys and sets the parameters when the run deploys StakingV10 and StakingKPI, or keeps 10.1.0 or later; the activation waits for 998b', async () => {
+    for (const reused of [{}, { StakingV10: '10.1.0', StakingKPI: '10.1.0' }, { StakingV10: '10.2.3', StakingKPI: '11.0.0' }]) {
+      for (const [network, environment] of [
+        ['hardhat', 'development'],
+        ['base_sepolia_v10', 'testnet'],
+      ]) {
+        const { hre, deployed, updates } = qisHre({ network, environment, reused });
+        const lines = await captured(() => deployQueryInferenceStorage(hre as never));
+        expect(deployed).to.deep.equal(['QueryInferenceStorage']);
+        expect(updates).to.deep.equal(['QueryInferenceStorage']);
+        expect(lines).to.have.length(0);
+      }
+    }
+  });
+
+  it('refuses a run that would keep a StakingV10 below 10.1.0, which splits epochs without the pool, and names the redeploy flag', async () => {
+    for (const version of ['10.0.4', '10.0.6']) {
+      const { hre, deployed } = qisHre({ network: 'base_sepolia_v10', environment: 'testnet', reused: { StakingV10: version } });
+      const error = await failureOf(() => deployQueryInferenceStorage(hre as never));
+      expect(error?.message).to.match(/needs StakingV10 10\.1\.0 or later on base_sepolia_v10/);
+      expect(error?.message).to.contain(`${version} at ${STAKING_V10}`);
+      expect(error?.message).to.match(/stays in the vault/);
+      expect(error?.message).to.match(/contracts\.StakingV10\.deployed to false/);
+      expect(deployed).to.have.length(0);
+    }
+  });
+
+  it('warns loudly when the run keeps a StakingKPI below 10.1.0, whose views leave the pool out, and deploys', async () => {
+    const { hre, deployed } = qisHre({
+      network: 'base_sepolia_v10',
+      environment: 'testnet',
+      reused: { StakingV10: '10.1.0', StakingKPI: '10.0.2' },
+    });
+    const lines = await captured(() => deployQueryInferenceStorage(hre as never));
+    expect(deployed).to.deep.equal(['QueryInferenceStorage']);
+    expect(lines.join('\n')).to.match(/WARNING.*StakingKPI 10\.0\.2.*leave the query\/inference pool out.*contracts\.StakingKPI\.deployed to false/s);
+  });
+
+  it('on a mainnet network, deploys nothing, sets nothing and reads nothing', async () => {
+    for (const network of ['base_mainnet', 'gnosis_mainnet']) {
+      const { hre, deployed, updates } = qisHre({ network, environment: 'mainnet', reused: { StakingV10: '10.0.5' } });
+      const lines = await captured(() => deployQueryInferenceStorage(hre as never));
+      expect(deployed).to.have.length(0);
+      expect(updates).to.have.length(0);
+      expect(lines.join('\n')).to.match(new RegExp(`${network}: the query/inference pool is not deployed on mainnet yet`));
+    }
+  });
+});
+
+describe('@unit deploy/998b — the activation of the query/inference pool', () => {
+  const qisInterface = new Interface(abiOf('QueryInferenceStorage'));
+
+  const activationHre = (opts: { network?: string; environment?: string; activation?: bigint; currentEpoch?: bigint; deployed?: boolean } = {}) => {
+    const forwarded: Array<[string, string]> = [];
+    const qis = { interface: qisInterface, activationEpoch: async () => opts.activation ?? 0n };
+    const contracts: Record<string, { evmAddress: string }> = { Hub: { evmAddress: HUB }, Chronos: { evmAddress: CHRONOS } };
+    if (opts.deployed !== false) contracts.QueryInferenceStorage = { evmAddress: QIS };
+    const hre = {
+      network: { name: opts.network ?? 'hardhat', config: { environment: opts.environment ?? 'development' } },
+      ethers: {
+        getContractAt: async (name: string, address: string) => {
+          if (name === 'QueryInferenceStorage' && address === QIS) return qis;
           if (name === 'Chronos' && address === CHRONOS) return { getCurrentEpoch: async () => opts.currentEpoch ?? 7n };
           if (name === 'Hub' && address === HUB) {
             return {
@@ -215,55 +301,40 @@ describe('@unit deploy/052e — QueryInferenceStorage and its activation', () =>
           throw new Error(`unexpected getContractAt(${name}, ${address})`);
         },
       },
-      helpers: {
-        deploy: async ({ newContractName }: { newContractName: string }) => {
-          deployed.push(newContractName);
-          return qis;
-        },
-        updateContractParameters: async (name: string) => {
-          updates.push(name);
-        },
-        contractDeployments: { contracts: { Hub: { evmAddress: HUB }, Chronos: { evmAddress: CHRONOS } } },
-      },
+      helpers: { contractDeployments: { contracts } },
     };
-    return { hre, deployed, updates, forwarded };
+    return { hre, forwarded };
   };
 
-  it('on development, deploys, sets the parameters, and sets the activation epoch to the deployment epoch', async () => {
+  it('on development, once every contract is registered and initialized, sets the activation epoch to the current epoch', async () => {
     for (const network of ['hardhat', 'localhost']) {
-      const { hre, deployed, updates, forwarded } = qisHre({ network, currentEpoch: 7n });
-      const lines = await captured(() => deployQueryInferenceStorage(hre as never));
-      expect(deployed).to.deep.equal(['QueryInferenceStorage']);
-      expect(updates).to.deep.equal(['QueryInferenceStorage']);
+      const { hre, forwarded } = activationHre({ network, currentEpoch: 7n });
+      const lines = await captured(() => activateQueryInference(hre as never));
       expect(forwarded).to.deep.equal([[QIS, qisInterface.encodeFunctionData('setActivationEpoch', [7n])]]);
       expect(lines.join('\n')).to.match(/activationEpoch set to the deployment epoch, 7/);
     }
+    expect(activateQueryInference.runAtTheEnd).to.equal(true);
+    expect(activateQueryInference.dependencies).to.include.members(['QueryInferenceStorage', 'QueryInferenceSettlement', 'StakingV10']);
   });
 
   it('on development, leaves an activation epoch already set as it is', async () => {
-    const { hre, deployed, forwarded } = qisHre({ activation: 3n, currentEpoch: 9n });
-    await captured(() => deployQueryInferenceStorage(hre as never));
-    expect(deployed).to.deep.equal(['QueryInferenceStorage']);
+    const { hre, forwarded } = activationHre({ activation: 3n, currentEpoch: 9n });
+    await captured(() => activateQueryInference(hre as never));
     expect(forwarded).to.have.length(0);
   });
 
-  it('on a testnet, deploys and sets the parameters but leaves the activation epoch unset, and says how to set it', async () => {
-    const { hre, deployed, updates, forwarded } = qisHre({ network: 'base_sepolia_v10', environment: 'testnet' });
-    const lines = await captured(() => deployQueryInferenceStorage(hre as never));
-    expect(deployed).to.deep.equal(['QueryInferenceStorage']);
-    expect(updates).to.deep.equal(['QueryInferenceStorage']);
+  it('on a testnet, leaves the activation epoch unset and says how to set it', async () => {
+    const { hre, forwarded } = activationHre({ network: 'base_sepolia_v10', environment: 'testnet' });
+    const lines = await captured(() => activateQueryInference(hre as never));
     expect(forwarded).to.have.length(0);
     expect(lines.join('\n')).to.match(/base_sepolia_v10: activationEpoch stays unset.*setActivationEpoch\(currentEpoch \+ 1\)/);
   });
 
-  it('on a mainnet network, deploys nothing and sets nothing', async () => {
-    for (const network of ['base_mainnet', 'gnosis_mainnet']) {
-      const { hre, deployed, updates, forwarded } = qisHre({ network, environment: 'mainnet' });
-      const lines = await captured(() => deployQueryInferenceStorage(hre as never));
-      expect(deployed).to.have.length(0);
-      expect(updates).to.have.length(0);
+  it('does nothing where the pool is not deployed: on mainnet, and in a run without it', async () => {
+    for (const opts of [{ network: 'base_mainnet', environment: 'mainnet' }, { deployed: false }]) {
+      const { hre, forwarded } = activationHre(opts);
+      await captured(() => activateQueryInference(hre as never));
       expect(forwarded).to.have.length(0);
-      expect(lines.join('\n')).to.match(new RegExp(`${network}: the query/inference pool is not deployed on mainnet yet`));
     }
   });
 });

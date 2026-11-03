@@ -45,7 +45,8 @@ async function deployFixture(): Promise<Fixture> {
   await hre.deployments.fixture(['Hub', 'ParametersStorage', 'Chronos', 'PublishingConvictionStorage']);
   const accounts = await hre.ethers.getSigners();
   const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { CSS, SS } = await registerServiceContracts(Hub);
+  // No staking stack here, which an activation needs, and nothing is funded.
+  const { CSS, SS } = await registerServiceContracts(Hub, { activate: false });
   return { accounts, Hub, CSS, SS };
 }
 

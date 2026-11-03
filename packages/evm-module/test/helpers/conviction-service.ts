@@ -67,7 +67,10 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
  *
  * As the development deploy does, it also sets the activation epoch to the
  * current epoch, so periods can be funded at once; `activate: false` leaves it
- * unset.
+ * unset. The pool activates only once a settlement over it is registered and
+ * the Hub's StakingV10 reads it through that settlement
+ * (`QueryInferenceStorage.setActivationEpoch`), so activating registers the
+ * settlement too, last, and needs the staking stack in the Hub.
  */
 export async function registerServiceContracts(
   hub: Hub,
@@ -79,14 +82,16 @@ export async function registerServiceContracts(
   SSW?: ServiceSubscriptionsWallet;
   QS?: QueryInferenceSettlement;
 }> {
+  const activate = opts.activate !== false;
   const QIS = await registerOne<QueryInferenceStorage>(hub, 'QueryInferenceStorage');
-  if (opts.activate !== false) await activateQueryInference(hub, QIS);
   const CSS = await registerOne<ConvictionServiceStorage>(hub, 'ConvictionServiceStorage');
   const SS = await registerOne<ServiceSubscriptions>(hub, 'ServiceSubscriptions');
   const SSW = opts.wallet ? await registerOne<ServiceSubscriptionsWallet>(hub, 'ServiceSubscriptionsWallet') : undefined;
-  const QS = opts.settlement
-    ? await registerOne<QueryInferenceSettlement>(hub, 'QueryInferenceSettlement')
-    : undefined;
+  const QS =
+    opts.settlement || activate
+      ? await registerOne<QueryInferenceSettlement>(hub, 'QueryInferenceSettlement')
+      : undefined;
+  if (activate) await activateQueryInference(hub, QIS);
   return { QIS, CSS, SS, SSW, QS };
 }
 
