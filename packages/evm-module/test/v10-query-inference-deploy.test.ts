@@ -103,7 +103,7 @@ describe('@integration The development deploy of the plan-period contracts', () 
     const forward = async (fn: string, args: unknown[]) =>
       Hub.forwardCall(await QIS.getAddress(), QIS.interface.encodeFunctionData(fn, args));
     const helpers = hre.helpers as unknown as {
-      parametersConfig: Record<string, Record<string, Record<string, string>>>;
+      parametersConfig: Record<string, Record<string, Record<string, unknown>>>;
       contractDeployments: { contracts: Record<string, { evmAddress: string }> };
     };
     const config = helpers.parametersConfig.development.QueryInferenceStorage;
@@ -130,7 +130,10 @@ describe('@integration The development deploy of the plan-period contracts', () 
       // epoch, and the configuration follows.
       await forward('setLambdaBps', [3_000n]);
       await forward('setReceiptGraceSeconds', [1_800n]);
-      Object.assign(config, { lambdaBps: '3000', receiptGraceSeconds: '1800' });
+      Object.assign(config, {
+        latestLambdaBps: { setter: 'setLambdaBps', setterArgs: ['3000'] },
+        latestReceiptGraceSeconds: { setter: 'setReceiptGraceSeconds', setterArgs: ['1800'] },
+      });
       const schedule = async () => [
         await QIS.nextLambdaBps(),
         await QIS.nextLambdaFromEpoch(),
