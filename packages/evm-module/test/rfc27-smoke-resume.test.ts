@@ -17,7 +17,7 @@ import hre from 'hardhat';
 
 import { TRAC } from './helpers/conviction-service';
 import { hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
-import { RewardsContext, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
+import { deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 import { Contracts, Stack } from '../scripts/rfc27/contracts';
 import { Fork } from '../scripts/rfc27/fork';
 import { Redactor, Report, fmt } from '../scripts/rfc27/report';
@@ -74,14 +74,13 @@ const derived = (role: string) => ethers.HDNodeWallet.fromSeed(ethers.id(`rfc27-
 /** The stack, a seller in the sharding table, an owner with ETH and no TRAC, and the clock at the start of an epoch. */
 async function deployFixture() {
   const f = await deployRewardsStack();
-  const domain = await queryInferenceDomain(f.QIS);
-  const ctx = { f, key: hardhatWallet(60), domain, nextAccount: 30 } as RewardsContext;
-  const seller = await rewardsHelpers(ctx).createSeller(100_000n * TRAC, 0n);
+  const helpers = rewardsHelpers({ f, domain: await queryInferenceDomain(f.QIS), firstAccount: 30, key: hardhatWallet(60) });
+  const seller = await helpers.createSeller(100_000n * TRAC, 0n);
   // The scripts look it up for the fork's stand-in proofs: here the scores are written directly.
   await f.Hub.setContractAddress('RandomSampling', f.accounts[49].address);
   await f.accounts[0].sendTransaction({ to: derived('owner').address, value: 10n ** 19n });
   await time.increaseTo((await f.Chronos.timestampForEpoch((await f.Chronos.getCurrentEpoch()) + 1n)) + 60n);
-  return { f, seller, helpers: rewardsHelpers({ ...ctx, nextAccount: ctx.nextAccount }), state: undefined as string | undefined };
+  return { f, seller, helpers, state: undefined as string | undefined };
 }
 
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
