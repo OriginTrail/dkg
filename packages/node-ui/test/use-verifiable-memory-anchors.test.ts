@@ -3,7 +3,14 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { useVerifiableMemoryAnchors, anchorsFromReceiptRows } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
+import {
+  useVerifiableMemoryAnchors,
+  anchorsFromReceiptRows,
+  buildDecorationTriples,
+  VIZ_ANCHOR_TYPE,
+  VIZ_PRED_ANCHORED_IN,
+  type VerifiableMemoryAnchorsResult,
+} from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -50,6 +57,32 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
     expect(body.sparql).toContain('dkg:publishedAtTx');
     expect(body.sparql).not.toContain('WorkspaceOperation');
   });
+
+  it('turns receipts (with and without a finalize time) into graph decorations', async () => {
+    const A = 'did:dkg:context-graph:cg-1/assertion/0xabc/notes';
+    vi.mocked(fetch).mockImplementation(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ result: { bindings: [
+        { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+        { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', member: 'urn:x:b' },
+      ] } }),
+    } as any));
+    let result: VerifiableMemoryAnchorsResult | null = null;
+    function Probe() {
+      result = useVerifiableMemoryAnchors('cg-1', new Set(['urn:x:a', 'urn:x:b']));
+      return null;
+    }
+    await act(async () => { root.render(React.createElement(Probe)); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+
+    const r = result as unknown as VerifiableMemoryAnchorsResult;
+    expect(r.error).toBeNull();
+    expect(r.anchors.map(a => a.publishedAt)).toEqual(['2026-10-31T10:00:00.000Z', null]);
+    const anchorNodes = r.decorationTriples.filter(t => t.object === VIZ_ANCHOR_TYPE);
+    expect(anchorNodes).toHaveLength(2);
+    expect(r.decorationTriples.filter(t => t.predicate === VIZ_PRED_ANCHORED_IN).map(t => t.subject).sort()).toEqual(['urn:x:a', 'urn:x:b']);
+  });
 });
 
 describe('anchorsFromReceiptRows', () => {
@@ -64,5 +97,36 @@ describe('anchorsFromReceiptRows', () => {
     expect(anchors).toHaveLength(2);
     expect(anchors[0]).toMatchObject({ opId: '0x9f2c7a1d', roots: ['urn:x:a', 'urn:x:b'], agents: ['did:dkg:agent:0x1'], subGraph: 'research' });
     expect(anchors[1]).toMatchObject({ opId: '0x41ab', agents: ['did:dkg:agent:0xdef'], subGraph: undefined });
+  });
+});
+
+describe('receipts without a finalize time', () => {
+  const rows = [
+    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/undated', tx: '0x1111', member: 'urn:x:a', agent: 'did:dkg:agent:0x1' },
+    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/garbled', tx: '0x2222', member: 'urn:x:b', finalizedAt: '"not a date"' },
+    { asrt: 'did:dkg:context-graph:cg-1/assertion/0xabc/dated', tx: '0x3333', member: 'urn:x:c', finalizedAt: '"2026-10-31T10:00:00Z"' },
+  ];
+
+  it('keeps the anchor with an unknown time and sorts it after dated ones', () => {
+    const anchors = anchorsFromReceiptRows(rows, 'cg-1');
+    expect(anchors.map(a => a.opId)).toEqual(['0x3333', '0x1111', '0x2222']);
+    expect(anchors.map(a => a.publishedAt)).toEqual(['2026-10-31T10:00:00.000Z', null, null]);
+  });
+
+  it('builds decorations without throwing and says the time is unknown', () => {
+    const anchors = anchorsFromReceiptRows(rows, 'cg-1');
+    const triples = buildDecorationTriples(anchors, new Set(['urn:x:a', 'urn:x:b', 'urn:x:c']));
+    const desc = (op: string) => triples.find(t => t.subject === `urn:dkg:viz:anchor:${op}` && t.predicate === 'http://schema.org/description')?.object;
+    expect(desc('0x1111')).toBe('"Published 1 KA · finalize time unknown"');
+    expect(desc('0x3333')).toBe('"Published 1 KA · 2026-10-31T10:00:00.000Z"');
+    const name = triples.find(t => t.subject === 'urn:dkg:viz:anchor:0x1111' && t.predicate === 'http://schema.org/name')?.object;
+    expect(name).toBe('"anchor 0x1111"');
+  });
+
+  it('links entities under the assertion URI, but not siblings that share a prefix', () => {
+    const A = 'did:dkg:context-graph:cg-1/assertion/0xabc/note';
+    const anchors = anchorsFromReceiptRows([{ asrt: A, tx: '0x4444', finalizedAt: '"2026-10-31T10:00:00Z"' }], 'cg-1');
+    const triples = buildDecorationTriples(anchors, new Set([`${A}/entity/1`, `${A}book/entity/1`]));
+    expect(triples.filter(t => t.predicate === VIZ_PRED_ANCHORED_IN).map(t => t.subject)).toEqual([`${A}/entity/1`]);
   });
 });

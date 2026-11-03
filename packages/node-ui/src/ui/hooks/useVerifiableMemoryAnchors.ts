@@ -56,7 +56,9 @@ export interface PublishAnchor {
   opUri: string;       // urn:dkg:share:<cg>:<opId>
   agents: string[];    // distinct peer-ids / DIDs that attested
   roots: string[];     // KA root entities included in this batch
-  publishedAt: string; // ISO timestamp
+  /** ISO timestamp of the on-chain finalize, or null when the receipt has
+   *  none (older receipts, or a finalize not yet recorded). */
+  publishedAt: string | null;
   subGraph?: string;   // sub-graph slug (from the graph URI)
 }
 
@@ -88,13 +90,13 @@ function bv(v: unknown): string | undefined {
 /** Short label for an anchor: `tx mo3e0z…` + relative time if we can derive it. */
 function anchorLabel(a: PublishAnchor): string {
   const short = a.opId.slice(0, 10);
-  try {
-    const d = new Date(a.publishedAt);
-    const hhmm = d.toISOString().slice(11, 16);
-    return `anchor ${short} · ${hhmm}UTC`;
-  } catch {
-    return `anchor ${short}`;
-  }
+  return a.publishedAt ? `anchor ${short} · ${a.publishedAt.slice(11, 16)}UTC` : `anchor ${short}`;
+}
+
+/** A receipt's finalize time as ISO, or null when missing or unparseable. */
+function isoOrNull(value: string): string | null {
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 
 /** Short label for an agent peer-id / DID. */
@@ -126,7 +128,7 @@ export function anchorsFromReceiptRows(rows: Array<Record<string, unknown>>, cgI
     if (!asrt || !tx) continue;
     let a = byAsrt.get(asrt);
     if (!a) {
-      a = { opId: tx, opUri: asrt, agents: [], roots: [], publishedAt: receiptValue(row.finalizedAt), subGraph: subGraphFromAssertionUri(asrt, cgId) };
+      a = { opId: tx, opUri: asrt, agents: [], roots: [], publishedAt: isoOrNull(receiptValue(row.finalizedAt)), subGraph: subGraphFromAssertionUri(asrt, cgId) };
       byAsrt.set(asrt, a);
     }
     const member = receiptValue(row.member);
@@ -134,10 +136,12 @@ export function anchorsFromReceiptRows(rows: Array<Record<string, unknown>>, cgI
     const agent = receiptAgent(row);
     if (agent && !a.agents.includes(agent)) a.agents.push(agent);
   }
-  return [...byAsrt.values()].sort((x, y) => y.publishedAt.localeCompare(x.publishedAt));
+  // Newest first; receipts without a finalize time go last.
+  return [...byAsrt.values()].sort((x, y) => (y.publishedAt ?? '').localeCompare(x.publishedAt ?? ''));
 }
 
-function buildDecorationTriples(
+/** Synthetic anchor / agent triples for the graph. Exported for tests. */
+export function buildDecorationTriples(
   anchors: PublishAnchor[],
   visibleEntityUris: Set<string> | null,
 ): Triple[] {
@@ -163,7 +167,7 @@ function buildDecorationTriples(
     out.push({
       subject: anchorUri,
       predicate: SCHEMA_DESC,
-      object: `"Published ${a.roots.length} KA${a.roots.length === 1 ? '' : 's'} · ${new Date(a.publishedAt).toISOString()}"`,
+      object: `"Published ${a.roots.length} KA${a.roots.length === 1 ? '' : 's'}${a.publishedAt ? ` · ${a.publishedAt}` : ' · finalize time unknown'}"`,
       subGraph: a.subGraph,
     });
 
