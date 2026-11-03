@@ -23,7 +23,8 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *
  * Architecture (the pattern of `PublishingConvictionStorage`):
  *   - This contract holds every byte of service-spending state: the opt-in
- *     switch per account, the assignments and the periods counted under
+ *     switch per account and the owner who switched it on, the assignments,
+ *     each with the owner who consented to it, and the periods counted under
  *     them, the end of each assignment a new one replaced, and the period
  *     records with their buckets, which top-ups grow. A period record names
  *     the assignment it was funded under by its nonce, so the period keeps
@@ -73,7 +74,11 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //           under (`Subscription.assignmentNonce`, beside the assignee),
     //           and a new assignment keeps the end of the one it replaces
     //           (`assignmentEnd`, slot 16), so a period keeps the assignment
-    //           it was funded under.
+    //           it was funded under. The opt-in records the owner who switched
+    //           it on (`getServiceSpending`, slot 1, where
+    //           `serviceSpendingEnabledAt` was) and an assignment the owner who
+    //           consented to it (`Assignment.owner`, beside its nonce), so
+    //           neither outlives a sale of the account.
     string private constant _VERSION = "1.2.0";
 
     uint8 internal constant _DEFAULT_MAX_BUCKETS_PER_PERIOD = 16;
@@ -88,15 +93,24 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //                          Records
     // ============================================================
 
+    /// @notice An account's opt-in to service spending. It counts only while
+    ///         the owner who switched it on holds the account.
+    struct ServiceSpending {
+        uint40 enabledAt; // when it was switched on; 0 = off
+        address owner; // the account's owner who switched it on
+    }
+
     /// @notice A buyer key's authority over one account: the most it may draw
     ///         for one period, in COST (TRAC wei drawn from the account's
-    ///         allowance after its discount), until it expires.
+    ///         allowance after its discount), until it expires. It funds only
+    ///         while the owner who consented to it holds the account.
     struct Assignment {
         uint96 maxCostPerPeriod; // the period's cost, its top-ups included
         uint40 assignedAt; // 0 = no assignment
         uint40 expiresAt;
         uint40 revokedAt; // 0 = not revoked
         uint64 nonce; // the account nonce this assignment consumed
+        address owner; // the account's owner who consented to it
     }
 
     /// @notice The two limits of an assignment. `setAssignmentCaps` writes
@@ -178,8 +192,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ///         included.
     uint8 public maxBucketsPerPeriod;
 
-    /// @notice accountId => when the owner switched service spending on; 0 = off.
-    mapping(uint256 => uint40) public serviceSpendingEnabledAt;
+    /// @dev accountId => its opt-in to service spending.
+    mapping(uint256 => ServiceSpending) internal _serviceSpending;
     /// @notice accountId => the nonce the next assignment must carry.
     mapping(uint256 => uint64) public assignmentNonce;
     /// @dev accountId => assignee => assignment.
@@ -241,9 +255,10 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //                   Mutators (onlyContracts)
     // ============================================================
 
-    /// @notice Record when service spending was switched on, or 0 for off.
-    function setServiceSpendingEnabledAt(uint256 accountId, uint40 at) external onlyContracts {
-        serviceSpendingEnabledAt[accountId] = at;
+    /// @notice Record an account's opt-in: when service spending was switched
+    ///         on and the owner who switched it on, or 0 for off.
+    function setServiceSpending(uint256 accountId, ServiceSpending calldata s) external onlyContracts {
+        _serviceSpending[accountId] = s;
     }
 
     /// @notice Return the account's current assignment nonce and advance it.
@@ -277,8 +292,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     }
 
     /// @notice Overwrite the two limits of a stored assignment and nothing
-    ///         else: `assignedAt`, `revokedAt`, `nonce`, the assignee list and
-    ///         the usage stay as they are.
+    ///         else: `assignedAt`, `revokedAt`, `nonce`, `owner`, the assignee
+    ///         list and the usage stay as they are.
     function setAssignmentCaps(
         uint256 accountId,
         address assignee,
@@ -366,6 +381,12 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //                           Views
     // ============================================================
 
+    /// @notice An account's opt-in, and the owner who made it; it counts only
+    ///         while that owner holds the account.
+    function getServiceSpending(uint256 accountId) external view returns (ServiceSpending memory) {
+        return _serviceSpending[accountId];
+    }
+
     function getAssignment(uint256 accountId, address assignee) external view returns (Assignment memory) {
         return _assignments[accountId][assignee];
     }
@@ -375,7 +396,9 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     }
 
     /// @notice True when the assignment exists, is not revoked and has not
-    ///         expired at the current block time.
+    ///         expired at the current block time. It does not read the
+    ///         account's owner: an assignment funds only while the owner who
+    ///         consented to it (`Assignment.owner`) holds the account.
     function isAssignmentActive(uint256 accountId, address assignee) external view returns (bool) {
         Assignment storage a = _assignments[accountId][assignee];
         return a.assignedAt != 0 && a.revokedAt == 0 && block.timestamp < a.expiresAt;

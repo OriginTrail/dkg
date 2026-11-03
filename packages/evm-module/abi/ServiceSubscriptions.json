@@ -37,6 +37,22 @@
         "internalType": "address",
         "name": "assignee",
         "type": "address"
+      }
+    ],
+    "name": "AssignedByFormerOwner",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
       },
       {
         "internalType": "uint40",

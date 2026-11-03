@@ -7,11 +7,11 @@
 //     forwardCall, or the Hub owner), and the two never admit each other's
 //     callers;
 //   - the parameters: defaults and bounds;
-//   - the mutators' semantics: assignment listing and usage reset, the end a
-//     replaced assignment keeps, cap updates that keep everything but the two
-//     limits, the period count, period records, each written once and never
-//     with a start of 0, and top-ups of a recorded period at its bucket
-//     indexes;
+//   - the mutators' semantics: the opt-in and the owner who made it,
+//     assignment listing and usage reset, the end a replaced assignment
+//     keeps, cap updates that keep everything but the two limits, the period
+//     count, period records, each written once and never with a start of 0,
+//     and top-ups of a recorded period at its bucket indexes;
 //   - the compiler's storage layout against the documented one: the mapping
 //     slots of 1.1.0, with the label slots held empty, and the ends of
 //     replaced assignments last;
@@ -55,12 +55,15 @@ async function deployFixture(): Promise<Fixture> {
   return { accounts, Hub, CSS, owner: accounts[0], logic: accounts[1], stranger: accounts[2] };
 }
 
-const assignmentTerms = (overrides: Record<string, bigint> = {}) => ({
+const ACCOUNT_OWNER = ethers.getAddress('0x00000000000000000000000000000000000000c3');
+
+const assignmentTerms = (overrides: Record<string, bigint | string> = {}) => ({
   maxCostPerPeriod: 25n * TRAC,
   assignedAt: 1_000n,
   expiresAt: 4_000_000_000n,
   revokedAt: 0n,
   nonce: 0n,
+  owner: ACCOUNT_OWNER,
   ...overrides,
 });
 
@@ -228,7 +231,7 @@ describe('@unit ConvictionServiceStorage', () => {
     // Each call takes a salt so the two passing callers write distinct records.
     const assignee = ASSIGNEE;
     const mutators: Array<[string, (c: ConvictionServiceStorage, salt: bigint) => Promise<unknown>]> = [
-      ['setServiceSpendingEnabledAt', (c, s) => c.setServiceSpendingEnabledAt(s, 1_000n)],
+      ['setServiceSpending', (c, s) => c.setServiceSpending(s, { enabledAt: 1_000n, owner: ACCOUNT_OWNER })],
       ['consumeAssignmentNonce', (c, s) => c.consumeAssignmentNonce(s)],
       ['setAssignment', (c, s) => c.setAssignment(s, assignee, assignmentTerms())],
       ['setAssignmentRevokedAt', (c, s) => c.setAssignmentRevokedAt(s, assignee, 2_000n)],
@@ -272,11 +275,13 @@ describe('@unit ConvictionServiceStorage', () => {
   });
 
   describe('opt-in and assignment nonce', () => {
-    it('setServiceSpendingEnabledAt records the switch time, and 0 switches it off', async () => {
-      await CSS.connect(logic).setServiceSpendingEnabledAt(7n, 1_234n);
-      expect(await CSS.serviceSpendingEnabledAt(7n)).to.equal(1_234n);
-      await CSS.connect(logic).setServiceSpendingEnabledAt(7n, 0n);
-      expect(await CSS.serviceSpendingEnabledAt(7n)).to.equal(0n);
+    it('setServiceSpending records the switch time and the owner who switched it, and 0 switches it off', async () => {
+      expect(plain(await CSS.getServiceSpending(7n))).to.deep.equal({ enabledAt: 0n, owner: ethers.ZeroAddress });
+      await CSS.connect(logic).setServiceSpending(7n, { enabledAt: 1_234n, owner: ACCOUNT_OWNER });
+      expect(plain(await CSS.getServiceSpending(7n))).to.deep.equal({ enabledAt: 1_234n, owner: ACCOUNT_OWNER });
+      expect((await CSS.getServiceSpending(8n)).enabledAt).to.equal(0n);
+      await CSS.connect(logic).setServiceSpending(7n, { enabledAt: 0n, owner: ethers.ZeroAddress });
+      expect(plain(await CSS.getServiceSpending(7n))).to.deep.equal({ enabledAt: 0n, owner: ethers.ZeroAddress });
     });
 
     it('consumeAssignmentNonce returns the current nonce and advances it, per account', async () => {
@@ -378,6 +383,7 @@ describe('@unit ConvictionServiceStorage', () => {
         assignedAt: 1_111n,
         revokedAt: 2_222n,
         nonce: 4n,
+        owner: ACCOUNT_OWNER,
       });
       expect(plain(await CSS.getUsage(accountId, a))).to.deep.equal(usageBefore);
       expect(usageBefore).to.deep.equal({ periods: 2n });
@@ -614,7 +620,7 @@ describe('@unit ConvictionServiceStorage', () => {
       expect(rows).to.deep.equal([
         ['0', 0, 'hub', 'contract Hub'],
         ['0', 20, 'maxBucketsPerPeriod', 'uint8'],
-        ['1', 0, 'serviceSpendingEnabledAt', 'mapping(uint256 => uint40)'],
+        ['1', 0, '_serviceSpending', 'mapping(uint256 => struct ConvictionServiceStorage.ServiceSpending)'],
         ['2', 0, 'assignmentNonce', 'mapping(uint256 => uint64)'],
         [
           '3',
@@ -655,12 +661,19 @@ describe('@unit ConvictionServiceStorage', () => {
       const retired = layout!.storage.find((s) => s.label === '_retiredLabelSlots')!;
       expect(layout!.types[retired.type].numberOfBytes).to.equal(String(6 * 32));
 
-      // An Assignment takes 2 slots and a Usage 1.
-      const structBytes = (label: string) =>
-        Object.values(layout!.types).find((t) => t.label === `struct ConvictionServiceStorage.${label}`)!
-          .numberOfBytes;
-      expect(structBytes('Assignment')).to.equal('64');
-      expect(structBytes('Usage')).to.equal('32');
+      // An Assignment takes 2 slots, its consenting owner beside its nonce in
+      // the second; an opt-in and a Usage take 1 each.
+      const structOf = (label: string) =>
+        Object.values(layout!.types).find((t) => t.label === `struct ConvictionServiceStorage.${label}`)!;
+      expect(structOf('Assignment').numberOfBytes).to.equal('64');
+      expect(
+        structOf('Assignment').members!.filter((m) => ['nonce', 'owner'].includes(m.label)).map((m) => [m.label, m.slot, m.offset]),
+      ).to.deep.equal([
+        ['nonce', '1', 0],
+        ['owner', '1', 8],
+      ]);
+      expect(structOf('ServiceSpending').numberOfBytes).to.equal('32');
+      expect(structOf('Usage').numberOfBytes).to.equal('32');
     });
   });
 });

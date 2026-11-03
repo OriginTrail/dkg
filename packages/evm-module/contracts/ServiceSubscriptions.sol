@@ -63,7 +63,10 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * Gates:
  *   - Only the current NFT owner switches service spending, revokes, updates
  *     caps or advances the assignment nonce, and the owner's consent to an
- *     assignment is checked against the owner at the time of `assign`.
+ *     assignment is checked against the owner at the time of `assign`. The
+ *     opt-in and each assignment record the owner who made them and fund
+ *     only while that owner holds the account: a sale of the account NFT
+ *     leaves both inert, and the new owner opts in and assigns afresh.
  *   - An assignment needs the consent of both the owner and the assignee over
  *     one EIP-712 digest that carries the account's current nonce. A party
  *     consents by sending the transaction, or by a signature: ERC-1271 for an
@@ -118,7 +121,10 @@ contract ServiceSubscriptions is
     //           opt-in needed (`ExactScheduleFromUnset`). The opt-in refuses an
     //           account scheduled in full (`EmissionAlreadyScheduled`). A
     //           funded period records the nonce of its assignment, whose end
-    //           a later assignment of the buyer key does not move.
+    //           a later assignment of the buyer key does not move. The opt-in
+    //           and each assignment record the owner who made them, and fund
+    //           or top up nothing once another owner holds the account
+    //           (`ServiceSpendingDisabled`, `AssignedByFormerOwner`).
     string private constant _VERSION = "1.2.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -214,6 +220,9 @@ contract ServiceSubscriptions is
     error ConsentMissing(address party);
     error InvalidConsentSignature(address party);
     error NotAssigned(uint256 accountId, address assignee);
+    /// @notice The owner who consented to the assignment no longer holds the
+    ///         account: it funds nothing, and the current owner assigns afresh.
+    error AssignedByFormerOwner(uint256 accountId, address assignee);
     error AssignmentRevoked(uint256 accountId, address assignee);
     error AssignmentExpired(uint256 accountId, address assignee);
     /// @notice The assignment expires at or before the start of the period,
@@ -260,12 +269,16 @@ contract ServiceSubscriptions is
      *      (`lastSettledWindow` at the lock while it is live) reverts
      *      `EmissionAlreadyScheduled`, as each of its draws would.
      *      Switching off is a pause: assignments are kept, and funded periods
-     *      run to their end.
+     *      run to their end. The opt-in records its owner and counts only
+     *      while that owner holds the account: after a sale it reads as off,
+     *      the new owner switches it on afresh, and the former owner's
+     *      assignments stay inert whatever the new owner switches.
      */
     function setServiceSpending(uint256 accountId, bool enabled) external {
         _requireOwner(accountId);
         ConvictionServiceStorage css = convictionServiceStorage;
-        bool isOn = css.serviceSpendingEnabledAt(accountId) != 0;
+        ConvictionServiceStorage.ServiceSpending memory current = css.getServiceSpending(accountId);
+        bool isOn = current.enabledAt != 0 && current.owner == msg.sender;
 
         if (enabled) {
             _requireNoTreasury();
@@ -276,10 +289,16 @@ contract ServiceSubscriptions is
             if (acct.lastSettledWindow >= acct.lockDurationEpochs) revert EmissionAlreadyScheduled(accountId);
             if (isOn) revert ServiceSpendingUnchanged(accountId, true);
 
-            css.setServiceSpendingEnabledAt(accountId, SafeCast.toUint40(block.timestamp));
+            css.setServiceSpending(
+                accountId,
+                ConvictionServiceStorage.ServiceSpending({
+                    enabledAt: SafeCast.toUint40(block.timestamp),
+                    owner: msg.sender
+                })
+            );
         } else {
             if (!isOn) revert ServiceSpendingUnchanged(accountId, false);
-            css.setServiceSpendingEnabledAt(accountId, 0);
+            css.setServiceSpending(accountId, ConvictionServiceStorage.ServiceSpending({enabledAt: 0, owner: address(0)}));
         }
 
         emit ServiceSpendingSet(accountId, enabled);
@@ -296,8 +315,9 @@ contract ServiceSubscriptions is
      *      under the earlier one keep its end, its expiry or its revocation if
      *      sooner, so a new assignment never admits a request issued once the
      *      earlier one had ended; the periods funded under this one follow it.
-     *      It consumes the account's nonce, so the same terms never assign
-     *      twice.
+     *      The assignment records the owner who consented, and funds only
+     *      while that owner holds the account. It consumes the account's
+     *      nonce, so the same terms never assign twice.
      */
     function assign(
         AssignmentTerms calldata t,
@@ -305,7 +325,7 @@ contract ServiceSubscriptions is
         bytes calldata assigneeSignature
     ) external {
         ConvictionServiceStorage css = convictionServiceStorage;
-        if (css.serviceSpendingEnabledAt(t.accountId) == 0) revert ServiceSpendingDisabled(t.accountId);
+        address accountOwner = _requireSpendingOn(css, t.accountId);
 
         if (t.assignee == address(0)) revert InvalidAssignmentTerms("assignee");
         _validateCaps(
@@ -316,7 +336,7 @@ contract ServiceSubscriptions is
         if (t.nonce != expected) revert InvalidAssignmentNonce(t.accountId, expected, t.nonce);
 
         bytes32 digest = hashAssignment(t);
-        _requireConsent(_nft().ownerOf(t.accountId), digest, ownerSignature);
+        _requireConsent(accountOwner, digest, ownerSignature);
         _requireConsent(t.assignee, digest, assigneeSignature);
 
         uint64 used = css.consumeAssignmentNonce(t.accountId);
@@ -328,7 +348,8 @@ contract ServiceSubscriptions is
                 assignedAt: SafeCast.toUint40(block.timestamp),
                 expiresAt: t.expiresAt,
                 revokedAt: 0,
-                nonce: used
+                nonce: used,
+                owner: accountOwner
             })
         );
 
@@ -385,7 +406,7 @@ contract ServiceSubscriptions is
     ) external {
         _requireOwner(accountId);
         ConvictionServiceStorage css = convictionServiceStorage;
-        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, accountId, assignee);
+        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, accountId, assignee, msg.sender);
         _validateCaps(caps);
         if (caps.maxCostPerPeriod == a.maxCostPerPeriod && caps.expiresAt == a.expiresAt) {
             revert CapsUnchanged(accountId, assignee);
@@ -415,7 +436,8 @@ contract ServiceSubscriptions is
      *         partially.
      * @dev The cheap, read-only refusals come first: the pause and the
      *      activation, the session key, the period's epoch, the opt-in and the
-     *      assignment, which must not expire before the period starts (a
+     *      assignment, both made by the account's current owner, the
+     *      assignment one that must not expire before the period starts (a
      *      period funded ahead for the next epoch would otherwise serve
      *      nothing), the buckets, one period per buyer key and epoch, and the
      *      assignment's limit as stored at this block. A revoked assignment
@@ -447,10 +469,10 @@ contract ServiceSubscriptions is
         if (r.sessionKey == address(0)) revert ZeroSessionKey();
         (uint40 periodStart, uint40 periodEnd) = ServicePeriodLib.periodOf(chronos, r.epoch, currentEpoch);
 
-        // 2. The opt-in and a live assignment, still live when the period
-        //    starts.
-        if (css.serviceSpendingEnabledAt(r.accountId) == 0) revert ServiceSpendingDisabled(r.accountId);
-        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, r.accountId, assignee);
+        // 2. The opt-in and a live assignment, both made by the account's
+        //    current owner, the assignment still live when the period starts.
+        address accountOwner = _requireSpendingOn(css, r.accountId);
+        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, r.accountId, assignee, accountOwner);
         _requireLiveAtStart(r.accountId, assignee, a, periodStart);
 
         // 3. The buckets and their value.
@@ -557,10 +579,10 @@ contract ServiceSubscriptions is
         ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
         ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
 
-        // 2. The opt-in and a live assignment, still live when the period
-        //    starts.
-        if (css.serviceSpendingEnabledAt(s.accountId) == 0) revert ServiceSpendingDisabled(s.accountId);
-        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee);
+        // 2. The opt-in and a live assignment, both made by the account's
+        //    current owner, the assignment still live when the period starts.
+        address accountOwner = _requireSpendingOn(css, s.accountId);
+        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee, accountOwner);
         _requireLiveAtStart(s.accountId, assignee, a, s.periodStart);
 
         // 3. The additions, merged into the stored buckets.
@@ -690,14 +712,30 @@ contract ServiceSubscriptions is
         if (c.expiresAt <= block.timestamp) revert InvalidAssignmentTerms("expiresAt");
     }
 
-    /// @dev A live assignment exists, is not revoked and has not expired.
+    /// @dev Service spending is on for `accountId`, switched on by its current
+    ///      owner, which it returns. An opt-in another owner made reads as
+    ///      off; an account that was never switched on is refused before its
+    ///      owner is read.
+    function _requireSpendingOn(
+        ConvictionServiceStorage css,
+        uint256 accountId
+    ) internal view returns (address accountOwner) {
+        ConvictionServiceStorage.ServiceSpending memory s = css.getServiceSpending(accountId);
+        if (s.enabledAt != 0) accountOwner = _nft().ownerOf(accountId);
+        if (s.enabledAt == 0 || s.owner != accountOwner) revert ServiceSpendingDisabled(accountId);
+    }
+
+    /// @dev A live assignment exists, `accountOwner`, the account's current
+    ///      owner, consented to it, and it is neither revoked nor expired.
     function _liveAssignment(
         ConvictionServiceStorage css,
         uint256 accountId,
-        address assignee
+        address assignee,
+        address accountOwner
     ) internal view returns (ConvictionServiceStorage.Assignment memory a) {
         a = css.getAssignment(accountId, assignee);
         if (a.assignedAt == 0) revert NotAssigned(accountId, assignee);
+        if (a.owner != accountOwner) revert AssignedByFormerOwner(accountId, assignee);
         if (a.revokedAt != 0) revert AssignmentRevoked(accountId, assignee);
         if (block.timestamp >= uint256(a.expiresAt)) revert AssignmentExpired(accountId, assignee);
     }

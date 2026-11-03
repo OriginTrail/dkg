@@ -11,6 +11,9 @@
 //   - assign: consent by sending or by signature (EOA and ERC-1271), the nonce,
 //     replay, the domain, every invalid term, a transferred NFT, high-s and
 //     compact signatures, and the separation from publishing agents;
+//   - a sale of the account NFT: the former owner's opt-in and assignments
+//     fund and top up nothing, also once the new owner opts in, and the new
+//     owner assigns afresh;
 //   - revoke, and advancing the nonce;
 //   - caps update: owner only, live assignments only, a valid and changed limit
 //     and expiry, usage and nonces kept, applied from the next funding in both
@@ -345,7 +348,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expect(SS.connect(owner).setServiceSpending(scheduled.accountId, true))
         .to.be.revertedWithCustomError(SS, 'EmissionAlreadyScheduled')
         .withArgs(scheduled.accountId);
-      expect(await CSS.serviceSpendingEnabledAt(scheduled.accountId)).to.equal(0n);
+      expect((await CSS.getServiceSpending(scheduled.accountId)).enabledAt).to.equal(0n);
 
       const { accountId } = await createAccountFor();
       expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(0n);
@@ -376,21 +379,24 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         const { accountId } = await createAccountFor();
         const on = await SS.connect(owner).setServiceSpending(accountId, true);
         await expect(on).to.emit(SS, 'ServiceSpendingSet').withArgs(accountId, true);
-        expect(await CSS.serviceSpendingEnabledAt(accountId)).to.equal(await blockTime((await on.wait())!));
+        expect(plain(await CSS.getServiceSpending(accountId))).to.deep.equal({
+          enabledAt: await blockTime((await on.wait())!),
+          owner: owner.address,
+        });
         const terms = await termsFor(accountId, buyer.address);
         await assignAs(terms, buyer);
 
         await expect(SS.connect(owner).setServiceSpending(accountId, false))
           .to.emit(SS, 'ServiceSpendingSet')
           .withArgs(accountId, false);
-        expect(await CSS.serviceSpendingEnabledAt(accountId)).to.equal(0n);
+        expect(plain(await CSS.getServiceSpending(accountId))).to.deep.equal({ enabledAt: 0n, owner: ethers.ZeroAddress });
         expect(await CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
         await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
           .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
           .withArgs(accountId);
 
         const again = await SS.connect(owner).setServiceSpending(accountId, true);
-        expect(await CSS.serviceSpendingEnabledAt(accountId)).to.equal(await blockTime((await again.wait())!));
+        expect((await CSS.getServiceSpending(accountId)).enabledAt).to.equal(await blockTime((await again.wait())!));
         await fund(await inference(accountId, TRAC));
       });
 
@@ -507,6 +513,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(a.assignedAt).to.equal(await blockTime((await tx.wait())!));
       expect(a.revokedAt).to.equal(0n);
       expect(a.nonce).to.equal(nonce);
+      expect(a.owner).to.equal(await NFT.ownerOf(t.accountId));
       expect(await CSS.assignmentNonce(t.accountId)).to.equal(nonce + 1n);
       expect(await CSS.isAssignmentActive(t.accountId, t.assignee)).to.equal(true);
     };
@@ -542,6 +549,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const ownerWalletAddress = await ownerWallet.getAddress();
       const buyerWalletAddress = await buyerWallet.getAddress();
       await NFT.connect(owner).transferFrom(owner.address, ownerWalletAddress, accountId);
+      // The opt-in is the former owner's: the wallet, now the owner, opts in itself.
+      await SS.connect(await impersonate(ownerWalletAddress)).setServiceSpending(accountId, true);
 
       const t = await termsFor(accountId, buyerWalletAddress);
       const ownerSig = await signTerms(ownerKey, SS, t);
@@ -654,17 +663,24 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         .withArgs(accountId);
     });
 
-    it("after an NFT transfer the previous owner's signature fails, and the stored assignment survives", async () => {
+    it("after an NFT transfer the previous owner's signature fails, and its opt-in and assignments fund nothing", async () => {
       await assignAs(await termsFor(accountId, buyer.address), buyer);
       await NFT.connect(owner).transferFrom(owner.address, newOwner.address, accountId);
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
+        .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
+        .withArgs(accountId);
 
+      await SS.connect(newOwner).setServiceSpending(accountId, true);
       const t = await termsFor(accountId, buyer2.address);
       await expect(SS.connect(buyer2).assign(t, await signTerms(owner, SS, t), '0x'))
         .to.be.revertedWithCustomError(SS, 'InvalidConsentSignature')
         .withArgs(newOwner.address);
 
+      // The stored assignment is still there, but its consent was the former owner's.
       expect(await CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
-      await fund(await inference(accountId, TRAC));
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, TRAC)))
+        .to.be.revertedWithCustomError(SS, 'AssignedByFormerOwner')
+        .withArgs(accountId, buyer.address);
 
       for (const call of [
         SS.connect(owner).revoke(accountId, buyer.address),
@@ -674,6 +690,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         await expect(call).to.be.revertedWithCustomError(SS, 'NotAccountOwner').withArgs(accountId, owner.address);
       }
       await expectAssigned(await SS.connect(buyer2).assign(t, await signTerms(newOwner, SS, t), '0x'), t, 1n);
+      await fund(await inference(accountId, TRAC), buyer2);
       await SS.connect(newOwner).revoke(accountId, buyer.address);
     });
 
@@ -748,6 +765,72 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expectAssigned(await assignAs(t, buyer), t, 1n);
       expect((await CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
       expect(await CSS.assigneeCount(accountId)).to.equal(1n);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // A sale of the account
+  // -------------------------------------------------------------------------
+
+  describe('a sale of the account NFT', () => {
+    let accountId: bigint;
+    let p: string;
+
+    beforeEach(async () => {
+      ({ accountId } = await openAccount());
+      ({ subscriptionId: p } = await fund(await inference(accountId, 10n * TRAC)));
+      await NFT.connect(owner).transferFrom(owner.address, newOwner.address, accountId);
+    });
+
+    it("leaves the former owner's buyer key unable to fund or top up from the new owner's allowance", async () => {
+      const { window } = await SS.currentWindowAllowance(accountId);
+      const spent = await PCS.windowSpent(accountId, window);
+      await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 900n * TRAC, { epoch: await epochNext() })))
+        .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
+        .withArgs(accountId);
+      await expect(SS.connect(buyer).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, 900n * TRAC)], ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
+        .withArgs(accountId);
+      expect(await PCS.windowSpent(accountId, window)).to.equal(spent);
+    });
+
+    it('switching spending on again does not revive the assignments the former owner made', async () => {
+      await expect(SS.connect(newOwner).setServiceSpending(accountId, true))
+        .to.emit(SS, 'ServiceSpendingSet')
+        .withArgs(accountId, true);
+      expect((await CSS.getServiceSpending(accountId)).owner).to.equal(newOwner.address);
+      const refused = async () => {
+        await expect(SS.connect(buyer).fundFromConviction(await inference(accountId, 900n * TRAC, { epoch: await epochNext() })))
+          .to.be.revertedWithCustomError(SS, 'AssignedByFormerOwner')
+          .withArgs(accountId, buyer.address);
+        await expect(SS.connect(buyer).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
+          .to.be.revertedWithCustomError(SS, 'AssignedByFormerOwner')
+          .withArgs(accountId, buyer.address);
+      };
+      await refused();
+      await expect(
+        SS.connect(newOwner).updateAssignmentCaps(accountId, buyer.address, {
+          maxCostPerPeriod: 2_000n * TRAC,
+          expiresAt: (await latest()) + 500n * DAY,
+        }),
+      )
+        .to.be.revertedWithCustomError(SS, 'AssignedByFormerOwner')
+        .withArgs(accountId, buyer.address);
+
+      // Off and on again: still nothing.
+      await SS.connect(newOwner).setServiceSpending(accountId, false);
+      await SS.connect(newOwner).setServiceSpending(accountId, true);
+      await refused();
+    });
+
+    it('the new owner opts in and assigns afresh, and its buyer key funds and tops up', async () => {
+      await SS.connect(newOwner).setServiceSpending(accountId, true);
+      const t = await termsFor(accountId, buyer.address);
+      await SS.connect(newOwner).assign(t, '0x', await signTerms(buyer, SS, t));
+      expect((await CSS.getAssignment(accountId, buyer.address)).owner).to.equal(newOwner.address);
+      const { subscriptionId: q } = await fund(await inference(accountId, TRAC, { epoch: await epochNext() }));
+      await SS.connect(buyer).topUpFromConviction(q, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
+      expect((await CSS.getSubscription(q)).value).to.equal(2n * TRAC);
     });
   });
 

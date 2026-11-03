@@ -550,6 +550,11 @@
             "internalType": "uint64",
             "name": "nonce",
             "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
           }
         ],
         "internalType": "struct ConvictionServiceStorage.Assignment",
@@ -642,6 +647,37 @@
         "internalType": "struct ConvictionServiceStorage.Bucket[]",
         "name": "",
         "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getServiceSpending",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint40",
+            "name": "enabledAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.ServiceSpending",
+        "name": "",
+        "type": "tuple"
       }
     ],
     "stateMutability": "view",
@@ -871,25 +907,6 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "serviceSpendingEnabledAt",
-    "outputs": [
-      {
-        "internalType": "uint40",
-        "name": "",
-        "type": "uint40"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
       },
@@ -924,6 +941,11 @@
             "internalType": "uint64",
             "name": "nonce",
             "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
           }
         ],
         "internalType": "struct ConvictionServiceStorage.Assignment",
@@ -1015,12 +1037,24 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint40",
-        "name": "at",
-        "type": "uint40"
+        "components": [
+          {
+            "internalType": "uint40",
+            "name": "enabledAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.ServiceSpending",
+        "name": "s",
+        "type": "tuple"
       }
     ],
-    "name": "setServiceSpendingEnabledAt",
+    "name": "setServiceSpending",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
