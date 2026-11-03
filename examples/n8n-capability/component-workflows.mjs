@@ -55,6 +55,10 @@ export function componentPiece(id, name, param, { credentials = {}, subworkflowI
     case 'google-drive': parameters = { resource: 'file', operation: 'upload', inputDataFieldName: 'data', name: p('name'), driveId: { __rl: true, mode: 'list', value: 'My Drive' }, folderId: { __rl: true, mode: 'id', value: 'root' }, options: {} }; break;
     case 'switch': parameters = { mode: 'expression', numberOutputs: 2, output: expression(`String($json[${param('field')}]) === String(${param('equals')}) ? 0 : 1`) }; break;
     case 'merge': parameters = { mode: 'append', numberInputs: 2, options: {} }; break;
+    case 'merge-fields': parameters = { mode: 'combine', combineBy: 'combineByFields',
+      advanced: true, mergeByFields: { values: [{ field1: p('fieldA'), field2: p('fieldB') }] },
+      joinMode: p('joinMode'), outputDataFrom: 'both',
+      options: { fuzzyCompare: false, multipleMatches: 'all', clashHandling: { values: { resolveClash: 'preferInput1', mergeMode: 'shallowMerge', overrideEmpty: false } } } }; break;
     case 'compare-datasets': parameters = { mergeByFields: { values: [{ field1: p('field'), field2: p('field') }] }, resolve: 'includeBoth', options: {} }; break;
     case 'loop-items': parameters = { batchSize: p('batchSize'), options: {} }; break;
     case 'execute-workflow': parameters = { source: 'database', workflowId: { __rl: true, mode: 'id', value: subworkflowId }, mode: 'once', workflowInputs: { mappingMode: 'passThrough', value: {} }, options: { waitForSubWorkflow: true } }; break;

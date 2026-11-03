@@ -45,6 +45,11 @@ export const componentRegistry = [
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),
   entry('switch', 'Switch', 'Flow', 'switch', { field: field('Field', 'name'), equals: text('First route equals', 'Ana') }, { outputs: ['match', 'other'], mode: 'branch' }),
   entry('merge', 'Merge', 'Flow', 'merge', {}, { inputs: 2, mode: 'join' }),
+  entry('merge-fields', 'Merge by fields', 'Flow', 'merge', {
+    fieldA: field('Match field in input A', 'joinKey'),
+    fieldB: field('Match field in input B', 'joinKey'),
+    joinMode: choice('Rows to keep', 'keepEverything', ['keepEverything', 'keepMatches', 'keepNonMatches']),
+  }, { inputs: 2, mode: 'join', version: 2 }),
   entry('compare-datasets', 'Compare Datasets', 'Flow', 'compareDatasets', { field: field('Match field', 'name') }, { inputs: 2, outputs: ['only-a', 'same', 'different', 'only-b'], mode: 'join' }),
   entry('loop-items', 'Loop Over Items', 'Flow', 'splitInBatches', { batchSize: number('Batch size', 1) }, { outputs: ['done', 'loop'], mode: 'loop' }),
   entry('execute-workflow', 'Execute Sub-workflow', 'Flow', 'executeWorkflow', {}, { mode: 'subworkflow' }),

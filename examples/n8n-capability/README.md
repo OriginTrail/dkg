@@ -176,9 +176,9 @@ save and run. Invalid CSV, missing mapped columns or incompatible Google headers
 stop before downstream calls with a confirmed result the user can correct.
 Uncertain outcomes retain the original invocation for reconciliation.
 
-## Thirty native components and nOS Studio
+## Native components and nOS Studio
 
-The **Workflow builder** tab now opens **n8n KA Studio**, with thirty separately
+The **Workflow builder** tab now opens **n8n KA Studio**, with thirty-one separately
 registered component Programs. Every leaf KA declares its exact native workflow
 ID, definition hash, bounded input/output schemas and selected result nodes in
 its owner-approved n8n grant. Credentials stay in the local n8n installation.
@@ -188,8 +188,16 @@ its owner-approved n8n grant. Credentials stay in the local n8n installation.
 | Data | Edit Fields, Filter, Sort, Limit, Remove Duplicates, Split Out, Aggregate, Summarize, Rename Keys, Date & Time |
 | Files | Extract From File, Convert to File, XML, HTML, Markdown, Crypto, Compression |
 | Integrations | HTTP Request, Google Sheets, Google Drive |
-| Flow | IF, Switch, Merge, Compare Datasets, Loop Over Items, Execute Sub-workflow, Stop And Error |
+| Flow | IF, Switch, Merge, Merge by fields, Compare Datasets, Loop Over Items, Execute Sub-workflow, Stop And Error |
 | Events | Webhook, Schedule Trigger, Wait |
+
+**Merge by fields** is a separate component revision; existing append-only Merge workflows
+keep their original pins and behavior. Select the exact field in input A and input B and choose
+`keepEverything` (full outer join), `keepMatches`, or `keepNonMatches`. Matching is case-sensitive
+with fuzzy comparison disabled. All matches are retained, including one-to-many/many-to-many
+results, within the existing twenty-record/8 KiB result bound. Overlapping properties prefer
+input A; map independent provenance into separate named fields before joining to preserve both.
+This exposes n8n's native Merge v3.2 settings; no new join engine or domain-specific mapping is added.
 
 Provision the installed local n8n runtime with its official CLI while that owned
 instance is stopped. The installer first takes a SQLite backup, reads credential
