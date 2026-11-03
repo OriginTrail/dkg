@@ -22,7 +22,9 @@
 //   - refusals: a zero key, before activation or while it is unset (from a
 //     wallet and from an account alike), paused, an unknown or ended period, a
 //     wrong source or buyer, a changed cap, and the bucket rules; each without
-//     partial effect.
+//     partial effect;
+//   - a wallet payment the Token answers with false, after every storage write
+//     of a funding or a top-up: refused, and all of them undone.
 //
 // A Conviction Account period funded ahead, and its assignment, is in
 // v10-query-inference-assignment-lifetime.test.ts.
@@ -37,6 +39,7 @@ import {
   Chronos,
   ConvictionServiceStorage,
   ConvictionStakingStorage,
+  FalseReturnERC20,
   Hub,
   ParametersStorage,
   PublishingConviction,
@@ -195,6 +198,87 @@ describe('@integration Plan-period funding for the query/inference pool', functi
     await allow(sender, additions.reduce((a, b) => a + b.value, 0n));
     return (await (await SSW.connect(sender).topUpFromWallet(subscriptionId, additions, planDigest)).wait())!;
   };
+
+  // -------------------------------------------------------------------------
+  // A payment the Token answers with false
+  // -------------------------------------------------------------------------
+
+  describe('a wallet payment the Token answers with false', () => {
+    let Falsy: FalseReturnERC20;
+    let epoch: bigint;
+
+    beforeEach(async () => {
+      Falsy = (await (
+        await hre.ethers.getContractFactory('FalseReturnERC20')
+      ).deploy('False', 'FALSE')) as unknown as FalseReturnERC20;
+      await Falsy.waitForDeployment();
+      await HubContract.setContractAddress('Token', await Falsy.getAddress());
+      await forward(SSW, 'initialize');
+      expect(await SSW.tokenContract()).to.equal(await Falsy.getAddress());
+      epoch = await epochNow();
+      await Falsy.mint(buyer.address, 100n * TRAC);
+      await Falsy.connect(buyer).approve(await SSW.getAddress(), 100n * TRAC);
+    });
+
+    /** Everything a funding or a top-up writes or moves, for the period of `subscriptionId`. */
+    const stateOf = async (subscriptionId: string) => ({
+      exists: await CSS.subscriptionExists(subscriptionId),
+      record: plain(await CSS.getSubscription(subscriptionId)),
+      buckets: tuples(await CSS.getBuckets(subscriptionId)),
+      storedBuckets: await CSS.storedBucketCount(subscriptionId),
+      walletPeriods: await CSS.accountSubscriptionCount(0n),
+      due: [await QIS.walletDue(epoch), await QIS.walletDue(epoch + 1n), await QIS.walletDue(epoch + 2n)],
+      balances: [await Falsy.balanceOf(buyer.address), await Falsy.balanceOf(await Vault.getAddress())],
+    });
+
+    it('a funding is refused TokenTransferFailed, with no record, bucket, list entry, money due or balance left of it', async () => {
+      const r = walletRequestOf(epoch, {
+        buckets: [bucket(0, CLASS_INFERENCE, 7n * TRAC), bucket(1, CLASS_QUERY, 3n * TRAC)],
+      });
+      const subscriptionId = subscriptionIdOf(buyer.address, epoch);
+      const before = await stateOf(subscriptionId);
+      expect(before.exists).to.equal(false);
+
+      await Falsy.setTransferFromReturnsFalse(true);
+      await expect(SSW.connect(buyer).fundFromWallet(r)).to.be.revertedWithCustomError(SSW, 'TokenTransferFailed');
+      expect(await stateOf(subscriptionId)).to.deep.equal(before);
+
+      // The same request goes through once the Token pays.
+      await Falsy.setTransferFromReturnsFalse(false);
+      await SSW.connect(buyer).fundFromWallet(r);
+      const after = await stateOf(subscriptionId);
+      expect(after.exists).to.equal(true);
+      expect(after.walletPeriods).to.equal(before.walletPeriods + 1n);
+      expect(after.due[1]).to.equal(10n * TRAC);
+      expect(after.balances).to.deep.equal([before.balances[0] - 10n * TRAC, before.balances[1] + 10n * TRAC]);
+    });
+
+    it('a top-up of a funded period is refused TokenTransferFailed, with its record, buckets, list entry, money due and balances as they were', async () => {
+      const subscriptionId = subscriptionIdOf(buyer.address, epoch);
+      await SSW.connect(buyer).fundFromWallet(walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, 7n * TRAC)] }));
+      const before = await stateOf(subscriptionId);
+      const digest = (await CSS.getSubscription(subscriptionId)).planDigest;
+      // An addition to the stored bucket, and an appended one.
+      const additions = [bucket(0, CLASS_INFERENCE, TRAC), bucket(1, CLASS_QUERY, 2n * TRAC)];
+      const newDigest = ethers.id('another plan');
+
+      await Falsy.setTransferFromReturnsFalse(true);
+      await expect(SSW.connect(buyer).topUpFromWallet(subscriptionId, additions, newDigest)).to.be.revertedWithCustomError(
+        SSW,
+        'TokenTransferFailed',
+      );
+      expect(await stateOf(subscriptionId)).to.deep.equal(before);
+      expect((await CSS.getSubscription(subscriptionId)).planDigest).to.equal(digest);
+
+      // The same top-up goes through once the Token pays.
+      await Falsy.setTransferFromReturnsFalse(false);
+      await SSW.connect(buyer).topUpFromWallet(subscriptionId, additions, newDigest);
+      const after = await stateOf(subscriptionId);
+      expect(after.storedBuckets).to.equal(before.storedBuckets + 1n);
+      expect(after.due[1]).to.equal(10n * TRAC);
+      expect(after.balances).to.deep.equal([before.balances[0] - 3n * TRAC, before.balances[1] + 3n * TRAC]);
+    });
+  });
 
   // -------------------------------------------------------------------------
   // Wallet funding
