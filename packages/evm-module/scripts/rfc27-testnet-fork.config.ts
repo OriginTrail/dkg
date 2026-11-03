@@ -83,7 +83,7 @@ export async function assertLocalAnvilFork(hre: HardhatRuntimeEnvironment): Prom
 /**
  * Seed the scratch deployments file from the tracked one, with the entries
  * REDEPLOY names (comma-separated) marked not deployed, so this run redeploys
- * them, as 052d and 052e document for the real deploy. Returns the tracked
+ * them, as the deploy's first step, 000, asks of the real deploy. Returns the tracked
  * file's path and bytes.
  */
 function seedScratchDeployments(network: string): { tracked: string; bytes: Buffer } {

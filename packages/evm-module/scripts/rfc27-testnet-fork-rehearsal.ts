@@ -41,8 +41,8 @@
 //
 //   # 2. the real deploy pipeline. REDEPLOY lists the entries the scratch copy
 //   #    marks not deployed, which is how the three upgrades are redeployed, as
-//   #    052d and 052e document.
-//   #    2a. the guard: with StakingV10 left deployed, 052e refuses the run, before any transaction
+//   #    the deploy's first step, 000, asks.
+//   #    2a. the guard: with StakingV10 left deployed, 000 refuses the run, before it deploys anything
 //   REDEPLOY=PublishingConviction,StakingKPI npx hardhat deploy --network base_sepolia_v10 --config $CFG  # fails
 //   #    2b. the real run
 //   REDEPLOY=PublishingConviction,StakingV10,StakingKPI npx hardhat deploy --network base_sepolia_v10 \
