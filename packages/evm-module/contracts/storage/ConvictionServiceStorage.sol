@@ -45,7 +45,9 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *     a narrow setter that writes that field alone, beside the writes they
  *     make today (`setAssignment` and `createSubscription` write several
  *     fields at once). So a later logic version reads and writes all of this
- *     state without a new storage, which would start empty.
+ *     state without a new storage, which would start empty. The writes of
+ *     several fields remain the normal path: a writer that calls a narrow
+ *     setter keeps in step the fields its NatSpec names.
  *   - The parameter setters are `onlyHub`, so governance reaches them through
  *     `Hub.forwardCall` (the Hub owner may also call them directly).
  *
@@ -390,12 +392,25 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     // ============================================================
     //            Narrow setters (onlyContracts), one field each
+    //
+    // `setAssignment`, `recordUsage`, `createSubscription` and `applyTopUp`
+    // remain the normal path: they keep related fields in step. A setter here
+    // writes its own field and leaves the others, so a later logic version
+    // can ship without a new storage, and its caller keeps in step the fields
+    // its NatSpec names.
     // ============================================================
 
     /// @notice Store `a` as `assignee`'s assignment over `accountId`, and
     ///         nothing else: unlike `setAssignment`, it keeps no end for the
     ///         assignment it overwrites, lists no assignee and leaves the
     ///         usage as it is.
+    /// @dev    The caller keeps in step what `setAssignment` does here: the
+    ///         end of the assignment it overwrites
+    ///         (`setReplacedAssignmentEnd`), without which `assignmentEnd`
+    ///         reads 0 for that nonce and the periods funded under it take no
+    ///         request; the list (`listAssignee`); and the usage, which counts
+    ///         from nothing under new terms (`setUsage`). `setAssignment`
+    ///         remains the normal path.
     function setAssignmentRecord(uint256 accountId, address assignee, Assignment calldata a) external onlyContracts {
         _assignments[accountId][assignee] = a;
     }
@@ -403,6 +418,10 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @notice Set the end kept for `assignee`'s assignment over `accountId`
     ///         that consumed `nonce`, the end `assignmentEnd` reads once a
     ///         later assignment has replaced it.
+    /// @dev    The caller keeps it the end that assignment had, which the
+    ///         periods funded under it are held to, and it counts only for a
+    ///         `nonce` other than the current assignment's. `setAssignment`
+    ///         keeps it, and remains the normal path.
     function setReplacedAssignmentEnd(
         uint256 accountId,
         address assignee,
@@ -421,6 +440,9 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @notice Set what `assignee` has funded under its assignment over
     ///         `accountId`, which `recordUsage` counts and `setAssignment`
     ///         resets.
+    /// @dev    The caller keeps `periods` the count of periods funded under the
+    ///         current assignment. `recordUsage` and `setAssignment` remain the
+    ///         normal path.
     function setUsage(uint256 accountId, address assignee, Usage calldata u) external onlyContracts {
         _usage[accountId][assignee] = u;
     }
@@ -430,7 +452,16 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @dev    It refuses an id with no record (`SubscriptionNotFound`), so a
     ///         record is still created only by `createSubscription`, and a
     ///         record with a `periodStart` of 0 (`ZeroPeriodStart`), which
-    ///         would read as absent.
+    ///         would read as absent. The caller keeps in step what the record
+    ///         repeats: `bucketCount` with the stored buckets
+    ///         (`storedBucketCount`, `appendBucket`), `value` with the sum of
+    ///         their values (`setBucket`, `appendBucket`), `cost` with
+    ///         `drawnFromWindow + drawnFromTopUp`, or with `value` for a wallet
+    ///         period, `accountId` with the account's list
+    ///         (`appendAccountSubscription`), and `assignee` and `epoch` with
+    ///         the id, keccak256(abi.encode(assignee, epoch)). The money due is
+    ///         `QueryInferenceStorage`'s, and does not follow.
+    ///         `createSubscription` and `applyTopUp` remain the normal path.
     function setSubscription(bytes32 subscriptionId, Subscription calldata s) external onlyContracts {
         _requireRecorded(subscriptionId);
         if (s.periodStart == 0) revert ZeroPeriodStart(subscriptionId);
@@ -440,6 +471,10 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @notice Overwrite bucket `index` of a recorded period. It refuses an id
     ///         with no record (`SubscriptionNotFound`), and reverts past the
     ///         period's stored buckets, as `getBucket` does.
+    /// @dev    The caller keeps in step the record's `value`, the sum of the
+    ///         buckets' values (`setSubscription`). Claims are kept by the
+    ///         bucket's index (`QueryInferenceStorage`), so a bucket with claims
+    ///         keeps its `bucketId`. `applyTopUp` remains the normal path.
     function setBucket(bytes32 subscriptionId, uint256 index, Bucket calldata b) external onlyContracts {
         _requireRecorded(subscriptionId);
         _buckets[subscriptionId][index] = b;
@@ -447,8 +482,12 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     /// @notice Append a bucket after a recorded period's stored ones, so
     ///         every stored bucket keeps its index. It refuses an id with no
-    ///         record (`SubscriptionNotFound`). The record's `bucketCount` is
-    ///         the record's own, set with it (`setSubscription`).
+    ///         record (`SubscriptionNotFound`).
+    /// @dev    The caller keeps in step the record's `bucketCount` and `value`
+    ///         (`setSubscription`). Until it does, `storedBucketCount` reads one
+    ///         more than `getSubscription(...).bucketCount`, and
+    ///         `QueryInferenceSettlement` refuses the new bucket as unknown.
+    ///         `applyTopUp` writes all three, and remains the normal path.
     function appendBucket(bytes32 subscriptionId, Bucket calldata b) external onlyContracts {
         _requireRecorded(subscriptionId);
         _buckets[subscriptionId].push(b);
@@ -457,6 +496,9 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @notice Append a recorded period's id to `accountId`'s list, as
     ///         `createSubscription` appends it. It refuses an id with no
     ///         record (`SubscriptionNotFound`).
+    /// @dev    The caller keeps the list in step with the records: an id belongs
+    ///         under its record's `accountId`, once, and neither is checked
+    ///         here. `createSubscription` remains the normal path.
     function appendAccountSubscription(uint256 accountId, bytes32 subscriptionId) external onlyContracts {
         _requireRecorded(subscriptionId);
         _accountSubscriptions[accountId].push(subscriptionId);

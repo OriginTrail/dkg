@@ -123,7 +123,11 @@ contract ConvictionWithdrawalStorage is INamed, IVersioned, HubDependent {
     /// @dev    It refuses a token id with no record (`WithdrawalNotRecorded`),
     ///         so no carry outlives its record into a later one, and a record
     ///         that holds 32 carries, the most a position holds
-    ///         (`RewardCarriesFull`).
+    ///         (`RewardCarriesFull`). The caller keeps the carry's epoch at the
+    ///         record's or before it, as a withdrawal does: the claim closes
+    ///         the query/inference pool through the record's epoch alone, so a
+    ///         later epoch could be split without the pool. `setWithdrawal`
+    ///         remains the normal path.
     function addRewardCarry(uint256 tokenId, ConvictionStakingStorage.RewardCarry calldata c) external onlyContracts {
         if (_withdrawals[tokenId].epoch == 0) revert WithdrawalNotRecorded(tokenId);
         ConvictionStakingStorage.RewardCarry[] storage list = _carries[tokenId];
