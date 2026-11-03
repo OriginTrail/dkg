@@ -56,7 +56,7 @@ export function validateDkgTopology(definition) {
   if (writes.some((n) => definition.edges.some((e) => e.from === n.id)))
     throw fail("DKG Write must be the terminal output.");
 }
-export function componentEvidence(rows, context, read, workbook) {
+export function componentEvidence(rows, context, read, workbook, programOutput) {
   if (
     !Array.isArray(rows) ||
     !rows.length ||
@@ -78,10 +78,11 @@ export function componentEvidence(rows, context, read, workbook) {
       throw fail("Workbook provenance differs from this execution input.");
   }
   const payload = JSON.stringify({
-    kind: "PLCAInputEvidence",
+    kind: programOutput ? 'PLCADemoResult' : "PLCAInputEvidence",
     interpretation: "planned-routing-reference-only",
     allocationStatus: "unconfirmed",
-    plcaCalculated: false,
+    plcaCalculated: programOutput?.result?.assessment?.calculated === true,
+    ...(programOutput ? { assessment: programOutput.result.assessment, programExecution: programOutput.programExecution } : {}),
     execution: { ...context, status: "running-at-write" },
     source: read.source,
     records: rows,
@@ -92,7 +93,7 @@ export function componentEvidence(rows, context, read, workbook) {
   const quads = [
     q(
       "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
-      "urn:nos:workflow:PLCAInputEvidence",
+      programOutput ? 'urn:nos:workflow:PLCADemoResult' : "urn:nos:workflow:PLCAInputEvidence",
     ),
     q("urn:nos:workflow:payload", JSON.stringify(payload)),
     q("urn:nos:workflow:sha256", JSON.stringify(digest)),
@@ -100,6 +101,7 @@ export function componentEvidence(rows, context, read, workbook) {
     q("http://www.w3.org/ns/prov#wasGeneratedBy", context.executionIri),
     q("urn:nos:workflow:workflow", context.kaRef),
   ];
+  if (programOutput) quads.push(q('http://www.w3.org/ns/prov#wasGeneratedBy', programOutput.programExecution.executionIri));
   for (const r of rows)
     for (const ref of [
       r.erp?.recordId,
@@ -302,11 +304,20 @@ export function dkgComponentStore(
         n8nExecutionId: value.executionId,
         blockId: node.id,
       };
+      let evidenceRows = rows, programOutput;
+      if (rows.length === 1 && rows[0]?.programExecution) {
+        const incoming = definition.edges.find(e => e.to === node.id);
+        const invoked = definition.nodes.find(n => n.id === incoming?.from && n.componentId === 'invoke-dkg-program');
+        const completed = invoked && db.prepare('SELECT result FROM dkg_component_calls WHERE id=?').get(id + ':' + invoked.id);
+        if (!completed?.result || !isDeepStrictEqual(JSON.parse(completed.result).items, rows)) throw fail('Program output differs from this execution.');
+        programOutput = rows[0]; evidenceRows = programOutput.result?.records;
+      }
       const payload = componentEvidence(
-        rows,
+        evidenceRows,
         context,
         JSON.parse(read.result),
         JSON.parse(input.itemsJson)[0].workbook ?? [],
+        programOutput,
       );
       const result = await remoteCall({ ...payload, allowCreate: !prior });
       if (
@@ -331,10 +342,11 @@ export function dkgComponentStore(
             status: "wm-sealed",
             readbackVerified: true,
             digest: payload.digest,
-            recordCount: rows.length,
+            recordCount: evidenceRows.length,
             executionIri: context.executionIri,
             n8nExecutionId: value.executionId,
-            plcaCalculated: false,
+            plcaCalculated: programOutput?.result?.assessment?.calculated === true,
+            ...(programOutput ? { assessment: programOutput.result.assessment, programExecution: programOutput.programExecution } : {}),
           },
         ],
       };
