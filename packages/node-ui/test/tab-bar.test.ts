@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { TabBar } from '../src/ui/components/Shell/TabBar.js';
 import { DASHBOARD_TAB, useTabsStore, type CenterTab } from '../src/ui/stores/tabs.js';
+import { useProjectsStore } from '../src/ui/stores/projects.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -34,6 +35,7 @@ function fire(el: Element, type: string, init: Record<string, unknown> = {}, ext
 const dataTransfer = () => ({ effectAllowed: '', setData() {}, getData() { return ''; } });
 
 beforeEach(() => {
+  useProjectsStore.setState({ contextGraphs: [{ id: 'alpha', name: 'Alpha' } as any] });
   useTabsStore.setState({ tabs: [DASHBOARD_TAB, A, B, C], activeTabId: A.id, recentlyClosed: [] });
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -47,6 +49,16 @@ afterEach(() => {
 });
 
 describe('TabBar', () => {
+  it('shows a graph tab under its current name from the inventory, with the saved label as fallback', () => {
+    // The saved label is a short id until the graph list loads; the sidebar need not be mounted.
+    act(() => { useTabsStore.setState({ tabs: [DASHBOARD_TAB, tab('project:beta', 'beta'), tab('project:gamma', 'gamma')], activeTabId: 'project:beta' }); });
+    act(() => { useProjectsStore.setState({ contextGraphs: [{ id: 'beta', name: 'Beta Research' } as any] }); });
+    expect(titles()).toEqual(['Dashboard', 'Beta Research', 'gamma']);
+    expect(tabEl('Beta Research').querySelector('[aria-label="Close Beta Research"]')).not.toBeNull();
+    act(() => { container.querySelector<HTMLElement>('.v10-center-tabs-all')!.click(); });
+    expect([...container.querySelectorAll('.v10-tab-menu-text')].map(e => e.textContent)).toContain('Beta Research');
+  });
+
   it('pins Dashboard first: icon-only, no close button, not draggable', () => {
     expect(titles()).toEqual(['Dashboard', 'Settings', 'Observability', 'Alpha']);
     const dash = tabEl('Dashboard');

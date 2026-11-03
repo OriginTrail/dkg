@@ -4,31 +4,43 @@
  * drag or Ctrl+Shift+←/→, close with ×, middle-click or the context menu,
  * and the ⌄ menu lists every open tab plus recently closed ones.
  */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTabsStore, type CenterTab } from '../../stores/tabs.js';
-import { ContextGraphMark, contextGraphIdFromTab } from '../../context-graph-colors.js';
+import { ContextGraphMark } from '../../context-graph-colors.js';
+import { useProjectsStore } from '../../stores/projects.js';
+import { decodeTabId } from '../../lib/tab-target.js';
 import { AgentDot } from '../AgentDot.js';
-import { DOC_TAB_PREFIX } from '../../lib/doc-tab-id.js';
 import { CHEVRON_DOWN, CLOSE_ICON, FILE_ICON, placeIcon } from './nav-icons.js';
 
-export function TabMark({ tab }: { tab: CenterTab }) {
-  const cg = contextGraphIdFromTab(tab.id);
-  if (cg) return <ContextGraphMark id={cg} name={tab.label} />;
-  if (tab.id.startsWith('agent:')) {
-    const [cgId, slug] = tab.id.slice('agent:'.length).split('|');
-    return <AgentDot uri={slug ?? cgId} label={tab.label.replace(/^@\s*/, '')} size={16} />;
+export function TabMark({ tab, label }: { tab: CenterTab; label?: string }) {
+  const t = decodeTabId(tab.id);
+  switch (t.kind) {
+    case 'graph': return <ContextGraphMark id={t.contextGraphId} name={label ?? tab.label} />;
+    case 'agent': return <AgentDot uri={t.slug} label={(label ?? tab.label).replace(/^@\s*/, '')} size={16} />;
+    case 'conviction': return <span className="v10-tab-mark-icon">{placeIcon('conviction')}</span>;
+    case 'document': return <span className="v10-tab-mark-icon">{FILE_ICON}</span>;
+    case 'layer': return <span className="v10-tab-mark-icon">{placeIcon('memory-stack')}</span>;
+    case 'place': { const icon = placeIcon(t.id); return icon ? <span className="v10-tab-mark-icon">{icon}</span> : null; }
+    default: return null;
   }
-  if (tab.id.startsWith('conviction:')) return <span className="v10-tab-mark-icon">{placeIcon('conviction')}</span>;
-  if (tab.id.startsWith(DOC_TAB_PREFIX)) return <span className="v10-tab-mark-icon">{FILE_ICON}</span>;
-  if (/^(wm|swm|vm):/.test(tab.id)) return <span className="v10-tab-mark-icon">{placeIcon('memory-stack')}</span>;
-  const icon = placeIcon(tab.id);
-  return icon ? <span className="v10-tab-mark-icon">{icon}</span> : null;
+}
+
+/** A graph tab shows the graph's current name from the inventory; the saved
+ *  label (a short id until the list loads) is the fallback. */
+export function useTabLabels(): (tab: CenterTab) => string {
+  const graphs = useProjectsStore((s) => s.contextGraphs);
+  const names = useMemo(() => new Map(graphs.map((g) => [g.id, g.name])), [graphs]);
+  return useCallback((tab: CenterTab) => {
+    const t = decodeTabId(tab.id);
+    return (t.kind === 'graph' && names.get(t.contextGraphId)) || tab.label;
+  }, [names]);
 }
 
 type Menu = { kind: 'context'; id: string; x: number; y: number } | { kind: 'all'; x: number; y: number } | null;
 
 export function TabBar() {
   const { tabs, activeTabId, recentlyClosed, setActiveTab, closeTab, moveTab, closeOtherTabs, closeTabsToRight, reopenTab } = useTabsStore();
+  const labelOf = useTabLabels();
   const [menu, setMenu] = useState<Menu>(null);
   const [drag, setDrag] = useState<{ id: string; over?: string; side?: 'before' | 'after' } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -87,7 +99,7 @@ export function TabBar() {
               aria-selected={active}
               tabIndex={active ? 0 : -1}
               className={`v10-center-tab${active ? ' active' : ''}${pinned ? ' pinned' : ''}${drag?.id === tab.id ? ' dragging' : ''}${dropClass}`}
-              title={tab.label}
+              title={labelOf(tab)}
               draggable={!pinned}
               onClick={() => setActiveTab(tab.id)}
               onKeyDown={(e) => onKeyDown(e, tab, index)}
@@ -113,14 +125,14 @@ export function TabBar() {
               }}
               onDragEnd={() => setDrag(null)}
             >
-              <TabMark tab={tab} />
-              {!pinned && <span className="v10-center-tab-label">{tab.label}</span>}
-              {pinned && <span className="v10-sr-only">{tab.label}</span>}
+              <TabMark tab={tab} label={labelOf(tab)} />
+              {!pinned && <span className="v10-center-tab-label">{labelOf(tab)}</span>}
+              {pinned && <span className="v10-sr-only">{labelOf(tab)}</span>}
               {tab.closable && (
                 <button
                   type="button"
                   className="v10-center-tab-close"
-                  aria-label={`Close ${tab.label}`}
+                  aria-label={`Close ${labelOf(tab)}`}
                   tabIndex={-1}
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                 >
@@ -172,7 +184,7 @@ export function TabBar() {
               <div className="v10-tab-menu-label">Open tabs</div>
               {tabs.map((tab) => (
                 <button key={tab.id} role="menuitem" className={`v10-tab-menu-item${tab.id === activeTabId ? ' active' : ''}`} onClick={() => { setActiveTab(tab.id); setMenu(null); }}>
-                  <TabMark tab={tab} /><span className="v10-tab-menu-text">{tab.label}</span>
+                  <TabMark tab={tab} label={labelOf(tab)} /><span className="v10-tab-menu-text">{labelOf(tab)}</span>
                   {tab.id === activeTabId && <span className="v10-tab-menu-hint">active</span>}
                 </button>
               ))}
@@ -181,7 +193,7 @@ export function TabBar() {
               {recentlyClosed.length === 0 && <div className="v10-tab-menu-empty">Nothing closed yet</div>}
               {recentlyClosed.map((tab) => (
                 <button key={tab.id} role="menuitem" className="v10-tab-menu-item" onClick={() => { reopenTab(tab.id); setMenu(null); }}>
-                  <TabMark tab={tab} /><span className="v10-tab-menu-text">{tab.label}</span><span className="v10-tab-menu-hint">reopen</span>
+                  <TabMark tab={tab} label={labelOf(tab)} /><span className="v10-tab-menu-text">{labelOf(tab)}</span><span className="v10-tab-menu-hint">reopen</span>
                 </button>
               ))}
             </>

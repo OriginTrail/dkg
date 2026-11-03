@@ -1,5 +1,6 @@
 /** Icons for places (sidebar "Node" group, tab marks). Stroke icons inherit currentColor. */
 import React from 'react';
+import type { PlaceId } from '../../lib/tab-target.js';
 
 const svg = (children: React.ReactNode, size = 14) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{children}</svg>
@@ -16,7 +17,7 @@ export const CHEVRON_DOWN = svg(<polyline points="6 9 12 15 18 9" />, 14);
 export const CLOSE_ICON = svg(<><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></>, 12);
 
 /** The place icon for a tab id, or null for things you open. */
-export function placeIcon(id: string): React.ReactNode | null {
+export function placeIcon(id: PlaceId): React.ReactNode | null {
   switch (id) {
     case 'dashboard': return DASHBOARD_ICON;
     case 'operations': return OBSERVABILITY_ICON;

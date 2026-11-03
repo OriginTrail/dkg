@@ -2,36 +2,44 @@
  * Verifiable Memory publish receipts for a context graph — loaded and
  * normalised in one place.
  *
- * A receipt is what the chain gave back for a published assertion, stored in
+ * Confirmed Knowledge Assets leave two kinds of record in
  * `did:dkg:context-graph:<cg>/_meta`:
  *
- *   <assertionUri>  dkg:publishedAtTx        "0x…"   (real tx hash)
- *   <assertionUri>  dkg:assertionFinalizedAt "…"     (finalize time, optional)
- *   <assertionUri>  dkg:assertionRootEntity | dkg:assertionEntity <member>
- *   <assertionUri>  prov:wasAttributedTo     <did:dkg:agent:0x…> (optional)
- *   <assertionUri>  dkg:kaUal                <did:dkg:<chain>/<addr>/<n>> (graph-scoped KAs)
+ *   Named-assertion receipt (local publishes):
+ *     <assertionUri>  dkg:publishedAtTx        "0x…"   (real tx hash)
+ *     <assertionUri>  dkg:publishedAtBlock     42      (block of that tx)
+ *     <assertionUri>  dkg:assertionFinalizedAt "…"     (seal time, optional)
+ *     <assertionUri>  dkg:assertionRootEntity | dkg:assertionEntity <member>  (legacy)
+ *     <assertionUri>  dkg:kaUal                <ual>   (graph-scoped KAs)
+ *     <assertionUri>  prov:wasAttributedTo     <did:dkg:agent:0x…>
  *
- * Membership has two shapes. Legacy (root-scoped) seals list their entities
- * with the member predicates above. Current graph-scoped seals list none:
- * the KA's content is the exact per-KA graph
- * `did:dkg:context-graph:<cg>[/<sub>]/_verifiable_memory/<addr>/<n>` named by
- * its `dkg:kaUal`, so its members are the subjects of that graph, read with a
- * second, VALUES-bounded query that asks for the context graph's registered
- * partitions (sub-graph VM graphs are only readable that way).
+ *   Confirmed KA metadata on the UAL (also written for assets that arrived
+ *   through sync and were never published locally):
+ *     <ual>  dkg:status "confirmed" ; dkg:kaUal <ual> ; dkg:assertionGraph <per-KA VM graph>
+ *     <ual>  dkg:confirmationKind "transaction" | "finalized-materialization"
+ *     <ual>  dkg:transactionHash "0x…"   (transaction kind only)
+ *     <ual>  dkg:assertionVersion 3 ; dkg:publishedAt "…" ; prov:wasAttributedTo …
  *
- * Storage identities are parsed and built with core's helpers
- * (`parseContextGraphAssertionStorageUri`, `parseDeterministicKnowledgeAssetUal`,
- * `contextGraphLayerUri`); rows they don't recognise are skipped, never thrown.
+ * Both kinds fold into one `VmReceipt` per Knowledge Asset (keyed by UAL
+ * when there is one, else by assertion URI). Members come from legacy
+ * member rows plus the subjects of the per-KA graph, read with a second,
+ * VALUES-bounded query over the context graph's partitions. A finalized
+ * materialization has no transaction hash: it is still anchored, and `tx`
+ * is null rather than invented.
  *
- * Both reads are capped. When a read hits its cap the result is marked
- * incomplete, so callers never treat an omitted receipt as a missing one.
+ * Transaction selection is order-independent: for repeated publishes of one
+ * assertion the receipt at the highest block wins (then the lexically
+ * greatest hash); for UAL records the highest assertion version wins.
  *
- * The SPARQL result has one row per (assertion, member, agent). This module
- * folds those rows into one typed `VmReceipt` per assertion, so the VM header
- * facts (`useVmReceiptSummary`) and the VM graph anchors
- * (`useVerifiableMemoryAnchors`) are pure projections of the same records and
- * never read raw query rows themselves. Both go through `executeQuery`, which
- * shares an identical in-flight request.
+ * Storage identities are parsed and built with core's helpers; rows they
+ * don't recognise are skipped, never thrown. Both reads are capped; when a
+ * read hits its cap the result is marked incomplete, so callers never treat
+ * an omitted receipt as a missing one.
+ *
+ * The VM header facts (`useVmReceiptSummary`) and the VM graph anchors
+ * (`useVerifiableMemoryAnchors`) are pure projections of these records and
+ * never read raw query rows. Both go through `executeQuery`, which shares an
+ * identical in-flight request.
  *
  * Read-only over `/api/query`.
  */
@@ -46,12 +54,24 @@ import { useMemoryGraphEvents } from './useNodeEvents.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
+/** How the chain confirmation is known. */
+export type VmConfirmation =
+  /** A local publish receipt (`dkg:publishedAtTx`). */
+  | 'receipt'
+  /** Confirmed KA metadata carrying the transaction hash. */
+  | 'transaction'
+  /** Confirmed through finalized materialization (synced); no local tx hash. */
+  | 'finalized-materialization';
+
 export interface VmReceipt {
-  /** Assertion URI. Legacy members are namespaced under it. */
+  /** Assertion URI when the KA has a named assertion, else its UAL. */
   assertion: string;
-  /** Publish transaction hash. */
-  tx: string;
-  /** Latest finalize time as ISO, or null when the receipt has none. */
+  /** The KA's UAL, when known. */
+  ual?: string;
+  /** Publish transaction hash, or null when the confirmation carries none. */
+  tx: string | null;
+  confirmation: VmConfirmation;
+  /** Latest finalize (seal) time as ISO, or null when the receipt has none. */
   finalizedAt: string | null;
   /** Entities the KA covers: seal member rows, plus the subjects of its
    *  per-KA graph for graph-scoped KAs. */
@@ -61,8 +81,7 @@ export interface VmReceipt {
   signers: string[];
   /** Sub-graph slug when the assertion lives in one. */
   subGraph?: string;
-  /** Graph-scoped KAs: the per-KA Verifiable Memory graph holding the
-   *  content, derived from `dkg:kaUal`. */
+  /** Graph-scoped KAs: the per-KA Verifiable Memory graph holding the content. */
   kaGraph?: string;
 }
 
@@ -94,13 +113,23 @@ export const MEMBER_ROW_LIMIT = 20000;
 export function buildVmReceiptQuery(cgId: string): string {
   return `PREFIX dkg: <${DKG}>
 PREFIX prov: <http://www.w3.org/ns/prov#>
-SELECT ?asrt ?tx ?finalizedAt ?agent ?member ?kaUal WHERE {
+SELECT ?asrt ?ual ?tx ?block ?version ?kind ?finalizedAt ?agent ?member ?kaUal ?kaGraph WHERE {
   GRAPH <did:dkg:context-graph:${cgId}/_meta> {
-    ?asrt dkg:publishedAtTx ?tx .
-    OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
-    OPTIONAL { ?asrt prov:wasAttributedTo ?agent . }
-    OPTIONAL { ?asrt dkg:kaUal ?kaUal . }
-    OPTIONAL { { ?asrt dkg:assertionRootEntity ?member . } UNION { ?asrt dkg:assertionEntity ?member . } }
+    {
+      ?asrt dkg:publishedAtTx ?tx .
+      OPTIONAL { ?asrt dkg:publishedAtBlock ?block . }
+      OPTIONAL { ?asrt dkg:assertionFinalizedAt ?finalizedAt . }
+      OPTIONAL { ?asrt prov:wasAttributedTo ?agent . }
+      OPTIONAL { ?asrt dkg:kaUal ?kaUal . }
+      OPTIONAL { { ?asrt dkg:assertionRootEntity ?member . } UNION { ?asrt dkg:assertionEntity ?member . } }
+    } UNION {
+      ?ual dkg:status "confirmed" ; dkg:kaUal ?ual ; dkg:assertionGraph ?kaGraph .
+      OPTIONAL { ?ual dkg:transactionHash ?tx . }
+      OPTIONAL { ?ual dkg:assertionVersion ?version . }
+      OPTIONAL { ?ual dkg:confirmationKind ?kind . }
+      OPTIONAL { ?ual dkg:publishedAt ?finalizedAt . }
+      OPTIONAL { ?ual prov:wasAttributedTo ?agent . }
+    }
   }
 } LIMIT ${RECEIPT_ROW_LIMIT}`;
 }
@@ -149,32 +178,100 @@ function isoOrNull(value: string): string | null {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 
-/** Fold query rows into one receipt per assertion. Rows without an assertion
- *  or a transaction are not receipts and are skipped. */
+const bigOrNull = (value: string): bigint | null => {
+  if (!/^\d+$/.test(value)) return null;
+  try { return BigInt(value); } catch { return null; }
+};
+
+/** A transaction candidate with its ordering key (block or version). */
+interface TxCandidate { tx: string; rank: bigint | null }
+
+/** The candidate at the highest rank; without ranks, the lexically greatest
+ *  hash. Independent of row order. */
+function pickTx(candidates: readonly TxCandidate[]): string | null {
+  let best: TxCandidate | null = null;
+  for (const c of candidates) {
+    if (!best) { best = c; continue; }
+    const byRank = c.rank === null || best.rank === null ? 0 : c.rank > best.rank ? 1 : c.rank < best.rank ? -1 : 0;
+    if (byRank > 0 || (byRank === 0 && c.rank !== null && best.rank === null) || (byRank === 0 && (c.rank === null) === (best.rank === null) && c.tx > best.tx)) best = c;
+  }
+  return best?.tx ?? null;
+}
+
+interface Folding {
+  assertion?: string;
+  ual?: string;
+  receiptTxs: TxCandidate[];
+  ualTxs: TxCandidate[];
+  kind?: string;
+  finalizedAt: string | null;
+  members: string[];
+  attributed: string[];
+  kaGraph?: string;
+  subGraph?: string;
+}
+
+/** Fold query rows into one receipt per Knowledge Asset (by UAL, else by
+ *  assertion URI). Rows that name neither a receipted assertion nor a
+ *  confirmed UAL are skipped. */
 export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>, cgId: string): VmReceipt[] {
-  const byAssertion = new Map<string, VmReceipt & { attributed: string[] }>();
+  const byKey = new Map<string, Folding>();
+  const get = (key: string): Folding => {
+    let f = byKey.get(key);
+    if (!f) { f = { receiptTxs: [], ualTxs: [], finalizedAt: null, members: [], attributed: [] }; byKey.set(key, f); }
+    return f;
+  };
+  const add = (list: string[], v: string) => { if (v && !list.includes(v)) list.push(v); };
   for (const row of rows) {
     const assertion = term(row.asrt);
+    const ual = term(row.ual) || term(row.kaUal);
     const tx = term(row.tx);
-    if (!assertion || !tx) continue;
-    let r = byAssertion.get(assertion);
-    if (!r) {
-      r = { assertion, tx, finalizedAt: null, members: [], signers: [], attributed: [], subGraph: decodeAssertionIdentity(assertion, cgId)?.subGraph };
-      byAssertion.set(assertion, r);
+    if (assertion && !tx) continue; // a seal without a receipt
+    if (!assertion && !ual) continue;
+    const f = get(ual || assertion);
+    if (assertion) {
+      f.assertion = assertion;
+      f.subGraph ??= decodeAssertionIdentity(assertion, cgId)?.subGraph;
+      f.receiptTxs.push({ tx, rank: bigOrNull(term(row.block)) });
+    } else if (tx) {
+      f.ualTxs.push({ tx, rank: bigOrNull(term(row.version)) });
     }
+    if (ual) {
+      f.ual = ual;
+      // The UAL's own dkg:assertionGraph is authoritative; otherwise derive it from the UAL.
+      const explicit = term(row.kaGraph);
+      if (explicit) f.kaGraph = explicit;
+      else f.kaGraph ??= kaGraphOf(ual, cgId, f.subGraph);
+    }
+    const kind = term(row.kind);
+    if (kind) f.kind = kind;
     const finalizedAt = isoOrNull(term(row.finalizedAt));
-    if (finalizedAt && (!r.finalizedAt || finalizedAt > r.finalizedAt)) r.finalizedAt = finalizedAt;
-    const member = term(row.member);
-    if (member && !r.members.includes(member)) r.members.push(member);
-    const agent = term(row.agent);
-    if (agent && !r.attributed.includes(agent)) r.attributed.push(agent);
-    const kaUal = term(row.kaUal);
-    if (kaUal && !r.kaGraph) r.kaGraph = kaGraphOf(kaUal, cgId, r.subGraph);
+    if (finalizedAt && (!f.finalizedAt || finalizedAt > f.finalizedAt)) f.finalizedAt = finalizedAt;
+    add(f.members, term(row.member));
+    add(f.attributed, term(row.agent));
   }
-  return [...byAssertion.values()].map(({ attributed, ...r }) => {
-    const author = authorOf(r.assertion);
-    return { ...r, signers: attributed.length ? attributed : author ? [author] : [] };
-  });
+  const out: VmReceipt[] = [];
+  for (const f of byKey.values()) {
+    const receiptTx = pickTx(f.receiptTxs);
+    const ualTx = pickTx(f.ualTxs);
+    const tx = receiptTx ?? ualTx;
+    const confirmation: VmConfirmation = receiptTx ? 'receipt' : ualTx ? 'transaction' : f.kind === 'finalized-materialization' ? 'finalized-materialization' : 'transaction';
+    if (!tx && confirmation !== 'finalized-materialization') continue; // confirmed status without any provenance: not anchored
+    const assertion = f.assertion ?? f.ual!;
+    const author = f.assertion ? authorOf(f.assertion) : null;
+    out.push({
+      assertion,
+      ...(f.ual ? { ual: f.ual } : {}),
+      tx,
+      confirmation,
+      finalizedAt: f.finalizedAt,
+      members: f.members,
+      signers: f.attributed.length ? f.attributed : author ? [author] : [],
+      subGraph: f.subGraph,
+      ...(f.kaGraph ? { kaGraph: f.kaGraph } : {}),
+    });
+  }
+  return out;
 }
 
 /** Add the subjects of each graph-scoped receipt's KA graph to its members. */

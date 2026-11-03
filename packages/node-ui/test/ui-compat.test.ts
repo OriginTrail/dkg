@@ -274,14 +274,14 @@ describe('backward-compatible URL redirects (V10 consolidation)', () => {
   });
 
   it('exposes /observability as a deep-linkable path (BUG-018)', () => {
-    // The mapping table now lives in `hooks/useShellRouting.ts`; the
-    // companion behavioural tests in `use-shell-routing.test.ts`
-    // exercise the deep-link / unmapped-tab reset semantics directly.
-    const shellRouting = readFileSync(
-      resolve(__dirname, '../src/ui/hooks/useShellRouting.ts'),
+    // Places and their addresses live in `lib/tab-target.ts` (one tab model;
+    // `tab-routes.ts` maps them to paths); `use-shell-routing.test.ts`
+    // exercises deep links and Back/Forward directly.
+    const routes = readFileSync(
+      resolve(__dirname, '../src/ui/lib/tab-target.ts'),
       'utf-8',
     );
-    expect(shellRouting).toContain("'/observability'");
+    expect(routes).toContain("'/observability'");
   });
 });
 

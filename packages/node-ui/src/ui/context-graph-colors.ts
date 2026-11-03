@@ -16,6 +16,7 @@
  *   - from the 9th graph on, colours repeat (hash slot, no probing).
  */
 import { createElement } from 'react';
+import { decodeTabId } from './lib/tab-target.js';
 import { useProjectsStore } from './stores/projects.js';
 
 export const CONTEXT_GRAPH_SLOTS = 8;
@@ -70,7 +71,8 @@ export function useContextGraphColor(id: string | null | undefined): string {
 
 /** For a center tab id like `project:<cgId>`; null for non-graph tabs. */
 export function contextGraphIdFromTab(tabId: string): string | null {
-  return tabId.startsWith('project:') ? tabId.slice('project:'.length) : null;
+  const t = decodeTabId(tabId);
+  return t.kind === 'graph' ? t.contextGraphId : null;
 }
 
 /** First letter (or digit) of a graph's display name, for the monogram tile. */

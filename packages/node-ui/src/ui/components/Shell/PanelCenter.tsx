@@ -4,7 +4,7 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { authHeaders, fileUrl } from '../../api.js';
-import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
+import { decodeTabId } from '../../lib/tab-target.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
@@ -72,7 +72,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
   const docLabel = currentTab?.label ?? 'Document';
 
   const handleBack = () => {
-    const projectTab = tabs.find(t => t.id.startsWith('project:'));
+    const projectTab = tabs.find(t => decodeTabId(t.id).kind === 'graph');
     if (projectTab) {
       setActiveTab(projectTab.id);
     }
@@ -281,46 +281,16 @@ function ViewContainer() {
 
   if (activeTabId === CONTEXT_GRAPH_PRIMER_TAB_ID) return <ContextGraphPrimerView />;
 
-  if (activeTabId.startsWith('project:')) {
-    const cgId = activeTabId.slice('project:'.length);
-    return <ProjectView contextGraphId={cgId} />;
-  }
-
-  if (activeTabId.startsWith('conviction:')) {
-    const accountId = activeTabId.slice('conviction:'.length);
-    return <ConvictionDetailView accountId={accountId} />;
-  }
-
-  if (activeTabId.startsWith('agent:')) {
-    // Tab id shape: `agent:<projectId>|<agentSlug>`. The project part
-    // scopes the profile to a single context graph's data; a future
-    // "global agent profile" view could drop the prefix.
-    const raw = activeTabId.slice('agent:'.length);
-    const pipeIdx = raw.indexOf('|');
-    if (pipeIdx > 0) {
-      const cgId = raw.slice(0, pipeIdx);
-      const agentSlug = raw.slice(pipeIdx + 1);
-      const agentUri = agentSlug.includes(':') ? agentSlug : `urn:dkg:agent:${agentSlug}`;
-      return <AgentProfilePage contextGraphId={cgId} agentUri={agentUri} />;
-    }
-  }
-
-  if (activeTabId.startsWith(DOC_TAB_PREFIX)) {
-    // Tab id shape: `doc:<contextGraphId>|<docRef>|<contentType>`. The
-    // encode/decode contract lives in doc-tab-id.ts (kept pure so it is
-    // unit-testable without mounting React).
-    const { docRef, contentType } = decodeDocTabId(activeTabId);
-    return <DocumentViewer docRef={docRef} contentType={contentType} />;
-  }
-
-  if (activeTabId.startsWith('wm:')) {
-    return <MemoryLayerView layer="wm" contextGraphId={activeTabId.slice(3)} />;
-  }
-  if (activeTabId.startsWith('swm:')) {
-    return <MemoryLayerView layer="swm" contextGraphId={activeTabId.slice(4)} />;
-  }
-  if (activeTabId.startsWith('vm:')) {
-    return <MemoryLayerView layer="vm" contextGraphId={activeTabId.slice(3)} />;
+  const target = decodeTabId(activeTabId);
+  switch (target.kind) {
+    case 'graph': return <ProjectView contextGraphId={target.contextGraphId} />;
+    case 'conviction': return <ConvictionDetailView accountId={target.accountId} />;
+    // The graph part of an agent tab scopes the profile to one context graph's
+    // data; a future "global agent profile" view could drop it.
+    case 'agent': return <AgentProfilePage contextGraphId={target.contextGraphId} agentUri={target.agentUri} />;
+    case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} />;
+    case 'layer': return <MemoryLayerView layer={target.layer} contextGraphId={target.contextGraphId} />;
+    default: break;
   }
 
   return (

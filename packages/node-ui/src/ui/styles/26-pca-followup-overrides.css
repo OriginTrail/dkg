@@ -218,7 +218,7 @@
   .v10-pca-node-picker-option {
     grid-template-columns: auto minmax(0, 1fr);
   }
-  .v10-pca-node-picker-option .badge,
+  .v10-pca-node-picker-option .ds-badge,
   .v10-pca-node-picker-stake,
   .v10-pca-node-picker-own {
     grid-column: 2;

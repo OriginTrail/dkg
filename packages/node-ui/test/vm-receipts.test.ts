@@ -37,6 +37,7 @@ describe('parseVmReceiptRows', () => {
       {
         assertion: A,
         tx: '0x9f2c',
+        confirmation: 'receipt',
         finalizedAt: '2026-10-31T10:00:00.000Z',
         members: ['urn:x:a', 'urn:x:b'],
         signers: ['did:dkg:agent:0x1', 'did:dkg:agent:0x2'],
@@ -45,6 +46,7 @@ describe('parseVmReceiptRows', () => {
       {
         assertion: B,
         tx: '0x41ab',
+        confirmation: 'receipt',
         finalizedAt: null,
         members: ['urn:x:c'],
         // No attribution row: the author address in the assertion URI.
@@ -52,6 +54,54 @@ describe('parseVmReceiptRows', () => {
         subGraph: 'research',
       },
     ]);
+  });
+
+  it('binds a repeatedly published assertion to its latest transaction, whatever the row order', () => {
+    const rows = [
+      { asrt: A, tx: '0xold', block: '"41"^^<http://www.w3.org/2001/XMLSchema#integer>', member: 'urn:x:a' },
+      { asrt: A, tx: '0xnew', block: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>', member: 'urn:x:a' },
+    ];
+    for (const order of [rows, [...rows].reverse()]) {
+      const [r] = parseVmReceiptRows(order, CG);
+      expect(r).toMatchObject({ assertion: A, tx: '0xnew', confirmation: 'receipt', members: ['urn:x:a'] });
+    }
+    // Without block numbers the choice is still deterministic (greatest hash).
+    const noBlocks = [{ asrt: A, tx: '0xaaa' }, { asrt: A, tx: '0xbbb' }];
+    expect(parseVmReceiptRows(noBlocks, CG)[0].tx).toBe('0xbbb');
+    expect(parseVmReceiptRows([...noBlocks].reverse(), CG)[0].tx).toBe('0xbbb');
+  });
+
+  it('folds confirmed KA metadata on the UAL: transaction-confirmed and receiptless finalized materialization', () => {
+    const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
+    const KA_GRAPH = `did:dkg:context-graph:${CG}/_verifiable_memory/${'0x' + 'ab'.repeat(20)}/9`;
+    const receipts = parseVmReceiptRows([
+      // Transaction-confirmed, two versions: the newest version's tx wins, in either order.
+      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv2', version: '2', kind: 'transaction', finalizedAt: '"2026-10-31T10:00:00Z"', agent: 'did:dkg:agent:0x9' },
+      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv1', version: '1', kind: 'transaction' },
+      // Synced, finalized materialization: anchored, but no local transaction hash.
+      { ual: 'did:dkg:hardhat:31337/0x' + 'cd'.repeat(20) + '/3', kaGraph: 'urn:g:synced', kind: 'finalized-materialization', agent: 'peer-1' },
+      // A confirmed status with no provenance at all is not anchored.
+      { ual: 'did:dkg:hardhat:31337/0x' + 'ef'.repeat(20) + '/4', kaGraph: 'urn:g:bare' },
+    ], CG);
+    expect(receipts).toEqual([
+      { assertion: UAL, ual: UAL, tx: '0xv2', confirmation: 'transaction', finalizedAt: '2026-10-31T10:00:00.000Z', members: [], signers: ['did:dkg:agent:0x9'], subGraph: undefined, kaGraph: KA_GRAPH },
+      { assertion: 'did:dkg:hardhat:31337/0x' + 'cd'.repeat(20) + '/3', ual: 'did:dkg:hardhat:31337/0x' + 'cd'.repeat(20) + '/3', tx: null, confirmation: 'finalized-materialization', finalizedAt: null, members: [], signers: ['peer-1'], subGraph: undefined, kaGraph: 'urn:g:synced' },
+    ]);
+    const reversed = parseVmReceiptRows([
+      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv1', version: '1', kind: 'transaction' },
+      { ual: UAL, kaGraph: KA_GRAPH, tx: '0xv2', version: '2', kind: 'transaction' },
+    ], CG);
+    expect(reversed[0].tx).toBe('0xv2');
+  });
+
+  it('merges a named receipt and its UAL metadata into one Knowledge Asset', () => {
+    const UAL = `did:dkg:hardhat:31337/${'0x' + 'ab'.repeat(20)}/9`;
+    const receipts = parseVmReceiptRows([
+      { asrt: A, tx: '0x9f2c', kaUal: UAL },
+      { ual: UAL, kaGraph: 'urn:g:ka9', tx: '0x9f2c', kind: 'transaction' },
+    ], CG);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ assertion: A, ual: UAL, tx: '0x9f2c', confirmation: 'receipt', kaGraph: 'urn:g:ka9' });
   });
 
   it('treats an unparseable finalize time as unknown', () => {

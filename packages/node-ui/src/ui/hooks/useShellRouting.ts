@@ -4,6 +4,7 @@ import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
+import { decodeTabId } from '../lib/tab-target.js';
 
 /**
  * The address owns the active centre tab.
@@ -65,17 +66,19 @@ export function useShellRouting(): void {
   // target instead, like the sidebar's Browse; it's re-checked once the graph
   // list arrives (a bookmark can load before it). The dashboard clears it too;
   // other places (Settings, Observability) leave it as it was.
+  const activeTarget = decodeTabId(activeTabId);
+  const activeGraphId = activeTarget.kind === 'graph' ? activeTarget.contextGraphId : null;
   const activeGraphPassive = useProjectsStore((s) => {
-    const graph = activeTabId.startsWith('project:') ? s.contextGraphs.find((cg) => `project:${cg.id}` === activeTabId) : undefined;
+    const graph = activeGraphId ? s.contextGraphs.find((cg) => cg.id === activeGraphId) : undefined;
     return graph ? isPassiveCatalogueGraph(graph) : false;
   });
   useEffect(() => {
     const { setActiveProject, activeProjectId } = useProjectsStore.getState();
-    if (activeTabId.startsWith('project:')) {
-      const graphId = activeGraphPassive ? null : activeTabId.slice('project:'.length) || null;
+    if (activeGraphId) {
+      const graphId = activeGraphPassive ? null : activeGraphId;
       if (graphId !== activeProjectId) setActiveProject(graphId);
     } else if (activeTabId === 'dashboard' && activeProjectId !== null) {
       setActiveProject(null);
     }
-  }, [activeTabId, activeGraphPassive]);
+  }, [activeTabId, activeGraphId, activeGraphPassive]);
 }

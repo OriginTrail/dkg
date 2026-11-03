@@ -78,7 +78,7 @@ export function WalletPill({
           via {provider}
         </span>
         {wrongNetwork ? (
-          <span className="badge badge-warn v10-wallet-pill-network" role="alert">
+          <span className="ds-badge ds-sm ds-tone-warning v10-wallet-pill-network" role="alert">
             wrong network
           </span>
         ) : (

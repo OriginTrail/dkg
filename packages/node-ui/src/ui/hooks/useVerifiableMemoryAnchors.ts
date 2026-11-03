@@ -67,8 +67,14 @@ export interface VerifiableMemoryAnchorsResult {
 
 /** Short label for an anchor: `tx mo3e0z…` + finalize time when known. */
 function anchorLabel(r: VmReceipt): string {
-  const short = r.tx.slice(0, 10);
+  const short = r.tx ? r.tx.slice(0, 10) : 'confirmed';
   return r.finalizedAt ? `anchor ${short} · ${r.finalizedAt.slice(11, 16)}UTC` : `anchor ${short}`;
+}
+
+/** One synthetic node per Knowledge Asset: by its tx, else by its UAL or
+ *  assertion (a finalized materialization carries no local tx hash). */
+function anchorUriFor(r: VmReceipt): string {
+  return `urn:dkg:viz:anchor:${r.tx ?? encodeURIComponent(r.ual ?? r.assertion)}`;
 }
 
 
@@ -111,14 +117,14 @@ export function buildDecorationTriples(
       : r.members;
     if (visibleRoots.length === 0) continue;
 
-    const anchorUri = `urn:dkg:viz:anchor:${r.tx}`;
+    const anchorUri = anchorUriFor(r);
     // Anchor node typing + label so RdfGraph can render it with our viz colors.
     out.push({ subject: anchorUri, predicate: RDF_TYPE, object: VIZ_ANCHOR_TYPE, subGraph: r.subGraph });
     out.push({ subject: anchorUri, predicate: SCHEMA_NAME, object: `"${anchorLabel(r)}"`, subGraph: r.subGraph });
     out.push({
       subject: anchorUri,
       predicate: SCHEMA_DESC,
-      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · finalized ${r.finalizedAt}` : ' · finalize time unknown'}"`,
+      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · finalized ${r.finalizedAt}` : ' · finalize time unknown'}${r.tx ? '' : ' · confirmed by finalized materialization (no local transaction hash)'}"`,
       subGraph: r.subGraph,
     });
 

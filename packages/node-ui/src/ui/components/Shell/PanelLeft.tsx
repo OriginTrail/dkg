@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useId, useState } from 'react';
+import React, { useCallback, useId, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -22,13 +22,10 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
-import { DASHBOARD_ICON, OBSERVABILITY_ICON, CONVICTION_ICON, SETTINGS_ICON } from './nav-icons.js';
+import { DASHBOARD_ICON, placeIcon } from './nav-icons.js';
+import { NODE_PLACE_IDS, PLACES } from '../../lib/tab-target.js';
 
-const NODE_PLACES = [
-  { id: 'operations', label: 'Observability', title: 'Observability: operations, replication, hardware, logs', icon: OBSERVABILITY_ICON, testId: undefined },
-  { id: 'conviction', label: 'Publisher Conviction', title: 'Publisher Conviction: publishing discounts', icon: CONVICTION_ICON, testId: 'pca-launch-btn' },
-  { id: 'settings', label: 'Settings', title: 'Node settings', icon: SETTINGS_ICON, testId: undefined },
-] as const;
+const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: placeIcon(id) }));
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -226,12 +223,6 @@ export function PanelLeft() {
   const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
 
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
-  // Tabs restored from a refresh or opened from an address carry a short id
-  // as their label; give them the graph's real name once the list loads.
-  const renameTab = useTabsStore((s) => s.renameTab);
-  useEffect(() => {
-    for (const cg of contextGraphs) if (cg.name) renameTab(`project:${cg.id}`, cg.name);
-  }, [contextGraphs, renameTab]);
   const myProjects = visibleContextGraphs.filter((cg) =>
     belongsInMyProjectsSidebar(cg, agentIdentity));
   const contextOracleProjects = visibleContextGraphs.filter((cg) =>

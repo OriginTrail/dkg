@@ -92,31 +92,6 @@ select.input {
 .data-table tbody tr:last-child td { border-bottom: none; }
 
 /* Badges */
-/* Generic table/status badge — the Badge "sm" look (components/ds/Badge):
-   18px pill, 10px sentence-case text, tint carries the tone. Prefer
-   <Badge size="sm" tone=…> in new code. */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: var(--h-badge-sm);
-  padding: 0 6px;
-  border-radius: var(--radius-pill);
-  font-family: var(--font-sans);
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  box-shadow: inset 0 0 0 1px var(--border-default);
-}
-.badge-success { background: color-mix(in srgb, var(--text-success) 13%, transparent); color: var(--text-success); box-shadow: none; }
-.badge-error   { background: color-mix(in srgb, var(--text-danger) 13%, transparent);  color: var(--text-danger);  box-shadow: none; }
-.badge-warn    { background: color-mix(in srgb, var(--text-warning) 13%, transparent); color: var(--text-warning); box-shadow: none; }
-.badge-cancelled { background: transparent; color: var(--text-tertiary); }
-.badge-info    { background: var(--bg-elevated); color: var(--text-secondary); }
-
 /* Empty states */
 .empty-state {
   display: flex;

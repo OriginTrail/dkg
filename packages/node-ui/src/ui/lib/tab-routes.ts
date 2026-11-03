@@ -5,32 +5,26 @@
  * Places get short paths; things you open get readable paths with their id.
  * Anything else round-trips through `/open/<encoded tab id>`.
  */
+import { PLACES, decodeTabId, type PlaceId } from './tab-target.js';
+
 export interface TabRoute { id: string; label: string }
 
-const PLACES: Record<string, { path: string; label: string }> = {
-  dashboard: { path: '/', label: 'Dashboard' },
-  operations: { path: '/observability', label: 'Observability' },
-  settings: { path: '/settings', label: 'Settings' },
-  conviction: { path: '/conviction', label: 'Publisher Conviction' },
-  'context-graph-primer': { path: '/primer', label: 'What is a Context Graph?' },
-  'memory-stack': { path: '/memory-stack', label: 'Memory stack' },
-  'agent-hub': { path: '/agent-hub', label: 'Agent hub' },
-};
-
+const PLACE_BY_PATH = new Map<string, PlaceId>((Object.keys(PLACES) as PlaceId[]).map((id) => [PLACES[id].path, id]));
 /** Legacy paths that still land on a place. */
-const ALIASES: Record<string, string> = { '/operations': 'operations' };
+const ALIASES: Record<string, PlaceId> = { '/operations': 'operations' };
 
 // Keep ':' readable in paths (it's valid in a path segment).
 const enc = (s: string) => encodeURIComponent(s).replace(/%3A/gi, ':');
 const dec = (s: string) => { try { return decodeURIComponent(s); } catch { return s; } };
 
 export function tabIdToPath(id: string): string {
-  if (PLACES[id]) return PLACES[id].path;
-  if (id.startsWith('project:')) return `/graph/${enc(id.slice('project:'.length))}`;
-  if (/^conviction:\d+$/.test(id)) return `/pca/${id.slice('conviction:'.length)}`;
-  if (id.startsWith('agent:')) {
-    const [cg, slug] = id.slice('agent:'.length).split('|');
-    if (cg && slug) return `/agent/${enc(cg)}/${enc(slug)}`;
+  const t = decodeTabId(id);
+  switch (t.kind) {
+    case 'place': return PLACES[t.id].path;
+    case 'graph': return `/graph/${enc(t.contextGraphId)}`;
+    case 'conviction': if (/^\d+$/.test(t.accountId)) return `/pca/${t.accountId}`; break;
+    case 'agent': return `/agent/${enc(t.contextGraphId)}/${enc(t.slug)}`;
+    default: break;
   }
   return `/open/${enc(id)}`;
 }
@@ -38,8 +32,8 @@ export function tabIdToPath(id: string): string {
 /** The tab a path stands for, or null when the path isn't a tab (e.g. /network). */
 export function pathToTab(pathname: string): TabRoute | null {
   const path = pathname.length > 1 ? pathname.replace(/\/+$/, '') : pathname;
-  for (const [id, p] of Object.entries(PLACES)) if (p.path === path) return { id, label: p.label };
-  if (ALIASES[path]) return { id: ALIASES[path], label: PLACES[ALIASES[path]].label };
+  const place = PLACE_BY_PATH.get(path) ?? ALIASES[path];
+  if (place) return { id: place, label: PLACES[place].label };
   let m = /^\/graph\/([^/]+)$/.exec(path);
   if (m) { const cg = dec(m[1]); return { id: `project:${cg}`, label: cg.slice(0, 16) }; }
   m = /^\/pca\/(\d+)$/.exec(path);

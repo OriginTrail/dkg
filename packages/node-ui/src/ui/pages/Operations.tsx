@@ -1656,15 +1656,15 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
 }
 
 export function operationStatusBadgeClass(status: string): string {
-  if (status === 'success') return 'badge-success';
-  if (status === 'error') return 'badge-error';
-  if (status === 'cancelled') return 'badge-cancelled';
-  return 'badge-warn';
+  if (status === 'success') return 'ds-tone-success';
+  if (status === 'error') return 'ds-tone-danger';
+  if (status === 'cancelled') return 'ds-tone-muted';
+  return 'ds-tone-warning';
 }
 
 export function StatusBadge({ status }: { status: string }) {
   const cls = operationStatusBadgeClass(status);
-  return <span className={`badge ${cls}`}>{humanizeStatus(status)}</span>;
+  return <span className={`ds-badge ds-sm ${cls}`}>{humanizeStatus(status)}</span>;
 }
 
 function CopyButton({ text }: { text: string }) {

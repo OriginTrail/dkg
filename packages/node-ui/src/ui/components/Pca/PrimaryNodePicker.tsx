@@ -218,7 +218,7 @@ export function PrimaryNodePicker({
                       <span className="v10-pca-node-picker-peer" title={n.nodeId}>
                         {n.nodeId}
                       </span>
-                      <span className="badge" title="Node labels are not verified — match on id">
+                      <span className="ds-badge ds-sm" title="Node labels are not verified — match on id">
                         unverified
                       </span>
                       <span className="v10-pca-node-picker-stake">
