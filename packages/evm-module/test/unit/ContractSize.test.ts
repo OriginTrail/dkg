@@ -18,6 +18,7 @@ const isCoverage = process.argv.includes('coverage');
 const CONTRACTS = [
   'StakingV10',
   'StakingV10Ledger',
+  'ConvictionWithdrawalStorage',
   'PublishingConviction',
   'ServiceSubscriptions',
   'ServiceSubscriptionsWallet',

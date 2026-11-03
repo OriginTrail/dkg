@@ -181,6 +181,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             in the Hub serves the next claim without a
     //             re-initialization. Where the Hub holds no settlement, as on
     //             a network without the pool, the rewards are those of 10.0.6.
+    //           * A withdrawal leaves the epoch in progress claimable: it
+    //             settles the position's score in that epoch and records it,
+    //             with the epoch's reward carries, in
+    //             `ConvictionWithdrawalStorage`, and once the epoch has ended
+    //             the permissionless `claimWithdrawnEpoch` pays its share of
+    //             both pools to the staker the withdrawal paid. Before, that
+    //             share counted in the node's total and stayed in the vault.
     string private constant _VERSION = "10.1.0";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
@@ -245,6 +252,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         wrapper burns `tokenId` on the back half.
     event Withdrawn(uint256 indexed tokenId, address indexed staker, uint96 amount);
     event RewardsClaimed(uint256 indexed tokenId, uint96 amount);
+    /// @notice The withdrawn position `tokenId` left its share of `epoch`,
+    ///         the epoch in progress at its withdrawal, to be claimed once
+    ///         that epoch has ended (10.1.0).
+    event WithdrawnEpochRecorded(uint256 indexed tokenId, address indexed staker, uint256 epoch);
+    /// @notice `amount` of TRAC, the withdrawn position's share of `epoch`,
+    ///         was paid to `staker` (10.1.0).
+    event WithdrawnEpochClaimed(uint256 indexed tokenId, address indexed staker, uint256 epoch, uint96 amount);
 
     // ========================================================================
     // Errors
@@ -277,6 +291,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         Raised by `QueryInferenceSettlement.ensureClosed` and declared
     ///         here so it stays in this contract's ABI (10.1.0).
     error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
+    /// @notice `tokenId` holds no withdrawn epoch to claim: none was
+    ///         recorded, or it has been claimed (10.1.0).
+    error NoWithdrawnEpoch(uint256 tokenId);
+    /// @notice `epoch`, the epoch `tokenId` was withdrawn in, has not ended
+    ///         yet (10.1.0).
+    error WithdrawnEpochInProgress(uint256 tokenId, uint256 epoch);
 
     // ========================================================================
     // Constructor + initialize
@@ -652,6 +672,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      result (tier-0 with 1x multiplier is effectively liquid
      *      stake). Q3 — rewards are auto-claimed inside this call so
      *      the user sees a single button in the UI.
+     *
+     *      10.1.0 — the auto-claim covers every epoch that has ended. The
+     *      position's score in the epoch in progress counts in its node's
+     *      total for that epoch too, so it is settled here and recorded,
+     *      with that epoch's reward carries, in `ConvictionWithdrawalStorage`
+     *      before the position is deleted; once the epoch has ended,
+     *      `claimWithdrawnEpoch` pays its share of both pools to `staker`.
+     *      Nothing is recorded when there is nothing to claim.
      */
     function withdraw(
         address staker,
@@ -670,6 +698,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // happen BEFORE reading the final raw, because compounding grows
         // it. No-op when `currentEpoch <= 1` or nothing is unclaimed.
         _claim(tokenId);
+
+        // 10.1.0 — the epoch in progress, claimed once it has ended.
+        _recordWithdrawnEpoch(staker, tokenId, pos.identityId);
 
         // Re-read after auto-claim — raw may have grown via compounding.
         pos = convictionStorage.getPosition(tokenId);
@@ -799,6 +830,65 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         already-withdrawn position, so no extra guard is required.
     function claimFor(uint256 tokenId) external {
         _claim(tokenId);
+    }
+
+    /**
+     * @notice Pay a withdrawn position's share of the epoch that was in
+     *         progress at its withdrawal, once that epoch has ended, to the
+     *         staker the withdrawal paid. Permissionless, and once per
+     *         position.
+     * @dev    10.1.0 — the withdrawal settled the position's score in that
+     *         epoch and recorded it with the epoch's reward carries
+     *         (`ConvictionWithdrawalStorage`). This runs the split `_claim`
+     *         runs for an epoch: the query/inference pool closes through it
+     *         first, then the position's score and each carry's take their
+     *         share of their node's reward for the epoch (`_nodeEpochReward`),
+     *         the publishing pool's and the query/inference pool's, net of
+     *         the operator fee, which is what the position would have been
+     *         paid had it stayed to the end of the epoch. With no position
+     *         left to compound into, the share is paid in TRAC from the
+     *         vault. The record is deleted before the payment.
+     * @return amount The TRAC paid.
+     */
+    function claimWithdrawnEpoch(uint256 tokenId) external returns (uint96 amount) {
+        // Exists, has ended, and is deleted: `StakingV10Ledger.takeWithdrawal`.
+        (address staker, uint72 node, uint256 epoch, ConvictionStakingStorage.RewardCarry[] memory carries) = ledger
+            .takeWithdrawal(tokenId);
+
+        (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _closeQueryInference(epoch);
+        bytes32 delegatorKey = bytes32(tokenId);
+        uint256 reward;
+        // Each carry, then the position's own slot, last.
+        for (uint256 i = 0; i <= carries.length; i++) {
+            (uint256 e, uint72 identityId, bytes32 key) = (epoch, node, delegatorKey);
+            if (i < carries.length) {
+                (e, identityId, key) = (uint256(carries[i].epoch), carries[i].identityId, carries[i].delegatorKey);
+                // A carry that points at the position's own slot is read last, once; `_claim` skips it too.
+                if (identityId == node && key == delegatorKey) continue;
+            }
+            uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(e, identityId, key);
+            if (score18 > 0) reward += _nodeEpochReward(e, identityId, score18, qiFromEpoch, settlement);
+        }
+
+        if (reward > type(uint96).max) revert RewardOverflow();
+        amount = uint96(reward);
+        if (amount > 0) convictionStorage.transferStake(staker, amount);
+        emit WithdrawnEpochClaimed(tokenId, staker, epoch, amount);
+    }
+
+    /// @dev 10.1.0 — settle `tokenId`'s score in the epoch in progress on
+    ///      `identityId`, and have it recorded, with the position's reward
+    ///      carries, for `claimWithdrawnEpoch` (`StakingV10Ledger`), unless
+    ///      there is nothing to claim. The auto-claim before it has matured
+    ///      and cleared the carries of every epoch that has ended, so those
+    ///      left are of the epoch in progress; the claim reads each at its
+    ///      own epoch all the same.
+    function _recordWithdrawnEpoch(address staker, uint256 tokenId, uint72 identityId) internal {
+        uint256 epoch = chronos.getCurrentEpoch();
+        uint256 score18 = _prepareForStakeChangeV10(epoch, tokenId, identityId);
+        if (ledger.recordWithdrawal(tokenId, staker, identityId, epoch, score18)) {
+            emit WithdrawnEpochRecorded(tokenId, staker, epoch);
+        }
     }
 
     /**
