@@ -474,7 +474,7 @@ export function LayerGraphPanel({
     const swm = layer === 'swm' ? swmAttr.nodeColors : undefined;
     const hasAgents = Object.keys(agentColors).length > 0;
     if (!swm && !nodeColorsOverride && !hasAgents) return undefined;
-    return { ...agentColors, ...(swm ?? {}), ...(nodeColorsOverride ?? {}) };
+    return { ...agentColors, ...swm, ...nodeColorsOverride };
   }, [layer, swmAttr.nodeColors, nodeColorsOverride, agentColors]);
   const { canvasTriples, singletonItems } = useMemo(
     () => splitGraphTriplesForShelf(renderTriples),

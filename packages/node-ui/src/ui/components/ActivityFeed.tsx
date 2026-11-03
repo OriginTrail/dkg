@@ -277,12 +277,6 @@ function ActivityRow({
     const raw = typeBinding?.label ?? (item.kindUri ? item.kindUri.split(/[#/]/).pop() : null);
     return raw ? humanizeTypeName(raw) : 'Entity';
   })();
-  const typeIcon = ((): string => {
-    if (item.event === 'added') return '+';
-    if (item.event === 'promoted') return '⇡';
-    if (item.event === 'published') return '◉';
-    return typeBinding?.icon ?? '◆';
-  })();
   const typeColor = ((): string => {
     if (item.event === 'promoted') return LAYER_COLOR.shared;
     if (item.event === 'published') return LAYER_COLOR.verified;

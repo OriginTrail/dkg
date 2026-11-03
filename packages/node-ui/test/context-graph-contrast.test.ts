@@ -42,12 +42,6 @@ function customProperties(selector: string): Record<string, string> {
 const rootVars = customProperties(':root');
 const lightVars = { ...rootVars, ...customProperties('body.light') };
 
-function declaration(rule: string, property: string): string {
-  const match = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);?`).exec(rule);
-  if (!match) throw new Error(`Missing ${property} declaration in ${rule}`);
-  return match[1].trim();
-}
-
 function resolveColor(value: string, vars = lightVars): string {
   const varMatch = /var\((--[a-z0-9-]+)(?:,\s*([^)]+))?\)/i.exec(value);
   if (varMatch) {
@@ -77,10 +71,6 @@ function contrast(foreground: string, background: string): number {
   const lighter = Math.max(a, b);
   const darker = Math.min(a, b);
   return (lighter + 0.05) / (darker + 0.05);
-}
-
-function foregroundFor(selector: string): string {
-  return resolveColor(declaration(ruleFor(selector), 'color'));
 }
 
 describe('Context Graph contrast tokens', () => {

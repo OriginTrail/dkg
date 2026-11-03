@@ -894,7 +894,6 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
             : p.status === 'cancelled'
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
-          const isHovered = hover === i;
           return (
             <div
               key={`${p.phase}-${i}`}
