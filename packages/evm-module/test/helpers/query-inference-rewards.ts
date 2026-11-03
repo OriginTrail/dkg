@@ -12,6 +12,7 @@ import hre from 'hardhat';
 
 import {
   ConvictionServiceStorage,
+  ConvictionWithdrawalStorage,
   QueryInferenceSettlement,
   QueryInferenceStorage,
   ServiceSubscriptions,
@@ -40,6 +41,7 @@ export async function deployRewardsStack() {
     ...stack,
     EpochStorage,
     Ledger: await hre.ethers.getContract<StakingV10Ledger>('StakingV10Ledger'),
+    CWS: await hre.ethers.getContract<ConvictionWithdrawalStorage>('ConvictionWithdrawalStorage'),
     KPI: await hre.ethers.getContract<StakingKPI>('StakingKPI'),
     QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
     CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
