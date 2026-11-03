@@ -143,9 +143,10 @@ export async function maxFeePerGas(ctx: Ctx): Promise<bigint> {
 export async function progressOf(ctx: Ctx): Promise<Progress> {
   const s = ctx.file.state;
   if (!s) return NOTHING_YET;
+  // Read, not waited for: a transaction not mined yet has spent nothing so far, and the phase waits for it itself.
   const confirmed = async (key: string): Promise<boolean> => {
     const record = s.steps[key];
-    return !!record && (await ctx.tx.receipt(record.hash)).status === 1;
+    return !!record && (await ctx.hre.ethers.provider.getTransactionReceipt(record.hash))?.status === 1;
   };
   const sentBy = (role: string): bigint => BigInt(Object.values(s.steps).filter((x) => x.role === role).length);
   return {
