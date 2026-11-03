@@ -24,21 +24,27 @@
 //     keeps only the floors once everything is withdrawn;
 //   - a withdrawal mid-epoch: once the epoch in progress has ended, the
 //     withdrawn position's share of both pools, its carries of that epoch
-//     included, is claimed for the staker the withdrawal paid, once, for the
-//     score the position had earned by its withdrawal (with no proof after
-//     it, exactly what staying would have paid), and the node's other
-//     positions are as they were.
+//     included, is claimed for the staker the withdrawal paid, once: the
+//     score the position had earned by its withdrawal over the node's score
+//     at the end of the epoch, so with no proof after it exactly what
+//     staying would have paid, while proofs after it, which RandomSampling
+//     scores over the stake left, add to the positions still staked alone;
+//     and the node's other positions are as they were.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, mine, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import { BaseContract, ContractTransactionReceipt, ContractTransactionResponse } from 'ethers';
 import hre from 'hardhat';
 
 import {
+  CGWeightTreeStorage,
   Chronos,
+  ContextGraphStorage,
+  ContextGraphValueStorage,
   ConvictionServiceStorage,
   ConvictionStakingStorage,
+  DKGKnowledgeAssets,
   DKGPublishingConvictionNFT,
   DKGStakingConvictionNFT,
   EpochStorage,
@@ -48,6 +54,7 @@ import {
   PublishingConvictionStorage,
   QueryInferenceSettlement,
   QueryInferenceStorage,
+  RandomSampling,
   RandomSamplingStorage,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
@@ -937,6 +944,164 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       await f.StakingNFT.connect(d1).withdraw(t1);
       await toEpoch(e + 1n);
       expect(await claimWithdrawn(t1, d1)).to.equal(stayed);
+    });
+
+    /**
+     * RandomSampling registered and initialized on the Hub, as the
+     * development deploy does, and one public knowledge asset of a single
+     * leaf in a context graph valued from the current epoch, the only one the
+     * value-weighted draw can pick. Returns a proof of it by `node`: a
+     * challenge and its proof in the next proof period, which RandomSampling
+     * scores over the node's effective stake at that time.
+     */
+    const realProofs = async () => {
+      const noPrivateData = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('DKG_NO_PRIVATE_DATA_V10'));
+      const content = hre.ethers.toUtf8Bytes('a withdrawal in the epoch in progress');
+      const root = hre.ethers.keccak256(hre.ethers.concat([hre.ethers.keccak256(content), noPrivateData]));
+      const owner = f.accounts[0];
+      const rs = (await (
+        await hre.ethers.getContractFactory('RandomSampling')
+      ).deploy(await f.Hub.getAddress())) as unknown as RandomSampling;
+      await rs.waitForDeployment();
+      await f.Hub.setContractAddress('RandomSampling', await rs.getAddress());
+      await forward(rs, 'initialize');
+      const tree = (await hre.ethers.getContractAt(
+        'CGWeightTreeStorage',
+        await f.Hub.getContractAddress('CGWeightTreeStorage'),
+      )) as unknown as CGWeightTreeStorage;
+      const graphs = (await hre.ethers.getContractAt(
+        'ContextGraphStorage',
+        await f.Hub.getAssetStorageAddress('ContextGraphStorage'),
+      )) as unknown as ContextGraphStorage;
+      const assets = (await hre.ethers.getContractAt(
+        'DKGKnowledgeAssets',
+        await f.Hub.getAssetStorageAddress('DKGKnowledgeAssets'),
+      )) as unknown as DKGKnowledgeAssets;
+      const values = (await hre.ethers.getContractAt(
+        'ContextGraphValueStorage',
+        await f.Hub.getContractAddress('ContextGraphValueStorage'),
+      )) as unknown as ContextGraphValueStorage;
+      await tree.finishBackfill();
+      const [publicAccess, openPublishing] = [0, 1];
+      await graphs.createContextGraph(
+        owner.address,
+        [],
+        0n,
+        publicAccess,
+        openPublishing,
+        hre.ethers.ZeroAddress,
+        0n,
+        hre.ethers.ZeroHash,
+      );
+      const graph = await graphs.getLatestContextGraphId();
+      const now = await epochNow();
+      const asset = (BigInt(owner.address) << 96n) | 1n;
+      await assets.createKnowledgeAsset(
+        owner.address,
+        owner.address,
+        asset,
+        'withdrawal',
+        root,
+        1n,
+        128n,
+        now,
+        now + 5n,
+        0n,
+        false,
+        1n,
+      );
+      await graphs.registerKnowledgeAssetToContextGraph(graph, asset);
+      await values.addCGValueForEpochRange(graph, now, 5n, 1_000n);
+      await tree.settle(graph);
+      return async (node: Seller) => {
+        await mine(await rs.getActiveProofingPeriodDurationInBlocks());
+        await rs.updateAndGetActiveProofPeriodStartBlock();
+        await rs.connect(node.operational).createChallenge();
+        await rs.connect(node.operational).submitProof(content, [noPrivateData]);
+      };
+    };
+
+    it("with later proofs scored by RandomSampling over the stake left, pays the withdrawn position a quarter of both pools' net for a quarter of the node's final score, and the position still staked three quarters", async () => {
+      const a = await epochNow();
+      // The node's own tier-0 position and a tier-3 one at 2x, of 3.2M
+      // effective stake each: 6.4M together, above the 5M cap of the score's
+      // stake factor, and 3.2M, 64% of the cap, once the tier-0 position has
+      // left, so a proof after the withdrawal scores 0.8 of one before it
+      // (the square root of 0.64). Four proofs before the withdrawal give
+      // each position half of 4, and five after it give the position still
+      // staked 4 more: the node ends with 8, four times the withdrawn
+      // position's 2, with no rounding on the way.
+      const n1 = await createSeller(3_200_000n * TRAC, 1_000n);
+      const d1 = f.accounts[10];
+      const t1 = await delegate(d1, n1.identityId, 1_600_000n * TRAC, 3n);
+      expect(await f.Vault.getNodeEffectiveStake(n1.identityId)).to.equal(6_400_000n * TRAC);
+      const slack = async () => (await balanceOf(await vault())) - (await owed([n1]));
+      const start = await slack();
+      const p = await walletFund(f.accounts[20], a, 100n * TRAC);
+      await claimReceipts(n1, p, 30n * TRAC);
+
+      // Epoch e, in which the node proves, finalizes the period's value, takes
+      // a publishing pool and loses its own position, then proves again.
+      const e = a + 1n;
+      await toEpoch(e);
+      const prove = await realProofs();
+      for (let i = 0; i < 4; i++) await prove(n1);
+      const before = await f.RSS.getNodeEpochScore(e, n1.identityId);
+      expect(before).to.be.greaterThan(0n);
+      expect(await positionScore(n1.tokenId, n1, e)).to.equal(before / 2n);
+      expect(await positionScore(t1, n1, e)).to.equal(before / 2n);
+      const deadline = (await f.Chronos.timestampForEpoch(e)) + (await f.QIS.receiptGraceSecondsAt(a));
+      await time.increaseTo(deadline + 1n);
+      await f.QS.finalizeClaims([{ subscriptionId: p, bucketIndex: 0n, seller: n1.identityId }]);
+      await publishingPool(e, 1_000n * TRAC);
+
+      await f.StakingNFT.connect(n1.operational).withdraw(n1.tokenId);
+      expect(await f.Vault.getNodeEffectiveStake(n1.identityId)).to.equal(3_200_000n * TRAC);
+      const ownKey = hre.ethers.toBeHex(n1.tokenId, 32);
+      const withdrawn = await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, ownKey);
+      expect(withdrawn).to.equal(before / 2n);
+      for (let i = 0; i < 5; i++) await prove(n1);
+
+      // The later proofs add to the position still staked, by its stake, and
+      // not to the withdrawn one, whose score stays frozen.
+      const nodeScore = await f.RSS.getNodeEpochScore(e, n1.identityId);
+      expect(nodeScore).to.equal(4n * withdrawn);
+      expect(await f.RSS.getEpochNodeDelegatorScore(e, n1.identityId, ownKey)).to.equal(withdrawn);
+      const staying = await positionScore(t1, n1, e);
+      expect(staying).to.equal(3n * withdrawn);
+      expect(withdrawn + staying).to.equal(nodeScore);
+
+      await toEpoch(e + 1n);
+      const snapshot = await takeSnapshot();
+      const run = async (withdrawnFirst: boolean) => {
+        const paid = { withdrawn: 0n, staying: 0n };
+        if (withdrawnFirst) paid.withdrawn = await claimWithdrawn(n1.tokenId, n1.operational);
+        paid.staying = await claim(d1, t1);
+        if (!withdrawnFirst) paid.withdrawn = await claimWithdrawn(n1.tokenId, n1.operational);
+        await expect(f.StakingV10.claimWithdrawnEpoch(n1.tokenId))
+          .to.be.revertedWithCustomError(f.StakingV10, 'NoWithdrawnEpoch')
+          .withArgs(n1.tokenId);
+        const stored = await f.Vault.getNetNodeEpochRewards(n1.identityId, e);
+        return { paid, stored, s: await split(n1, e), left: (await slack()) - start };
+      };
+      const first = await run(true);
+      await snapshot.restore();
+      const last = await run(false);
+
+      expect(last.paid).to.deep.equal(first.paid);
+      for (const { paid, stored, s, left } of [first, last]) {
+        expect(s.nodeScore).to.equal(nodeScore);
+        expect(s.publishing > 0n && s.queryInference > 0n).to.equal(true);
+        expect(stored).to.equal(s.net);
+        expect(paid.withdrawn).to.equal((withdrawn * s.net) / s.nodeScore);
+        expect(paid.staying).to.equal((staying * s.net) / s.nodeScore);
+        expect(paid.withdrawn).to.equal(s.net / 4n);
+        expect(paid.staying).to.equal((3n * s.net) / 4n);
+        // Only the floors of the splits stay behind: well under a gwei of TRAC.
+        const delegated = paid.withdrawn + paid.staying;
+        expect(delegated <= s.net && s.net - delegated < 10n ** 9n, `${delegated} of ${s.net}`).to.equal(true);
+        expect(left >= 0n && left < 10n ** 9n, `left ${left}`).to.equal(true);
+      }
     });
 
     it('pays the carries of the epoch too: the score on a node the position left by a redelegation earlier in it', async () => {
