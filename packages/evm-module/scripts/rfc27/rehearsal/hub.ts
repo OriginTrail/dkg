@@ -13,6 +13,7 @@ import { QueryInferenceSettlement__factory } from '../../../typechain/factories/
 import { QueryInferenceStorage__factory } from '../../../typechain/factories/contracts/storage/QueryInferenceStorage__factory';
 import { errorMessage } from '../contracts';
 import { field, rpc } from '../network';
+import { requireParameter } from '../parameters';
 import { toJson } from '../report';
 import { TX_GAS_CAP } from '../tx';
 import { Ctx, HUB, LIVE, expectRevert, saveResults, send, withPool } from './context';
@@ -190,15 +191,28 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
     epochLength: await c.chronos.epochLength(),
   };
   report.say(`  ${JSON.stringify(toJson(params))}`);
+  // parameters.json "testnet", read as the deploy reads it: λ and the grace
+  // under `latestLambdaBps` and `latestReceiptGraceSeconds`, as
+  // `{ setter, setterArgs }`, or under the parameters' own keys as plain
+  // values, and compared with the latest getters, which the deploy compares.
+  const want = {
+    grace: requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds']),
+    items: requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value,
+    groups: requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value,
+    closeSteps: requireParameter('QueryInferenceStorage', ['maxCloseStepsPerClaim']).value,
+    lambda: requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps']),
+    buckets: requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value,
+  };
   check(
-    'QueryInferenceStorage holds parameters.json "testnet" (3600, 256, 32, 32, 5000)',
-    params.receiptGraceSeconds === 3600n &&
-      params.maxItemsPerBatch === 256n &&
-      params.maxGroupsPerBatch === 32n &&
-      params.maxCloseStepsPerClaim === 32n &&
-      params.lambdaBps === 5000n,
+    `QueryInferenceStorage holds parameters.json "testnet" (${want.grace.value}, ${want.items}, ${want.groups}, ${want.closeSteps}, ${want.lambda.value})`,
+    params.latestReceiptGraceSeconds === want.grace.value &&
+      params.maxItemsPerBatch === want.items &&
+      params.maxGroupsPerBatch === want.groups &&
+      params.maxCloseStepsPerClaim === want.closeSteps &&
+      params.latestLambdaBps === want.lambda.value,
+    `the grace read as ${want.grace.key}, λ as ${want.lambda.key}, against latestReceiptGraceSeconds and latestLambdaBps`,
   );
-  check('ConvictionServiceStorage.maxBucketsPerPeriod is 16', params.maxBucketsPerPeriod === 16n);
+  check(`ConvictionServiceStorage.maxBucketsPerPeriod is ${want.buckets}`, params.maxBucketsPerPeriod === want.buckets);
   check(
     `the receipt grace, ${params.receiptGraceSeconds} s, is at most half the ${params.epochLength} s epoch`,
     params.receiptGraceSeconds * 2n <= params.epochLength,
