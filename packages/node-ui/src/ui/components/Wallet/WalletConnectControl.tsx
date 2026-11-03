@@ -85,7 +85,7 @@ export function WalletConnectControl({
     <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
       <button
         type="button"
-        className="v10-wallet-connect-btn"
+        className="v10-wallet-connect-btn ds-btn"
         data-testid={testId}
         onClick={onMainClick}
         aria-expanded={pickerOpen}

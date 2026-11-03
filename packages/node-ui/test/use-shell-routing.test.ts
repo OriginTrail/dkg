@@ -242,6 +242,62 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       }
     });
 
+    it('Back to the dashboard address re-activates the dashboard, Forward returns to the graph', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/', ref, nav);
+      await settle();
+      await act(async () => { useTabsStore.getState().openTab({ id: 'project:foo', label: 'Foo', closable: true }); });
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect(ref.current).toBe('/');
+      expect(useTabsStore.getState().activeTabId).toBe('dashboard');
+
+      await act(async () => { nav.current!(1); });
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+      expect(useTabsStore.getState().activeTabId).toBe('project:foo');
+    });
+
+    it('revisiting a tab adds one entry per switch and none for re-selecting the active tab', async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/', ref, nav);
+      await settle();
+      const open = async (id: string) => {
+        await act(async () => { useTabsStore.getState().openTab({ id, label: id, closable: true }); });
+        await settle();
+      };
+      await open('project:foo');                // /graph/foo
+      await open('settings');                   // /settings
+      await open('project:foo');                // revisit → /graph/foo again
+      await act(async () => { useTabsStore.getState().setActiveTab('project:foo'); }); // no-op
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+
+      // History is exactly: /, /graph/foo, /settings, /graph/foo.
+      const visited: Array<[string, string]> = [];
+      for (let i = 0; i < 4; i++) {
+        await act(async () => { nav.current!(-1); });
+        await settle();
+        visited.push([ref.current, useTabsStore.getState().activeTabId]);
+      }
+      expect(visited).toEqual([
+        ['/settings', 'settings'],
+        ['/graph/foo', 'project:foo'],
+        ['/', 'dashboard'],
+        ['/', 'dashboard'], // nothing further back
+      ]);
+      for (const [path, tab] of [['/graph/foo', 'project:foo'], ['/settings', 'settings'], ['/graph/foo', 'project:foo']]) {
+        await act(async () => { nav.current!(1); });
+        await settle();
+        expect([ref.current, useTabsStore.getState().activeTabId]).toEqual([path, tab]);
+      }
+    });
+
     it('switching tabs pushes history entries instead of replacing them', async () => {
       const ref = { current: '' };
       const nav = { current: null as NavigateFunction | null };

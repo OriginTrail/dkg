@@ -294,7 +294,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               <option value="100">100 rows</option>
               <option value="200">200 rows</option>
             </select>
-            <button className="v10-mlv-run-btn" onClick={runVerifiedSearch}>
+            <button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runVerifiedSearch}>
               Search
             </button>
           </div>
@@ -331,12 +331,12 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}
             />
           )}
-          <button className="v10-mlv-run-btn" onClick={runQuery}>
+          <button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runQuery}>
             Run
           </button>
           {activeQuery && (
             <button
-              className="v10-mlv-clear-btn"
+              className="v10-mlv-clear-btn ds-btn ds-ghost"
               onClick={() => setActiveQuery('')}
               title="Reset to full layer overview"
             >
@@ -559,7 +559,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
       <div className="v10-assertion-list-header">
         <span className="v10-assertion-list-title">Assertions in Working Memory ({assertions.length})</span>
         <button
-          className="v10-btn-promote-all"
+          className="v10-btn-promote-all ds-btn ds-swm"
           disabled={promoting !== null}
           onClick={handlePromoteAll}
         >
@@ -594,7 +594,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
               )}
             </div>
             <button
-              className="v10-btn-promote"
+              className="v10-btn-promote ds-btn ds-swm ds-sm"
               disabled={promoting !== null}
               onClick={() => handlePromote(a)}
               title="Share this complete Knowledge Asset to Shared Working Memory"
@@ -737,9 +737,9 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
           Knowledge assets in Shared Working Memory ({assertions!.length} asset{assertions!.length === 1 ? '' : 's'} · {totalTriples} triples)
         </span>
         <div className="v10-publish-panel-header-actions">
-          <button className="v10-publish-panel-refresh" onClick={refresh} title="Refresh">↻</button>
+          <button className="v10-publish-panel-refresh ds-btn ds-ghost ds-sm ds-icon" onClick={refresh} title="Refresh">↻</button>
           <button
-            className="v10-btn-promote-all"
+            className="v10-btn-promote-all ds-btn ds-swm"
             disabled={publishing}
             onClick={handlePublishAll}
           >
@@ -755,7 +755,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
         </label>
         {selected.size > 0 && (
           <button
-            className="v10-btn-publish"
+            className="v10-btn-publish ds-btn ds-vm"
             disabled={publishing}
             onClick={handlePublishSelected}
           >

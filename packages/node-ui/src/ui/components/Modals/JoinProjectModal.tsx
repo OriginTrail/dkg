@@ -524,7 +524,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         >
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
@@ -573,7 +573,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={onClose}
           aria-label="Close join context graph dialog"
           title="Close (Esc)"
@@ -663,9 +663,9 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>{pending || approved ? 'Close' : 'Cancel'}</button>
           <button
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             onClick={handleRequestJoin}
             disabled={!inviteCode.trim() || sending || pending || approved}
           >

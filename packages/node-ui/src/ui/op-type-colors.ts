@@ -50,11 +50,14 @@ export const opTypeBg = (name: string | undefined) => BG[opTone(name)];
 /** Accent rule (e.g. the left edge of a per-type card). */
 export const opTypeRule = (name: string | undefined) => RULE[opTone(name)];
 
-// Fallbacks match 00-theme.css (dark / light) for tests and SSR.
-const DATA_FALLBACK = {
+/** --data-1 … --data-8 per theme; matches 00-theme.css (graph-palette.test.ts
+ *  checks). Canvas code reads these through graph-palette; also the fallback
+ *  for tests and SSR. */
+export const DATA_HEX: Record<'dark' | 'light', readonly string[]> = {
   dark: ['#1a81ff', '#a69300', '#ec2890', '#c98500', '#e200d0', '#ac6800', '#00a1df', '#00a309'],
   light: ['#1f6fd1', '#8a7a00', '#a3195b', '#c28a00', '#b5179e', '#9a5b1e', '#0284c7', '#008300'],
 };
+const DATA_FALLBACK = DATA_HEX;
 
 /** Resolved hex for data slot n (1-based). Charts render SVG attributes,
  *  which don't resolve CSS variables, so read the computed value. */

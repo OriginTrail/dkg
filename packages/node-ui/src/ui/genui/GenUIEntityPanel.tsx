@@ -122,7 +122,7 @@ const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
         </div>
       </div>
       <button
-        className="v10-genui-error-cta-btn"
+        className="v10-genui-error-cta-btn ds-btn ds-sm"
         onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
       >
         Open Settings →

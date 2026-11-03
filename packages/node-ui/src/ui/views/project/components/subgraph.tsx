@@ -11,12 +11,13 @@ import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { SubGraphBar } from '../../../components/SubGraphBar.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
-import { TRUST_COLORS, LAYER_CONFIG, CODE_CLASS_COLORS, CODE_PREDICATE_COLORS, entityAuthorUri, entityMeta, neutraliseBuiltinNamespaces, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
+import { trustColors, LAYER_CONFIG, codeClassColors, codePredicateColors, entityAuthorUri, entityMeta, neutraliseBuiltinNamespaces, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
-import { neutralHex } from '../../../layer-colors.js';
+import { LAYER_VAR } from '../../../layer-colors.js';
+import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { useLayoutStore } from '../../../stores/layout.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
@@ -50,6 +51,7 @@ export function SubGraphOverviewGrid({
   onSelectSubGraph: (slug: string) => void;
 }) {
   const profile = useProjectProfileContext();
+  const palette = useGraphPalette();
   const [subGraphs, setSubGraphs] = useState<SubGraphInfo[]>([]);
   const [loading, setLoading] = useState(true);
   // Track fetch failure separately from "the daemon returned no
@@ -291,7 +293,7 @@ export function SubGraphOverviewGrid({
         return {
           slug: sg.name,
           icon: binding.icon ?? '•',
-          color: binding.color ?? neutralHex('node'),
+          color: binding.color ?? palette.neutral.node,
           displayName: binding.displayName ?? sg.name,
           description: binding.description,
           rank: binding.rank ?? 99,
@@ -342,7 +344,7 @@ export function SubGraphOverviewGrid({
         };
       })
       .sort((a, b) => a.rank - b.rank);
-  }, [subGraphs, profile, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
+  }, [subGraphs, profile, palette, triplesBySubGraph, tripleCountBySubGraph, layerCountsBySubGraph, entityUrisBySubGraph, entityTrustByUriBySubGraph]);
 
   // GH #813 — Root mini-card. Synthesizes a card for the
   // "entities not in any named sub-graph" bucket so the grid
@@ -477,7 +479,7 @@ export function SubGraphOverviewGrid({
       // Color left unset — the chrome falls through to neutral
       // tokens via the `.v10-sgov-card.root` modifier (mirrors
       // the chip's `--text-tertiary` neutral fallback).
-      color: binding.color ?? neutralHex('node'),
+      color: binding.color ?? palette.neutral.node,
       displayName: binding.displayName ?? 'Root',
       description: binding.description,
       rank: 999,
@@ -494,7 +496,7 @@ export function SubGraphOverviewGrid({
       layerCounts: { wm, swm, vm },
       entityTrustByUri: rootEntityTrust,
     };
-  }, [memory.entityList, memory.allTriples, memory.entities, profile]);
+  }, [memory.entityList, memory.allTriples, memory.entities, profile, palette]);
 
   if (loading && cards.length === 0) {
     return (
@@ -663,7 +665,7 @@ export function SubGraphMiniCard({
   // Per-URI trust palette for the mini-graph (#3 polish).
   // ui-locked priority chain (graph-viz style engine):
   //   1. `nodeColors[uri]` — wins for any entity carrying a
-  //      canonical trust level (TRUST_COLORS[e.trustLevel]).
+  //      canonical trust level (trustColors(palette)[e.trustLevel]).
   //   2. `defaultNodeColor: card.color` — fallback for non-entity
   //      URIs (vocabulary IRIs, blank-node anchors) preserves the
   //      card's chrome identity.
@@ -678,13 +680,15 @@ export function SubGraphMiniCard({
   // subjects/objects survive promotion without falling through to
   // `card.color`. Mirrors the dual-key shape in `trustNodeColors`
   // further down this file.
+  const palette = useGraphPalette();
   const nodeColors = useMemo(() => {
+    const trust = trustColors(palette);
     const out: Record<string, string> = {};
     for (const [uri, trustLevel] of card.entityTrustByUri) {
-      out[uri] = TRUST_COLORS[trustLevel];
+      out[uri] = trust[trustLevel];
     }
     return out;
-  }, [card.entityTrustByUri]);
+  }, [card.entityTrustByUri, palette]);
 
   // A compact-mode graph options block — pared-down labels, smaller nodes,
   // brighter default color (driven by the sub-graph's profile color) so each
@@ -697,15 +701,15 @@ export function SubGraphMiniCard({
     renderer: '2d' as const,
     labels: memoryGraphLabels({ minZoomForLabels: 0.8 }), // Keep labels out of the way in the mini view.
     style: {
-      classColors: CODE_CLASS_COLORS,
-      predicateColors: CODE_PREDICATE_COLORS,
+      classColors: codeClassColors(palette),
+      predicateColors: codePredicateColors(palette),
       namespaceColors: neutraliseBuiltinNamespaces(card.color),
       // Per-URI tints sit ABOVE classColors / namespaceColors in
-      // the style-engine priority stack — TRUST_COLORS wins for
+      // the style-engine priority stack — the trust colour wins for
       // every entity in the card's scope (#3 polish).
       ...(Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
       defaultNodeColor: card.color,
-      defaultEdgeColor: neutralHex('edge'),
+      defaultEdgeColor: palette.neutral.edge,
       edgeWidth: 1.0,
       fontSize: 12,
       gradient: true,
@@ -1044,6 +1048,7 @@ export function SubGraphDetailView({
   onOpenQueryCatalog?: () => void;
 }) {
   const profile = useProjectProfileContext();
+  const palette = useGraphPalette();
   const binding = profile?.forSubGraph(slug);
   const chips = profile?.chipsFor(slug) ?? [];
   const queryCatalogs = profile?.savedQueryCatalogsFor(slug) ?? [];
@@ -1309,21 +1314,22 @@ export function SubGraphDetailView({
   // `layer={singleLayer ?? 'wm'}` and painted every node WM-gray
   // when no single layer was active — even in a sub-graph spanning
   // SWM and VM. Build a `nodeColors` map keyed by entity URI using
-  // the canonical `TRUST_COLORS` palette (same hex values as the
+  // the canonical trust colours (same hex values as the
   // layer chips and the Knowledge Pipeline bar). When a single
   // layer is active, every panel entity belongs to that layer by
   // construction, so the per-URI map collapses to the layer default
   // and we can skip the override (saves a copy on the common path).
   const trustNodeColors = useMemo(() => {
     if (singleLayer) return undefined;
+    const trust = trustColors(palette);
     const out: Record<string, string> = {};
     for (const e of graphPanelEntities) {
-      out[e.uri] = TRUST_COLORS[e.trustLevel];
+      out[e.uri] = trust[e.trustLevel];
       const canonical = canonicalEntityUri(e.uri);
-      if (canonical !== e.uri) out[canonical] = TRUST_COLORS[e.trustLevel];
+      if (canonical !== e.uri) out[canonical] = trust[e.trustLevel];
     }
     return out;
-  }, [singleLayer, graphPanelEntities]);
+  }, [singleLayer, graphPanelEntities, palette]);
 
   // Locked active-layer chip pill copy (UX §4.4.1). "All layers"
   // when every layer is enabled; otherwise the single enabled
@@ -1466,7 +1472,7 @@ export function SubGraphDetailView({
   // detail header, the project breadcrumb strip — reads the same
   // identity. Root's color is left unset so the CSS neutral
   // (--text-tertiary via the `--sg-color` fallback) wins.
-  const color = binding?.color ?? (isRoot ? 'var(--text-tertiary)' : neutralHex('node'));
+  const color = binding?.color ?? 'var(--text-tertiary)';
   const icon = binding?.icon ?? '•';
   const title = binding?.displayName ?? slug;
   const desc = binding?.description;
@@ -1560,7 +1566,7 @@ export function SubGraphDetailView({
             aria-pressed={enabledLayers.has('working')}
             onClick={() => toggleLayer('working')}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.working }}>◇</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: LAYER_VAR.working }}>◇</span>
             <span className="v10-subgraph-cross-layer-cell-label">Working</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.wm}</span>
           </button>
@@ -1579,7 +1585,7 @@ export function SubGraphDetailView({
               ? 'Showing Shared Working Memory only — graph is colored by contributing agent (see legend).'
               : undefined}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.shared }}>◈</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: LAYER_VAR.shared }}>◈</span>
             <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.swm}</span>
           </button>
@@ -1591,7 +1597,7 @@ export function SubGraphDetailView({
             aria-pressed={enabledLayers.has('verified')}
             onClick={() => toggleLayer('verified')}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: TRUST_COLORS.verified }}>◉</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: LAYER_VAR.verified }}>◉</span>
             <span className="v10-subgraph-cross-layer-cell-label">Verifiable</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
           </button>

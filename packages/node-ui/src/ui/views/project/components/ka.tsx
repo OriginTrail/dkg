@@ -10,9 +10,9 @@ import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBann
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
 import { useLayoutStore } from '../../../stores/layout.js';
-import { TRUST_COLORS, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
+import { trustColors, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
-import { neutralHex } from '../../../layer-colors.js';
+import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { LayerBadge } from '../../../components/ds/Badge.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
@@ -38,7 +38,7 @@ export function SubGraphBadge({
   }, [entity.subGraphs]);
   if (!slug || !profile) return null;
   const binding = profile.forSubGraph(slug);
-  const color = binding?.color ?? neutralHex('node');
+  const color = binding?.color ?? 'var(--text-tertiary)';
   const icon = binding?.icon ?? '•';
   const label = binding?.displayName ?? slug;
   return (
@@ -216,7 +216,7 @@ export function VerifyOnDkgButton({
       )}
       {!result && (
         <button
-          className={`v10-ka-verify-btn ${action.kind}`}
+          className={`v10-ka-verify-btn ${action.kind} ds-btn ${action.kind === 'publish' ? 'ds-vm' : 'ds-swm'}`}
           onClick={handle}
           disabled={busy || action.disabled}
         >
@@ -311,6 +311,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
 }) {
   const [pane, setPane] = useState<KAPane>('content');
   const theme = useLayoutStore(s => s.theme);
+  const palette = useGraphPalette();
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
   const { icon, type } = entityMeta(entity, profile);
@@ -388,7 +389,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   );
 
   const graphOptions = useMemo(() => {
-    const focalColor = TRUST_COLORS[entity.trustLevel];
+    const focalColor = trustColors(palette)[entity.trustLevel];
     return {
       labelMode: 'humanized' as const,
       renderer: '2d' as const,
@@ -396,14 +397,14 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
       style: {
         namespaceColors: neutraliseBuiltinNamespaces(focalColor),
         defaultNodeColor: focalColor,
-        defaultEdgeColor: neutralHex('edge'),
+        defaultEdgeColor: palette.neutral.edge,
         edgeWidth: 1.0,
         fontSize: 11,
       },
       hexagon: { baseSize: 7, minSize: 4, maxSize: 10, scaleWithDegree: true },
       focus: { maxNodes: 500, hops: 999 },
     };
-  }, [entity.trustLevel]);
+  }, [entity.trustLevel, palette]);
 
   // ViewConfig makes the opened entity visually focal (bigger hexagon)
   // and drives the `<CenterOnEntity>` child to pan the camera to it

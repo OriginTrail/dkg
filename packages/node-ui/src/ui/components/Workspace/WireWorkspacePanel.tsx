@@ -257,7 +257,7 @@ export function WireWorkspacePanel({
         </pre>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
-          <button className="v10-modal-btn primary" onClick={onDone}>Done</button>
+          <button className="v10-modal-btn primary ds-btn ds-primary" onClick={onDone}>Done</button>
         </div>
       </div>
     );
@@ -283,16 +283,16 @@ export function WireWorkspacePanel({
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
           <button
-            className="v10-modal-btn"
+            className="v10-modal-btn ds-btn"
             onClick={() => { setPlanResult(null); setError(null); }}
             disabled={busy}
           >
             ← Back
           </button>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="v10-modal-btn" onClick={onDone} disabled={busy}>Skip for now</button>
+            <button className="v10-modal-btn ds-btn" onClick={onDone} disabled={busy}>Skip for now</button>
             <button
-              className="v10-modal-btn primary"
+              className="v10-modal-btn primary ds-btn ds-primary"
               onClick={handleInstall}
               disabled={busy}
             >
@@ -400,10 +400,10 @@ export function WireWorkspacePanel({
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
         {onCancel
-          ? <button className="v10-modal-btn" onClick={onCancel} disabled={busy}>Cancel</button>
-          : <button className="v10-modal-btn" onClick={onDone} disabled={busy}>Skip for now</button>}
+          ? <button className="v10-modal-btn ds-btn" onClick={onCancel} disabled={busy}>Cancel</button>
+          : <button className="v10-modal-btn ds-btn" onClick={onDone} disabled={busy}>Skip for now</button>}
         <button
-          className="v10-modal-btn primary"
+          className="v10-modal-btn primary ds-btn ds-primary"
           onClick={handlePreview}
           // NOTE: we deliberately DO NOT gate on `!agent`. The backend
           // derives `agentUri` from the bearer token during

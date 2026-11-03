@@ -181,7 +181,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
           </div>
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={handleClose}
             disabled={status === 'uploading'}
             aria-label="Close import dialog"
@@ -330,9 +330,9 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
         <div className="v10-modal-footer">
           {status === 'idle' && (
             <>
-              <button className="v10-modal-btn" onClick={handleClose}>Cancel</button>
+              <button className="v10-modal-btn ds-btn" onClick={handleClose}>Cancel</button>
               <button
-                className="v10-modal-btn primary"
+                className="v10-modal-btn primary ds-btn ds-primary"
                 onClick={handleImport}
                 disabled={files.length === 0}
               >
@@ -341,10 +341,10 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             </>
           )}
           {status === 'uploading' && (
-            <button className="v10-modal-btn" disabled>Importing…</button>
+            <button className="v10-modal-btn ds-btn" disabled>Importing…</button>
           )}
           {(status === 'done' || status === 'error') && (
-            <button className="v10-modal-btn primary" onClick={handleClose}>Done</button>
+            <button className="v10-modal-btn primary ds-btn ds-primary" onClick={handleClose}>Done</button>
           )}
         </div>
       </div>

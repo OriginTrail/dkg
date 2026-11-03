@@ -94,7 +94,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {query.status === 'error' && (
         <p className="v10-modal-warning" role="alert">
           Couldn&apos;t load identity wallet management: {query.message}.{' '}
-          <button type="button" className="v10-identity-wallet-btn compact" onClick={refreshQuery}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}>Retry</button>
         </p>
       )}
       {data && !data.hasProfile && (
@@ -116,7 +116,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {summaryState.status === 'error' && (
         <p className="v10-modal-warning" role="alert">
           Couldn&apos;t verify identity keys: {summaryState.message}{' '}
-          <button type="button" className="v10-identity-wallet-btn compact" onClick={reloadSummary}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}>Retry</button>
         </p>
       )}
 
@@ -153,10 +153,10 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
             Remove {removal.address} as an {removal.role} key from identity {data?.identityId}?
             This takes effect on-chain immediately.
           </span>
-          <button type="button" className="v10-identity-wallet-btn" onClick={confirmRemoval} disabled={transactionPending}>
+          <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={confirmRemoval} disabled={transactionPending}>
             Yes, remove
           </button>
-          <button type="button" className="v10-identity-wallet-btn" onClick={cancelRemoval} disabled={transactionPending}>
+          <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={cancelRemoval} disabled={transactionPending}>
             Cancel
           </button>
         </div>

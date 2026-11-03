@@ -203,7 +203,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             title="Applies to all assertions in this layer across every page. Query catalog assertions are excluded."
             disabled={busy !== null}
             onClick={handlePromoteAll}
@@ -257,7 +257,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           </div>
           <button
             data-testid="assertion-row-action"
-            className={`v10-layer-expand-footer-btn ${layer === 'wm' ? 'promote' : 'publish'}`}
+            className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             disabled={busy !== null}
             onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
             style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}

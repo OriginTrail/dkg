@@ -9,6 +9,7 @@ import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
+import { LAYER_VAR } from '../../../layer-colors.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
@@ -16,7 +17,7 @@ import { LayerWidgetStrip } from './layer-widgets.js';
 import { AssertionsList } from './assertions.js';
 import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
 import { kindColorForType } from '../../../entity-kind-colors.js';
-import { humanizeTypeName } from '../../../components/ActivityFeed.js';
+import { humanizeTypeName } from '../../../lib/formatLabels.js';
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -465,7 +466,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: config.color }}>{config.icon}</span>
+        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}>{config.icon}</span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>
@@ -568,7 +569,7 @@ export function DocumentsList({
                   {size && <span className="v10-item-count">· {Math.round(parseInt(size) / 1024)}KB</span>}
                 </div>
               </div>
-              <button className="v10-item-promote-btn" onClick={ev => { ev.stopPropagation(); handleOpenDoc(e); }}>Open →</button>
+              <button className="v10-item-promote-btn ds-btn ds-swm ds-sm" onClick={ev => { ev.stopPropagation(); handleOpenDoc(e); }}>Open →</button>
             </div>
           );
         })}

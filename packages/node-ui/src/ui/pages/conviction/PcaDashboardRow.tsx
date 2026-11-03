@@ -34,7 +34,7 @@ export function PcaDashboardRow() {
       </span>
       <button
         type="button"
-        className="v10-ws-pca-cta"
+        className="v10-ws-pca-cta ds-btn ds-sm"
         onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
       >
         {role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'} -&gt;

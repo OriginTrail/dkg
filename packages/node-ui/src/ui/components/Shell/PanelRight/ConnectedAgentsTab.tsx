@@ -23,7 +23,7 @@ import type { LocalAgentAttachmentDraft, LocalAgentMessage } from './types.js';
 import { agentLogoDataUri } from './agentLogos.js';
 import { ContextGraphMark } from '../../../context-graph-colors.js';
 import { Badge } from '../../ds/Badge.js';
-import { humanizeStatus } from '../../ActivityFeed.js';
+import { humanizeStatus } from '../../../lib/formatLabels.js';
 
 /**
  * The agent's own mark, drawn as a mask so it inherits the panel's text colour
@@ -383,16 +383,16 @@ export function ConnectedAgentsTab(props: {
                     </p>
                     <div className="v10-local-agent-actions">
                       <button
-                        className="v10-agent-send-btn secondary"
+                        className="v10-agent-send-btn secondary ds-btn"
                         onClick={() => onConnectIntegration(integration.id)}
                         disabled={connectBusyId === integration.id}
                       >
                         {connectBusyId === integration.id ? 'Connecting...' : 'Connect OpenClaw'}
                       </button>
-                      <a className="v10-agent-link-btn" href={OPENCLAW_DOCS_URL} target="_blank" rel="noreferrer">
+                      <a className="v10-agent-link-btn ds-btn" href={OPENCLAW_DOCS_URL} target="_blank" rel="noreferrer">
                         Docs
                       </a>
-                      <a className="v10-agent-link-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
+                      <a className="v10-agent-link-btn ds-btn" href={OPENCLAW_RELEASE_URL} target="_blank" rel="noreferrer">
                         Release Notes
                       </a>
                     </div>
@@ -423,7 +423,7 @@ export function ConnectedAgentsTab(props: {
                     {integration.connectSupported && (
                       <div className="v10-local-agent-actions">
                         <button
-                          className="v10-agent-send-btn secondary"
+                          className="v10-agent-send-btn secondary ds-btn"
                           onClick={() => onConnectIntegration(integration.id)}
                           disabled={connectBusyId === integration.id}
                         >
@@ -441,7 +441,7 @@ export function ConnectedAgentsTab(props: {
                     {integration.connectSupported && (
                       <div className="v10-local-agent-actions">
                         <button
-                          className="v10-agent-send-btn secondary"
+                          className="v10-agent-send-btn secondary ds-btn"
                           onClick={() => onConnectIntegration(integration.id)}
                           disabled={connectBusyId === integration.id}
                         >

@@ -70,7 +70,7 @@ export function PcaAccountCard({
         <div className="card-body v10-pca-card-error">
           <p>PCA #{accountId} no longer exists on-chain.</p>
           {onRemove && (
-            <button type="button" className="v10-pca-card-btn" onClick={() => onRemove(accountId)}>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => onRemove(accountId)}>
               Remove from tracked
             </button>
           )}
@@ -84,7 +84,7 @@ export function PcaAccountCard({
         <div className="card-body v10-pca-card-error">
           <p>Couldn’t load PCA #{accountId}.</p>
           {onRetry && (
-            <button type="button" className="v10-pca-card-btn" onClick={() => onRetry(accountId)}>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => onRetry(accountId)}>
               Retry
             </button>
           )}
@@ -232,7 +232,7 @@ export function PcaAccountCard({
             {onManage && (
               <button
                 type="button"
-                className="v10-pca-card-btn primary"
+                className="v10-pca-card-btn primary ds-btn ds-primary"
                 onClick={() => onManage(accountId)}
               >
                 {ownerMode === 'external' ? 'View details' : 'Manage'}
@@ -242,7 +242,7 @@ export function PcaAccountCard({
               onRemove && (
                 <button
                   type="button"
-                  className="v10-pca-card-btn"
+                  className="v10-pca-card-btn ds-btn"
                   onClick={() => onRemove(accountId)}
                 >
                   Stop tracking
@@ -251,7 +251,7 @@ export function PcaAccountCard({
             ) : (
               <button
                 type="button"
-                className="v10-pca-card-btn"
+                className="v10-pca-card-btn ds-btn"
                 onClick={() => onApproveWallets?.(accountId)}
                 disabled={!ownerWritesEnabled || !onApproveWallets}
                 title={ownerActionTitle}
@@ -304,7 +304,7 @@ export function PcaAccountCard({
         ) : null}
         <div className="v10-pca-card-actions">
           {onManage && (
-            <button type="button" className="v10-pca-card-btn primary" onClick={() => onManage(accountId)}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => onManage(accountId)}>
               View details
             </button>
           )}
@@ -312,7 +312,7 @@ export function PcaAccountCard({
               per-CG publish CTA. Guidance hint, not an inert disabled button.
               (If a caller ever wires onUseForPublishing, render the action.) */}
           {onUseForPublishing && (
-            <button type="button" className="v10-pca-card-btn primary" onClick={() => onUseForPublishing(accountId)}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => onUseForPublishing(accountId)}>
               Use for publishing
             </button>
           )}

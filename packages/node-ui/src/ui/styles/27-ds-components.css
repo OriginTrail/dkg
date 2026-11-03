@@ -82,20 +82,11 @@
      layer     — actions that move knowledge into a layer wear its colour:
                  swm (Share to SWM, cyan tint), vm (Publish to VM, purple fill)
    Sizes 24 / 32 / 40; icon buttons are square. Every target is ≥ 24×24.
-   Legacy per-screen button classes are listed next to the variant they
-   map to; new code uses <Button> (components/ds/Button). */
+   Elements declare their look with these classes (`ds-btn` plus a variant
+   and size), or use <Button> (components/ds/Button), which renders them.
+   Screen classes on the same element only add layout. */
 
-.ds-btn,
-.v10-retry-btn, .v10-header-icon-btn, .v10-notif-btn, .v10-tree-hide-btn,
-.v10-tree-catalogue-btn, .v10-new-project-btn, .v10-agent-link-btn, .v10-agent-send-btn,
-.v10-mlv-run-btn, .v10-mlv-save-btn, .v10-mlv-clear-btn, .v10-btn-promote-all, .v10-btn-promote,
-.v10-btn-publish, .v10-modal-btn, .v10-genui-error-cta-btn, .v10-empty-state-action,
-.v10-po-identity-primer, .v10-po-join-btn, .v10-layer-expand-footer-btn, .v10-item-promote-btn,
-.v10-layer-action-btn, .v10-decision-btn, .v10-graph-expand-btn, .v10-ka-verify-btn,
-.v10-primer-back, .v10-identity-wallet-btn, .v10-pca-card-btn, .v10-pca-copy-btn, .v10-ws-pca-cta,
-.v10-wallet-connect-btn, .v10-wallet-pill-btn, .v10-modal-close, .v10-graph-expanded-close,
-.v10-agents-refresh, .v10-md-copy, .v10-publish-panel-refresh, .v10-notif-pane-markread,
-.v10-bottom-toggle, .v10-peer-chip-more {
+.ds-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -119,57 +110,27 @@
   cursor: pointer;
   transition: background-color .12s, border-color .12s, color .12s;
 }
-.ds-btn:hover:not(:disabled),
-.v10-retry-btn:hover:not(:disabled), .v10-notif-btn:hover:not(:disabled), .v10-tree-catalogue-btn:hover:not(:disabled),
-.v10-new-project-btn:hover:not(:disabled), .v10-agent-link-btn:hover:not(:disabled), .v10-agent-send-btn:hover:not(:disabled),
-.v10-mlv-save-btn:hover:not(:disabled), .v10-modal-btn:hover:not(:disabled), .v10-genui-error-cta-btn:hover:not(:disabled),
-.v10-empty-state-action:hover:not(:disabled), .v10-po-identity-primer:hover:not(:disabled), .v10-layer-expand-footer-btn:hover:not(:disabled),
-.v10-layer-action-btn:hover:not(:disabled), .v10-decision-btn:hover:not(:disabled), .v10-graph-expand-btn:hover:not(:disabled),
-.v10-identity-wallet-btn:hover:not(:disabled), .v10-pca-card-btn:hover:not(:disabled), .v10-ws-pca-cta:hover:not(:disabled),
-.v10-wallet-connect-btn:hover:not(:disabled), .v10-wallet-pill-btn:hover:not(:disabled), .v10-agents-refresh:hover:not(:disabled) {
+.ds-btn:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: var(--border-strong);
 }
-.ds-btn:focus-visible,
-.v10-retry-btn:focus-visible, .v10-header-icon-btn:focus-visible, .v10-notif-btn:focus-visible, .v10-tree-hide-btn:focus-visible,
-.v10-tree-catalogue-btn:focus-visible, .v10-new-project-btn:focus-visible, .v10-agent-link-btn:focus-visible, .v10-agent-send-btn:focus-visible,
-.v10-mlv-run-btn:focus-visible, .v10-mlv-save-btn:focus-visible, .v10-mlv-clear-btn:focus-visible, .v10-btn-promote-all:focus-visible,
-.v10-btn-promote:focus-visible, .v10-btn-publish:focus-visible, .v10-modal-btn:focus-visible, .v10-genui-error-cta-btn:focus-visible,
-.v10-empty-state-action:focus-visible, .v10-po-identity-primer:focus-visible, .v10-po-join-btn:focus-visible,
-.v10-layer-expand-footer-btn:focus-visible, .v10-item-promote-btn:focus-visible, .v10-layer-action-btn:focus-visible,
-.v10-decision-btn:focus-visible, .v10-graph-expand-btn:focus-visible, .v10-ka-verify-btn:focus-visible, .v10-primer-back:focus-visible,
-.v10-identity-wallet-btn:focus-visible, .v10-pca-card-btn:focus-visible, .v10-pca-copy-btn:focus-visible, .v10-ws-pca-cta:focus-visible,
-.v10-wallet-connect-btn:focus-visible, .v10-wallet-pill-btn:focus-visible, .v10-modal-close:focus-visible,
-.v10-graph-expanded-close:focus-visible, .v10-agents-refresh:focus-visible, .v10-md-copy:focus-visible,
-.v10-publish-panel-refresh:focus-visible, .v10-notif-pane-markread:focus-visible, .v10-bottom-toggle:focus-visible {
+.ds-btn:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
-.ds-btn:disabled,
-.v10-retry-btn:disabled, .v10-notif-btn:disabled, .v10-agent-send-btn:disabled, .v10-mlv-run-btn:disabled, .v10-mlv-save-btn:disabled,
-.v10-btn-promote-all:disabled, .v10-btn-promote:disabled, .v10-btn-publish:disabled, .v10-modal-btn:disabled, .v10-po-join-btn:disabled,
-.v10-layer-expand-footer-btn:disabled, .v10-item-promote-btn:disabled, .v10-layer-action-btn:disabled, .v10-decision-btn:disabled,
-.v10-ka-verify-btn:disabled, .v10-identity-wallet-btn:disabled, .v10-pca-card-btn:disabled, .v10-wallet-connect-btn:disabled,
-.v10-wallet-pill-btn:disabled, .v10-agents-refresh:disabled {
+.ds-btn:disabled {
   opacity: .45;
   cursor: not-allowed;
 }
 
 /* Sizes */
-.ds-btn.ds-sm,
-.v10-retry-btn, .v10-notif-btn, .v10-tree-catalogue-btn, .v10-genui-error-cta-btn, .v10-empty-state-action,
-.v10-po-identity-primer, .v10-po-join-btn, .v10-layer-expand-footer-btn, .v10-item-promote-btn, .v10-layer-action-btn,
-.v10-btn-promote, .v10-ws-pca-cta, .v10-wallet-pill-btn, .v10-agents-refresh, .v10-notif-pane-markread,
-.v10-pca-card-btn.compact, .v10-identity-wallet-btn.compact,
-.v10-graph-expand-btn, .v10-tree-hide-btn, .v10-bottom-toggle, .v10-pca-copy-btn, .v10-md-copy,
-.v10-publish-panel-refresh, .v10-peer-chip-more {
+.ds-btn.ds-sm {
   height: var(--h-control-sm);
   padding: 0 10px;
   gap: 4px;
   font-size: var(--fs-label);
 }
-.ds-btn.ds-lg,
-.v10-decision-btn.primary-cta.publish-vm {
+.ds-btn.ds-lg {
   height: var(--h-control-lg);
   padding: 0 18px;
   font-size: var(--fs-body);
@@ -180,14 +141,11 @@
 .v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: flex-start; padding: 0 10px; }
 
 /* Square icon buttons */
-.ds-btn.ds-icon,
-.v10-header-icon-btn, .v10-modal-close, .v10-graph-expanded-close {
+.ds-btn.ds-icon {
   width: var(--h-control-md);
   padding: 0;
 }
-.ds-btn.ds-sm.ds-icon,
-.v10-graph-expand-btn, .v10-tree-hide-btn, .v10-bottom-toggle, .v10-pca-copy-btn, .v10-md-copy,
-.v10-publish-panel-refresh {
+.ds-btn.ds-sm.ds-icon {
   width: var(--h-control-sm);
   padding: 0;
   font-size: var(--fs-body);
@@ -195,80 +153,57 @@
 .v10-modal-close { font-size: var(--fs-heading); font-weight: 400; }
 
 /* Primary — one per view */
-.ds-btn.ds-primary,
-.v10-modal-btn.primary, .v10-pca-card-btn.primary, .v10-identity-wallet-btn.primary, .v10-empty-state-action.primary,
-.v10-tree-catalogue-btn.primary, .v10-layer-action-btn.primary, .v10-mlv-run-btn, .v10-agent-send-btn:not(.secondary),
-.v10-notif-btn-approve, .v10-po-join-btn.approve, .v10-decision-btn.approve {
+.ds-btn.ds-primary {
   background: var(--accent-primary);
   border-color: var(--accent-primary);
   color: var(--text-on-primary);
 }
-.ds-btn.ds-primary:hover:not(:disabled),
-.v10-modal-btn.primary:hover:not(:disabled), .v10-pca-card-btn.primary:hover:not(:disabled),
-.v10-identity-wallet-btn.primary:hover:not(:disabled), .v10-empty-state-action.primary:hover:not(:disabled),
-.v10-tree-catalogue-btn.primary:hover:not(:disabled), .v10-layer-action-btn.primary:hover:not(:disabled),
-.v10-mlv-run-btn:hover:not(:disabled), .v10-agent-send-btn:not(.secondary):hover:not(:disabled),
-.v10-notif-btn-approve:hover:not(:disabled), .v10-po-join-btn.approve:hover:not(:disabled), .v10-decision-btn.approve:hover:not(:disabled) {
+.ds-btn.ds-primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
   border-color: color-mix(in srgb, var(--accent-primary) 86%, var(--bg-root));
 }
 
 /* Ghost — no chrome until hover */
-.ds-btn.ds-ghost,
-.v10-mlv-clear-btn, .v10-primer-back, .v10-notif-btn-ghost, .v10-header-icon-btn, .v10-modal-close,
-.v10-graph-expanded-close, .v10-tree-hide-btn, .v10-bottom-toggle, .v10-pca-copy-btn, .v10-md-copy,
-.v10-publish-panel-refresh, .v10-notif-pane-markread, .v10-peer-chip-more {
+.ds-btn.ds-ghost {
   background: transparent;
   border-color: transparent;
   color: var(--text-secondary);
 }
-.ds-btn.ds-ghost:hover:not(:disabled),
-.v10-mlv-clear-btn:hover:not(:disabled), .v10-primer-back:hover:not(:disabled), .v10-notif-btn-ghost:hover:not(:disabled),
-.v10-header-icon-btn:hover, .v10-modal-close:hover, .v10-graph-expanded-close:hover, .v10-tree-hide-btn:hover, .v10-bottom-toggle:hover, .v10-pca-copy-btn:hover, .v10-md-copy:hover,
-.v10-publish-panel-refresh:hover, .v10-notif-pane-markread:hover, .v10-peer-chip-more:hover {
+.ds-btn.ds-ghost:hover:not(:disabled) {
   background: var(--bg-hover);
   border-color: transparent;
   color: var(--text-primary);
 }
-.v10-header-icon-btn.active-toggle { background: var(--bg-active); color: var(--text-primary); }
+.v10-header-icon-btn.active-toggle,
+.v10-header-icon-btn.active-toggle:hover:not(:disabled) { background: var(--bg-active); color: var(--text-primary); }
 
 /* Danger — red outline, red tint on hover */
-.ds-btn.ds-danger,
-.v10-notif-btn-deny, .v10-po-join-btn.reject, .v10-agents-refresh.disconnect {
+.ds-btn.ds-danger {
   background: transparent;
   border-color: color-mix(in srgb, var(--text-danger) 45%, transparent);
   color: var(--text-danger);
 }
-.ds-btn.ds-danger:hover:not(:disabled),
-.v10-notif-btn-deny:hover:not(:disabled), .v10-po-join-btn.reject:hover:not(:disabled), .v10-agents-refresh.disconnect:hover:not(:disabled) {
+.ds-btn.ds-danger:hover:not(:disabled) {
   background: color-mix(in srgb, var(--text-danger) 12%, transparent);
   border-color: color-mix(in srgb, var(--text-danger) 65%, transparent);
 }
 
 /* Layer actions */
-.ds-btn.ds-swm,
-.v10-btn-promote, .v10-btn-promote-all, .v10-item-promote-btn, .v10-layer-action-btn.promote,
-.v10-layer-expand-footer-btn.promote, .v10-ka-verify-btn.promote {
+.ds-btn.ds-swm {
   background: var(--layer-shared-bg);
   border-color: color-mix(in srgb, var(--layer-shared-border) 70%, transparent);
   color: var(--layer-shared-text);
 }
-.ds-btn.ds-swm:hover:not(:disabled),
-.v10-btn-promote:hover:not(:disabled), .v10-btn-promote-all:hover:not(:disabled), .v10-item-promote-btn:hover:not(:disabled),
-.v10-layer-action-btn.promote:hover:not(:disabled), .v10-layer-expand-footer-btn.promote:hover:not(:disabled),
-.v10-ka-verify-btn.promote:hover:not(:disabled) {
+.ds-btn.ds-swm:hover:not(:disabled) {
   background: color-mix(in srgb, var(--layer-shared) 22%, var(--layer-shared-bg));
   border-color: var(--layer-shared-border);
 }
-.ds-btn.ds-vm,
-.v10-btn-publish, .v10-layer-expand-footer-btn.publish, .v10-ka-verify-btn.publish, .v10-decision-btn.primary-cta.publish-vm {
+.ds-btn.ds-vm {
   background: var(--accent-vm);
   border-color: var(--accent-vm);
   color: var(--text-on-vm);
 }
-.ds-btn.ds-vm:hover:not(:disabled),
-.v10-btn-publish:hover:not(:disabled), .v10-layer-expand-footer-btn.publish:hover:not(:disabled),
-.v10-ka-verify-btn.publish:hover:not(:disabled), .v10-decision-btn.primary-cta.publish-vm:hover:not(:disabled) {
+.ds-btn.ds-vm:hover:not(:disabled) {
   background: var(--accent-vm-hover);
   border-color: var(--accent-vm-hover);
 }

@@ -246,7 +246,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           </div>
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={onClose}
             aria-label="Close share dialog"
             title="Close (Esc)"
@@ -375,7 +375,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       {invitePayload}
                     </pre>
                     <button
-                      className="v10-modal-btn primary"
+                      className="v10-modal-btn primary ds-btn ds-primary"
                       onClick={() => copyToClipboard(invitePayload, 'invite')}
                       style={{
                         position: 'absolute', top: 6, right: 6, fontSize: 10, padding: '4px 10px', height: 26,
@@ -462,7 +462,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>Done</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>Done</button>
         </div>
       </div>
     </div>

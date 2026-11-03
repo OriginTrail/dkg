@@ -304,7 +304,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         >
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
@@ -352,7 +352,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={onClose}
           aria-label="Close create context graph dialog"
           title="Close (Esc)"
@@ -566,14 +566,14 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>Cancel</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
-            <button className="v10-modal-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
+            <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
               {identityLoading ? 'Retrying…' : 'Retry Loading Agent'}
             </button>
           )}
           <button
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             onClick={handleCreate}
             disabled={!name.trim() || !!validateCgName(name) || creating || !agentAddress || identityLoading}
           >

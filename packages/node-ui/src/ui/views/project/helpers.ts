@@ -13,8 +13,9 @@ import {
 } from '../../hooks/useVerifiableMemoryAnchors.js';
 import { memoryGraphLabels } from '../../lib/memoryLabels.js';
 import { LAYER_CONFIG } from './layer-presentation.js';
-import { layerHex, neutralHex, vmAnchorHex, VM_ANCHOR_RING_WIDTH } from '../../layer-colors.js';
-import { kindHex } from '../../entity-kind-colors.js';
+import { VM_ANCHOR_RING_WIDTH } from '../../layer-colors.js';
+import { kindSlot, type EntityKind } from '../../entity-kind-colors.js';
+import { dataSlotHex, type GraphPalette } from '../../graph-palette.js';
 import { agentHexForUri } from '../../hooks/useAgents.js';
 export { LAYER_CONFIG, layerNoun, VM_TRIPLE_STAT } from './layer-presentation.js';
 
@@ -50,12 +51,10 @@ export function shouldFetchSwmAttribution(args: {
   if (args.activeSubGraph) return false;
   return args.activeLayer === 'swm';
 }
-// Getters so canvas tints follow the active theme (see layer-colors.ts).
-export const TRUST_COLORS: Record<TrustLevel, string> = {
-  get verified() { return layerHex('verified'); },
-  get shared() { return layerHex('shared'); },
-  get working() { return layerHex('working'); },
-};
+/** Memory layer colour per trust level, for graph node tints. */
+export function trustColors(p: GraphPalette): Record<TrustLevel, string> {
+  return { verified: p.layer.verified, shared: p.layer.shared, working: p.layer.working };
+}
 
 export const TYPE_LABELS: Record<string, { icon: string; group: string }> = {
   Person: { icon: '👤', group: 'People' },
@@ -178,35 +177,43 @@ export function entityMeta(e: MemoryEntity, profile?: { forType: (iri: string) =
 // default color (WM gray / SWM amber / VM green).
 export const CODE = 'http://dkg.io/ontology/code/';
 // C9: code classes take their entity-kind data colour (same as the generated
-// cards); external modules are neutral. Getters so canvas colours follow the
-// active theme.
-export const CODE_CLASS_COLORS: Record<string, string> = {
-  get [CODE + 'Package']() { return kindHex('package'); },
-  get [CODE + 'File']() { return kindHex('file'); },
-  get [CODE + 'Class']() { return kindHex('class'); },
-  get [CODE + 'Interface']() { return kindHex('interface'); },
-  get [CODE + 'Function']() { return kindHex('function'); },
-  get [CODE + 'TypeAlias']() { return kindHex('typeAlias'); },
-  get [CODE + 'Enum']() { return kindHex('enum'); },
-  get [CODE + 'ExternalModule']() { return neutralHex('node'); },
-  // C10: anchor deep VM purple (ringed, see VIZ_CLASS_BORDERS); agents neutral.
-  get [VIZ_ANCHOR_TYPE]() { return vmAnchorHex('fill'); },
-  get [VIZ_AGENT_TYPE]() { return neutralHex('node'); },
-};
-// C9: code relationship edges stay neutral (the graph's default edge colour);
-// relationship names are on the edge labels. Only VM provenance edges are
-// coloured here (C10).
-export const CODE_PREDICATE_COLORS: Record<string, string> = {
-  // C10: "anchored in" ties assets to their anchor in VM purple; the
-  // signed-by and consensus edges are neutral.
-  get [VIZ_PRED_ANCHORED_IN]() { return layerHex('verified'); },
-  get [VIZ_PRED_SIGNED_BY]() { return neutralHex('edge'); },
-  get [VIZ_PRED_CONSENSUS]() { return neutralHex('edge'); },
-};
+// cards); external modules are neutral. C10: anchors in deep VM purple
+// (ringed, see vizClassBorders); agents neutral.
+const CODE_CLASS_KINDS: ReadonlyArray<[string, EntityKind]> = [
+  [CODE + 'Package', 'package'],
+  [CODE + 'File', 'file'],
+  [CODE + 'Class', 'class'],
+  [CODE + 'Interface', 'interface'],
+  [CODE + 'Function', 'function'],
+  [CODE + 'TypeAlias', 'typeAlias'],
+  [CODE + 'Enum', 'enum'],
+];
+
+/** Node colours for code classes and VM decoration types. */
+export function codeClassColors(p: GraphPalette): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [iri, kind] of CODE_CLASS_KINDS) out[iri] = dataSlotHex(p, kindSlot(kind));
+  out[CODE + 'ExternalModule'] = p.neutral.node;
+  out[VIZ_ANCHOR_TYPE] = p.anchor.fill;
+  out[VIZ_AGENT_TYPE] = p.neutral.node;
+  return out;
+}
+
+/** Edge colours. C9: code relationship edges stay neutral (the graph's
+ *  default edge colour; names are on the edge labels). C10: "anchored in"
+ *  ties assets to their anchor in VM purple; signed-by and consensus edges
+ *  are neutral. */
+export function codePredicateColors(p: GraphPalette): Record<string, string> {
+  return {
+    [VIZ_PRED_ANCHORED_IN]: p.layer.verified,
+    [VIZ_PRED_SIGNED_BY]: p.neutral.edge,
+    [VIZ_PRED_CONSENSUS]: p.neutral.edge,
+  };
+}
 
 /** C10: the anchor is the only outlined node in the VM graph. */
-export function vizClassBorders(): Record<string, { color: string; width: number }> {
-  return { [VIZ_ANCHOR_TYPE]: { color: vmAnchorHex('ring'), width: VM_ANCHOR_RING_WIDTH } };
+export function vizClassBorders(p: GraphPalette): Record<string, { color: string; width: number }> {
+  return { [VIZ_ANCHOR_TYPE]: { color: p.anchor.ring, width: VM_ANCHOR_RING_WIDTH } };
 }
 
 // Built-in graph-viz auto-tints (schema.org → purple, prov → blue, etc) that
@@ -255,9 +262,10 @@ export function agentNodeColors(triples: ReadonlyArray<{ subject: string; predic
 
 export function buildLayerGraphOptions(
   layer: 'wm' | 'swm' | 'vm',
+  palette: GraphPalette,
   nodeColors?: Record<string, string>,
 ) {
-  const { color } = LAYER_CONFIG[layer];
+  const color = palette.layer[LAYER_CONFIG[layer].trustLevel];
   // VM ("Verifiable Memory") is the DKG hero view — we deliberately juice it:
   // thicker & brighter edges, bigger hub/leaf spread, higher gradient so every
   // node reads as a "trust gem". WM/SWM stay quieter so VM clearly wins the
@@ -268,9 +276,9 @@ export function buildLayerGraphOptions(
     renderer: '2d' as const,
     labels: memoryGraphLabels({ minZoomForLabels: isVM ? 0.2 : 0.3 }),
     style: {
-      classColors: CODE_CLASS_COLORS,
-      predicateColors: CODE_PREDICATE_COLORS,
-      classBorders: vizClassBorders(),
+      classColors: codeClassColors(palette),
+      predicateColors: codePredicateColors(palette),
+      classBorders: vizClassBorders(palette),
       // Anchors keep their exact deep purple (no lighter gradient centre).
       flatClasses: [VIZ_ANCHOR_TYPE],
       namespaceColors: neutraliseBuiltinNamespaces(color),
@@ -279,7 +287,7 @@ export function buildLayerGraphOptions(
       // the style engine keeps falling back to classColors.
       ...(nodeColors && Object.keys(nodeColors).length > 0 ? { nodeColors } : {}),
       defaultNodeColor: color,
-      defaultEdgeColor: isVM ? layerHex('verified') : neutralHex('edge'), // VM: layer-purple edges; WM/SWM neutral (C15)
+      defaultEdgeColor: isVM ? palette.layer.verified : palette.neutral.edge, // VM: layer-purple edges; WM/SWM neutral (C15)
       edgeWidth: isVM ? 1.8 : 1.2,
       // VM anchors fan out to many assets; their edge labels pile up at
       // overview zoom. Show them only once zoomed in.

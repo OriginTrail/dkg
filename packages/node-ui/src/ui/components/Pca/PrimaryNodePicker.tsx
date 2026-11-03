@@ -142,7 +142,7 @@ export function PrimaryNodePicker({
           Couldn’t load the staked-node list — a primary node is required to create.{' '}
           <button
             type="button"
-            className="v10-pca-card-btn"
+            className="v10-pca-card-btn ds-btn"
             data-testid="pca-primary-node-retry"
             onClick={onRetry}
           >
@@ -272,7 +272,7 @@ export function PrimaryNodePicker({
             />
             <button
               type="button"
-              className="v10-pca-card-btn"
+              className="v10-pca-card-btn ds-btn"
               data-testid="pca-primary-node-paste-use"
               onClick={usePastedId}
             >

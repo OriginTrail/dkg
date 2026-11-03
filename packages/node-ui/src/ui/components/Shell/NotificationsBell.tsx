@@ -116,7 +116,7 @@ export function NotificationsBell() {
     >
       <button
         ref={bellRef}
-        className="v10-header-icon-btn"
+        className="v10-header-icon-btn ds-btn ds-ghost ds-icon"
         onClick={() => setOpen((v) => !v)}
         title={unread > 0 ? `Notifications (${unread} unread)` : 'Notifications'}
         aria-label={unread > 0 ? `Notifications, ${unread} unread` : 'Notifications'}

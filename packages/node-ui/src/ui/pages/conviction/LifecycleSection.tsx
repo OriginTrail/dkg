@@ -37,7 +37,7 @@ export function LifecycleSection({
             account nears/passes expiry. Honest copy lives in the seeded create modal (#9). */}
         <button
           type="button"
-          className={`v10-pca-card-btn${health === 'expiring' || health === 'expired' ? ' primary' : ''}`}
+          className={`v10-pca-card-btn ds-btn${health === 'expiring' || health === 'expired' ? ' primary ds-primary' : ''}`}
           data-testid="pca-renew-btn"
           onClick={() => renewal.openRenew()}
           disabled={!access.writesEnabled}

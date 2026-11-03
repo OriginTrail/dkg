@@ -46,7 +46,7 @@ export function PcaSettingsCard() {
         )}
         <button
           type="button"
-          className="v10-pca-card-btn"
+          className="v10-pca-card-btn ds-btn"
           onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
         >
           Manage publisher conviction -&gt;

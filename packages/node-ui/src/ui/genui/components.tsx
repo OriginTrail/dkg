@@ -12,7 +12,7 @@
 import React from 'react';
 import { kindColor, type EntityKind } from '../entity-kind-colors.js';
 import { Badge, LayerBadge, type BadgeTone } from '../components/ds/Badge.js';
-import { humanizeStatus } from '../components/ActivityFeed.js';
+import { humanizeStatus } from '../lib/formatLabels.js';
 
 /** Card status → badge tone: done is success, blocked/rejected danger, open/in progress warning. */
 function genuiStatusTone(status: string): BadgeTone {

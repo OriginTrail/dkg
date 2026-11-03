@@ -33,6 +33,8 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Focus | `--focus-ring` | Keyboard focus only, always as a 2px ring. Not a link colour, not a layer. |
 | Data | `--data-1` … `--data-8` | Charts and context graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
 
+**Canvas colours.** graph-viz draws on a canvas and can't read CSS variables. Graph views take a plain `GraphPalette` for an explicit theme (`graphPalette(theme)` in `graph-palette.ts`, or `useGraphPalette()` in a component) and pass it to the option builders; `test/graph-palette.test.ts` keeps its values in step with the tokens.
+
 **Contrast.** Readable text clears 4.5:1 on the surface it sits on, in both themes; non-text marks (icons, layer bars, borders that carry meaning) clear 3:1. `test/context-graph-contrast.test.ts` checks the main pairs.
 
 ## Type
@@ -82,7 +84,7 @@ Controls placed side by side share a height.
 
 ### Button
 
-`<Button variant size icon>`, the only button.
+`<Button variant size icon>`, the only button. Existing markup can use the classes it renders directly: `ds-btn` plus `ds-primary` / `ds-ghost` / `ds-danger` / `ds-swm` / `ds-vm`, and `ds-sm` / `ds-lg` / `ds-icon`.
 
 | Variant | Use |
 |---|---|
@@ -151,4 +153,4 @@ to lower the baseline, so they can't creep back. Never raise it by hand: use or 
 1. Check the reference page first: most needs are covered by an existing token or component.
 2. A new colour or size is a new token in `00-theme.css`, with a value for both themes and a line in this file saying what job it does.
 3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, and a section on the reference page.
-4. Old per-screen classes are mapped onto the shared rules by adding them to the shared selector lists in `27-ds-components.css`, not by copying values.
+4. Put the shared classes on the element (`ds-btn ds-primary ds-sm`, or render `<Button>`) and keep the screen's own class only for layout. Buttons work this way already (`test/button-classes.test.ts` checks it); tabs, segmented controls, filter chips, cards and inputs still map some old per-screen names onto the shared rules in `27-ds-components.css` and should move the same way when those screens are touched.

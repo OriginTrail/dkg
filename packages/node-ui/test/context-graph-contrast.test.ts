@@ -173,16 +173,15 @@ describe('Context Graph contrast tokens', () => {
       expect(c('--text-on-vm', '--accent-vm'), `${theme} publish to VM`).toBeGreaterThanOrEqual(4.5);
       expect(c('--text-on-vm', '--accent-vm-hover'), `${theme} publish to VM hover`).toBeGreaterThanOrEqual(4.5);
     }
-    // The legacy classes must keep pointing at those variants.
-    const ds = css.slice(css.indexOf('/* ══ Button'));
-    for (const [variant, legacy] of [
-      ['ds-primary', '.v10-modal-btn.primary'], ['ds-primary', '.v10-po-join-btn.approve'],
-      ['ds-danger', '.v10-po-join-btn.reject'], ['ds-swm', '.v10-btn-promote-all'],
-      ['ds-swm', '.v10-ka-verify-btn.promote'], ['ds-vm', '.v10-btn-publish'],
-      ['ds-vm', '.v10-decision-btn.primary-cta.publish-vm'],
+    // Elements declare their variant: the screens that used these legacy
+    // classes now carry the matching ds-* classes on the element itself.
+    for (const [file, cls] of [
+      ['components/Workspace/WireWorkspacePanel.tsx', 'v10-modal-btn primary ds-btn ds-primary'],
+      ['views/project/components/overview.tsx', 'v10-po-join-btn approve ds-btn ds-primary ds-sm'],
+      ['views/project/components/overview.tsx', 'v10-po-join-btn reject ds-btn ds-danger ds-sm'],
+      ['views/MemoryLayerView.tsx', 'v10-btn-publish ds-btn ds-vm'],
     ] as const) {
-      const block = ds.slice(ds.indexOf(`.ds-btn.${variant},`));
-      expect(block.slice(0, block.indexOf('{')), `${legacy} → ${variant}`).toContain(legacy);
+      expect(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/ui', file), 'utf8'), `${file}: ${cls}`).toContain(`"${cls}"`);
     }
 
     // Badges (components/ds/Badge): each tone's text colour must clear AA on

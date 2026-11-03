@@ -151,7 +151,7 @@ export function JoinRequestRow({
             <span className="v10-notif-deny-confirm-label">Deny?</span>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-deny"
+              className="v10-notif-btn v10-notif-btn-deny ds-btn ds-danger ds-sm"
               onClick={() => run('deny')}
               aria-label={`Confirm deny join request from ${who} for ${cg}`}
             >
@@ -159,7 +159,7 @@ export function JoinRequestRow({
             </button>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-ghost"
+              className="v10-notif-btn v10-notif-btn-ghost ds-btn ds-ghost ds-sm"
               onClick={() => setPhase({ kind: 'idle' })}
               autoFocus
             >
@@ -170,7 +170,7 @@ export function JoinRequestRow({
           <>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-approve"
+              className="v10-notif-btn v10-notif-btn-approve ds-btn ds-primary ds-sm"
               onClick={() => run('approve')}
               disabled={working}
               aria-label={`Approve join request from ${who} for ${cg}`}
@@ -179,7 +179,7 @@ export function JoinRequestRow({
             </button>
             <button
               type="button"
-              className="v10-notif-btn v10-notif-btn-ghost"
+              className="v10-notif-btn v10-notif-btn-ghost ds-btn ds-ghost ds-sm"
               onClick={() => setPhase({ kind: 'confirming-deny' })}
               disabled={working}
               aria-label={`Deny join request from ${who} for ${cg}`}

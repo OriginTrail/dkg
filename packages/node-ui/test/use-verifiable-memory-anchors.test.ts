@@ -5,12 +5,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   useVerifiableMemoryAnchors,
-  anchorsFromReceiptRows,
+  anchorsFromReceipts,
   buildDecorationTriples,
   VIZ_ANCHOR_TYPE,
   VIZ_PRED_ANCHORED_IN,
+  VIZ_PRED_SIGNED_BY,
+  VIZ_AGENT_TYPE,
   type VerifiableMemoryAnchorsResult,
 } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
+import { parseVmReceiptRows } from '../src/ui/hooks/useVmReceipts.js';
+
+const anchorsFromReceiptRows = (rows: Array<Record<string, unknown>>, cg: string) => anchorsFromReceipts(parseVmReceiptRows(rows, cg));
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -64,13 +69,19 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
       ok: true,
       status: 200,
       json: async () => ({ result: { bindings: [
+        // Dated receipt with a member row and an explicit signer.
         { asrt: A, tx: '0x9f2c7a1d', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '"2026-10-31T10:00:00Z"' },
+        // No finalize time, no attribution row: signer from the author address.
         { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/two', tx: '0x41ab', member: 'urn:x:b' },
+        // Receipt whose only member is not visible in this layer.
+        { asrt: 'did:dkg:context-graph:cg-1/assertion/0xdef/hidden', tx: '0x77', member: 'urn:x:not-visible', finalizedAt: '"2026-10-29T10:00:00Z"' },
       ] } }),
     } as any));
     let result: VerifiableMemoryAnchorsResult | null = null;
+    // urn:x:a by member row; A/entity/1 only by the assertion URI prefix.
+    const visible = new Set(['urn:x:a', 'urn:x:b', `${A}/entity/1`]);
     function Probe() {
-      result = useVerifiableMemoryAnchors('cg-1', new Set(['urn:x:a', 'urn:x:b']));
+      result = useVerifiableMemoryAnchors('cg-1', visible);
       return null;
     }
     await act(async () => { root.render(React.createElement(Probe)); });
@@ -78,14 +89,30 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
 
     const r = result as unknown as VerifiableMemoryAnchorsResult;
     expect(r.error).toBeNull();
-    expect(r.anchors.map(a => a.publishedAt)).toEqual(['2026-10-31T10:00:00.000Z', null]);
-    const anchorNodes = r.decorationTriples.filter(t => t.object === VIZ_ANCHOR_TYPE);
-    expect(anchorNodes).toHaveLength(2);
-    expect(r.decorationTriples.filter(t => t.predicate === VIZ_PRED_ANCHORED_IN).map(t => t.subject).sort()).toEqual(['urn:x:a', 'urn:x:b']);
+    expect(r.anchors.map(a => [a.opId, a.publishedAt])).toEqual([
+      ['0x9f2c7a1d', '2026-10-31T10:00:00.000Z'],
+      ['0x77', '2026-10-29T10:00:00.000Z'],
+      ['0x41ab', null],
+    ]);
+    const t = r.decorationTriples;
+    // The hidden receipt draws no anchor; the other two do.
+    expect(t.filter(x => x.object === VIZ_ANCHOR_TYPE).map(x => x.subject).sort())
+      .toEqual(['urn:dkg:viz:anchor:0x41ab', 'urn:dkg:viz:anchor:0x9f2c7a1d']);
+    expect(t.filter(x => x.predicate === VIZ_PRED_ANCHORED_IN).map(x => `${x.subject} → ${x.object}`).sort()).toEqual([
+      `${A}/entity/1 → urn:dkg:viz:anchor:0x9f2c7a1d`,
+      'urn:x:a → urn:dkg:viz:anchor:0x9f2c7a1d',
+      'urn:x:b → urn:dkg:viz:anchor:0x41ab',
+    ]);
+    const signers = t.filter(x => x.predicate === VIZ_PRED_SIGNED_BY).map(x => `${x.subject} → ${decodeURIComponent(x.object)}`).sort();
+    expect(signers).toEqual([
+      'urn:dkg:viz:anchor:0x41ab → urn:dkg:viz:agent:did:dkg:agent:0xdef',
+      'urn:dkg:viz:anchor:0x9f2c7a1d → urn:dkg:viz:agent:did:dkg:agent:0x1',
+    ]);
+    expect(t.filter(x => x.object === VIZ_AGENT_TYPE)).toHaveLength(2);
   });
 });
 
-describe('anchorsFromReceiptRows', () => {
+describe('anchors from receipts', () => {
   it('builds one anchor per receipted assertion with its members, agents and sub-graph', () => {
     const A = 'did:dkg:context-graph:cg-1/research/assertion/0xabc/batch-1';
     const anchors = anchorsFromReceiptRows([

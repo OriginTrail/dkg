@@ -83,7 +83,7 @@ export function Header() {
       </div>
 
       <button
-        className={`v10-header-icon-btn ${!leftCollapsed ? 'active-toggle' : ''}`}
+        className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!leftCollapsed ? ' active-toggle' : ''}`}
         onClick={toggleLeft}
         title="Toggle sidebar"
       >
@@ -117,7 +117,7 @@ export function Header() {
         <NotificationsBell />
 
         <button
-          className="v10-header-icon-btn"
+          className="v10-header-icon-btn ds-btn ds-ghost ds-icon"
           onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
         >
@@ -125,7 +125,7 @@ export function Header() {
         </button>
 
         <button
-          className={`v10-header-icon-btn ${!rightCollapsed ? 'active-toggle' : ''}`}
+          className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!rightCollapsed ? ' active-toggle' : ''}`}
           onClick={toggleRight}
           title="Toggle agent panel"
         >

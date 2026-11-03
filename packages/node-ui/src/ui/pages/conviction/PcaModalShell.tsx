@@ -49,7 +49,7 @@ export function PcaModalShell({
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={handleClose}
           aria-label={dismissDisabled ? 'Close disabled while signing' : 'Close dialog'}
           title={dismissDisabled ? 'Finish or reject the wallet prompt first' : 'Close (Esc)'}

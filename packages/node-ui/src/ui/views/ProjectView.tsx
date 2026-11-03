@@ -690,11 +690,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
               : 'Context graph not found.'}
           </p>
           {cgAuthError ? (
-            <button type="button" className="v10-retry-btn" onClick={() => window.location.reload()}>
+            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
               Refresh page
             </button>
           ) : (
-            <button type="button" className="v10-retry-btn" onClick={refreshContextGraphs}>
+            <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
               Retry
             </button>
           )}
@@ -752,14 +752,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {cgAuthError ? (
             <>
               <span>{cgError}</span>
-              <button type="button" className="v10-retry-btn" onClick={() => window.location.reload()}>
+              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
                 Refresh page
               </button>
             </>
           ) : (
             <>
               <span>Couldn’t refresh context-graph data — showing last known values.</span>
-              <button type="button" className="v10-retry-btn" onClick={refreshContextGraphs}>
+              <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
                 Retry
               </button>
             </>

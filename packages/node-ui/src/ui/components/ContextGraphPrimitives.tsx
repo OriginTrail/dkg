@@ -75,7 +75,7 @@ export function EmptyState({
               <button
                 key={action.label}
                 type="button"
-                className={`v10-empty-state-action ${action.variant ?? 'secondary'}`}
+                className={`v10-empty-state-action ${action.variant ?? 'secondary'} ds-btn ds-sm${action.variant === 'primary' ? ' ds-primary' : ''}`}
                 onClick={action.onClick}
                 data-testid={action.testId}
               >

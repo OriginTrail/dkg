@@ -137,15 +137,15 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       </div>
       <div className="v10-layer-switcher-spacer" />
       <div className="v10-layer-switcher-actions">
-        <button className="v10-layer-action-btn" onClick={onShare} aria-label="Share Context Graph">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onShare} aria-label="Share Context Graph">
           <span className="v10-layer-action-icon">⤴</span>
           <span className="v10-layer-action-label">Share</span>
         </button>
-        <button className="v10-layer-action-btn" onClick={onImport} aria-label="Import into Context Graph">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onImport} aria-label="Import into Context Graph">
           <span className="v10-layer-action-icon">↑</span>
           <span className="v10-layer-action-label">Import</span>
         </button>
-        <button className="v10-layer-action-btn" onClick={onRefresh} aria-label="Refresh Context Graph data">
+        <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh Context Graph data">
           <span className="v10-layer-action-icon">↻</span>
         </button>
       </div>
@@ -511,7 +511,7 @@ export function ProjectOverviewCard({
         {onOpenPrimer && (
           <button
             type="button"
-            className="v10-po-identity-primer"
+            className="v10-po-identity-primer ds-btn ds-sm"
             onClick={onOpenPrimer}
             title="Open the Context Graph primer"
           >
@@ -830,14 +830,14 @@ export function PendingJoinRequestsSection({
                     </div>
                     <div className="v10-po-join-actions">
                       <button
-                        className="v10-po-join-btn approve"
+                        className="v10-po-join-btn approve ds-btn ds-primary ds-sm"
                         onClick={() => handleApprove(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                       >
                         {processing === req.agentAddress ? '…' : '✓ Approve'}
                       </button>
                       <button
-                        className="v10-po-join-btn reject"
+                        className="v10-po-join-btn reject ds-btn ds-danger ds-sm"
                         onClick={() => handleReject(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                         aria-label="Reject join request"

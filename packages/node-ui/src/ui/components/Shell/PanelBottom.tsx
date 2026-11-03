@@ -341,14 +341,14 @@ export function PanelBottom() {
         ))}
         <div style={{ flex: 1 }} />
         <button
-          className="v10-bottom-toggle"
+          className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
           onClick={toggleBottomMaximised}
           title={bottomMaximised ? 'Restore' : 'Maximise'}
           style={{ display: bottomCollapsed ? 'none' : undefined }}
         >
           {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
         </button>
-        <button className="v10-bottom-toggle" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
+        <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
           <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
             {CHEVRON_DOWN}
           </span>

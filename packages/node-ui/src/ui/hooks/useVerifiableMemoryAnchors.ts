@@ -25,15 +25,18 @@
  * in-memory on the client, under a dedicated viz:* namespace that
  * `ProjectView`'s style maps recognise for VM-only rendering.
  *
+ * Receipts come from `useVmReceipts` (shared with the VM header facts), so
+ * this hook only projects typed receipt records into triples.
+ *
  * If the daemon has no publish provenance yet (e.g. VM wasn't seeded), the
  * hook just returns an empty list — the VM graph falls back to the plain
  * committed-sub-graph view.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { authHeaders } from '../api.js';
+import { useMemo } from 'react';
 import type { Triple } from './useMemoryEntities.js';
-import { buildVmReceiptSummaryQuery, isSafeIriPart, receiptAgent, receiptValue } from './useVmReceiptSummary.js';
+import { useVmReceipts, type VmReceipt } from './useVmReceipts.js';
+import { isAtOrUnder } from './useVmReceiptSummary.js';
 
 /** Namespace for synthetic visualisation triples — unique to VM decoration
  *  so downstream code (SubGraphBar bucketing, counts) never mistakes them
@@ -49,13 +52,12 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA_NAME = 'http://schema.org/name';
 const SCHEMA_DESC = 'http://schema.org/description';
 
-/** Single publish batch as reported by the daemon's workspace-operation
- *  records. */
+/** One receipted assertion, as drawn in the VM graph. */
 export interface PublishAnchor {
-  opId: string;        // raw operation id (tail of urn:dkg:share:<cg>:<opId>)
-  opUri: string;       // urn:dkg:share:<cg>:<opId>
-  agents: string[];    // distinct peer-ids / DIDs that attested
-  roots: string[];     // KA root entities included in this batch
+  opId: string;        // publish transaction hash
+  opUri: string;       // assertion URI
+  agents: string[];    // distinct DIDs that published it
+  roots: string[];     // member entities of the assertion
   /** ISO timestamp of the on-chain finalize, or null when the receipt has
    *  none (older receipts, or a finalize not yet recorded). */
   publishedAt: string | null;
@@ -73,19 +75,6 @@ export interface VerifiableMemoryAnchorsResult {
   error: string | null;
 }
 
-function bv(v: unknown): string | undefined {
-  if (v == null) return undefined;
-  if (typeof v === 'string') {
-    // Strip wrapping quotes for literals, and the trailing ^^<datatype> tag.
-    return v.startsWith('"')
-      ? v.replace(/^"/, '').replace(/"(\^\^<[^>]*>)?$/, '')
-      : v;
-  }
-  if (typeof v === 'object' && v !== null && 'value' in (v as any)) {
-    return String((v as any).value);
-  }
-  return String(v);
-}
 
 /** Short label for an anchor: `tx mo3e0z…` + relative time if we can derive it. */
 function anchorLabel(a: PublishAnchor): string {
@@ -93,11 +82,6 @@ function anchorLabel(a: PublishAnchor): string {
   return a.publishedAt ? `anchor ${short} · ${a.publishedAt.slice(11, 16)}UTC` : `anchor ${short}`;
 }
 
-/** A receipt's finalize time as ISO, or null when missing or unparseable. */
-function isoOrNull(value: string): string | null {
-  const t = Date.parse(value);
-  return Number.isFinite(t) ? new Date(t).toISOString() : null;
-}
 
 /** Short label for an agent peer-id / DID. */
 function agentLabel(agentId: string): string {
@@ -111,33 +95,12 @@ function agentLabel(agentId: string): string {
   return agentId;
 }
 
-/** did:dkg:context-graph:<cg>/<sub>/assertion/… → <sub> (undefined at the root). */
-function subGraphFromAssertionUri(asrt: string, cgId: string): string | undefined {
-  const prefix = `did:dkg:context-graph:${cgId}/`;
-  if (!asrt.startsWith(prefix)) return undefined;
-  const seg = asrt.slice(prefix.length).split('/')[0];
-  return seg && seg !== 'assertion' ? seg : undefined;
-}
-
-/** Fold receipt rows into one anchor per receipted assertion. Exported for tests. */
-export function anchorsFromReceiptRows(rows: Array<Record<string, unknown>>, cgId: string): PublishAnchor[] {
-  const byAsrt = new Map<string, PublishAnchor>();
-  for (const row of rows) {
-    const asrt = receiptValue(row.asrt);
-    const tx = receiptValue(row.tx);
-    if (!asrt || !tx) continue;
-    let a = byAsrt.get(asrt);
-    if (!a) {
-      a = { opId: tx, opUri: asrt, agents: [], roots: [], publishedAt: isoOrNull(receiptValue(row.finalizedAt)), subGraph: subGraphFromAssertionUri(asrt, cgId) };
-      byAsrt.set(asrt, a);
-    }
-    const member = receiptValue(row.member);
-    if (member && !a.roots.includes(member)) a.roots.push(member);
-    const agent = receiptAgent(row);
-    if (agent && !a.agents.includes(agent)) a.agents.push(agent);
-  }
-  // Newest first; receipts without a finalize time go last.
-  return [...byAsrt.values()].sort((x, y) => (y.publishedAt ?? '').localeCompare(x.publishedAt ?? ''));
+/** One anchor per receipt, newest first; receipts without a finalize time
+ *  go last. Exported for tests. */
+export function anchorsFromReceipts(receipts: readonly VmReceipt[]): PublishAnchor[] {
+  return receipts
+    .map(r => ({ opId: r.tx, opUri: r.assertion, agents: [...r.signers], roots: [...r.members], publishedAt: r.finalizedAt, subGraph: r.subGraph }))
+    .sort((x, y) => (y.publishedAt ?? '').localeCompare(x.publishedAt ?? ''));
 }
 
 /** Synthetic anchor / agent triples for the graph. Exported for tests. */
@@ -156,7 +119,7 @@ export function buildDecorationTriples(
     // Members come from the seal rows; entities namespaced under the
     // assertion URI belong to it too (same rule as the receipt hook).
     const visibleRoots = visibleEntityUris
-      ? [...new Set([...a.roots.filter(r => visibleEntityUris.has(r)), ...[...visibleEntityUris].filter(u => u.startsWith(a.opUri + '/'))])]
+      ? [...new Set([...a.roots.filter(r => visibleEntityUris.has(r)), ...[...visibleEntityUris].filter(u => u !== a.opUri && isAtOrUnder(u, a.opUri))])]
       : a.roots;
     if (visibleRoots.length === 0) continue;
 
@@ -209,44 +172,8 @@ export function useVerifiableMemoryAnchors(
   contextGraphId: string | undefined,
   visibleEntityUris?: Set<string> | Iterable<string>,
 ): VerifiableMemoryAnchorsResult {
-  const [anchors, setAnchors] = useState<PublishAnchor[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const versionRef = useRef(0);
-
-  useEffect(() => {
-    if (!contextGraphId || !isSafeIriPart(contextGraphId)) {
-      setAnchors([]);
-      setLoading(false);
-      return;
-    }
-    const version = ++versionRef.current;
-    setLoading(true);
-    setError(null);
-
-    (async () => {
-      try {
-        const res = await fetch('/api/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', ...authHeaders() },
-          body: JSON.stringify({ contextGraphId, sparql: buildVmReceiptSummaryQuery(contextGraphId) }),
-        });
-        if (!res.ok) throw new Error(`SPARQL query failed: ${res.status}`);
-        const data = await res.json();
-        const rows: any[] = data?.result?.bindings ?? [];
-        const next = anchorsFromReceiptRows(rows, contextGraphId);
-
-        if (version !== versionRef.current) return;
-        setAnchors(next);
-      } catch (err: any) {
-        if (version !== versionRef.current) return;
-        setError(err?.message ?? 'Failed to load anchors');
-        setAnchors([]);
-      } finally {
-        if (version === versionRef.current) setLoading(false);
-      }
-    })();
-  }, [contextGraphId]);
+  const { receipts, loading, error } = useVmReceipts(contextGraphId);
+  const anchors = useMemo(() => (receipts ? anchorsFromReceipts(receipts) : []), [receipts]);
 
   // Normalise visibleEntityUris into a stable Set whose identity only
   // changes when the membership changes. We serialise to a sorted join

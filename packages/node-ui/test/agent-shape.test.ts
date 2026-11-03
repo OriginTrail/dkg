@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { agentInitials } from '../src/ui/components/AgentDot.js';
 import { agentHexForUri } from '../src/ui/hooks/useAgents.js';
 import { agentNodeColors, AGENT_GRAPH_TYPES, buildLayerGraphOptions } from '../src/ui/views/project/helpers.js';
+import { graphPalette } from '../src/ui/graph-palette.js';
 import { VIZ_AGENT_TYPE } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
 import { overviewRoleState } from '../src/ui/views/project/components/overview-role.js';
 
@@ -53,10 +54,10 @@ describe('agent node colours', () => {
   });
 
   it('draws agent types as avatars and hides VM edge labels until zoomed in', () => {
-    const vm = buildLayerGraphOptions('vm');
+    const vm = buildLayerGraphOptions('vm', graphPalette('dark'));
     expect(vm.hexagon.agentTypes).toEqual(AGENT_GRAPH_TYPES);
     expect(vm.style.edgeLabelMinZoom).toBeGreaterThan(1);
-    expect(buildLayerGraphOptions('swm').style.edgeLabelMinZoom).toBe(0.3);
+    expect(buildLayerGraphOptions('swm', graphPalette('dark')).style.edgeLabelMinZoom).toBe(0.3);
   });
 });
 

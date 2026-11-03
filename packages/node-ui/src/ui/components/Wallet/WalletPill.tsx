@@ -86,7 +86,7 @@ export function WalletPill({
         )}
         <button
           type="button"
-          className="v10-wallet-pill-btn"
+          className="v10-wallet-pill-btn ds-btn ds-sm"
           onClick={disconnect}
           title="Disconnect this wallet before switching to another wallet"
         >

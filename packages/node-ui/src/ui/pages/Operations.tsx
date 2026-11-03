@@ -22,7 +22,7 @@ import {
   PHASE_FALLBACK_COLOR,
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
-import { humanizeStatus } from '../components/ActivityFeed.js';
+import { humanizeStatus } from '../lib/formatLabels.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 

@@ -370,16 +370,16 @@ export function CreatePcaModal({
         </div>
         <div className="v10-modal-footer">
           {txUrl && (
-            <a className="v10-modal-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer ↗</a>
+            <a className="v10-modal-btn ds-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer ↗</a>
           )}
           <button
             type="button"
-            className="v10-modal-btn"
+            className="v10-modal-btn ds-btn"
             onClick={() => { clearCreatePending(); setPendingTxHash(undefined); setPhase('form'); }}
           >
             No PCA minted — clear &amp; retry
           </button>
-          <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={onClose}>Close</button>
         </div>
       </PcaModalShell>
     );
@@ -399,7 +399,7 @@ export function CreatePcaModal({
           </p>
         </div>
         <div className="v10-modal-footer">
-          <button type="button" className="v10-modal-btn" onClick={onClose}>Close</button>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={onClose}>Close</button>
         </div>
       </PcaModalShell>
     );
@@ -442,7 +442,7 @@ export function CreatePcaModal({
         <div className="v10-modal-footer">
           <button
             type="button"
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             data-testid="pca-approve-own-wallets"
             onClick={() => onApproveOwnWallets(result.accountId)}
           >
@@ -450,7 +450,7 @@ export function CreatePcaModal({
               ? `Re-approve PCA #${replacingAccountId}’s wallets`
               : 'Approve this node’s operational wallets'}
           </button>
-          <button type="button" className="v10-modal-btn" onClick={() => onManage(result.accountId)}>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={() => onManage(result.accountId)}>
             Manage PCA #{result.accountId}
           </button>
         </div>
@@ -683,7 +683,7 @@ export function CreatePcaModal({
       <div className="v10-modal-footer">
         <button
           type="button"
-          className="v10-modal-btn"
+          className="v10-modal-btn ds-btn"
           onClick={() => {
             if (!hardwareDismissDisabled) onClose();
           }}
@@ -693,7 +693,7 @@ export function CreatePcaModal({
         </button>
         <button
           type="button"
-          className="v10-modal-btn primary"
+          className="v10-modal-btn primary ds-btn ds-primary"
           data-testid="pca-create-submit"
           onClick={handleCreate}
           disabled={!canSubmit}

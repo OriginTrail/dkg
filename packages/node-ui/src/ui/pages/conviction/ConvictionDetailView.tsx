@@ -66,7 +66,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
         <div className="card">
           <div className="card-body v10-pca-card-error">
             <p>Couldn’t load PCA #{accountId}.</p>
-            <button type="button" className="v10-pca-card-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
           </div>
         </div>
       </div>
@@ -216,7 +216,7 @@ function DetailBody({
           <div className="v10-modal-warning" role="status">
             ⓘ {ownerOnlyReason}{' '}
             {walletsUnreadable ? (
-              <button type="button" className="v10-pca-card-btn" onClick={onRetryWallets}>Retry</button>
+              <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}>Retry</button>
             ) : (
               'Wallet probe stays available.'
             )}

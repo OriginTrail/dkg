@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { buildVmFacts } from '../src/ui/views/project/vm-facts.js';
-import { summariseVmReceipts, buildVmReceiptSummaryQuery, isSafeIriPart, hasReceipt } from '../src/ui/hooks/useVmReceiptSummary.js';
+import { summariseVmReceipts as summarise, hasReceipt } from '../src/ui/hooks/useVmReceiptSummary.js';
+import { buildVmReceiptQuery, isSafeIriPart, parseVmReceiptRows } from '../src/ui/hooks/useVmReceipts.js';
+
+// Raw query rows → typed receipts → summary, as the hooks do. Every receipt row has a tx.
+const summariseVmReceipts = (rows: Array<Record<string, unknown>>) =>
+  summarise(parseVmReceiptRows(rows.map(r => ({ tx: '0x1', ...r })), 'cg'));
 
 const ent = (uri: string) => ({ uri, label: uri, types: [], trustLevel: 'verified', layers: new Set(), subGraphs: new Set(), properties: new Map(), connections: [] }) as any;
 const A = 'did:dkg:context-graph:cg/assertion/0xabc/';
@@ -8,7 +13,7 @@ const ok = { loading: false, error: null };
 
 describe('VM receipt summary', () => {
   it('reads real receipts from the context graph _meta, not share records', () => {
-    const q = buildVmReceiptSummaryQuery('cg');
+    const q = buildVmReceiptQuery('cg');
     expect(q).toContain('GRAPH <did:dkg:context-graph:cg/_meta>');
     expect(q).toContain('dkg:publishedAtTx');
     expect(q).not.toContain('WorkspaceOperation');

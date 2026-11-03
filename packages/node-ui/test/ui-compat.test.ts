@@ -96,8 +96,10 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.v10-agent-input-area\s*\{/);
   });
 
-  it('includes .v10-agent-send-btn selector', () => {
-    expect(css).toMatch(/\.v10-agent-send-btn[\s,{:]/);
+  it('styles buttons through the design-system variant classes', () => {
+    for (const sel of ['.ds-btn.ds-primary', '.ds-btn.ds-ghost', '.ds-btn.ds-danger', '.ds-btn.ds-swm', '.ds-btn.ds-vm', '.ds-btn.ds-sm', '.ds-btn.ds-lg', '.ds-btn.ds-icon']) {
+      expect(css).toContain(sel);
+    }
   });
 
   it('includes .v10-header-notif selectors', () => {
@@ -108,8 +110,10 @@ describe('V10 CSS layout selectors', () => {
     expect(css).toMatch(/\.ds-btn[\s,{]/);
   });
 
-  it('includes .v10-modal-btn selector', () => {
-    expect(css).toMatch(/\.v10-modal-btn[\s,{:]/);
+  it('keeps per-screen button names out of the shared button rules', () => {
+    const buttons = css.slice(css.indexOf('/* ══ Button'), css.indexOf('/* ══ Tabs'));
+    const rules = buttons.replace(/\/\*[\s\S]*?\*\//g, '').split('}').map(r => r.split('{')[0]).filter(sel => sel.includes('.ds-'));
+    for (const sel of rules) expect(sel).not.toMatch(/\.v10-/);
   });
 });
 
@@ -466,7 +470,7 @@ describe('memory layer custom query execution', () => {
     expect(memoryLayerView).toContain('const runQuery = useCallback(() => {');
     expect(memoryLayerView).toContain('onChange={(e) => setDraftQuery(e.target.value)}');
     expect(memoryLayerView).toContain("onKeyDown={(e) => { if (e.key === 'Enter') runQuery(); }}");
-    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn" onClick={runQuery}>');
+    expect(memoryLayerView).toContain('<button className="v10-mlv-run-btn ds-btn ds-primary" onClick={runQuery}>');
   });
 
   it('keeps the WM default query GRAPH variable top-level AND WM-scoped (scoped-query guard #749 + Codex #944)', () => {

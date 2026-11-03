@@ -63,7 +63,7 @@ function ProjectTreeItem({
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <button
           type="button"
-          className="v10-tree-hide-btn"
+          className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
@@ -97,7 +97,7 @@ function OracleCatalogueItem({
         <span className="v10-tree-section-label">{label}</span>
         <button
           type="button"
-          className="v10-tree-catalogue-btn"
+          className="v10-tree-catalogue-btn ds-btn ds-sm"
           aria-label={`Browse ${label}`}
           onClick={onBrowse}
         >
@@ -105,7 +105,7 @@ function OracleCatalogueItem({
         </button>
         <button
           type="button"
-          className="v10-tree-catalogue-btn primary"
+          className="v10-tree-catalogue-btn primary ds-btn ds-primary ds-sm"
           aria-label={`Subscribe to ${label}`}
           onClick={onSubscribe}
         >
@@ -113,7 +113,7 @@ function OracleCatalogueItem({
         </button>
         <button
           type="button"
-          className="v10-tree-hide-btn"
+          className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={onHide}
         >
@@ -256,8 +256,8 @@ export function PanelLeft() {
   return (
     <div className="v10-panel-left">
       <div className="v10-tree-create-actions">
-        <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
-        <button className="v10-new-project-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
+        <button className="v10-new-project-btn ds-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
+        <button className="v10-new-project-btn ds-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
       </div>
 
       <div className="v10-tree-header">
@@ -310,7 +310,7 @@ export function PanelLeft() {
                   : 'Create your first context graph to give your agent structured memory.'}
               </div>
               {stage === 1 && (
-                <button className="v10-new-project-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
+                <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
                   + Create First Context Graph
                 </button>
               )}

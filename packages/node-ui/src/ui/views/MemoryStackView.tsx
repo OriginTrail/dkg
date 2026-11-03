@@ -68,7 +68,7 @@ export function MemoryStackView() {
       {inventoryError && <div className="v10-stale-banner" role="alert">
         <span>{listError ? 'Context graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}
           {contextGraphs.length > 0 ? 'Showing the last available context graphs.' : 'Context graph inventory is unknown.'}</span>
-        <button type="button" className="v10-retry-btn" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
+        <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry context graphs</button>
       </div>}
       {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (

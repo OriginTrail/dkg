@@ -148,7 +148,7 @@ export function FundingSection({
         />
         <button
           type="button"
-          className="v10-pca-card-btn primary"
+          className="v10-pca-card-btn primary ds-btn ds-primary"
           data-testid="pca-topup-btn"
           onClick={runFund}
           disabled={!access.writesEnabled || fund.busy || !!topUpPending || !/^\d+(\.\d+)?$/.test(topUp.trim()) || Number(topUp.trim()) <= 0}
@@ -163,7 +163,7 @@ export function FundingSection({
           Top-up transaction <code>{topUpPending.txHash}</code> is pending confirmation. The top-up
           button is disabled while this exact receipt is checked; adding again could lock more TRAC.
           {' '}
-          <button type="button" className="v10-pca-card-btn" onClick={refresh}>Recheck account</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={refresh}>Recheck account</button>
         </p>
       )}
     </section>
@@ -192,7 +192,7 @@ function ActionFeedback({
             <code>{state.warning.txHash}</code>
           ))}{' '}
         {onRecheck && (
-          <button type="button" className="v10-pca-card-btn" onClick={onRecheck}>Recheck</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRecheck}>Recheck</button>
         )}
       </p>
     );

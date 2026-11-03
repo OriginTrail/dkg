@@ -67,7 +67,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
         {hasInformationalUnread && (
           <button
             type="button"
-            className="v10-notif-pane-markread"
+            className="v10-notif-pane-markread ds-btn ds-ghost ds-sm"
             onClick={markAllInformationalSeen}
             title="Mark informational notifications as read"
           >

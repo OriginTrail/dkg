@@ -410,17 +410,17 @@ export function ApproveWalletsModal({
       </div>
 
       <div className="v10-modal-footer">
-        <button type="button" className="v10-modal-btn" onClick={onClose} disabled={walletBatchSigning}>
+        <button type="button" className="v10-modal-btn ds-btn" onClick={onClose} disabled={walletBatchSigning}>
           {done ? 'Done' : 'Cancel'}
         </button>
         {running ? (
-          <button type="button" className="v10-modal-btn" onClick={() => { stopRef.current = true; }}>
+          <button type="button" className="v10-modal-btn ds-btn" onClick={() => { stopRef.current = true; }}>
             Stop
           </button>
         ) : !done ? (
           <button
             type="button"
-            className="v10-modal-btn primary"
+            className="v10-modal-btn primary ds-btn ds-primary"
             data-testid="pca-approve-submit"
             onClick={run}
             disabled={addresses.length === 0}
@@ -430,7 +430,7 @@ export function ApproveWalletsModal({
         ) : counts.stranded > 0 ? (
           // One-click re-run to finish the stranded migrations. `run()` re-processes the
           // selected wallets; a stranded one is now UNBOUND (we deregistered it) → it registers.
-          <button type="button" className="v10-modal-btn primary" data-testid="pca-approve-retry-stranded" onClick={run}>
+          <button type="button" className="v10-modal-btn primary ds-btn ds-primary" data-testid="pca-approve-retry-stranded" onClick={run}>
             Retry to finish
           </button>
         ) : null}

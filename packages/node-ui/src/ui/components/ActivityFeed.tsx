@@ -29,11 +29,7 @@ import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { AgentChip } from './AgentChip.js';
 import { kindColorForType } from '../entity-kind-colors.js';
 
-/** "PullRequest" → "Pull request", "CreativeWork" → "Creative work". */
-export function humanizeTypeName(name: string): string {
-  const words = name.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').trim().split(/\s+/);
-  return words.map((w, i) => (i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w.toLowerCase())).join(' ');
-}
+import { humanizeStatus, humanizeTypeName } from '../lib/formatLabels.js';
 import { LAYER_VAR } from '../layer-colors.js';
 import { Badge } from './ds/Badge.js';
 
@@ -393,11 +389,6 @@ function findStatus(e: MemoryEntity): string | null {
 
 const STATUS_BADGE_TONE = { good: 'success', warn: 'warning', bad: 'danger', neutral: 'neutral' } as const;
 /** "in_progress" → "In progress". */
-export function humanizeStatus(status: string): string {
-  const t = status.replace(/[_-]+/g, ' ').trim();
-  return t ? t[0].toUpperCase() + t.slice(1) : t;
-}
-
 function statusTone(status: string): 'good' | 'warn' | 'bad' | 'neutral' {
   switch (status) {
     case 'accepted':
