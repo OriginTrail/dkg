@@ -14,7 +14,7 @@ import type { Profile } from '../../../typechain';
 import { Contracts, eventsIn, typedAt } from '../contracts';
 import type { NodeSigner } from '../fork';
 import { chainNow } from '../network';
-import { ClaimRef, delegatorKey, positionScore, skipReasonOf } from '../reads';
+import { ClaimRef, claimPreview, delegatorKey, positionScore, skipReasonOf } from '../reads';
 import { fmt, sum, toJson } from '../report';
 import { Ctx, expectRevert, send, withPool } from './context';
 import { closeAndPay } from './cycle-pay';
@@ -229,7 +229,8 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   const w = smallestOn(await positions(c), SELLERS[0]);
   if (!w) throw new Error(`no position on node ${SELLERS[0]}`);
   const wKey = delegatorKey(w.tokenId);
-  const rawBefore = (await c.css.getPosition(w.tokenId)).raw;
+  const wPos = await c.css.getPosition(w.tokenId);
+  const rawBefore = wPos.raw;
   // The score a position staying to the end of A + 1 holds in it, from views:
   // what `_claim` integrates for an epoch after the position's boost expired.
   const stayed = await positionScore(c, w.tokenId, w.node, A + 1n, rawBefore);
@@ -239,6 +240,12 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   await prove(w.node, `node ${w.node}'s next proof in epoch ${A + 1n}, in a reverted snapshot, with token ${w.tokenId} still staked`);
   const stayedThroughLaterProof = await positionScore(c, w.tokenId, w.node, A + 1n, rawBefore);
   await ctx.fork.revert(counterfactual);
+  // What the withdrawal pays, from views before it: the stake, plus every
+  // ended epoch since the position's last claim (from its migration epoch, if
+  // later) at StakingKPI's nets and the position's scores in storage.
+  const claimFrom = wPos.migrationEpoch > wPos.lastClaimedEpoch + 1n ? wPos.migrationEpoch : wPos.lastClaimedEpoch + 1n;
+  const pending = await claimPreview(c, w.tokenId, w.node, claimFrom, A, rawBefore);
+  const expectedPayout = rawBefore + pending.total;
   const wOwner = await impersonate(ctx, w.owner);
   const ownerBal = await c.token.balanceOf(w.owner);
   const wd = await send(ctx, `token ${w.tokenId} owner: withdraw in the middle of epoch ${A + 1n}`, wOwner, snftAddr, c.snft.interface.encodeFunctionData('withdraw', [w.tokenId]));
@@ -248,7 +255,8 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   const recordedScore = await c.rss.getEpochNodeDelegatorScore(A + 1n, w.node, wKey);
   check(
     `the withdrawal pays the position's whole raw stake, rewards compounded (${fmt(paidOut)} TRAC)`,
-    !!withdrawnEv && paidOut === withdrawnEv.amount,
+    paidOut === expectedPayout && !!withdrawnEv && withdrawnEv.amount === paidOut,
+    `expected ${fmt(expectedPayout)} = raw ${fmt(rawBefore)} before it + ${fmt(pending.total)} for epochs ${claimFrom}..${A} at StakingKPI's nets`,
   );
   check(
     `the withdrawal records epoch ${A + 1n} for the staker, with the position's score up to the withdrawal`,
@@ -284,6 +292,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     recordedScore,
     stayedThroughLaterProof,
     epoch: A + 1n,
+    expected: { raw: rawBefore, rewards: pending.total, fromEpoch: claimFrom, toEpoch: A, total: expectedPayout },
   };
 
   await closeAndPay({
