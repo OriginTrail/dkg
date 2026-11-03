@@ -243,6 +243,8 @@ export const AGENT_GRAPH_TYPES = [
 const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const VIZ_AGENT_PREFIX = 'urn:dkg:viz:agent:';
 const bareIri = (v: string) => (v.startsWith('<') && v.endsWith('>') ? v.slice(1, -1) : v);
+/** The id in a VM signer URN; graph data may use the prefix with invalid percent-encoding (`%FF`), kept as written. */
+const agentIdOf = (uri: string, s = uri.slice(VIZ_AGENT_PREFIX.length)) => { if (!uri.startsWith(VIZ_AGENT_PREFIX)) return uri; try { return decodeURIComponent(s); } catch { return s; } };
 
 /** Per-node colours for agent nodes: the same hashed colour as the agent's
  *  chip (`agentHexForUri`). Synthetic VM "signed by" nodes carry the DID in
@@ -254,8 +256,7 @@ export function agentNodeColors(triples: ReadonlyArray<{ subject: string; predic
     if (t.predicate !== RDF_TYPE_IRI || !types.has(bareIri(t.object))) continue;
     const uri = bareIri(t.subject);
     if (out[uri]) continue;
-    const id = uri.startsWith(VIZ_AGENT_PREFIX) ? decodeURIComponent(uri.slice(VIZ_AGENT_PREFIX.length)) : uri;
-    out[uri] = agentHexForUri(id);
+    out[uri] = agentHexForUri(agentIdOf(uri));
   }
   return out;
 }

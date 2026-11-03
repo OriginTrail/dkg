@@ -38,6 +38,17 @@ describe('agent initials', () => {
 });
 
 describe('agent node colours', () => {
+  it('keeps graph-supplied agent IRIs that are not valid percent-encoding, and still colours the rest', () => {
+    const bad = ['urn:dkg:viz:agent:%FF', 'urn:dkg:viz:agent:%E0%A4%A', 'urn:dkg:viz:agent:100%'];
+    const good = `urn:dkg:viz:agent:${encodeURIComponent(DID)}`;
+    const triples = [...bad, good].map(subject => ({ subject, predicate: RDF_TYPE, object: '<http://dkg.io/ontology/agent/AIAgent>' }));
+    let colors: Record<string, string> = {};
+    expect(() => { colors = agentNodeColors(triples); }).not.toThrow();
+    expect(colors['urn:dkg:viz:agent:%FF']).toBe(agentHexForUri('%FF'));
+    expect(colors[good]).toBe(agentHexForUri(DID));
+    for (const uri of bad) expect(colors[uri]).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
   it('colours VM signer nodes by the DID in their URN, like the SWM legend', () => {
     const urn = `urn:dkg:viz:agent:${encodeURIComponent(DID)}`;
     const colors = agentNodeColors([{ subject: urn, predicate: RDF_TYPE, object: VIZ_AGENT_TYPE }]);

@@ -20,6 +20,8 @@ describe('operation type colours (C4 / C5)', () => {
     const types = ['publish', 'query', 'sync', 'share'];
     const cols = types.map((t) => opChartColor(t, types));
     expect(new Set(cols).size).toBe(types.length);
-    for (const c of cols) expect(c).toMatch(/^#[0-9a-f]{6}$/i);
+    // CSS variables: SVG attributes resolve them, so charts follow the theme.
+    expect(cols).toEqual(['var(--data-1)', 'var(--data-2)', 'var(--data-3)', 'var(--data-4)']);
+    expect(opChartColor('unknown', types)).toBe('var(--data-1)');
   });
 });

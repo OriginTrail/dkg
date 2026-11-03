@@ -4,8 +4,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
 } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
-import { opTypeText, opTypeBg, opTypeRule, opChartColor, cssColor } from '../op-type-colors.js';
-import { layerHex } from '../layer-colors.js';
+import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
 import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
@@ -242,9 +241,9 @@ function ReplicationTab() {
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
               <Tooltip />
               <Legend />
-              <Area type="monotone" dataKey="promotes" stackId="1" stroke={layerHex('verified')} fill={layerHex('verified')} fillOpacity={0.55} name="promotes" />
-              <Area type="monotone" dataKey="fetches" stackId="1" stroke={cssColor('--text-tertiary')} fill={cssColor('--text-tertiary')} fillOpacity={0.2} name="fetches" />
-              <Area type="monotone" dataKey="defers" stackId="1" stroke={cssColor('--text-warning')} fill={cssColor('--text-warning')} fillOpacity={0.45} name="defers" />
+              <Area type="monotone" dataKey="promotes" stackId="1" stroke="var(--layer-verified)" fill="var(--layer-verified)" fillOpacity={0.55} name="promotes" />
+              <Area type="monotone" dataKey="fetches" stackId="1" stroke="var(--text-tertiary)" fill="var(--text-tertiary)" fillOpacity={0.2} name="fetches" />
+              <Area type="monotone" dataKey="defers" stackId="1" stroke="var(--text-warning)" fill="var(--text-warning)" fillOpacity={0.45} name="defers" />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -773,9 +772,9 @@ function HardwareTab() {
   const peersLv: Level = hw && hw.peers === 0 ? 'crit' : 'ok';
   const rpcLv: Level = hw && hw.rpcMs !== null && hw.rpcMs > TH.rpcMs ? 'crit' : 'ok';
   const warnIcon = (lv: Level) => lv === 'ok' ? null : <span aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6, fontSize: 13 }}>⚠</span>;
-  const s1 = cssColor('--data-1');
-  const grid = cssColor('--border-subtle'), tick = cssColor('--text-tertiary');
-  const warnLine = cssColor('--text-warning'), critLine = cssColor('--text-danger');
+  const s1 = 'var(--data-1)';
+  const grid = 'var(--border-subtle)', tick = 'var(--text-tertiary)';
+  const warnLine = 'var(--text-warning)', critLine = 'var(--text-danger)';
   const hwCharts: Array<{ key: string; title: string; name: string; pct?: boolean; warn?: number; crit?: number }> = [
     { key: 'cpu', title: 'CPU usage (%)', name: 'CPU %', pct: true, warn: TH.cpu[0], crit: TH.cpu[1] },
     { key: 'memPct', title: 'RAM used (%)', name: 'RAM %', pct: true, warn: TH.mem[0], crit: TH.mem[1] },

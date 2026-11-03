@@ -1,4 +1,3 @@
-import { dataHex } from './op-type-colors.js';
 
 /**
  * Colours for well-known entity kinds (decision, task, pull request, …).
@@ -59,9 +58,4 @@ export function kindColorForType(typeIri: string | undefined): string | null {
 /** Data-palette slot (1–8) for a kind. */
 export function kindSlot(kind: EntityKind): number {
   return KIND_SLOT[kind];
-}
-
-/** Resolved hex for a kind, for canvas renderers (graph nodes). */
-export function kindHex(kind: EntityKind): string {
-  return dataHex(KIND_SLOT[kind]);
 }

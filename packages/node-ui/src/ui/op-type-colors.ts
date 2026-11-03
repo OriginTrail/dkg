@@ -51,33 +51,16 @@ export const opTypeBg = (name: string | undefined) => BG[opTone(name)];
 export const opTypeRule = (name: string | undefined) => RULE[opTone(name)];
 
 /** --data-1 … --data-8 per theme; matches 00-theme.css (graph-palette.test.ts
- *  checks). Canvas code reads these through graph-palette; also the fallback
- *  for tests and SSR. */
+ *  checks). Canvas code reads these through graph-palette; DOM and SVG use
+ *  the CSS variables. */
 export const DATA_HEX: Record<'dark' | 'light', readonly string[]> = {
   dark: ['#1a81ff', '#a69300', '#ec2890', '#c98500', '#e200d0', '#ac6800', '#00a1df', '#00a309'],
   light: ['#1f6fd1', '#8a7a00', '#a3195b', '#c28a00', '#b5179e', '#9a5b1e', '#0284c7', '#008300'],
 };
-const DATA_FALLBACK = DATA_HEX;
 
-/** Resolved hex for data slot n (1-based). Charts render SVG attributes,
- *  which don't resolve CSS variables, so read the computed value. */
-export function dataHex(slot: number): string {
-  const i = ((slot - 1) % 8 + 8) % 8;
-  if (typeof document === 'undefined') return DATA_FALLBACK.dark[i]!;
-  const light = document.documentElement.classList.contains('light');
-  const raw = getComputedStyle(document.documentElement).getPropertyValue(`--data-${i + 1}`).trim();
-  return raw || DATA_FALLBACK[light ? 'light' : 'dark'][i]!;
-}
-
-/** Chart series colour: the type's position in `types`, as a data slot. */
+/** Chart series colour: the type's position in `types`, as a data slot.
+ *  SVG presentation attributes resolve CSS variables, so this follows the theme. */
 export function opChartColor(type: string, types: readonly string[]): string {
   const idx = types.indexOf(type);
-  return dataHex((idx < 0 ? 0 : idx) + 1);
-}
-
-/** Resolve a CSS colour variable to its computed value, for SVG chart
- *  attributes (which don't resolve var()). */
-export function cssColor(name: string, fallback = '#8a8a8a'): string {
-  if (typeof document === 'undefined') return fallback;
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  return `var(--data-${((idx < 0 ? 0 : idx) % 8) + 1})`;
 }

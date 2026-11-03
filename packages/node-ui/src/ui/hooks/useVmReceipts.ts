@@ -16,7 +16,15 @@
  * the KA's content is the exact per-KA graph
  * `did:dkg:context-graph:<cg>[/<sub>]/_verifiable_memory/<addr>/<n>` named by
  * its `dkg:kaUal`, so its members are the subjects of that graph, read with a
- * second, VALUES-bounded query.
+ * second, VALUES-bounded query that asks for the context graph's registered
+ * partitions (sub-graph VM graphs are only readable that way).
+ *
+ * Storage identities are parsed and built with core's helpers
+ * (`parseContextGraphAssertionStorageUri`, `parseDeterministicKnowledgeAssetUal`,
+ * `contextGraphLayerUri`); rows they don't recognise are skipped, never thrown.
+ *
+ * Both reads are capped. When a read hits its cap the result is marked
+ * incomplete, so callers never treat an omitted receipt as a missing one.
  *
  * The SPARQL result has one row per (assertion, member, agent). This module
  * folds those rows into one typed `VmReceipt` per assertion, so the VM header
@@ -28,7 +36,11 @@
  * Read-only over `/api/query`.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { executeQuery } from '../api.js';
+import { contextGraphLayerUri, parseContextGraphAssertionStorageUri } from '@origintrail-official/dkg-core/dist/constants.js';
+import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-core/dist/ka-content-scope.js';
+import { MemoryLayer } from '@origintrail-official/dkg-core/dist/memory-model.js';
+import { executeQuery, type QueryExecutionOptions } from '../api.js';
+import { decodeAssertionIdentity } from '../assertion-identity.js';
 import { bindingLexicalValue } from '../query-bindings.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
 
@@ -54,9 +66,18 @@ export interface VmReceipt {
   kaGraph?: string;
 }
 
+/** Receipts plus whether every receipt and membership row was read. */
+export interface VmReceiptLoad {
+  receipts: VmReceipt[];
+  /** false when a capped read came back full: some receipts or members may be missing. */
+  complete: boolean;
+}
+
 export interface VmReceiptsState {
   /** null until the first load finishes (or when there is no graph). */
   receipts: VmReceipt[] | null;
+  /** false when the last load hit a read cap (see `VmReceiptLoad`). */
+  complete: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -65,6 +86,10 @@ export interface VmReceiptsState {
 export function isSafeIriPart(value: string): boolean {
   return value.length > 0 && !/[\s<>"{}|^`\\]/.test(value);
 }
+
+/** Row caps for the two reads; a read that returns this many rows may be cut short. */
+export const RECEIPT_ROW_LIMIT = 20000;
+export const MEMBER_ROW_LIMIT = 20000;
 
 export function buildVmReceiptQuery(cgId: string): string {
   return `PREFIX dkg: <${DKG}>
@@ -77,7 +102,7 @@ SELECT ?asrt ?tx ?finalizedAt ?agent ?member ?kaUal WHERE {
     OPTIONAL { ?asrt dkg:kaUal ?kaUal . }
     OPTIONAL { { ?asrt dkg:assertionRootEntity ?member . } UNION { ?asrt dkg:assertionEntity ?member . } }
   }
-} LIMIT 20000`;
+} LIMIT ${RECEIPT_ROW_LIMIT}`;
 }
 
 /** Most per-KA graphs read by one membership query. */
@@ -90,32 +115,32 @@ export function buildKaGraphMemberQuery(kaGraphs: readonly string[]): string {
   VALUES ?g { ${values} }
   GRAPH ?g { ?member ?p ?o . }
   FILTER(isIRI(?member))
-} LIMIT 20000`;
+} LIMIT ${MEMBER_ROW_LIMIT}`;
 }
+
+/** Query options for the receipt read (`_meta` is in every scope). */
+export const receiptQueryOptions = (cgId: string): QueryExecutionOptions => ({ contextGraphId: cgId });
+/** Query options for the membership read: per-KA graphs inside registered
+ *  sub-graphs are only readable through the context graph's partitions. */
+export const memberQueryOptions = (cgId: string): QueryExecutionOptions => ({ contextGraphId: cgId, includeContextGraphPartitions: true });
 
 const term = (v: unknown): string => (bindingLexicalValue(v) ?? '').trim();
 
 /** The author DID encoded in an assertion URI, if any. */
 function authorOf(assertion: string): string | null {
-  const addr = assertion.match(/\/assertion\/([^/]+)\//)?.[1];
+  const addr = parseContextGraphAssertionStorageUri(assertion)?.agentAddress;
   return addr ? `did:dkg:agent:${addr}` : null;
-}
-
-/** did:dkg:context-graph:<cg>/<sub>/assertion/… → <sub> (undefined at the root). */
-function subGraphOf(assertion: string, cgId: string): string | undefined {
-  const prefix = `did:dkg:context-graph:${cgId}/`;
-  if (!assertion.startsWith(prefix)) return undefined;
-  const seg = assertion.slice(prefix.length).split('/')[0];
-  return seg && seg !== 'assertion' ? seg : undefined;
 }
 
 /** did:dkg:<chain>/<0x-author>/<n> → that KA's Verifiable Memory graph in
  *  this context graph (and sub-graph); undefined for anything else. */
 export function kaGraphOf(kaUal: string, cgId: string, subGraph?: string): string | undefined {
-  const m = /^did:dkg:[^/\s]+\/(0x[0-9a-fA-F]{40})\/(\d+)$/.exec(kaUal);
-  if (!m) return undefined;
-  const base = subGraph ? `did:dkg:context-graph:${cgId}/${subGraph}` : `did:dkg:context-graph:${cgId}`;
-  return `${base}/_verifiable_memory/${m[1].toLowerCase()}/${m[2]}`;
+  try {
+    const ka = parseDeterministicKnowledgeAssetUal(kaUal);
+    return contextGraphLayerUri(cgId, MemoryLayer.VerifiableMemory, ka.agentAddress, ka.kaNumber, subGraph);
+  } catch {
+    return undefined;
+  }
 }
 
 function isoOrNull(value: string): string | null {
@@ -134,7 +159,7 @@ export function parseVmReceiptRows(rows: ReadonlyArray<Record<string, unknown>>,
     if (!assertion || !tx) continue;
     let r = byAssertion.get(assertion);
     if (!r) {
-      r = { assertion, tx, finalizedAt: null, members: [], signers: [], attributed: [], subGraph: subGraphOf(assertion, cgId) };
+      r = { assertion, tx, finalizedAt: null, members: [], signers: [], attributed: [], subGraph: decodeAssertionIdentity(assertion, cgId)?.subGraph };
       byAssertion.set(assertion, r);
     }
     const finalizedAt = isoOrNull(term(row.finalizedAt));
@@ -169,22 +194,33 @@ export function addKaGraphMembers(receipts: readonly VmReceipt[], rows: Readonly
   });
 }
 
+/** Runs one read and returns its binding rows. */
+export type VmQueryRunner = (sparql: string, options: QueryExecutionOptions) => Promise<Array<Record<string, unknown>>>;
+
 const bindingsOf = (res: unknown): Array<Record<string, unknown>> => {
   const rows = (res as { result?: { bindings?: unknown } })?.result?.bindings;
   return Array.isArray(rows) ? rows as Array<Record<string, unknown>> : [];
 };
 
-export async function loadVmReceipts(cgId: string): Promise<VmReceipt[]> {
-  const res = await executeQuery(buildVmReceiptQuery(cgId), { contextGraphId: cgId });
-  const receipts = parseVmReceiptRows(bindingsOf(res), cgId);
+/** Load receipts with a given query runner (the API in the app, a scoped
+ *  engine in tests), using the same queries and options either way. */
+export async function loadVmReceiptsWith(cgId: string, run: VmQueryRunner): Promise<VmReceiptLoad> {
+  const rows = await run(buildVmReceiptQuery(cgId), receiptQueryOptions(cgId));
+  let complete = rows.length < RECEIPT_ROW_LIMIT;
+  const receipts = parseVmReceiptRows(rows, cgId);
   const kaGraphs = [...new Set(receipts.flatMap(r => (r.kaGraph ? [r.kaGraph] : [])))];
-  if (kaGraphs.length === 0) return receipts;
+  if (kaGraphs.length === 0) return { receipts, complete };
   const memberRows: Array<Record<string, unknown>> = [];
   for (let i = 0; i < kaGraphs.length; i += KA_GRAPH_BATCH) {
-    const batch = kaGraphs.slice(i, i + KA_GRAPH_BATCH);
-    memberRows.push(...bindingsOf(await executeQuery(buildKaGraphMemberQuery(batch), { contextGraphId: cgId })));
+    const batch = await run(buildKaGraphMemberQuery(kaGraphs.slice(i, i + KA_GRAPH_BATCH)), memberQueryOptions(cgId));
+    if (batch.length >= MEMBER_ROW_LIMIT) complete = false;
+    memberRows.push(...batch);
   }
-  return addKaGraphMembers(receipts, memberRows);
+  return { receipts: addKaGraphMembers(receipts, memberRows), complete };
+}
+
+export function loadVmReceipts(cgId: string): Promise<VmReceiptLoad> {
+  return loadVmReceiptsWith(cgId, async (sparql, options) => bindingsOf(await executeQuery(sparql, options)));
 }
 
 // Explicit reloads (a Refresh button) reach every mounted reader of a graph.
@@ -198,7 +234,7 @@ export function refreshVmReceipts(contextGraphId: string): void {
 /** Receipts for a context graph. Reloads when the graph changes, when its
  *  Verifiable Memory changes (a publish), and on `refreshVmReceipts`. */
 export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsState {
-  const [state, setState] = useState<VmReceiptsState>({ receipts: null, loading: false, error: null });
+  const [state, setState] = useState<VmReceiptsState>({ receipts: null, complete: true, loading: false, error: null });
   const [reloads, setReloads] = useState(0);
   const versionRef = useRef(0);
   const reload = useCallback(() => setReloads(n => n + 1), []);
@@ -212,17 +248,17 @@ export function useVmReceipts(contextGraphId: string | undefined): VmReceiptsSta
   useEffect(() => {
     const version = ++versionRef.current;
     if (!contextGraphId || !isSafeIriPart(contextGraphId)) {
-      setState({ receipts: null, loading: false, error: null });
+      setState({ receipts: null, complete: true, loading: false, error: null });
       return;
     }
     // Keep the last receipts while reloading so facts and anchors don't flicker.
     setState(prev => ({ ...prev, loading: true, error: null }));
     loadVmReceipts(contextGraphId).then(
-      receipts => { if (version === versionRef.current) setState({ receipts, loading: false, error: null }); },
+      ({ receipts, complete }) => { if (version === versionRef.current) setState({ receipts, complete, loading: false, error: null }); },
       (err: unknown) => {
         if (version !== versionRef.current) return;
         const message = err instanceof Error ? err.message : 'Failed to load publish receipts';
-        setState({ receipts: null, loading: false, error: message });
+        setState({ receipts: null, complete: true, loading: false, error: message });
       },
     );
   }, [contextGraphId, reloads]);

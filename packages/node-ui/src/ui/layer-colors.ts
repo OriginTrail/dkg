@@ -1,11 +1,11 @@
 /**
  * Memory-layer colours — the single TS source for WM / SWM / VM.
  *
- * DOM code should use the CSS custom properties (`LAYER_VAR`), which follow
- * the theme automatically. Canvas code (graph-viz node and edge tints) cannot
- * read CSS variables, so it uses `layerHex()`, which returns the value for
- * the theme that is active when it is called. Keep `LAYER_HEX` in step with
- * the `--layer-*` tokens in styles/00-theme.css.
+ * DOM and SVG code should use the CSS custom properties (`LAYER_VAR`), which
+ * follow the theme automatically. Canvas code (graph-viz node and edge tints)
+ * cannot read CSS variables, so it takes `LAYER_HEX` through the explicit
+ * graph palette (graph-palette.ts). Keep `LAYER_HEX` in step with the
+ * `--layer-*` tokens in styles/00-theme.css.
  *
  * Hue rule (shared with nOS): WM slate, SWM OriginTrail cyan, VM OriginTrail
  * purple. Amber, green and red are signals only and never mean a layer.
@@ -39,11 +39,6 @@ export const KEY_TO_LEVEL: Record<LayerKey, LayerLevel> = {
 function activeTheme(): 'dark' | 'light' {
   if (typeof document === 'undefined') return 'dark';
   return document.documentElement.classList.contains('light') ? 'light' : 'dark';
-}
-
-/** Hex for canvas renderers, resolved against the theme active right now. */
-export function layerHex(level: LayerLevel): string {
-  return LAYER_HEX[activeTheme()][level];
 }
 
 /** Neutral greys for canvas fallbacks: untyped nodes, default subgraph,

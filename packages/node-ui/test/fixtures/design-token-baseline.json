@@ -38,7 +38,7 @@
     "colour": 12
   },
   "styles/03-left-center.css": {
-    "radius": 2
+    "radius": 1
   },
   "styles/04-right-core.css": {
     "colour": 2,
@@ -120,7 +120,7 @@
     "colour": 2
   },
   "styles/27-ds-components.css": {
-    "colour": 2,
+    "colour": 1,
     "radius": 1
   },
   "views/project/components/graph.tsx": {

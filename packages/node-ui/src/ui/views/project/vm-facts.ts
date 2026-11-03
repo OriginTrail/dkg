@@ -27,7 +27,11 @@ export function buildVmFacts(
   const total = entities.length;
   const anchored = entities.filter(e => hasReceipt(e.uri, summary) || hasReceipt(canonicalEntityUri(e.uri), summary)).length;
   const missing = total - anchored;
-  const facts: VmFact[] = [{
+  // A capped read may have left receipts out: never call those entities unanchored.
+  const facts: VmFact[] = [missing > 0 && !summary.complete ? {
+    id: 'onchain', label: 'On-chain', value: `at least ${anchored} / ${total} anchored`, tone: 'muted',
+    tooltip: 'This context graph has more publish receipts than could be read at once, so Knowledge Assets without a listed receipt may still be anchored.',
+  } : {
     id: 'onchain', label: 'On-chain', value: `${anchored} / ${total} anchored`, tone: missing > 0 ? 'warn' : 'ok',
     tooltip: missing > 0
       ? `${missing} Knowledge Asset${missing === 1 ? ' has' : 's have'} no on-chain receipt yet: still settling, or read from a pre-cutover graph.`
