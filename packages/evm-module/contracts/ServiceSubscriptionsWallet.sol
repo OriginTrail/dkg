@@ -70,7 +70,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         uint256 epoch; // the period's epoch: the current one or the next
         address sessionKey; // the buyer's request-signing key; never zero
         bytes32 planDigest; // the buyer's commitment to its plan, opaque here
-        BucketInput[] buckets; // 1 to maxBucketsPerPeriod, strictly increasing bucketId
+        ConvictionServiceStorage.Bucket[] buckets; // 1 to maxBucketsPerPeriod, strictly increasing bucketId
     }
 
     // ============================================================
@@ -136,10 +136,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         (uint40 periodStart, uint40 periodEnd) = ServicePeriodLib.periodOf(chronos, r.epoch, currentEpoch);
 
         // 2. The buckets and their value.
-        (ConvictionServiceStorage.Bucket[] memory buckets, uint96 value) = ServicePeriodLib.fundingBuckets(
-            r.buckets,
-            css.maxBucketsPerPeriod()
-        );
+        uint96 value = ServicePeriodLib.fundingValue(r.buckets, css.maxBucketsPerPeriod());
 
         // 3. One period per buyer key and epoch, shared with account periods.
         subscriptionId = ServicePeriodLib.subscriptionIdOf(buyer, r.epoch);
@@ -163,13 +160,13 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
                 fundedEpoch: SafeCast.toUint40(currentEpoch),
                 fundedWindow: 0,
                 discountBps: 0,
-                bucketCount: uint8(buckets.length),
+                bucketCount: uint8(r.buckets.length),
                 value: value,
                 cost: value,
                 drawnFromWindow: 0,
                 drawnFromTopUp: 0
             }),
-            buckets
+            r.buckets
         );
 
         // 6. The payment, after every write.
@@ -204,7 +201,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
      */
     function topUpFromWallet(
         bytes32 subscriptionId,
-        BucketInput[] calldata additions,
+        ConvictionServiceStorage.Bucket[] calldata additions,
         bytes32 planDigest
     ) external returns (uint96 value) {
         ConvictionServiceStorage css = convictionServiceStorage;

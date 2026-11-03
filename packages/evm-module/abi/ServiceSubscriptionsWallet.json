@@ -258,7 +258,7 @@
           }
         ],
         "indexed": false,
-        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "internalType": "struct ConvictionServiceStorage.Bucket[]",
         "name": "buckets",
         "type": "tuple[]"
       }
@@ -329,7 +329,7 @@
           }
         ],
         "indexed": false,
-        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "internalType": "struct ConvictionServiceStorage.Bucket[]",
         "name": "additions",
         "type": "tuple[]"
       }
@@ -405,7 +405,7 @@
                 "type": "uint96"
               }
             ],
-            "internalType": "struct IServicePeriodFunding.BucketInput[]",
+            "internalType": "struct ConvictionServiceStorage.Bucket[]",
             "name": "buckets",
             "type": "tuple[]"
           }
@@ -554,7 +554,7 @@
             "type": "uint96"
           }
         ],
-        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "internalType": "struct ConvictionServiceStorage.Bucket[]",
         "name": "additions",
         "type": "tuple[]"
       },
