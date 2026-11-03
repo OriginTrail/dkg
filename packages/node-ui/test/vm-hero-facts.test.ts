@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildVmFacts } from '../src/ui/views/project/vm-facts.js';
+import { buildVmFacts, isTripleSubject } from '../src/ui/views/project/vm-facts.js';
+import { buildEntities } from '../src/ui/hooks/useMemoryEntities.js';
 import { summariseVmReceipts as summarise, hasReceipt } from '../src/ui/hooks/useVmReceiptSummary.js';
 import { buildVmReceiptQuery, parseVmReceiptRows, receiptMetaGraph } from '../src/ui/hooks/useVmReceipts.js';
 
@@ -8,7 +9,8 @@ import { buildVmReceiptQuery, parseVmReceiptRows, receiptMetaGraph } from '../sr
 const summariseVmReceipts = (rows: Array<Record<string, unknown>>) =>
   summarise(parseVmReceiptRows(rows.map(r => ({ tx: '0x1', sealRoot: '"ab"', ...r })), 'cg'));
 
-const ent = (uri: string) => ({ uri, label: uri, types: [], trustLevel: 'verified', layers: new Set(), subGraphs: new Set(), properties: new Map(), connections: [] }) as any;
+// An entity with triples of its own (here a type), as receipts cover.
+const ent = (uri: string) => ({ uri, label: uri, types: ['http://schema.org/Thing'], trustLevel: 'verified', layers: new Set(), subGraphs: new Set(), properties: new Map(), connections: [] }) as any;
 const A = 'did:dkg:context-graph:cg/assertion/0xabc/';
 const ok = { loading: false, error: null };
 
@@ -62,6 +64,21 @@ describe('Verifiable Memory hero facts (C11)', () => {
     const facts = buildVmFacts([ent('urn:x:a'), ent('urn:x:b'), ent('urn:x:c')], s, ok);
     expect(facts[0]).toMatchObject({ value: '1 / 3 anchored', tone: 'warn' });
     expect(facts[0]!.tooltip).toContain('2 Knowledge Assets have no on-chain receipt');
+  });
+
+  it('does not count a node that is only referenced as an object', () => {
+    // A fully published relationship: <alice> schema:knows <bob>, Bob has no triples of his own.
+    const entities = [...buildEntities([
+      { subject: 'urn:person:alice', predicate: 'http://schema.org/name', object: '"Alice"', layer: 'verified' },
+      { subject: 'urn:person:alice', predicate: 'http://schema.org/knows', object: 'urn:person:bob', layer: 'verified' },
+    ] as any).values()];
+    expect(entities.map(e => [e.uri, isTripleSubject(e)])).toEqual([['urn:person:alice', true], ['urn:person:bob', false]]);
+    // Receipt membership holds triple subjects only: Alice.
+    const s = summariseVmReceipts([{ asrt: A + 'people', member: 'urn:person:alice' }]);
+    expect(buildVmFacts(entities, s, ok)[0]).toMatchObject({ value: '1 / 1 anchored', tone: 'ok' });
+    // A subject without a receipt is still flagged.
+    const unreceipted = buildVmFacts(entities, summariseVmReceipts([]), ok)[0];
+    expect(unreceipted).toMatchObject({ value: '0 / 1 anchored', tone: 'warn' });
   });
 
   it('matches receipts on assertion boundaries, not bare prefixes', () => {

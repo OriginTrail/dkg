@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it } from 'vitest';
-import { useTabsStore, loadPersistedTabs, TABS_STORAGE_KEY, DASHBOARD_TAB } from '../src/ui/stores/tabs.js';
+import { useTabsStore, loadPersistedTabs, decodePersistedTab, TABS_STORAGE_KEY, DASHBOARD_TAB } from '../src/ui/stores/tabs.js';
 import { pathToTab, tabIdToPath } from '../src/ui/lib/tab-routes.js';
 
 // Tabs behave like browser tabs: saved across refresh, reorderable, closable
@@ -65,6 +65,29 @@ describe('tab store', () => {
     expect(loadPersistedTabs({ getItem: () => '{not json' }).tabs).toEqual([DASHBOARD_TAB]);
     expect(loadPersistedTabs({ getItem: () => JSON.stringify({ tabs: [{ id: 'x', label: 'X' }, { id: 'x', label: 'X' }, 5], activeTabId: 'gone' }) }))
       .toMatchObject({ tabs: [DASHBOARD_TAB, { id: 'x' }], activeTabId: 'dashboard' });
+  });
+
+  it('decodes every saved record into a complete tab, the same way for open and recently closed', () => {
+    // The reviewer's record: no closable flag, an object icon.
+    expect(decodePersistedTab({ id: 'settings', label: 'Settings', icon: {} })).toEqual({ id: 'settings', label: 'Settings', closable: true });
+    expect(decodePersistedTab({ id: 'project:a', label: 'Alpha', icon: 'graph', closable: false })).toEqual({ id: 'project:a', label: 'Alpha', closable: true, icon: 'graph' });
+    for (const bad of [null, 5, 'x', [], {}, { id: '', label: 'L' }, { id: 'x' }, { id: 7, label: 'L' }, { id: 'x', label: 3 }, { id: 'dashboard', label: 'Dashboard' }]) {
+      expect(decodePersistedTab(bad), JSON.stringify(bad)).toBeNull();
+    }
+    const saved = JSON.stringify({
+      tabs: [{ id: 'b', label: 'B' }, { id: 'a', label: 'A', icon: 1 }, { id: 'dashboard', label: 'Dashboard', closable: true }],
+      activeTabId: 'a',
+      recentlyClosed: [{ id: 'settings', label: 'Settings', icon: {} }, { id: 'b', label: 'B' }, { id: 'settings', label: 'again' }, { label: 'no id' }],
+    });
+    const restored = loadPersistedTabs({ getItem: () => saved });
+    // Order kept, Dashboard pinned first and not closable.
+    expect(restored.tabs).toEqual([DASHBOARD_TAB, { id: 'b', label: 'B', closable: true }, { id: 'a', label: 'A', closable: true }]);
+    expect(restored.activeTabId).toBe('a');
+    // Recently closed: complete tabs, no open duplicates, no repeats.
+    expect(restored.recentlyClosed).toEqual([{ id: 'settings', label: 'Settings', closable: true }]);
+    for (const junk of ['null', '[]', '"x"', JSON.stringify({ tabs: 'x', activeTabId: 5, recentlyClosed: {} })]) {
+      expect(loadPersistedTabs({ getItem: () => junk }), junk).toEqual({ tabs: [DASHBOARD_TAB], activeTabId: 'dashboard', recentlyClosed: [] });
+    }
   });
 });
 

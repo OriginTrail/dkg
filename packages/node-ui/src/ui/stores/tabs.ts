@@ -41,8 +41,31 @@ const RECENT_LIMIT = 10;
 
 interface Persisted { tabs: CenterTab[]; activeTabId: string; recentlyClosed: CenterTab[] }
 
-function isTab(t: unknown): t is CenterTab {
-  return !!t && typeof (t as CenterTab).id === 'string' && typeof (t as CenterTab).label === 'string';
+/**
+ * The one decoder for a saved tab record (open and recently closed alike).
+ * Builds a complete `CenterTab` from what was stored: a non-empty string id
+ * and a string label are required; `icon` is kept only when it is a string;
+ * every restored tab is closable (the pinned Dashboard is never stored).
+ * Anything else, including the Dashboard's id, is rejected.
+ */
+export function decodePersistedTab(value: unknown): CenterTab | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const { id, label, icon } = value as Record<string, unknown>;
+  if (typeof id !== 'string' || id === '' || id === DASHBOARD_TAB.id || typeof label !== 'string') return null;
+  return { id, label, closable: true, ...(typeof icon === 'string' && icon !== '' ? { icon } : {}) };
+}
+
+/** Decode a saved list: valid records in order, each id once, ids in `seen` skipped (and added). */
+function decodeTabList(value: unknown, seen: Set<string>, limit = Infinity): CenterTab[] {
+  const out: CenterTab[] = [];
+  for (const item of Array.isArray(value) ? value : []) {
+    if (out.length >= limit) break;
+    const tab = decodePersistedTab(item);
+    if (!tab || seen.has(tab.id)) continue;
+    seen.add(tab.id);
+    out.push(tab);
+  }
+  return out;
 }
 
 /** Read the saved workspace; always returns a valid state with the dashboard first. */
@@ -52,18 +75,15 @@ export function loadPersistedTabs(storage: Pick<Storage, 'getItem'> | null = saf
   try {
     const raw = storage.getItem(TABS_STORAGE_KEY);
     if (!raw) return fallback;
-    const parsed = JSON.parse(raw) as Partial<Persisted>;
-    const seen = new Set<string>(['dashboard']);
-    const rest = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
-      .filter(isTab)
-      .filter((t) => (seen.has(t.id) ? false : (seen.add(t.id), true)))
-      .map((t) => ({ id: t.id, label: t.label, closable: true, ...(t.icon ? { icon: t.icon } : {}) }));
-    const tabs = [DASHBOARD_TAB, ...rest];
-    const activeTabId = tabs.some((t) => t.id === parsed.activeTabId) ? parsed.activeTabId! : 'dashboard';
-    const recentlyClosed = (Array.isArray(parsed.recentlyClosed) ? parsed.recentlyClosed : [])
-      .filter(isTab)
-      .filter((t) => !seen.has(t.id))
-      .slice(0, RECENT_LIMIT);
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return fallback;
+    const record = parsed as Record<string, unknown>;
+    const seen = new Set<string>([DASHBOARD_TAB.id]);
+    const tabs = [DASHBOARD_TAB, ...decodeTabList(record.tabs, seen)];
+    const active = record.activeTabId;
+    const activeTabId = typeof active === 'string' && tabs.some((t) => t.id === active) ? active : DASHBOARD_TAB.id;
+    // A recently closed tab that is open again (or listed twice) is dropped.
+    const recentlyClosed = decodeTabList(record.recentlyClosed, seen, RECENT_LIMIT);
     return { tabs, activeTabId, recentlyClosed };
   } catch {
     return fallback;

@@ -3,6 +3,11 @@ import type { MemoryEntity } from '../../hooks/useMemoryEntities.js';
 import { hasReceipt, type VmReceiptSummary } from '../../hooks/useVmReceiptSummary.js';
 import { formatRelativeTime } from './helpers.js';
 
+/** The entity has triples of its own (types, values or outgoing links), not only incoming references. */
+export function isTripleSubject(e: MemoryEntity): boolean {
+  return e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0;
+}
+
 export type VmFactTone = 'ok' | 'warn' | 'muted';
 export interface VmFact { id: string; label: string; value: string; tone: VmFactTone; tooltip: string }
 
@@ -24,8 +29,12 @@ export function buildVmFacts(
     if (state.error) return [{ id: 'onchain', label: 'On-chain', value: "couldn't load", tone: 'muted', tooltip: state.error }, consensus];
     return [{ id: 'onchain', label: 'On-chain', value: 'checking…', tone: 'muted', tooltip: 'Loading publish receipts' }, consensus];
   }
-  const total = entities.length;
-  const anchored = entities.filter(e => hasReceipt(e.uri, summary) || hasReceipt(canonicalEntityUri(e.uri), summary)).length;
+  // Count the same population receipts cover: entities that are the subject
+  // of at least one triple. A node seen only as a relationship's object
+  // (<alice> schema:knows <bob>) belongs to its subject's asset, not one of its own.
+  const assets = entities.filter(isTripleSubject);
+  const total = assets.length;
+  const anchored = assets.filter(e => hasReceipt(e.uri, summary) || hasReceipt(canonicalEntityUri(e.uri), summary)).length;
   const missing = total - anchored;
   // A capped read may have left receipts out: never call those entities unanchored.
   const facts: VmFact[] = [missing > 0 && !summary.complete ? {

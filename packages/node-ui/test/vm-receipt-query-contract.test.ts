@@ -214,7 +214,8 @@ async function load(): Promise<VmReceiptLoad> {
   try { return await loadVmReceiptsWith(CG, scopedRunner(store)); } finally { await store.close(); }
 }
 
-const entity = (uri: string): MemoryEntity => ({ uri } as MemoryEntity);
+// Each seeded entity is the subject of its content triples.
+const entity = (uri: string): MemoryEntity => ({ uri, types: ['http://schema.org/Note'], properties: new Map(), connections: [] } as unknown as MemoryEntity);
 
 describe('VM receipt loader against writer-shaped RDF through the scoped engine', () => {
   it('loads one receipt per published assertion in this context graph only', async () => {

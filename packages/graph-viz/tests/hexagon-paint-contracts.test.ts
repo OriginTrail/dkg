@@ -27,6 +27,17 @@ describe('hexagon visual contracts', () => {
       expect(plain.ctx.moveTo).toHaveBeenCalled();
       expect(plain.ctx.fillText).not.toHaveBeenCalled();
     });
+    it('hides avatar initials once the circle is too small to read, and never clips a photo into an avatar', () => {
+      const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
+      const tiny = canvasContext();
+      painter.paint(tiny.ctx, node('agent', { types: [AGENT], label: 'Claude Code' }), 0, 0, 0.1); // 36 px radius → 3.6 px on screen
+      expect(tiny.ctx.arc).toHaveBeenCalled();
+      expect(tiny.ctx.fillText).not.toHaveBeenCalled();
+      const photo = canvasContext();
+      painter.paint(photo.ctx, node('agent', { types: [AGENT], label: 'Ada', imageUrl: 'https://example.org/a.png' }), 0, 0, 0.3);
+      expect(photo.ctx.drawImage).not.toHaveBeenCalled();
+      expect(photo.ctx.fillText).toHaveBeenCalledWith('AD', 0, expect.any(Number));
+    });
     it('fills flat types with their exact colour and keeps the gradient for the rest', () => {
       const painter = painterWith({ [ANCHOR]: { fill: 'flat' } });
       const flat = canvasContext();
