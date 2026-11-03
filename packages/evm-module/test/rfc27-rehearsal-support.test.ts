@@ -6,7 +6,9 @@ import { expect } from 'chai';
 import hre from 'hardhat';
 
 import { PoolModel, scheduleModel } from './helpers/emission-model';
+import { ParametersConfig, contractParameters } from '../utils/helpers';
 import { Fork } from '../scripts/rfc27/fork';
+import { expectedParameterIn, requireParameter } from '../scripts/rfc27/parameters';
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
@@ -260,6 +262,73 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         credits: curves.flatMap((cv) => cv.booked),
       });
       expect(report.checks.filter((c) => !c.ok).map((c) => c.detail)).to.deep.equal(['emitted 0..4, cursor 1']);
+    });
+  });
+
+  describe('parameters.json, as the deploy helper and the scripts read it', () => {
+    const config = {
+      testnet: {
+        Thing: {
+          plain: '5',
+          structured: { setter: 'setStructuredNow', setterArgs: ['7'] },
+          noSetter: { setterArgs: ['8'] },
+          withGetterArgs: { getterArgs: [3], setter: 'setPair', setterArgs: [3, '9'], desiredValue: '9' },
+          listed: [{ setter: 'setA', setterArgs: ['1'] }, '2', { setter: 'setB', setterArgs: ['3'] }],
+          overridden: '100',
+          overriddenFrom: { setter: 'setFrom', setterArgs: ['100'] },
+        },
+        overrides: {
+          base_sepolia_v10: { Thing: { overridden: '200', overriddenFrom: '201', added: '202' } },
+          other_network: { Thing: { plain: '999' } },
+        },
+      },
+    } as unknown as ParametersConfig;
+    const entries = contractParameters(config, 'testnet', 'base_sepolia_v10', 'Thing');
+
+    it('reads a plain value, naming its setter after the getter', () => {
+      expect(entries.plain).to.deep.equal([{ getterArgs: [], desiredValue: '5', setter: 'setPlain', setterArgs: ['5'] }]);
+    });
+
+    it('reads a structured value, its one setter argument being the value', () => {
+      expect(entries.structured).to.deep.equal([{ getterArgs: [], desiredValue: '7', setter: 'setStructuredNow', setterArgs: ['7'] }]);
+      expect(entries.noSetter).to.deep.equal([{ getterArgs: [], desiredValue: '8', setter: 'setNoSetter', setterArgs: ['8'] }]);
+    });
+
+    it('reads a structured value of several setter arguments, its value being desiredValue', () => {
+      expect(entries.withGetterArgs).to.deep.equal([{ getterArgs: [3], desiredValue: '9', setter: 'setPair', setterArgs: [3, '9'] }]);
+    });
+
+    it('reads a list in order', () => {
+      expect(entries.listed.map((e) => [e.setter, e.desiredValue])).to.deep.equal([
+        ['setA', '1'],
+        ['setListed', '2'],
+        ['setB', '3'],
+      ]);
+    });
+
+    it('lets the network\'s overrides replace the environment\'s values, and add their own, and no other network\'s', () => {
+      expect(entries.overridden.map((e) => e.desiredValue)).to.deep.equal(['200']);
+      expect(entries.overriddenFrom).to.deep.equal([{ getterArgs: [], desiredValue: '201', setter: 'setOverriddenFrom', setterArgs: ['201'] }]);
+      expect(entries.added.map((e) => e.desiredValue)).to.deep.equal(['202']);
+      expect(entries.plain.map((e) => e.desiredValue)).to.deep.equal(['5']);
+    });
+
+    it('holds nothing for a contract or an environment it does not set', () => {
+      expect(contractParameters(config, 'testnet', 'base_sepolia_v10', 'Other')).to.deep.equal({});
+      expect(contractParameters(config, 'mainnet', 'base_sepolia_v10', 'Thing')).to.deep.equal({});
+    });
+
+    it('gives the scripts the first key it holds, as a number, the last of a list', () => {
+      expect(expectedParameterIn(config, 'Thing', ['missing', 'structured', 'plain'])).to.deep.equal({ key: 'structured', value: 7n });
+      expect(expectedParameterIn(config, 'Thing', ['listed'])).to.deep.equal({ key: 'listed', value: 3n });
+      expect(expectedParameterIn(config, 'Thing', ['overridden'])).to.deep.equal({ key: 'overridden', value: 200n });
+      expect(expectedParameterIn(config, 'Thing', ['missing'])).to.equal(undefined);
+    });
+
+    it('reads the tracked file\'s query/inference parameters', () => {
+      expect(requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps'])).to.deep.equal({ key: 'latestLambdaBps', value: 5000n });
+      expect(requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds'])).to.deep.equal({ key: 'latestReceiptGraceSeconds', value: 3600n });
+      expect(requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value).to.equal(16n);
     });
   });
 });
