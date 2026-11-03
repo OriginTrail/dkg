@@ -15,9 +15,13 @@
 //     value into the vault and due after the period;
 //   - Conviction Account top-ups and upgrades: the draw at the account's tier
 //     and its cost due after the period, the period limit counting the
-//     period's earlier cost, and the usage without another period;
+//     period's earlier cost, and the usage without another period; a top-up
+//     only while the assignment the period was funded under is live, so a new
+//     assignment of the key after a revocation or an expiry reopens nothing,
+//     while one replaced still live tops up until its own expiry;
 //   - a Conviction Account period funded ahead, or topped up before it
-//     starts, is refused if its assignment expires before the period starts;
+//     starts, is refused if its assignment expires before the period starts,
+//     the assignment it was funded under included;
 //   - refusals: a zero key, before activation or while it is unset (from a
 //     wallet and from an account alike), paused, an unknown or ended period, a
 //     wrong source or buyer, a changed cap, and the bucket rules; each without
@@ -712,18 +716,96 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         .to.be.revertedWithCustomError(SS, 'ServiceSpendingDisabled')
         .withArgs(accountId);
       await SS.connect(owner).setServiceSpending(accountId, true);
+      await SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash);
       await SS.connect(owner).revoke(accountId, buyer.address);
       await expect(SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash))
         .to.be.revertedWithCustomError(SS, 'AssignmentRevoked')
         .withArgs(accountId, buyer.address);
-      await assign(accountId, buyer, 30n * TRAC);
-      await SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash);
 
       const s = await CSS.getSubscription(subscriptionId);
       await time.increaseTo(s.periodEnd);
       await expect(SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash))
         .to.be.revertedWithCustomError(SS, 'PeriodEnded')
         .withArgs(subscriptionId, s.periodEnd);
+    });
+
+    /** What a refused top-up must leave as it was: the record, its buckets, the cost due and the allowance. */
+    const untouched = async (id: string, account: bigint) => [
+      plain(await CSS.getSubscription(id)),
+      tuples(await CSS.getBuckets(id)),
+      await QIS.convictionDue(epoch + 1n),
+      await SS.currentWindowAllowance(account),
+    ];
+
+    it("a new assignment of the buyer key reopens no period whose own assignment has ended: after a revocation or an expiry, a top-up is refused and draws nothing", async () => {
+      const add = [bucket(0, CLASS_INFERENCE, 10n * TRAC)];
+      const fundedUnder = (await CSS.getSubscription(subscriptionId)).assignmentNonce;
+
+      // Revoked ten minutes after the funding, then assigned again ten minutes
+      // later, with room for the top-up.
+      await time.increase(600n);
+      await SS.connect(owner).revoke(accountId, buyer.address);
+      const revokedAt = (await CSS.getAssignment(accountId, buyer.address)).revokedAt;
+      await time.increase(600n);
+      await assign(accountId, buyer, 1_000n * TRAC);
+      expect(await CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
+      expect(await CSS.assignmentEnd(accountId, buyer.address, fundedUnder)).to.equal(revokedAt);
+
+      const before = await untouched(subscriptionId, accountId);
+      await expect(SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
+        .withArgs(accountId, buyer.address);
+      expect(await untouched(subscriptionId, accountId)).to.deep.equal(before);
+      // One period per buyer key and epoch, so the key is served again from
+      // its next period not yet funded, which the new assignment tops up.
+      await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, epoch)))
+        .to.be.revertedWithCustomError(SS, 'PeriodAlreadyFunded')
+        .withArgs(subscriptionId);
+      const next = await caFund(accountId, epoch + 1n, 10n * TRAC);
+      await SS.connect(buyer).topUpFromConviction(next.subscriptionId, add, ethers.ZeroHash);
+
+      // The same for an assignment that expired inside the period and was
+      // renewed by a new one.
+      await assign(accountId, buyer2, 1_000n * TRAC);
+      const second = await caFund(accountId, epoch, 10n * TRAC, buyer2);
+      const expiresAt = (await latest()) + 3_600n;
+      expect(expiresAt).to.be.lessThan((await CSS.getSubscription(second.subscriptionId)).periodEnd);
+      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, { maxCostPerPeriod: 1_000n * TRAC, expiresAt });
+      await time.increaseTo(expiresAt + 60n);
+      await assign(accountId, buyer2, 1_000n * TRAC);
+      const renewed = await untouched(second.subscriptionId, accountId);
+      await expect(SS.connect(buyer2).topUpFromConviction(second.subscriptionId, add, ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
+        .withArgs(accountId, buyer2.address);
+      expect(await untouched(second.subscriptionId, accountId)).to.deep.equal(renewed);
+    });
+
+    it("a period whose assignment was replaced while still live is topped up until that assignment's own expiry, and from then on refused", async () => {
+      const add = [bucket(0, CLASS_INFERENCE, 10n * TRAC)];
+      const s = await CSS.getSubscription(subscriptionId);
+      // The period's assignment is set to expire inside the period, then
+      // replaced while it is still live.
+      const expiresAt = (await latest()) + 3_600n;
+      expect(expiresAt).to.be.lessThan(s.periodEnd);
+      await SS.connect(owner).updateAssignmentCaps(accountId, buyer.address, { maxCostPerPeriod: 30n * TRAC, expiresAt });
+      await assign(accountId, buyer, 1_000n * TRAC);
+      expect(await CSS.assignmentEnd(accountId, buyer.address, s.assignmentNonce)).to.equal(expiresAt);
+
+      // Until then the period takes requests, and so a top-up, drawn and
+      // booked as any other, under the key's new assignment's limit.
+      await time.setNextBlockTimestamp(expiresAt - 1n);
+      await SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash);
+      const booked = costOf(20n * TRAC, BPS) + costOf(10n * TRAC, BPS);
+      expect(await QIS.convictionDue(epoch + 1n)).to.equal(booked);
+      expect((await CSS.getSubscription(subscriptionId)).cost).to.equal(booked);
+
+      // From its expiry on, the period takes no request, and no top-up.
+      const before = await untouched(subscriptionId, accountId);
+      await time.setNextBlockTimestamp(expiresAt);
+      await expect(SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
+        .withArgs(accountId, buyer.address);
+      expect(await untouched(subscriptionId, accountId)).to.deep.equal(before);
     });
 
     it('caps never change within a period, and an unknown period is refused', async () => {
@@ -791,6 +873,38 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await SS.connect(buyer2).topUpFromConviction(running.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
       await expireAt(nextStart + 1n);
       await SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
+    });
+
+    it('a period funded ahead takes no top-up once its own assignment ends before it starts, though the buyer key is assigned again', async () => {
+      const add = [bucket(0, CLASS_INFERENCE, TRAC)];
+      const due = async () => QIS.convictionDue(now + 2n);
+
+      // Revoked before the period starts, then assigned again.
+      const ahead = await caFund(accountId, now + 1n, 10n * TRAC);
+      await SS.connect(owner).revoke(accountId, buyer.address);
+      await assign(accountId, buyer, 100n * TRAC);
+      const before = await due();
+      await expect(SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, add, ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentExpired')
+        .withArgs(accountId, buyer.address);
+
+      // Set to expire before the period starts, then replaced while still
+      // live: the period could never take a request.
+      await assign(accountId, buyer2, 100n * TRAC);
+      const second = await caFund(accountId, now + 1n, 10n * TRAC, buyer2);
+      const expiresAt = nextStart - 60n;
+      await SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, { maxCostPerPeriod: 100n * TRAC, expiresAt });
+      await assign(accountId, buyer2, 100n * TRAC);
+      const funded = await due();
+      await expect(SS.connect(buyer2).topUpFromConviction(second.subscriptionId, add, ethers.ZeroHash))
+        .to.be.revertedWithCustomError(SS, 'AssignmentEndsBeforePeriod')
+        .withArgs(accountId, buyer2.address, expiresAt, nextStart);
+      expect([before, funded, await due()]).to.deep.equal([
+        costOf(10n * TRAC, BPS),
+        2n * costOf(10n * TRAC, BPS),
+        2n * costOf(10n * TRAC, BPS),
+      ]);
+      expect((await CSS.getSubscription(second.subscriptionId)).value).to.equal(10n * TRAC);
     });
   });
 

@@ -121,7 +121,8 @@ contract ServiceSubscriptions is
     //           opt-in needed (`ExactScheduleFromUnset`). The opt-in refuses an
     //           account scheduled in full (`EmissionAlreadyScheduled`). A
     //           funded period records the nonce of its assignment, whose end
-    //           a later assignment of the buyer key does not move. The opt-in
+    //           a later assignment of the buyer key does not move, and takes a
+    //           top-up only while that assignment is live. The opt-in
     //           and each assignment record the owner who made them, and fund
     //           or top up nothing once another owner holds the account
     //           (`ServiceSpendingDisabled`, `AssignedByFormerOwner`).
@@ -224,11 +225,16 @@ contract ServiceSubscriptions is
     ///         account: it funds nothing, and the current owner assigns afresh.
     error AssignedByFormerOwner(uint256 accountId, address assignee);
     error AssignmentRevoked(uint256 accountId, address assignee);
+    /// @notice The assignment has expired. A top-up also reverts with it once
+    ///         the assignment the period was funded under has ended, by its
+    ///         expiry or its revocation, whatever later assignment the buyer
+    ///         key holds: the period takes no request issued after that end.
     error AssignmentExpired(uint256 accountId, address assignee);
     /// @notice The assignment expires at or before the start of the period,
     ///         which it could then never serve: no request issued in the
     ///         period would be from a live assignment, and a period is
-    ///         non-refundable.
+    ///         non-refundable. A top-up checks the assignment the period was
+    ///         funded under too.
     error AssignmentEndsBeforePeriod(uint256 accountId, address assignee, uint40 expiresAt, uint40 periodStart);
     error CapsUnchanged(uint256 accountId, address assignee);
     error CapExceeded(string cap, uint256 limit, uint256 attempted);
@@ -556,9 +562,22 @@ contract ServiceSubscriptions is
      *      period was funded from an account by `msg.sender` and has not
      *      ended. An addition to a stored bucket repeats its class and price
      *      cap, which never change within a period; a new bucket is appended
-     *      under the funding rules. The opt-in, a live assignment that does not
-     *      expire before the period starts, and its limit are checked as for a
-     *      funding, the limit against the period's cost with this top-up added.
+     *      under the funding rules. The opt-in, a live assignment of the buyer
+     *      key that does not expire before the period starts, and its limit
+     *      are checked as for a funding, the limit against the period's cost
+     *      with this top-up added.
+     *
+     *      The assignment the period was funded under must be live too, and
+     *      must not end before the period starts: it decides which of the
+     *      period's requests count, so once it has ended no request issued
+     *      after the top-up could use what the top-up buys. A later assignment
+     *      of the buyer key does not reopen the period. After a revocation or
+     *      an expiry, the key is served again only from its next period not
+     *      yet funded, and refused here with `AssignmentExpired`. An
+     *      assignment replaced while still live keeps its period open, to
+     *      requests and top-ups alike, until its own expiry
+     *      (`ConvictionServiceStorage.assignmentEnd`).
+     *
      *      The draw and the cost due in the epoch after the period follow as
      *      for a funding, at the account's own tier; a top-up funds no new
      *      period, so the usage is unchanged, and the period keeps the
@@ -580,10 +599,12 @@ contract ServiceSubscriptions is
         ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
 
         // 2. The opt-in and a live assignment, both made by the account's
-        //    current owner, the assignment still live when the period starts.
+        //    current owner, the assignment still live when the period starts,
+        //    and the assignment the period was funded under live too.
         address accountOwner = _requireSpendingOn(css, s.accountId);
         ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee, accountOwner);
         _requireLiveAtStart(s.accountId, assignee, a, s.periodStart);
+        _requireFundedUnderLive(css, s.accountId, assignee, s.assignmentNonce, s.periodStart);
 
         // 3. The additions, merged into the stored buckets.
         ServicePeriodLib.TopUp memory t = ServicePeriodLib.mergeTopUp(
@@ -753,6 +774,27 @@ contract ServiceSubscriptions is
         if (a.expiresAt <= periodStart) {
             revert AssignmentEndsBeforePeriod(accountId, assignee, a.expiresAt, periodStart);
         }
+    }
+
+    /// @dev The assignment of `assignee` that consumed `nonce`, the one a
+    ///      period was funded under, has not ended and does not end at or
+    ///      before the period's start, as `_liveAssignment` and
+    ///      `_requireLiveAtStart` check the current one: its end is when its
+    ///      period stops taking requests. For the current assignment that
+    ///      holds already; for one a later assignment replaced, it is the end
+    ///      it had then, its expiry or its revocation if sooner. A revocation
+    ///      is never after the block time, so the second check meets only an
+    ///      expiry.
+    function _requireFundedUnderLive(
+        ConvictionServiceStorage css,
+        uint256 accountId,
+        address assignee,
+        uint64 nonce,
+        uint40 periodStart
+    ) internal view {
+        uint40 end = css.assignmentEnd(accountId, assignee, nonce);
+        if (block.timestamp >= end) revert AssignmentExpired(accountId, assignee);
+        if (end <= periodStart) revert AssignmentEndsBeforePeriod(accountId, assignee, end, periodStart);
     }
 
     /**
