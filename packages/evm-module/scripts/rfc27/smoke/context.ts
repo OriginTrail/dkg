@@ -11,7 +11,7 @@ import { Report } from '../report';
 import { LIVE_JSON, SmokeEnv } from './config';
 import { Marketplace } from './marketplace';
 import { Roles } from './roles';
-import { SmokeState, StateFile } from './state';
+import { ServedState, SetupState, SmokeState, StateFile, isServed, isSetup, serveMissing, setupMissing } from './state';
 import { SmokeTx } from './tx';
 
 export type Ctx = {
@@ -65,11 +65,22 @@ export async function bindState(ctx: PoolCtx): Promise<SmokeState | undefined> {
   return s;
 }
 
-/** The state of a run that has started, bound to this network. */
-export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-claim'): Promise<SmokeState> {
+/**
+ * The gate of a phase: the state of a run bound to this network, in which the
+ * phase `after` completed. What that phase must have
+ * recorded is validated here, once, and the state comes back typed as holding
+ * it. It is the same object as the file's, so what a phase writes to it is saved.
+ */
+export async function runState(ctx: PoolCtx, after: 'setup'): Promise<SetupState>;
+export async function runState(ctx: PoolCtx, after: 'serve' | 'close-claim'): Promise<ServedState>;
+export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-claim'): Promise<SetupState> {
   const s = await bindState(ctx);
   if (!s) throw new Error(`${ctx.file.file} is missing: run PHASE=setup SEND=1 first`);
   if (!ctx.file.done(after)) throw new Error(`run PHASE=${after} SEND=1 first`);
+  const lacks = (what: string[]) => new Error(`${ctx.file.file} says ${after} completed, but holds no ${what.join(', ')}: start a new run`);
+  if (!isSetup(s)) throw lacks(setupMissing(s));
+  if (after === 'setup') return s;
+  if (!isServed(s)) throw lacks(serveMissing(s));
   return s;
 }
 

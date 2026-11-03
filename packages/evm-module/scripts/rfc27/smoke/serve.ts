@@ -12,18 +12,17 @@ import { planValue, requestPlan } from './config';
 import { PoolCtx, complete, doneEarlier, epochStart, now, runState, standInProof } from './context';
 import { need } from './roles';
 import { fundOnFork, planDigest } from './setup';
+import { serveMissing } from './state';
 
 export async function phaseServe(ctx: PoolCtx): Promise<void> {
   const { report, c, market, file } = ctx;
   const r = need(ctx.roles, ['owner', 'buyer', 'edgeBuyer', 'caSession', 'walletSession', 'edgeSession', 'seller']);
   const s = await runState(ctx, 'setup');
   if (doneEarlier(ctx, '')) return;
-  const a = s.amounts;
-  const E = s.E ?? 0n;
+  const { amounts: a, E, accountId, accountExpiresAt: expiresAt, buyerNonce } = s;
+  const { ca, wallet } = s.periods;
   const current = await c.chronos.getCurrentEpoch();
   if (current !== E) throw new Error(`serve runs in epoch ${E}, the epoch of the periods; it is ${current}: start a new run`);
-  const [accountId, expiresAt, ca, wallet] = [s.accountId, s.accountExpiresAt, s.periods.ca, s.periods.wallet];
-  if (accountId === undefined || expiresAt === undefined || !ca || !wallet) throw new Error('the state lacks the account or a period: run PHASE=setup SEND=1 again');
   await fundOnFork(ctx, 0n);
   const plan = requestPlan(a);
   report.say(`\nServe in epoch ${E}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
@@ -63,7 +62,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   const topUp = await market.topUp('serve.top-up', 'buyer key', r.buyer, ca, a.caTopUp, planDigest(ctx, 'account plan, topped up'), {
     done: (await c.cssvc.getSubscription(ca)).value >= a.caValue + a.caTopUp ? 'the period holds the topped-up value' : undefined,
   });
-  if (ctx.env.send && s.costs.ca !== undefined) {
+  if (ctx.env.send) {
     s.costs.topUp = (await c.cssvc.getSubscription(ca)).cost - s.costs.ca;
     file.save();
   }
@@ -136,7 +135,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     needs: ['serve.edge-revoke'],
     done: s.edgeNonce !== undefined && edge2.revokedAt === 0n && edge2.nonce > s.edgeNonce ? `assigned again at nonce ${edge2.nonce}` : undefined,
   });
-  if ((again.receipt || again.skipped) && s.edgeNonce !== undefined && s.buyerNonce !== undefined) {
+  if ((again.receipt || again.skipped) && s.edgeNonce !== undefined) {
     const why = await ctx.tx.refusal(r.edgeBuyer.address, ssAddr, topUpEdge);
     report.set('edgeRefusal', why);
     report.check(
@@ -152,18 +151,20 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
       `old assignment ended ${iso(oldEnd)}, new nonce ${live.nonce}`,
     );
     const buyer = await c.cssvc.getAssignment(accountId, r.buyer.address);
-    const buyerEnd = await c.cssvc.assignmentEnd(accountId, r.buyer.address, s.buyerNonce);
+    const buyerEnd = await c.cssvc.assignmentEnd(accountId, r.buyer.address, buyerNonce);
     report.check('the main buyer key\'s assignment is untouched: live, ending at the account\'s expiry', buyer.revokedAt === 0n && buyerEnd === expiresAt, `ends ${iso(buyerEnd)}`);
   }
 
   if (ctx.env.send) {
     const due = await c.qis.dueIn(E + 1n);
-    const ours = { wallet: a.walletValue, conviction: sum([s.costs.ca ?? 0n, s.costs.topUp ?? 0n, s.costs.edge ?? 0n]) };
+    const ours = { wallet: a.walletValue, conviction: sum([s.costs.ca, s.costs.topUp ?? 0n, s.costs.edge ?? 0n]) };
     report.check(
       `epoch ${E + 1n} has our money due: ${fmt(ours.wallet)} TRAC of wallet value and ${fmt(ours.conviction)} TRAC of account cost`,
       due.wallet >= ours.wallet && due.conviction >= ours.conviction,
       `due ${fmt(due.wallet)} wallet, ${fmt(due.conviction)} account${due.wallet === ours.wallet && due.conviction === ours.conviction ? ': ours alone' : ''}`,
     );
+    const missing = serveMissing(s);
+    if (missing.length) report.check('the state holds what serve records', false, `no ${missing.join(', ')}`);
     complete(ctx);
     report.say(
       `\nNext: PHASE=finalize SEND=1 in epoch ${E + 1n}, after the batch deadline ${iso(await c.qs.batchDeadline(ca))} and before ${iso(await epochStart(ctx, E + 2n))}.`,

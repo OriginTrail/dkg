@@ -13,7 +13,7 @@ import { MIN_EPOCH_LEFT, plannedAmounts } from './config';
 import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt } from './context';
 import { checkBalances, checkDeployment, maxFeePerGas, verifySeller } from './check';
 import { need } from './roles';
-import { Amounts, SmokeState } from './state';
+import { Amounts, SmokeState, setupMissing } from './state';
 
 /** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
 export const planDigest = (ctx: PoolCtx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
@@ -225,6 +225,8 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     );
   }
 
+  const missing = s ? setupMissing(s) : [];
+  if (ctx.env.send && missing.length) report.check('the state holds what setup records', false, `no ${missing.join(', ')}`);
   complete(ctx);
   if (ctx.env.send) report.say(`\nNext: PHASE=serve SEND=1, still in epoch ${E}, before ${iso(await epochStart(ctx, E + 1n))}.`);
 }

@@ -62,6 +62,49 @@ export type SmokeState = {
   phases: Partial<Record<PhaseName, { status: 'done'; failedChecks: number }>>;
 };
 
+/** A run once setup has completed: what every later phase takes for granted. */
+export type SetupState = SmokeState & {
+  E: bigint;
+  tokenId: bigint;
+  stakeRaw: bigint;
+  stakeEpoch: bigint;
+  accountId: bigint;
+  accountExpiresAt: bigint;
+  buyerNonce: bigint;
+  periods: { ca: string; wallet: string };
+  costs: { ca: bigint };
+};
+
+/** A run once serve has completed too. */
+export type ServedState = SetupState & {
+  edgeNonce: bigint;
+  periods: { edge: string };
+  costs: { topUp: bigint; edge: bigint };
+};
+
+const missingOf = (fields: Record<string, unknown>): string[] => Object.keys(fields).filter((k) => fields[k] === undefined);
+
+/** What a completed setup must have recorded and `s` has not. */
+export const setupMissing = (s: SmokeState): string[] =>
+  missingOf({
+    E: s.E,
+    tokenId: s.tokenId,
+    stakeRaw: s.stakeRaw,
+    stakeEpoch: s.stakeEpoch,
+    accountId: s.accountId,
+    accountExpiresAt: s.accountExpiresAt,
+    buyerNonce: s.buyerNonce,
+    'periods.ca': s.periods.ca,
+    'periods.wallet': s.periods.wallet,
+    'costs.ca': s.costs.ca,
+  });
+
+/** What a completed serve must have recorded and `s` has not. */
+export const serveMissing = (s: SmokeState): string[] => missingOf({ edgeNonce: s.edgeNonce, 'periods.edge': s.periods.edge, 'costs.topUp': s.costs.topUp, 'costs.edge': s.costs.edge });
+
+export const isSetup = (s: SmokeState): s is SetupState => setupMissing(s).length === 0;
+export const isServed = (s: SetupState): s is ServedState => serveMissing(s).length === 0;
+
 // ---------------------------------------------------------------------------
 // Decoding: every field checked and typed where the file is loaded
 // ---------------------------------------------------------------------------

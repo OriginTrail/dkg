@@ -15,8 +15,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   const { report, c, file } = ctx;
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
   const s = await runState(ctx, 'close-claim');
-  if (s.tokenId === undefined) throw new Error('the state holds no position');
-  const tokenId = s.tokenId;
+  const { tokenId } = s;
   const sv10 = await c.sv10.getAddress();
   const claimData = c.sv10.interface.encodeFunctionData('claimWithdrawnEpoch', [tokenId]);
 

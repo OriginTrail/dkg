@@ -18,16 +18,14 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   const s = await runState(ctx, 'serve');
   if (!ctx.file.done('finalize')) report.note('finalize has not completed: the epoch closes with whatever was finalized');
   if (doneEarlier(ctx, '')) return;
-  const E = s.E ?? 0n;
+  const { E, tokenId } = s;
   const P = E + 1n; // the pool epoch: the periods of E are due in it
-  if (s.tokenId === undefined || s.stakeRaw === undefined) throw new Error('the state holds no position');
-  const tokenId = s.tokenId;
   if (!(await opensAt(ctx, (await epochStart(ctx, E + 2n)) + 60n, `the close of epoch ${P}, once it has ended`))) return;
   const current = await c.chronos.getCurrentEpoch();
   report.say(`\nClose and claim in epoch ${current}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
 
   // The previews, before any close: the pool, the seller's gross, StakingKPI's nets.
-  const windowStart = s.stakeEpoch ?? E;
+  const windowStart = s.stakeEpoch;
   const [previewPool] = await c.qs.previewEpochClose(P);
   const previewGross = await c.qs.previewQueryInferenceGross(P, s.sellerId);
   const pre = await kpiNets(c, s.sellerId, windowStart, current - 1n);
@@ -76,7 +74,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.set('epochClosed', { ...close, money, served: close.sumR, unused });
     report.say(`\n  Epoch ${P} closed: money ${fmt(money)} TRAC (wallet due ${fmt(close.walletDue)} + account due ${fmt(close.convictionDue)} + carry in ${fmt(close.carryIn)}),`);
     report.say(`  served (ΣR) ${fmt(close.sumR)}, unused ${fmt(unused)}, pool ${fmt(close.pool)} TRAC; λ ${close.lambdaBps} bps, ΣQueryInferenceScore ${fmt(close.sumScore)}`);
-    const ours = { wallet: s.amounts.walletValue, conviction: sum([s.costs.ca ?? 0n, s.costs.topUp ?? 0n, s.costs.edge ?? 0n]) };
+    const ours = { wallet: s.amounts.walletValue, conviction: sum([s.costs.ca, s.costs.topUp, s.costs.edge]) };
     report.check('the close pools what the preview said', close.pool === previewPool, `${fmt(close.pool)} TRAC`);
     report.check(
       close.sumR > 0n ? 'value was served, so the pool is the whole money, the unused share included' : 'no value was served, so the money carries on',

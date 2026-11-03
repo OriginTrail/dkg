@@ -13,7 +13,7 @@ import { fmt, iso, sum } from '../report';
 import { ClaimRef, finalizedValueOf, predictSkip, skipReasonOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, now, opensAt, runState, standInProof } from './context';
 import { need } from './roles';
-import { RefRecord, SmokeState } from './state';
+import { RefRecord, ServedState } from './state';
 
 const PREFIX = 'finalize.finalize-claims.';
 
@@ -23,7 +23,7 @@ const sameRef = (a: ClaimRef, b: ClaimRef): boolean =>
 const settled = (r: RefRecord): boolean => r.status === 'finalized' || r.status === 'finalized by another caller';
 
 /** The refs of the serve batches, from their ReceiptsClaimed events, with what became of each so far. */
-async function refsOf(ctx: PoolCtx, s: SmokeState): Promise<RefRecord[]> {
+async function refsOf(ctx: PoolCtx, s: ServedState): Promise<RefRecord[]> {
   const period = (id: string) => (id === s.periods.ca ? 'account' : id === s.periods.wallet ? 'wallet' : id === s.periods.edge ? 'edge' : id);
   const out: RefRecord[] = [];
   for (const key of ['serve.batch-1', 'serve.batch-2']) {
@@ -80,8 +80,7 @@ export async function phaseFinalize(ctx: PoolCtx): Promise<void> {
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
   const s = await runState(ctx, 'serve');
   if (doneEarlier(ctx, '')) return;
-  const E = s.E ?? 0n;
-  if (!s.periods.ca) throw new Error('the state holds no account period');
+  const E = s.E;
   const deadline = await c.qs.batchDeadline(s.periods.ca);
   const end = await epochStart(ctx, E + 2n);
   const refs = await refsOf(ctx, s);
