@@ -23,32 +23,29 @@
 // local anvil and uses anvil's remote accounts, so no key is involved. The
 // deployer is anvil's first development account, which is not the Hub owner:
 // 998 then prints the Hub transaction, decoded, and the `hub` phase sends it
-// as the impersonated Hub owner.
+// as the impersonated Hub owner. The config never writes the tracked
+// deployments file: each deploy reads and writes a scratch copy,
+// cache/rfc27-fork/deployments/base_sepolia_v10_contracts.json, seeded from the
+// tracked file when the deploy starts, and fails if the tracked file changed.
 //
 // Usage (from packages/evm-module; unset every *BASE_SEPOLIA* / *PRIVATE_KEY* /
 // *MNEMONIC* variable first, e.g. with `env -u`):
 //
-//   anvil --fork-url <base-sepolia-rpc> --fork-block-number <N> --port 8545 &
+//   anvil --fork-url <base-sepolia-rpc> --fork-block-number <N> --host 127.0.0.1 --port 8545 &
 //   CFG=scripts/rfc27-testnet-fork.config.ts
 //   RUN="npx hardhat run scripts/rfc27-testnet-fork-rehearsal.ts --network base_sepolia_v10 --config $CFG"
 //
 //   # 1. what the live contracts do before the upgrade, inside a reverted snapshot
 //   PHASE=pre $RUN
 //
-//   # 2. the real deploy pipeline. The three upgrades are redeployed by marking
-//   #    their entries not deployed, as 052d and 052e document; the run
-//   #    rewrites the deployments file, which is restored afterwards and never
-//   #    committed. flip marks the given entries not deployed:
-//   flip() { node -e "const f='deployments/base_sepolia_v10_contracts.json',j=require('./'+f);for(const n of process.argv.slice(1))j.contracts[n].deployed=false;require('fs').writeFileSync(f,JSON.stringify(j,null,4))" "$@"; }
+//   # 2. the real deploy pipeline. REDEPLOY lists the entries the scratch copy
+//   #    marks not deployed, which is how the three upgrades are redeployed, as
+//   #    052d and 052e document.
 //   #    2a. the guard: with StakingV10 left deployed, 052e refuses the run, before any transaction
-//   flip PublishingConviction StakingKPI
-//   npx hardhat deploy --network base_sepolia_v10 --config $CFG    # fails: StakingV10 10.0.4 is kept
-//   git checkout -- deployments/base_sepolia_v10_contracts.json
+//   REDEPLOY=PublishingConviction,StakingKPI npx hardhat deploy --network base_sepolia_v10 --config $CFG  # fails
 //   #    2b. the real run
-//   flip PublishingConviction StakingV10 StakingKPI
-//   npx hardhat deploy --network base_sepolia_v10 --config $CFG | tee cache/rfc27-fork/deploy.log
-//   cp deployments/base_sepolia_v10_contracts.json cache/rfc27-fork/contracts.deployed.json
-//   git checkout -- deployments/base_sepolia_v10_contracts.json
+//   REDEPLOY=PublishingConviction,StakingV10,StakingKPI npx hardhat deploy --network base_sepolia_v10 \
+//     --config $CFG | tee cache/rfc27-fork/deploy.log
 //
 //   # 3. the activation refused before the Hub transaction (and, in a reverted
 //   #    snapshot, while the settlement or StakingV10 does not read the pool),
