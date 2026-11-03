@@ -264,6 +264,60 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       expect(receipt.logs.filter((l) => l.address.toLowerCase() === tokenAddress)).to.have.length(0);
     });
 
+    it('verifies the digest hashRequest returns and records the one hashReceipt returns, at the widest values a batch takes', async () => {
+      const widest = (1n << 96n) - 1n;
+      const widestId = ethers.toBeHex(ethers.MaxUint256, 32);
+      const now = await epochNow();
+      const wide = await walletFund(owner, now, [
+        bucket(0, CLASS_INFERENCE, TRAC, widest),
+        { bucketId: widestId, serviceClass: CLASS_QUERY, value: TRAC, maxAskWeiPerUnit: widest },
+      ]);
+      const expiry = (1n << 40n) - 1n;
+      const widestUnits = (1n << 64n) - 1n;
+      const asked: Array<[number, ServiceRequest, Receipt]> = [];
+      // The widest ask and value, in one unit of the widest maximum, under the widest nonce.
+      let r = await requestFor(wide, 0, s1, {
+        nonce: widestUnits,
+        acceptedAskWeiPerUnit: widest,
+        maxUnits: widestUnits,
+        maxValueWei: widest,
+        expiry,
+      });
+      asked.push([0, r, { resultCommitment: widestId, units: 1n, valueWei: widest, completedAt: r.issuedAt }]);
+      // The widest units, at an ask of one wei, in the bucket of the widest id.
+      r = await requestFor(wide, 1, s1, {
+        nonce: 0n,
+        acceptedAskWeiPerUnit: 1n,
+        maxUnits: widestUnits,
+        maxValueWei: widest,
+        expiry,
+      });
+      asked.push([1, r, { resultCommitment: ethers.id('narrow'), units: widestUnits, valueWei: widestUnits, completedAt: r.issuedAt }]);
+
+      const groups: ReceiptGroup[] = [];
+      const expected: string[] = [];
+      for (const [bucketIndex, request, rec] of asked) {
+        // Signed over the contract's own digest, not one built off chain: any
+        // other digest in the batch recovers another key and fails BadSignature.
+        const requestDigest = await QS.hashRequest(request);
+        expected.push(await QS.hashReceipt({ requestDigest, ...rec }));
+        groups.push({
+          subscriptionId: wide,
+          bucketIndex: BigInt(bucketIndex),
+          items: [itemOf(request, rec, signCompact(key, requestDigest))],
+        });
+      }
+
+      const returned = await QS.connect(s1.operational).submitReceiptBatch.staticCall(groups);
+      const receipt = await accept(s1, groups);
+      expect(eventsOf(receipt, QS, 'ReceiptsClaimed').map((e) => e.groupDigest)).to.deep.equal(
+        expected.map((digest) => digestOfDigests([digest])),
+      );
+      expect(returned).to.equal(digestOfDigests(expected));
+      expect((await QIS.getSellerClaim(wide, 0n, s1.identityId)).claimed).to.equal(widest);
+      expect((await QIS.getSellerClaim(wide, 1n, s1.identityId)).claimed).to.equal(widestUnits);
+    });
+
     it('later batches add to the totals, another seller claims the same bucket apart, and a claim above the funded value is accepted', async () => {
       const first = await items(a, 0, s1, 2, { units: 1_000n });
       await accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: first.items }]);
