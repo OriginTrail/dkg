@@ -311,16 +311,7 @@ export class Helpers {
         }
 
         if (contract.interface.hasFunction(getterName)) {
-          // A parameter a schedule holds (QueryInferenceStorage's λ and
-          // receipt grace) is compared with the latest value accepted,
-          // scheduled or in force, through the contract's `latest<Name>`
-          // getter, so a run never forwards that value again: its setter
-          // would refuse it while the schedule is in force, which reverts the
-          // whole Hub transaction, or move the schedule.
-          const latestGetterName = `latest${getterName.charAt(0).toUpperCase() + getterName.slice(1)}`;
-          const currentValue = contract.interface.hasFunction(latestGetterName)
-            ? await contract[latestGetterName](...getterArgs)
-            : await contract[getterName](...getterArgs);
+          const currentValue = await contract[getterName](...getterArgs);
 
           if (currentValue.toString() !== desiredValue.toString()) {
             console.log(
