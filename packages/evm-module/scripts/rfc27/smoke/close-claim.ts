@@ -7,8 +7,9 @@
 import { eventsIn } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, min, sum } from '../report';
-import { EpochCloseNumbers, EpochReward, claimPreview, claimsByOthers, closeFromStorage, kpiNets, poolShareOf } from '../reads';
+import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
+import { rewardClaims } from './reward-claims';
 import { need } from './roles';
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
@@ -95,22 +96,21 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   }
 
   // 2. claimFor on our position, against StakingKPI's preview. Claims another caller (the
-  //    upkeep cron) made before it are checked first, reconstructed from views.
+  //    upkeep cron) made before it are checked first, from the claims the chain recorded.
   const pos = await c.css.getPosition(tokenId);
   const per: EpochReward[] = [];
   let claimed = false;
   if (pos.lastClaimedEpoch >= windowStart) {
-    const by = await claimsByOthers(c, tokenId, s.sellerId, windowStart, pos.lastClaimedEpoch, s.stakeRaw, pos.cumulativeRewardsClaimed);
-    const windows = by?.windows.map(([a, b]) => (a === b ? `${a}` : `${a}..${b}`)).join(', ');
+    const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
+    const by = await rewardClaims(ctx.hre.ethers.provider, c, { tokenId, node: s.sellerId, stakeRaw: s.stakeRaw, firstEpoch: windowStart, fromBlock: staked.blockNumber });
+    const windows = by.claims.map((x) => (x.from === x.to ? `${x.from}` : `${x.from}..${x.to}`)).join(', ');
     report.check(
-      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by another caller (the upkeep cron): what it paid is StakingKPI's preview`,
-      !!by,
-      by
-        ? `paid ${fmt(by.total)} TRAC in ${by.windows.length} claim${by.windows.length > 1 ? 's' : ''}, of epochs ${windows}`
-        : `paid ${fmt(pos.cumulativeRewardsClaimed)} TRAC, which no sequence of claims over those epochs explains`,
+      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by another caller (the upkeep cron): what each claim paid is StakingKPI's preview`,
+      by.through === pos.lastClaimedEpoch && by.total === pos.cumulativeRewardsClaimed && by.claims.every((x) => x.paid === x.previewed),
+      `paid ${fmt(by.total)} TRAC of ${fmt(pos.cumulativeRewardsClaimed)} in ${by.claims.length} claim${by.claims.length > 1 ? 's' : ''}, of epochs ${windows}, through ${by.through}`,
     );
-    if (by) per.push(...by.per);
-    report.set('claimsByOthers', by ?? null);
+    per.push(...by.per);
+    report.set('claimsByOthers', by);
     claimed = true;
   }
   if (pos.lastClaimedEpoch < current - 1n) {
