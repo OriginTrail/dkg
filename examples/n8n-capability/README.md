@@ -370,3 +370,23 @@ that become ambiguous are blocked for inspection; they are never automatically
 redispatched. A successful completed retry returns the persisted result after
 current authorization checks. Private KA receipts establish provenance and
 matching content, not independently verified execution of an external service.
+
+### JPB output for the reviewed local demo
+
+`NOS_JPB_WRITE_ENABLED=1` and `NOS_JPB_WORKFLOW_REF=<exact saved KA>` enable the
+owner-only `/studio/jpb-output` action. It accepts an invocation ID already
+read back from DKG, uses the existing SSH access to the fixed JPB owner host,
+and calls the node's knowledge-asset create/write/finalize API. Credentials stay
+on that host. No JPB service is installed or restarted.
+
+The target is the existing private `jpb-plca-study` Context Graph. The output is
+explicitly non-calculated PLCA input evidence with unconfirmed allocation; the
+receipt and both input provenances are retained. Sharing and VM publishing are
+explicitly false. Readback checks every RDF term, decodes Unicode literal escapes,
+verifies the payload SHA-256, and requires `wm-sealed` status.
+
+A durable pending row is recorded before dispatch. Retry checks the same named
+asset; an uncertain missing asset requires reconciliation rather than automatic
+recreation. Successful retries also perform remote readback. Concurrent calls for
+one execution share the same in-flight request. Only the configured workflow
+revision may write. EPCIS emission remains disabled.

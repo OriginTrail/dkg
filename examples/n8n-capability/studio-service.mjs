@@ -1,3 +1,4 @@
+import { jpbOutputStore } from './jpb-output.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { component, normalizeComponentInput } from './component-registry.mjs';
@@ -13,6 +14,7 @@ const eventUuid = (ref, id) => { const b = createHash('sha256').update(ref + ':'
   const h = b.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`; };
 
 export function createStudioService({ graphId, owner, client, provider, listCapabilities, loadOutputs, exportTokenFile }) {
+  const jpb = jpbOutputStore(provider.db);
   const saving = new Map(); let polling = false, stopped = false;
   async function approved(kaRef, sourceHash) {
     try { const a = await client.programs.getApproval({ graphId, operationIri: kaRef }); return a.binding.enabled && a.binding.program.sourceHash === sourceHash; }
@@ -91,10 +93,10 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const output = result.outputs[0];
     if (output?.kind !== 'n8n-result' || output.workflowSha256 !== compiled.grant.workflowSha256 || !output.output || typeof output.output.traceJson !== 'string') throw new Error('Native graph evidence is incomplete.');
     const trace = JSON.parse(output.output.traceJson);
-    return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
+    return jpb.remember({ kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
       n8nExecutionId: output.n8nExecutionId, workflowSha256: output.workflowSha256, output: output.output,
       steps: compiled.definition.nodes.map((n, i) => ({ nodeId: n.id, componentId: n.componentId, kaRef: n.kaRef, ...trace[i] })),
-      persisted: true, readbackVerified: true };
+      persisted: true, readbackVerified: true });
   }
   function eventAuthorized(ref, compiled, reserved = false) {
     const active = activation(ref);
@@ -200,5 +202,5 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     finally { polling = false; }
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
-  return { list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };
+  return { writeJpb: jpb.write, list, get, save, run, activate, event, history, poll, stop() { stopped = true; clearInterval(timer); } };
 }

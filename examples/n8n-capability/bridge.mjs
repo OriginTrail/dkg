@@ -97,7 +97,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     if (origin && !['http://127.0.0.1:4620', 'http://localhost:4620'].includes(origin)) { json(res, 403, { error: 'Local console origin required' }); return true; }
     const identity = req.headers.authorization;
     const routes = [prefix, prefix + '/invoke', prefix + '/inspect', prefix + '/workflows', prefix + '/workflows/save', prefix + '/workflows/run',
-      ...['', '/save', '/run', '/invoke', '/activation', '/history'].map(s => prefix + '/studio' + s)];
+      ...['', '/save', '/run', '/invoke', '/activation', '/history', '/jpb-output'].map(s => prefix + '/studio' + s)];
     if (!['Bearer l1-owner-a', 'Bearer l1-viewer-a'].includes(identity)
       || !routes.includes(path)) { json(res, 403, { error: 'Account access denied' }); return true; }
     try {
@@ -106,11 +106,12 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         if (route === '' && req.method === 'GET') json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: identity === 'Bearer l1-owner-a' });
         else if (route === '/history' && req.method === 'GET') {
           const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams; json(res, 200, await studio.history(params.get('kaRef')));
-        } else if (['/save', '/run', '/invoke', '/activation'].includes(route) && req.method === 'POST') {
+        } else if (['/save', '/run', '/invoke', '/activation', '/jpb-output'].includes(route) && req.method === 'POST') {
           if (identity !== 'Bearer l1-owner-a') { json(res, 403, { error: 'Owner access required.' }); return true; }
           let body = '', size = 0; for await (const chunk of req) { size += chunk.length; if (size > 16384) throw new Error('Request too large'); body += chunk; }
           const value = JSON.parse(body);
-          if (route === '/save') json(res, 200, await studio.save(value, authorize));
+          if (route === '/jpb-output') json(res, 200, await studio.writeJpb(value));
+          else if (route === '/save') json(res, 200, await studio.save(value, authorize));
           else if (route === '/run') json(res, 200, await studio.run(value, authorize));
           else if (route === '/activation') json(res, 200, await studio.activate(value, authorize));
           else {
