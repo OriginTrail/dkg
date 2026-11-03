@@ -940,17 +940,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _closeQueryInference(epoch);
         bytes32 delegatorKey = bytes32(tokenId);
         uint256 reward;
-        // Each carry, then the position's own slot, last.
-        for (uint256 i = 0; i <= carries.length; i++) {
-            (uint256 e, uint72 identityId, bytes32 key) = (epoch, node, delegatorKey);
-            if (i < carries.length) {
-                (e, identityId, key) = (uint256(carries[i].epoch), carries[i].identityId, carries[i].delegatorKey);
-                // A carry that points at the position's own slot is read last, once; `_claim` skips it too.
-                if (identityId == node && key == delegatorKey) continue;
-            }
-            uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(e, identityId, key);
-            if (score18 > 0) reward += _nodeEpochReward(e, identityId, score18, qiFromEpoch, settlement);
+        // Each carry, but one that points at the position's own slot, which
+        // is read once, after them.
+        for (uint256 i = 0; i < carries.length; i++) {
+            reward += _carryReward(node, delegatorKey, qiFromEpoch, settlement, carries[i]);
         }
+        uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(epoch, node, delegatorKey);
+        if (score18 > 0) reward += _nodeEpochReward(epoch, node, score18, qiFromEpoch, settlement);
 
         if (reward > type(uint96).max) revert RewardOverflow();
         amount = uint96(reward);
@@ -1124,27 +1120,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 convictionStorage.getRewardCarries(tokenId);
             bool carriesMatured = false;
             for (uint256 i = 0; i < carries.length; i++) {
-                if (uint256(carries[i].epoch) > claimToEpoch) continue;
+                ConvictionStakingStorage.RewardCarry memory carry = carries[i];
+                if (uint256(carry.epoch) > claimToEpoch) continue;
                 carriesMatured = true;
                 // The main loop above already integrated the position's
-                // CURRENT (node, key) slot for every epoch in the window —
-                // skip a carry that points at it (e.g. A→B→A round-trip).
-                if (carries[i].identityId == identityId && carries[i].delegatorKey == delegatorKey) {
-                    continue;
-                }
-                uint256 carryScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
-                    uint256(carries[i].epoch),
-                    carries[i].identityId,
-                    carries[i].delegatorKey
-                );
-                if (carryScore18 == 0) continue;
-                rewardTotal += _nodeEpochReward(
-                    uint256(carries[i].epoch),
-                    carries[i].identityId,
-                    carryScore18,
-                    qiFromEpoch,
-                    settlement
-                );
+                // CURRENT (node, key) slot for every epoch in the window, so
+                // a carry that points at it (e.g. A→B→A round-trip) pays 0.
+                rewardTotal += _carryReward(identityId, delegatorKey, qiFromEpoch, settlement, carry);
             }
             if (carriesMatured) {
                 convictionStorage.clearRewardCarries(tokenId, uint32(claimToEpoch));
@@ -1369,6 +1351,33 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (delegatorScore18 > 0) {
             epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
         }
+    }
+
+    /**
+     * @dev The reward of `carry`, the position's score on the slot it points
+     *      at, a node the position left by a redelegation or its token before
+     *      a relock: that score's share of the slot node's reward for the
+     *      carry's epoch (`_nodeEpochReward`). 0 for a carry that points at
+     *      the position's own slot, (`identityId`, `delegatorKey`), which the
+     *      caller reads once itself, as an A→B→A round trip leaves one. The
+     *      claim of a position (`_claim`) and of a withdrawn one's epoch
+     *      (`claimWithdrawnEpoch`) both pay carries through it.
+     */
+    function _carryReward(
+        uint72 identityId,
+        bytes32 delegatorKey,
+        uint256 qiFromEpoch,
+        QueryInferenceSettlement settlement,
+        ConvictionStakingStorage.RewardCarry memory carry
+    ) internal returns (uint256) {
+        if (carry.identityId == identityId && carry.delegatorKey == delegatorKey) return 0;
+        uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+            uint256(carry.epoch),
+            carry.identityId,
+            carry.delegatorKey
+        );
+        if (score18 == 0) return 0;
+        return _nodeEpochReward(uint256(carry.epoch), carry.identityId, score18, qiFromEpoch, settlement);
     }
 
     /**
