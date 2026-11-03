@@ -575,7 +575,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             {renderedQueryCatalogs.map((catalog) => {
               const scope = queryCatalogueScope(catalog);
               const binding = scope === 'context' ? undefined : profile?.forSubGraph(catalog.subGraph);
-              const color = binding?.color ?? '#38bdf8';
+              const color = binding?.color ?? 'var(--text-tertiary)';
               const label = queryCatalogueGroupLabel(catalog, scope, binding?.displayName);
               const description = queryCatalogueGroupDescription(catalog);
               return (

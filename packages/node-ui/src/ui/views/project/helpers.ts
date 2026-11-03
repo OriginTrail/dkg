@@ -178,7 +178,7 @@ export function entityMeta(e: MemoryEntity, profile?: { forType: (iri: string) =
 export const CODE = 'http://dkg.io/ontology/code/';
 // C9: code classes take their entity-kind data colour (same as the generated
 // cards); external modules are neutral. C10: anchors in deep VM purple
-// (ringed, see vizClassBorders); agents neutral.
+// (ringed, see graphClassAppearance); agents neutral.
 const CODE_CLASS_KINDS: ReadonlyArray<[string, EntityKind]> = [
   [CODE + 'Package', 'package'],
   [CODE + 'File', 'file'],
@@ -211,9 +211,13 @@ export function codePredicateColors(p: GraphPalette): Record<string, string> {
   };
 }
 
-/** C10: the anchor is the only outlined node in the VM graph. */
-export function vizClassBorders(p: GraphPalette): Record<string, { color: string; width: number }> {
-  return { [VIZ_ANCHOR_TYPE]: { color: p.anchor.ring, width: VM_ANCHOR_RING_WIDTH } };
+/** Node types' look beyond colour. C10: the anchor is the only outlined VM node and keeps
+ *  its exact deep purple (flat fill); agents draw as initials avatars, like their chips. */
+type ClassAppearance = { border?: { color: string; width?: number }; fill?: 'flat'; shape?: 'avatar' }; // graph-viz ClassAppearance
+export function graphClassAppearance(p: GraphPalette): Record<string, ClassAppearance> {
+  const out: Record<string, ClassAppearance> = { [VIZ_ANCHOR_TYPE]: { border: { color: p.anchor.ring, width: VM_ANCHOR_RING_WIDTH }, fill: 'flat' } };
+  for (const t of AGENT_GRAPH_TYPES) out[t] = { shape: 'avatar' };
+  return out;
 }
 
 // Built-in graph-viz auto-tints (schema.org → purple, prov → blue, etc) that
@@ -279,9 +283,7 @@ export function buildLayerGraphOptions(
     style: {
       classColors: codeClassColors(palette),
       predicateColors: codePredicateColors(palette),
-      classBorders: vizClassBorders(palette),
-      // Anchors keep their exact deep purple (no lighter gradient centre).
-      flatClasses: [VIZ_ANCHOR_TYPE],
+      classAppearance: graphClassAppearance(palette),
       namespaceColors: neutraliseBuiltinNamespaces(color),
       // Per-URI node tints (SWM attribution uses this to paint root KAs by
       // their proposing agent). Omitted for layers that don't use it, so
@@ -307,7 +309,6 @@ export function buildLayerGraphOptions(
       // typical anchor ties to 8–20 entities and pops out visually.
       maxSize: isVM ? 42 : 28,
       scaleWithDegree: true,
-      agentTypes: AGENT_GRAPH_TYPES,
     },
     focus: { maxNodes: 3000, hops: 999 },
   };

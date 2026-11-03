@@ -66,7 +66,7 @@ describe('agent node colours', () => {
 
   it('draws agent types as avatars and hides VM edge labels until zoomed in', () => {
     const vm = buildLayerGraphOptions('vm', graphPalette('dark'));
-    expect(vm.hexagon.agentTypes).toEqual(AGENT_GRAPH_TYPES);
+    for (const t of AGENT_GRAPH_TYPES) expect(vm.style.classAppearance[t]).toEqual({ shape: 'avatar' });
     expect(vm.style.edgeLabelMinZoom).toBeGreaterThan(1);
     expect(buildLayerGraphOptions('swm', graphPalette('dark')).style.edgeLabelMinZoom).toBe(0.3);
   });

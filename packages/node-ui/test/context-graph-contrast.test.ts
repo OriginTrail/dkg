@@ -73,6 +73,44 @@ function contrast(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+/** Surfaces a badge or count can sit on. */
+const SURFACES = ['--bg-root', '--bg-panel', '--bg-surface', '--bg-elevated'] as const;
+
+/** A component background as rendered: `color-mix(in srgb, <fg> N%, transparent)`
+ *  tints, `transparent`, or a solid colour, composited over `surface`. */
+function compositedBackground(value: string, surface: string, vars: Record<string, string>): string {
+  const v = value.trim();
+  const mix = /^color-mix\(in srgb,\s*(.+?)\s+(\d+(?:\.\d+)?)%,\s*transparent\)$/.exec(v);
+  if (v === 'transparent') return resolveColor(surface, vars);
+  if (!mix) return resolveColor(v, vars);
+  const fg = rgb(resolveColor(mix[1], vars));
+  const bg = rgb(resolveColor(surface, vars));
+  const p = Number(mix[2]) / 100;
+  return '#' + fg.map((c, i) => Math.round((c * p + bg[i] * (1 - p)) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+/** The rule whose selector is exactly `selector` (at the start of a line),
+ *  not a descendant rule that ends with it (the bell's `… .ds-count…`). */
+function ownRule(selector: string): string {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);
+  if (!m) throw new Error(`Missing rule ${selector}`);
+  const open = css.indexOf('{', m.index);
+  return css.slice(open + 1, css.indexOf('}', open));
+}
+
+/** Declared value of a property in a rule, without resolving var(). */
+function declared(selector: string, property: string): string {
+  const m = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`).exec(ownRule(selector));
+  if (!m) throw new Error(`Missing ${property} in ${selector}`);
+  return m[1].trim();
+}
+
+function contrastIn(foreground: string, background: string, vars: Record<string, string>): number {
+  const a = luminance(resolveColor(foreground, vars));
+  const b = luminance(background);
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
 describe('Context Graph contrast tokens', () => {
   it('keeps readable Context Graph text off the decoration-only ghost token', () => {
     const readableSelectors = [
@@ -174,14 +212,35 @@ describe('Context Graph contrast tokens', () => {
       expect(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/ui', file), 'utf8'), `${file}: ${cls}`).toContain(`"${cls}"`);
     }
 
-    // Badges (components/ds/Badge): each tone's text colour must clear AA on
-    // the light surface. Tones set --badge-fg rather than `color`.
-    for (const tone of ['success', 'warning', 'danger', 'wm', 'swm', 'vm', 'role', 'muted']) {
-      const fg = resolveColor(customProperties(`.ds-badge.ds-tone-${tone}`)['--badge-fg']);
-      expect(contrast(fg, lightVars['--bg-surface']), `badge ${tone}`).toBeGreaterThanOrEqual(4.5);
+    // Badges and counts: text against the background they actually render,
+    // their tint composited over every surface they can sit on, both themes.
+    const BADGE_TONES = ['neutral', 'success', 'warning', 'danger', 'wm', 'swm', 'vm', 'role', 'muted'];
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      const base = customProperties('.ds-badge');
+      for (const tone of BADGE_TONES) {
+        const t = tone === 'neutral' ? base : { ...base, ...customProperties(`.ds-badge.ds-tone-${tone}`) };
+        for (const surface of SURFACES) {
+          const bg = compositedBackground(t['--badge-bg'], `var(${surface})`, vars);
+          expect(contrastIn(t['--badge-fg'], bg, vars), `${theme} badge ${tone} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+      for (const [tone, selector] of [['neutral', '.ds-count'], ['attention', '.ds-count.ds-tone-attention'], ['quiet', '.ds-count.ds-tone-quiet']] as const) {
+        for (const surface of SURFACES) {
+          const bg = compositedBackground(declared(selector, 'background'), `var(${surface})`, vars);
+          expect(contrastIn(declared(selector, 'color'), bg, vars), `${theme} count ${tone} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+        }
+      }
     }
-    // Attention counts use --text-warning on a light tint; the bell's solid disc puts --bg-root on it.
-    expect(contrast(resolveColor(lightVars['--text-warning']), lightVars['--bg-surface']), 'count attention').toBeGreaterThanOrEqual(4.5);
+    // Regression: the notification pane's attention count sits on --bg-elevated.
+    // #a35207 rendered 3.94:1 there; the check must fail anything below AA.
+    const attentionOn = (warning: string) => {
+      const vars = { ...lightVars, '--text-warning': warning };
+      return contrastIn('var(--text-warning)', compositedBackground(declared('.ds-count.ds-tone-attention', 'background'), 'var(--bg-elevated)', vars), vars);
+    };
+    console.log('DBG2', JSON.stringify(declared('.ds-count.ds-tone-attention', 'background')), JSON.stringify(ruleFor('.ds-count.ds-tone-attention').slice(0, 120)));
+    expect(attentionOn('#a35207')).toBeLessThan(4.5);
+    expect(attentionOn(lightVars['--text-warning'])).toBeGreaterThanOrEqual(4.5);
+    // The bell's solid disc puts --bg-root on --text-warning.
     expect(contrast(resolveColor(lightVars['--bg-root']), resolveColor(lightVars['--text-warning'])), 'bell count').toBeGreaterThanOrEqual(4.5);
 
   });

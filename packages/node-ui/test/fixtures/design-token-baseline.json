@@ -2,9 +2,6 @@
   "components/AgentChip.tsx": {
     "colour": 1
   },
-  "components/AgentProfileView.tsx": {
-    "colour": 1
-  },
   "components/Modals/JoinProjectModal.tsx": {
     "colour": 3
   },
@@ -124,9 +121,6 @@
     "radius": 1
   },
   "views/project/components/graph.tsx": {
-    "colour": 1
-  },
-  "views/project/components/query.tsx": {
     "colour": 1
   }
 }

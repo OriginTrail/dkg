@@ -66,18 +66,28 @@ it('falls through unrelated custom namespaces to a built-in vocabulary color', (
   expect(styles.getNodeColor(graph().node)).toBe('#8b5cf6');
 });
 
-describe('per-type outlines (classBorders)', () => {
-  it('returns the outline configured for a node type, by full or compact URI', () => {
+describe('per-type appearance (classAppearance)', () => {
+  it('resolves outline, fill and shape for a type keyed by full or compact URI', () => {
     const { node } = graph();
-    expect(new StyleEngine({ classBorders: { 'https://schema.org/Person': { color: '#d9d0ff', width: 4 } } }, new PrefixManager())
-      .getClassBorder(node)).toEqual({ color: '#d9d0ff', width: 4 });
-    expect(new StyleEngine({ classBorders: { 'schema:Person': { color: '#2a1680' } } }, new PrefixManager())
-      .getClassBorder(node)).toEqual({ color: '#2a1680' });
+    const full = new StyleEngine({ classAppearance: { 'https://schema.org/Person': { border: { color: '#d9d0ff', width: 4 }, fill: 'flat' } } }, new PrefixManager());
+    expect(full.getAppearance(node)).toEqual({ border: { color: '#d9d0ff', width: 4 }, fill: 'flat', shape: undefined });
+    const compact = new StyleEngine({ classAppearance: { 'schema:Person': { shape: 'avatar' } } }, new PrefixManager());
+    expect(compact.getAppearance(node).shape).toBe('avatar');
   });
-  it('returns null when no outline applies', () => {
+
+  it('takes each property from the first of a node\'s types that sets it', () => {
+    const se = new StyleEngine({ classAppearance: {
+      'urn:x:A': { border: { color: '#111' } },
+      'urn:x:B': { border: { color: '#222' }, fill: 'flat', shape: 'avatar' },
+    } }, new PrefixManager());
+    expect(se.getAppearance({ id: 'n', types: ['urn:x:A', 'urn:x:B'] } as any))
+      .toEqual({ border: { color: '#111' }, fill: 'flat', shape: 'avatar' });
+  });
+
+  it('is empty when none of the node\'s types is configured', () => {
     const { node } = graph();
-    expect(new StyleEngine({}, new PrefixManager()).getClassBorder(node)).toBeNull();
-    expect(new StyleEngine({ classBorders: { 'urn:other-type': { color: '#000' } } }, new PrefixManager()).getClassBorder(node)).toBeNull();
+    expect(new StyleEngine({}, new PrefixManager()).getAppearance(node)).toEqual({});
+    expect(new StyleEngine({ classAppearance: { 'urn:other-type': { fill: 'flat' } } }, new PrefixManager()).getAppearance(node)).toEqual({});
   });
 });
 
@@ -100,15 +110,17 @@ describe('agent avatar nodes', () => {
     expect(agentInitials('')).toBe('?');
   });
 
-  it('recognises agent types, expanded from compact form', async () => {
+  it('draws avatar-shaped types no smaller than legible, keyed by compact form', async () => {
     const { HexagonPainter } = await import('../src/core/hexagon-painter.js');
     const { StyleEngine } = await import('../src/core/style-engine.js');
     const { PrefixManager } = await import('../src/core/prefix-manager.js');
     const pm = new PrefixManager();
-    const painter = new HexagonPainter({ agentTypes: ['schema:Person'] }, new StyleEngine(undefined, pm), pm);
-    const node = (types: string[]) => ({ id: 'x', types, label: 'x', degree: 1 } as any);
-    expect(painter.isAgentNode(node([pm.expand('schema:Person')]))).toBe(true);
-    expect(painter.isAgentNode(node(['https://schema.org/Thing']))).toBe(false);
+    const se = new StyleEngine({ classAppearance: { 'schema:Person': { shape: 'avatar' } } }, pm);
+    const painter = new HexagonPainter({ baseSize: 10, minSize: 2, maxSize: 30 }, se, pm);
+    const node = (types: string[]) => ({ id: 'x', types, label: 'x', degree: 0 } as any);
+    expect(se.getAppearance(node([pm.expand('schema:Person')])).shape).toBe('avatar');
+    expect(se.getAppearance(node(['https://schema.org/Thing'])).shape).toBeUndefined();
+    expect(painter.getRadius(node([pm.expand('schema:Person')]))).toBeGreaterThanOrEqual(13);
   });
 
   it('defaults the edge label zoom threshold', async () => {
@@ -143,11 +155,3 @@ describe('agent avatar initials from literals', () => {
   });
 });
 
-describe('flat fill classes', () => {
-  it('opts listed classes out of the gradient', () => {
-    const pm = new PrefixManager();
-    const se = new StyleEngine({ flatClasses: ['urn:x:Anchor'] }, pm);
-    expect(se.isFlatFill({ id: 'a', types: ['urn:x:Anchor'] } as any)).toBe(true);
-    expect(se.isFlatFill({ id: 'b', types: ['urn:x:Other'] } as any)).toBe(false);
-  });
-});

@@ -3,7 +3,6 @@ import type { ReactNode } from 'react';
 import { useMemoryEntities, canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
-import { useLayoutStore } from '../../../stores/layout.js';
 import { useVerifiableMemoryAnchors } from '../../../hooks/useVerifiableMemoryAnchors.js';
 import type { VmReceipt } from '../../../hooks/useVmReceipts.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
@@ -375,8 +374,8 @@ export function LayerGraphPanel({
 }) {
   const { title: layerTitle } = LAYER_CONFIG[layer];
   const title = titleOverride ?? layerTitle;
-  const theme = useLayoutStore(s => s.theme);
   const palette = useGraphPalette();
+  const theme = palette.theme;
 
   // All URIs that already appear as subject or object in the base VM triples.
   // We pass this into the anchor hook so synthetic anchor→entity edges only
@@ -610,7 +609,9 @@ export function LayerGraphPanel({
         canvasTriples.length > 0 ? (
           <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
             <RdfGraph
-              key={`${graphKey}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}:${graphOptions.focus?.maxNodes}`}
+              // RdfGraph reads its options once, at mount: remount on a theme switch so
+              // the canvas takes the new palette along with the legend.
+              key={`${graphKey}:${theme}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}:${graphOptions.focus?.maxNodes}`}
               data={canvasTriples}
               format="triples"
               options={graphOptions}
@@ -704,7 +705,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
         <span className="v10-vm-legend-label">Anchored-in edge</span>
       </div>
       {latestLabel && (
-        <div className="v10-vm-legend-foot">Latest: {latestLabel}</div>
+        <div className="v10-vm-legend-foot" title="When the newest anchored assertion was finalized (sealed off-chain)">Latest finalized: {latestLabel}</div>
       )}
     </div>
   );

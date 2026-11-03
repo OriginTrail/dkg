@@ -36,21 +36,12 @@ export const KEY_TO_LEVEL: Record<LayerKey, LayerLevel> = {
   vm: 'verified',
 };
 
-function activeTheme(): 'dark' | 'light' {
-  if (typeof document === 'undefined') return 'dark';
-  return document.documentElement.classList.contains('light') ? 'light' : 'dark';
-}
-
-/** Neutral greys for canvas fallbacks: untyped nodes, default subgraph,
- *  graph edges. Pure grey on purpose; slate is WM's colour now (C15). */
+/** Neutral greys for canvas fallbacks (through GraphPalette): untyped nodes,
+ *  default subgraph, graph edges. Pure grey on purpose; slate is WM's colour now (C15). */
 export const NEUTRAL_HEX: Record<'dark' | 'light', { node: string; edge: string }> = {
   dark: { node: '#9a9a9a', edge: '#4d4d4d' },
   light: { node: '#6b6b6b', edge: '#a3a3a3' },
 };
-
-export function neutralHex(kind: 'node' | 'edge'): string {
-  return NEUTRAL_HEX[activeTheme()][kind];
-}
 
 /** C10: on-chain anchor nodes in the VM graph. A very deep indigo, drawn
  *  flat (no gradient), with a purple ring (pale lavender in dark mode, the
@@ -62,6 +53,3 @@ export const VM_ANCHOR_HEX: Record<'dark' | 'light', { fill: string; ring: strin
 };
 export const VM_ANCHOR_RING_WIDTH = 4;
 
-export function vmAnchorHex(part: 'fill' | 'ring'): string {
-  return VM_ANCHOR_HEX[activeTheme()][part];
-}

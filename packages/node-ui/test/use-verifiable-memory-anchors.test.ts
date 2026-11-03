@@ -205,7 +205,7 @@ describe('receipts without a finalize time', () => {
     const triples = buildDecorationTriples(anchors, new Set(['urn:x:a', 'urn:x:b', 'urn:x:c']));
     const desc = (op: string) => triples.find(t => t.subject === `urn:dkg:viz:anchor:${op}` && t.predicate === 'http://schema.org/description')?.object;
     expect(desc('0x1111')).toBe('"Published 1 KA · finalize time unknown"');
-    expect(desc('0x3333')).toBe('"Published 1 KA · 2026-10-31T10:00:00.000Z"');
+    expect(desc('0x3333')).toBe('"Published 1 KA · finalized 2026-10-31T10:00:00.000Z"');
     const name = triples.find(t => t.subject === 'urn:dkg:viz:anchor:0x1111' && t.predicate === 'http://schema.org/name')?.object;
     expect(name).toBe('"anchor 0x1111"');
   });

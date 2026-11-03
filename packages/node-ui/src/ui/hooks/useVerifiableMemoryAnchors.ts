@@ -118,7 +118,7 @@ export function buildDecorationTriples(
     out.push({
       subject: anchorUri,
       predicate: SCHEMA_DESC,
-      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · ${r.finalizedAt}` : ' · finalize time unknown'}"`,
+      object: `"Published ${r.members.length} KA${r.members.length === 1 ? '' : 's'}${r.finalizedAt ? ` · finalized ${r.finalizedAt}` : ' · finalize time unknown'}"`,
       subGraph: r.subGraph,
     });
 

@@ -9,7 +9,6 @@ import { AgentChip } from '../../../components/AgentChip.js';
 import { VerifiedIdentityBanner } from '../../../components/VerifiedIdentityBanner.js';
 import { GenUIEntityPanel } from '../../../genui/index.js';
 import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
-import { useLayoutStore } from '../../../stores/layout.js';
 import { trustColors, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
@@ -310,8 +309,8 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   onOpenAgent?: (uri: string) => void;
 }) {
   const [pane, setPane] = useState<KAPane>('content');
-  const theme = useLayoutStore(s => s.theme);
   const palette = useGraphPalette();
+  const theme = palette.theme;
   const profile = useProjectProfileContext();
   const agents = useAgentsContext();
   const { icon, type } = entityMeta(entity, profile);
@@ -568,7 +567,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                 renderHoodTriples.length > 0 ? (
                   <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
                     <RdfGraph
-                      key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
+                      key={`${entity.uri}:${theme}:${expanded ? 'expanded' : 'inline'}`}
                       data={renderHoodTriples}
                       format="triples"
                       options={graphOptions}

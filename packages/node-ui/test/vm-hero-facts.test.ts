@@ -27,7 +27,7 @@ describe('VM receipt summary', () => {
     ]);
     expect([...s.members]).toEqual(['urn:x:a', 'urn:x:b']);
     expect([...s.signers].sort()).toEqual(['did:dkg:agent:0xabc', 'did:dkg:agent:0xdef']);
-    expect(s.lastPublishedAt).toBe(Date.parse('2026-10-31T10:00:00Z'));
+    expect(s.lastFinalizedAt).toBe(Date.parse('2026-10-31T10:00:00Z'));
   });
 
   it('refuses context graph ids that would break the IRI', () => {
@@ -37,7 +37,7 @@ describe('VM receipt summary', () => {
 });
 
 describe('Verifiable Memory hero facts (C11)', () => {
-  it('reports anchored count, signers, last publish and consensus', () => {
+  it('reports anchored count, signers, last finalize time and consensus', () => {
     const s = summariseVmReceipts([
       { asrt: A + 'one', member: 'urn:x:a', agent: 'did:dkg:agent:0x1', finalizedAt: '2026-10-30T10:00:00Z' },
       { asrt: A + 'two', agent: 'did:dkg:agent:0x2', finalizedAt: '2026-10-31T10:00:00Z' },
@@ -48,6 +48,10 @@ describe('Verifiable Memory hero facts (C11)', () => {
     expect(facts[0]).toMatchObject({ value: '2 / 2 anchored', tone: 'ok' });
     expect(facts[1]).toMatchObject({ value: '2 agents' });
     expect(facts[3]).toMatchObject({ value: 'not set up', tone: 'muted' });
+    // Finalize (off-chain seal) time, never presented as the publish time:
+    // an assertion finalized Monday and published Friday still reads Monday.
+    expect(facts[2]).toMatchObject({ label: 'Last finalized' });
+    expect(facts[2].tooltip).toContain('may have been published later');
   });
 
   it('flags assets without an on-chain receipt', () => {

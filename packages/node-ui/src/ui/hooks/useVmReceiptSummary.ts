@@ -18,8 +18,10 @@ export interface VmReceiptSummary {
   members: Set<string>;
   /** Distinct agents that published (attribution, else the assertion author). */
   signers: Set<string>;
-  /** Latest finalize time (ms), or null when unknown. */
-  lastPublishedAt: number | null;
+  /** Latest assertion finalize (off-chain seal) time, ms, or null when
+   *  unknown. Not the publish time: a receipt carries no publish timestamp,
+   *  and publishing can come days after finalizing. */
+  lastFinalizedAt: number | null;
   /** false when not every receipt could be read: an entity without a listed
    *  receipt may still be anchored. */
   complete: boolean;
@@ -42,7 +44,7 @@ export function summariseVmReceipts(receipts: readonly VmReceipt[], complete = t
     const t = r.finalizedAt ? Date.parse(r.finalizedAt) : NaN;
     if (Number.isFinite(t) && (last === null || t > last)) last = t;
   }
-  return { assertions: receipts.map(r => r.assertion), members, signers, lastPublishedAt: last, complete };
+  return { assertions: receipts.map(r => r.assertion), members, signers, lastFinalizedAt: last, complete };
 }
 
 /** Is this entity covered by a receipted assertion? Either a member row

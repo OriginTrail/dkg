@@ -172,10 +172,11 @@
   --text-ghost: #d4d4d4;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-success: #166534;
-  /* Lifted from #92400e (read as brown). Lightest amber that still clears
-     4.5:1 on every light surface it sits on, incl. the 18% amber banner
-     over --bg-panel (4.70:1) and --bg-elevated (4.89:1). */
-  --text-warning: #a35207;
+  /* Amber, between #92400e (read as brown) and #a35207 (failed AA on its
+     own tint). Clears 4.5:1 with its tint composited over every light
+     surface: 13% badge, 16% count; worst case the count on --bg-elevated
+     (4.76:1). context-graph-contrast.test.ts checks. */
+  --text-warning: #8e4706;
   --text-info: var(--text-secondary);
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;

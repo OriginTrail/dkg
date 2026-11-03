@@ -8,7 +8,7 @@ import {
   codeClassColors,
   codePredicateColors,
   trustColors,
-  vizClassBorders,
+  graphClassAppearance,
   CODE,
 } from '../src/ui/views/project/helpers.js';
 import { VIZ_ANCHOR_TYPE, VIZ_PRED_ANCHORED_IN } from '../src/ui/hooks/useVerifiableMemoryAnchors.js';
@@ -39,6 +39,10 @@ describe('graph palette', () => {
     });
   }
 
+  it('uses the --text-tertiary grey as the neutral node, so DOM fallbacks (the token) and canvas fallbacks (the palette) match', () => {
+    for (const t of ['dark', 'light'] as const) expect(graphPalette(t).neutral.node, t).toBe(tokens(t)['--text-tertiary']);
+  });
+
   it('is resolved without the DOM, and stable per theme', () => {
     expect(typeof (globalThis as { document?: unknown }).document).toBe('undefined');
     expect(graphPalette('dark')).toBe(graphPalette('dark'));
@@ -60,7 +64,7 @@ describe('graph option builders take the palette explicitly', () => {
       expect(classes[VIZ_ANCHOR_TYPE]).toBe(p.anchor.fill);
       expect(classes[CODE + 'ExternalModule']).toBe(p.neutral.node);
       expect(preds[VIZ_PRED_ANCHORED_IN]).toBe(p.layer.verified);
-      expect(vizClassBorders(p)[VIZ_ANCHOR_TYPE]!.color).toBe(p.anchor.ring);
+      expect(graphClassAppearance(p)[VIZ_ANCHOR_TYPE]).toMatchObject({ border: { color: p.anchor.ring }, fill: 'flat' });
       expect(trustColors(p)).toEqual({ verified: p.layer.verified, shared: p.layer.shared, working: p.layer.working });
     }
     expect(codeClassColors(dark)).not.toEqual(codeClassColors(light));

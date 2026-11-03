@@ -153,7 +153,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
           const arr = authoredByType.get(t.iri) ?? [];
           if (arr.length === 0) return null;
           const binding = profile?.forType(t.iri);
-          const color = binding?.color ?? '#a855f7';
+          const color = binding?.color ?? 'var(--text-tertiary)';
           return (
             <button
               key={t.iri}

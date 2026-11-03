@@ -42,9 +42,9 @@ export function buildVmFacts(
     facts.push({ id: 'signers', label: 'Signed by', value: `${n} agent${n === 1 ? '' : 's'}`, tone: 'ok',
       tooltip: 'Distinct agents that published to Verifiable Memory in this context graph.' });
   }
-  if (summary.lastPublishedAt !== null) {
-    facts.push({ id: 'last', label: 'Last publish', value: formatRelativeTime(summary.lastPublishedAt), tone: 'ok',
-      tooltip: new Date(summary.lastPublishedAt).toLocaleString() });
+  if (summary.lastFinalizedAt !== null) {
+    facts.push({ id: 'last', label: 'Last finalized', value: formatRelativeTime(summary.lastFinalizedAt), tone: 'ok',
+      tooltip: `${new Date(summary.lastFinalizedAt).toLocaleString()}: when the newest published assertion was finalized (sealed off-chain). It may have been published later.` });
   }
   facts.push(consensus);
   return facts;

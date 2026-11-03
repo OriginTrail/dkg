@@ -147,13 +147,21 @@ export interface HexagonConfig {
    * node types like SentimentAnalysis, ImageObject, Keyword, etc.
    */
   circleTypes?: string[];
-  /**
-   * RDF type URIs (full or compact) for agents. These draw as a full-size
-   * circle with the agent's initials inside and the usual label below, the
-   * same avatar shape the UI uses for agent chips, so an agent reads as an
-   * agent in every view. Unlike `circleTypes` this is not a cheap path.
-   */
-  agentTypes?: string[];
+}
+
+/** How nodes of one rdf:type look, beyond their colour (`classColors`). */
+export interface ClassAppearance {
+  /** Outline override, e.g. to set apart a node kind that shares a hue with
+   *  its neighbours. Width in px at zoom 1. */
+  border?: { color: string; width?: number };
+  /** `flat` keeps the exact colour even when `gradient` is on, so a
+   *  deliberately dark or saturated node isn't lightened at the centre. */
+  fill?: 'gradient' | 'flat';
+  /** `avatar` draws a full-size circle with the label's initials inside and
+   *  the usual label below: the shape the UI uses for agent chips, so an
+   *  agent reads as an agent in every view. Never shrinks below a legible
+   *  size. Unlike `circleTypes` this is not a cheap path. */
+  shape?: 'hexagon' | 'avatar';
 }
 
 export interface StyleConfig {
@@ -165,16 +173,13 @@ export interface StyleConfig {
   namespaceColors?: Record<string, string>;
   /** Per predicate edge colors */
   predicateColors?: Record<string, string>;
-  /** Per rdf:type outline (stroke) override, e.g. to set apart a node kind
-   *  that shares a hue with its neighbours. Width in px at zoom 1. */
-  classBorders?: Record<string, { color: string; width?: number }>;
+  /** Per rdf:type appearance (outline, fill, shape), keyed by full or
+   *  compact type IRI. When a node has several configured types, each
+   *  property comes from the first of its types that sets it. */
+  classAppearance?: Record<string, ClassAppearance>;
   /** Zoom level at which edge labels start fading in (fully shown 0.5 later).
    *  Default 0.3. Raise it for dense graphs so labels appear only on zoom. */
   edgeLabelMinZoom?: number;
-  /** rdf:types (full or compact) drawn with a flat fill even when
-   *  `gradient` is on, so a deliberately dark or saturated node keeps its
-   *  exact colour instead of being lightened at the centre. */
-  flatClasses?: string[];
   /** Enable subtle radial gradient on nodes */
   gradient?: boolean;
   /** Gradient intensity (0.0 = flat, 1.0 = strong gradient). Default: 0.3 */

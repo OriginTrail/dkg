@@ -391,6 +391,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           </div>
           <Suspense fallback={<div className="v10-mlv-graph-loading">Loading graph renderer...</div>}>
             <RdfGraph
+              key={palette.theme}
               data={triples}
               format="triples"
               options={graphOptionsForView}

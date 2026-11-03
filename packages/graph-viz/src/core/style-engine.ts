@@ -1,4 +1,4 @@
-import type { GraphNode, GraphEdge, StyleConfig } from './types.js';
+import type { ClassAppearance, GraphNode, GraphEdge, StyleConfig } from './types.js';
 import type { ColorPalette } from './palette.js';
 import { PALETTE_DARK } from './palette.js';
 import { PrefixManager } from './prefix-manager.js';
@@ -10,6 +10,8 @@ const NAMESPACE_COLORS: Record<string, string> = {
   'http://xmlns.com/foaf/0.1/': '#10b981',   // Emerald for FOAF
   'http://purl.org/dc/terms/': '#f59e0b',    // Amber for Dublin Core
 };
+
+const NO_APPEARANCE: ClassAppearance = Object.freeze({});
 
 /**
  * Resolves colors for nodes and edges based on configurable rules.
@@ -30,6 +32,8 @@ export class StyleEngine {
   private _palette: ColorPalette;
   private _hasExplicitDefaultNodeColor: boolean;
   private _hasExplicitDefaultEdgeColor: boolean;
+  /** classAppearance keyed by full type IRI (compact keys expanded once). */
+  private _appearance: Map<string, ClassAppearance>;
 
   constructor(config: StyleConfig | undefined, prefixManager: PrefixManager, palette?: ColorPalette) {
     this._prefixManager = prefixManager;
@@ -41,9 +45,8 @@ export class StyleEngine {
       classColors: config?.classColors ?? {},
       namespaceColors: config?.namespaceColors ?? {},
       predicateColors: config?.predicateColors ?? {},
-      classBorders: config?.classBorders ?? {},
+      classAppearance: config?.classAppearance ?? {},
       edgeLabelMinZoom: config?.edgeLabelMinZoom ?? 0.3,
-      flatClasses: config?.flatClasses ?? [],
       gradient: config?.gradient ?? true,
       gradientIntensity: config?.gradientIntensity ?? 0.3,
       defaultNodeColor: config?.defaultNodeColor ?? this._palette.primary,
@@ -54,6 +57,11 @@ export class StyleEngine {
       fontFamily: config?.fontFamily ?? 'system-ui, -apple-system, sans-serif',
       fontSize: config?.fontSize ?? 11,
     };
+    this._appearance = new Map();
+    for (const [type, appearance] of Object.entries(this._config.classAppearance)) {
+      this._appearance.set(type, appearance);
+      this._appearance.set(prefixManager.expand(type), appearance);
+    }
   }
 
   /** The active color palette */
@@ -112,23 +120,21 @@ export class StyleEngine {
     return this._config.defaultNodeColor;
   }
 
-  /** Outline override for a node's rdf:type, if one is configured. */
-  getClassBorder(node: GraphNode): { color: string; width?: number } | null {
-    const borders = this._config.classBorders;
-    if (!borders || Object.keys(borders).length === 0) return null;
+  /** A node's resolved appearance: each property from the first of its
+   *  types that sets it; empty when none of its types is configured. */
+  getAppearance(node: GraphNode): ClassAppearance {
+    if (this._appearance.size === 0) return NO_APPEARANCE;
+    const out: ClassAppearance = {};
+    let found = false;
     for (const type of node.types) {
-      if (borders[type]) return borders[type]!;
-      const compact = this._prefixManager.compact(type);
-      if (compact && borders[compact]) return borders[compact]!;
+      const a = this._appearance.get(type);
+      if (!a) continue;
+      found = true;
+      out.border ??= a.border;
+      out.fill ??= a.fill;
+      out.shape ??= a.shape;
     }
-    return null;
-  }
-
-  /** Whether this node's class opts out of the gradient fill. */
-  isFlatFill(node: GraphNode): boolean {
-    const flat = this._config.flatClasses;
-    if (!flat || flat.length === 0) return false;
-    return node.types.some((t) => flat.includes(t) || flat.includes(this._prefixManager.compact(t) ?? ''));
+    return found ? out : NO_APPEARANCE;
   }
 
   /** Get the color for an edge */

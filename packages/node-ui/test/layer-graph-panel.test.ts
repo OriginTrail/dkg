@@ -8,6 +8,8 @@ import { createRoot, type Root } from 'react-dom/client';
 const graphState = vi.hoisted(() => ({
   mounts: [] as string[],
   unmounts: [] as string[],
+  /** One entry per mounted instance (the real RdfGraph reads options only here). */
+  instances: [] as string[],
 }));
 
 vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
@@ -15,6 +17,8 @@ vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
   return {
     RdfGraph(props: any) {
       const defaultColor = props.options?.style?.defaultNodeColor ?? '';
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      React.useEffect(() => { graphState.instances.push(defaultColor); }, []);
       React.useEffect(() => {
         graphState.mounts.push(defaultColor);
         return () => {
@@ -71,7 +75,10 @@ describe('LayerGraphPanel graph lifecycle', () => {
   beforeEach(() => {
     graphState.mounts.length = 0;
     graphState.unmounts.length = 0;
+    graphState.instances.length = 0;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+    // The VM graph's receipts reload on node events; happy-dom has no EventSource.
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} onerror: (() => void) | null = null; });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -326,6 +333,25 @@ describe('LayerGraphPanel graph lifecycle', () => {
 
     expect(graphState.mounts).toEqual([LAYER_HEX.dark.working, LAYER_HEX.dark.shared]);
     expect(graphState.unmounts).toEqual([LAYER_HEX.dark.working]);
+  });
+
+  it('remounts the graph with the new palette when the theme switches', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
+    const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    const before = useLayoutStore.getState().theme;
+    act(() => { useLayoutStore.setState({ theme: 'dark' }); });
+    try {
+      await act(async () => { root.render(React.createElement(LayerGraphPanel, { layer: 'wm', triples })); });
+      await waitForAssertion(() => { expect(graphState.instances).toEqual([LAYER_HEX.dark.working]); });
+
+      act(() => { useLayoutStore.setState({ theme: 'light' }); });
+      // A new instance, built with the light palette: the canvas can't keep dark colours.
+      await waitForAssertion(() => { expect(graphState.instances).toEqual([LAYER_HEX.dark.working, LAYER_HEX.light.working]); });
+      expect(container.querySelector('[data-testid="rdf-graph"]')?.getAttribute('data-default-color')).toBe(LAYER_HEX.light.working);
+    } finally {
+      act(() => { useLayoutStore.setState({ theme: before }); });
+    }
   });
 
   it('renders layer graph with degree sizing and in-canvas expand control', async () => {

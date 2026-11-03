@@ -174,7 +174,7 @@ export function ProjectHeaderStrip({
   const name = cg.name || profile.displayName || cg.id;
   const cgColor = useContextGraphColor(cg.id);
   return (
-    <div className="v10-project-strip" style={{ '--sg-color': activeSubGraph?.color ?? cgColor } as React.CSSProperties}>
+    <div className="v10-project-strip" style={{ '--sg-color': activeSubGraph ? activeSubGraph.color ?? 'var(--text-tertiary)' : cgColor } as React.CSSProperties}>
       <ContextGraphMark id={cg.id} name={name} size="md" />
       <button
         type="button"

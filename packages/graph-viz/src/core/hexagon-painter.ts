@@ -17,7 +17,6 @@ const DEFAULT_HEXAGON: Required<HexagonConfig> = {
   ],
   imageUrlPredicate: 'https://schema.org/url',
   circleTypes: [],
-  agentTypes: [],
 };
 
 /** Cache for loaded images */
@@ -36,8 +35,6 @@ export class HexagonPainter {
   private _maxDegree = 1;
   /** Expanded circleTypes — full URIs resolved from compact forms */
   private _circleTypeSet: Set<string>;
-  /** Expanded agentTypes */
-  private _agentTypeSet: Set<string>;
   /** Callback to trigger graph repaint when an image finishes loading */
   private _onImageLoad: (() => void) | null = null;
   /** Trust visualization style */
@@ -61,17 +58,6 @@ export class HexagonPainter {
         this._circleTypeSet.add(prefixManager.expand(t));
       }
     }
-    this._agentTypeSet = new Set<string>();
-    for (const t of this._config.agentTypes) {
-      this._agentTypeSet.add(t);
-      if (prefixManager) this._agentTypeSet.add(prefixManager.expand(t));
-    }
-  }
-
-  /** Check if a node is an agent (drawn as an initials avatar circle) */
-  isAgentNode(node: GraphNode): boolean {
-    if (this._agentTypeSet.size === 0) return false;
-    return node.types.some((t) => this._agentTypeSet.has(t));
   }
 
   /** Check if a node should render as a simple circle */
@@ -122,8 +108,8 @@ export class HexagonPainter {
     const range = this._config.maxSize - this._config.minSize;
     const degreeSize = this._config.minSize + ratio * range;
     // Agents never shrink below the base size: their initials must stay legible.
-    const agentMinSize = this.isAgentNode(node) ? this._config.baseSize * 1.3 : 0;
-    return Math.max(degreeSize, imageMinSize, agentMinSize) * multiplier;
+    const avatarMinSize = this._styleEngine.getAppearance(node).shape === 'avatar' ? this._config.baseSize * 1.3 : 0;
+    return Math.max(degreeSize, imageMinSize, avatarMinSize) * multiplier;
   }
 
   /**
@@ -174,7 +160,8 @@ export class HexagonPainter {
 
     // Draw node path: agents are circles (the avatar shape), everything
     // else a flat-top hexagon.
-    const isAgent = this.isAgentNode(node);
+    const appearance = this._styleEngine.getAppearance(node);
+    const isAgent = appearance.shape === 'avatar';
     ctx.beginPath();
     if (isAgent) {
       ctx.arc(x, y, radius, 0, 2 * Math.PI);
@@ -190,7 +177,7 @@ export class HexagonPainter {
     ctx.closePath();
 
     // Fill with gradient or flat color
-    if (styleConfig.gradient && !this._styleEngine.isFlatFill(node)) {
+    if (styleConfig.gradient && appearance.fill !== 'flat') {
       const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
       gradient.addColorStop(0, this._styleEngine.getGradientCenter(color));
       gradient.addColorStop(1, color);
@@ -220,9 +207,8 @@ export class HexagonPainter {
       ctx.strokeStyle = palette.info;
       ctx.lineWidth = (styleConfig.borderWidth + Math.min(3, sourceCount)) / globalScale;
     } else {
-      const classBorder = this._styleEngine.getClassBorder(node);
-      ctx.strokeStyle = classBorder?.color ?? this._styleEngine.getBorderColor(color);
-      ctx.lineWidth = (classBorder?.width ?? styleConfig.borderWidth) / globalScale;
+      ctx.strokeStyle = appearance.border?.color ?? this._styleEngine.getBorderColor(color);
+      ctx.lineWidth = (appearance.border?.width ?? styleConfig.borderWidth) / globalScale;
     }
 
     // Boundary node indicator (subtle lighter border, no dashes)

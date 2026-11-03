@@ -129,6 +129,48 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
     });
   });
 
+  describe('restoring a saved workspace', () => {
+    async function settle() {
+      await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    }
+
+    it('a refresh at / lands on the saved tab, replacing / instead of adding history', async () => {
+      useTabsStore.setState({
+        tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }, { id: 'project:foo', label: 'Foo', closable: true }],
+        activeTabId: 'project:foo',
+      });
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/', ref, nav);
+      await settle();
+      expect([ref.current, useTabsStore.getState().activeTabId]).toEqual(['/graph/foo', 'project:foo']);
+      // No entry for "/": Back has nowhere to go inside the app.
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect(ref.current).toBe('/graph/foo');
+    });
+
+    it('after restoring, going back to / shows the dashboard', async () => {
+      useTabsStore.setState({
+        tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }, { id: 'settings', label: 'Settings', closable: true }],
+        activeTabId: 'settings',
+      });
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/', ref, nav);
+      await settle();
+      await act(async () => { useTabsStore.getState().setActiveTab('dashboard'); });
+      await settle();
+      expect(ref.current).toBe('/');
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect([ref.current, useTabsStore.getState().activeTabId]).toEqual(['/settings', 'settings']);
+      await act(async () => { nav.current!(1); });
+      await settle();
+      expect([ref.current, useTabsStore.getState().activeTabId]).toEqual(['/', 'dashboard']);
+    });
+  });
+
   describe('Step 2 — URL syncs to the active tab', () => {
     it('opens /settings → user clicks Operations tab → URL navigates to /observability', async () => {
       const ref = { current: '' };

@@ -24,7 +24,6 @@ import {
 import { executeQuery, readProfileQueryCatalog, type QueryExecutionView } from '../api.js';
 import { ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
 import { metaGraphPrefixFilter } from '../lib/sparql.js';
-import { neutralHex } from '../layer-colors.js';
 
 async function runProjectQuery(
   sparql: string,
@@ -169,11 +168,13 @@ const DEFAULT_PROFILE_SEED = {
   accentColor: 'var(--text-tertiary)',
 };
 
+// Fallbacks carry no colour: profile data stays theme-free, and each
+// consumer applies its own neutral (a CSS token in the DOM, the GraphPalette
+// on canvas), as for ROOT_SUBGRAPH_BINDING below.
 const DEFAULT_SUBGRAPH_FALLBACK = (slug: string): SubGraphBinding => ({
   slug,
   displayName: slug,
   icon: '•',
-  color: neutralHex('node'),
   rank: 99,
 });
 
@@ -199,7 +200,6 @@ const ROOT_SUBGRAPH_BINDING: SubGraphBinding = {
 const DEFAULT_TYPE_FALLBACK = (typeIri: string): EntityTypeBinding => ({
   typeIri,
   label: typeIri.split(/[/#]/).pop() || typeIri,
-  color: neutralHex('node'),
   isFallback: true,
 });
 
