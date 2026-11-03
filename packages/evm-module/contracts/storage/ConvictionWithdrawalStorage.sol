@@ -29,9 +29,17 @@ import {ConvictionStakingStorage} from "./ConvictionStakingStorage.sol";
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
  *     contract, and the Hub owner): `StakingV10Ledger` writes a record at a
  *     withdrawal and deletes it at its claim, both for `StakingV10`. The one
- *     rule it keeps itself is
- *     that a token id holds one record: a second write is refused
- *     (`WithdrawalRecorded`), so a record is paid once.
+ *     rule it keeps itself is that a token id holds one record: a second
+ *     write is refused (`WithdrawalRecorded`), so a record is paid once.
+ *   - Every field has a view, and the carries a narrow setter beside the
+ *     writes the ledger makes (`setWithdrawal` and `deleteWithdrawal` write a
+ *     record with its carries): `addRewardCarry` adds one to a recorded token
+ *     id, once per slot it points at and at most 32, as
+ *     `ConvictionStakingStorage` keeps a position's carries, so no slot is
+ *     paid twice and a claim stays bounded, and `clearRewardCarries` removes
+ *     them. `setWithdrawal` with no carries writes a record alone. So a later
+ *     logic version reads and writes all of this state without a new
+ *     storage, which would start empty.
  *   - It holds no TRAC: the claim pays from the vault,
  *     `ConvictionStakingStorage`. It emits no events; `StakingV10` emits
  *     them.
@@ -44,8 +52,16 @@ contract ConvictionWithdrawalStorage is INamed, IVersioned, HubDependent {
     string private constant _NAME = "ConvictionWithdrawalStorage";
     // Version history:
     //   1.0.0 — the epoch in progress at a withdrawal, kept for its claim
-    //           (`StakingV10` 10.1.0).
+    //           (`StakingV10` 10.1.0). Every field has a view, the carries by
+    //           count and index too (`rewardCarryCount`, `rewardCarryAt`), and
+    //           the carries a narrow setter (`addRewardCarry`,
+    //           `clearRewardCarries`).
     string private constant _VERSION = "1.0.0";
+
+    /// @dev The most carries a record takes through `addRewardCarry`: the
+    ///      bound `ConvictionStakingStorage.MAX_REWARD_CARRIES` puts on a
+    ///      position's, whose carries a withdrawal records.
+    uint256 internal constant _MAX_REWARD_CARRIES = 32;
 
     /// @notice A withdrawn position's claim on the epoch that was in progress
     ///         at its withdrawal.
@@ -57,6 +73,11 @@ contract ConvictionWithdrawalStorage is INamed, IVersioned, HubDependent {
 
     /// @notice The token id already holds a record.
     error WithdrawalRecorded(uint256 tokenId);
+    /// @notice The token id holds no record, so it takes no carry.
+    error WithdrawalNotRecorded(uint256 tokenId);
+    /// @notice The record holds 32 carries already, the most a position holds
+    ///         (`ConvictionStakingStorage.MAX_REWARD_CARRIES`).
+    error RewardCarriesFull(uint256 tokenId);
 
     /// @dev tokenId => its record.
     mapping(uint256 => Withdrawal) internal _withdrawals;
@@ -95,11 +116,51 @@ contract ConvictionWithdrawalStorage is INamed, IVersioned, HubDependent {
         delete _carries[tokenId];
     }
 
+    /// @notice Add carry `c` to `tokenId`'s record, once: a carry that points
+    ///         at the same node, epoch and delegator key as one the record
+    ///         holds is not added again, as `ConvictionStakingStorage` keeps a
+    ///         position's carries.
+    /// @dev    It refuses a token id with no record (`WithdrawalNotRecorded`),
+    ///         so no carry outlives its record into a later one, and a record
+    ///         that holds 32 carries, the most a position holds
+    ///         (`RewardCarriesFull`).
+    function addRewardCarry(uint256 tokenId, ConvictionStakingStorage.RewardCarry calldata c) external onlyContracts {
+        if (_withdrawals[tokenId].epoch == 0) revert WithdrawalNotRecorded(tokenId);
+        ConvictionStakingStorage.RewardCarry[] storage list = _carries[tokenId];
+        uint256 n = list.length;
+        for (uint256 i; i < n; i++) {
+            ConvictionStakingStorage.RewardCarry storage held = list[i];
+            if (held.identityId == c.identityId && held.epoch == c.epoch && held.delegatorKey == c.delegatorKey) {
+                return;
+            }
+        }
+        if (n >= _MAX_REWARD_CARRIES) revert RewardCarriesFull(tokenId);
+        list.push(c);
+    }
+
+    /// @notice Remove every carry of `tokenId`'s record; the record stays.
+    function clearRewardCarries(uint256 tokenId) external onlyContracts {
+        delete _carries[tokenId];
+    }
+
     /// @notice A token id's record and its carries; an epoch of 0 when it
     ///         has none.
     function getWithdrawal(
         uint256 tokenId
     ) external view returns (Withdrawal memory w, ConvictionStakingStorage.RewardCarry[] memory carries) {
         return (_withdrawals[tokenId], _carries[tokenId]);
+    }
+
+    /// @notice How many carries `tokenId`'s record holds.
+    function rewardCarryCount(uint256 tokenId) external view returns (uint256) {
+        return _carries[tokenId].length;
+    }
+
+    /// @notice Carry `index` of `tokenId`'s record. Reverts past its carries.
+    function rewardCarryAt(
+        uint256 tokenId,
+        uint256 index
+    ) external view returns (ConvictionStakingStorage.RewardCarry memory) {
+        return _carries[tokenId][index];
     }
 }

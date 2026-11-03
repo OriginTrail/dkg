@@ -51,6 +51,16 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *     money is never booked into an epoch that has closed, whose inputs are
  *     frozen. Business events come from the logic contracts; this contract
  *     emits events only for its parameters.
+ *   - Every field has a view, and every field the logic contracts write has
+ *     a narrow setter that writes that field alone, beside the writes they
+ *     make today (`addClaim`, `finalizeClaim` and `closeEpoch` write several
+ *     fields at once), so a later logic version reads and writes all of this
+ *     state without a new storage, which would start empty. The setters keep
+ *     the storage's own rules: a closed epoch's totals take no write, a
+ *     finalized claim never moves, and a nonce bit, once set, is never
+ *     cleared. The close record and the cursor `closedThrough` are written
+ *     only by `closeEpoch`, one epoch at a time and in order, with whatever
+ *     pool, λ and carry the logic passes, so a close never moves once made.
  *   - The parameter setters are `onlyHub`, so governance reaches them through
  *     `Hub.forwardCall` (the Hub owner may also call them directly). The
  *     setters that need the current epoch or the epoch length read them from
@@ -499,6 +509,54 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         _epochClose[epoch] = EpochClose({pool: pool, lambdaBps: lambda, closed: true});
         closedThrough = epoch;
         carry = carryOut;
+    }
+
+    // ============================================================
+    //            Narrow setters (onlyContracts), one field each
+    // ============================================================
+
+    /// @notice Set `seller`'s claim in a bucket, which `addClaim` adds to and
+    ///         `finalizeClaim` finalizes, and nothing else: the bucket's
+    ///         total, the node's and the epoch's are left as they are.
+    /// @dev    A finalized claim never moves, so one is refused
+    ///         (`ClaimFinalized`).
+    function setSellerClaim(
+        bytes32 subscriptionId,
+        uint8 bucketIndex,
+        uint72 seller,
+        SellerClaim calldata c
+    ) external onlyContracts {
+        SellerClaim storage stored = _sellerClaim[subscriptionId][bucketIndex][seller];
+        if (stored.finalized) revert ClaimFinalized(subscriptionId, bucketIndex, seller);
+        _sellerClaim[subscriptionId][bucketIndex][seller] = c;
+    }
+
+    /// @notice Set the value claimed in a bucket over all sellers, which
+    ///         `addClaim` adds to.
+    function setBucketClaimed(bytes32 subscriptionId, uint8 bucketIndex, uint128 value) external onlyContracts {
+        _bucketClaimed[subscriptionId][bucketIndex] = value;
+    }
+
+    /// @notice Set a node's R and QueryInferenceScore in `epoch`, which
+    ///         `finalizeClaim` adds to. It refuses a closed epoch, whose
+    ///         inputs are frozen (`EpochClosed`).
+    function setNodeEpoch(uint72 identityId, uint256 epoch, NodeEpoch calldata n) external onlyContracts {
+        _requireOpen(epoch);
+        _nodeEpoch[identityId][epoch] = n;
+    }
+
+    /// @notice Set `epoch`'s ΣR and ΣQueryInferenceScore, which
+    ///         `finalizeClaim` adds to. It refuses a closed epoch, whose
+    ///         inputs are frozen (`EpochClosed`).
+    function setEpochTotals(uint256 epoch, EpochTotals calldata t) external onlyContracts {
+        _requireOpen(epoch);
+        _epochTotals[epoch] = t;
+    }
+
+    /// @notice Set the pool carried into the next epoch to close, which
+    ///         `closeEpoch` sets to its carry out.
+    function setCarry(uint96 value) external onlyContracts {
+        carry = value;
     }
 
     // ============================================================

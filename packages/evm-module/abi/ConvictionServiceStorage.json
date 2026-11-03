@@ -198,6 +198,64 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "appendAccountSubscription",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Bucket",
+        "name": "b",
+        "type": "tuple"
+      }
+    ],
+    "name": "appendBucket",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
@@ -848,6 +906,30 @@
         "type": "address"
       }
     ],
+    "name": "isAssigneeListed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      }
+    ],
     "name": "isAssignmentActive",
     "outputs": [
       {
@@ -857,6 +939,24 @@
       }
     ],
     "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      }
+    ],
+    "name": "listAssignee",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -901,6 +1001,35 @@
     "name": "recordUsage",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "nonce",
+        "type": "uint64"
+      }
+    ],
+    "name": "replacedAssignmentEnd",
+    "outputs": [
+      {
+        "internalType": "uint40",
+        "name": "",
+        "type": "uint40"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1006,6 +1135,61 @@
         "type": "address"
       },
       {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "maxCostPerPeriod",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "assignedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "expiresAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "revokedAt",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint64",
+            "name": "nonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "owner",
+            "type": "address"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Assignment",
+        "name": "a",
+        "type": "tuple"
+      }
+    ],
+    "name": "setAssignmentRecord",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
         "internalType": "uint40",
         "name": "at",
         "type": "uint40"
@@ -1019,12 +1203,85 @@
   {
     "inputs": [
       {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "index",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "bucketId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint8",
+            "name": "serviceClass",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "maxAskWeiPerUnit",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Bucket",
+        "name": "b",
+        "type": "tuple"
+      }
+    ],
+    "name": "setBucket",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint8",
         "name": "value",
         "type": "uint8"
       }
     ],
     "name": "setMaxBucketsPerPeriod",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "internalType": "uint64",
+        "name": "nonce",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint40",
+        "name": "end",
+        "type": "uint40"
+      }
+    ],
+    "name": "setReplacedAssignmentEnd",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1057,6 +1314,155 @@
     "name": "setServiceSpending",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "accountId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "assignee",
+            "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "assignmentNonce",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "sessionKey",
+            "type": "address"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "periodId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "planDigest",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "uint40",
+            "name": "periodStart",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "periodEnd",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedEpoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "fundedWindow",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint8",
+            "name": "bucketCount",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "value",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "drawnFromTopUp",
+            "type": "uint96"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Subscription",
+        "name": "s",
+        "type": "tuple"
+      }
+    ],
+    "name": "setSubscription",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "assignee",
+        "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint32",
+            "name": "periods",
+            "type": "uint32"
+          }
+        ],
+        "internalType": "struct ConvictionServiceStorage.Usage",
+        "name": "u",
+        "type": "tuple"
+      }
+    ],
+    "name": "setUsage",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "storedBucketCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

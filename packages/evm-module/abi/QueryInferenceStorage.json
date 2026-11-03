@@ -1025,6 +1025,72 @@
   {
     "inputs": [
       {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint128",
+        "name": "value",
+        "type": "uint128"
+      }
+    ],
+    "name": "setBucketClaimed",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "name": "setCarry",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint128",
+            "name": "sumR",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "sumScore",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct QueryInferenceStorage.EpochTotals",
+        "name": "t",
+        "type": "tuple"
+      }
+    ],
+    "name": "setEpochTotals",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "uint16",
         "name": "value",
         "type": "uint16"
@@ -1077,6 +1143,41 @@
   {
     "inputs": [
       {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint128",
+            "name": "r",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "score",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct QueryInferenceStorage.NodeEpoch",
+        "name": "n",
+        "type": "tuple"
+      }
+    ],
+    "name": "setNodeEpoch",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "bool",
         "name": "value",
         "type": "bool"
@@ -1096,6 +1197,51 @@
       }
     ],
     "name": "setReceiptGraceSeconds",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "bucketIndex",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint72",
+        "name": "seller",
+        "type": "uint72"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "claimed",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "weighted",
+            "type": "uint96"
+          },
+          {
+            "internalType": "bool",
+            "name": "finalized",
+            "type": "bool"
+          }
+        ],
+        "internalType": "struct QueryInferenceStorage.SellerClaim",
+        "name": "c",
+        "type": "tuple"
+      }
+    ],
+    "name": "setSellerClaim",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
