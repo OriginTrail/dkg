@@ -20,7 +20,12 @@ import { impersonate } from './plumbing';
 import { stakerCredits } from './reads';
 import type { ClaimResult, Position, PublishResult } from './results';
 
-/** Claim every position as its owner, through the staking NFT; the reward is the cumulative-rewards delta. */
+/**
+ * Claim every position as its owner, through the staking NFT. The reward is
+ * what the claim adds to the cumulative-rewards statistic; a check of its own
+ * requires the claim to credit the same to the raw stake, which is what the
+ * position owns.
+ */
 export async function claimAll(ctx: Ctx, pos: Position[], tag: string): Promise<ClaimResult[]> {
   const { snft, css } = ctx.base;
   const out: ClaimResult[] = [];
@@ -29,14 +34,10 @@ export async function claimAll(ctx: Ctx, pos: Position[], tag: string): Promise<
     const before = await css.getPosition(p.tokenId);
     const { gasUsed } = await send(ctx, `${tag} claim token ${p.tokenId} (node ${p.node})`, owner, await snft.getAddress(), snft.interface.encodeFunctionData('claim', [p.tokenId]));
     const after = await css.getPosition(p.tokenId);
-    out.push({
-      tokenId: p.tokenId,
-      node: p.node,
-      reward: after.cumulativeRewardsClaimed - before.cumulativeRewardsClaimed,
-      rawDelta: after.raw - before.raw,
-      lastClaimedEpoch: after.lastClaimedEpoch,
-      gasUsed,
-    });
+    const reward = after.cumulativeRewardsClaimed - before.cumulativeRewardsClaimed;
+    const rawDelta = after.raw - before.raw;
+    ctx.report.check(`${tag} token ${p.tokenId}: the claim credits its reward to the raw stake`, rawDelta === reward, `raw +${fmt(rawDelta)}, rewards +${fmt(reward)} TRAC`);
+    out.push({ tokenId: p.tokenId, node: p.node, reward, rawDelta, lastClaimedEpoch: after.lastClaimedEpoch, gasUsed });
   }
   return out;
 }

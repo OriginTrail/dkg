@@ -131,7 +131,7 @@ export type PublishResult = {
   gasUsed: bigint;
 };
 
-/** A position's claim: the reward is its cumulative-rewards delta. */
+/** A position's claim: the reward is its cumulative-rewards delta, and rawDelta what it credited to the raw stake. */
 export type ClaimResult = {
   tokenId: bigint;
   node: bigint;

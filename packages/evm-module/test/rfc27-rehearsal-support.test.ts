@@ -9,6 +9,8 @@ import { Fork } from '../scripts/rfc27/fork';
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
+import { claimAll } from '../scripts/rfc27/rehearsal/operations';
+import type { Position } from '../scripts/rfc27/rehearsal/results';
 
 /** A report that keeps its checks and prints nothing. */
 class QuietReport extends Report {
@@ -139,6 +141,41 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       const message = (p: Promise<unknown>) => p.then(() => 'no error', (e: unknown) => (e as Error).message);
       expect(await message(f.inSnapshot(async () => Promise.reject(new Error('the body failed'))))).to.equal('the body failed');
       expect(await message(f.inSnapshot(async () => 'fine'))).to.equal('evm_revert failed');
+    });
+  });
+
+  describe('a claim', () => {
+    const position = { tokenId: 7n, owner: '0x00000000000000000000000000000000000000dd', node: 3n } as Position;
+    /** One claim on stubs: the position's fields before it, and after it. */
+    const claim = async (before: { raw: bigint; cumulativeRewardsClaimed: bigint }, after: { raw: bigint; cumulativeRewardsClaimed: bigint }) => {
+      const report = new QuietReport();
+      const reads = [before, after];
+      const ctx = {
+        report,
+        txs: [],
+        fork: { impersonate: async () => ({}), setEth: async () => undefined },
+        tx: { run: async () => ({ receipt: { hash: HASH, blockNumber: 1, from: '0x', to: '0x', gasUsed: 1n, status: 1 }, estimate: 1n, gasLimit: 1n }) },
+        base: {
+          snft: { getAddress: async () => '0x00000000000000000000000000000000000000ee', interface: { encodeFunctionData: () => '0x' } },
+          css: { getPosition: async () => ({ ...reads.shift(), lastClaimedEpoch: 5n }) },
+        },
+      } as unknown as Ctx;
+      const [out] = await claimAll(ctx, [position], 'test');
+      return { out, report };
+    };
+
+    it('passes when the reward reaches the raw stake', async () => {
+      const { out, report } = await claim({ raw: 100n, cumulativeRewardsClaimed: 0n }, { raw: 110n, cumulativeRewardsClaimed: 10n });
+      expect(out.reward).to.equal(10n);
+      expect(out.rawDelta).to.equal(10n);
+      expect(report.failed).to.equal(0);
+    });
+
+    it('fails when a claim moves the statistic and credits no stake', async () => {
+      const { out, report } = await claim({ raw: 100n, cumulativeRewardsClaimed: 0n }, { raw: 100n, cumulativeRewardsClaimed: 10n });
+      expect(out.reward).to.equal(10n);
+      expect(out.rawDelta).to.equal(0n);
+      expect(report.failed).to.equal(1);
     });
   });
 });

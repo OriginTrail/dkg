@@ -138,8 +138,8 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   for (const cl of claims) {
     const x = expected[String(cl.tokenId)];
     check(
-      `token ${cl.tokenId} (node ${cl.node}) is paid what StakingKPI previewed`,
-      cl.reward === x.total,
+      `token ${cl.tokenId} (node ${cl.node}) is paid what StakingKPI previewed, in its raw stake and in its rewards statistic`,
+      cl.rawDelta === x.total && cl.reward === x.total,
       `${fmt(cl.reward)} TRAC (preview ${fmt(x.total)}; epoch ${A + 1n}: ${fmt(x.per[String(A + 1n)] ?? 0n)})`,
     );
   }
