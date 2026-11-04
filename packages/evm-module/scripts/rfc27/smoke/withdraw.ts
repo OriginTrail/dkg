@@ -2,7 +2,8 @@
 // withdrawn in the middle of an epoch, which records that epoch's share for
 // the owner; once that epoch has ended, claimWithdrawnEpoch pays it, against
 // the amount the views give (the position's recorded score × StakingKPI's net
-// / the node's score). On testnet this adds a day to the run. A withdrawal burns
+// / the node's score), exactly nothing for an epoch that earned nothing. On testnet
+// this adds a day to the run. A withdrawal burns
 // the position, and records nothing to claim for one with no score in the epoch,
 // so it waits for the seller's proof first. What it expects is journaled with it,
 // since a resume cannot read that from a position that is gone.
@@ -94,7 +95,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   }
 
   // 2. claimWithdrawnEpoch, once the withdrawal's epoch has ended.
-  const { epoch, node } = s.withdrawal;
+  const { epoch, node, recordedScore } = s.withdrawal;
   if (!(await opensAt(ctx, (await epochStart(ctx, epoch + 1n)) + 60n, `claimWithdrawnEpoch, once epoch ${epoch} has ended`))) return { part: 'claim' };
   report.say(`\nClaim the withdrawn epoch ${epoch}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
   const score = await c.rss.getEpochNodeDelegatorScore(epoch, node, delegatorKey(tokenId));
@@ -102,6 +103,9 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   const net = await c.kpi.getNetNodeRewards(node, epoch);
   const expected = nodeScore === 0n ? 0n : (score * net) / nodeScore;
   report.note(`expected: score ${score} × StakingKPI net ${fmt(net)} TRAC / node score ${nodeScore} = ${fmt(expected)} TRAC`);
+  // What makes an expected zero mean the epoch earned nothing, and not that the score was lost.
+  report.check(`the position's score in epoch ${epoch} is the one its withdrawal recorded, and within the node's`, score === recordedScore && nodeScore >= score, `score ${score} of node score ${nodeScore}, recorded ${recordedScore}`);
+  if (expected === 0n) report.note(`epoch ${epoch} earned the position nothing, so its claim is to pay exactly nothing: this run has not seen the claim pay`);
   // This run's attempt may have reverted, with another caller (the upkeep cron) claiming between its
   // estimate and its mining: it paid nothing then. With the record gone, the claim is that caller's.
   const attempt = file.get(CLAIM);
@@ -116,7 +120,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
     const received = tracMoved(res.receipt, c.token, r.ownerAddr);
     report.check(
       `claimWithdrawnEpoch pays the owner the position's share of epoch ${epoch}: its score × StakingKPI's net / the node's score`,
-      !!ev && paid === expected && paid > 0n && ev.staker === r.ownerAddr && received === paid,
+      !!ev && paid === expected && ev.staker === r.ownerAddr && received === paid,
       `${fmt(paid)} TRAC, expected ${fmt(expected)}; the owner received ${fmt(received)} TRAC, by its own Transfer logs`,
     );
   } else {
@@ -130,7 +134,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
     const received = receipt ? tracMoved(receipt, c.token, r.ownerAddr) : 0n;
     report.check(
       'the withdrawn epoch was claimed by another caller (the upkeep cron): the owner received the expected amount',
-      !!ev && ev.staker === r.ownerAddr && paid === expected && expected > 0n && received === paid,
+      !!ev && ev.staker === r.ownerAddr && paid === expected && received === paid,
       ev ? `${fmt(paid)} TRAC, expected ${fmt(expected)}; the owner received ${fmt(received)} TRAC, by that transaction's Transfer logs, tx ${log.transactionHash}` : 'no record, and no claim of it on chain',
     );
   }

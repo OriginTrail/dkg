@@ -1323,6 +1323,69 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('by that transaction\'s Transfer logs');
     });
 
+    describe('with a withdrawn epoch that earned nothing', () => {
+      const CLAIM = 'withdraw.claim-withdrawn-epoch';
+      /** The position withdrawn in an epoch with a score and no reward, and the clock in the next. */
+      const withdrawn = async () => {
+        use(await loadFixture(afterCloseClaim));
+        const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+        await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+        await scoreIn(e);
+        const first = await ctxOf('withdraw');
+        await phaseWithdraw(first);
+        passes(first);
+        await toEpoch(e + 1n);
+        return { tokenId: stateNow().tokenId };
+      };
+
+      it('takes the exact zero its claim pays, and the run completes', async () => {
+        await withdrawn();
+        const owner = ownerWallet().address;
+        const before = await fx.f.Token.balanceOf(owner);
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        passes(ctx);
+        expect(ctx.file.done('withdraw')).to.equal(true);
+        expect(checkOf(ctx, 'claimWithdrawnEpoch pays the owner').detail).to.contain('0.0 TRAC, expected 0.0');
+        expect(await fx.f.Token.balanceOf(owner)).to.equal(before);
+      });
+
+      it('takes the exact zero another caller\'s claim paid, and the run completes', async () => {
+        const { tokenId } = await withdrawn();
+        await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId);
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        passes(ctx);
+        expect(ctx.file.done('withdraw')).to.equal(true);
+        expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('0.0 TRAC, expected 0.0');
+      });
+
+      it('fails a claim that paid nothing while a share was due, by the run or by another caller', async () => {
+        for (const byAnother of [false, true]) {
+          const { tokenId } = await withdrawn();
+          if (byAnother) await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId);
+          else await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: CLAIM })));
+          const ctx = await ctxOf('withdraw');
+          // The views give the position a share, which the claim did not pay.
+          ctx.c = { ...ctx.c, kpi: new Proxy(ctx.c.kpi, { get: (t, k) => (k === 'getNetNodeRewards' ? async () => 10n * TRAC : Reflect.get(t, k)) }) };
+          await phaseWithdraw(ctx);
+          expect(failedLabels(ctx).join(' | ')).to.contain(byAnother ? 'claimed by another caller' : 'claimWithdrawnEpoch pays the owner');
+          expect(ctx.file.done('withdraw')).to.equal(false);
+        }
+      });
+
+      it('fails an expected zero that comes from a score other than the one recorded', async () => {
+        await withdrawn();
+        editState((raw) => {
+          raw.withdrawal.recordedScore = String(BigInt(raw.withdrawal.recordedScore) + 1n);
+        });
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        expect(failedLabels(ctx).join(' | ')).to.contain('is the one its withdrawal recorded');
+        expect(ctx.file.done('withdraw')).to.equal(false);
+      });
+    });
+
     describe('with this run\'s claim of the withdrawn epoch reverting', () => {
       const CLAIM = 'withdraw.claim-withdrawn-epoch';
       /** The position withdrawn, with something to claim of that epoch, and the clock in the next: the claim is what is left. */
