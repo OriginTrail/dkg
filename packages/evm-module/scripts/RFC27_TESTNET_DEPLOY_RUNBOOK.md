@@ -465,9 +465,17 @@ The phases, with `SEND=1`, about two days apart in all:
   node score in E+1, it waits and says so (`NoScore`). Run it again after the
   node's next proof, before E+1 ends; after that the claims still unfinalized
   are void, and it fails. Claims another caller finalized count, whenever
-  `finalize` first runs.
-- `close-claim` requires both claims finalized, by the run or by the upkeep cron.
-  With one void the run goes no further: start a new one.
+  `finalize` first runs. Each claim must have finalized at what it was due, by
+  its own `ClaimsFinalized` event, and the node's and the epoch's sums must be
+  what all the epoch's finalizations add up to.
+- `close-claim` requires both claims finalized at what they were due, by the run
+  or by the upkeep cron, and the money due in E+1 to be exactly what the periods
+  of E were funded and topped up with. It checks this before it sends anything,
+  and reads up to three epochs of logs to do it, which can take a few minutes on
+  a public endpoint. With a claim void the run goes no further: start a new one.
+- These sums read the logs of the contracts registered now. An endpoint that
+  serves incomplete logs fails a correct run: run the phase again. A settlement
+  or service contract replaced during the run fails it too: start a new one.
 - `withdraw` waits until the position holds score in the epoch: without it, a
   withdrawal burns the position and records nothing to claim.
 - A phase stopped at any point is run again as it was: it sends nothing the
@@ -482,8 +490,8 @@ The phases, with `SEND=1`, about two days apart in all:
   `cache/rfc27-smoke/<run>.json`.
 
 The upkeep cron may run `closeEpochs`, `finalizeClaims`, `claimFor` or
-`claimWithdrawnEpoch` first. The phase then checks what the cron did, from
-storage, and does not fail.
+`claimWithdrawnEpoch` first. The phase then checks what the cron did, from the
+chain, and does not fail because another caller went first.
 
 The smoke test also runs on the fork, before the deploy reaches testnet, with
 `--config scripts/rfc27-testnet-fork.config.ts`. Its header lists the fork-only

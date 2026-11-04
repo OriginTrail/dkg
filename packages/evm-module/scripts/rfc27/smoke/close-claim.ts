@@ -3,16 +3,57 @@
 // (walletDue + convictionDue + carryIn), served value (sumR), unused share and
 // pool. Where the upkeep cron closed or claimed first, what it did is checked
 // from storage instead. Both of the run's claims must be finalized first, by the
-// run or by the upkeep cron: with one void, the cycle has failed, and goes no further.
+// run or by the upkeep cron, at what they were due, and the money due in E+1 must be
+// exactly what the periods of E were funded with: otherwise the cycle has failed, and
+// goes no further.
 
 import { eventsIn } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, min, sum } from '../report';
 import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
-import { netsFromInputs, rewardClaims } from './reward-claims';
-import { finalizedValue, names, unfinalizedClaims } from './finalize';
+import { firstBlockAt, netsFromInputs, pagedLogs, rewardClaims } from './reward-claims';
+import { checkFinalizations, finalizedValue, names, unfinalizedClaims } from './finalize';
 import { need } from './roles';
+import type { SetupState } from './state';
+
+/**
+ * What is due in the epoch after E, exactly against what every period of E, ours and others',
+ * was funded and topped up with, by their events: others' money cannot make up for a booking
+ * of ours that fell short, and the due holds nothing no funding shows. A period of E can be
+ * funded from E-1, and from the activation epoch at the earliest.
+ */
+async function checkDue(ctx: PoolCtx, s: SetupState): Promise<boolean> {
+  const { report, c } = ctx;
+  const { provider } = ctx.hre.ethers;
+  const { E } = s;
+  const activation = await c.qis.activationEpoch();
+  const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
+  const from = await firstBlockAt(provider, await epochStart(ctx, E - 1n > activation ? E - 1n : activation), staked.blockNumber);
+  const logs = await pagedLogs(
+    provider,
+    { address: [await c.ss.getAddress(), await c.ssw.getAddress()], topics: [[c.ss.getEvent('PeriodFunded').fragment.topicHash, c.ss.getEvent('PeriodToppedUp').fragment.topicHash]] },
+    from,
+  );
+  const funded = { wallet: 0n, conviction: 0n };
+  let count = 0;
+  for (const l of logs) {
+    const parsed = c.ss.interface.parseLog({ topics: [...l.topics], data: l.data });
+    if (!parsed) throw new Error(`transaction ${l.transactionHash}: a funding log that does not parse`);
+    const { subscriptionId, accountId, cost } = parsed.args;
+    if ((await c.cssvc.getSubscription(subscriptionId)).epoch !== E) continue;
+    count++;
+    if (BigInt(accountId) === 0n) funded.wallet += BigInt(cost);
+    else funded.conviction += BigInt(cost);
+  }
+  const due = await c.qis.dueIn(E + 1n);
+  report.set('funded', { ...funded, events: count });
+  return report.check(
+    `what is due in epoch ${E + 1n} is exactly what the periods of epoch ${E} were funded and topped up with`,
+    due.wallet === funded.wallet && due.conviction === funded.conviction,
+    `wallet ${fmt(due.wallet)} of ${fmt(funded.wallet)} TRAC, account ${fmt(due.conviction)} of ${fmt(funded.conviction)} TRAC, by ${count} events`,
+  );
+}
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   const { report, c, file } = ctx;
@@ -34,6 +75,12 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     return;
   }
   if (!file.done('finalize')) report.note('PHASE=finalize has not completed here: another caller (the upkeep cron) finalized the claims');
+  const finalizationsHold = await checkFinalizations(ctx, s);
+  const dueHolds = await checkDue(ctx, s);
+  if (!finalizationsHold || !dueHolds) {
+    report.fail('what the chain holds of this cycle is not what its finalizations and fundings show, so it goes no further: run again if an endpoint may have served incomplete logs, or start a new run');
+    return;
+  }
 
   // The previews, before any close: the pool, the seller's gross, StakingKPI's nets.
   const windowStart = s.stakeEpoch;

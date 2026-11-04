@@ -16,13 +16,37 @@ import { EpochReward, claimPreview, poolShareOf } from '../reads';
 const LOG_PAGE = 199;
 
 /** Logs from `fromBlock` to the head, a page at a time, in order. */
-export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'getLogs'>, filter: { address: string; topics: (string | string[])[] }, fromBlock: number): Promise<Log[]> {
+export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'getLogs'>, filter: { address: string | string[]; topics: (string | string[])[] }, fromBlock: number): Promise<Log[]> {
   const head = await provider.getBlockNumber();
   const logs: Log[] = [];
   for (let from = fromBlock; from <= head; from += LOG_PAGE) {
     logs.push(...(await provider.getLogs({ ...filter, fromBlock: from, toBlock: Math.min(from + LOG_PAGE - 1, head) })));
   }
   return logs;
+}
+
+/**
+ * The first block at or after `ts`, given a block `from` that is. It steps back from
+ * there, doubling, and then halves what is left: an endpoint serves no block it has pruned,
+ * so it reads none from long before `ts`.
+ */
+export async function firstBlockAt(provider: Pick<Provider, 'getBlock'>, ts: bigint, from: number): Promise<number> {
+  const before = async (n: number): Promise<boolean> => BigInt((await provider.getBlock(n))?.timestamp ?? 0) < ts;
+  let high = from;
+  let step = 256;
+  let low = Math.max(high - step, 0);
+  while (!(await before(low))) {
+    if (low === 0) return 0;
+    high = low;
+    step *= 2;
+    low = Math.max(high - step, 0);
+  }
+  while (high - low > 1) {
+    const middle = Math.floor((low + high) / 2);
+    if (await before(middle)) low = middle;
+    else high = middle;
+  }
+  return high;
 }
 
 /**
