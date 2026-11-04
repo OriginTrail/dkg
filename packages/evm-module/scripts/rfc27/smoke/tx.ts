@@ -12,8 +12,8 @@ import { eventsIn } from '../contracts';
 import { Report } from '../report';
 import { Sized, Tx, TxOverGasCap, TxReverted, TxRunner, TxWouldRevert } from '../tx';
 
-/** What is expected of a step, worked out before it is sent, by name. */
-export type Expected = Record<string, bigint>;
+/** What a withdrawal is expected to do, worked out before it is sent and journaled with it: it burns the position these are read from. */
+export type WithdrawalExpected = { epoch: bigint; raw: bigint; auto: bigint; score: bigint };
 
 /** A transaction a run sent, as its journal keeps it. */
 export type StepRecord = {
@@ -25,7 +25,7 @@ export type StepRecord = {
   gasLimit: bigint;
   block?: number;
   gasUsed?: bigint;
-  expected?: Expected;
+  expected?: WithdrawalExpected;
 };
 
 /** Where a run keeps the transactions it sent, by step key. */
@@ -43,7 +43,7 @@ export type Step = Tx & {
   /** Why the step is done already on chain, if it is. */
   done?: string;
   /** What is expected of it, worked out before it is sent and journaled with it, for what it destroys. */
-  expected?: Expected;
+  expected?: WithdrawalExpected;
   /** The contract keeps it from doing its work twice: an attempt that reverted is made again, and does not stop the run. */
   retriesReverted?: boolean;
 };
@@ -59,7 +59,7 @@ export type StepResult = {
   receipt?: TransactionReceipt;
   estimate?: bigint;
   gasLimit?: bigint;
-  expected?: Expected;
+  expected?: WithdrawalExpected;
 };
 
 /**

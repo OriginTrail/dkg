@@ -1518,6 +1518,19 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       });
     });
 
+    it('refuses a journaled withdrawal that does not hold all it is expected to do, and reads one that does as it was written', async () => {
+      use(await loadFixture(afterCloseClaim));
+      await scoreIn(await toMiddle());
+      await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.withdraw' })));
+      const { expected } = rawState().steps['withdraw.withdraw'];
+      expect(Object.keys(expected).sort()).to.deep.equal(['auto', 'epoch', 'raw', 'score']);
+      expect(decodeState(rawState()).steps['withdraw.withdraw'].expected?.raw).to.equal(BigInt(expected.raw));
+      editState((raw) => {
+        raw.steps['withdraw.withdraw'].expected = { epoch: expected.epoch, raw: expected.raw, auto: expected.auto, scor: expected.score };
+      });
+      expect(() => decodeState(rawState())).to.throw('expected.score is not an integer');
+    });
+
     it('stays on its part while a check fails, and runs again sending nothing', async () => {
       use(await loadFixture(afterCloseClaim));
       const e = await toMiddle();
