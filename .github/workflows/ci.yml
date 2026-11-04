@@ -887,7 +887,7 @@ jobs:
     name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04 # Playwright has no Chromium for ubuntu-latest (Ubuntu 26.04) yet
     # Cold 4-node bring-up + on-chain staking/CG registration + one seventh of
     # the real-node suite at one worker, with retries. Generous so a slow
     # runner or a publish retry never flakes the whole lane on a timeout.
