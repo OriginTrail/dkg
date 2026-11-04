@@ -101,6 +101,7 @@
 // the process right after the journal records that step, as a crash would, to
 // resume from (test/rfc27-smoke-resume.test.ts does the same with no fork).
 
+import * as fs from 'fs';
 import * as path from 'path';
 
 import hre from 'hardhat';
@@ -111,8 +112,8 @@ import { guardNetwork } from './rfc27/network';
 import { Redactor, Report, iso, span } from './rfc27/report';
 import { deployed, phaseCheck } from './rfc27/smoke/check';
 import { phaseCloseClaim } from './rfc27/smoke/close-claim';
-import { RESULTS_DIR, SmokeEnv, readEnv } from './rfc27/smoke/config';
-import { Ctx, HUB, withPool } from './rfc27/smoke/context';
+import { LIVE_JSON, RESULTS_DIR, SmokeEnv, readEnv } from './rfc27/smoke/config';
+import { Ctx, withPool } from './rfc27/smoke/context';
 import { phaseFinalize } from './rfc27/smoke/finalize';
 import { roles } from './rfc27/smoke/roles';
 import { phaseServe } from './rfc27/smoke/serve';
@@ -139,7 +140,8 @@ async function main(): Promise<void> {
   const flags = [env.send ? 'SEND=1: transactions are sent' : 'dry run: nothing is sent', net.local && env.warp ? 'FORK_WARP=1' : '', net.local && env.proofs ? 'FORK_PROOFS=1' : ''];
   report.say(`run "${env.run}", phase ${env.phase}, ${flags.filter(Boolean).join(', ')}`);
 
-  const stack = await Stack.at(hre, HUB);
+  // The deployment this run is on: the phases take it from the stack.
+  const stack = await Stack.at(hre, (JSON.parse(fs.readFileSync(LIVE_JSON, 'utf8')) as { contracts: { Hub: { evmAddress: string } } }).contracts.Hub.evmAddress);
   const base = await stack.base();
   const current = await base.chronos.getCurrentEpoch();
   const next = await base.chronos.timestampForEpoch(current + 1n);

@@ -8,7 +8,7 @@ import { eventsIn } from '../contracts';
 import { FORK_ETH } from '../fork';
 import { fmt, iso } from '../report';
 import { MIN_EPOCH_LEFT, needsOf, plannedAmounts } from './config';
-import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt, planDigest, walletPeriodClash } from './context';
+import { PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt, planDigest, walletPeriodClash } from './context';
 import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
 import { Amounts, SmokeState, setupMissing } from './state';
@@ -33,7 +33,7 @@ export async function fundOnFork(ctx: PoolCtx, trac: bigint): Promise<void> {
   }
 }
 
-function newState(ctx: PoolCtx, settlement: string, sellerId: bigint, a: Amounts, startedAt: bigint): SmokeState {
+function newState(ctx: PoolCtx, hub: string, settlement: string, sellerId: bigint, a: Amounts, startedAt: bigint): SmokeState {
   const r = need(ctx.roles, ['ownerAddr', 'buyer', 'edgeBuyer', 'caSession', 'walletSession', 'edgeSession', 'sellerAddr']);
   return {
     version: 1,
@@ -41,7 +41,7 @@ function newState(ctx: PoolCtx, settlement: string, sellerId: bigint, a: Amounts
     network: ctx.net.local ? 'fork' : 'base-sepolia',
     chainId: ctx.net.chainId,
     forkBlock: ctx.net.forkBlock,
-    hub: HUB,
+    hub,
     settlement,
     startedAt,
     addresses: {
@@ -93,7 +93,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const seller = await verifySeller(ctx, a);
   if (!seller.ok) throw new Error('the seller does not qualify: see the checks above');
   if (!s && ctx.env.send) {
-    file.state = newState(ctx, await c.qs.getAddress(), seller.id, a, await now(ctx));
+    file.state = newState(ctx, await ctx.stack.hub.getAddress(), await c.qs.getAddress(), seller.id, a, await now(ctx));
     file.save();
     s = file.state;
   }

@@ -1210,6 +1210,15 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
   });
 
   describe('what a completed phase leaves', () => {
+    it('records the Hub of the stack it was given, and refuses a state of another', async () => {
+      use(await loadFixture(afterSetup));
+      expect(rawState().hub).to.equal(await fx.f.Hub.getAddress());
+      editState((raw) => {
+        raw.hub = hardhatWallet(62).address;
+      });
+      expect(await errorOf(phaseServe(await ctxOf('serve')))).to.match(/belongs to another run: Hub 0x[0-9a-fA-F]{40}, this stack's is 0x[0-9a-fA-F]{40}/);
+    });
+
     it('gates the phases after setup on a state typed to hold what setup records, and refuses one that lacks it', async () => {
       use(await loadFixture(afterSetup));
       editState((raw) => {

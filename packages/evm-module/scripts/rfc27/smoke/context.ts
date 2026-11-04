@@ -1,7 +1,5 @@
 // What every phase of the smoke test works with, built once by the entry point.
 
-import * as fs from 'fs';
-
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
 import { ethers } from 'ethers';
 
@@ -11,7 +9,7 @@ import { BaseContracts, Contracts, Stack } from '../contracts';
 import { Fork, notBefore } from '../fork';
 import { Net, chainNow } from '../network';
 import { Report } from '../report';
-import { LIVE_JSON, SmokeEnv } from './config';
+import { SmokeEnv } from './config';
 import { Marketplace } from './marketplace';
 import { Roles } from './roles';
 import { ServedState, SetupState, SmokeState, StateFile, isServed, isSetup, serveMissing, setupMissing } from './state';
@@ -32,8 +30,6 @@ export type Ctx = {
 
 /** A context of a deployed stack: the pool contracts and the marketplace operations too. */
 export type PoolCtx = Ctx & { c: Contracts; market: Marketplace };
-
-export const HUB = (JSON.parse(fs.readFileSync(LIVE_JSON, 'utf8')) as { contracts: { Hub: { evmAddress: string } } }).contracts.Hub.evmAddress;
 
 export async function withPool(ctx: Ctx): Promise<PoolCtx> {
   const c: Contracts = { ...ctx.base, ...(await ctx.stack.pool()) };
@@ -84,7 +80,8 @@ export async function bindState(ctx: PoolCtx): Promise<SmokeState | undefined> {
   const problems: string[] = [];
   if (s.network !== network) problems.push(`it is a ${s.network} run, this is ${network}`);
   if (s.chainId !== ctx.net.chainId) problems.push(`chain ${s.chainId}`);
-  if (s.hub.toLowerCase() !== HUB.toLowerCase()) problems.push(`Hub ${s.hub}`);
+  const hub = await ctx.stack.hub.getAddress();
+  if (s.hub.toLowerCase() !== hub.toLowerCase()) problems.push(`Hub ${s.hub}, this stack's is ${hub}`);
   if (s.settlement.toLowerCase() !== settlement.toLowerCase()) problems.push(`settlement ${s.settlement}, the Hub now holds ${settlement}`);
   if (ctx.net.local && s.forkBlock !== ctx.net.forkBlock) problems.push(`fork block ${s.forkBlock}, this fork is at ${ctx.net.forkBlock}`);
   if (ctx.roles.ownerAddr && s.addresses.owner !== ctx.roles.ownerAddr) problems.push(`owner ${s.addresses.owner}, this key is ${ctx.roles.ownerAddr}`);
