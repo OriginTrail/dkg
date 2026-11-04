@@ -249,6 +249,11 @@ option explicit (no ACK, health, normal or background reserve; the shared
 scheduler's normal-lane queue limit and its queue wait as values; the same
 timeout diagnostics).
 
+The async VM publisher also uses its control scheduler for the assertion-seal
+point metadata read that gates job admission. When enabled, this keeps shared-lane
+bulk reads from starving that lookup before enqueueing. Full publication snapshot
+and payload reads keep their existing scheduling and validation.
+
 A call reaches its queue's scheduler by naming the queue and nothing else:
 
 ```ts

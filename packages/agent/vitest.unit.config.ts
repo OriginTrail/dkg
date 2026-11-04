@@ -125,6 +125,7 @@ export default defineConfig({
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
+      "test/async-vm-publish-seal-control.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/named-ka-vm-lifecycle.test.ts",
       "test/storage-ack-ledger-timestamp-writer.test.ts",
