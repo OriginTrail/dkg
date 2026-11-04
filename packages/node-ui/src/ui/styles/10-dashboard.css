@@ -31,7 +31,7 @@
 }
 .v10-dash-section:hover {
   border-color: var(--border-strong);
-  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  box-shadow: var(--shadow-sm);
 }
 .v10-dash-section-header {
   display: flex;
@@ -127,7 +127,7 @@
   display: flex;
   gap: 1px;
   height: 7px;
-  border-radius: 3px;
+  border-radius: var(--radius-hair);
   overflow: hidden;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);

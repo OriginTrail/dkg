@@ -298,7 +298,7 @@ function ReplicationTab() {
                 <tr
                   key={r.context_graph_id}
                   onClick={() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id)}
-                  style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover, rgba(255,255,255,0.04))' : undefined }}
+                  style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover)' : undefined }}
                 >
                   <td className="mono">{r.context_graph_id}</td>
                   <td>{r.promotes}</td>
@@ -395,7 +395,7 @@ function HealthTab() {
         </p>
         {hotspots.length === 0 ? (
           <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon" style={{ background: 'rgba(74,222,128,.1)', borderColor: 'rgba(74,222,128,.25)' }}>
+            <div className="empty-state-icon" style={{ background: 'var(--success-bg)', borderColor: 'var(--success-border)' }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
             </div>
             <div className="empty-state-title" style={{ color: 'var(--green)' }}>No errors in this period</div>
@@ -413,7 +413,7 @@ function HealthTab() {
                 <React.Fragment key={rowKey}>
                   <tr
                     onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
-                    style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'rgba(239,68,68,.08)' : undefined }}
+                    style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
                   >
                     <td style={{ fontSize: 12, color: 'var(--text-muted)', padding: '10px 14px' }}>
                       <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
@@ -427,7 +427,7 @@ function HealthTab() {
                     <td style={{ padding: '10px 14px' }}>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
                   </tr>
                   {expandedPhase === rowKey && (
-                    <tr><td colSpan={5} style={{ padding: 0, background: 'rgba(0,0,0,.15)' }}>
+                    <tr><td colSpan={5} style={{ padding: 0, background: 'var(--shade)' }}>
                       <FailedOperationsList
                         operations={failedOps}
                         expandedOp={expandedOp}
@@ -461,7 +461,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
             onClick={() => onToggleOp(op.operation_id)}
             style={{
               display: 'flex', alignItems: 'center', gap: 10, padding: '10px 20px', cursor: 'pointer',
-              background: expandedOp === op.operation_id ? 'rgba(239,68,68,.05)' : undefined,
+              background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
             }}
           >
             <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
@@ -475,12 +475,12 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.1)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.2)', fontSize: 11, color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 11, color: 'var(--red)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'rgba(239,68,68,.06)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.15)', fontSize: 11, color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 11, color: 'var(--red)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -596,7 +596,7 @@ function OperationStatsSection() {
                 const color = opTypeText(r.type);
                 const rateColor = r.rate >= 0.9 ? 'var(--green-mid)' : r.rate >= 0.7 ? 'var(--amber)' : 'var(--red)';
                 return (
-                  <div key={r.type} style={{ background: 'rgba(255,255,255,.03)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
+                  <div key={r.type} style={{ background: 'var(--tint-subtle)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 700, color }}>{r.type}</span>
                     </div>
@@ -618,8 +618,8 @@ function OperationStatsSection() {
                         <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? 'var(--red)' : 'var(--text-dim)' }}>{r.error}</div>
                       </div>
                     </div>
-                    <div style={{ height: 3, background: 'rgba(255,255,255,.06)', borderRadius: 2, overflow: 'hidden', marginTop: 10 }}>
-                      <div style={{ height: '100%', width: `${r.rate * 100}%`, background: rateColor, borderRadius: 2 }} />
+                    <div style={{ height: 3, background: 'var(--tint-strong)', borderRadius: 'var(--radius-hair)', overflow: 'hidden', marginTop: 10 }}>
+                      <div style={{ height: '100%', width: `${r.rate * 100}%`, background: rateColor, borderRadius: 'var(--radius-hair)' }} />
                     </div>
                   </div>
                 );
@@ -634,10 +634,10 @@ function OperationStatsSection() {
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations Over Time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={28} />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
                       <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
@@ -650,9 +650,9 @@ function OperationStatsSection() {
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg Duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -666,9 +666,9 @@ function OperationStatsSection() {
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: '#9ca3af' }} width={28} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
@@ -682,10 +682,10 @@ function OperationStatsSection() {
                 <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#9ca3af' }} width={32} />
-                    <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'rgba(255,255,255,.06)' }} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={32} />
+                    <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
                     <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
                       <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
@@ -766,8 +766,8 @@ export function HardwareTab() {
             <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
-              <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 2, margin: '5px 0 3px' }}>
-                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 2, transition: 'width .4s ease' }} />
+              <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
+                <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 'var(--radius-hair)', transition: 'width .4s ease' }} />
               </div>
             ) : <div style={{ height: 3, margin: '5px 0 3px' }} />}
             <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{stat.sub}</div>
@@ -836,7 +836,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       <div style={{ display: 'flex', gap: 4, marginBottom: 3, flexWrap: 'wrap' }}>
         {phases.map((p: any, i: number) => {
           const color = p.status === 'error'
-            ? '#ef4444'
+            ? 'var(--accent-red)'
             : p.status === 'cancelled'
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
@@ -855,11 +855,11 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
         })}
       </div>
       {/* Gantt bar */}
-      <div style={{ display: 'flex', gap: 2, height: 10, borderRadius: 3, overflow: 'hidden', background: 'transparent' }}>
+      <div style={{ display: 'flex', gap: 2, height: 10, borderRadius: 'var(--radius-hair)', overflow: 'hidden', background: 'transparent' }}>
         {phases.map((p: any, i: number) => {
           const pct = Math.max(((p.duration_ms ?? 0) / phaseTotal) * 100, 3);
           const color = p.status === 'error'
-            ? '#ef4444'
+            ? 'var(--accent-red)'
             : p.status === 'cancelled'
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
@@ -887,7 +887,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
             marginBottom: 6, padding: '5px 10px', borderRadius: 'var(--radius-control)',
             background: 'var(--surface)', border: '1px solid var(--border)',
-            boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+            boxShadow: 'var(--shadow-menu)',
             fontSize: 11, zIndex: 10, pointerEvents: 'none',
             maxWidth: 260,
           }}>
@@ -979,7 +979,7 @@ function OperationsTab() {
       <div style={{
         display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 10,
         padding: '6px 12px', borderRadius: 'var(--radius-control)',
-        background: 'rgba(255,255,255,.02)', border: '1px solid var(--border)',
+        background: 'var(--tint-faint)', border: '1px solid var(--border)',
         fontSize: 10, color: 'var(--text-muted)', alignItems: 'center',
       }}>
         <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
@@ -1023,7 +1023,7 @@ function OperationsTab() {
                 <tr
                   key={op.operation_id}
                   onClick={() => setSelectedOp(op.operation_id)}
-                  style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
+                  style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'var(--tint-strong)' : undefined }}
                 >
                   <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
                   <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
@@ -1113,7 +1113,7 @@ function OperationsTab() {
           <div
             onClick={() => setSelectedOp(null)}
             style={{
-              position: 'fixed', inset: 0, background: 'rgba(0,0,0,.4)', zIndex: 900,
+              position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 900,
               animation: 'fadeIn .15s ease-out',
             }}
           />
@@ -1121,7 +1121,7 @@ function OperationsTab() {
             position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
             background: 'var(--bg)', borderLeft: '1px solid var(--border)', zIndex: 901,
             overflowY: 'auto', padding: '20px 24px',
-            boxShadow: '-8px 0 30px rgba(0,0,0,.3)',
+            boxShadow: 'var(--shadow-drawer)',
             animation: 'slideInRight .2s ease-out',
           }}>
             {detail?.operation ? (
@@ -1165,7 +1165,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         <span>{formatAbsTime(opEnd)}</span>
       </div>
 
-      <div style={{ position: 'relative', background: 'rgba(255,255,255,.03)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', padding: '6px 0' }}>
+      <div style={{ position: 'relative', background: 'var(--tint-subtle)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', padding: '6px 0' }}>
         {phases.map((p: any, i: number) => {
           const phaseStart = p.started_at ?? opStart;
           const phaseDuration = p.duration_ms ?? 0;
@@ -1175,7 +1175,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
           const isCancelled = p.status === 'cancelled';
           const isInProgress = p.status === 'in_progress';
           const color = isError
-            ? '#ef4444'
+            ? 'var(--accent-red)'
             : isCancelled
               ? CANCELLED_COLOR
               : isInProgress
@@ -1197,8 +1197,8 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                   }`}
                   style={{
                     position: 'absolute', left: `${left}%`, width: `${Math.min(width, 100 - left)}%`,
-                    height: '100%', borderRadius: 3, opacity: isInProgress ? 0.7 : 1, transition: 'width .3s ease',
-                    background: isError ? 'repeating-linear-gradient(45deg, #ef4444, #ef4444 3px, #b91c1c 3px, #b91c1c 6px)' : color,
+                    height: '100%', borderRadius: 'var(--radius-hair)', opacity: isInProgress ? 0.7 : 1, transition: 'width .3s ease',
+                    background: isError ? 'repeating-linear-gradient(45deg, var(--accent-red), var(--accent-red) 3px, var(--danger-stripe) 3px, var(--danger-stripe) 6px)' : color,
                   }}
                 />
               </div>
@@ -1213,22 +1213,22 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
       <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 9, color: 'var(--text-dim)' }}>
         {phases.some((p: any) => p.status === 'success') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--green-mid)', display: 'inline-block' }} /> Success
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--green-mid)', display: 'inline-block' }} /> Success
           </span>
         )}
         {phases.some((p: any) => p.status === 'error') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--red)', display: 'inline-block' }} /> Failed
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--red)', display: 'inline-block' }} /> Failed
           </span>
         )}
         {phases.some((p: any) => p.status === 'cancelled') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: CANCELLED_COLOR, display: 'inline-block' }} /> Cancelled
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: CANCELLED_COLOR, display: 'inline-block' }} /> Cancelled
           </span>
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 2, background: 'var(--amber)', display: 'inline-block' }} /> In Progress
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--amber)', display: 'inline-block' }} /> In Progress
           </span>
         )}
       </div>
@@ -1277,7 +1277,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,.1)', borderRadius: 'var(--radius-control)', border: '1px solid rgba(239,68,68,.2)', fontSize: 12, color: 'var(--red)' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 12, color: 'var(--red)' }}>
             {op.error_message}
           </div>
         )}
@@ -1309,7 +1309,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                 // to the umbrella `chain` entry.
                 const desc = PHASE_DESCRIPTIONS[p.phase] ?? PHASE_DESCRIPTIONS[topLevel];
                 return (
-                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'rgba(255,255,255,.02)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
+                  <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--tint-faint)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
                     <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
@@ -1424,7 +1424,7 @@ function LogsTab() {
     return (
       <>
         {line.slice(0, idx)}
-        <mark style={{ background: 'var(--amber)', color: 'var(--bg)', borderRadius: 2, padding: '0 1px' }}>
+        <mark style={{ background: 'var(--amber)', color: 'var(--bg)', borderRadius: 'var(--radius-hair)', padding: '0 1px' }}>
           {line.slice(idx, idx + debouncedSearch.length)}
         </mark>
         {line.slice(idx + debouncedSearch.length)}
@@ -1483,7 +1483,7 @@ function LogsTab() {
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'rgba(74,222,128,.3)' : 'var(--border)'}`,
+            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border)'}`,
             background: autoScroll ? 'var(--green-dim)' : 'var(--surface)',
             color: autoScroll ? 'var(--green)' : 'var(--text-muted)',
             fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
@@ -1496,18 +1496,18 @@ function LogsTab() {
         </button>
       </div>
 
-      <div style={{ borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid rgba(139,92,246,.15)', boxShadow: '0 0 40px rgba(139,92,246,.04)' }}>
+      <div style={{ borderRadius: 'var(--radius-card)', overflow: 'hidden', border: '1px solid var(--border-default)' }}>
         <div style={{
           padding: '8px 16px',
-          background: 'linear-gradient(135deg, rgba(139,92,246,.08) 0%, rgba(59,130,246,.05) 100%)',
-          borderBottom: '1px solid rgba(139,92,246,.12)',
+          background: 'var(--tint-faint)',
+          borderBottom: '1px solid var(--border-subtle)',
           fontSize: 11, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
           <span>
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
-            {loading ? <span style={{ marginLeft: 6, color: 'var(--purple)', fontSize: 10 }}>refreshing...</span> : ''}
+            {loading ? <span style={{ marginLeft: 6, color: 'var(--text-tertiary)', fontSize: 10 }}>refreshing...</span> : ''}
           </span>
-          <span className="mono" style={{ fontSize: 10, color: 'rgba(139,92,246,.6)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
         </div>
         <div
           ref={containerRef}
@@ -1517,7 +1517,7 @@ function LogsTab() {
             minHeight: 500,
             overflowY: 'auto',
             padding: '8px 0',
-            background: 'linear-gradient(180deg, rgba(13,17,23,1) 0%, rgba(20,15,35,1) 50%, rgba(13,17,23,1) 100%)',
+            background: 'var(--log-bg)',
             fontFamily: LOG_FONT,
             fontSize: 10.5,
             lineHeight: 1.5,
@@ -1554,13 +1554,13 @@ function LogsTab() {
 
 const LOG_FONT = '"SF Mono", "Consolas", "Liberation Mono", "Menlo", monospace';
 const LOG_COLORS = {
-  timestamp: '#6e7681',
-  module: '#79c0ff',
-  levelError: '#f85149',
-  levelWarn: '#d29922',
-  levelInfo: '#8b949e',
-  message: '#c9d1d9',
-  bg: '#0d1117',
+  timestamp: 'var(--log-timestamp)',
+  module: 'var(--log-module)',
+  levelError: 'var(--log-error)',
+  levelWarn: 'var(--log-warn)',
+  levelInfo: 'var(--log-meta)',
+  message: 'var(--log-text)',
+  bg: 'var(--log-bg)',
 };
 
 function StyledLogEntry({ ts, level, module, message }: { ts: number; level: string; module: string; message: string }) {
@@ -1568,7 +1568,7 @@ function StyledLogEntry({ ts, level, module, message }: { ts: number; level: str
   return (
     <div style={{
       padding: '1px 12px', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-      background: level === 'error' ? 'rgba(248,81,73,.08)' : undefined,
+      background: level === 'error' ? 'var(--log-error-bg)' : undefined,
     }}>
       <span style={{ color: LOG_COLORS.timestamp, marginRight: 6 }}>{formatTime(ts)}</span>
       <span style={{ color: levelColor, fontWeight: 600, marginRight: 6 }}>{level.toUpperCase().padEnd(5)}</span>
@@ -1600,7 +1600,7 @@ function parseDaemonLogLine(line: string): { ts: string; opName: string; opId: s
 function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum: number; highlight?: (s: string) => React.ReactNode }) {
   const parsed = parseDaemonLogLine(line);
   const cls = classifyLine(line);
-  const bg = cls === 'error' ? 'rgba(248,81,73,.08)' : undefined;
+  const bg = cls === 'error' ? 'var(--log-error-bg)' : undefined;
 
   if (!parsed) {
     const color = cls === 'error' ? LOG_COLORS.levelError : cls === 'warn' ? LOG_COLORS.levelWarn : LOG_COLORS.message;

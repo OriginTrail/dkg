@@ -170,7 +170,7 @@
   min-width: 0;
 }
 .v10-attachment-chip[data-status="error"] {
-  border-color: color-mix(in srgb, #ef4444 35%, var(--border-subtle));
+  border-color: color-mix(in srgb, var(--accent-red) 35%, var(--border-subtle));
 }
 .v10-attachment-chip[data-status="uploading"] {
   border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border-subtle));
@@ -286,7 +286,7 @@
      instead of competing with it as the blue accent did. Theme-aware
      via --text-primary (~white in dark mode, ~black in light mode). */
   border: 2px dashed var(--text-primary);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-menu);
   text-align: center;
   max-width: 320px;
 }
@@ -331,9 +331,9 @@
   color: var(--text-secondary);
 }
 .v10-local-agent-error {
-  background: color-mix(in srgb, #ef4444 12%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, #ef4444 30%, var(--border-subtle));
-  color: #fca5a5;
+  background: color-mix(in srgb, var(--accent-red) 12%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent-red) 30%, var(--border-subtle));
+  color: var(--text-danger);
 }
 .v10-agent-empty-state {
   padding: 24px 16px;

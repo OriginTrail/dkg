@@ -21,9 +21,9 @@
   padding: 6px 14px;
   font-size: 12px;
   line-height: 1.4;
-  color: var(--text-warning, #7c2d12);
-  background: var(--amber-dim, rgba(251, 191, 36, 0.18));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.45);
+  color: var(--text-warning);
+  background: var(--amber-dim);
+  border-bottom: 1px solid var(--warning-border);
   z-index: 30;
 }
 .v10-token-prompt-text {
@@ -33,9 +33,9 @@
   flex: 0 1 280px;
   min-width: 160px;
   padding: 3px 8px;
-  color: var(--text-primary, inherit);
-  background: var(--bg-surface, transparent);
-  border: 1px solid rgba(251, 191, 36, 0.6);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border: 1px solid var(--warning-border);
 }
 .v10-token-prompt-submit {
   flex: 0 0 auto;
@@ -44,9 +44,9 @@
   padding: 3px 12px;
   border-radius: var(--radius-control);
   cursor: pointer;
-  color: var(--text-warning, #7c2d12);
-  background: rgba(251, 191, 36, 0.35);
-  border: 1px solid rgba(251, 191, 36, 0.6);
+  color: var(--text-warning);
+  background: var(--warning-bg-strong);
+  border: 1px solid var(--warning-border);
 }
 .v10-token-prompt-submit:disabled {
   cursor: default;
@@ -60,9 +60,9 @@
   gap: 10px;
   padding: 5px 12px;
   font-size: 11px;
-  color: #7c2d12;
-  background: var(--amber-dim, rgba(251, 191, 36, 0.16));
-  border-bottom: 1px solid rgba(251, 191, 36, 0.4);
+  color: var(--text-warning);
+  background: var(--amber-dim);
+  border-bottom: 1px solid var(--warning-border);
 }
 .v10-stale-banner .v10-retry-btn { margin-left: auto; }
 
@@ -200,7 +200,7 @@
   flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-menu);
   z-index: 200;
   overflow: hidden;
 }
@@ -404,7 +404,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     top: 0;
     bottom: 0;
     z-index: 40;
-    box-shadow: 0 0 24px rgba(0, 0, 0, 0.35);
+    box-shadow: var(--shadow-menu);
   }
   .v10-app-body > .v10-panel-left { left: 0; }
   .v10-app-body > .v10-panel-right { right: 0; }

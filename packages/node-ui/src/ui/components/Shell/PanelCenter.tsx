@@ -163,7 +163,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         <button
           onClick={handleBack}
           style={{
-            border: '1px solid var(--border-default)', borderRadius: 5, background: 'none',
+            border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)', background: 'none',
             color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, padding: '4px 10px',
             cursor: 'pointer', fontFamily: 'var(--font-sans)',
           }}

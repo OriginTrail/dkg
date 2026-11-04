@@ -166,8 +166,8 @@
   flex-wrap: wrap;
   margin-top: 8px;
   padding: 10px 12px;
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  background: rgba(96, 165, 250, 0.08);
+  border: 1px solid var(--border-strong);
+  background: var(--tint-subtle);
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.4;

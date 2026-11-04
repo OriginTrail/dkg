@@ -32,6 +32,11 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Links | `--text-link`, `--link-underline` | Links are text colour with an underline. Blue is not a link colour. |
 | Focus | `--focus-ring` | Keyboard focus only, always as a 2px ring. Not a link colour, not a layer. |
 | Data | `--data-1` … `--data-8` | Charts and context graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
+| Signal tints | `--success-bg`, `--warning-bg`, `--danger-bg` (+ `-bg-strong`, `-border`) | Washes of the signal accents for notices, result cards and highlighted rows. Text on them uses the matching `--text-*` signal. Mixed from the accents, so they follow the theme. |
+| Neutral tints | `--tint-faint`, `--tint-subtle`, `--tint-strong` | Hover rows, wells, tracks and inline code. A wash of the text colour, so they read in both themes (white-alpha disappears in light mode). |
+| Elevation | `--shadow-xs`, `--shadow-sm`, `--shadow-menu`, `--shadow-popover`, `--shadow-lift`, `--shadow-modal`, `--shadow-drawer`; `--scrim`, `--scrim-strong`, `--shade` | One shadow per kind of surface: sm for hovered cards, menu for dropdowns and floating panels, popover for popovers, lift for raised graph cards, modal for dialogs, drawer for side sheets. Scrim dims the page behind a modal or drawer; shade darkens an expanded row or inset well. |
+| Identity fallback | `--identity-fallback`, `--text-on-identity` | The colour an agent, cell or sub-graph shows before its own identity colour is known, and text on identity fills. |
+| Log viewer | `--log-bg`, `--log-text`, `--log-meta`, `--log-timestamp`, `--log-module`, `--log-error`, `--log-error-bg`, `--log-warn` | The terminal well on Observability, which stays dark in both themes. Nowhere else. |
 
 **Canvas colours.** graph-viz draws on a canvas and can't read CSS variables. Graph views take a plain `GraphPalette` for an explicit theme (`graphPalette(theme)` in `graph-palette.ts`, or `useGraphPalette()` in a component) and pass it to the option builders; `test/graph-palette.test.ts` keeps its values in step with the tokens.
 
@@ -59,6 +64,7 @@ Sentence case everywhere, including buttons, tabs and badges. Uppercase is only 
 
 | Token | px | Use |
 |---|---|---|
+| `--radius-hair` | 2 | Thin bars, tracks, swatches, scrollbars, inline code |
 | `--radius-xs` | 4 | Menu rows, segments inside a segmented control |
 | `--radius-control` | 6 | Buttons, inputs, selects, filter chips |
 | `--radius-nested` | 8 | Anything inside a card (stat cells, notes, legends, tables); menus and popovers |
@@ -135,18 +141,12 @@ The centre of the app works like browser tabs:
 
 ## Checks
 
-`test/design-tokens.test.ts` runs with the normal test suite and fails when a change adds:
+`test/design-tokens.test.ts` runs with the normal test suite and fails when the node UI has:
 
-- a hard-coded colour (hex, `rgb()`, `hsl()`) in a stylesheet other than `00-theme.css`, or in a component's inline style;
+- a hard-coded colour (hex, `rgb()`, `hsl()`) in a stylesheet other than `00-theme.css`, or anywhere in component code, including `var()` fallbacks, gradients and shadows;
 - a hard-coded corner size (`border-radius` / `borderRadius` in px) instead of a `--radius-*` token. `0` and `50%` (circles) are allowed.
 
-Existing hard-coded values are listed per file in `test/fixtures/design-token-baseline.json`. The check only fails when a file has more than its baseline, so old code doesn't block new work. When you remove hard-coded values, run
-
-```bash
-UPDATE_DESIGN_BASELINE=1 pnpm vitest run test/design-tokens.test.ts
-```
-
-to lower the baseline, so they can't creep back. Never raise it by hand: use or add a token instead.
+There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
 
 ## Adding to the system
 

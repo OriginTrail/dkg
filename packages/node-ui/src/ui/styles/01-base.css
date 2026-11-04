@@ -47,7 +47,7 @@ input::placeholder { color: var(--text-tertiary); }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: var(--radius-hair); }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 * { scrollbar-width: thin; scrollbar-color: var(--border-default) transparent; }
 :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }

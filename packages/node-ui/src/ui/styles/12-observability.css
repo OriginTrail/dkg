@@ -135,7 +135,7 @@ select.input {
 
 /* Stat cards */
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:16px 18px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
-.stat-card:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.stat-card:hover{border-color:var(--border-strong);box-shadow: var(--shadow-sm)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
 .stat-label{font-size:12px;color:var(--text-secondary);font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
 .stat-value{font-size:28px;font-weight:700;color:var(--text-primary);line-height:1}
@@ -147,7 +147,7 @@ select.input {
 .v10-modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--scrim);
   z-index: 1000;
   display: flex;
   align-items: center;
@@ -161,7 +161,7 @@ select.input {
   width: 560px;
   max-height: 85vh;
   overflow-y: auto;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-modal);
 }
 .v10-modal-header {
   padding: 20px 24px 16px;
@@ -193,8 +193,8 @@ select.input {
 
 .v10-modal-error {
   padding: 10px 14px;
-  background: rgba(239, 68, 68, 0.08);
-  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
   margin-bottom: 16px;
   font-size: 12px;
   color: var(--text-danger);
@@ -204,7 +204,7 @@ select.input {
 .v10-modal-warning {
   padding: 10px 14px;
   background: var(--amber-dim);
-  border: 1px solid rgba(245, 158, 11, 0.25);
+  border: 1px solid var(--warning-border);
   margin-bottom: 16px;
   font-size: 12px;
   color: var(--text-warning);

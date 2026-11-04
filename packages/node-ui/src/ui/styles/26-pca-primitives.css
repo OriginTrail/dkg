@@ -5,7 +5,7 @@
    Shared sub-components (HealthChip, WalletRow, AddressCrux,
    DiscountTierLadder, DiscountAppliedBadge, EligibilityVerdictBanner,
    SponsorshipHandshake). Warning semantics resolve to `--text-warning`
-   (NOT the SWM `--layer-shared` #f59e0b layer-identity accent).
+   (NOT the SWM `--layer-shared` var(--accent-amber) layer-identity accent).
    ══════════════════════════════════════════ */
 
 /* ----- Copy button (shared) ----- */
@@ -111,17 +111,17 @@
 
 .v10-pca-verdict-green {
   background: var(--green-dim);
-  border-color: rgba(34, 197, 94, 0.25);
+  border-color: var(--success-border);
 }
 .v10-pca-verdict-green .v10-pca-verdict-glyph { color: var(--text-success); }
 .v10-pca-verdict-amber {
   background: var(--amber-dim);
-  border-color: rgba(245, 158, 11, 0.3);
+  border-color: var(--warning-border);
 }
 .v10-pca-verdict-amber .v10-pca-verdict-glyph { color: var(--text-warning); }
 .v10-pca-verdict-danger {
   background: var(--red-dim);
-  border-color: rgba(239, 68, 68, 0.35);
+  border-color: var(--danger-border);
 }
 .v10-pca-verdict-danger .v10-pca-verdict-glyph { color: var(--text-danger); }
 .v10-pca-verdict-neutral {

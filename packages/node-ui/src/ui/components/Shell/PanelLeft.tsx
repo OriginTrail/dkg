@@ -127,16 +127,16 @@ function OracleCatalogueItem({
 function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
   switch (status) {
     case 'chat_ready':
-      return 'var(--accent-green, #22c55e)';
+      return 'var(--accent-green)';
     case 'connecting':
-      return 'var(--accent-yellow, #eab308)';
     case 'degraded':
+      return 'var(--accent-amber)';
     case 'bridge_offline':
-      return 'var(--accent-orange, #f97316)';
+      return 'var(--accent-red)';
     case 'available':
     case 'coming_soon':
     default:
-      return 'var(--text-tertiary, #6b7280)';
+      return 'var(--text-tertiary)';
   }
 }
 
@@ -166,7 +166,7 @@ function IntegrationsSectionBody() {
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 11, color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 11, color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}

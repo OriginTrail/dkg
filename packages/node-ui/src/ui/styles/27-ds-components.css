@@ -350,7 +350,7 @@
   white-space: nowrap;
 }
 .ds-entity-chip-name { overflow: hidden; text-overflow: ellipsis; }
-.ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: 5px; font-size: 10px; }
+.ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: var(--radius-xs); font-size: 10px; }
 .ds-entity-chip.interactive { cursor: pointer; transition: background-color .12s, border-color .12s; }
 .ds-entity-chip.interactive:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
@@ -358,7 +358,7 @@
 /* Light: the selected segment is the white surface lifted off a grey track. */
 body.light .ds-seg-item.active {
   background: var(--bg-surface);
-  box-shadow: 0 0 0 1px var(--border-default), 0 1px 2px rgba(0, 0, 0, .06);
+  box-shadow: 0 0 0 1px var(--border-default), var(--shadow-xs);
 }
 
 /* ══ Cards and surfaces ════════════════════════════════════════════════

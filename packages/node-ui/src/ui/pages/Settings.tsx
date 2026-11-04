@@ -136,7 +136,7 @@ function NetworkTelemetrySection() {
             aria-label="Share telemetry with the network"
             onClick={toggleTelemetry}
             style={{
-              width: 38, height: 22, borderRadius: 11, border: 'none', flexShrink: 0,
+              width: 38, height: 22, borderRadius: 'var(--radius-pill)', border: 'none', flexShrink: 0,
               background: telemetryEnabled ? 'var(--green)' : 'var(--border)',
               transition: 'background .2s', position: 'relative', marginLeft: 16,
               cursor: telemetrySaving ? 'wait' : 'pointer', opacity: telemetrySaving ? 0.6 : 1,
@@ -144,7 +144,7 @@ function NetworkTelemetrySection() {
           >
             <span style={{
               position: 'absolute', top: 3, left: telemetryEnabled ? 19 : 3,
-              width: 16, height: 16, borderRadius: '50%', background: '#fff',
+              width: 16, height: 16, borderRadius: '50%', background: 'var(--text-on-identity)',
               transition: 'left .2s', display: 'block',
             }} />
           </button>
@@ -159,7 +159,7 @@ function NetworkTelemetrySection() {
       {showConsentModal && (
         <div style={{
           position: 'fixed', inset: 0, zIndex: 9999,
-          background: 'rgba(0,0,0,.55)', display: 'flex',
+          background: 'var(--scrim)', display: 'flex',
           alignItems: 'center', justifyContent: 'center',
         }}>
           <div
@@ -170,7 +170,7 @@ function NetworkTelemetrySection() {
             style={{
               background: 'var(--surface)', border: '1px solid var(--border)',
               borderRadius: 'var(--radius-overlay)', padding: '24px 28px', maxWidth: 440, width: '90%',
-              boxShadow: '0 8px 32px rgba(0,0,0,.3)',
+              boxShadow: 'var(--shadow-popover)',
             }}
           >
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
@@ -201,7 +201,7 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
                 style={{
-                  padding: '7px 18px', borderRadius: 7, fontSize: 12, fontWeight: 600,
+                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 12, fontWeight: 600,
                   cursor: 'pointer', border: '1px solid var(--border)',
                   background: 'var(--surface)', color: 'var(--text-muted)',
                 }}
@@ -212,9 +212,9 @@ function NetworkTelemetrySection() {
                 type="button"
                 onClick={confirmTelemetry}
                 style={{
-                  padding: '7px 18px', borderRadius: 7, fontSize: 12, fontWeight: 700,
-                  cursor: 'pointer', border: '1px solid rgba(74,222,128,.4)',
-                  background: 'rgba(74,222,128,.1)', color: 'var(--green)',
+                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 12, fontWeight: 700,
+                  cursor: 'pointer', border: '1px solid var(--success-border)',
+                  background: 'var(--success-bg)', color: 'var(--green)',
                 }}
               >
                 Enable Streaming
@@ -319,7 +319,7 @@ function LocalDataRetentionSection() {
             aria-label="Confirm retention reduction"
             style={{
               marginTop: 8, padding: '10px 14px', borderRadius: 'var(--radius-nested)',
-              background: 'rgba(251,191,36,.06)', border: '1px solid rgba(251,191,36,.2)',
+              background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
             }}
           >
             <div style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 600, marginBottom: 4 }}>
@@ -335,7 +335,7 @@ function LocalDataRetentionSection() {
                 onClick={confirmRetention}
                 style={{
                   padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 11, fontWeight: 700, cursor: 'pointer',
-                  border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.1)', color: 'var(--amber)',
+                  border: '1px solid var(--warning-border)', background: 'var(--warning-bg)', color: 'var(--amber)',
                 }}
               >
                 Prune &amp; Save
@@ -448,7 +448,7 @@ function GeneralSettingsTab() {
           <Field label="Role" value={s?.nodeRole ?? '—'} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-          <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-nested)', background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
+          <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-nested)', background: isOnline ? 'var(--green-dim)' : 'var(--danger-bg)', border: `1px solid ${isOnline ? 'var(--success-border)' : 'var(--danger-border)'}` }}>
             <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
               {isOnline ? '● ONLINE' : '● OFFLINE'}
             </div>
@@ -497,12 +497,12 @@ function GeneralSettingsTab() {
             <RpcUrlField rpcUrl={w.rpcUrl} />
           )}
           {w?.error ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid var(--warning-border)' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
@@ -520,7 +520,7 @@ function GeneralSettingsTab() {
       <LocalDataRetentionSection />
 
       {/* Danger Zone (full-width footer; last in the stack) */}
-      <section className="card ds-card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
+      <section className="card ds-card" style={{ borderColor: 'var(--danger-border)', background: 'var(--danger-bg)' }}>
         <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -529,8 +529,8 @@ function GeneralSettingsTab() {
               disabled={shuttingDown}
               style={{
                 padding: '8px 16px', borderRadius: 'var(--radius-nested)',
-                border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
-                background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
+                border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'var(--warning-border)'}`,
+                background: shutdownConfirm ? 'var(--danger-bg-strong)' : 'var(--warning-bg)',
                 color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
                 fontSize: 12, fontWeight: 600,
                 cursor: shuttingDown ? 'not-allowed' : 'pointer',
