@@ -83,11 +83,35 @@ export class Fork {
       done = true;
       return out;
     } finally {
-      await this.revert(snap).catch((e: unknown) => {
-        if (done) throw e;
-        this.report.note(`the snapshot was not restored: ${errorMessage(e)}`);
-      });
+      await this.restore(snap, !done);
     }
+  }
+
+  /**
+   * `body`, whose changes stay if it succeeds. If it throws, or `failed` says so
+   * once it has ended, the fork goes back as it was, and it can run again. Its
+   * error is the one that reaches the caller, even if the revert fails as well.
+   */
+  async undoIfFailed(body: () => Promise<void>, failed: () => boolean): Promise<void> {
+    const snap = await this.snapshot();
+    let threw = true;
+    try {
+      await body();
+      threw = false;
+    } finally {
+      if (threw || failed()) {
+        await this.restore(snap, threw);
+        this.report.note('it failed: the fork is restored as it was before it');
+      }
+    }
+  }
+
+  /** Reverts to `snap`; if an error is on its way already, a failed revert is noted rather than replacing it. */
+  private async restore(snap: string, errorOnItsWay: boolean): Promise<void> {
+    await this.revert(snap).catch((e: unknown) => {
+      if (!errorOnItsWay) throw e;
+      this.report.note(`the snapshot was not restored: ${errorMessage(e)}`);
+    });
   }
 
   /** A stand-in transaction from an impersonated address, its gas limit set by hand too. */
