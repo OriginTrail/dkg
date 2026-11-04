@@ -132,13 +132,23 @@ export type EpochCloseNumbers = {
   closed: boolean;
 };
 
-/** An epoch's close as storage keeps it, the carry into it chained from activation, as `EpochClosed` reports it. */
+/**
+ * `QueryInferenceSettlement._closeRule`: an epoch's money is all its pool if a node
+ * finalized value in it, and all its carry out otherwise.
+ */
+export const closeRule = (money: bigint, sumR: bigint): { pool: bigint; carryOut: bigint } => (sumR > 0n ? { pool: money, carryOut: 0n } : { pool: 0n, carryOut: money });
+
+/**
+ * An epoch's close as storage keeps it, with the carry into it as `EpochClosed` reports it,
+ * but worked out by the close rule from activation, from what no close writes, so that a
+ * stored pool that took too much cannot lower it.
+ */
 export async function closeFromStorage(c: Contracts, e: bigint): Promise<EpochCloseNumbers> {
   const activation = await c.qis.activationEpoch();
   let carryIn = 0n;
   for (let x = activation; x < e; x++) {
     const due = await c.qis.dueIn(x);
-    carryIn = due.wallet + due.conviction + carryIn - (await c.qis.getEpochClose(x)).pool;
+    carryIn = closeRule(due.wallet + due.conviction + carryIn, (await c.qis.getEpochTotals(x)).sumR).carryOut;
   }
   const due = await c.qis.dueIn(e);
   const close = await c.qis.getEpochClose(e);
