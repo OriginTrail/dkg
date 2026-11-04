@@ -221,10 +221,18 @@ function decodeCycle(x: unknown, where: string): CycleRead {
   return { activation: asBigint(o.activation, `${where}.activation`), lateAccount: { accountId: asBigint(late.accountId, `${where}.lateAccount.accountId`) } };
 }
 
+/** A results file, unless its phase failed checks: what those did to the fork was undone, so nothing can build on it. */
+export function passedResults(name: string, file: string, x: unknown): unknown {
+  const { checks } = asObject(x, file);
+  const failed = Array.isArray(checks) ? checks.filter((c) => Array.isArray(c) && c[1] === false).length : 0;
+  if (failed) throw new Error(`${file} records ${failed} failed check${failed > 1 ? 's' : ''}, whose phase was undone: run PHASE=${name} again`);
+  return x;
+}
+
 function load<T>(name: string, decode: (x: unknown, where: string) => T): T {
   const f = path.join(DIR, `${name}.json`);
   if (!fs.existsSync(f)) throw new Error(`${f} is missing: run PHASE=${name} first`);
-  return decode(JSON.parse(fs.readFileSync(f, 'utf8')), f);
+  return decode(passedResults(name, f, JSON.parse(fs.readFileSync(f, 'utf8'))), f);
 }
 
 export const loadPre = (): PreRead => load('pre', decodePre);

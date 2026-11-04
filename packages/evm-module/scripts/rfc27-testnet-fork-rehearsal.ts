@@ -98,8 +98,10 @@
 // directory) and reads what the earlier phases wrote, decoded and checked
 // where it is loaded (scripts/rfc27/rehearsal/results.ts). The switch phase
 // follows the hub phase directly, before the activation epoch ends, and
-// reverts all it does. Every snapshot is reverted however its phase ends, so a
-// failed phase leaves the fork as it found it and can run again.
+// reverts all it does. A phase that fails, by an error or a failed check, leaves
+// the fork as it found it, so it can run again: each runs in a snapshot that stays
+// only if it succeeds, and the snapshots inside it are reverted however it ends. A
+// later phase refuses the results file of a phase that failed its checks.
 // REHEARSAL_FAIL_AT=<part of a transaction's label> makes a phase fail just
 // before that transaction, which shows it.
 //
@@ -167,7 +169,8 @@ async function main(): Promise<void> {
   const run = Object.prototype.hasOwnProperty.call(PHASES, PHASE) ? PHASES[PHASE] : undefined;
   if (!run) throw new Error(`set PHASE to ${Object.keys(PHASES).join(', ')}`);
   report.say(`client ${String(await rpc(hre, 'web3_clientVersion'))}, chain ${BigInt(String(await rpc(hre, 'eth_chainId')))}, phase ${PHASE}`);
-  await run(await createContext(hre, report));
+  const ctx = await createContext(hre, report);
+  await ctx.fork.undoIfFailed(() => run(ctx), () => report.failed > 0);
 }
 
 main()

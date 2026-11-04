@@ -16,6 +16,7 @@ import { checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existin
 import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
 import { claimAll } from '../scripts/rfc27/rehearsal/operations';
 import { closedWindows } from '../scripts/rfc27/rehearsal/reads';
+import { passedResults } from '../scripts/rfc27/rehearsal/results';
 import type { ClaimResult, Position } from '../scripts/rfc27/rehearsal/results';
 
 /** A report that keeps its checks and prints nothing. */
@@ -147,6 +148,75 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       const message = (p: Promise<unknown>) => p.then(() => 'no error', (e: unknown) => (e as Error).message);
       expect(await message(f.inSnapshot(async () => Promise.reject(new Error('the body failed'))))).to.equal('the body failed');
       expect(await message(f.inSnapshot(async () => 'fine'))).to.equal('evm_revert failed');
+    });
+  });
+
+  describe('a phase, run in a snapshot that stays only if it succeeds', () => {
+    const address = '0x00000000000000000000000000000000000000cd';
+    const local = { chainId: 31337n, client: 'test', local: true, name: 'the in-process chain' };
+    const change = async (wei: bigint) => {
+      await hre.network.provider.send('hardhat_setBalance', [address, hre.ethers.toQuantity(wei)]);
+      await hre.network.provider.send('evm_mine', []);
+    };
+    const state = async () => [await hre.ethers.provider.getBlockNumber(), await hre.ethers.provider.getBalance(address)];
+
+    it('keeps what a successful phase did, for the next one', async () => {
+      const before = await state();
+      await new Fork(hre, local, new QuietReport()).undoIfFailed(() => change(5n), () => false);
+      expect(await hre.ethers.provider.getBalance(address)).to.equal(5n);
+      expect((await state())[0]).to.equal((before[0] as number) + 1);
+    });
+
+    it('undoes a phase that throws, and passes its error on, so a retry starts clean', async () => {
+      const report = new QuietReport();
+      const f = new Fork(hre, local, report);
+      await change(1n);
+      const before = await state();
+      let thrown: unknown;
+      await f
+        .undoIfFailed(async () => {
+          await change(5n);
+          throw new Error('REHEARSAL_FAIL_AT: stopping');
+        }, () => false)
+        .catch((e: unknown) => {
+          thrown = e;
+        });
+      expect((thrown as Error).message).to.equal('REHEARSAL_FAIL_AT: stopping');
+      expect(await state()).to.deep.equal(before);
+      await f.undoIfFailed(() => change(6n), () => false);
+      expect(await hre.ethers.provider.getBalance(address)).to.equal(6n);
+    });
+
+    it('undoes a phase that ended with a failed check, without an error of its own', async () => {
+      const report = new QuietReport();
+      await change(1n);
+      const before = await state();
+      await new Fork(hre, local, report).undoIfFailed(async () => {
+        await change(5n);
+        report.check('something', false);
+      }, () => report.failed > 0);
+      expect(await state()).to.deep.equal(before);
+      expect(report.failed).to.equal(1);
+    });
+
+    it('survives a failed revert: the phase\'s error stands, and without one the revert\'s reaches the caller', async () => {
+      class Stale extends Fork {
+        override async revert(): Promise<void> {
+          throw new Error('evm_revert failed');
+        }
+      }
+      const f = new Stale(hre, local, new QuietReport());
+      const message = (p: Promise<unknown>) => p.then(() => 'no error', (e: unknown) => (e as Error).message);
+      expect(await message(f.undoIfFailed(async () => Promise.reject(new Error('the phase failed')), () => false))).to.equal('the phase failed');
+      expect(await message(f.undoIfFailed(async () => undefined, () => true))).to.equal('evm_revert failed');
+    });
+
+    it('later phases refuse the results file of a phase that failed its checks', () => {
+      const passed = { activation: '660', checks: [['a', true, 'x'], ['b', true]] };
+      expect(passedResults('hub', 'hub.json', passed)).to.equal(passed);
+      const none = { activation: '660' };
+      expect(passedResults('hub', 'hub.json', none)).to.equal(none);
+      expect(() => passedResults('hub', 'hub.json', { checks: [['a', true], ['b', false, 'why']] })).to.throw('hub.json records 1 failed check, whose phase was undone: run PHASE=hub again');
     });
   });
 
