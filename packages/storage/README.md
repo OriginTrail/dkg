@@ -178,6 +178,18 @@ families per scheduler, then `other`). `takeStoreSchedulerStatsReports()` return
 for each registered scheduler, the queue waits of each lane since the previous
 call (`queueWaits`) and the cumulative rejections by lane, family and reason. A
 lane's figures are its longest wait and the count of its waits in fixed buckets.
+
+The existing rate-limited queue-wait warning can also include a locally minted
+async-admission request ID and phase for the waiter and up to three active
+admission operations. These IDs appear only in local diagnostics, never metrics,
+pressure snapshots or public errors. Join them to the bounded
+`async_admission_slow_or_failed` warning to distinguish client close from a later
+answer. Diagnostics are sampled, not an admission ledger. `queueWaitMs` ends at
+dispatch; `activeAgeMs` is time holding a scheduler slot, including transport and
+decoding, not CPU time or proof that the operation caused another request's wait.
+Unscoped work and worker IPC do not acquire a request identity. A timeout or a
+missing diagnostic remains insufficient evidence to retry a publication.
+
 Every started operation counts, including one that starts at once, as a wait of
 about 0 ms; so do those that time out in the queue or are cancelled there. A
 rejection on a full queue never queued, so it adds no wait. The buckets
