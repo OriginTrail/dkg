@@ -1,7 +1,7 @@
 import { createServer, request, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Logger, asyncAdmissionUsage, createAsyncAdmissionDiagnosticTrace, currentAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
+import { ASYNC_ADMISSION_PHASES, ASYNC_ADMISSION_ROUTES, Logger, asyncAdmissionUsage, createAsyncAdmissionDiagnosticTrace, currentAsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import { StorePriorityScheduler } from '../../storage/src/store-priority-scheduler.js';
 import { admissionStep, beginAsyncAdmissionTrace, noteAdmissionResponse } from '../src/daemon/async-admission-trace.js';
 import { createAdmissionTraceReporter } from '../src/daemon/async-admission-trace-diagnostics.js';
@@ -9,6 +9,17 @@ import { createAdmissionTraceReporter } from '../src/daemon/async-admission-trac
 afterEach(() => vi.restoreAllMocks());
 
 describe('admission private trace diagnostics', () => {
+  it('reports every canonical route and phase without accepting arbitrary labels', () => {
+    const emit = vi.fn();
+    const report = createAdmissionTraceReporter({ emit });
+    for (const route of ASYNC_ADMISSION_ROUTES) for (const phase of ASYNC_ADMISSION_PHASES) {
+      const trace = createAsyncAdmissionDiagnosticTrace(route);
+      trace.run(phase, () => report(currentAsyncAdmissionDiagnosticContext()!, 503, 20_000));
+      expect(JSON.parse(emit.mock.lastCall![0])).toMatchObject({ requestId: trace.requestId, route, phase });
+    }
+    expect(emit).toHaveBeenCalledTimes(ASYNC_ADMISSION_ROUTES.length * ASYNC_ADMISSION_PHASES.length);
+  });
+
   it('bounds warning keys independently of request IDs and emits no caller payload or arbitrary labels', async () => {
     let now = 0;
     const emit = vi.fn();
@@ -21,6 +32,7 @@ describe('admission private trace diagnostics', () => {
     const event = JSON.parse(emit.mock.calls[1]![0]);
     expect(Object.keys(event).sort()).toEqual(['elapsedMs', 'event', 'outcome', 'phase', 'requestId', 'route', 'status']);
     report({ ...context, route: 'TOKEN' } as never, 503, 20_000);
+    report({ ...context, phase: 'TOKEN' } as never, 503, 20_000);
     report({ ...context, requestId: 'TOKEN' }, 503, 20_000);
     expect(emit).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(emit.mock.calls)).not.toMatch(/PRIVATE|TOKEN|SECRET/);

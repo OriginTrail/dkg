@@ -1,4 +1,4 @@
-import { Logger, createOperationContext, type AsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
+import { Logger, createOperationContext, isAsyncAdmissionPhase, isAsyncAdmissionRoute, type AsyncAdmissionDiagnosticContext } from '@origintrail-official/dkg-core';
 import { createWarningGate } from './warning-gate.js';
 
 /** Local warnings only; twenty closed route/phase/outcome keys, never request ID. */
@@ -14,8 +14,7 @@ export function createAdmissionTraceReporter(options: {
     outcome: 'response_closed' | 'answer_after_close' = 'response_closed',
   ): void => {
     try {
-      if (!['share_async', 'publish_async'].includes(context.route)
-        || !['request', 'write_preflight', 'intent_resolution', 'snapshot_preflight', 'enqueue'].includes(context.phase)
+      if (!isAsyncAdmissionRoute(context.route) || !isAsyncAdmissionPhase(context.phase)
         || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(context.requestId)
         || !['response_closed', 'answer_after_close'].includes(outcome)
         || !Number.isInteger(status) || status < 0 || status > 599) return;

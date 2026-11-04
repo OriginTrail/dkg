@@ -3,8 +3,22 @@ import {
   createAsyncAdmissionDiagnosticTrace, currentAsyncAdmissionDiagnosticContext,
   withoutAsyncAdmissionDiagnosticContext,
 } from '../src/async-admission-diagnostic-context.js';
+import { ASYNC_ADMISSION_PHASES, ASYNC_ADMISSION_ROUTES, isAsyncAdmissionPhase, isAsyncAdmissionRoute } from '../src/async-admission-usage.js';
 
 describe('private admission diagnostic context', () => {
+  it('accepts every canonical route and phase and rejects values outside that vocabulary', () => {
+    for (const route of ASYNC_ADMISSION_ROUTES) for (const phase of ASYNC_ADMISSION_PHASES) {
+      expect(isAsyncAdmissionRoute(route)).toBe(true);
+      expect(isAsyncAdmissionPhase(phase)).toBe(true);
+      const trace = createAsyncAdmissionDiagnosticTrace(route);
+      expect(trace.run(phase, currentAsyncAdmissionDiagnosticContext)).toEqual({ requestId: trace.requestId, route, phase });
+    }
+    for (const invalid of [undefined, null, 0, {}, 'toString', 'TOKEN', '']) {
+      expect(isAsyncAdmissionRoute(invalid)).toBe(false);
+      expect(isAsyncAdmissionPhase(invalid)).toBe(false);
+    }
+  });
+
   it('isolates concurrent requests and restores the caller across async and nested steps', async () => {
     const a = createAsyncAdmissionDiagnosticTrace('publish_async');
     const b = createAsyncAdmissionDiagnosticTrace('share_async');

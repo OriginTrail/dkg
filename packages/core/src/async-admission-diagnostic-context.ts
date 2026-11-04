@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
-import type { AsyncAdmissionPhase, AsyncAdmissionRoute } from './async-admission-usage.js';
+import { isAsyncAdmissionPhase, isAsyncAdmissionRoute, type AsyncAdmissionPhase, type AsyncAdmissionRoute } from './async-admission-usage.js';
 
 /** Private diagnostic correlation only: never an authority, intent key or metric label. */
 export interface AsyncAdmissionDiagnosticContext {
@@ -10,10 +10,6 @@ export interface AsyncAdmissionDiagnosticContext {
 }
 
 const current = new AsyncLocalStorage<AsyncAdmissionDiagnosticContext>();
-const routes = new Set<AsyncAdmissionRoute>(['share_async', 'publish_async']);
-const phases = new Set<AsyncAdmissionPhase>([
-  'request', 'write_preflight', 'intent_resolution', 'snapshot_preflight', 'enqueue',
-]);
 
 /** Mint locally; no header, body, coordinate or caller-supplied ID is accepted. */
 export function createAsyncAdmissionDiagnosticTrace(route: AsyncAdmissionRoute) {
@@ -22,7 +18,7 @@ export function createAsyncAdmissionDiagnosticTrace(route: AsyncAdmissionRoute) 
     requestId,
     run<T>(phase: AsyncAdmissionPhase, work: () => T): T {
       // Diagnostics must not change admission even for an invalid internal label.
-      if (!routes.has(route) || !phases.has(phase)) return current.exit(work);
+      if (!isAsyncAdmissionRoute(route) || !isAsyncAdmissionPhase(phase)) return current.exit(work);
       return current.run(Object.freeze({ requestId, route, phase }), work);
     },
   });

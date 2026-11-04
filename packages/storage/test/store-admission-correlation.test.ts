@@ -66,6 +66,54 @@ describe('store timeout admission correlation', () => {
     }
   });
 
+  it('removes successful and rejected admissions before reporting replacement blockers', async () => {
+    vi.useFakeTimers();
+    const events: StoreSchedulerTimeoutDiagnostic[] = [];
+    const releases: Array<() => void> = [];
+    const tasks: Promise<unknown>[] = [];
+    let now = 0;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2, ackReservedSlots: 0, healthReservedSlots: 0,
+      normalReservedSlots: 0, backgroundReservedSlots: 0, queueWaitTimeoutMs: 20,
+      now: () => now, timeoutDiagnosticSink: (event) => { events.push(event); },
+    });
+    const settled = [createAsyncAdmissionDiagnosticTrace('publish_async'), createAsyncAdmissionDiagnosticTrace('share_async')];
+    try {
+      for (const [i, trace] of settled.entries()) {
+        tasks.push(trace.run('enqueue', () => scheduler.run('normal', 'blazegraph.query',
+          () => new Promise<void>((resolve, reject) => { releases.push(() => i === 0 ? resolve() : reject(new Error('work failed'))); }))));
+      }
+      const results = Promise.allSettled(tasks);
+      const timeout = () => scheduler.run('normal', 'blazegraph.query', async () => 'unused').catch(() => undefined);
+      const first = timeout();
+      now += 20;
+      await vi.advanceTimersByTimeAsync(20);
+      await first;
+      expect(events[0]?.activeAdmissions?.map((entry) => entry.requestId)).toEqual(settled.map((trace) => trace.requestId));
+      releases.forEach((release) => release());
+      expect((await results).map((result) => result.status)).toEqual(['fulfilled', 'rejected']);
+      await vi.advanceTimersByTimeAsync(0); // Let scheduler finally-cleanup finish before replacing the work.
+      const active = settled.map(() => createAsyncAdmissionDiagnosticTrace('publish_async'));
+      for (const trace of active) {
+        tasks.push(trace.run('snapshot_preflight', () => scheduler.run('normal', 'blazegraph.query',
+          () => new Promise<void>((resolve) => { releases.push(resolve); }))));
+      }
+      now += 60_000; // Permit a second warning for the same operation.
+      await vi.advanceTimersByTimeAsync(60_000);
+      const second = timeout();
+      now += 20;
+      await vi.advanceTimersByTimeAsync(20);
+      await second;
+      expect(events).toHaveLength(2);
+      expect(events[1]?.activeAdmissions?.map((entry) => entry.requestId)).toEqual(active.map((trace) => trace.requestId));
+      for (const trace of settled) expect(JSON.stringify(events[1])).not.toContain(trace.requestId);
+    } finally {
+      releases.forEach((release) => release());
+      await Promise.allSettled(tasks);
+      vi.useRealTimers();
+    }
+  });
+
   it('clears only priority while preserving independent diagnostic context', async () => {
     const trace = createAsyncAdmissionDiagnosticTrace('share_async');
     const { currentAsyncAdmissionDiagnosticContext } = await import('@origintrail-official/dkg-core');
