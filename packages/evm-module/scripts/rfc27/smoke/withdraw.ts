@@ -1,12 +1,12 @@
 // PHASE withdraw, optional, after close-claim, in two runs: the position is
 // withdrawn in the middle of an epoch, which records that epoch's share for
 // the owner; once that epoch has ended, claimWithdrawnEpoch pays it, against
-// the amount the views give (the position's recorded score × StakingKPI's net
-// / the node's score), exactly nothing for an epoch that earned nothing. On testnet
-// this adds a day to the run. A withdrawal burns
-// the position, and records nothing to claim for one with no score in the epoch,
-// so it waits for the seller's proof first. What it expects is journaled with it,
-// since a resume cannot read that from a position that is gone.
+// the amount the views give (the position's recorded score × the epoch's net /
+// the node's score), exactly nothing for an epoch that earned nothing. On testnet
+// this adds a day to the run. A withdrawal burns the position, and records nothing
+// to claim for one with no score in the epoch, so it waits for the seller's proof
+// first. What it expects is journaled with it, since a resume cannot read that from
+// a position that is gone.
 
 import { ethers } from 'ethers';
 
@@ -15,7 +15,7 @@ import { fmt, iso } from '../report';
 import { claimPreview, delegatorKey, positionScore } from '../reads';
 import { MID_EPOCH_MARGIN } from './config';
 import { PoolCtx, complete, doneEarlier, epochStart, now, opensAt, runState, standInProof } from './context';
-import { pagedLogs } from './reward-claims';
+import { netFromInputs, netsFromInputs, pagedLogs } from './reward-claims';
 import { need } from './roles';
 import { tracMoved } from './tx';
 
@@ -57,7 +57,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
         );
         return { part: 'withdraw' };
       }
-      const auto = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw);
+      const auto = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw, await netsFromInputs(c, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n));
       expected = { epoch: current, raw: pos.raw, auto: auto.total, score };
     }
     const w = await ctx.tx.step({
@@ -100,9 +100,9 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   report.say(`\nClaim the withdrawn epoch ${epoch}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
   const score = await c.rss.getEpochNodeDelegatorScore(epoch, node, delegatorKey(tokenId));
   const nodeScore = await c.rss.getNodeEpochScore(epoch, node);
-  const net = await c.kpi.getNetNodeRewards(node, epoch);
+  const net = await netFromInputs(c, node, epoch);
   const expected = nodeScore === 0n ? 0n : (score * net) / nodeScore;
-  report.note(`expected: score ${score} × StakingKPI net ${fmt(net)} TRAC / node score ${nodeScore} = ${fmt(expected)} TRAC`);
+  report.note(`expected: score ${score} × the epoch's net ${fmt(net)} TRAC / node score ${nodeScore} = ${fmt(expected)} TRAC`);
   // What makes an expected zero mean the epoch earned nothing, and not that the score was lost.
   report.check(`the position's score in epoch ${epoch} is the one its withdrawal recorded, and within the node's`, score === recordedScore && nodeScore >= score, `score ${score} of node score ${nodeScore}, recorded ${recordedScore}`);
   if (expected === 0n) report.note(`epoch ${epoch} earned the position nothing, so its claim is to pay exactly nothing: this run has not seen the claim pay`);
@@ -119,7 +119,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
     paid = ev?.amount ?? 0n;
     const received = tracMoved(res.receipt, c.token, r.ownerAddr);
     report.check(
-      `claimWithdrawnEpoch pays the owner the position's share of epoch ${epoch}: its score × StakingKPI's net / the node's score`,
+      `claimWithdrawnEpoch pays the owner the position's share of epoch ${epoch}: its score × the epoch's net / the node's score`,
       !!ev && paid === expected && ev.staker === r.ownerAddr && received === paid,
       `${fmt(paid)} TRAC, expected ${fmt(expected)}; the owner received ${fmt(received)} TRAC, by its own Transfer logs`,
     );
@@ -140,7 +140,8 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   }
   const twice = await ctx.tx.refusal(r.ownerAddr, sv10, claimData);
   report.check('the withdrawn epoch is paid once (NoWithdrawnEpoch)', twice.startsWith('NoWithdrawnEpoch'), twice);
-  report.check(`epoch ${epoch}'s stored net is StakingKPI's`, (await c.css.getNetNodeEpochRewards(node, epoch)) === net);
+  const stored = await c.css.getNetNodeEpochRewards(node, epoch);
+  report.check(`epoch ${epoch}'s stored net is what its publishing share, query/inference gross and operator fee give`, stored === net, `${fmt(stored)} TRAC, those give ${fmt(net)} TRAC`);
   report.set('withdrawnEpoch', { epoch, score, nodeScore, net, expected, paid });
   if (ctx.env.send) {
     complete(ctx);

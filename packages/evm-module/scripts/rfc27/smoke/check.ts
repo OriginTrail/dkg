@@ -216,7 +216,7 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
       `edge: a ${fmt(a.edgeValue)} TRAC period of the edge buyer key, revoked, assigned again, its top-up refused AssignmentExpired`,
   );
   say(`  finalize  epoch E+1, from end(E) + ${grace} s = ${iso((await ts(E + 1n)) + grace)} to ${iso(await ts(E + 2n))}, once the seller has proved in E+1`);
-  say(`  close-claim from the start of E+2, ${iso(await ts(E + 2n))}: closeEpochs, then claimFor against StakingKPI's preview`);
+  say(`  close-claim from the start of E+2, ${iso(await ts(E + 2n))}: closeEpochs, then claimFor against the epochs' nets`);
   say(`  withdraw  optional: in the middle of an epoch after close-claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 3n))})`);
   if (s) {
     const done = PHASES.filter((p) => ctx.file.done(p)).join(', ') || 'nothing yet';
