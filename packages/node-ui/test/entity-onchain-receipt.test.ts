@@ -17,7 +17,7 @@ import { OxigraphStore } from '../../storage/dist/index.js';
 import { DKGQueryEngine } from '../../query/src/index.js';
 import { generateAssertionCreatedMetadata, generateConfirmedFullMetadata } from '../../publisher/src/metadata.js';
 import { summariseVmReceipts } from '../src/ui/hooks/useVmReceiptSummary.js';
-import { buildVmFacts } from '../src/ui/views/project/vm-facts.js';
+import { buildVmFacts, vmSubjectsOf } from '../src/ui/views/project/vm-facts.js';
 import { loadVmReceiptsWith, useVmReceiptsResource, VmReceiptsProvider, type VmReceipt } from '../src/ui/hooks/useVmReceipts.js';
 import {
   buildShareQuery,
@@ -60,6 +60,10 @@ async function seedDirectPublish(store: OxigraphStore, cg: string, ual: string, 
     { txHash: tx, blockNumber: 50, blockTimestamp: 0, publisherAddress: ADDR, batchId: 77n, chainId: 'hardhat:31337' } as any,
   ));
 }
+
+/** VM facts for entities that are all subjects of VM triples. */
+const vmFacts = (entities: Array<{ uri: string }>, summary: Parameters<typeof buildVmFacts>[1]) =>
+  buildVmFacts(entities as any, summary, { loading: false, error: null }, vmSubjectsOf(entities.map(e => ({ subject: e.uri }))));
 
 async function load(store: OxigraphStore, cg: string): Promise<VmReceipt[]> {
   const engine = new DKGQueryEngine(store);
@@ -120,7 +124,7 @@ describe('receipt per entity, from the shared model', () => {
       expect(receiptForEntity(receipts, 'urn:note:3')!.members.sort()).toEqual(['urn:note:2', 'urn:note:3']);
       // The VM header no longer calls them unanchored.
       const entity = (uri: string) => ({ uri, types: ['urn:t:Note'], properties: new Map(), connections: [] }) as any;
-      const facts = buildVmFacts(['urn:note:1', 'urn:note:2', 'urn:note:3'].map(entity), summariseVmReceipts(receipts, true), { loading: false, error: null });
+      const facts = vmFacts(['urn:note:1', 'urn:note:2', 'urn:note:3'].map(entity), summariseVmReceipts(receipts, true));
       expect(facts[0]).toMatchObject({ value: '3 / 3 anchored', tone: 'ok' });
     } finally { await store.close(); }
   });

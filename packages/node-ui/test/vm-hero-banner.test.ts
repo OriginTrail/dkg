@@ -34,8 +34,10 @@ async function renderVmHero(props: {
   document.body.appendChild(container);
   const root = createRoot(container);
 
+  // The banner takes Verifiable Memory's own triples; here only their count matters.
+  const vmTriples = Array.from({ length: props.tripleCount }, (_, i) => ({ subject: `urn:t:${i}`, predicate: 'urn:p', object: 'urn:o' }));
   await act(async () => {
-    root.render(React.createElement(VerifiableMemoryHeroBanner, props));
+    root.render(React.createElement(VerifiableMemoryHeroBanner, { entities: props.entities, vmTriples, contextGraphId: props.contextGraphId }));
   });
 
   return {

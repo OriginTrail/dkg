@@ -82,6 +82,7 @@ export function tabContextGraphId(id: string): string | null {
   const t = decodeTabId(id);
   switch (t.kind) {
     case 'graph': case 'agent': case 'layer': return t.contextGraphId;
+    case 'document': return t.contextGraphId ?? null;
     default: return null;
   }
 }

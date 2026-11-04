@@ -81,6 +81,11 @@ describe('canvas graph rendering', () => {
     driver.call('linkCanvasObject', link, ctx, 1.2); expect(ctx.fillText).toHaveBeenCalledWith('knows', 20, 30); expect(paints.at(-1)?.alpha).toBe(0);
     driver.call('linkCanvasObject', link, ctx, 1.45); expect(paints.at(-1)?.alpha).toBeCloseTo(.5);
     driver.call('linkCanvasObject', link, ctx, 1.7); expect(paints.at(-1)?.alpha).toBe(1);
+    // A restyle after init reaches the running renderer: no re-init.
+    conf.styleEngine.setStyle({ edgeLabelMinZoom: 0.3, defaultEdgeColor: '#abcdef' });
+    ctx.fillText.mockClear();
+    driver.call('linkCanvasObject', link, ctx, 1); expect(ctx.fillText).toHaveBeenCalledWith('knows', 20, 30);
+    expect(driver.call('linkColor', {})).toBe('#abcdef');
   });
   it('animates node fade and risk pulse while keeping canvas alpha restored', () => {
     renderer.init(); renderer.applyAnimation({ fadeIn: true, riskPulse: true }); renderer.render(nodes(node('risk', { isHighRisk: true })), new Map());

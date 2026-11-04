@@ -138,14 +138,15 @@ export class Canvas2DRenderer implements RendererBackend {
         if (fl._graphEdge) {
           return this._styleEngine.getEdgeColor(fl._graphEdge);
         }
-        return styleConfig.defaultEdgeColor;
+        // Live config: the palette and style can change after init (setStyle / applyView).
+        return this._styleEngine.config.defaultEdgeColor;
       })
       .linkWidth(styleConfig.edgeWidth)
       .linkDirectionalArrowLength(styleConfig.edgeArrowSize)
       .linkDirectionalArrowRelPos(1)
       .linkCanvasObjectMode(() => 'after')
       .linkCanvasObject((link: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
-        const fadeStart = styleConfig.edgeLabelMinZoom ?? 0.3;
+        const fadeStart = this._styleEngine.config.edgeLabelMinZoom ?? 0.3;
         if (globalScale < fadeStart) return;
 
         const fl = link as ForceLink;
@@ -168,7 +169,7 @@ export class Canvas2DRenderer implements RendererBackend {
 
         ctx.save();
         ctx.globalAlpha = opacity;
-        ctx.font = `${fontSize}px ${styleConfig.fontFamily}`;
+        ctx.font = `${fontSize}px ${this._styleEngine.config.fontFamily}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 

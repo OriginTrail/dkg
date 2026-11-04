@@ -661,7 +661,7 @@ describe('Context Graph shared empty/stat patterns', () => {
         React.createElement('div', { className: 'v10-layer-expand-body entities-tab' },
           React.createElement(VerifiableMemoryHeroBanner, {
             entities: [],
-            tripleCount: 0,
+            vmTriples: [],
             contextGraphId: 'cg-test',
           }),
         ),

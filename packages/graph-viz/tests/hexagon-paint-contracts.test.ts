@@ -27,16 +27,32 @@ describe('hexagon visual contracts', () => {
       expect(plain.ctx.moveTo).toHaveBeenCalled();
       expect(plain.ctx.fillText).not.toHaveBeenCalled();
     });
-    it('hides avatar initials once the circle is too small to read, and never clips a photo into an avatar', () => {
+    it('hides avatar initials once the circle is too small to read', () => {
       const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
       const tiny = canvasContext();
       painter.paint(tiny.ctx, node('agent', { types: [AGENT], label: 'Claude Code' }), 0, 0, 0.1); // 36 px radius → 3.6 px on screen
       expect(tiny.ctx.arc).toHaveBeenCalled();
       expect(tiny.ctx.fillText).not.toHaveBeenCalled();
-      const photo = canvasContext();
-      painter.paint(photo.ctx, node('agent', { types: [AGENT], label: 'Ada', imageUrl: 'https://example.org/a.png' }), 0, 0, 0.3);
-      expect(photo.ctx.drawImage).not.toHaveBeenCalled();
-      expect(photo.ctx.fillText).toHaveBeenCalledWith('AD', 0, expect.any(Number));
+    });
+    it('never paints a loaded photo over an avatar, while an ordinary node with the same photo shows it', () => {
+      const images: any[] = [];
+      vi.stubGlobal('Image', class { naturalWidth = 64; naturalHeight = 64; constructor() { images.push(this); } });
+      const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
+      const URL = 'https://example.org/a.png';
+      // Positive control: an ordinary node loads the photo and, once loaded, draws it.
+      const thing = node('thing', { types: ['urn:t:Thing'], label: 'Thing', imageUrl: URL });
+      painter.paint(canvasContext().ctx, thing, 0, 0, 0.3);
+      expect(images).toHaveLength(1);
+      images[0].onload();
+      const shown = canvasContext();
+      painter.paint(shown.ctx, thing, 0, 0, 0.3);
+      expect(shown.ctx.drawImage).toHaveBeenCalledWith(images[0], expect.any(Number), expect.any(Number), expect.any(Number), expect.any(Number));
+      // The same, already-loaded photo on an agent: initials only, no image.
+      const avatar = canvasContext();
+      painter.paint(avatar.ctx, node('agent', { types: [AGENT], label: 'Ada', imageUrl: URL }), 0, 0, 0.3);
+      expect(avatar.ctx.drawImage).not.toHaveBeenCalled();
+      expect(avatar.ctx.fillText).toHaveBeenCalledWith('AD', 0, expect.any(Number));
+      expect(images).toHaveLength(1);
     });
     it('fills flat types with their exact colour and keeps the gradient for the rest', () => {
       const painter = painterWith({ [ANCHOR]: { fill: 'flat' } });

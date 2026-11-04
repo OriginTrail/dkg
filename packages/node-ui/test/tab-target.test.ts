@@ -26,6 +26,7 @@ describe('decodeTabId', () => {
     expect(tabContextGraphId('project:cg-1')).toBe('cg-1');
     expect(tabContextGraphId('agent:cg-2|hermes')).toBe('cg-2');
     expect(tabContextGraphId('swm:cg-3')).toBe('cg-3');
+    expect(tabContextGraphId(encodeDocTabId('cg-4', 'urn:dkg:file:keccak256:abc', ''))).toBe('cg-4');
     expect(tabContextGraphId('settings')).toBeNull();
     expect(tabContextGraphId('conviction:7')).toBeNull();
   });

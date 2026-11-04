@@ -41,6 +41,24 @@ describe('style precedence and palette changes', () => {
     expect(explicit.getEdgeColor(edge)).toBe('#654321');
   });
 
+  it('restyles in place: new class colours and appearances, kept node overrides, palette-following defaults', () => {
+    const { node, edge } = graph();
+    const engine = new StyleEngine({ classColors: { 'schema:Person': '#222222' }, classAppearance: { 'schema:Person': { fill: 'flat' } }, edgeLabelMinZoom: 1.2 }, new PrefixManager(), PALETTE_DARK);
+    engine.setNodeColors({ 'urn:other': '#999999' });
+    expect(engine.getNodeColor(node)).toBe('#222222');
+    // The light theme's dictionaries replace the dark ones.
+    engine.setStyle({ classColors: { 'schema:Person': '#dddddd' }, classAppearance: { 'https://schema.org/Person': { shape: 'avatar' } } });
+    expect(engine.getNodeColor(node)).toBe('#dddddd');
+    expect(engine.getAppearance(node)).toEqual({ shape: 'avatar' });
+    expect(engine.config.edgeLabelMinZoom).toBe(0.3);
+    expect(engine.config.nodeColors).toEqual({ 'urn:other': '#999999' });
+    // Unset defaults follow the active palette; an explicit one is kept across palette changes.
+    expect(engine.getEdgeColor(edge)).toBe(PALETTE_DARK.edgeColor);
+    engine.setStyle({ defaultEdgeColor: '#123456' });
+    engine.setPalette(PALETTE_MIDNIGHT);
+    expect(engine.config.defaultEdgeColor).toBe('#123456');
+    expect(engine.config.defaultNodeColor).toBe(PALETTE_MIDNIGHT.primary);
+  });
   it('merges node overrides and resolves compact and full predicate overrides', () => {
     const { node, edge } = graph();
     const styles = new StyleEngine({ nodeColors: { other: '#abcdef' }, predicateColors: { 'schema:knows': '#112233' } }, new PrefixManager());

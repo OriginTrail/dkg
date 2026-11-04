@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { encodeDocTabId, resolveDocRef } from '../../../lib/doc-tab-id.js';
 import { useMemoryEntities, type TrustLevel, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { useVmReceiptSummary } from '../../../hooks/useVmReceiptSummary.js';
-import { buildVmFacts } from '../vm-facts.js';
+import { buildVmFacts, vmSubjectsOf } from '../vm-facts.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
@@ -262,7 +262,7 @@ export function LayerContent({
           {layer === 'vm' && !isInitialVerifiableMemoryLoad && !isVerifiableMemoryUnavailable && (
             <VerifiableMemoryHeroBanner
               entities={entities}
-              tripleCount={tripleCount}
+              vmTriples={layerTriples}
               contextGraphId={contextGraphId}
             />
           )}
@@ -353,9 +353,10 @@ export function LayerContent({
 // agent identity — the verifiability elements that justify the VM's cost.
 const VM_BADGE_TIP = 'Verifiable Memory: Knowledge Assets published to the DKG chain, signed by the publishing agent, and tamper-evident via content hashes.';
 
-function VmHeroFacts({ entities, contextGraphId }: { entities: MemoryEntity[]; contextGraphId: string }) {
+function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: MemoryEntity[]; vmTriples: Triple[]; contextGraphId: string }) {
   const { summary, loading, error } = useVmReceiptSummary(contextGraphId);
-  const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }), [entities, summary, loading, error]);
+  const vmSubjects = useMemo(() => vmSubjectsOf(vmTriples), [vmTriples]);
+  const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }, vmSubjects), [entities, summary, loading, error, vmSubjects]);
   return (
     <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this context graph">
       {facts.map(f => (
@@ -368,11 +369,13 @@ function VmHeroFacts({ entities, contextGraphId }: { entities: MemoryEntity[]; c
   );
 }
 
-export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraphId }: {
+export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId }: {
   entities: MemoryEntity[];
-  tripleCount: number;
+  /** Verifiable Memory's own triples (the layer view's triples). */
+  vmTriples: Triple[];
   contextGraphId: string;
 }) {
+  const tripleCount = vmTriples.length;
   const totalAssets = entities.length;
   const typeSet = new Set<string>();
   for (const e of entities) for (const t of e.types) typeSet.add(t);
@@ -422,7 +425,7 @@ export function VerifiableMemoryHeroBanner({ entities, tripleCount, contextGraph
           { id: 'types', value: typeCount, label: 'Entity Types' },
         ]}
       />
-      <VmHeroFacts entities={entities} contextGraphId={contextGraphId} />
+      <VmHeroFacts entities={entities} vmTriples={vmTriples} contextGraphId={contextGraphId} />
     </div>
   );
 }

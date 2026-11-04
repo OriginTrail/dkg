@@ -33,7 +33,7 @@ import { DKGQueryEngine } from '../../query/src/index.js';
 import { generateAssertionCreatedMetadata, generateGraphKnowledgeAssetMetadata, generateSubGraphRegistration } from '../../publisher/src/metadata.js';
 import { loadVmReceiptsWith, MEMBER_ROW_LIMIT, type VmQueryRunner, type VmReceiptLoad } from '../src/ui/hooks/useVmReceipts.js';
 import { hasReceipt, summariseVmReceipts } from '../src/ui/hooks/useVmReceiptSummary.js';
-import { buildVmFacts } from '../src/ui/views/project/vm-facts.js';
+import { buildVmFacts, vmSubjectsOf } from '../src/ui/views/project/vm-facts.js';
 import type { MemoryEntity } from '../src/ui/hooks/useMemoryEntities.js';
 
 const CG = 'vm-receipt-contract';
@@ -216,6 +216,9 @@ async function load(): Promise<VmReceiptLoad> {
 
 // Each seeded entity is the subject of its content triples.
 const entity = (uri: string): MemoryEntity => ({ uri, types: ['http://schema.org/Note'], properties: new Map(), connections: [] } as unknown as MemoryEntity);
+/** VM facts for entities that are all subjects of VM triples. */
+const vmFacts = (entities: Array<{ uri: string }>, summary: Parameters<typeof buildVmFacts>[1]) =>
+  buildVmFacts(entities as any, summary, { loading: false, error: null }, vmSubjectsOf(entities.map(e => ({ subject: e.uri }))));
 
 describe('VM receipt loader against writer-shaped RDF through the scoped engine', () => {
   it('loads one receipt per published assertion in this context graph only', async () => {
@@ -273,7 +276,7 @@ describe('VM receipt loader against writer-shaped RDF through the scoped engine'
     for (const uri of [LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, REPUB_REV_ENTITY, CURRENT_ENTITY, REOPENED_ENTITY, DRAFT_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY]) expect(hasReceipt(uri, summary), uri).toBe(true);
     expect(hasReceipt(UNRECEIPTED_ENTITY, summary)).toBe(false);
     expect(hasReceipt('urn:contract:other:1', summary)).toBe(false);
-    const facts = buildVmFacts([LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, REPUB_REV_ENTITY, CURRENT_ENTITY, REOPENED_ENTITY, DRAFT_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY, UNRECEIPTED_ENTITY].map(entity), summary, { loading: false, error: null });
+    const facts = vmFacts([LEGACY_ENTITY, V2_ENTITY, SUB_ENTITY, REPUB_ENTITY, REPUB_REV_ENTITY, CURRENT_ENTITY, REOPENED_ENTITY, DRAFT_ENTITY, SYNCED_ENTITY, TXCONF_ENTITY, UNRECEIPTED_ENTITY].map(entity), summary);
     expect(facts.find(f => f.id === 'onchain')?.value).toBe('10 / 11 anchored');
   });
 
@@ -288,7 +291,7 @@ describe('VM receipt loader against writer-shaped RDF through the scoped engine'
       };
       const { receipts, complete } = await loadVmReceiptsWith(CG, capped);
       expect(complete).toBe(false);
-      const facts = buildVmFacts([entity(UNRECEIPTED_ENTITY)], summariseVmReceipts(receipts, complete), { loading: false, error: null });
+      const facts = vmFacts([entity(UNRECEIPTED_ENTITY)], summariseVmReceipts(receipts, complete));
       const onchain = facts.find(f => f.id === 'onchain');
       expect(onchain).toMatchObject({ value: 'at least 0 / 1 anchored', tone: 'muted' });
     } finally { await store.close(); }

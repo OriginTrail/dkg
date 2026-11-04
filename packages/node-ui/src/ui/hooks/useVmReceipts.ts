@@ -70,7 +70,7 @@
  *
  * Read-only over `/api/query`.
  */
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext } from 'react';
 import {
   assertionLifecycleUri,
   contextGraphLayerUri,
@@ -81,6 +81,7 @@ import { parseDeterministicKnowledgeAssetUal } from '@origintrail-official/dkg-c
 import { MemoryLayer } from '@origintrail-official/dkg-core/dist/memory-model.js';
 import { isSafeIri, sparqlIri, sparqlString } from '@origintrail-official/dkg-core/sparql-safe';
 import { executeQuery, type QueryExecutionOptions } from '../api.js';
+import { useFetch } from '../hooks.js';
 import { decodeAssertionIdentity } from '../assertion-identity.js';
 import { bindingLexicalValue } from '../query-bindings.js';
 import { useMemoryGraphEvents } from './useNodeEvents.js';
@@ -474,46 +475,27 @@ export interface VmReceiptsResource extends VmReceiptsState {
 
 /** Load and own the receipts of one graph. Reloads when the graph changes,
  *  when its Verifiable Memory changes (a publish), and on `refresh()`.
- *  A missing id, or one that can't form a safe graph IRI, loads nothing. */
+ *  A missing id, or one that can't form a safe graph IRI, loads nothing.
+ *
+ *  The request lifecycle is the shared `useFetch`: scoped to the graph with
+ *  `retention: 'scope'`, so a same-graph reload keeps its receipts on screen,
+ *  and a render for another graph (including the first one after a switch,
+ *  before any effect runs) never exposes the previous graph's receipts or
+ *  error. The only receipt-specific policy is reloading on VM changes. */
 export function useVmReceiptsResource(contextGraphId: string | undefined): VmReceiptsResource {
-  // The state records which graph it belongs to. A render for any other graph
-  // (the first render after a switch, before the effect below runs) reads as
-  // empty and loading, so no consumer ever sees one graph's receipts as another's.
-  const [state, setState] = useState<OwnedState>(EMPTY_OWNED);
-  const [reloads, setReloads] = useState(0);
-  const versionRef = useRef(0);
-  const refresh = useCallback(() => setReloads(n => n + 1), []);
   const loadable = receiptMetaGraph(contextGraphId) ? contextGraphId : undefined;
+  const { data, loading, error, refresh: load } = useFetch(
+    () => loadVmReceipts(loadable!),
+    [loadable],
+    0,
+    { scope: loadable, retention: 'scope', enabled: loadable !== undefined },
+  );
+  const refresh = useCallback(() => { void load(); }, [load]);
   useMemoryGraphEvents(loadable ?? '', refresh, { layers: ['vm'] });
-  useEffect(() => {
-    const version = ++versionRef.current;
-    if (!loadable) {
-      setState(EMPTY_OWNED);
-      return;
-    }
-    // Reloading the same graph keeps its receipts on screen (no flicker).
-    setState(prev => (prev.graph === loadable ? { ...prev, loading: true, error: null } : { ...EMPTY_STATE, graph: loadable, loading: true }));
-    loadVmReceipts(loadable).then(
-      ({ receipts, complete }) => {
-        if (version !== versionRef.current) return;
-        setState({ graph: loadable, receipts, complete, loading: false, error: null });
-      },
-      (err: unknown) => {
-        if (version !== versionRef.current) return;
-        const message = err instanceof Error ? err.message : 'Failed to load publish receipts';
-        setState({ graph: loadable, receipts: null, complete: true, loading: false, error: message });
-      },
-    );
-  }, [loadable, reloads]);
-  const current = state.graph === loadable ? state : { ...EMPTY_STATE, loading: !!loadable };
-  return { receipts: current.receipts, complete: current.complete, loading: current.loading, error: current.error, contextGraphId, refresh };
+  return { receipts: data?.receipts ?? null, complete: data?.complete ?? true, loading, error, contextGraphId, refresh };
 }
 
-/** Owner state, tagged with the graph it was loaded for. */
-interface OwnedState extends VmReceiptsState { graph: string | undefined }
-
 const EMPTY_STATE: VmReceiptsState = { receipts: null, complete: true, loading: false, error: null };
-const EMPTY_OWNED: OwnedState = { ...EMPTY_STATE, graph: undefined };
 const noop = () => {};
 
 const VmReceiptsContext = createContext<VmReceiptsResource | null>(null);

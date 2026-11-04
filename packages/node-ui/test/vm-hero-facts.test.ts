@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildVmFacts, isTripleSubject } from '../src/ui/views/project/vm-facts.js';
+import { buildVmFacts, vmSubjectsOf } from '../src/ui/views/project/vm-facts.js';
 import { buildEntities } from '../src/ui/hooks/useMemoryEntities.js';
 import { summariseVmReceipts as summarise, hasReceipt } from '../src/ui/hooks/useVmReceiptSummary.js';
 import { buildVmReceiptQuery, parseVmReceiptRows, receiptMetaGraph } from '../src/ui/hooks/useVmReceipts.js';
@@ -9,10 +9,12 @@ import { buildVmReceiptQuery, parseVmReceiptRows, receiptMetaGraph } from '../sr
 const summariseVmReceipts = (rows: Array<Record<string, unknown>>) =>
   summarise(parseVmReceiptRows(rows.map(r => ({ tx: '0x1', sealRoot: '"ab"', ...r })), 'cg'));
 
-// An entity with triples of its own (here a type), as receipts cover.
 const ent = (uri: string) => ({ uri, label: uri, types: ['http://schema.org/Thing'], trustLevel: 'verified', layers: new Set(), subGraphs: new Set(), properties: new Map(), connections: [] }) as any;
 const A = 'did:dkg:context-graph:cg/assertion/0xabc/';
 const ok = { loading: false, error: null };
+/** Every given entity is a subject of a VM triple. */
+const asSubjects = (entities: Array<{ uri: string }>) => vmSubjectsOf(entities.map(e => ({ subject: e.uri })));
+const facts_ = (entities: any[], s: any, state = ok) => buildVmFacts(entities, s, state, asSubjects(entities));
 
 describe('VM receipt summary', () => {
   it('reads real receipts from the context graph _meta, not share records', () => {
@@ -48,7 +50,7 @@ describe('Verifiable Memory hero facts (C11)', () => {
       { asrt: A + 'two', agent: 'did:dkg:agent:0x2', finalizedAt: '2026-10-31T10:00:00Z' },
     ]);
     // urn:x:a by member row; the second entity by assertion-URI prefix.
-    const facts = buildVmFacts([ent('urn:x:a'), ent(A + 'two/entity/1')], s, ok);
+    const facts = facts_([ent('urn:x:a'), ent(A + 'two/entity/1')], s, ok);
     expect(facts.map(f => f.id)).toEqual(['onchain', 'signers', 'last', 'consensus']);
     expect(facts[0]).toMatchObject({ value: '2 / 2 anchored', tone: 'ok' });
     expect(facts[1]).toMatchObject({ value: '2 agents' });
@@ -61,24 +63,25 @@ describe('Verifiable Memory hero facts (C11)', () => {
 
   it('flags assets without an on-chain receipt', () => {
     const s = summariseVmReceipts([{ asrt: A + 'one', member: 'urn:x:a', agent: 'x' }]);
-    const facts = buildVmFacts([ent('urn:x:a'), ent('urn:x:b'), ent('urn:x:c')], s, ok);
+    const facts = facts_([ent('urn:x:a'), ent('urn:x:b'), ent('urn:x:c')], s, ok);
     expect(facts[0]).toMatchObject({ value: '1 / 3 anchored', tone: 'warn' });
     expect(facts[0]!.tooltip).toContain('2 Knowledge Assets have no on-chain receipt');
   });
 
-  it('does not count a node that is only referenced as an object', () => {
-    // A fully published relationship: <alice> schema:knows <bob>, Bob has no triples of his own.
-    const entities = [...buildEntities([
-      { subject: 'urn:person:alice', predicate: 'http://schema.org/name', object: '"Alice"', layer: 'verified' },
-      { subject: 'urn:person:alice', predicate: 'http://schema.org/knows', object: 'urn:person:bob', layer: 'verified' },
-    ] as any).values()];
-    expect(entities.map(e => [e.uri, isTripleSubject(e)])).toEqual([['urn:person:alice', true], ['urn:person:bob', false]]);
-    // Receipt membership holds triple subjects only: Alice.
+  it('counts subjects of Verifiable Memory triples only, whatever other layers add', () => {
+    // The reviewer's case: VM holds only <alice> schema:knows <bob>; Working
+    // Memory adds a draft name for Bob. Bob is merged into one entity with a
+    // property, but in VM he is only an object.
+    const vm = [{ subject: 'urn:person:alice', predicate: 'http://schema.org/knows', object: 'urn:person:bob', layer: 'verified' }];
+    const wm = [{ subject: 'urn:person:bob', predicate: 'http://schema.org/name', object: '"Draft Bob"', layer: 'working' }];
+    const entities = [...buildEntities([...vm, ...wm] as any).values()];
+    expect(entities.find(e => e.uri === 'urn:person:bob')?.properties.size).toBe(1);
     const s = summariseVmReceipts([{ asrt: A + 'people', member: 'urn:person:alice' }]);
-    expect(buildVmFacts(entities, s, ok)[0]).toMatchObject({ value: '1 / 1 anchored', tone: 'ok' });
-    // A subject without a receipt is still flagged.
-    const unreceipted = buildVmFacts(entities, summariseVmReceipts([]), ok)[0];
-    expect(unreceipted).toMatchObject({ value: '0 / 1 anchored', tone: 'warn' });
+    expect(buildVmFacts(entities, s, ok, vmSubjectsOf(vm))[0]).toMatchObject({ value: '1 / 1 anchored', tone: 'ok' });
+    // A VM subject without a receipt is still flagged.
+    expect(buildVmFacts(entities, summariseVmReceipts([]), ok, vmSubjectsOf(vm))[0]).toMatchObject({ value: '0 / 1 anchored', tone: 'warn' });
+    // Subjects compare in canonical form (a bracketed IRI is the same subject).
+    expect(vmSubjectsOf([{ subject: '<urn:person:alice>' }]).has('urn:person:alice')).toBe(true);
   });
 
   it('matches receipts on assertion boundaries, not bare prefixes', () => {
@@ -88,14 +91,14 @@ describe('Verifiable Memory hero facts (C11)', () => {
     expect(hasReceipt(A + 'note#e1', s)).toBe(true);
     expect(hasReceipt(A + 'notebook', s)).toBe(false);
     expect(hasReceipt(A + 'notebook/entity/1', s)).toBe(false);
-    const facts = buildVmFacts([ent(A + 'note/entity/1'), ent(A + 'notebook/entity/1')], s, ok);
+    const facts = facts_([ent(A + 'note/entity/1'), ent(A + 'notebook/entity/1')], s, ok);
     expect(facts[0]).toMatchObject({ value: '1 / 2 anchored', tone: 'warn' });
   });
 
   it('never claims consensus, and stays neutral while loading or on error', () => {
-    const loading = buildVmFacts([ent('urn:x:a')], null, { loading: true, error: null });
+    const loading = facts_([ent('urn:x:a')], null, { loading: true, error: null });
     expect(loading.map(f => f.tone)).toEqual(['muted', 'muted']);
-    const failed = buildVmFacts([ent('urn:x:a')], null, { loading: false, error: 'boom' });
+    const failed = facts_([ent('urn:x:a')], null, { loading: false, error: 'boom' });
     expect(failed[0]).toMatchObject({ value: "couldn't load", tone: 'muted' });
     for (const f of [...loading, ...failed]) if (f.id === 'consensus') expect(f.value).toBe('not set up');
   });

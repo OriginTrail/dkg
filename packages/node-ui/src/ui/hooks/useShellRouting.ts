@@ -4,7 +4,7 @@ import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { isPassiveCatalogueGraph } from '../lib/contextGraphSidebar.js';
 import { pathToTab, tabIdToPath } from '../lib/tab-routes.js';
-import { decodeTabId } from '../lib/tab-target.js';
+import { tabContextGraphId } from '../lib/tab-target.js';
 
 /**
  * The address owns the active centre tab.
@@ -59,15 +59,16 @@ export function useShellRouting(): void {
     openTab(tabs.find((t) => t.id === route.id) ?? { id: route.id, label: route.label, closable: true });
   }, [pathname, navigate]);
 
-  // Active tab → active graph. Back/Forward, a refreshed or bookmarked graph
+  // Active tab → active graph. Back/Forward, a refreshed or bookmarked
   // address and the tab bar all establish the same context as picking the
   // graph in the sidebar, so the agent panel's chat and attachments target
-  // the graph on screen. A graph only browsed from the catalogue clears the
+  // the graph on screen. That holds for every graph-scoped tab (the graph
+  // itself, one of its agents, a memory layer, a document opened in it), not
+  // only the graph tab. A graph only browsed from the catalogue clears the
   // target instead, like the sidebar's Browse; it's re-checked once the graph
   // list arrives (a bookmark can load before it). The dashboard clears it too;
   // other places (Settings, Observability) leave it as it was.
-  const activeTarget = decodeTabId(activeTabId);
-  const activeGraphId = activeTarget.kind === 'graph' ? activeTarget.contextGraphId : null;
+  const activeGraphId = tabContextGraphId(activeTabId);
   const activeGraphPassive = useProjectsStore((s) => {
     const graph = activeGraphId ? s.contextGraphs.find((cg) => cg.id === activeGraphId) : undefined;
     return graph ? isPassiveCatalogueGraph(graph) : false;

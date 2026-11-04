@@ -567,7 +567,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                 renderHoodTriples.length > 0 ? (
                   <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
                     <RdfGraph
-                      key={`${entity.uri}:${theme}:${expanded ? 'expanded' : 'inline'}`}
+                      key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
                       data={renderHoodTriples}
                       format="triples"
                       options={graphOptions}

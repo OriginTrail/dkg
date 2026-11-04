@@ -335,7 +335,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     expect(graphState.unmounts).toEqual([LAYER_HEX.dark.working]);
   });
 
-  it('remounts the graph with the new palette when the theme switches', async () => {
+  it('keeps the same graph and hands it the new palette when the theme switches', async () => {
     vi.stubGlobal('fetch', vi.fn());
     const { LayerGraphPanel } = await import('../src/ui/views/project/components.js');
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
@@ -346,9 +346,12 @@ describe('LayerGraphPanel graph lifecycle', () => {
       await waitForAssertion(() => { expect(graphState.instances).toEqual([LAYER_HEX.dark.working]); });
 
       act(() => { useLayoutStore.setState({ theme: 'light' }); });
-      // A new instance, built with the light palette: the canvas can't keep dark colours.
-      await waitForAssertion(() => { expect(graphState.instances).toEqual([LAYER_HEX.dark.working, LAYER_HEX.light.working]); });
-      expect(container.querySelector('[data-testid="rdf-graph"]')?.getAttribute('data-default-color')).toBe(LAYER_HEX.light.working);
+      // The same instance (no remount, reload or refit) receives the light
+      // style; graph-viz restyles it in place (RdfGraph's style effect).
+      await waitForAssertion(() => {
+        expect(container.querySelector('[data-testid="rdf-graph"]')?.getAttribute('data-default-color')).toBe(LAYER_HEX.light.working);
+      });
+      expect(graphState.instances).toEqual([LAYER_HEX.dark.working]);
     } finally {
       act(() => { useLayoutStore.setState({ theme: before }); });
     }

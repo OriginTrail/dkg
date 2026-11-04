@@ -609,9 +609,9 @@ export function LayerGraphPanel({
         canvasTriples.length > 0 ? (
           <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
             <RdfGraph
-              // RdfGraph reads its options once, at mount: remount on a theme switch so
-              // the canvas takes the new palette along with the legend.
-              key={`${graphKey}:${theme}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}:${graphOptions.focus?.maxNodes}`}
+              // A theme switch restyles the canvas in place (RdfGraph applies a
+              // changed options.style); the key only covers mount-only options.
+              key={`${graphKey}:${expanded ? 'expanded' : 'inline'}:${canvasTriples.length}:${graphOptions.focus?.maxNodes}`}
               data={canvasTriples}
               format="triples"
               options={graphOptions}

@@ -41,10 +41,25 @@ export class StyleEngine {
   constructor(config: StyleConfig | undefined, prefixManager: PrefixManager, palette?: ColorPalette) {
     this._prefixManager = prefixManager;
     this._palette = palette ?? PALETTE_DARK;
+    this._config = undefined as unknown as Required<StyleConfig>;
+    this._hasExplicitDefaultNodeColor = false;
+    this._hasExplicitDefaultEdgeColor = false;
+    this._appearance = new Map();
+    this.setStyle(config);
+  }
+
+  /**
+   * Replace the style configuration in place (a theme switch: new class,
+   * namespace and predicate colours, appearances, defaults). Per-node colour
+   * overrides are kept unless the new config sets them; defaults not set
+   * explicitly follow the active palette. The renderer reads the live
+   * config, so a repaint is enough: no graph rebuild.
+   */
+  setStyle(config: StyleConfig | undefined): void {
     this._hasExplicitDefaultNodeColor = config?.defaultNodeColor !== undefined;
     this._hasExplicitDefaultEdgeColor = config?.defaultEdgeColor !== undefined;
     this._config = {
-      nodeColors: config?.nodeColors ?? {},
+      nodeColors: config?.nodeColors ?? this._config?.nodeColors ?? {},
       classColors: config?.classColors ?? {},
       namespaceColors: config?.namespaceColors ?? {},
       predicateColors: config?.predicateColors ?? {},
@@ -61,9 +76,10 @@ export class StyleEngine {
       fontSize: config?.fontSize ?? 11,
     };
     this._appearance = new Map();
+    this._hasCompactKeys = false;
     for (const [type, appearance] of Object.entries(this._config.classAppearance)) {
       this._appearance.set(type, appearance);
-      this._appearance.set(prefixManager.expand(type), appearance);
+      this._appearance.set(this._prefixManager.expand(type), appearance);
       if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(type) && type.includes(':')) this._hasCompactKeys = true;
     }
   }

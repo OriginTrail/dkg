@@ -9,6 +9,7 @@ import { useShellRouting } from '../src/ui/hooks/useShellRouting.js';
 import { pathToTab, tabIdToPath } from '../src/ui/lib/tab-routes.js';
 import { useTabsStore } from '../src/ui/stores/tabs.js';
 import { useProjectsStore } from '../src/ui/stores/projects.js';
+import { encodeDocTabId } from '../src/ui/lib/doc-tab-id.js';
 
 const mountedRoots: Root[] = [];
 const mountedContainers: HTMLElement[] = [];
@@ -387,6 +388,34 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       await act(async () => { nav.current!(1); });
       await settle();
       expect([ref.current, activeGraph()]).toEqual(['/graph/b', 'b']);
+    });
+
+    it("an agent, memory-layer or document tab sets the graph it belongs to, not the previous one", async () => {
+      const ref = { current: '' };
+      const nav = { current: null as NavigateFunction | null };
+      mountAtPath('/graph/b', ref, nav);
+      await settle();
+      expect(activeGraph()).toBe('b');
+      // The reviewer's case: from graph B to graph A's agent by address.
+      await act(async () => { nav.current!('/agent/a/alice'); });
+      await settle();
+      expect([useTabsStore.getState().activeTabId, activeGraph()]).toEqual(['agent:a|alice', 'a']);
+      await act(async () => { nav.current!(-1); });
+      await settle();
+      expect(activeGraph()).toBe('b');
+      await act(async () => { useTabsStore.getState().openTab({ id: 'vm:c', label: 'VM', closable: true }); });
+      await settle();
+      expect(activeGraph()).toBe('c');
+      await act(async () => { useTabsStore.getState().openTab({ id: encodeDocTabId('d', 'urn:dkg:file:keccak256:ab', 'text/markdown'), label: 'Doc', closable: true }); });
+      await settle();
+      expect(activeGraph()).toBe('d');
+    });
+
+    it('refreshing an agent address sets its graph', async () => {
+      const ref = { current: '' };
+      mountAtPath('/agent/a/alice', ref);
+      await settle();
+      expect(activeGraph()).toBe('a');
     });
 
     it('the dashboard clears it and other places leave it as it was', async () => {

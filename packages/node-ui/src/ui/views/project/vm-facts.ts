@@ -3,9 +3,11 @@ import type { MemoryEntity } from '../../hooks/useMemoryEntities.js';
 import { hasReceipt, type VmReceiptSummary } from '../../hooks/useVmReceiptSummary.js';
 import { formatRelativeTime } from './helpers.js';
 
-/** The entity has triples of its own (types, values or outgoing links), not only incoming references. */
-export function isTripleSubject(e: MemoryEntity): boolean {
-  return e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0;
+/** The subjects of Verifiable Memory's own triples, canonicalised. Entity
+ *  fields merge every memory layer, so they can't say whether an entity is a
+ *  subject in VM; the VM triples can. */
+export function vmSubjectsOf(vmTriples: ReadonlyArray<{ subject: string }>): Set<string> {
+  return new Set(vmTriples.map(t => canonicalEntityUri(t.subject)));
 }
 
 export type VmFactTone = 'ok' | 'warn' | 'muted';
@@ -20,6 +22,7 @@ export function buildVmFacts(
   entities: MemoryEntity[],
   summary: VmReceiptSummary | null,
   state: { loading: boolean; error: string | null },
+  vmSubjects: ReadonlySet<string>,
 ): VmFact[] {
   const consensus: VmFact = {
     id: 'consensus', label: 'Consensus', value: 'not set up', tone: 'muted',
@@ -30,9 +33,10 @@ export function buildVmFacts(
     return [{ id: 'onchain', label: 'On-chain', value: 'checking…', tone: 'muted', tooltip: 'Loading publish receipts' }, consensus];
   }
   // Count the same population receipts cover: entities that are the subject
-  // of at least one triple. A node seen only as a relationship's object
-  // (<alice> schema:knows <bob>) belongs to its subject's asset, not one of its own.
-  const assets = entities.filter(isTripleSubject);
+  // of at least one Verifiable Memory triple. A node seen in VM only as a
+  // relationship's object (<alice> schema:knows <bob>) belongs to its
+  // subject's asset, even when it has draft facts in another layer.
+  const assets = entities.filter(e => vmSubjects.has(e.uri) || vmSubjects.has(canonicalEntityUri(e.uri)));
   const total = assets.length;
   const anchored = assets.filter(e => hasReceipt(e.uri, summary) || hasReceipt(canonicalEntityUri(e.uri), summary)).length;
   const missing = total - anchored;

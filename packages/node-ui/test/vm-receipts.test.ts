@@ -282,7 +282,8 @@ describe('useVmReceipts', () => {
     // A same-graph refresh keeps B's receipts on screen while it reloads.
     await act(async () => { state.refresh(); });
     await settle();
-    expect(state).toMatchObject({ loading: true });
+    expect(pending.has('graph-b')).toBe(true); // the reload is in flight
+    expect(state.receipts?.map(r => r.members)).toEqual([['urn:b:1']]);
     expect(signers).toEqual(['did:dkg:agent:bob']);
     await resolveGraph('graph-b', [bob, { ...bob, member: 'urn:b:2' }]);
     expect(state.receipts?.[0].members).toEqual(['urn:b:1', 'urn:b:2']);

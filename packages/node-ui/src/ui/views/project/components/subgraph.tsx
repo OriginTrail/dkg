@@ -804,7 +804,6 @@ export function SubGraphMiniCard({
         ) : (
           <Suspense fallback={<div className="v10-sgov-card-empty">Loading…</div>}>
             <RdfGraph
-              key={palette.theme}
               data={card.triples}
               format="triples"
               options={graphOptions}

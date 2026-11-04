@@ -32,6 +32,8 @@ export interface DecodedDocTab {
   docRef: string;
   /** MIME hint recorded at import time; `''` when unknown or legacy. */
   contentType: string;
+  /** The context graph the document was opened in; absent on legacy ids. */
+  contextGraphId?: string;
 }
 
 /**
@@ -66,8 +68,10 @@ export function decodeDocTabId(tabId: string): DecodedDocTab {
   if (firstPipe < 0) {
     return { docRef: raw, contentType: '' };
   }
+  const contextGraphId = raw.slice(0, firstPipe);
   return {
     docRef: raw.slice(firstPipe + 1, lastPipe),
     contentType: raw.slice(lastPipe + 1),
+    ...(contextGraphId ? { contextGraphId } : {}),
   };
 }
