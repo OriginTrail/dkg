@@ -469,8 +469,8 @@ The phases, with `SEND=1`, about two days apart in all:
 - `withdraw` waits until the position holds score in the epoch: without it, a
   withdrawal burns the position and records nothing to claim.
 - A phase stopped at any point is run again as it was: it sends nothing the
-  journal holds, and its checks keep what each transaction moved when it was
-  first mined.
+  journal holds, and its checks read what each transaction did from its own
+  receipt, so other transactions in its block, or since, have no part in them.
 - A phase with a failed check is not done. It exits nonzero, the phases after it
   refuse to start, and running it again sends nothing it sent already, until its
   checks pass.

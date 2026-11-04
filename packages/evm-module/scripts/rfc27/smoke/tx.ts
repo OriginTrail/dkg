@@ -1,18 +1,19 @@
 // The smoke test's transactions, as steps on the shared runner. Each is sent only
 // when the run sends; a dry run simulates it and prints what it would send. A
-// journal records every transaction sent, so a phase resumes after a crash, and
-// what the step moved, read around it when it was first mined, so that a replay
-// of its receipt reports what it did then rather than comparing it with now.
+// journal records every transaction sent, so a phase resumes after a crash. A
+// replay gets the step's own receipt, and what the step did is read from that, the
+// same each time, whatever else its block held and whatever has happened since.
 
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
 import type { TransactionReceipt } from 'ethers';
 
-import { errorMessage } from '../contracts';
-import { Report, fmt } from '../report';
+import type { Token } from '../../../typechain';
+import { eventsIn } from '../contracts';
+import { Report } from '../report';
 import { Sized, Tx, TxOverGasCap, TxReverted, TxRunner, TxWouldRevert } from '../tx';
 
-/** What a step reads of the chain at one block, by name. */
-export type Reads = Record<string, bigint>;
+/** What is expected of a step, worked out before it is sent, by name. */
+export type Expected = Record<string, bigint>;
 
 /** A transaction a run sent, as its journal keeps it. */
 export type StepRecord = {
@@ -24,9 +25,7 @@ export type StepRecord = {
   gasLimit: bigint;
   block?: number;
   gasUsed?: bigint;
-  before?: Reads;
-  after?: Reads;
-  expected?: Reads;
+  expected?: Expected;
 };
 
 /** Where a run keeps the transactions it sent, by step key. */
@@ -43,10 +42,8 @@ export type Step = Tx & {
   needs?: string[];
   /** Why the step is done already on chain, if it is. */
   done?: string;
-  /** What the step moves, read at a block: at the block before its own and at its own, then journaled. */
-  reads?: (blockTag: number) => Promise<Reads>;
   /** What is expected of it, worked out before it is sent and journaled with it, for what it destroys. */
-  expected?: Reads;
+  expected?: Expected;
 };
 
 /**
@@ -60,17 +57,23 @@ export type StepResult = {
   receipt?: TransactionReceipt;
   estimate?: bigint;
   gasLimit?: bigint;
-  before?: Reads;
-  after?: Reads;
-  expected?: Reads;
+  expected?: Expected;
 };
 
-/** Whether the step moved what it reads as `key` by `want`; true if the endpoint no longer serves the state of its block, which `movement` says. */
-export const movedBy = (r: StepResult, key: string, want: bigint): boolean => !r.before || !r.after || r.after[key] - r.before[key] === want;
-
-/** What the step moved, for a check's detail. */
-export const movement = (r: StepResult, key: string): string =>
-  r.before && r.after ? `${fmt(r.before[key])} → ${fmt(r.after[key])} TRAC` : 'not read: this endpoint no longer serves the state of its block';
+/**
+ * What a transaction moved into `who`, less what it moved out, by its own TRAC
+ * Transfer logs: no other transaction of its block can change that, and it reads
+ * the same on a replay. A receipt that shows no transfer shows a movement of none.
+ */
+export function tracMoved(receipt: TransactionReceipt, token: Token, who: string): bigint {
+  const account = who.toLowerCase();
+  let moved = 0n;
+  for (const ev of eventsIn(receipt, token, token.getEvent('Transfer'))) {
+    if (ev.to.toLowerCase() === account) moved += ev.value;
+    if (ev.from.toLowerCase() === account) moved -= ev.value;
+  }
+  return moved;
+}
 
 /**
  * FORK-ONLY: the journal, calling `stop` right after it records `at`, a step's
@@ -96,22 +99,6 @@ export class SmokeTx extends TxRunner {
     super(hre, report);
   }
 
-  /** The step's reads around its transaction, a few tries as an endpoint may lag behind the receipt it gave. */
-  private async around(s: Step, receipt: TransactionReceipt): Promise<{ before: Reads; after: Reads } | undefined> {
-    if (!s.reads) return undefined;
-    for (let i = 0; ; i++) {
-      try {
-        return { before: await s.reads(receipt.blockNumber - 1), after: await s.reads(receipt.blockNumber) };
-      } catch (e: unknown) {
-        if (i >= 4) {
-          this.report.note(`      ${s.label}: what it moved cannot be read at its block ${receipt.blockNumber}: ${errorMessage(e)}`);
-          return undefined;
-        }
-        await new Promise((res) => setTimeout(res, 2_000 * (i + 1)));
-      }
-    }
-  }
-
   /**
    * Run one step. The estimate is the transaction's smallest gas limit: a
    * step whose estimate does not fit under 2^24 fails its check, and is not
@@ -122,14 +109,12 @@ export class SmokeTx extends TxRunner {
     if (earlier) {
       const receipt = await this.receipt(earlier.hash);
       if (receipt.status !== 1) throw new Error(`${s.label}: transaction ${earlier.hash} of an earlier run reverted`);
-      // Read once, around the transaction: at its first run, or now if that run stopped before it could.
-      const around = earlier.before && earlier.after ? { before: earlier.before, after: earlier.after } : await this.around(s, receipt);
-      if (earlier.status === 'sent' || (around && !earlier.before)) {
-        this.log.put(s.key, { ...earlier, ...around, status: 'mined', block: receipt.blockNumber, gasUsed: receipt.gasUsed });
+      if (earlier.status === 'sent') {
+        this.log.put(s.key, { ...earlier, status: 'mined', block: receipt.blockNumber, gasUsed: receipt.gasUsed });
       }
       this.report.note(`=     ${s.label}: done earlier, tx ${earlier.hash}, gas ${receipt.gasUsed}`);
       this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'done earlier', hash: earlier.hash, gasUsed: receipt.gasUsed });
-      return { sent: true, skipped: false, replayed: true, receipt, expected: earlier.expected, ...around };
+      return { sent: true, skipped: false, replayed: true, receipt, expected: earlier.expected };
     }
     if (s.done) {
       this.report.note(`=     ${s.label}: already done (${s.done})`);
@@ -179,9 +164,8 @@ export class SmokeTx extends TxRunner {
       if (e instanceof TxReverted) this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'reverted', hash, gasUsed: e.receipt.gasUsed, gasLimit });
       throw e;
     }
-    const around = await this.around(s, receipt);
-    this.log.put(s.key, { ...sent, ...around, status: 'mined', block: receipt.blockNumber, gasUsed: receipt.gasUsed });
+    this.log.put(s.key, { ...sent, status: 'mined', block: receipt.blockNumber, gasUsed: receipt.gasUsed });
     this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'mined', hash, block: receipt.blockNumber, estimate, gasLimit, gasUsed: receipt.gasUsed });
-    return { sent: true, skipped: false, receipt, estimate, gasLimit, expected: s.expected, ...around };
+    return { sent: true, skipped: false, receipt, estimate, gasLimit, expected: s.expected };
   }
 }

@@ -6,7 +6,7 @@
 // it runs in, and leaves the score inputs of every ended epoch as the later
 // claims read them.
 
-import type { Provider } from 'ethers';
+import type { Log, Provider } from 'ethers';
 import { ethers } from 'ethers';
 
 import type { Contracts } from '../contracts';
@@ -14,6 +14,16 @@ import { EpochReward, claimPreview } from '../reads';
 
 /** A public endpoint limits eth_getLogs to a range of 200 blocks. */
 const LOG_PAGE = 199;
+
+/** Logs from `fromBlock` to the head, a page at a time, in order. */
+export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'getLogs'>, filter: { address: string; topics: (string | string[])[] }, fromBlock: number): Promise<Log[]> {
+  const head = await provider.getBlockNumber();
+  const logs: Log[] = [];
+  for (let from = fromBlock; from <= head; from += LOG_PAGE) {
+    logs.push(...(await provider.getLogs({ ...filter, fromBlock: from, toBlock: Math.min(from + LOG_PAGE - 1, head) })));
+  }
+  return logs;
+}
 
 /** One claim: the epochs it covered, what it paid, what the preview says of them, and where it ran. */
 export type RewardClaim = { from: bigint; to: bigint; paid: bigint; previewed: bigint; tx: string; block: number };
@@ -37,15 +47,9 @@ export async function rewardClaims(
   c: Contracts,
   o: { tokenId: bigint; node: bigint; stakeRaw: bigint; firstEpoch: bigint; fromBlock: number },
 ): Promise<RewardClaims> {
-  const address = await c.css.getAddress();
   const claimedTopic = c.css.getEvent('LastClaimedEpochUpdated').fragment.topicHash;
   const paidTopic = c.css.getEvent('CumulativeRewardsClaimedUpdated').fragment.topicHash;
-  const tokenTopic = ethers.toBeHex(o.tokenId, 32);
-  const head = await provider.getBlockNumber();
-  const logs = [];
-  for (let from = o.fromBlock; from <= head; from += LOG_PAGE) {
-    logs.push(...(await provider.getLogs({ address, topics: [[claimedTopic, paidTopic], tokenTopic], fromBlock: from, toBlock: Math.min(from + LOG_PAGE - 1, head) })));
-  }
+  const logs = await pagedLogs(provider, { address: await c.css.getAddress(), topics: [[claimedTopic, paidTopic], ethers.toBeHex(o.tokenId, 32)] }, o.fromBlock);
 
   const paidIn = new Map<string, bigint>();
   const cursors: { epoch: bigint; tx: string; block: number }[] = [];

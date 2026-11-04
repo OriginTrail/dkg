@@ -16,8 +16,8 @@ import { BUCKET0, UNIT_ASK, inference } from '../plans';
 import { fmt } from '../report';
 import { SmokeTx, Step, StepResult } from './tx';
 
-/** Steps that need an earlier step, what makes them done already on chain, and what they move. */
-export type StepOpts = Pick<Step, 'needs' | 'done' | 'reads' | 'expected'>;
+/** Steps that need an earlier step, and what makes them done already on chain. */
+export type StepOpts = Pick<Step, 'needs' | 'done' | 'expected'>;
 
 export class Marketplace {
   private qiDomain?: Domain;

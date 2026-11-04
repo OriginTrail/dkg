@@ -7,13 +7,16 @@
 // so it waits for the seller's proof first. What it expects is journaled with it,
 // since a resume cannot read that from a position that is gone.
 
+import { ethers } from 'ethers';
+
 import { eventsIn } from '../contracts';
 import { fmt, iso } from '../report';
 import { claimPreview, delegatorKey, positionScore } from '../reads';
 import { MID_EPOCH_MARGIN } from './config';
 import { PoolCtx, complete, doneEarlier, epochStart, now, opensAt, runState, standInProof } from './context';
+import { pagedLogs } from './reward-claims';
 import { need } from './roles';
-import { Reads, movedBy, movement } from './tx';
+import { tracMoved } from './tx';
 
 const WITHDRAW = 'withdraw.withdraw';
 const CLAIM = 'withdraw.claim-withdrawn-epoch';
@@ -26,7 +29,6 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   const { tokenId } = s;
   const sv10 = await c.sv10.getAddress();
   const claimData = c.sv10.interface.encodeFunctionData('claimWithdrawnEpoch', [tokenId]);
-  const ownerTracAt = async (blockTag: number): Promise<Reads> => ({ owner: await c.token.balanceOf(r.ownerAddr, { blockTag }) });
 
   if (!s.withdrawal) {
     // 1. The withdrawal, in the middle of an epoch: not within 10 minutes of either end; on the fork, its middle.
@@ -64,7 +66,6 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
       signer: r.owner,
       to: await c.snft.getAddress(),
       data: c.snft.interface.encodeFunctionData('withdraw', [tokenId]),
-      reads: ownerTracAt,
       expected,
     });
     if (!w.receipt) return { part: 'withdraw' };
@@ -72,7 +73,8 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
     const paid = eventsIn(w.receipt, c.sv10, c.sv10.getEvent('Withdrawn')).find((x) => x.tokenId === tokenId)?.amount ?? 0n;
     const rec = eventsIn(w.receipt, c.sv10, c.sv10.getEvent('WithdrawnEpochRecorded')).find((x) => x.tokenId === tokenId);
     const recorded = await c.rss.getEpochNodeDelegatorScore(epoch, s.sellerId, delegatorKey(tokenId));
-    report.check(`the withdrawal pays the stake and every ended epoch: ${fmt(paid)} TRAC = raw ${fmt(raw)} + ${fmt(auto)}`, paid === raw + auto && movedBy(w, 'owner', paid), movement(w, 'owner'));
+    const received = tracMoved(w.receipt, c.token, r.ownerAddr);
+    report.check(`the withdrawal pays the stake and every ended epoch: ${fmt(paid)} TRAC = raw ${fmt(raw)} + ${fmt(auto)}`, paid === raw + auto && received === paid, `the owner received ${fmt(received)} TRAC, by its own Transfer logs`);
     report.check(
       `it records epoch ${epoch} for the owner, with the score the position had earned by then`,
       !!rec && rec.epoch === epoch && rec.staker === r.ownerAddr && recorded > 0n && (ctx.net.local ? recorded === score : recorded >= score),
@@ -85,7 +87,7 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
     }
     // A failed check keeps the run on this part, whose next run sends nothing again.
     if (report.failed) return { part: 'withdraw' };
-    s.withdrawal = { epoch, node: s.sellerId, recordedScore: recorded, ownerTracAfter: w.after?.owner ?? (await c.token.balanceOf(r.ownerAddr)), block: w.receipt.blockNumber };
+    s.withdrawal = { epoch, node: s.sellerId, recordedScore: recorded };
     file.save();
     report.say(`\nNext: PHASE=withdraw SEND=1 again from ${iso(await epochStart(ctx, epoch + 1n))}, once epoch ${epoch} has ended.`);
     return { part: 'withdraw' };
@@ -103,21 +105,29 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   const [record] = await c.cws.getWithdrawal(tokenId);
   let paid: bigint | undefined;
   if (record.epoch !== 0n || file.get(CLAIM)) {
-    const res = await ctx.tx.step({ key: CLAIM, label: `owner: StakingV10.claimWithdrawnEpoch(${tokenId})`, role: 'owner', signer: r.owner, to: sv10, data: claimData, reads: ownerTracAt });
+    const res = await ctx.tx.step({ key: CLAIM, label: `owner: StakingV10.claimWithdrawnEpoch(${tokenId})`, role: 'owner', signer: r.owner, to: sv10, data: claimData });
     if (!res.receipt) return { part: 'claim' };
     const ev = eventsIn(res.receipt, c.sv10, c.sv10.getEvent('WithdrawnEpochClaimed')).find((x) => x.tokenId === tokenId);
     paid = ev?.amount ?? 0n;
+    const received = tracMoved(res.receipt, c.token, r.ownerAddr);
     report.check(
       `claimWithdrawnEpoch pays the owner the position's share of epoch ${epoch}: its score × StakingKPI's net / the node's score`,
-      !!ev && paid === expected && paid > 0n && ev.staker === r.ownerAddr && movedBy(res, 'owner', paid),
-      `${fmt(paid)} TRAC, expected ${fmt(expected)}; ${movement(res, 'owner')}`,
+      !!ev && paid === expected && paid > 0n && ev.staker === r.ownerAddr && received === paid,
+      `${fmt(paid)} TRAC, expected ${fmt(expected)}; the owner received ${fmt(received)} TRAC, by its own Transfer logs`,
     );
   } else {
-    paid = (await c.token.balanceOf(r.ownerAddr)) - s.withdrawal.ownerTracAfter;
+    // Another caller's claim, read from its own transaction: other TRAC of the owner's has no part in it.
+    const withdrawnAt = (await ctx.tx.receipt(file.s.steps[WITHDRAW].hash)).blockNumber;
+    const claimedTopic = c.sv10.getEvent('WithdrawnEpochClaimed').fragment.topicHash;
+    const [log] = await pagedLogs(ctx.hre.ethers.provider, { address: sv10, topics: [claimedTopic, ethers.toBeHex(tokenId, 32)] }, withdrawnAt);
+    const receipt = log ? await ctx.tx.receipt(log.transactionHash) : undefined;
+    const ev = eventsIn(receipt, c.sv10, c.sv10.getEvent('WithdrawnEpochClaimed')).find((x) => x.tokenId === tokenId);
+    paid = ev?.amount ?? 0n;
+    const received = receipt ? tracMoved(receipt, c.token, r.ownerAddr) : 0n;
     report.check(
       'the withdrawn epoch was claimed by another caller (the upkeep cron): the owner received the expected amount',
-      paid === expected && expected > 0n,
-      `the owner's TRAC since the withdrawal +${fmt(paid)}, expected ${fmt(expected)}${paid !== expected ? ' (other TRAC movements of the owner make this inconclusive)' : ''}`,
+      !!ev && ev.staker === r.ownerAddr && paid === expected && expected > 0n && received === paid,
+      ev ? `${fmt(paid)} TRAC, expected ${fmt(expected)}; the owner received ${fmt(received)} TRAC, by that transaction's Transfer logs, tx ${log.transactionHash}` : 'no record, and no claim of it on chain',
     );
   }
   const twice = await ctx.tx.refusal(r.ownerAddr, sv10, claimData);

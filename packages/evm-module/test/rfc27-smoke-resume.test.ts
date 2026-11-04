@@ -13,9 +13,10 @@ import * as path from 'path';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import { ethers } from 'ethers';
+import type { Signer, TransactionRequest } from 'ethers';
 import hre from 'hardhat';
 
-import { TRAC } from './helpers/conviction-service';
+import { CLASS_INFERENCE, TRAC, bucket, walletRequestOf } from './helpers/conviction-service';
 import { hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
 import { deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 import { Contracts, Stack } from '../scripts/rfc27/contracts';
@@ -107,7 +108,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
   });
 
   /** A phase's context, as the entry point builds it; `local` makes the in-process chain stand for the fork. */
-  const ctxOf = async (phase: PhaseName, o: { send?: boolean; local?: boolean; warp?: boolean; proofs?: boolean; stopAt?: string } = {}): Promise<PoolCtx> => {
+  const ctxOf = async (phase: PhaseName, o: { send?: boolean; local?: boolean; warp?: boolean; proofs?: boolean; stopAt?: string; owner?: Signer } = {}): Promise<PoolCtx> => {
     const send = o.send ?? true;
     const report = new QuietReport();
     const net = { chainId: 31337n, client: 'in-process', local: o.local ?? false, name: 'the in-process chain', forkBlock: o.local ? 1n : undefined };
@@ -126,7 +127,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       fork: new Fork(hre, net, report),
       file,
       tx: new SmokeTx(hre, report, send, o.stopAt ? stoppingAt(file, o.stopAt, stop) : file),
-      roles: roles(),
+      roles: { ...roles(), ...(o.owner ? { owner: o.owner } : {}) },
     });
   };
 
@@ -164,6 +165,34 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     fs.writeFileSync(stateFile, JSON.stringify(raw));
   };
   const head = () => hre.ethers.provider.getBlockNumber();
+  /**
+   * The owner's key, with `alongside` landing in the very block of its transaction
+   * calling `selector`, as a stranger's transaction does on a live chain.
+   */
+  const ownerBeside = (selector: string, alongside: () => Promise<unknown>): Signer => {
+    const wallet = ownerWallet();
+    const provider = hre.network.provider;
+    return {
+      getAddress: () => wallet.getAddress(),
+      sendTransaction: async (tx: TransactionRequest) => {
+        if (!String(tx.data).startsWith(selector)) return wallet.sendTransaction(tx);
+        await provider.send('evm_setAutomine', [false]);
+        try {
+          await alongside();
+          const sent = await wallet.sendTransaction(tx);
+          await provider.send('evm_mine', []);
+          return sent;
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+      },
+    } as unknown as Signer;
+  };
+  const inTheBlockOf = async (key: string, other: { hash: string }): Promise<number> => {
+    const block = (await hre.ethers.provider.getTransactionReceipt(rawState().steps[key].hash))?.blockNumber;
+    expect((await hre.ethers.provider.getTransactionReceipt(other.hash))?.blockNumber).to.equal(block);
+    return block ?? 0;
+  };
   const claimOf = (subscriptionId: string) => fx.f.QIS.getSellerClaim(subscriptionId, 0n, fx.seller.identityId);
   const scoreIn = (epoch: bigint) => fx.helpers.scoreEpoch(epoch, fx.seller, 10n ** 18n);
   /** Past the batch deadline of the run's periods, in E+1. */
@@ -238,7 +267,6 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
 
       const record = rawState().steps['setup.stake'];
       expect(record.status).to.equal('mined');
-      expect(BigInt(record.after.vault) - BigInt(record.before.vault)).to.equal(a.stake);
       expect(await fx.f.Token.balanceOf(owner)).to.equal(needed - a.stake);
       const tokensAfterStake = await fx.f.StakingNFT.nextTokenId();
       // Someone else's TRAC reaches the vault before the resume: the stake's own movement must not change.
@@ -252,7 +280,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(rawState().steps['setup.stake'].hash).to.equal(record.hash);
       const moved = checkOf(resumed, 'the stake moved into the vault');
       expect(moved.ok).to.equal(true);
-      expect(moved.detail).to.equal(`${fmt(BigInt(record.before.vault))} → ${fmt(BigInt(record.after.vault))} TRAC`);
+      expect(moved.detail).to.equal(`${fmt(a.stake)} TRAC, by its own Transfer logs`);
       const trac = checkOf(resumed, 'holds the TRAC the run still spends');
       expect(trac.label).to.contain('the commitment, the wallet period');
       expect(trac.label).to.not.contain('the stake');
@@ -260,13 +288,12 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(await fx.f.Token.balanceOf(owner)).to.equal(0n);
     });
 
-    it('after the stake is sent, before its receipt: the movement is read at its block, and not sent again', async () => {
+    it('after the stake is sent, before its receipt: the movement is read from the receipt, and it is not sent again', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
       await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.stake:sent' })));
       const record = rawState().steps['setup.stake'];
       expect(record.status).to.equal('sent');
-      expect(record.before).to.equal(undefined);
       const tokensAfterStake = await fx.f.StakingNFT.nextTokenId();
       await fx.f.Token.mint(await fx.f.Vault.getAddress(), 7n);
 
@@ -274,9 +301,8 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       await phaseSetup(resumed);
       passes(resumed);
       expect(await fx.f.StakingNFT.nextTokenId()).to.equal(tokensAfterStake);
-      const journaled = rawState().steps['setup.stake'];
-      expect(journaled.status).to.equal('mined');
-      expect(BigInt(journaled.after.vault) - BigInt(journaled.before.vault)).to.equal(a.stake);
+      expect(rawState().steps['setup.stake'].status).to.equal('mined');
+      expect(checkOf(resumed, 'the stake moved into the vault').detail).to.equal(`${fmt(a.stake)} TRAC, by its own Transfer logs`);
     });
 
     it('at each later step that moves money: every check passes, and nothing is sent twice', async () => {
@@ -350,13 +376,91 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
   });
 
+  describe('on a live chain, with a stranger\'s transaction in the same block', () => {
+    const stranger = () => fx.f.accounts[22];
+
+    it('a deposit into the vault beside the stake fails neither the phase nor its resume', async () => {
+      use(await loadFixture(deployFixture));
+      const { a } = await fundExactly();
+      await fx.f.Token.mint(stranger().address, 7n * TRAC);
+      const vault = await fx.f.Vault.getAddress();
+      let deposit: { hash: string } = { hash: '' };
+      const owner = ownerBeside(fx.f.StakingNFT.interface.getFunction('createConviction').selector, async () => {
+        deposit = await fx.f.Token.connect(stranger()).transfer(vault, 7n * TRAC);
+      });
+      await stops(phaseSetup(await ctxOf('setup', { owner, stopAt: 'setup.stake' })));
+      const block = await inTheBlockOf('setup.stake', deposit);
+      // What reading the block around it would have seen: the stake and the stranger's deposit together.
+      const atBlock = await fx.f.Token.balanceOf(vault, { blockTag: block });
+      expect(atBlock - (await fx.f.Token.balanceOf(vault, { blockTag: block - 1 }))).to.equal(a.stake + 7n * TRAC);
+
+      const resumed = await ctxOf('setup');
+      await phaseSetup(resumed);
+      passes(resumed);
+      expect(checkOf(resumed, 'the stake moved into the vault').detail).to.equal(`${fmt(a.stake)} TRAC, by its own Transfer logs`);
+      expect(resumed.file.done('setup')).to.equal(true);
+    });
+
+    it('the same deposit fails no first run either, and the phase is done', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await fx.f.Token.mint(stranger().address, 7n * TRAC);
+      const owner = ownerBeside(fx.f.StakingNFT.interface.getFunction('createConviction').selector, async () => fx.f.Token.connect(stranger()).transfer(await fx.f.Vault.getAddress(), 7n * TRAC));
+      const ctx = await ctxOf('setup', { owner });
+      await phaseSetup(ctx);
+      passes(ctx);
+      expect(ctx.file.done('setup')).to.equal(true);
+    });
+
+    it('a stranger\'s wallet period funded beside ours moves the vault and the due more, and fails nothing', async () => {
+      use(await loadFixture(deployFixture));
+      const { a } = await fundExactly();
+      const value = 5n * TRAC;
+      await fx.f.Token.mint(stranger().address, value);
+      await fx.f.Token.connect(stranger()).approve(await fx.f.SSW.getAddress(), value);
+      const epoch = await fx.f.Chronos.getCurrentEpoch();
+      let funding: { hash: string } = { hash: '' };
+      const owner = ownerBeside(fx.f.SSW.interface.getFunction('fundFromWallet').selector, async () => {
+        funding = await fx.f.SSW.connect(stranger()).fundFromWallet(walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, 10n ** 15n)], sessionKey: hardhatWallet(61).address }));
+      });
+      await stops(phaseSetup(await ctxOf('setup', { owner, stopAt: 'setup.fund-wallet-period' })));
+      await inTheBlockOf('setup.fund-wallet-period', funding);
+      expect((await fx.f.QIS.dueIn(epoch + 1n)).wallet).to.equal(a.walletValue + value);
+
+      const resumed = await ctxOf('setup');
+      await phaseSetup(resumed);
+      passes(resumed);
+      expect(checkOf(resumed, 'moved into the vault and is due').detail).to.contain(`${fmt(a.walletValue)} TRAC by its own Transfer logs; due ${fmt(a.walletValue + value)} TRAC`);
+    });
+
+    it('TRAC sent to the owner beside its withdrawal fails neither the phase nor its resume', async () => {
+      use(await loadFixture(afterCloseClaim));
+      const owner = ownerWallet().address;
+      const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+      await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+      await fx.helpers.publishingPool(e, 10n * TRAC);
+      await scoreIn(e);
+      await fx.f.Token.mint(stranger().address, 3n * TRAC);
+      let gift: { hash: string } = { hash: '' };
+      const signer = ownerBeside(fx.f.StakingNFT.interface.getFunction('withdraw').selector, async () => {
+        gift = await fx.f.Token.connect(stranger()).transfer(owner, 3n * TRAC);
+      });
+      await stops(phaseWithdraw(await ctxOf('withdraw', { owner: signer, stopAt: 'withdraw.withdraw' })));
+      await inTheBlockOf('withdraw.withdraw', gift);
+
+      const resumed = await ctxOf('withdraw');
+      await phaseWithdraw(resumed);
+      passes(resumed);
+      expect(checkOf(resumed, 'the withdrawal pays the stake').ok).to.equal(true);
+    });
+  });
+
   describe('a run stopped and resumed in serve', () => {
     it('after the top-up is mined: its movement stands, and no second top-up is sent', async () => {
       use(await loadFixture(afterSetup));
       const s = stateNow();
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.top-up' })));
       const record = rawState().steps['serve.top-up'];
-      expect(BigInt(record.after.due) - BigInt(record.before.due)).to.equal(s.amounts.caTopUp);
       const period = await fx.f.CSS.getSubscription(s.periods.ca);
       const due = await fx.f.QIS.dueIn(s.E + 1n);
 
@@ -364,9 +468,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       await phaseServe(resumed);
       passes(resumed);
       expect(resumed.file.done('serve')).to.equal(true);
-      const toppedUp = checkOf(resumed, 'the top-up is accepted');
-      expect(toppedUp.ok).to.equal(true);
-      expect(toppedUp.detail).to.equal(`${fmt(BigInt(record.before.due))} → ${fmt(BigInt(record.after.due))} TRAC`);
+      expect(checkOf(resumed, 'the top-up is accepted').ok).to.equal(true);
       expect(rawState().steps['serve.top-up'].hash).to.equal(record.hash);
       expect((await fx.f.CSS.getSubscription(s.periods.ca)).value).to.equal(period.value);
       // The edge period, funded after the stop, is all that adds to the due.
@@ -831,7 +933,6 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       passes(resumed);
       expect(await head()).to.equal(blocks);
       expect(checkOf(resumed, 'the withdrawal pays the stake').ok).to.equal(true);
-      expect(BigInt(rawState().withdrawal.ownerTracAfter)).to.equal(before + paid);
       expect(resumed.report.checks.some((x) => x.label.includes('WithdrawnEpochInProgress'))).to.equal(false);
 
       await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.claim-withdrawn-epoch' })));
@@ -842,6 +943,22 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(await head()).to.equal(blocks2);
       expect(claimed.file.done('withdraw')).to.equal(true);
       expect(checkOf(claimed, 'claimWithdrawnEpoch pays the owner').ok).to.equal(true);
+    });
+
+    it('reads a claim of the withdrawn epoch by another caller from its own transaction, whatever else the owner received', async () => {
+      use(await loadFixture(afterCloseClaim));
+      const s = stateNow();
+      const e = await toMiddle();
+      await scoreIn(e);
+      await phaseWithdraw(await ctxOf('withdraw'));
+      await toEpoch(e + 1n);
+      await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(s.tokenId);
+      await fx.f.Token.mint(ownerWallet().address, 3n); // other TRAC of the owner's
+      const ctx = await ctxOf('withdraw');
+      await phaseWithdraw(ctx);
+      passes(ctx);
+      expect(ctx.file.done('withdraw')).to.equal(true);
+      expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('by that transaction\'s Transfer logs');
     });
 
     it('stays on its part while a check fails, and runs again sending nothing', async () => {

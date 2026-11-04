@@ -63,8 +63,8 @@
 // addresses and transaction hashes, never a key, bound to its network.
 //
 // Resuming: a phase stopped at any point is run again as it was. A transaction
-// the journal holds is not sent again; what it moved, read around it when it was
-// first mined, stands in its checks. A resumed setup needs only what its remaining
+// the journal holds is not sent again, and its checks read what it did from its
+// own receipt. A resumed setup needs only what its remaining
 // steps will spend. A phase with a failed check is not done: it exits nonzero, the
 // phases after it refuse to start, and running it again sends nothing it sent
 // already, until its checks pass.
