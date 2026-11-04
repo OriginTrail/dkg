@@ -6,14 +6,17 @@
 // each time, in one place, from chain storage and the journal's receipts, and kept
 // nowhere: finalized, by this run or by another caller; waiting on the seller,
 // skipped NoScore while it has no node score in E+1, and retried after its next
-// proof; or void, once E+1 has ended with it unfinalized.
+// proof; or void, once E+1 has ended with it unfinalized. Storage says only that a
+// claim was finalized: what it finalized to is in its ClaimsFinalized event, which is
+// held to what the claim was due, whoever's it is.
 
 import type { TransactionReceipt } from 'ethers';
 
-import { eventsIn } from '../contracts';
+import { Contracts, eventsIn } from '../contracts';
 import { fmt, iso, sum } from '../report';
 import { ClaimRef, SkipReason, finalizedValueOf, predictSkip, skipReasonOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, now, opensAt, runState, standInProof } from './context';
+import { pagedLogs } from './reward-claims';
 import { need } from './roles';
 import { ServedState, SetupState } from './state';
 
@@ -33,8 +36,8 @@ export const expectedClaims = (s: SetupState): Claim[] => [
 
 type Status = 'finalized' | 'finalized by another caller' | 'pending' | 'waiting on the seller' | 'void' | 'skipped';
 
-/** What became of a claim: `reason` is why finalizeClaims would skip it now, and `value` what it finalized to. */
-type Outcome = Claim & { status: Status; reason: SkipReason; value?: bigint };
+/** What became of a claim: `reason` is why finalizeClaims would skip it now. */
+type Outcome = Claim & { status: Status; reason: SkipReason };
 
 const settled = (x: Outcome): boolean => x.status === 'finalized' || x.status === 'finalized by another caller';
 export const names = (xs: { period: string }[]): string => xs.map((x) => x.period).join(' and ');
@@ -49,20 +52,10 @@ async function claimsInBatches(ctx: PoolCtx, s: ServedState): Promise<ClaimRef[]
   return out;
 }
 
-/** One finalizeClaims receipt, its events checked: the claims it finalized. Each claim's fate is not read from here. */
-async function readAttempt(ctx: PoolCtx, receipt: TransactionReceipt, claims: Claim[], P: bigint): Promise<ClaimRef[]> {
+/** One finalizeClaims receipt: the claims it finalized. Neither their fate nor what they finalized to is read from here. */
+function readAttempt(ctx: PoolCtx, receipt: TransactionReceipt, claims: Claim[]): ClaimRef[] {
   const { report, c } = ctx;
-  const finalized: ClaimRef[] = [];
-  for (const ev of eventsIn(receipt, c.qs, c.qs.getEvent('ClaimsFinalized'))) {
-    const claim = claims.find((x) => sameRef(x, ev));
-    if (!claim) continue;
-    finalized.push(claim);
-    report.check(
-      `the ${claim.period} claim is finalized in epoch ${P} at its funded value (tx ${receipt.hash.slice(0, 10)}…)`,
-      ev.epoch === P && ev.value === (await finalizedValueOf(c, claim)),
-      `${fmt(ev.value)} of ${fmt(ev.claimed)} TRAC claimed`,
-    );
-  }
+  const finalized = claims.filter((x) => eventsIn(receipt, c.qs, c.qs.getEvent('ClaimsFinalized')).some((ev) => sameRef(x, ev)));
   for (const ev of eventsIn(receipt, c.qs, c.qs.getEvent('ClaimSkipped'))) {
     const claim = claims.find((x) => sameRef(x, ev));
     if (claim) report.note(`skip  the ${claim.period} claim: ClaimSkipped(${skipReasonOf(ev.reason)}) (tx ${receipt.hash.slice(0, 10)}…)`);
@@ -77,7 +70,7 @@ async function outcomesOf(ctx: PoolCtx, claims: Claim[], ours: ClaimRef[]): Prom
   for (const claim of claims) {
     const reason = await predictSkip(ctx.c, claim, t);
     if (reason === 'AlreadyFinalized') {
-      out.push({ ...claim, reason, status: ours.some((x) => sameRef(x, claim)) ? 'finalized' : 'finalized by another caller', value: await finalizedValueOf(ctx.c, claim) });
+      out.push({ ...claim, reason, status: ours.some((x) => sameRef(x, claim)) ? 'finalized' : 'finalized by another caller' });
     } else {
       out.push({ ...claim, reason, status: reason === 'None' ? 'pending' : reason === 'NoScore' ? 'waiting on the seller' : reason === 'Void' ? 'void' : 'skipped' });
     }
@@ -92,7 +85,73 @@ export async function unfinalizedClaims(ctx: PoolCtx, s: SetupState): Promise<Cl
   return out;
 }
 
-/** What the run's claims finalized to, as storage holds them now. */
+/** A finalization, as its ClaimsFinalized event says. */
+type Finalization = ClaimRef & { epoch: bigint; claimed: bigint; value: bigint; score: bigint; tx: string; block: number };
+
+/** Every finalization since the run's stake, of any seller on any period, whoever's it is. */
+async function finalizationsSince(ctx: PoolCtx, s: SetupState): Promise<Finalization[]> {
+  const { qs } = ctx.c;
+  const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
+  const logs = await pagedLogs(ctx.hre.ethers.provider, { address: await qs.getAddress(), topics: [qs.getEvent('ClaimsFinalized').fragment.topicHash] }, staked.blockNumber);
+  return logs.map((l) => {
+    const { args } = qs.interface.parseLog({ topics: [...l.topics], data: l.data }) ?? {};
+    if (!args) throw new Error(`transaction ${l.transactionHash}: a ClaimsFinalized log that does not parse`);
+    return { subscriptionId: args.subscriptionId, bucketIndex: args.bucketIndex, seller: args.seller, epoch: args.epoch, claimed: args.claimed, value: args.value, score: args.score, tx: l.transactionHash, block: l.blockNumber };
+  });
+}
+
+/** What a claim is due, from what no finalization writes: its value and its weighted value × min(1, the bucket's funded cap / all its claims). */
+async function dueOf(c: Contracts, ref: ClaimRef): Promise<{ value: bigint; score: bigint }> {
+  const { weighted } = await c.qis.getSellerClaim(ref.subscriptionId, ref.bucketIndex, ref.seller);
+  const cap = await c.qs.fundedCap(ref.subscriptionId, ref.bucketIndex);
+  const total = await c.qis.bucketClaimed(ref.subscriptionId, ref.bucketIndex);
+  return { value: await finalizedValueOf(c, ref), score: total > cap ? (weighted * cap) / total : weighted };
+}
+
+/**
+ * Each of the run's claims against what it was due, by its own event, whoever finalized
+ * it; and the node's and the epoch's sums, which others' value also goes into, exactly
+ * against all the epoch's finalizations: other value cannot make up for a claim finalized
+ * at too little, nor a sum hold what no finalization shows. False if any of them fails.
+ */
+export async function checkFinalizations(ctx: PoolCtx, s: SetupState): Promise<boolean> {
+  const { report, c } = ctx;
+  const P = s.E + 1n;
+  // The sums as of the last block read: others can finalize in E+1 while the logs are paged.
+  const head = await ctx.hre.ethers.provider.getBlockNumber();
+  const finalizations = await finalizationsSince(ctx, s);
+  let ok = true;
+  for (const claim of expectedClaims(s)) {
+    const ev = finalizations.find((x) => sameRef(x, claim));
+    const due = await dueOf(c, claim);
+    const held = report.check(
+      `the ${claim.period} claim is finalized in epoch ${P} at what it is due, by its own ClaimsFinalized event`,
+      !!ev && ev.epoch === P && ev.value === due.value && ev.score === due.score,
+      ev ? `${fmt(ev.value)} of ${fmt(ev.claimed)} TRAC claimed, due ${fmt(due.value)}; score ${ev.score}, due ${due.score}; tx ${ev.tx}` : 'no ClaimsFinalized of it on chain',
+    );
+    ok = held && ok;
+  }
+  const inP = finalizations.filter((x) => x.epoch === P && x.block <= head);
+  const ofSeller = inP.filter((x) => x.seller === s.sellerId);
+  const value = (xs: Finalization[]): bigint => sum(xs.map((x) => x.value));
+  const score = (xs: Finalization[]): bigint => sum(xs.map((x) => x.score));
+  const node = await c.qis.getNodeEpoch(s.sellerId, P, { blockTag: head });
+  const totals = await c.qis.getEpochTotals(P, { blockTag: head });
+  const nodeHolds = report.check(
+    `node ${s.sellerId}'s R and score in epoch ${P} are what its finalizations add up to`,
+    node.r === value(ofSeller) && node.score === score(ofSeller),
+    `R ${fmt(node.r)} TRAC, ${ofSeller.length} finalization${ofSeller.length === 1 ? '' : 's'} of ${fmt(value(ofSeller))} TRAC; score ${node.score} of ${score(ofSeller)}`,
+  );
+  const totalsHold = report.check(
+    `epoch ${P}'s ΣR and ΣQueryInferenceScore are what all its finalizations add up to`,
+    totals.sumR === value(inP) && totals.sumScore === score(inP),
+    `ΣR ${fmt(totals.sumR)} TRAC, ${inP.length} finalization${inP.length === 1 ? '' : 's'} of ${fmt(value(inP))} TRAC; ΣQueryInferenceScore ${totals.sumScore} of ${score(inP)}`,
+  );
+  report.set('finalizations', inP);
+  return ok && nodeHolds && totalsHold;
+}
+
+/** What the run's claims that storage holds finalized were due: after `checkFinalizations`, what they finalized to. */
 export async function finalizedValue(ctx: PoolCtx, s: SetupState): Promise<bigint> {
   const values = await Promise.all(
     expectedClaims(s).map(async (x) => ((await ctx.c.qis.getSellerClaim(x.subscriptionId, x.bucketIndex, x.seller)).finalized ? finalizedValueOf(ctx.c, x) : 0n)),
@@ -122,7 +181,7 @@ export async function phaseFinalize(ctx: PoolCtx): Promise<void> {
   // the others at any time before.
   const attempts = Object.keys(s.steps).filter((k) => k.startsWith(PREFIX));
   const ours: ClaimRef[] = [];
-  for (const k of attempts) ours.push(...(await readAttempt(ctx, await ctx.tx.receipt(s.steps[k].hash), claims, P)));
+  for (const k of attempts) ours.push(...readAttempt(ctx, await ctx.tx.receipt(s.steps[k].hash), claims));
   let outcomes = await outcomesOf(ctx, claims, ours);
   const voided = outcomes.filter((x) => x.status === 'void');
   if (voided.length) {
@@ -158,7 +217,7 @@ export async function phaseFinalize(ctx: PoolCtx): Promise<void> {
         data,
       });
       if (!ctx.env.send) return;
-      if (result.receipt) ours.push(...(await readAttempt(ctx, result.receipt, claims, P)));
+      if (result.receipt) ours.push(...readAttempt(ctx, result.receipt, claims));
       outcomes = await outcomesOf(ctx, claims, ours);
     }
   }
@@ -175,16 +234,14 @@ export async function phaseFinalize(ctx: PoolCtx): Promise<void> {
   }
 
   for (const x of outcomes.filter((y) => y.status === 'finalized by another caller')) {
-    report.note(`=     the ${x.period} claim was finalized by another caller (the upkeep cron): ${fmt(x.value ?? 0n)} TRAC`);
+    report.note(`=     the ${x.period} claim was finalized by another caller (the upkeep cron)`);
   }
-  const value = sum(outcomes.map((x) => x.value ?? 0n));
-  const R = (await c.qis.getNodeEpoch(s.sellerId, P)).r;
   report.check(
     `every claim is finalized${outcomes.some((x) => x.status === 'finalized by another caller') ? ', some by another caller (the upkeep cron)' : ''}`,
     outcomes.every(settled),
     outcomes.map((x) => `${x.period} ${x.status}`).join(', '),
   );
-  report.check(`node ${s.sellerId}'s R in epoch ${P} holds our finalized ${fmt(value)} TRAC`, value > 0n && R >= value, `R ${fmt(R)} TRAC`);
+  await checkFinalizations(ctx, s);
   complete(ctx);
   if (ctx.env.send) report.say(`\nNext: PHASE=close-claim SEND=1 from ${iso(end)}.`);
 }

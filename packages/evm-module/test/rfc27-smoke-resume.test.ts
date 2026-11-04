@@ -240,6 +240,28 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     return tx.wait();
   };
 
+  /**
+   * The upkeep cron's finalization, run while each bucket's funded cap is half of what is claimed of it:
+   * each claim finalizes to half of what it is due, in its event and in R, and the caps are then as they were.
+   */
+  const upkeepFinalizesTooLittle = async () => {
+    const writer = fx.f.accounts[46];
+    await fx.f.Hub.setContractAddress('BucketWriter', writer.address);
+    const claims = expectedClaims(stateNow());
+    const kept = await Promise.all(claims.map((x) => fx.f.CSS.getBucket(x.subscriptionId, x.bucketIndex)));
+    const write = (i: number, value: bigint) => {
+      const { bucketId, serviceClass, maxAskWeiPerUnit } = kept[i];
+      return fx.f.CSS.connect(writer).setBucket(claims[i].subscriptionId, claims[i].bucketIndex, { bucketId, serviceClass, value, maxAskWeiPerUnit });
+    };
+    for (const [i, x] of claims.entries()) {
+      const total = await fx.f.QIS.bucketClaimed(x.subscriptionId, x.bucketIndex);
+      const cap = await fx.f.QS.fundedCap(x.subscriptionId, x.bucketIndex);
+      await write(i, (kept[i].value * total) / (2n * cap));
+    }
+    await upkeepFinalizes();
+    for (const [i] of claims.entries()) await write(i, kept[i].value);
+  };
+
   /** The fixture a test runs from: its chain, its bindings, and the state file it left. */
   const use = (from: Fixture) => {
     fx = from;
@@ -943,7 +965,99 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       passes(ctx);
       expect(ctx.file.done('finalize')).to.equal(true);
       expect(checkOf(ctx, 'every claim is finalized').detail).to.equal('account finalized by another caller, wallet finalized by another caller');
-      expect(checkOf(ctx, 'R in epoch').ok).to.equal(true);
+      expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
+    });
+
+    describe('with other value in the seller\'s R and in the epoch\'s', () => {
+      /** The seller and another claim on another buyer's period of E, and are finalized on it past the deadline. */
+      const otherValue = async () => {
+        use(await loadFixture(afterServe));
+        const s = stateNow();
+        const period = await fx.helpers.walletFund(fx.f.accounts[21], s.E, 50n * TRAC);
+        const other = await fx.helpers.createSeller(100_000n * TRAC, 0n);
+        await fx.helpers.claimReceipts(fx.seller, period, 10n * TRAC);
+        await fx.helpers.claimReceipts(other, period, 5n * TRAC);
+        await toDeadline();
+        await scoreIn(s.E + 1n);
+        await fx.helpers.scoreEpoch(s.E + 1n, other, 10n ** 18n);
+        await fx.f.QS.connect(fx.f.accounts[20]).finalizeClaims([fx.seller, other].map((x) => ({ subscriptionId: period, bucketIndex: 0n, seller: x.identityId })));
+        return s;
+      };
+
+      it('takes what the upkeep cron finalized at what it was due: each claim, R and ΣR hold', async () => {
+        await otherValue();
+        await upkeepFinalizes();
+        const ctx = await ctxOf('finalize');
+        await phaseFinalize(ctx);
+        passes(ctx);
+        expect(ctx.file.done('finalize')).to.equal(true);
+        expect(checkOf(ctx, 'R and score in epoch').detail).to.contain('3 finalizations');
+        expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').detail).to.contain('4 finalizations');
+      });
+
+      it('fails claims the upkeep cron finalized at too little, though the other value lifts R past all they were due', async () => {
+        const s = await otherValue();
+        await upkeepFinalizesTooLittle();
+        const finalized = (await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E + 1n)).r;
+        const claims = expectedClaims(s);
+        const due = (await Promise.all(claims.map(async (x) => (await fx.f.QIS.getSellerClaim(x.subscriptionId, x.bucketIndex, x.seller)).claimed))).reduce((a, b) => a + b, 0n);
+        expect(finalized).to.be.greaterThan(due); // what a lower bound on R would have taken
+
+        const blocks = await head();
+        const ctx = await ctxOf('finalize');
+        await phaseFinalize(ctx);
+        expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(false);
+        expect(checkOf(ctx, 'the wallet claim is finalized in epoch').ok).to.equal(false);
+        expect(checkOf(ctx, 'every claim is finalized').ok).to.equal(true);
+        expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
+        expect(ctx.file.done('finalize')).to.equal(false);
+        expect(ctx.file.failedChecks('finalize')).to.equal(2);
+        expect(await head()).to.equal(blocks);
+        expect(await errorOf(phaseCloseClaim(await ctxOf('close-claim')))).to.match(/^PHASE=finalize ended with 2 failed checks/);
+      });
+    });
+
+    it('fails a claim storage holds finalized with no event of it, and an R that holds what no finalization shows', async () => {
+      await setupAndServe();
+      const s = stateNow();
+      const [account, wallet] = expectedClaims(s);
+      await scoreIn(s.E + 1n);
+      await fx.f.QS.connect(fx.f.accounts[20]).finalizeClaims([{ subscriptionId: account.subscriptionId, bucketIndex: account.bucketIndex, seller: account.seller }]);
+      const writer = fx.f.accounts[46];
+      await fx.f.Hub.setContractAddress('ClaimWriter', writer.address);
+      const { claimed, weighted } = await fx.f.QIS.getSellerClaim(wallet.subscriptionId, wallet.bucketIndex, wallet.seller);
+      await fx.f.QIS.connect(writer).finalizeClaim(wallet.subscriptionId, wallet.bucketIndex, wallet.seller, s.E + 1n, claimed, weighted);
+      const ctx = await ctxOf('finalize');
+      await phaseFinalize(ctx);
+      expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(true);
+      expect(checkOf(ctx, 'the wallet claim is finalized in epoch').detail).to.equal('no ClaimsFinalized of it on chain');
+      expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(false);
+      expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').ok).to.equal(false);
+      expect(ctx.file.done('finalize')).to.equal(false);
+    });
+
+    it('fails a claim finalized at the value it was due and another score', async () => {
+      await setupAndServe();
+      const s = stateNow();
+      await scoreIn(s.E + 1n);
+      await upkeepFinalizes();
+      const ctx = await ctxOf('finalize');
+      // What the claim holds of weighted value says it was due another score than it finalized to.
+      ctx.c = {
+        ...ctx.c,
+        qis: new Proxy(ctx.c.qis, {
+          get: (t, k) =>
+            k === 'getSellerClaim'
+              ? async (...args: Parameters<typeof t.getSellerClaim>) => {
+                  const claim = await t.getSellerClaim(...args);
+                  return new Proxy(claim, { get: (x, f) => (f === 'weighted' ? x.weighted + 1n : Reflect.get(x, f)) });
+                }
+              : Reflect.get(t, k),
+        }),
+      };
+      await phaseFinalize(ctx);
+      expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(false);
+      expect(ctx.file.done('finalize')).to.equal(false);
     });
 
     it('calls a claim void, and fails, only if it is still unfinalized once E+1 has ended', async () => {
@@ -1190,6 +1304,22 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       passes(ctx);
       expect(ctx.file.done('close-claim')).to.equal(true);
       expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(true);
+    });
+
+    it('refuses claims the upkeep cron finalized at too little, with PHASE=finalize never run: it sends nothing, and the run goes no further', async () => {
+      const s = await served();
+      await upkeepFinalizesTooLittle();
+      await toEpoch(s.E + 2n);
+      const blocks = await head();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(true);
+      expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(false);
+      expect(checkOf(ctx, 'the wallet claim is finalized in epoch').ok).to.equal(false);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
     });
 
     it('refuses while PHASE=finalize stands failed, though both claims are finalized', async () => {

@@ -3,7 +3,8 @@
 // (walletDue + convictionDue + carryIn), served value (sumR), unused share and
 // pool. Where the upkeep cron closed or claimed first, what it did is checked
 // from storage instead. Both of the run's claims must be finalized first, by the
-// run or by the upkeep cron: with one void, the cycle has failed, and goes no further.
+// run or by the upkeep cron, at what they were due: otherwise the cycle has failed,
+// and goes no further.
 
 import { eventsIn } from '../contracts';
 import { requireParameter } from '../parameters';
@@ -11,7 +12,7 @@ import { fmt, iso, min, sum } from '../report';
 import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
 import { netsFromInputs, rewardClaims } from './reward-claims';
-import { finalizedValue, names, unfinalizedClaims } from './finalize';
+import { checkFinalizations, finalizedValue, names, unfinalizedClaims } from './finalize';
 import { need } from './roles';
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
@@ -34,6 +35,10 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     return;
   }
   if (!file.done('finalize')) report.note('PHASE=finalize has not completed here: another caller (the upkeep cron) finalized the claims');
+  if (!(await checkFinalizations(ctx, s))) {
+    report.fail('what was finalized of this run\'s claims is not what they were due, so this run cannot go on: start a new run');
+    return;
+  }
 
   // The previews, before any close: the pool, the seller's gross, StakingKPI's nets.
   const windowStart = s.stakeEpoch;
