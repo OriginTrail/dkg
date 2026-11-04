@@ -495,6 +495,69 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx.file.done(phase)).to.equal(false);
     };
 
+    /** The context's receipts with no TRAC Transfer in them: each transaction's own events are there, and what it moved is not. */
+    const showingNoTransfer = (ctx: PoolCtx): PoolCtx => {
+      const { tx } = ctx;
+      const receipt = tx.receipt.bind(tx);
+      const token = String(fx.f.Token.target).toLowerCase();
+      tx.receipt = async (hash: string) =>
+        new Proxy(await receipt(hash), { get: (t, k) => (k === 'logs' ? t.logs.filter((l: { address: string }) => l.address.toLowerCase() !== token) : Reflect.get(t, k)) });
+      return ctx;
+    };
+    /** A position withdrawn in the middle of the epoch after close-claim, with something to claim of that epoch, and the clock in the next. */
+    const withdrawnWithClaim = async () => {
+      use(await loadFixture(afterCloseClaim));
+      const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+      await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+      await fx.helpers.publishingPool(e, 10n * TRAC);
+      await scoreIn(e);
+      await phaseWithdraw(await ctxOf('withdraw'));
+      await toEpoch(e + 1n);
+    };
+
+    it('fails setup, which is not done, when the receipt of a step that moves TRAC shows no Transfer', async () => {
+      for (const [stopAt, label] of [
+        ['setup.stake', 'the stake moved into the vault'],
+        ['setup.create-account', 'the commitment moved into the vault'],
+        ['setup.fund-wallet-period', 'moved into the vault and is due'],
+      ]) {
+        use(await loadFixture(deployFixture));
+        await fundExactly();
+        await stops(phaseSetup(await ctxOf('setup', { stopAt })));
+        const ctx = showingNoTransfer(await ctxOf('setup'));
+        await phaseSetup(ctx);
+        failsAndIsNotDone(ctx, 'setup', label);
+      }
+    });
+
+    it('fails the withdrawal, which stays on its part, when its event is there and its receipt shows no Transfer', async () => {
+      use(await loadFixture(afterCloseClaim));
+      const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+      await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+      await scoreIn(e);
+      await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.withdraw' })));
+      const ctx = showingNoTransfer(await ctxOf('withdraw'));
+      await phaseWithdraw(ctx);
+      failsAndIsNotDone(ctx, 'withdraw', 'the withdrawal pays the stake');
+      expect(rawState().withdrawal).to.equal(undefined);
+    });
+
+    it('fails the claim of the withdrawn epoch, when its event is there and its receipt shows no Transfer', async () => {
+      await withdrawnWithClaim();
+      await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.claim-withdrawn-epoch' })));
+      const ctx = showingNoTransfer(await ctxOf('withdraw'));
+      await phaseWithdraw(ctx);
+      failsAndIsNotDone(ctx, 'withdraw', 'claimWithdrawnEpoch pays the owner');
+    });
+
+    it('fails on another caller\'s claim of the withdrawn epoch, when its receipt shows no Transfer', async () => {
+      await withdrawnWithClaim();
+      await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(stateNow().tokenId);
+      const ctx = showingNoTransfer(await ctxOf('withdraw'));
+      await phaseWithdraw(ctx);
+      failsAndIsNotDone(ctx, 'withdraw', 'claimed by another caller');
+    });
+
     it('fails setup, which is not done, at the stake', async () => {
       use(await loadFixture(deployFixture));
       await fundExactly();
