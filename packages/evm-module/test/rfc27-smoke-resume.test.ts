@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
+import { getStorageAt, loadFixture, setStorageAt, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import { ethers } from 'ethers';
 import type { Signer, TransactionRequest } from 'ethers';
@@ -1323,6 +1323,79 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx.file.done('close-claim')).to.equal(false);
       expect(await head()).to.equal(blocks);
       expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+    });
+
+    describe('with what is due in E+1 against what the periods of E were funded with', () => {
+      /** The wallet money due in `epoch`, `less` short of what was booked, as a booking that fell short leaves it. */
+      const dueShort = async (epoch: bigint, less: bigint) => {
+        const qis = await fx.f.QIS.getAddress();
+        const { wallet } = await fx.f.QIS.dueIn(epoch);
+        for (let at = 0; at < 200; at++) {
+          const slot = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint256', 'uint256'], [epoch, at]));
+          if (BigInt(await getStorageAt(qis, slot)) === wallet) {
+            await setStorageAt(qis, slot, wallet - less);
+            return;
+          }
+        }
+        throw new Error('no slot holds the wallet money due');
+      };
+      /** A run past its finalization, in E+2, with another buyer's funding of E beside its own. */
+      const finalizedBesideAnother = async () => {
+        use(await loadFixture(afterServe));
+        const s = stateNow();
+        await fx.helpers.walletFund(fx.f.accounts[21], s.E, 5n * TRAC);
+        await toDeadline();
+        await scoreIn(s.E + 1n);
+        await upkeepFinalizes();
+        await toEpoch(s.E + 2n);
+        return s;
+      };
+
+      it('refuses a booking of ours that fell short, though another buyer\'s funding lifts the due past ours: it sends nothing', async () => {
+        const s = await finalizedBesideAnother();
+        await dueShort(s.E + 1n, TRAC);
+        expect((await fx.f.QIS.dueIn(s.E + 1n)).wallet).to.be.greaterThan(s.amounts.walletValue); // what a lower bound would have taken
+        const blocks = await head();
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        expect(ctx.report.status).to.equal('failed');
+        expect(checkOf(ctx, 'what is due in epoch').ok).to.equal(false);
+        expect(ctx.file.done('close-claim')).to.equal(false);
+        expect(await head()).to.equal(blocks);
+        expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+      });
+
+      it('refuses a due that holds what no funding shows', async () => {
+        const s = await finalizedBesideAnother();
+        const writer = fx.f.accounts[46];
+        await fx.f.Hub.setContractAddress('DueWriter', writer.address);
+        await fx.f.QIS.connect(writer).addWalletDue(s.E + 1n, 1n);
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        expect(checkOf(ctx, 'what is due in epoch').ok).to.equal(false);
+        expect(ctx.file.done('close-claim')).to.equal(false);
+      });
+
+      it('takes another buyer\'s period of E funded in the epoch before, and top-ups, to the wei', async () => {
+        use(await loadFixture(deployFixture));
+        const before = await fx.f.Chronos.getCurrentEpoch();
+        await fx.helpers.walletFund(fx.f.accounts[21], before + 1n, 5n * TRAC);
+        await toEpoch(before + 1n);
+        await fundExactly();
+        await phaseSetup(await ctxOf('setup'));
+        await phaseServe(await ctxOf('serve'));
+        const s = stateNow();
+        await toDeadline();
+        await scoreIn(s.E + 1n);
+        await upkeepFinalizes();
+        await toEpoch(s.E + 2n);
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        passes(ctx);
+        const raw = rawState();
+        expect(BigInt(raw.amounts.walletValue) + 5n * TRAC).to.equal((await fx.f.QIS.dueIn(s.E + 1n)).wallet);
+        expect(checkOf(ctx, 'what is due in epoch').detail).to.contain(`wallet ${fmt(BigInt(raw.amounts.walletValue) + 5n * TRAC)} of`);
+      });
     });
 
     it('refuses while PHASE=finalize stands failed, though both claims are finalized', async () => {

@@ -16,13 +16,25 @@ import { EpochReward, claimPreview, poolShareOf } from '../reads';
 const LOG_PAGE = 199;
 
 /** Logs from `fromBlock` to the head, a page at a time, in order. */
-export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'getLogs'>, filter: { address: string; topics: (string | string[])[] }, fromBlock: number): Promise<Log[]> {
+export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'getLogs'>, filter: { address: string | string[]; topics: (string | string[])[] }, fromBlock: number): Promise<Log[]> {
   const head = await provider.getBlockNumber();
   const logs: Log[] = [];
   for (let from = fromBlock; from <= head; from += LOG_PAGE) {
     logs.push(...(await provider.getLogs({ ...filter, fromBlock: from, toBlock: Math.min(from + LOG_PAGE - 1, head) })));
   }
   return logs;
+}
+
+/** The first block at or after `ts`. */
+export async function firstBlockAt(provider: Pick<Provider, 'getBlockNumber' | 'getBlock'>, ts: bigint): Promise<number> {
+  let low = 0;
+  let high = await provider.getBlockNumber();
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (BigInt((await provider.getBlock(middle))?.timestamp ?? 0) < ts) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 /**
