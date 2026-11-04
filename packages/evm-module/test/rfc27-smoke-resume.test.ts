@@ -1323,6 +1323,78 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('by that transaction\'s Transfer logs');
     });
 
+    describe('with this run\'s claim of the withdrawn epoch reverting', () => {
+      const CLAIM = 'withdraw.claim-withdrawn-epoch';
+      /** The position withdrawn, with something to claim of that epoch, and the clock in the next: the claim is what is left. */
+      const withdrawn = async () => {
+        use(await loadFixture(afterCloseClaim));
+        const e = await toMiddle();
+        await scoreIn(e);
+        await phaseWithdraw(await ctxOf('withdraw'));
+        await toEpoch(e + 1n);
+        return stateNow().tokenId;
+      };
+      const statusOf = async (hash: string) => (await hre.ethers.provider.getTransactionReceipt(hash))?.status;
+
+      for (const [when, stopAt] of [
+        ['it waits for its receipt', undefined],
+        ['it crashes once its attempt is sent', `${CLAIM}:sent`],
+      ]) {
+        it(`on a claim by the upkeep cron between its estimate and its mining, as ${when}: a resume takes the cron's, sending nothing`, async () => {
+          const tokenId = await withdrawn();
+          let cron: { hash: string } = { hash: '' };
+          const owner = ownerBeside(fx.f.StakingV10.interface.getFunction('claimWithdrawnEpoch').selector, async () => {
+            cron = await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId, { maxPriorityFeePerGas: 10n ** 11n, maxFeePerGas: 10n ** 12n });
+          });
+          const first = phaseWithdraw(await ctxOf('withdraw', { owner, stopAt }));
+          if (stopAt) await stops(first);
+          else expect(await errorOf(first)).to.match(/reverted on chain/);
+          expect(await statusOf(rawState().steps[CLAIM].hash)).to.equal(0);
+          expect(await statusOf(cron.hash)).to.equal(1);
+          await inTheBlockOf(CLAIM, cron);
+
+          const blocks = await head();
+          const resumed = await ctxOf('withdraw');
+          await phaseWithdraw(resumed);
+          passes(resumed);
+          expect(resumed.file.done('withdraw')).to.equal(true);
+          expect(await head()).to.equal(blocks);
+          expect(checkOf(resumed, 'claimed by another caller').detail).to.contain(cron.hash);
+        });
+      }
+
+      it('with the withdrawn epoch still to claim: the attempt is made again, and pays', async () => {
+        const tokenId = await withdrawn();
+        const wallet = ownerWallet();
+        const provider = hre.network.provider;
+        const short = {
+          getAddress: () => wallet.getAddress(),
+          sendTransaction: async (tx: TransactionRequest) => {
+            await provider.send('evm_setAutomine', [false]);
+            try {
+              const sent = await wallet.sendTransaction({ ...tx, gasLimit: 40_000n });
+              await provider.send('evm_mine', []);
+              return sent;
+            } finally {
+              await provider.send('evm_setAutomine', [true]);
+            }
+          },
+        } as unknown as Signer;
+        expect(await errorOf(phaseWithdraw(await ctxOf('withdraw', { owner: short })))).to.match(/reverted on chain/);
+        const reverted = rawState().steps[CLAIM].hash;
+        expect(await statusOf(reverted)).to.equal(0);
+        const c = await (await Stack.at(hre, await fx.f.Hub.getAddress())).pool();
+        expect((await c.cws.getWithdrawal(tokenId))[0].epoch).to.not.equal(0n);
+
+        const resumed = await ctxOf('withdraw');
+        await phaseWithdraw(resumed);
+        passes(resumed);
+        expect(resumed.file.done('withdraw')).to.equal(true);
+        expect(rawState().steps[CLAIM].hash).to.not.equal(reverted);
+        expect(checkOf(resumed, 'claimWithdrawnEpoch pays the owner').ok).to.equal(true);
+      });
+    });
+
     it('stays on its part while a check fails, and runs again sending nothing', async () => {
       use(await loadFixture(afterCloseClaim));
       const e = await toMiddle();

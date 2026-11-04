@@ -102,10 +102,14 @@ export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   const net = await c.kpi.getNetNodeRewards(node, epoch);
   const expected = nodeScore === 0n ? 0n : (score * net) / nodeScore;
   report.note(`expected: score ${score} × StakingKPI net ${fmt(net)} TRAC / node score ${nodeScore} = ${fmt(expected)} TRAC`);
+  // This run's attempt may have reverted, with another caller (the upkeep cron) claiming between its
+  // estimate and its mining: it paid nothing then. With the record gone, the claim is that caller's.
+  const attempt = file.get(CLAIM);
+  const claimedByThisRun = !!attempt && (await ctx.tx.receipt(attempt.hash)).status === 1;
   const [record] = await c.cws.getWithdrawal(tokenId);
   let paid: bigint | undefined;
-  if (record.epoch !== 0n || file.get(CLAIM)) {
-    const res = await ctx.tx.step({ key: CLAIM, label: `owner: StakingV10.claimWithdrawnEpoch(${tokenId})`, role: 'owner', signer: r.owner, to: sv10, data: claimData });
+  if (claimedByThisRun || record.epoch !== 0n) {
+    const res = await ctx.tx.step({ key: CLAIM, label: `owner: StakingV10.claimWithdrawnEpoch(${tokenId})`, role: 'owner', signer: r.owner, to: sv10, data: claimData, retriesReverted: true });
     if (!res.receipt) return { part: 'claim' };
     const ev = eventsIn(res.receipt, c.sv10, c.sv10.getEvent('WithdrawnEpochClaimed')).find((x) => x.tokenId === tokenId);
     paid = ev?.amount ?? 0n;
