@@ -466,6 +466,8 @@ The phases, with `SEND=1`, about two days apart in all:
   node's next proof, before E+1 ends; after that the claims still unfinalized
   are void, and it fails. Claims another caller finalized count, whenever
   `finalize` first runs.
+- `close-claim` requires both claims finalized, by the run or by the upkeep cron.
+  With one void the run goes no further: start a new one.
 - `withdraw` waits until the position holds score in the epoch: without it, a
   withdrawal burns the position and records nothing to claim.
 - A phase stopped at any point is run again as it was: it sends nothing the

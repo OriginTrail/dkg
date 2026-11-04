@@ -850,6 +850,75 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
   });
 
+  describe('close-claim, after the finalization', () => {
+    const served = async () => {
+      use(await loadFixture(afterServe));
+      await toDeadline();
+      const s = stateNow();
+      await scoreIn(s.E + 1n);
+      return s;
+    };
+
+    it('refuses a run with one claim finalized and one void, sends nothing, and the run goes no further', async () => {
+      const s = await served();
+      await upkeepFinalizes('wallet');
+      await toEpoch(s.E + 2n);
+      const finalize = await ctxOf('finalize');
+      await phaseFinalize(finalize);
+      expect(finalize.report.status).to.equal('failed');
+      expect(finalize.file.done('finalize')).to.equal(false);
+
+      const blocks = await head();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(false);
+      expect(checkOf(ctx, 'both of the run\'s claims are finalized').detail).to.contain('the account claim is not');
+      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+    });
+
+    it('refuses a run with neither finalized', async () => {
+      const s = await served();
+      await toEpoch(s.E + 2n);
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, 'both of the run\'s claims are finalized').detail).to.contain('the account and wallet claim is not');
+      expect(ctx.file.done('close-claim')).to.equal(false);
+    });
+
+    it('takes both claims finalized by the upkeep cron, with PHASE=finalize never run', async () => {
+      const s = await served();
+      await upkeepFinalizes();
+      await toEpoch(s.E + 2n);
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      passes(ctx);
+      expect(ctx.file.done('close-claim')).to.equal(true);
+      expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(true);
+    });
+
+    it('refuses while PHASE=finalize stands failed, though both claims are finalized', async () => {
+      const s = await served();
+      await upkeepFinalizes();
+      await toEpoch(s.E + 2n);
+      editState((raw) => {
+        raw.phases.finalize = { status: 'failed', failedChecks: 1 };
+      });
+      expect(await errorOf(phaseCloseClaim(await ctxOf('close-claim')))).to.match(/^PHASE=finalize ended with 1 failed check/);
+    });
+
+    it('defers before E+1 has ended, without calling a claim void', async () => {
+      await served();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('deferred');
+      expect(ctx.report.failed).to.equal(0);
+    });
+  });
+
   describe('close-claim', () => {
     /** A claim of the position outside the phase, as the upkeep cron's would be. */
     const upkeepClaims = async (tokenId: bigint) => (await fx.f.StakingV10.connect(fx.f.accounts[20]).claimFor(tokenId)).wait();

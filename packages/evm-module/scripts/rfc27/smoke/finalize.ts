@@ -37,7 +37,7 @@ type Status = 'finalized' | 'finalized by another caller' | 'pending' | 'waiting
 type Outcome = Claim & { status: Status; reason: SkipReason; value?: bigint };
 
 const settled = (x: Outcome): boolean => x.status === 'finalized' || x.status === 'finalized by another caller';
-const names = (xs: Claim[]): string => xs.map((x) => x.period).join(' and ');
+export const names = (xs: { period: string }[]): string => xs.map((x) => x.period).join(' and ');
 
 /** The claims the journaled serve batches' receipts show, from their ReceiptsClaimed events. */
 async function claimsInBatches(ctx: PoolCtx, s: ServedState): Promise<ClaimRef[]> {
@@ -82,6 +82,13 @@ async function outcomesOf(ctx: PoolCtx, claims: Claim[], ours: ClaimRef[]): Prom
       out.push({ ...claim, reason, status: reason === 'None' ? 'pending' : reason === 'NoScore' ? 'waiting on the seller' : reason === 'Void' ? 'void' : 'skipped' });
     }
   }
+  return out;
+}
+
+/** The run's claims that storage does not hold finalized, whoever would have finalized them. */
+export async function unfinalizedClaims(ctx: PoolCtx, s: SetupState): Promise<Claim[]> {
+  const out: Claim[] = [];
+  for (const x of expectedClaims(s)) if (!(await ctx.c.qis.getSellerClaim(x.subscriptionId, x.bucketIndex, x.seller)).finalized) out.push(x);
   return out;
 }
 

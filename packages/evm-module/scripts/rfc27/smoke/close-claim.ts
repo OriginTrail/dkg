@@ -2,7 +2,8 @@
 // our position against StakingKPI's preview, and from E+1's close its money
 // (walletDue + convictionDue + carryIn), served value (sumR), unused share and
 // pool. Where the upkeep cron closed or claimed first, what it did is checked
-// from storage instead.
+// from storage instead. Both of the run's claims must be finalized first, by the
+// run or by the upkeep cron: with one void, the cycle has failed, and goes no further.
 
 import { eventsIn } from '../contracts';
 import { requireParameter } from '../parameters';
@@ -10,20 +11,29 @@ import { fmt, iso, min, sum } from '../report';
 import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
 import { rewardClaims } from './reward-claims';
-import { finalizedValue } from './finalize';
+import { finalizedValue, names, unfinalizedClaims } from './finalize';
 import { need } from './roles';
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   const { report, c, file } = ctx;
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
   const s = await runState(ctx, 'serve');
-  if (!ctx.file.done('finalize')) report.note('finalize has not completed: the epoch closes with whatever was finalized');
   if (doneEarlier(ctx, '')) return;
+  const failed = file.failedChecks('finalize');
+  if (failed) throw new Error(`PHASE=finalize ended with ${failed} failed check${failed > 1 ? 's' : ''}: run it again first, which sends nothing it sent already`);
   const { E, tokenId } = s;
   const P = E + 1n; // the pool epoch: the periods of E are due in it
   if (!(await opensAt(ctx, (await epochStart(ctx, E + 2n)) + 60n, `the close of epoch ${P}, once it has ended`))) return;
   const current = await c.chronos.getCurrentEpoch();
   report.say(`\nClose and claim in epoch ${current}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
+
+  // E+1 has ended, so a claim not finalized by now never will be.
+  const unfinalized = await unfinalizedClaims(ctx, s);
+  if (!report.check('both of the run\'s claims are finalized, by the run or by another caller', unfinalized.length === 0, unfinalized.length ? `the ${names(unfinalized)} claim is not, and epoch ${P} has ended: it is void` : undefined)) {
+    report.fail(`the ${names(unfinalized)} claim is void, so this run cannot go on: start a new run`);
+    return;
+  }
+  if (!file.done('finalize')) report.note('PHASE=finalize has not completed here: another caller (the upkeep cron) finalized the claims');
 
   // The previews, before any close: the pool, the seller's gross, StakingKPI's nets.
   const windowStart = s.stakeEpoch;
