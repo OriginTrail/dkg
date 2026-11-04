@@ -93,33 +93,36 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
   let dir: string;
   let stateFile: string;
   const ownerWallet = () => derived('owner');
-  const roles = (): Roles => ({
+  /** A run's keys: its own but for the owner, as the script derives them from the run's label. */
+  const roles = (run: string): Roles => ({
     owner: ownerWallet(),
     ownerAddr: ownerWallet().address,
     ownerImpersonated: false,
-    buyer: derived('buyer'),
-    edgeBuyer: derived('edge-buyer'),
-    caSession: derived('ca-session'),
-    walletSession: derived('wallet-session'),
-    edgeSession: derived('edge-session'),
+    buyer: derived(`${run}/buyer`),
+    edgeBuyer: derived(`${run}/edge-buyer`),
+    caSession: derived(`${run}/ca-session`),
+    walletSession: derived(`${run}/wallet-session`),
+    edgeSession: derived(`${run}/edge-session`),
     seller: fx.seller.operational,
     sellerAddr: fx.seller.operational.address,
     sellerImpersonated: false,
   });
 
   /** A phase's context, as the entry point builds it; `local` makes the in-process chain stand for the fork. */
-  const ctxOf = async (phase: PhaseName, o: { send?: boolean; local?: boolean; warp?: boolean; proofs?: boolean; stopAt?: string; owner?: Signer } = {}): Promise<PoolCtx> => {
+  const ctxOf = async (phase: PhaseName, o: { send?: boolean; local?: boolean; warp?: boolean; proofs?: boolean; stopAt?: string; owner?: Signer; run?: string } = {}): Promise<PoolCtx> => {
     const send = o.send ?? true;
+    const run = o.run ?? 'test';
+    const file_ = run === 'test' ? stateFile : path.join(dir, `${run}.json`);
     const report = new QuietReport();
     const net = { chainId: 31337n, client: 'in-process', local: o.local ?? false, name: 'the in-process chain', forkBlock: o.local ? 1n : undefined };
     const stack = await Stack.at(hre, await fx.f.Hub.getAddress());
-    const file = new StateFile(stateFile, new Redactor(), !send);
+    const file = new StateFile(file_, new Redactor(), !send);
     const stop = (): never => {
       throw new Crash(`stopped after ${o.stopAt}`);
     };
     return withPool({
       hre,
-      env: { phase, send, warp: o.warp ?? false, proofs: o.proofs ?? false, run: 'test', stateFile },
+      env: { phase, send, warp: o.warp ?? false, proofs: o.proofs ?? false, run, stateFile: file_ },
       net,
       report,
       stack,
@@ -127,7 +130,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       fork: new Fork(hre, net, report),
       file,
       tx: new SmokeTx(hre, report, send, o.stopAt ? stoppingAt(file, o.stopAt, stop) : file),
-      roles: { ...roles(), ...(o.owner ? { owner: o.owner } : {}) },
+      roles: { ...roles(run), ...(o.owner ? { owner: o.owner } : {}) },
     });
   };
 
@@ -847,6 +850,84 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const calls = await rpcCalls(async () => phaseWithdraw(await ctxOf('withdraw', { send: false, local: true, warp: true, proofs: true })));
       expect(calls.filter((m) => MUTATING.test(m))).to.deep.equal([]);
       expect((await fx.f.Vault.getPosition(s.tokenId)).identityId).to.equal(fx.seller.identityId);
+    });
+  });
+
+  describe('two runs of one owner in the same epoch, whose wallet period can only be one of theirs', () => {
+    const fundOwner = async () => {
+      const { needed } = await fundExactly();
+      return needed;
+    };
+
+    it('defers the second run before it spends anything, and the first goes on', async () => {
+      use(await loadFixture(afterSetup));
+      const needed = await fundOwner();
+      const owner = ownerWallet().address;
+      const tokens = await fx.f.StakingNFT.nextTokenId();
+      const blocks = await head();
+      const second = await ctxOf('setup', { run: 'b' });
+      await phaseSetup(second);
+      expect(second.report.status).to.equal('deferred');
+      expect(second.report.why).to.contain('is another run\'s: session key');
+      expect(await head()).to.equal(blocks);
+      expect(await fx.f.StakingNFT.nextTokenId()).to.equal(tokens);
+      expect(await fx.f.Token.balanceOf(owner)).to.equal(needed);
+      expect(fs.existsSync(path.join(dir, 'b.json'))).to.equal(false);
+
+      // The first run's resume is untouched: its period is its own.
+      const first = await ctxOf('serve');
+      await phaseServe(first);
+      passes(first);
+      expect(first.file.done('serve')).to.equal(true);
+    });
+
+    it('lets the second run through in the next epoch, with a wallet period of its own that it can serve', async () => {
+      use(await loadFixture(afterSetup));
+      await fundOwner();
+      const E = stateNow().E;
+      await toEpoch(E + 1n);
+      const second = await ctxOf('setup', { run: 'b' });
+      await phaseSetup(second);
+      passes(second);
+      const serve = await ctxOf('serve', { run: 'b' });
+      await phaseServe(serve);
+      passes(serve);
+      const held = decodeState(JSON.parse(fs.readFileSync(path.join(dir, 'b.json'), 'utf8')));
+      expect(held.E).to.equal(E + 1n);
+      expect((await fx.f.CSS.getSubscription(held.periods.wallet ?? '')).sessionKey).to.equal(derived('b/wallet-session').address);
+    });
+
+    it('stops a run whose account period is funded in that epoch when another run took the wallet period, sending nothing', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { run: 'b', stopAt: 'setup.fund-account-period' })));
+      const first = await ctxOf('setup');
+      await phaseSetup(first);
+      passes(first);
+      const blocks = await head();
+      expect(await errorOf(phaseSetup(await ctxOf('setup', { run: 'b' })))).to.match(/is another run's: .*and this run funded its account period in that epoch: start a new run$/);
+      expect(await head()).to.equal(blocks);
+    });
+
+    it('keeps a resume of the same run working, whose period is its own', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period:sent' })));
+      const resumed = await ctxOf('setup');
+      await phaseSetup(resumed);
+      passes(resumed);
+      expect(resumed.file.done('setup')).to.equal(true);
+    });
+
+    it('says so at PHASE=check, for the second run and not the first', async () => {
+      use(await loadFixture(afterSetup));
+      const second = await ctxOf('check', { run: 'b', send: false });
+      await phaseCheck(second);
+      expect(checkOf(second, 'if it has one, is this run\'s').ok).to.equal(false);
+      const first = await ctxOf('check', { send: false });
+      await phaseCheck(first);
+      expect(checkOf(first, 'if it has one, is this run\'s').ok).to.equal(true);
     });
   });
 

@@ -3,6 +3,9 @@
 import * as fs from 'fs';
 
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
+import { ethers } from 'ethers';
+
+import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
 import { BaseContracts, Contracts, Stack } from '../contracts';
 import { Fork, notBefore } from '../fork';
@@ -51,6 +54,23 @@ export async function opensAt(ctx: Ctx, ts: bigint, what: string): Promise<boole
 }
 
 export const epochStart = (ctx: Ctx, e: bigint): Promise<bigint> => ctx.base.chronos.timestampForEpoch(e);
+
+/** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
+export const planDigest = (ctx: Ctx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
+
+/**
+ * Why the owner's wallet period of `epoch`, if it has one, is not this run's. Its
+ * id names only the owner and the epoch, while its session key and its plan are
+ * the run's: a second run of the same owner in the same epoch would skip funding
+ * and sign requests its period does not accept.
+ */
+export async function walletPeriodClash(ctx: PoolCtx, r: { ownerAddr: string; walletSession: { address: string } }, value: bigint, epoch: bigint): Promise<string | undefined> {
+  const id = subscriptionIdOf(r.ownerAddr, epoch);
+  if (!(await ctx.c.cssvc.subscriptionExists(id))) return undefined;
+  const held = await ctx.c.cssvc.getSubscription(id);
+  if (held.sessionKey === r.walletSession.address && held.planDigest === planDigest(ctx, 'wallet plan') && held.value === value) return undefined;
+  return `the owner's wallet period of epoch ${epoch} is another run's: session key ${held.sessionKey}, plan ${held.planDigest}, value ${held.value}; this run's key is ${r.walletSession.address}`;
+}
 
 /**
  * Binds the state file to this network: a fork run never resumes on testnet,

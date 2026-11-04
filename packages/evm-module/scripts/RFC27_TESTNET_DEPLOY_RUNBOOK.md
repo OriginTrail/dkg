@@ -441,7 +441,7 @@ What a run needs:
 |---|---|
 | `RFC27_SMOKE_OWNER_KEY` | required, from the owner wallet |
 | `RFC27_SMOKE_SELLER_KEY` | required, an operational key of the seller node |
-| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run |
+| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run. The owner has one wallet period an epoch, so a second run of the same owner in the same epoch defers to the next, before it spends anything |
 | `RPC_BASE_SEPOLIA_V10` | `https://sepolia.base.org` |
 | The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet period and a 50 TRAC stake. A resumed run needs only what its remaining steps spend |
 | The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer key; `PHASE=check` prints it at the current fee |

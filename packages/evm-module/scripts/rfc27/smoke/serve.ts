@@ -9,9 +9,9 @@ import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-servi
 import { eventsIn } from '../contracts';
 import { fmt, iso, sum } from '../report';
 import { planValue, requestPlan } from './config';
-import { PoolCtx, complete, doneEarlier, epochStart, now, runState, standInProof } from './context';
+import { PoolCtx, complete, doneEarlier, epochStart, now, planDigest, runState, standInProof } from './context';
 import { need } from './roles';
-import { fundOnFork, planDigest } from './setup';
+import { fundOnFork } from './setup';
 import { serveMissing } from './state';
 import { shownBy } from './tx';
 

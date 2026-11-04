@@ -2,22 +2,17 @@
 // Conviction Account under PublishingConviction 10.2.0, opted in, the buyer
 // key assigned; a Conviction Account period and a wallet-paid period of E.
 
-import { ethers } from 'ethers';
-
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
 import { eventsIn } from '../contracts';
 import { FORK_ETH } from '../fork';
 import { fmt, iso } from '../report';
 import { MIN_EPOCH_LEFT, needsOf, plannedAmounts } from './config';
-import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt } from './context';
+import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt, planDigest, walletPeriodClash } from './context';
 import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
 import { Amounts, SmokeState, setupMissing } from './state';
 import { shownBy, tracMoved } from './tx';
-
-/** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
-export const planDigest = (ctx: PoolCtx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
 
 /** FORK-ONLY: the owner's ETH and TRAC, and the seller's ETH, from anvil's balance setters, with SEND=1: a dry run changes nothing. */
 export async function fundOnFork(ctx: PoolCtx, trac: bigint): Promise<void> {
@@ -80,13 +75,21 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const fundedIn = s?.periods.ca || s?.periods.wallet || s?.steps['setup.fund-account-period'] || s?.steps['setup.fund-wallet-period'] ? s?.E : undefined;
   const end = await epochStart(ctx, (await c.chronos.getCurrentEpoch()) + 1n);
   if (fundedIn === undefined && end - (await now(ctx)) < MIN_EPOCH_LEFT && !(await opensAt(ctx, end + 120n, 'setup, with a whole epoch for setup and serve'))) return;
-  const current = await c.chronos.getCurrentEpoch();
+  let current = await c.chronos.getCurrentEpoch();
   if (fundedIn !== undefined && current !== fundedIn) throw new Error(`the periods of this run were funded in epoch ${fundedIn}, and it is ${current} now: start a new run`);
+  const a = await plannedAmounts(c, s, await maxFeePerGas(ctx));
+
+  // Before anything is spent: the owner has one wallet period an epoch, and it must be this run's.
+  const clash = await walletPeriodClash(ctx, r, a.walletValue, fundedIn ?? current);
+  if (clash) {
+    if (fundedIn !== undefined) throw new Error(`${clash}, and this run funded its account period in that epoch: start a new run`);
+    if (!(await opensAt(ctx, (await epochStart(ctx, current + 1n)) + 120n, `setup, with a wallet period of its own in the next epoch, as ${clash}`))) return;
+    current = await c.chronos.getCurrentEpoch();
+  }
 
   const d = await checkDeployment(ctx, current);
   if (!d.live) throw new Error('funding is not live: see the checks above');
   report.say('\nSeller:');
-  const a = await plannedAmounts(c, s, await maxFeePerGas(ctx));
   const seller = await verifySeller(ctx, a);
   if (!seller.ok) throw new Error('the seller does not qualify: see the checks above');
   if (!s && ctx.env.send) {
