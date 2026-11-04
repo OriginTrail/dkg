@@ -1030,34 +1030,37 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const ctx = await ctxOf('finalize');
       await phaseFinalize(ctx);
       expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(true);
+      expect(checkOf(ctx, 'the wallet claim is finalized in epoch').ok).to.equal(false);
       expect(checkOf(ctx, 'the wallet claim is finalized in epoch').detail).to.equal('no ClaimsFinalized of it on chain');
       expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(false);
       expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').ok).to.equal(false);
       expect(ctx.file.done('finalize')).to.equal(false);
     });
 
-    it('fails a claim finalized at the value it was due and another score', async () => {
-      await setupAndServe();
-      const s = stateNow();
-      await scoreIn(s.E + 1n);
-      await upkeepFinalizes();
-      const ctx = await ctxOf('finalize');
-      // What the claim holds of weighted value says it was due another score than it finalized to.
-      ctx.c = {
-        ...ctx.c,
-        qis: new Proxy(ctx.c.qis, {
-          get: (t, k) =>
-            k === 'getSellerClaim'
-              ? async (...args: Parameters<typeof t.getSellerClaim>) => {
-                  const claim = await t.getSellerClaim(...args);
-                  return new Proxy(claim, { get: (x, f) => (f === 'weighted' ? x.weighted + 1n : Reflect.get(x, f)) });
-                }
-              : Reflect.get(t, k),
-        }),
-      };
-      await phaseFinalize(ctx);
-      expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(false);
-      expect(ctx.file.done('finalize')).to.equal(false);
+    it('fails a claim finalized at the value it was due and another score, and at the score it was due and another value', async () => {
+      for (const field of ['weighted', 'claimed']) {
+        await setupAndServe();
+        const s = stateNow();
+        await scoreIn(s.E + 1n);
+        await upkeepFinalizes();
+        const ctx = await ctxOf('finalize');
+        // What the claim holds says it was due another amount than it finalized to, in that one field.
+        ctx.c = {
+          ...ctx.c,
+          qis: new Proxy(ctx.c.qis, {
+            get: (t, k) =>
+              k === 'getSellerClaim'
+                ? async (...args: Parameters<typeof t.getSellerClaim>) => {
+                    const claim = await t.getSellerClaim(...args);
+                    return new Proxy(claim, { get: (x, f) => (f === field ? Reflect.get(x, f) + 1n : Reflect.get(x, f)) });
+                  }
+                : Reflect.get(t, k),
+          }),
+        };
+        await phaseFinalize(ctx);
+        expect(checkOf(ctx, 'the account claim is finalized in epoch').ok, field).to.equal(false);
+        expect(ctx.file.done('finalize'), field).to.equal(false);
+      }
     });
 
     it('calls a claim void, and fails, only if it is still unfinalized once E+1 has ended', async () => {
