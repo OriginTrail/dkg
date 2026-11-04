@@ -1,14 +1,15 @@
 // What every phase of the smoke test works with, built once by the entry point.
 
-import * as fs from 'fs';
-
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
+import { ethers } from 'ethers';
+
+import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
 import { BaseContracts, Contracts, Stack } from '../contracts';
 import { Fork, notBefore } from '../fork';
 import { Net, chainNow } from '../network';
 import { Report } from '../report';
-import { LIVE_JSON, SmokeEnv } from './config';
+import { SmokeEnv } from './config';
 import { Marketplace } from './marketplace';
 import { Roles } from './roles';
 import { ServedState, SetupState, SmokeState, StateFile, isServed, isSetup, serveMissing, setupMissing } from './state';
@@ -30,8 +31,6 @@ export type Ctx = {
 /** A context of a deployed stack: the pool contracts and the marketplace operations too. */
 export type PoolCtx = Ctx & { c: Contracts; market: Marketplace };
 
-export const HUB = (JSON.parse(fs.readFileSync(LIVE_JSON, 'utf8')) as { contracts: { Hub: { evmAddress: string } } }).contracts.Hub.evmAddress;
-
 export async function withPool(ctx: Ctx): Promise<PoolCtx> {
   const c: Contracts = { ...ctx.base, ...(await ctx.stack.pool()) };
   return { ...ctx, c, market: new Marketplace(c, ctx.tx) };
@@ -52,6 +51,23 @@ export async function opensAt(ctx: Ctx, ts: bigint, what: string): Promise<boole
 
 export const epochStart = (ctx: Ctx, e: bigint): Promise<bigint> => ctx.base.chronos.timestampForEpoch(e);
 
+/** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
+export const planDigest = (ctx: Ctx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
+
+/**
+ * Why the owner's wallet period of `epoch`, if it has one, is not this run's. Its
+ * id names only the owner and the epoch, while its session key and its plan are
+ * the run's: a second run of the same owner in the same epoch would skip funding
+ * and sign requests its period does not accept.
+ */
+export async function walletPeriodClash(ctx: PoolCtx, r: { ownerAddr: string; walletSession: { address: string } }, value: bigint, epoch: bigint): Promise<string | undefined> {
+  const id = subscriptionIdOf(r.ownerAddr, epoch);
+  if (!(await ctx.c.cssvc.subscriptionExists(id))) return undefined;
+  const held = await ctx.c.cssvc.getSubscription(id);
+  if (held.sessionKey === r.walletSession.address && held.planDigest === planDigest(ctx, 'wallet plan') && held.value === value) return undefined;
+  return `the owner's wallet period of epoch ${epoch} is another run's: session key ${held.sessionKey}, plan ${held.planDigest}, value ${held.value}; this run's key is ${r.walletSession.address}`;
+}
+
 /**
  * Binds the state file to this network: a fork run never resumes on testnet,
  * nor the reverse, nor a run of another Hub, settlement, fork block or owner.
@@ -64,7 +80,8 @@ export async function bindState(ctx: PoolCtx): Promise<SmokeState | undefined> {
   const problems: string[] = [];
   if (s.network !== network) problems.push(`it is a ${s.network} run, this is ${network}`);
   if (s.chainId !== ctx.net.chainId) problems.push(`chain ${s.chainId}`);
-  if (s.hub.toLowerCase() !== HUB.toLowerCase()) problems.push(`Hub ${s.hub}`);
+  const hub = await ctx.stack.hub.getAddress();
+  if (s.hub.toLowerCase() !== hub.toLowerCase()) problems.push(`Hub ${s.hub}, this stack's is ${hub}`);
   if (s.settlement.toLowerCase() !== settlement.toLowerCase()) problems.push(`settlement ${s.settlement}, the Hub now holds ${settlement}`);
   if (ctx.net.local && s.forkBlock !== ctx.net.forkBlock) problems.push(`fork block ${s.forkBlock}, this fork is at ${ctx.net.forkBlock}`);
   if (ctx.roles.ownerAddr && s.addresses.owner !== ctx.roles.ownerAddr) problems.push(`owner ${s.addresses.owner}, this key is ${ctx.roles.ownerAddr}`);

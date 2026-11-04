@@ -157,8 +157,9 @@ export type PreRead = {
   kpiBefore: Record<string, NodeEpochNet>;
   old: {
     publish: Pick<PublishResult, 'discountedCost' | 'windowSpentDelta' | 'topUpDelta' | 'stakerCredits'>;
-    settles: { id: bigint; stakerCredits: Range[] }[];
-    claims: Pick<ClaimResult, 'tokenId' | 'reward' | 'lastClaimedEpoch' | 'gasUsed'>[];
+    settles: { id: bigint; stakerCredits: Range[]; events: string[] }[];
+    claims: Pick<ClaimResult, 'tokenId' | 'reward' | 'rawDelta' | 'lastClaimedEpoch' | 'gasUsed'>[];
+    netsAfterOldClaims: Record<string, { split: boolean; storedNet: bigint }>;
   };
 };
 
@@ -192,16 +193,21 @@ function decodePre(x: unknown, where: string): PreRead {
       },
       settles: listOf(old.settles, `${where}.old.settles`, (v, w) => {
         const s = asObject(v, w);
-        return { id: asBigint(s.id, `${w}.id`), stakerCredits: listOf(s.stakerCredits, `${w}.stakerCredits`, rangeOf) };
+        return { id: asBigint(s.id, `${w}.id`), stakerCredits: listOf(s.stakerCredits, `${w}.stakerCredits`, rangeOf), events: listOf(s.events, `${w}.events`, asString) };
       }),
       claims: listOf(old.claims, `${where}.old.claims`, (v, w) => {
         const c = asObject(v, w);
         return {
           tokenId: asBigint(c.tokenId, `${w}.tokenId`),
           reward: asBigint(c.reward, `${w}.reward`),
+          rawDelta: asBigint(c.rawDelta, `${w}.rawDelta`),
           lastClaimedEpoch: asBigint(c.lastClaimedEpoch, `${w}.lastClaimedEpoch`),
           gasUsed: asBigint(c.gasUsed, `${w}.gasUsed`),
         };
+      }),
+      netsAfterOldClaims: recordOf(old.netsAfterOldClaims, `${where}.old.netsAfterOldClaims`, (v, w) => {
+        const n = asObject(v, w);
+        return { split: asBoolean(n.split, `${w}.split`), storedNet: asBigint(n.storedNet, `${w}.storedNet`) };
       }),
     },
   };
@@ -215,10 +221,18 @@ function decodeCycle(x: unknown, where: string): CycleRead {
   return { activation: asBigint(o.activation, `${where}.activation`), lateAccount: { accountId: asBigint(late.accountId, `${where}.lateAccount.accountId`) } };
 }
 
+/** A results file, unless its phase failed checks: what those did to the fork was undone, so nothing can build on it. */
+export function passedResults(name: string, file: string, x: unknown): unknown {
+  const { checks } = asObject(x, file);
+  const failed = Array.isArray(checks) ? checks.filter((c) => Array.isArray(c) && c[1] === false).length : 0;
+  if (failed) throw new Error(`${file} records ${failed} failed check${failed > 1 ? 's' : ''}, whose phase was undone: run PHASE=${name} again`);
+  return x;
+}
+
 function load<T>(name: string, decode: (x: unknown, where: string) => T): T {
   const f = path.join(DIR, `${name}.json`);
   if (!fs.existsSync(f)) throw new Error(`${f} is missing: run PHASE=${name} first`);
-  return decode(JSON.parse(fs.readFileSync(f, 'utf8')), f);
+  return decode(passedResults(name, f, JSON.parse(fs.readFileSync(f, 'utf8'))), f);
 }
 
 export const loadPre = (): PreRead => load('pre', decodePre);

@@ -8,7 +8,7 @@ import { EXPECTED_VERSIONS, NEW_CONTRACTS } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, span } from '../report';
 import { MIN_EPOCH_LEFT, NOTHING_YET, Progress, needsOf, plannedAmounts, requestPlan, planValue } from './config';
-import { Ctx, PoolCtx, epochStart, now, withPool } from './context';
+import { Ctx, PoolCtx, epochStart, now, walletPeriodClash, withPool } from './context';
 import { Roles } from './roles';
 import { Amounts, PHASES } from './state';
 
@@ -230,8 +230,8 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
   const isDeployed = await deployed(ctx);
   let grace = requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds']).value;
   let activation = 0n;
-  if (isDeployed) {
-    const pctx = await withPool(ctx);
+  const pctx = isDeployed ? await withPool(ctx) : undefined;
+  if (pctx) {
     grace = (await checkDeployment(pctx, current)).grace;
     activation = await pctx.c.qis.activationEpoch();
   } else {
@@ -241,6 +241,12 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
   const a = await plannedAmounts(ctx.base, s, await maxFeePerGas(ctx));
   ctx.report.set('seller', await verifySeller(ctx, a));
   await checkBalances(ctx, a);
+  const { ownerAddr, walletSession } = ctx.roles;
+  if (pctx && ownerAddr && walletSession) {
+    const E = s?.E ?? (activation > current ? activation : current);
+    const clash = await walletPeriodClash(pctx, { ownerAddr, walletSession }, a.walletValue, E);
+    ctx.report.check(`the owner's wallet period of epoch ${E}, if it has one, is this run's`, !clash, clash);
+  }
   if (!s && isDeployed) {
     const left = (await epochStart(ctx, current + 1n)) - (await now(ctx));
     ctx.report.check(`epoch ${current} has at least ${span(MIN_EPOCH_LEFT)} left for setup and serve`, left >= MIN_EPOCH_LEFT || activation > current, `${span(left)} left`);

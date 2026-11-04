@@ -4,14 +4,15 @@
 // accounts, every position's first-claim gas and the longest history's
 // withdrawal gas against 2^24, and every position's claim.
 
+import type { Range } from '../../../test/helpers/emission-model';
 import { eventsIn } from '../contracts';
-import { fmt, sum } from '../report';
+import { Report, fmt, sum } from '../report';
 import { TX_GAS_CAP } from '../tx';
 import { Ctx, expectRevert, saveResults, send, withPool } from './context';
 import { claimAll, publishAs } from './operations';
 import { impersonate, measureTx } from './plumbing';
 import { positions, sameRanges, stakerCredits, storedNets } from './reads';
-import { GasMeasure, Position, loadPre } from './results';
+import { ClaimResult, GasMeasure, Position, PreRead, loadPre } from './results';
 import { SCHEDULED_ACCOUNT, TRAC } from './scenario';
 
 type History = { tokenId: bigint; node: bigint; unclaimedEpochs: bigint; scoredEpochs: bigint };
@@ -21,6 +22,43 @@ const ownerOf = (pos: Position[], tokenId: bigint): string => {
   if (!p) throw new Error(`no position ${tokenId}`);
   return p.owner;
 };
+
+const rangeText = (r: Range | undefined): string => (r ? `${fmt(r.amount)} TRAC over epochs ${r.start}..${r.end}` : 'none');
+
+/**
+ * settleMany against what 10.0.8's settle booked, one account at a time in the
+ * same order: the whole ordered ranges, since an amount in the wrong epoch changes
+ * when stakers are paid, and the same accounts swept.
+ */
+export function checkSettleMany(report: Report, many: { credits: Range[]; swept: bigint[] }, old: PreRead['old']['settles']): void {
+  const want = old.flatMap((s) => s.stakerCredits);
+  const differs = [...want, ...many.credits].findIndex((_, i) => !sameRanges(want.slice(i, i + 1), many.credits.slice(i, i + 1)));
+  report.check(
+    'settleMany books what 10.0.8 settle booked: the same amounts over the same epochs, in the same order',
+    sameRanges(many.credits, want),
+    `${fmt(sum(many.credits.map((x) => x.amount)))} TRAC in ${many.credits.length} credits (10.0.8: ${fmt(sum(want.map((x) => x.amount)))} in ${want.length})` +
+      (differs >= 0 ? `; credit ${differs}: ${rangeText(many.credits[differs])}, 10.0.8: ${rangeText(want[differs])}` : ''),
+  );
+  const swept = old.filter((s) => s.events.includes('AccountFinalSwept')).map((s) => s.id);
+  report.check('settleMany sweeps the accounts 10.0.8 settle swept', many.swept.length === swept.length && many.swept.every((id, i) => id === swept[i]), `${many.swept.length} accounts (10.0.8: ${swept.length})`);
+}
+
+/** Each position's claim against its 10.0.4 claim, in its stake and its statistic, and no position left out. */
+export function checkClaims(report: Report, claims: ClaimResult[], old: PreRead['old']['claims']): void {
+  report.check(
+    'the claims are of the positions the 10.0.4 claims were of',
+    claims.length === old.length && claims.every((cl, i) => cl.tokenId === old[i].tokenId),
+    `${claims.length} positions (10.0.4: ${old.length})`,
+  );
+  for (const cl of claims) {
+    const o = old.find((x) => x.tokenId === cl.tokenId);
+    report.check(
+      `token ${cl.tokenId}: the 10.1.0 claim pays what the 10.0.4 claim paid`,
+      !!o && cl.reward === o.reward && cl.rawDelta === o.rawDelta && cl.lastClaimedEpoch === o.lastClaimedEpoch,
+      `${fmt(cl.reward)} TRAC, through epoch ${cl.lastClaimedEpoch}; gas ${cl.gasUsed} (10.0.4: ${o?.gasUsed})`,
+    );
+  }
+}
 
 export async function phaseExisting(ctx: Ctx): Promise<void> {
   const { report } = ctx;
@@ -61,12 +99,7 @@ export async function phaseExisting(ctx: Ctx): Promise<void> {
   const many = await send(ctx, `settleMany(${expired.length} expired accounts)`, anyone, pcAddr, c.pc.interface.encodeFunctionData('settleMany', [expired]));
   const swept = eventsIn(many.receipt, c.pc, c.pc.getEvent('AccountFinalSwept')).map((e) => ({ id: e.accountId, topUp: e.topUpSwept }));
   const credits = stakerCredits(many.receipt, c);
-  const oldCredits = pre.old.settles.flatMap((s) => s.stakerCredits.map((x) => x.amount));
-  check(
-    'settleMany books what 10.0.8 settle booked, account by account',
-    sum(credits.map((x) => x.amount)) === sum(oldCredits) && credits.length === oldCredits.length,
-    `${fmt(sum(credits.map((x) => x.amount)))} TRAC in ${credits.length} credits (10.0.8: ${fmt(sum(oldCredits))} in ${oldCredits.length})`,
-  );
+  checkSettleMany(report, { credits, swept: swept.map((x) => x.id) }, pre.old.settles);
   const before1008 = pre.accounts.filter((a) => a.createdBefore1008).map((a) => String(a.id));
   report.say(`accounts created before 10.0.8: ${before1008.join(', ') || 'none'}`);
 
@@ -116,24 +149,18 @@ export async function phaseExisting(ctx: Ctx): Promise<void> {
     firstClaims.every((x) => x.minGasLimit <= TX_GAS_CAP) && longestWithdraw.minGasLimit <= TX_GAS_CAP,
   );
   const claims = await claimAll(ctx, pos, '10.1.0');
-  for (const cl of claims) {
-    const o = pre.old.claims.find((x) => x.tokenId === cl.tokenId);
-    check(
-      `token ${cl.tokenId}: the 10.1.0 claim pays what the 10.0.4 claim paid`,
-      !!o && cl.reward === o.reward && cl.lastClaimedEpoch === o.lastClaimedEpoch,
-      `${fmt(cl.reward)} TRAC, through epoch ${cl.lastClaimedEpoch}; gas ${cl.gasUsed} (10.0.4: ${o?.gasUsed})`,
-    );
-  }
+  checkClaims(report, claims, pre.old.claims);
   const nets = await storedNets(c, Object.keys(pre.kpiBefore));
   let same = 0;
   const diff: string[] = [];
   for (const [k, v] of Object.entries(nets)) {
     const kb = pre.kpiBefore[k];
-    if (v.storedNet === kb.kpiNet) same++;
-    else diff.push(`${k}: kpi ${kb.kpiNet} stored ${v.storedNet}`);
+    const old = pre.old.netsAfterOldClaims[k];
+    if (v.storedNet === kb.kpiNet && old && v.split === old.split && v.storedNet === old.storedNet) same++;
+    else diff.push(`${k}: kpi ${kb.kpiNet} stored ${v.storedNet}, split ${v.split}; 10.0.4 stored ${old?.storedNet}, split ${old?.split}`);
   }
   check(
-    'every node-epoch net the claims split equals the StakingKPI 10.0.2 preview from before the upgrade',
+    'every node-epoch net the claims split equals the StakingKPI 10.0.2 preview from before the upgrade, and what the 10.0.4 claims split',
     diff.length === 0,
     `${same} node-epochs equal${diff.length ? `; differing: ${diff.slice(0, 5).join('; ')}` : ''}`,
   );

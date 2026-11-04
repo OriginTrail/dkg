@@ -2,22 +2,17 @@
 // Conviction Account under PublishingConviction 10.2.0, opted in, the buyer
 // key assigned; a Conviction Account period and a wallet-paid period of E.
 
-import { ethers } from 'ethers';
-
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
 import { eventsIn } from '../contracts';
 import { FORK_ETH } from '../fork';
 import { fmt, iso } from '../report';
 import { MIN_EPOCH_LEFT, needsOf, plannedAmounts } from './config';
-import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt } from './context';
+import { PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt, planDigest, walletPeriodClash } from './context';
 import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
 import { Amounts, SmokeState, setupMissing } from './state';
-import { movedBy, movement } from './tx';
-
-/** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
-export const planDigest = (ctx: PoolCtx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
+import { shownBy, tracMoved } from './tx';
 
 /** FORK-ONLY: the owner's ETH and TRAC, and the seller's ETH, from anvil's balance setters, with SEND=1: a dry run changes nothing. */
 export async function fundOnFork(ctx: PoolCtx, trac: bigint): Promise<void> {
@@ -38,7 +33,7 @@ export async function fundOnFork(ctx: PoolCtx, trac: bigint): Promise<void> {
   }
 }
 
-function newState(ctx: PoolCtx, settlement: string, sellerId: bigint, a: Amounts, startedAt: bigint): SmokeState {
+function newState(ctx: PoolCtx, hub: string, settlement: string, sellerId: bigint, a: Amounts, startedAt: bigint): SmokeState {
   const r = need(ctx.roles, ['ownerAddr', 'buyer', 'edgeBuyer', 'caSession', 'walletSession', 'edgeSession', 'sellerAddr']);
   return {
     version: 1,
@@ -46,7 +41,7 @@ function newState(ctx: PoolCtx, settlement: string, sellerId: bigint, a: Amounts
     network: ctx.net.local ? 'fork' : 'base-sepolia',
     chainId: ctx.net.chainId,
     forkBlock: ctx.net.forkBlock,
-    hub: HUB,
+    hub,
     settlement,
     startedAt,
     addresses: {
@@ -80,17 +75,25 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const fundedIn = s?.periods.ca || s?.periods.wallet || s?.steps['setup.fund-account-period'] || s?.steps['setup.fund-wallet-period'] ? s?.E : undefined;
   const end = await epochStart(ctx, (await c.chronos.getCurrentEpoch()) + 1n);
   if (fundedIn === undefined && end - (await now(ctx)) < MIN_EPOCH_LEFT && !(await opensAt(ctx, end + 120n, 'setup, with a whole epoch for setup and serve'))) return;
-  const current = await c.chronos.getCurrentEpoch();
+  let current = await c.chronos.getCurrentEpoch();
   if (fundedIn !== undefined && current !== fundedIn) throw new Error(`the periods of this run were funded in epoch ${fundedIn}, and it is ${current} now: start a new run`);
+  const a = await plannedAmounts(c, s, await maxFeePerGas(ctx));
+
+  // Before anything is spent: the owner has one wallet period an epoch, and it must be this run's.
+  const clash = await walletPeriodClash(ctx, r, a.walletValue, fundedIn ?? current);
+  if (clash) {
+    if (fundedIn !== undefined) throw new Error(`${clash}, and this run funded its account period in that epoch: start a new run`);
+    if (!(await opensAt(ctx, (await epochStart(ctx, current + 1n)) + 120n, `setup, with a wallet period of its own in the next epoch, as ${clash}`))) return;
+    current = await c.chronos.getCurrentEpoch();
+  }
 
   const d = await checkDeployment(ctx, current);
   if (!d.live) throw new Error('funding is not live: see the checks above');
   report.say('\nSeller:');
-  const a = await plannedAmounts(c, s, await maxFeePerGas(ctx));
   const seller = await verifySeller(ctx, a);
   if (!seller.ok) throw new Error('the seller does not qualify: see the checks above');
   if (!s && ctx.env.send) {
-    file.state = newState(ctx, await c.qs.getAddress(), seller.id, a, await now(ctx));
+    file.state = newState(ctx, await ctx.stack.hub.getAddress(), await c.qs.getAddress(), seller.id, a, await now(ctx));
     file.save();
     s = file.state;
   }
@@ -106,17 +109,10 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const vault = await c.css.getAddress();
   report.say(`\nSetup in epoch ${E} (ends ${iso(await epochStart(ctx, E + 1n))}), ${ctx.env.send ? 'sending' : 'dry run'}:`);
 
-  // What the steps move into the vault, and what they make due in E+1, read around each one.
-  const vaultAt = async (blockTag: number) => ({ vault: await c.token.balanceOf(vault, { blockTag }) });
-  const dueAt = async (blockTag: number) => {
-    const due = await c.qis.dueIn(E + 1n, { blockTag });
-    return { wallet: due.wallet, conviction: due.conviction };
-  };
-
   // 1. The position on the seller's node, at tier 0.
-  const staked = await market.stake('setup', r.owner, seller.id, a.stake, { done: s?.tokenId !== undefined ? `position ${s.tokenId}` : undefined, reads: vaultAt });
+  const staked = await market.stake('setup', r.owner, seller.id, a.stake, { done: s?.tokenId !== undefined ? `position ${s.tokenId}` : undefined });
   const [stakedEv] = eventsIn(staked.receipt, c.sv10, c.sv10.getEvent('Staked'));
-  if (s && stakedEv && staked.receipt) {
+  if (shownBy(report, staked, stakedEv, 'the stake\'s Staked event') && s && staked.receipt) {
     const block = await ctx.hre.ethers.provider.getBlock(staked.receipt.blockNumber);
     s.tokenId = stakedEv.tokenId;
     s.stakeRaw = stakedEv.amount;
@@ -129,13 +125,14 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
       `position ${s.tokenId}: ${fmt(a.stake)} TRAC on node ${seller.id} at tier 0, with no lock, claimed through epoch ${s.stakeEpoch - 1n}`,
       pos.raw === a.stake + pos.cumulativeRewardsClaimed && pos.identityId === seller.id && pos.lockTier === 0n && pos.expiryTimestamp === 0n && claimedThrough,
     );
-    report.check('the stake moved into the vault', movedBy(staked, 'vault', a.stake), movement(staked, 'vault'));
+    const moved = tracMoved(staked.receipt, c.token, vault);
+    report.check('the stake moved into the vault', moved === a.stake, `${fmt(moved)} TRAC, by its own Transfer logs`);
   }
 
   // 2. The Conviction Account, opted in.
-  const created = await market.createAccount('setup', r.owner, a.committed, { done: s?.accountId !== undefined ? `account ${s.accountId}` : undefined, reads: vaultAt });
+  const created = await market.createAccount('setup', r.owner, a.committed, { done: s?.accountId !== undefined ? `account ${s.accountId}` : undefined });
   const [createdEv] = eventsIn(created.receipt, c.pc, c.pc.getEvent('AccountCreated'));
-  if (s && createdEv) {
+  if (shownBy(report, created, createdEv, 'the account\'s AccountCreated event') && s) {
     s.accountId = createdEv.accountId;
     s.accountExpiresAt = (await c.pcs.getAccount(createdEv.accountId)).expiresAtTimestamp;
     file.save();
@@ -145,7 +142,8 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
       acct.committedTRAC === a.committed && acct.lockDurationEpochs === a.lock && acct.discountBps === a.discountBps && (await c.nft.ownerOf(createdEv.accountId)) === r.ownerAddr,
     );
     const credits = eventsIn(created.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).filter((ev) => ev.shardId === 1n);
-    report.check('createAccount books nothing to the staker pool (10.2.0), and the commitment moved into the vault', credits.length === 0 && movedBy(created, 'vault', a.committed), movement(created, 'vault'));
+    const moved = created.receipt ? tracMoved(created.receipt, c.token, vault) : 0n;
+    report.check('createAccount books nothing to the staker pool (10.2.0), and the commitment moved into the vault', credits.length === 0 && moved === a.committed, `${fmt(moved)} TRAC, by its own Transfer logs`);
   }
   const accountId = s?.accountId;
   const spending = accountId === undefined ? undefined : await c.cssvc.getServiceSpending(accountId);
@@ -160,7 +158,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     done: held && held.assignedAt !== 0n && held.revokedAt === 0n ? `assigned at nonce ${held.nonce}` : undefined,
   });
   const [assignedEv] = eventsIn(assigned.receipt, c.ss, c.ss.getEvent('ServiceAssigned'));
-  if (assignedEv && account) {
+  if (shownBy(report, assigned, assignedEv, 'the assignment\'s ServiceAssigned event') && account) {
     report.check(
       'the buyer key is assigned, with its limit and the account\'s expiry as signed',
       assignedEv.assignee === r.buyer.address && assignedEv.maxCostPerPeriod === cap && assignedEv.expiresAt === account.expiresAt,
@@ -192,7 +190,6 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const funded = await market.fundFromConviction('setup.fund-account-period', 'buyer key', r.buyer, accountId, E, r.caSession.address, a.caValue, planDigest(ctx, 'account plan'), {
     needs: ['setup.assign-buyer', 'setup.eth-buyer'],
     done: (await c.cssvc.subscriptionExists(caPeriod)) ? `period ${caPeriod} exists` : undefined,
-    reads: dueAt,
   });
   if (s && (await c.cssvc.subscriptionExists(caPeriod))) {
     s.periods.ca = caPeriod;
@@ -200,12 +197,14 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     file.save();
   }
   const [fundedEv] = eventsIn(funded.receipt, c.ss, c.ss.getEvent('PeriodFunded'));
-  if (fundedEv) {
+  if (shownBy(report, funded, fundedEv, 'the account period\'s PeriodFunded event')) {
     report.check(`the account period's cost is its value at the account's discount: ${fmt(fundedEv.cost)} TRAC`, fundedEv.cost === costOf(a.caValue, a.discountBps) && fundedEv.subscriptionId === caPeriod);
     const moved = eventsIn(funded.receipt, c.token, c.token.getEvent('Transfer')).length;
     const credits = eventsIn(funded.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).length;
     report.check('the account period moves no TRAC and books nothing to the staker pool', moved === 0 && credits === 0);
-    report.check(`its cost is due in epoch ${E + 1n}`, movedBy(funded, 'conviction', fundedEv.cost), movement(funded, 'conviction'));
+    // No event says what a transaction adds to an epoch's due, and others fund periods too: the due holds it at least.
+    const due = (await c.qis.dueIn(E + 1n)).conviction;
+    report.check(`its cost is due in epoch ${E + 1n}`, due >= fundedEv.cost, `due ${fmt(due)} TRAC`);
   }
 
   // 6. The wallet-paid period of E, paid by the owner into the vault.
@@ -218,20 +217,20 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     r.walletSession.address,
     a.walletValue,
     planDigest(ctx, 'wallet plan'),
-    {
-      done: (await c.cssvc.subscriptionExists(walletPeriod)) ? `period ${walletPeriod} exists` : undefined,
-      reads: async (blockTag) => ({ ...(await vaultAt(blockTag)), ...(await dueAt(blockTag)) }),
-    },
+    { done: (await c.cssvc.subscriptionExists(walletPeriod)) ? `period ${walletPeriod} exists` : undefined },
   );
   if (s && (await c.cssvc.subscriptionExists(walletPeriod))) {
     s.periods.wallet = walletPeriod;
     file.save();
   }
-  if (walletFunded.receipt) {
+  const [walletEv] = eventsIn(walletFunded.receipt, c.ssw, c.ssw.getEvent('PeriodFunded'));
+  if (shownBy(report, walletFunded, walletEv, 'the wallet period\'s PeriodFunded event') && walletFunded.receipt) {
+    const moved = tracMoved(walletFunded.receipt, c.token, vault);
+    const due = (await c.qis.dueIn(E + 1n)).wallet;
     report.check(
       `the wallet period's ${fmt(a.walletValue)} TRAC moved into the vault and is due in epoch ${E + 1n}`,
-      movedBy(walletFunded, 'vault', a.walletValue) && movedBy(walletFunded, 'wallet', a.walletValue),
-      `vault ${movement(walletFunded, 'vault')}, due ${movement(walletFunded, 'wallet')}`,
+      moved === a.walletValue && due >= a.walletValue,
+      `${fmt(moved)} TRAC by its own Transfer logs; due ${fmt(due)} TRAC`,
     );
   }
 

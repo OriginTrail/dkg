@@ -9,11 +9,11 @@ import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-servi
 import { eventsIn } from '../contracts';
 import { fmt, iso, sum } from '../report';
 import { planValue, requestPlan } from './config';
-import { PoolCtx, complete, doneEarlier, epochStart, now, runState, standInProof } from './context';
+import { PoolCtx, complete, doneEarlier, epochStart, now, planDigest, runState, standInProof } from './context';
 import { need } from './roles';
-import { fundOnFork, planDigest } from './setup';
+import { fundOnFork } from './setup';
 import { serveMissing } from './state';
-import { movedBy, movement } from './tx';
+import { shownBy } from './tx';
 
 export async function phaseServe(ctx: PoolCtx): Promise<void> {
   const { report, c, market, file } = ctx;
@@ -49,7 +49,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     { done: (await claimed(wallet)) > 0n ? 'the seller has claimed on both periods' : undefined },
   );
   const [accepted] = eventsIn(b1.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
-  if (accepted) {
+  if (shownBy(report, b1, accepted, 'the first batch\'s ReceiptBatchAccepted event')) {
     report.check(
       'the first batch is accepted for the seller: four requests, signed by the two session keys',
       accepted.seller === s.sellerId && accepted.itemCount === 4n && accepted.value === planValue(plan.caFirst) + planValue(plan.wallet),
@@ -60,21 +60,22 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   // 2. The top-up of the account period: accepted, its cost due in E+1, the bucket's funded cap raised.
   const topUp = await market.topUp('serve.top-up', 'buyer key', r.buyer, ca, a.caTopUp, planDigest(ctx, 'account plan, topped up'), {
     done: (await c.cssvc.getSubscription(ca)).value >= a.caValue + a.caTopUp ? 'the period holds the topped-up value' : undefined,
-    reads: async (blockTag) => ({ due: (await c.qis.dueIn(E + 1n, { blockTag })).conviction, cap: await c.qs.fundedCap(ca, 0, { blockTag }) }),
   });
   if (ctx.env.send) {
     s.costs.topUp = (await c.cssvc.getSubscription(ca)).cost - s.costs.ca;
     file.save();
   }
   const [toppedUp] = eventsIn(topUp.receipt, c.ss, c.ss.getEvent('PeriodToppedUp'));
-  if (toppedUp) {
+  if (shownBy(report, topUp, toppedUp, 'the top-up\'s PeriodToppedUp event')) {
+    // No event says what a transaction adds to an epoch's due, and others fund periods too: the due holds it at least.
+    const due = (await c.qis.dueIn(E + 1n)).conviction;
     report.check(
       `the top-up is accepted at ${fmt(toppedUp.cost)} TRAC, due in epoch ${E + 1n}`,
-      toppedUp.cost === costOf(a.caTopUp, a.discountBps) && movedBy(topUp, 'due', toppedUp.cost),
-      movement(topUp, 'due'),
+      toppedUp.cost === costOf(a.caTopUp, a.discountBps) && due >= s.costs.ca + toppedUp.cost,
+      `due ${fmt(due)} TRAC`,
     );
     const capAfter = await c.qs.fundedCap(ca, 0);
-    report.check(`the account bucket's funded cap rises to ${fmt(capAfter)} TRAC`, capAfter === ((a.caValue + a.caTopUp) * (10_000n - a.discountBps)) / 10_000n, movement(topUp, 'cap'));
+    report.check(`the account bucket's funded cap rises to ${fmt(capAfter)} TRAC`, capAfter === ((a.caValue + a.caTopUp) * (10_000n - a.discountBps)) / 10_000n);
   }
 
   // 3. The second batch: one more account request, above the cap before the top-up.

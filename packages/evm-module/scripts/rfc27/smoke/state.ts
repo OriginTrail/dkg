@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 
 import { JsonObject, Redactor, toJson, writeJson } from '../report';
-import type { Journal, Reads, StepRecord } from './tx';
+import type { Expected, Journal, StepRecord } from './tx';
 
 export const PHASES = ['check', 'setup', 'serve', 'finalize', 'close-claim', 'withdraw'] as const;
 export type PhaseName = (typeof PHASES)[number];
@@ -25,7 +25,7 @@ export type Amounts = {
   discountBps: bigint;
 };
 
-export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint; ownerTracAfter: bigint; block?: number };
+export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint };
 
 export type SmokeState = {
   version: 1;
@@ -143,7 +143,7 @@ function oneOf<T extends string>(o: Obj, k: string, values: readonly T[], where:
 
 const AMOUNT_KEYS = ['stake', 'caValue', 'caTopUp', 'edgeValue', 'walletValue', 'keyEth', 'committed', 'committedFloor', 'lock', 'discountBps'] as const;
 
-function optReads(o: Obj, k: string, where: string): Reads | undefined {
+function optExpected(o: Obj, k: string, where: string): Expected | undefined {
   if (o[k] === undefined || o[k] === null) return undefined;
   const r = obj(o[k], `${where}.${k}`);
   return Object.fromEntries(Object.keys(r).map((name) => [name, bi(r, name, `${where}.${k}`)]));
@@ -160,9 +160,7 @@ function decodeStep(x: unknown, where: string): StepRecord {
     gasLimit: bi(o, 'gasLimit', where),
     block: optNum(o, 'block', where),
     gasUsed: optBi(o, 'gasUsed', where),
-    before: optReads(o, 'before', where),
-    after: optReads(o, 'after', where),
-    expected: optReads(o, 'expected', where),
+    expected: optExpected(o, 'expected', where),
   };
 }
 
@@ -191,8 +189,6 @@ export function decodeState(raw: unknown): SmokeState {
       epoch: bi(w, 'epoch', 'withdrawal'),
       node: bi(w, 'node', 'withdrawal'),
       recordedScore: bi(w, 'recordedScore', 'withdrawal'),
-      ownerTracAfter: bi(w, 'ownerTracAfter', 'withdrawal'),
-      block: optNum(w, 'block', 'withdrawal'),
     };
   }
   let fork: SmokeState['fork'];

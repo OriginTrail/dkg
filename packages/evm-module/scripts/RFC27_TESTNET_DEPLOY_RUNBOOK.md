@@ -441,7 +441,7 @@ What a run needs:
 |---|---|
 | `RFC27_SMOKE_OWNER_KEY` | required, from the owner wallet |
 | `RFC27_SMOKE_SELLER_KEY` | required, an operational key of the seller node |
-| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run |
+| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run. The owner has one wallet period an epoch, so a second run of the same owner in the same epoch defers to the next, before it spends anything |
 | `RPC_BASE_SEPOLIA_V10` | `https://sepolia.base.org` |
 | The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet period and a 50 TRAC stake. A resumed run needs only what its remaining steps spend |
 | The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer key; `PHASE=check` prints it at the current fee |
@@ -466,11 +466,13 @@ The phases, with `SEND=1`, about two days apart in all:
   node's next proof, before E+1 ends; after that the claims still unfinalized
   are void, and it fails. Claims another caller finalized count, whenever
   `finalize` first runs.
+- `close-claim` requires both claims finalized, by the run or by the upkeep cron.
+  With one void the run goes no further: start a new one.
 - `withdraw` waits until the position holds score in the epoch: without it, a
   withdrawal burns the position and records nothing to claim.
 - A phase stopped at any point is run again as it was: it sends nothing the
-  journal holds, and its checks keep what each transaction moved when it was
-  first mined.
+  journal holds, and its checks read what each transaction did from its own
+  receipt, so other transactions in its block, or since, have no part in them.
 - A phase with a failed check is not done. It exits nonzero, the phases after it
   refuse to start, and running it again sends nothing it sent already, until its
   checks pass.
