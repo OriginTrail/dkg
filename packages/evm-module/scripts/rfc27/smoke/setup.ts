@@ -14,7 +14,7 @@ import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensA
 import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
 import { Amounts, SmokeState, setupMissing } from './state';
-import { tracMoved } from './tx';
+import { shownBy, tracMoved } from './tx';
 
 /** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
 export const planDigest = (ctx: PoolCtx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
@@ -109,7 +109,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   // 1. The position on the seller's node, at tier 0.
   const staked = await market.stake('setup', r.owner, seller.id, a.stake, { done: s?.tokenId !== undefined ? `position ${s.tokenId}` : undefined });
   const [stakedEv] = eventsIn(staked.receipt, c.sv10, c.sv10.getEvent('Staked'));
-  if (s && stakedEv && staked.receipt) {
+  if (shownBy(report, staked, stakedEv, 'the stake\'s Staked event') && s && staked.receipt) {
     const block = await ctx.hre.ethers.provider.getBlock(staked.receipt.blockNumber);
     s.tokenId = stakedEv.tokenId;
     s.stakeRaw = stakedEv.amount;
@@ -129,7 +129,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   // 2. The Conviction Account, opted in.
   const created = await market.createAccount('setup', r.owner, a.committed, { done: s?.accountId !== undefined ? `account ${s.accountId}` : undefined });
   const [createdEv] = eventsIn(created.receipt, c.pc, c.pc.getEvent('AccountCreated'));
-  if (s && createdEv) {
+  if (shownBy(report, created, createdEv, 'the account\'s AccountCreated event') && s) {
     s.accountId = createdEv.accountId;
     s.accountExpiresAt = (await c.pcs.getAccount(createdEv.accountId)).expiresAtTimestamp;
     file.save();
@@ -155,7 +155,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     done: held && held.assignedAt !== 0n && held.revokedAt === 0n ? `assigned at nonce ${held.nonce}` : undefined,
   });
   const [assignedEv] = eventsIn(assigned.receipt, c.ss, c.ss.getEvent('ServiceAssigned'));
-  if (assignedEv && account) {
+  if (shownBy(report, assigned, assignedEv, 'the assignment\'s ServiceAssigned event') && account) {
     report.check(
       'the buyer key is assigned, with its limit and the account\'s expiry as signed',
       assignedEv.assignee === r.buyer.address && assignedEv.maxCostPerPeriod === cap && assignedEv.expiresAt === account.expiresAt,
@@ -194,7 +194,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     file.save();
   }
   const [fundedEv] = eventsIn(funded.receipt, c.ss, c.ss.getEvent('PeriodFunded'));
-  if (fundedEv) {
+  if (shownBy(report, funded, fundedEv, 'the account period\'s PeriodFunded event')) {
     report.check(`the account period's cost is its value at the account's discount: ${fmt(fundedEv.cost)} TRAC`, fundedEv.cost === costOf(a.caValue, a.discountBps) && fundedEv.subscriptionId === caPeriod);
     const moved = eventsIn(funded.receipt, c.token, c.token.getEvent('Transfer')).length;
     const credits = eventsIn(funded.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).length;
@@ -220,7 +220,8 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     s.periods.wallet = walletPeriod;
     file.save();
   }
-  if (walletFunded.receipt) {
+  const [walletEv] = eventsIn(walletFunded.receipt, c.ssw, c.ssw.getEvent('PeriodFunded'));
+  if (shownBy(report, walletFunded, walletEv, 'the wallet period\'s PeriodFunded event') && walletFunded.receipt) {
     const moved = tracMoved(walletFunded.receipt, c.token, vault);
     const due = (await c.qis.dueIn(E + 1n)).wallet;
     report.check(

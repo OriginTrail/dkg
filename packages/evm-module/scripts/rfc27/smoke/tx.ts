@@ -76,6 +76,16 @@ export function tracMoved(receipt: TransactionReceipt, token: Token, who: string
 }
 
 /**
+ * The event a step that ran must have emitted. A receipt without it is a failed
+ * check, as what the step did cannot be established; only a step that did not run,
+ * in a dry run or done already, has nothing to show.
+ */
+export function shownBy<T>(report: Report, step: StepResult, ev: T | undefined, what: string): ev is T {
+  if (ev === undefined && step.receipt) report.check(`${what} is in its transaction's receipt`, false, `tx ${step.receipt.hash}: what it did cannot be established`);
+  return ev !== undefined;
+}
+
+/**
  * FORK-ONLY: the journal, calling `stop` right after it records `at`, a step's
  * key once mined, or `<key>:sent` once sent: what a crash leaves to resume from.
  */

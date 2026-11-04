@@ -32,7 +32,7 @@ import type { Roles } from '../scripts/rfc27/smoke/roles';
 import { phaseServe } from '../scripts/rfc27/smoke/serve';
 import { phaseSetup } from '../scripts/rfc27/smoke/setup';
 import { PhaseName, SetupState, StateFile, decodeState, isSetup } from '../scripts/rfc27/smoke/state';
-import { SmokeTx, stoppingAt } from '../scripts/rfc27/smoke/tx';
+import { SmokeTx, stoppingAt, tracMoved } from '../scripts/rfc27/smoke/tx';
 import { phaseWithdraw } from '../scripts/rfc27/smoke/withdraw';
 
 /** A report that keeps its checks and prints nothing. */
@@ -452,6 +452,79 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       await phaseWithdraw(resumed);
       passes(resumed);
       expect(checkOf(resumed, 'the withdrawal pays the stake').ok).to.equal(true);
+    });
+  });
+
+  describe('a step whose receipt does not show what it did', () => {
+    /** The run stopped right after `key`, its journal then naming another transaction of the run, with none of what `key` emits. */
+    const pointedElsewhere = (key: string, other: string) =>
+      editState((raw) => {
+        raw.steps[key].hash = raw.steps[other].hash;
+      });
+    const failsAndIsNotDone = (ctx: PoolCtx, phase: PhaseName, label: string) => {
+      expect(failedLabels(ctx).join(' | ')).to.contain(label);
+      expect(ctx.file.done(phase)).to.equal(false);
+    };
+
+    it('fails setup, which is not done, at the stake', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.stake' })));
+      pointedElsewhere('setup.stake', 'setup.approve-staking');
+      const ctx = await ctxOf('setup');
+      await phaseSetup(ctx);
+      failsAndIsNotDone(ctx, 'setup', 'the stake\'s Staked event is in its transaction\'s receipt');
+    });
+
+    it('fails setup, which is not done, at the account period, and at the wallet period', async () => {
+      for (const [stopAt, label] of [
+        ['setup.fund-account-period', 'the account period\'s PeriodFunded event'],
+        ['setup.fund-wallet-period', 'the wallet period\'s PeriodFunded event'],
+      ]) {
+        use(await loadFixture(deployFixture));
+        await fundExactly();
+        await stops(phaseSetup(await ctxOf('setup', { stopAt })));
+        pointedElsewhere(stopAt, 'setup.opt-in');
+        const ctx = await ctxOf('setup');
+        await phaseSetup(ctx);
+        failsAndIsNotDone(ctx, 'setup', label);
+        expect(ctx.file.failedChecks('setup')).to.be.greaterThan(0);
+      }
+    });
+
+    it('reads no movement from a receipt with no Transfer in it', async () => {
+      use(await loadFixture(deployFixture));
+      const { a } = await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
+      const vault = await fx.f.Vault.getAddress();
+      const receipt = await hre.ethers.provider.getTransactionReceipt(rawState().steps['setup.fund-wallet-period'].hash);
+      if (!receipt) throw new Error('no receipt');
+      const c = await (await Stack.at(hre, await fx.f.Hub.getAddress())).base();
+      expect(tracMoved(receipt, c.token, vault)).to.equal(a.walletValue);
+      const noTransfer = new Proxy(receipt, { get: (t, k) => (k === 'logs' ? t.logs.filter((l: { address: string }) => l.address.toLowerCase() !== String(c.token.target).toLowerCase()) : Reflect.get(t, k)) });
+      expect(tracMoved(noTransfer, c.token, vault)).to.equal(0n);
+    });
+
+    it('fails serve, which is not done, at the top-up', async () => {
+      use(await loadFixture(afterSetup));
+      await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.top-up' })));
+      pointedElsewhere('serve.top-up', 'setup.opt-in');
+      const ctx = await ctxOf('serve');
+      await phaseServe(ctx);
+      failsAndIsNotDone(ctx, 'serve', 'the top-up\'s PeriodToppedUp event');
+    });
+
+    it('fails the withdrawal, which stays on its part', async () => {
+      use(await loadFixture(afterCloseClaim));
+      const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+      await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+      await scoreIn(e);
+      await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.withdraw' })));
+      pointedElsewhere('withdraw.withdraw', 'setup.opt-in');
+      const ctx = await ctxOf('withdraw');
+      await phaseWithdraw(ctx);
+      failsAndIsNotDone(ctx, 'withdraw', 'the withdrawal pays the stake');
+      expect(rawState().withdrawal).to.equal(undefined);
     });
   });
 

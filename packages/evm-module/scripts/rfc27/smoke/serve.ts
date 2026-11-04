@@ -13,6 +13,7 @@ import { PoolCtx, complete, doneEarlier, epochStart, now, runState, standInProof
 import { need } from './roles';
 import { fundOnFork, planDigest } from './setup';
 import { serveMissing } from './state';
+import { shownBy } from './tx';
 
 export async function phaseServe(ctx: PoolCtx): Promise<void> {
   const { report, c, market, file } = ctx;
@@ -48,7 +49,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     { done: (await claimed(wallet)) > 0n ? 'the seller has claimed on both periods' : undefined },
   );
   const [accepted] = eventsIn(b1.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
-  if (accepted) {
+  if (shownBy(report, b1, accepted, 'the first batch\'s ReceiptBatchAccepted event')) {
     report.check(
       'the first batch is accepted for the seller: four requests, signed by the two session keys',
       accepted.seller === s.sellerId && accepted.itemCount === 4n && accepted.value === planValue(plan.caFirst) + planValue(plan.wallet),
@@ -65,7 +66,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     file.save();
   }
   const [toppedUp] = eventsIn(topUp.receipt, c.ss, c.ss.getEvent('PeriodToppedUp'));
-  if (toppedUp) {
+  if (shownBy(report, topUp, toppedUp, 'the top-up\'s PeriodToppedUp event')) {
     // No event says what a transaction adds to an epoch's due, and others fund periods too: the due holds it at least.
     const due = (await c.qis.dueIn(E + 1n)).conviction;
     report.check(
