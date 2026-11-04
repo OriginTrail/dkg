@@ -28,7 +28,8 @@ async function checkDue(ctx: PoolCtx, s: SetupState): Promise<boolean> {
   const { provider } = ctx.hre.ethers;
   const { E } = s;
   const activation = await c.qis.activationEpoch();
-  const from = await firstBlockAt(provider, await epochStart(ctx, E - 1n > activation ? E - 1n : activation));
+  const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
+  const from = await firstBlockAt(provider, await epochStart(ctx, E - 1n > activation ? E - 1n : activation), staked.blockNumber);
   const logs = await pagedLogs(
     provider,
     { address: [await c.ss.getAddress(), await c.ssw.getAddress()], topics: [[c.ss.getEvent('PeriodFunded').fragment.topicHash, c.ss.getEvent('PeriodToppedUp').fragment.topicHash]] },

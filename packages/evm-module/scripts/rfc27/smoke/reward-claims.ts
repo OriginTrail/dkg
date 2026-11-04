@@ -25,16 +25,28 @@ export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'get
   return logs;
 }
 
-/** The first block at or after `ts`. */
-export async function firstBlockAt(provider: Pick<Provider, 'getBlockNumber' | 'getBlock'>, ts: bigint): Promise<number> {
-  let low = 0;
-  let high = await provider.getBlockNumber();
-  while (low < high) {
+/**
+ * The first block at or after `ts`, given a block `from` that is. It steps back from
+ * there, doubling, and then halves what is left: an endpoint serves no block it has pruned,
+ * so it reads none from long before `ts`.
+ */
+export async function firstBlockAt(provider: Pick<Provider, 'getBlock'>, ts: bigint, from: number): Promise<number> {
+  const before = async (n: number): Promise<boolean> => BigInt((await provider.getBlock(n))?.timestamp ?? 0) < ts;
+  let high = from;
+  let step = 256;
+  let low = Math.max(high - step, 0);
+  while (!(await before(low))) {
+    if (low === 0) return 0;
+    high = low;
+    step *= 2;
+    low = Math.max(high - step, 0);
+  }
+  while (high - low > 1) {
     const middle = Math.floor((low + high) / 2);
-    if (BigInt((await provider.getBlock(middle))?.timestamp ?? 0) < ts) low = middle + 1;
+    if (await before(middle)) low = middle;
     else high = middle;
   }
-  return low;
+  return high;
 }
 
 /**

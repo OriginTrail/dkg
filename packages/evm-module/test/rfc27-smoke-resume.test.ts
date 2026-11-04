@@ -28,7 +28,7 @@ import { phaseCloseClaim } from '../scripts/rfc27/smoke/close-claim';
 import { NOTHING_YET, needsOf, plannedAmounts } from '../scripts/rfc27/smoke/config';
 import { PoolCtx, withPool } from '../scripts/rfc27/smoke/context';
 import { expectedClaims, phaseFinalize } from '../scripts/rfc27/smoke/finalize';
-import { rewardClaims } from '../scripts/rfc27/smoke/reward-claims';
+import { firstBlockAt, rewardClaims } from '../scripts/rfc27/smoke/reward-claims';
 import type { Roles } from '../scripts/rfc27/smoke/roles';
 import { phaseServe } from '../scripts/rfc27/smoke/serve';
 import { phaseSetup } from '../scripts/rfc27/smoke/setup';
@@ -1553,6 +1553,28 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(by.detail).to.contain('in 1 claim');
       expect(checkOf(ctx, 'claimFor pays what the epochs\' nets give').ok).to.equal(true);
       expect(checkOf(ctx, 'the position is paid a share of epoch').ok).to.equal(true);
+    });
+  });
+
+  describe('the first block at a time', () => {
+    /** Blocks 2 s apart, from 1,000,000 at time 0, and an endpoint that has pruned all before block 1,000,000. */
+    const chain = { getBlock: async (n: number) => {
+      if (n < 1_000_000) throw new Error(`pruned history unavailable: requested ${n}`);
+      return { timestamp: (n - 1_000_000) * 2 };
+    } } as unknown as Parameters<typeof firstBlockAt>[0];
+
+    it('is found stepping back from a later block, reading none of what is long past', async () => {
+      expect(await firstBlockAt(chain, 200_000n, 1_200_000)).to.equal(1_100_000);
+      expect(await firstBlockAt(chain, 200_001n, 1_200_000)).to.equal(1_100_001);
+      expect(await firstBlockAt(chain, 400_000n, 1_200_000)).to.equal(1_200_000);
+      expect(await firstBlockAt(chain, 399_990n, 1_200_000)).to.equal(1_199_995);
+    });
+
+    it('is block 0 when every block is at or after it', async () => {
+      const from0 = { getBlock: async (n: number) => ({ timestamp: 100 + n }) } as unknown as Parameters<typeof firstBlockAt>[0];
+      expect(await firstBlockAt(from0, 50n, 1_000)).to.equal(0);
+      expect(await firstBlockAt(from0, 100n, 1_000)).to.equal(0);
+      expect(await firstBlockAt(from0, 101n, 1_000)).to.equal(1);
     });
   });
 
