@@ -13,7 +13,7 @@ import { BaseContracts, Contracts, Stack, errorMessage } from '../contracts';
 import { Fork } from '../fork';
 import { Net, guardNetwork } from '../network';
 import { Report } from '../report';
-import { TX_GAS_CAP, TxRunner } from '../tx';
+import { TX_GAS_CAP, TxReverted, TxRunner } from '../tx';
 import { deepestFailure } from './plumbing';
 import { CheckEntry, TxEntry, asNumber, asObject, asString, save } from './results';
 
@@ -55,7 +55,7 @@ export async function createContext(hre: HardhatRuntimeEnvironment, report: Repo
   const net = await guardNetwork(hre, report.redactor);
   if (!net.local) throw new Error(`refusing to run: the rehearsal runs on the local anvil fork only, and this is ${net.name}`);
   const stack = await Stack.at(hre, HUB);
-  return { hre, net, report, stack, base: await stack.base(), fork: new Fork(hre, net, report), tx: new TxRunner(hre, report, true), txs: [] };
+  return { hre, net, report, stack, base: await stack.base(), fork: new Fork(hre, net, report), tx: new TxRunner(hre, report), txs: [] };
 }
 
 /** The OT-RFC-27 contracts too, as the Hub holds them now. */
@@ -64,6 +64,9 @@ export async function withPool(ctx: Ctx): Promise<Contracts> {
 }
 
 export type Sent = { receipt: TransactionReceipt; gasUsed: bigint };
+
+/** FORK-ONLY: a part of a transaction's label; a phase fails just before it, to show what its snapshots restore. */
+const FAIL_AT = process.env.REHEARSAL_FAIL_AT;
 
 /**
  * One transaction, through the shared runner: estimated, the estimate, its
@@ -74,19 +77,18 @@ export type Sent = { receipt: TransactionReceipt; gasUsed: bigint };
  * a revert is recorded and rethrown.
  */
 export async function send(ctx: Ctx, label: string, signer: Signer, to: string | undefined, data: string): Promise<Sent> {
-  const role = label.includes(':') ? label.slice(0, label.indexOf(':')) : label;
+  if (FAIL_AT && label.includes(FAIL_AT)) throw new Error(`REHEARSAL_FAIL_AT: stopping before "${label}"`);
   let result;
   try {
-    result = await ctx.tx.run({ key: `tx-${ctx.txs.length}`, label, role, signer, to, data });
+    result = await ctx.tx.run({ label, signer, to, data });
   } catch (e: unknown) {
-    const hash = /transaction (0x[0-9a-fA-F]{64}) reverted on chain/.exec(errorMessage(e))?.[1];
+    const hash = e instanceof TxReverted ? e.receipt.hash : undefined;
     const why = hash ? await deepestFailure(ctx, hash) : errorMessage(e);
     ctx.txs.push(hash ? { label, hash, status: 0, error: why } : { label, status: 'reverted before inclusion', error: why });
     ctx.report.note(`✗ ${label}: ${hash ? `reverted on chain, ${why}` : why}`);
     throw e;
   }
   const { receipt, estimate, gasLimit } = result;
-  if (!receipt) throw new Error(`${label} was not sent`);
   const gasUsed = receipt.gasUsed;
   ctx.txs.push({
     label,

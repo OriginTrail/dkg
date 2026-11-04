@@ -22,14 +22,13 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import {
   Chronos,
   ConvictionServiceStorage,
   DKGPublishingConvictionNFT,
-  Hub,
   ParametersStorage,
   PublishingConviction,
   PublishingConvictionStorage,
@@ -37,8 +36,8 @@ import {
   ServiceSubscriptions,
   Token,
 } from '../../typechain';
+import { deployAccountStack, eventsOf } from '../helpers/account-stack';
 import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   DAY,
   TRAC,
@@ -83,38 +82,10 @@ const limitOf = (c: Case): bigint =>
 const COMMITTED = 100_000n * TRAC + 11n; // the 30 % tier
 const BPS = 3_000n;
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  Params: ParametersStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS } = await registerServiceContracts(Hub);
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-    QIS,
-    CSS,
-    SS,
-  };
+async function deployFixture() {
+  const stack = await deployAccountStack();
+  const { QIS, CSS, SS } = await registerServiceContracts(stack.Hub);
+  return { ...stack, QIS, CSS, SS };
 }
 
 // Instrumented coverage runs say nothing about deployed gas.
@@ -185,17 +156,6 @@ describe('@gas Conviction Account service spending', () => {
     measured.push([name, gas]);
     const limit = limitOf(GAS[name]);
     expect(gas, `${name}: ${gas} gas against ${limit} (target ${GAS[name].target})`).to.be.at.most(limit);
-  };
-
-  const eventsOf = async (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const address = (await contract.getAddress()).toLowerCase();
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== address) continue;
-      const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === name) out.push(parsed.args);
-    }
-    return out;
   };
 
   const createAccount = async (committed: bigint = COMMITTED) => {

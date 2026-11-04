@@ -4,8 +4,6 @@
 // claim, and StakingKPI's nets, which the existing phase compares the upgraded
 // contracts with.
 
-import type { PublishingConviction, StakingKPI } from '../../../typechain';
-import { typedAt } from '../contracts';
 import { Ctx, saveResults, send } from './context';
 import { claimAll, publishAs } from './operations';
 import { operationalKeys } from './plumbing';
@@ -33,30 +31,30 @@ export async function phasePre(ctx: Ctx): Promise<void> {
   const from = pos.reduce((m, p) => (p.lastClaimedEpoch + 1n < m ? p.lastClaimedEpoch + 1n : m), E);
 
   report.say(`\nStakingKPI ${versions.StakingKPI} nets for nodes ${nodes.join(',')} over epochs ${from}..${E - 1n}`);
-  const kpi = await typedAt<StakingKPI>(ctx.hre, 'StakingKPI', await stack.addr('StakingKPI'));
+  const kpi = await stack.held('StakingKPI');
   const kpiBefore = await nodeEpochNets(c, kpi, nodes, from, E - 1n);
 
-  const snap = await ctx.fork.snapshot();
-  report.say(`\nsnapshot ${snap}: the 10.0.8 / 10.0.4 behaviour, then revert`);
-
-  const pc = await typedAt<PublishingConviction>(ctx.hre, 'PublishingConviction', await stack.addr('PublishingConviction'));
-  const [agent] = await c.pcs.getRegisteredAgents(SCHEDULED_ACCOUNT);
-  const publish = await publishAs(ctx, pc, SCHEDULED_ACCOUNT, agent, 10n * TRAC, 2n, '10.0.8');
-  const [anyone] = await ctx.hre.ethers.getSigners();
-  const nft = await c.nft.getAddress();
-  const settle = (id: bigint) => c.nft.interface.encodeFunctionData('settle', [id]);
-  const settleScheduled = await send(ctx, `10.0.8 settle(${SCHEDULED_ACCOUNT})`, anyone, nft, settle(SCHEDULED_ACCOUNT));
-  const expired = accounts.filter((a) => !a.live).map((a) => a.id);
-  const sources = await eventSources(ctx.hre);
-  const settles: { id: bigint; stakerCredits: Range[]; events: string[] }[] = [];
-  for (const id of expired) {
-    const { receipt } = await send(ctx, `10.0.8 settle(${id})`, anyone, nft, settle(id));
-    settles.push({ id, stakerCredits: stakerCredits(receipt, c), events: eventNamesIn(receipt, sources) });
-  }
-  const claims = await claimAll(ctx, pos, '10.0.4');
-  const netsAfterOldClaims = await storedNets(c, Object.keys(kpiBefore));
-  await ctx.fork.revert(snap);
-  report.say(`reverted to ${snap}`);
+  report.say('\nin a snapshot: the 10.0.8 / 10.0.4 behaviour, then revert');
+  const old = await ctx.fork.inSnapshot(async () => {
+    const pc = await stack.held('PublishingConviction');
+    const [agent] = await c.pcs.getRegisteredAgents(SCHEDULED_ACCOUNT);
+    const publish = await publishAs(ctx, pc, SCHEDULED_ACCOUNT, agent, 10n * TRAC, 2n, '10.0.8');
+    const [anyone] = await ctx.hre.ethers.getSigners();
+    const nft = await c.nft.getAddress();
+    const settle = (id: bigint) => c.nft.interface.encodeFunctionData('settle', [id]);
+    const settleScheduled = await send(ctx, `10.0.8 settle(${SCHEDULED_ACCOUNT})`, anyone, nft, settle(SCHEDULED_ACCOUNT));
+    const expired = accounts.filter((a) => !a.live).map((a) => a.id);
+    const sources = await eventSources(ctx.hre);
+    const settles: { id: bigint; stakerCredits: Range[]; events: string[] }[] = [];
+    for (const id of expired) {
+      const { receipt } = await send(ctx, `10.0.8 settle(${id})`, anyone, nft, settle(id));
+      settles.push({ id, stakerCredits: stakerCredits(receipt, c), events: eventNamesIn(receipt, sources) });
+    }
+    const claims = await claimAll(ctx, pos, '10.0.4');
+    const netsAfterOldClaims = await storedNets(c, Object.keys(kpiBefore));
+    return { publish, settleScheduled: stakerCredits(settleScheduled.receipt, c), settles, claims, netsAfterOldClaims };
+  });
+  report.say('reverted');
 
   saveResults(ctx, 'pre', {
     forkBlock: block.number,
@@ -67,12 +65,6 @@ export async function phasePre(ctx: Ctx): Promise<void> {
     positions: pos,
     accounts,
     kpiBefore,
-    old: {
-      publish,
-      settleScheduled: stakerCredits(settleScheduled.receipt, c),
-      settles,
-      claims,
-      netsAfterOldClaims,
-    },
+    old,
   });
 }

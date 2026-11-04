@@ -1,39 +1,23 @@
-// OT-RFC-27 script support: the marketplace's operations as transaction steps,
-// built with the shapes, digests and request builders of test/helpers: a
+// The smoke test's marketplace operations, as transaction steps, built with the
+// shapes, digests and request builders of test/helpers: a
 // position, a Conviction Account opted in, an assignment with the buyer key's
 // EIP-712 consent, plan periods funded from an account or a wallet, top-ups,
 // revocations, and receipt batches of requests signed by session keys.
 
 import type { HDNodeWallet, Signer } from 'ethers';
 
-import type { Domain, Terms } from '../../test/helpers/conviction-service';
-import {
-  CLASS_INFERENCE,
-  SERVICE_ASSIGNMENT_TYPES,
-  bucket,
-  bucketId,
-  domainOf,
-  requestOf,
-  walletRequestOf,
-} from '../../test/helpers/conviction-service';
-import type { ReceiptGroup } from '../../test/helpers/query-inference';
-import { queryInferenceDomain, signedItems } from '../../test/helpers/query-inference';
+import type { Domain, Terms } from '../../../test/helpers/conviction-service';
+import { SERVICE_ASSIGNMENT_TYPES, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
+import type { ReceiptGroup } from '../../../test/helpers/query-inference';
+import { queryInferenceDomain, signedItems } from '../../../test/helpers/query-inference';
 
-import type { Contracts } from './contracts';
-import { fmt } from './report';
-import { StepResult, TxRunner } from './tx';
+import type { Contracts } from '../contracts';
+import { BUCKET0, UNIT_ASK, inference } from '../plans';
+import { fmt } from '../report';
+import { SmokeTx, Step, StepResult } from './tx';
 
-/** The seller's ask per unit, which the buyer accepts: 0.001 TRAC. */
-export const UNIT_ASK = 10n ** 15n;
-/** Each bucket's price cap per unit. */
-export const PRICE_CAP = 10n ** 16n;
-/** The one bucket of every period here: an inference bucket of index 0. */
-export const BUCKET0 = bucketId(0);
-
-const inference = (value: bigint) => [bucket(0, CLASS_INFERENCE, value, PRICE_CAP)];
-
-/** Steps that need an earlier step, and what makes them done already on chain. */
-export type StepOpts = { needs?: string[]; done?: string };
+/** Steps that need an earlier step, what makes them done already on chain, and what they move. */
+export type StepOpts = Pick<Step, 'needs' | 'done' | 'reads' | 'expected'>;
 
 export class Marketplace {
   private qiDomain?: Domain;
@@ -41,11 +25,11 @@ export class Marketplace {
 
   constructor(
     readonly c: Contracts,
-    readonly tx: TxRunner,
+    readonly tx: SmokeTx,
   ) {}
 
   async approve(key: string, who: string, holder: Signer, spender: string, amount: bigint, what: string, opts: StepOpts = {}): Promise<StepResult> {
-    return this.tx.run({
+    return this.tx.step({
       key,
       label: `${who}: approve ${what} for ${fmt(amount)} TRAC`,
       role: who,
@@ -57,9 +41,9 @@ export class Marketplace {
   }
 
   /** A position of `amount` TRAC on `node` at tier 0, which has no lock, so it can withdraw at any time. */
-  async stake(prefix: string, owner: Signer, node: bigint, amount: bigint, done?: string): Promise<StepResult> {
-    await this.approve(`${prefix}.approve-staking`, 'owner', owner, await this.c.sv10.getAddress(), amount, 'StakingV10', { done });
-    return this.tx.run({
+  async stake(prefix: string, owner: Signer, node: bigint, amount: bigint, opts: StepOpts = {}): Promise<StepResult> {
+    await this.approve(`${prefix}.approve-staking`, 'owner', owner, await this.c.sv10.getAddress(), amount, 'StakingV10', { done: opts.done });
+    return this.tx.step({
       key: `${prefix}.stake`,
       label: `owner: createConviction(node ${node}, ${fmt(amount)} TRAC, tier 0)`,
       role: 'owner',
@@ -67,15 +51,15 @@ export class Marketplace {
       to: await this.c.snft.getAddress(),
       data: this.c.snft.interface.encodeFunctionData('createConviction', [node, amount, 0]),
       needs: [`${prefix}.approve-staking`],
-      done,
+      ...opts,
     });
   }
 
   /** A new Conviction Account of `committed` TRAC, with no designated node, under the Hub's PublishingConviction. */
-  async createAccount(prefix: string, owner: Signer, committed: bigint, done?: string): Promise<StepResult> {
+  async createAccount(prefix: string, owner: Signer, committed: bigint, opts: StepOpts = {}): Promise<StepResult> {
     const nft = await this.c.nft.getAddress();
-    await this.approve(`${prefix}.approve-account`, 'owner', owner, nft, committed, 'DKGPublishingConvictionNFT', { done });
-    return this.tx.run({
+    await this.approve(`${prefix}.approve-account`, 'owner', owner, nft, committed, 'DKGPublishingConvictionNFT', { done: opts.done });
+    return this.tx.step({
       key: `${prefix}.create-account`,
       label: `owner: createAccount(${fmt(committed)} TRAC, no designated node)`,
       role: 'owner',
@@ -83,12 +67,12 @@ export class Marketplace {
       to: nft,
       data: this.c.nft.interface.encodeFunctionData('createAccount', [committed, 0]),
       needs: [`${prefix}.approve-account`],
-      done,
+      ...opts,
     });
   }
 
   async optIn(key: string, owner: Signer, accountId: bigint | undefined, opts: StepOpts = {}): Promise<StepResult> {
-    return this.tx.run({
+    return this.tx.step({
       key,
       label: `owner: setServiceSpending(${accountId ?? '<new account>'}, true)`,
       role: 'owner',
@@ -128,12 +112,12 @@ export class Marketplace {
       const consent = await assignee.signTypedData(this.ssDomain, SERVICE_ASSIGNMENT_TYPES, terms);
       data = this.c.ss.interface.encodeFunctionData('assign', [terms, '0x', consent]);
     }
-    const r = await this.tx.run({ key, label, role: 'owner', signer: owner, to: await this.c.ss.getAddress(), data, ...opts });
+    const r = await this.tx.step({ key, label, role: 'owner', signer: owner, to: await this.c.ss.getAddress(), data, ...opts });
     return { ...r, terms };
   }
 
   async revoke(key: string, owner: Signer, accountId: bigint, assignee: string, what: string, opts: StepOpts = {}): Promise<StepResult> {
-    return this.tx.run({
+    return this.tx.step({
       key,
       label: `owner: revoke ${what}`,
       role: 'owner',
@@ -157,7 +141,7 @@ export class Marketplace {
     opts: StepOpts = {},
   ): Promise<StepResult> {
     const request = requestOf(accountId ?? 0n, epoch, { sessionKey, planDigest, buckets: inference(value) });
-    return this.tx.run({
+    return this.tx.step({
       key,
       label: `${who}: fundFromConviction(account ${accountId ?? '<new account>'}, epoch ${epoch}, ${fmt(value)} TRAC)`,
       role: who,
@@ -177,11 +161,11 @@ export class Marketplace {
     sessionKey: string,
     value: bigint,
     planDigest: string,
-    done?: string,
+    opts: StepOpts = {},
   ): Promise<StepResult> {
     const ssw = await this.c.ssw.getAddress();
-    await this.approve(`${prefix}.approve-wallet`, who, buyer, ssw, value, 'ServiceSubscriptionsWallet', { done });
-    return this.tx.run({
+    await this.approve(`${prefix}.approve-wallet`, who, buyer, ssw, value, 'ServiceSubscriptionsWallet', { done: opts.done });
+    return this.tx.step({
       key: `${prefix}.fund-wallet-period`,
       label: `${who}: fundFromWallet(epoch ${epoch}, ${fmt(value)} TRAC)`,
       role: who,
@@ -189,7 +173,7 @@ export class Marketplace {
       to: ssw,
       data: this.c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequestOf(epoch, { sessionKey, planDigest, buckets: inference(value) })]),
       needs: [`${prefix}.approve-wallet`],
-      done,
+      ...opts,
     });
   }
 
@@ -199,7 +183,7 @@ export class Marketplace {
   }
 
   async topUp(key: string, who: string, buyer: Signer, subscriptionId: string, value: bigint, planDigest: string, opts: StepOpts = {}): Promise<StepResult> {
-    return this.tx.run({
+    return this.tx.step({
       key,
       label: `${who}: topUpFromConviction(the account period, +${fmt(value)} TRAC)`,
       role: who,
@@ -233,7 +217,7 @@ export class Marketplace {
   }
 
   async batch(key: string, label: string, seller: Signer, groups: ReceiptGroup[], opts: StepOpts = {}): Promise<StepResult> {
-    return this.tx.run({
+    return this.tx.step({
       key,
       label: `seller: submitReceiptBatch (${label})`,
       role: 'seller',

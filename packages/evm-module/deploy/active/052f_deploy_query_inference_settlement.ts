@@ -67,6 +67,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 export default func;
 func.tags = ['QueryInferenceSettlement', 'v10'];
 func.dependencies = [
+  'ServiceSpendingBuilds',
   'Hub',
   'QueryInferenceStorage',
   'ConvictionServiceStorage',

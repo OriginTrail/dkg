@@ -6,7 +6,7 @@ import * as path from 'path';
 import { ethers } from 'ethers';
 
 import type { BaseContracts } from '../contracts';
-import { UNIT_ASK } from '../marketplace';
+import { UNIT_ASK } from '../plans';
 import { fmt } from '../report';
 import { Amounts, PHASES, PhaseName, SmokeState } from './state';
 
@@ -20,17 +20,51 @@ export const MIN_EPOCH_LEFT = 3_600n;
 export const MID_EPOCH_MARGIN = 600n;
 
 /**
- * The gas each role's transactions are planned at, for the balance check:
- * about twice what the fork run measured (owner 3.79M over 18 transactions,
- * buyer key 0.76M, edge buyer key 0.48M, seller 0.58M). The gas limits come
- * from each transaction's own estimate.
+ * The gas each role's transactions are planned at, for the balance check, and
+ * how many it sends: about twice what the fork run measured (owner 3.79M over 18
+ * transactions, buyer key 0.76M over 2, edge buyer key 0.48M, seller 0.58M over
+ * 2). The gas limits come from each transaction's own estimate.
  */
-export const PLANNED_GAS = { owner: 7_600_000n, ownerTxs: 18n, buyer: 1_550_000n, edgeBuyer: 1_000_000n, seller: 1_200_000n };
+export const PLANNED_GAS = {
+  owner: { gas: 7_600_000n, txs: 18n },
+  buyer: { gas: 1_550_000n, txs: 2n },
+  edgeBuyer: { gas: 1_000_000n, txs: 1n },
+  seller: { gas: 1_200_000n, txs: 2n },
+};
 /** Per transaction: Base adds an L1 data fee to the gas. */
 export const L1_FEE_ALLOWANCE = 10n ** 13n;
 
 /** Twice the planned gas at the max fee, which the sender's balance must cover up front, and the L1 data fee. */
 export const gasCost = (gas: bigint, txs: bigint, maxFee: bigint): bigint => 2n * gas * maxFee + txs * L1_FEE_ALLOWANCE;
+
+/** How far a run has got, as the journal and the chain confirm it. */
+export type Progress = {
+  staked: boolean;
+  accountCreated: boolean;
+  walletFunded: boolean;
+  buyerFunded: boolean;
+  edgeBuyerFunded: boolean;
+  /** The transactions each role has sent. */
+  sent: { owner: bigint; buyer: bigint; edgeBuyer: bigint; seller: bigint };
+};
+
+export const NOTHING_YET: Progress = { staked: false, accountCreated: false, walletFunded: false, buyerFunded: false, edgeBuyerFunded: false, sent: { owner: 0n, buyer: 0n, edgeBuyer: 0n, seller: 0n } };
+
+/** What a run still spends: only what its remaining steps will. */
+export function needsOf(a: Amounts, maxFee: bigint, p: Progress) {
+  const gasLeft = (role: keyof Progress['sent']): bigint => {
+    const { gas, txs } = PLANNED_GAS[role];
+    const left = txs > p.sent[role] ? txs - p.sent[role] : 0n;
+    return gasCost((gas * left) / txs, left, maxFee);
+  };
+  return {
+    ownerTrac: (p.accountCreated ? 0n : a.committed) + (p.walletFunded ? 0n : a.walletValue) + (p.staked ? 0n : a.stake),
+    ownerEth: gasLeft('owner') + (p.buyerFunded ? 0n : a.keyEth) + (p.edgeBuyerFunded ? 0n : a.keyEth),
+    sellerEth: gasLeft('seller'),
+    buyerEth: gasLeft('buyer'),
+    edgeBuyerEth: gasLeft('edgeBuyer'),
+  };
+}
 
 export type SmokeEnv = {
   phase: PhaseName;
@@ -39,6 +73,8 @@ export type SmokeEnv = {
   warp: boolean;
   /** Fork-only: write the seller's proofs where the real node would have proved. */
   proofs: boolean;
+  /** Fork-only: end the process right after the journal records this step, as a crash would. */
+  stopAfter?: string;
   run: string;
   stateFile: string;
 };
@@ -53,6 +89,7 @@ export function readEnv(): SmokeEnv {
     send: process.env.SEND === '1',
     warp: process.env.FORK_WARP === '1',
     proofs: process.env.FORK_PROOFS === '1',
+    stopAfter: process.env.FORK_STOP_AFTER || undefined,
     run,
     stateFile: path.join(RESULTS_DIR, `${run}.json`),
   };
@@ -105,7 +142,7 @@ export async function plannedAmounts(c: BaseContracts, state: SmokeState | undef
   }
   if (committed >= 1n << 96n) throw new Error('RFC27_SMOKE_COMMITTED does not fit a uint96');
   // Each derived buyer key's ETH: 0.0002, or what its gas needs at the current fee if that is more.
-  const need = gasCost(PLANNED_GAS.buyer > PLANNED_GAS.edgeBuyer ? PLANNED_GAS.buyer : PLANNED_GAS.edgeBuyer, 2n, maxFee);
+  const need = gasCost(PLANNED_GAS.buyer.gas > PLANNED_GAS.edgeBuyer.gas ? PLANNED_GAS.buyer.gas : PLANNED_GAS.edgeBuyer.gas, 2n, maxFee);
   const step = 10n ** 14n;
   const keyEthDefault = need > 2n * step ? ((need + step - 1n) / step) * step : 2n * step;
   return {

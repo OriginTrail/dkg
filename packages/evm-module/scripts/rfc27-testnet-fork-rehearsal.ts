@@ -41,8 +41,8 @@
 //
 //   # 2. the real deploy pipeline. REDEPLOY lists the entries the scratch copy
 //   #    marks not deployed, which is how the three upgrades are redeployed, as
-//   #    052d and 052e document.
-//   #    2a. the guard: with StakingV10 left deployed, 052e refuses the run, before any transaction
+//   #    the deploy's first step, 000, asks.
+//   #    2a. the guard: with StakingV10 left deployed, 000 refuses the run, before it deploys anything
 //   REDEPLOY=PublishingConviction,StakingKPI npx hardhat deploy --network base_sepolia_v10 --config $CFG  # fails
 //   #    2b. the real run
 //   REDEPLOY=PublishingConviction,StakingV10,StakingKPI npx hardhat deploy --network base_sepolia_v10 \
@@ -98,7 +98,10 @@
 // directory) and reads what the earlier phases wrote, decoded and checked
 // where it is loaded (scripts/rfc27/rehearsal/results.ts). The switch phase
 // follows the hub phase directly, before the activation epoch ends, and
-// reverts all it does.
+// reverts all it does. Every snapshot is reverted however its phase ends, so a
+// failed phase leaves the fork as it found it and can run again.
+// REHEARSAL_FAIL_AT=<part of a transaction's label> makes a phase fail just
+// before that transaction, which shows it.
 //
 // The phases live in scripts/rfc27/rehearsal/, one module each, on the script
 // support of scripts/rfc27/ that the smoke test shares: the contracts through

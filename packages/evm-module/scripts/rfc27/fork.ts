@@ -6,6 +6,7 @@
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
 import { ethers } from 'ethers';
 
+import { errorMessage } from './contracts';
 import type { BaseContracts } from './contracts';
 import { Net, chainNow, rpc } from './network';
 import { Report, iso, span } from './report';
@@ -67,6 +68,26 @@ export class Fork {
   async revert(snapshot: string): Promise<void> {
     this.only('a revert');
     if ((await rpc(this.hre, 'evm_revert', [snapshot])) !== true) throw new Error(`evm_revert(${snapshot}) failed`);
+  }
+
+  /**
+   * `body` inside a snapshot, which is reverted however it ends: a failure
+   * leaves the fork as it was, and is the error that reaches the caller, even
+   * if the revert fails as well.
+   */
+  async inSnapshot<T>(body: () => Promise<T>): Promise<T> {
+    const snap = await this.snapshot();
+    let done = false;
+    try {
+      const out = await body();
+      done = true;
+      return out;
+    } finally {
+      await this.revert(snap).catch((e: unknown) => {
+        if (done) throw e;
+        this.report.note(`the snapshot was not restored: ${errorMessage(e)}`);
+      });
+    }
   }
 
   /** A stand-in transaction from an impersonated address, its gas limit set by hand too. */

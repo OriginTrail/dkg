@@ -6,13 +6,13 @@ import type { HardhatRuntimeEnvironment } from 'hardhat/types';
 
 import { BaseContracts, Contracts, Stack } from '../contracts';
 import { Fork, notBefore } from '../fork';
-import { Marketplace } from '../marketplace';
 import { Net, chainNow } from '../network';
 import { Report } from '../report';
-import { TxRunner } from '../tx';
 import { LIVE_JSON, SmokeEnv } from './config';
+import { Marketplace } from './marketplace';
 import { Roles } from './roles';
-import { SmokeState, StateFile } from './state';
+import { ServedState, SetupState, SmokeState, StateFile, isServed, isSetup, serveMissing, setupMissing } from './state';
+import { SmokeTx } from './tx';
 
 export type Ctx = {
   hre: HardhatRuntimeEnvironment;
@@ -23,7 +23,7 @@ export type Ctx = {
   base: BaseContracts;
   fork: Fork;
   file: StateFile;
-  tx: TxRunner;
+  tx: SmokeTx;
   roles: Roles;
 };
 
@@ -39,9 +39,16 @@ export async function withPool(ctx: Ctx): Promise<PoolCtx> {
 
 export const now = (ctx: Ctx): Promise<bigint> => chainNow(ctx.hre);
 
-/** The phase may run from `ts`: see fork.notBefore. */
-export const opensAt = (ctx: Ctx, ts: bigint, what: string): Promise<boolean> =>
-  notBefore({ hre: ctx.hre, fork: ctx.fork, report: ctx.report, warp: ctx.env.warp }, ts, what);
+/**
+ * The phase may run from `ts`: see fork.notBefore. A dry run changes nothing on
+ * the fork either, so it does not move the clock: it is deferred, as without
+ * FORK_WARP.
+ */
+export async function opensAt(ctx: Ctx, ts: bigint, what: string): Promise<boolean> {
+  const open = await notBefore({ hre: ctx.hre, fork: ctx.fork, report: ctx.report, warp: ctx.env.warp && ctx.env.send }, ts, what);
+  if (!open && ctx.env.warp && !ctx.env.send) ctx.report.note('a dry run changes nothing on the fork: FORK_WARP=1 moves the clock with SEND=1 only');
+  return open;
+}
 
 export const epochStart = (ctx: Ctx, e: bigint): Promise<bigint> => ctx.base.chronos.timestampForEpoch(e);
 
@@ -65,30 +72,57 @@ export async function bindState(ctx: PoolCtx): Promise<SmokeState | undefined> {
   return s;
 }
 
-/** The state of a run that has started, bound to this network. */
-export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-claim'): Promise<SmokeState> {
+/**
+ * The gate of a phase: the state of a run bound to this network, in which the
+ * phase `after` completed with no failed check. What that phase must have
+ * recorded is validated here, once, and the state comes back typed as holding
+ * it. It is the same object as the file's, so what a phase writes to it is saved.
+ */
+export async function runState(ctx: PoolCtx, after: 'setup'): Promise<SetupState>;
+export async function runState(ctx: PoolCtx, after: 'serve' | 'close-claim'): Promise<ServedState>;
+export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-claim'): Promise<SetupState> {
   const s = await bindState(ctx);
   if (!s) throw new Error(`${ctx.file.file} is missing: run PHASE=setup SEND=1 first`);
+  const failed = ctx.file.failedChecks(after);
+  if (failed) throw new Error(`PHASE=${after} ended with ${failed} failed check${failed > 1 ? 's' : ''}: run it again first, which sends nothing it sent already`);
   if (!ctx.file.done(after)) throw new Error(`run PHASE=${after} SEND=1 first`);
+  const lacks = (what: string[]) => new Error(`${ctx.file.file} says ${after} completed, but holds no ${what.join(', ')}: start a new run`);
+  if (!isSetup(s)) throw lacks(setupMissing(s));
+  if (after === 'setup') return s;
+  if (!isServed(s)) throw lacks(serveMissing(s));
   return s;
 }
 
-/** A phase that completed earlier: say so, and keep the results it wrote then. */
+/**
+ * A phase that completed earlier: say so, and keep the results it wrote then.
+ * One whose checks failed did not: it runs again, and its failure stands until
+ * they pass.
+ */
 export function doneEarlier(ctx: Ctx, what: string): boolean {
+  const failed = ctx.file.failedChecks(ctx.env.phase);
+  if (failed) ctx.report.note(`${ctx.env.phase} ended with ${failed} failed check${failed > 1 ? 's' : ''} when it last ran: running it again, which sends nothing it sent already`);
   if (!ctx.file.done(ctx.env.phase)) return false;
   ctx.report.note(`${ctx.env.phase} is done${what ? `: ${what}` : ''}`);
   ctx.report.status = 'done earlier';
   return true;
 }
 
-/** Marks the phase done once it ran to its end with SEND=1. */
+/** Records the phase's outcome once it ran to its end with SEND=1: done, or failed if any check did. */
 export function complete(ctx: Ctx): void {
-  if (ctx.env.send && !ctx.report.stopped && ctx.report.status === 'ran') ctx.file.markDone(ctx.env.phase, ctx.report.failed);
+  if (ctx.env.send && !ctx.report.stopped && ctx.report.status === 'ran') ctx.file.finish(ctx.env.phase, ctx.report.failed);
 }
 
-/** FORK-ONLY: the seller's next proof, where the real node would have proved, with FORK_PROOFS=1. */
+/**
+ * FORK-ONLY: the seller's next proof, where the real node would have proved,
+ * with FORK_PROOFS=1 and SEND=1. It sends transactions outside the runner, so a
+ * dry run only says what it would write.
+ */
 export async function standInProof(ctx: PoolCtx, why: string): Promise<boolean> {
   if (!ctx.net.local || !ctx.env.proofs) return false;
+  if (!ctx.env.send) {
+    ctx.report.note(`plan  fork-only: a stand-in proof of node ${ctx.file.s.sellerId}, with SEND=1: ${why}`);
+    return false;
+  }
   const s = ctx.file.s;
   s.fork ??= { proofs: [] };
   if (s.fork.mirrorScore === undefined) {

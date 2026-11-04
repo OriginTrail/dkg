@@ -7,10 +7,10 @@ import { ethers } from 'ethers';
 import { EXPECTED_VERSIONS, NEW_CONTRACTS } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, span } from '../report';
-import { MIN_EPOCH_LEFT, PLANNED_GAS, gasCost, plannedAmounts, requestPlan, planValue } from './config';
+import { MIN_EPOCH_LEFT, NOTHING_YET, Progress, needsOf, plannedAmounts, requestPlan, planValue } from './config';
 import { Ctx, PoolCtx, epochStart, now, withPool } from './context';
 import { Roles } from './roles';
-import { Amounts } from './state';
+import { Amounts, PHASES } from './state';
 
 /** Whether the Hub holds the OT-RFC-27 stack; reports "not deployed yet" when it does not. */
 export async function deployed(ctx: Ctx): Promise<boolean> {
@@ -127,7 +127,9 @@ export async function verifySeller(ctx: Ctx, a: Amounts): Promise<Seller> {
   );
   if (ok) {
     const [stake, max] = [await c.css.getNodeStakeV10(id), await c.params.maximumStake()];
-    ok = report.check(`node ${id} takes the ${fmt(a.stake)} TRAC stake under the maximum stake`, stake + a.stake <= max, `node stake ${fmt(stake)} of ${fmt(max)} TRAC`);
+    // A stake already made is in the node's stake.
+    const adding = ctx.file.state?.tokenId !== undefined ? 0n : a.stake;
+    ok = report.check(`node ${id} takes the ${fmt(a.stake)} TRAC stake under the maximum stake`, stake + adding <= max, `node stake ${fmt(stake)} of ${fmt(max)} TRAC`);
   }
   return { id, ok };
 }
@@ -137,40 +139,59 @@ export async function maxFeePerGas(ctx: Ctx): Promise<bigint> {
   return fee.maxFeePerGas ?? fee.gasPrice ?? 0n;
 }
 
-/** The ETH and TRAC the run needs, against what each role holds. */
+/** How far the run has got: a spend counts once its receipt confirms it, or the state holds what it made. */
+export async function progressOf(ctx: Ctx): Promise<Progress> {
+  const s = ctx.file.state;
+  if (!s) return NOTHING_YET;
+  // Read, not waited for: a transaction not mined yet has spent nothing so far, and the phase waits for it itself.
+  const confirmed = async (key: string): Promise<boolean> => {
+    const record = s.steps[key];
+    return !!record && (await ctx.hre.ethers.provider.getTransactionReceipt(record.hash))?.status === 1;
+  };
+  const sentBy = (role: string): bigint => BigInt(Object.values(s.steps).filter((x) => x.role === role).length);
+  return {
+    staked: s.tokenId !== undefined || (await confirmed('setup.stake')),
+    accountCreated: s.accountId !== undefined || (await confirmed('setup.create-account')),
+    walletFunded: s.periods.wallet !== undefined || (await confirmed('setup.fund-wallet-period')),
+    buyerFunded: await confirmed('setup.eth-buyer'),
+    edgeBuyerFunded: await confirmed('setup.eth-edge-buyer'),
+    sent: { owner: sentBy('owner'), buyer: sentBy('buyer key'), edgeBuyer: sentBy('edge buyer key'), seller: sentBy('seller') },
+  };
+}
+
+/** The ETH and TRAC the run still spends, against what each role holds. */
 export async function checkBalances(ctx: Ctx, a: Amounts): Promise<void> {
   const { report, roles: r, base: c } = ctx;
   report.say('\nBalances:');
   const maxFee = await maxFeePerGas(ctx);
-  const needs = {
-    ownerTrac: a.committed + a.walletValue + a.stake,
-    ownerEth: gasCost(PLANNED_GAS.owner, PLANNED_GAS.ownerTxs, maxFee) + 2n * a.keyEth,
-    sellerEth: gasCost(PLANNED_GAS.seller, 2n, maxFee),
-    buyerEth: gasCost(PLANNED_GAS.buyer, 2n, maxFee),
-    edgeBuyerEth: gasCost(PLANNED_GAS.edgeBuyer, 1n, maxFee),
-  };
+  const progress = await progressOf(ctx);
+  const needs = needsOf(a, maxFee, progress);
   report.set('needs', { ...needs, maxFeePerGas: maxFee });
-  report.note(`at a max fee of ${ethers.formatUnits(maxFee, 'gwei')} gwei: twice the planned gas, and ${fmt(10n ** 13n)} ETH a transaction for the L1 data fee`);
+  report.note(`at a max fee of ${ethers.formatUnits(maxFee, 'gwei')} gwei: twice the planned gas of what is left to send, and ${fmt(10n ** 13n)} ETH a transaction for the L1 data fee`);
   const byFork = ctx.net.local ? ' (fork-only: setup sets it with anvil\'s balance setters)' : '';
   if (r.ownerAddr) {
     const [eth, trac] = [await ctx.hre.ethers.provider.getBalance(r.ownerAddr), await c.token.balanceOf(r.ownerAddr)];
+    const left = [progress.accountCreated ? '' : 'the commitment', progress.walletFunded ? '' : 'the wallet period', progress.staked ? '' : 'the stake'].filter(Boolean).join(', ');
     report.check(
-      `the owner ${r.ownerAddr}${r.ownerImpersonated ? ' (fork-only: impersonated)' : ''} holds the TRAC the run needs: the commitment, the wallet period and the stake`,
+      `the owner ${r.ownerAddr}${r.ownerImpersonated ? ' (fork-only: impersonated)' : ''} holds the TRAC the run still spends: ${left || 'none'}`,
       trac >= needs.ownerTrac || ctx.net.local,
       `${fmt(trac)} of ${fmt(needs.ownerTrac)} TRAC${trac < needs.ownerTrac ? byFork : ''}`,
     );
-    report.check('the owner holds the ETH the run needs: its gas and the buyer keys\' ETH', eth >= needs.ownerEth || ctx.net.local, `${fmt(eth)} of about ${fmt(needs.ownerEth)} ETH${eth < needs.ownerEth ? byFork : ''}`);
+    report.check('the owner holds the ETH the run still spends: its gas and the buyer keys\' ETH', eth >= needs.ownerEth || ctx.net.local, `${fmt(eth)} of about ${fmt(needs.ownerEth)} ETH${eth < needs.ownerEth ? byFork : ''}`);
   } else {
     report.check('the owner key is set', false, 'set RFC27_SMOKE_OWNER_KEY');
   }
   if (r.sellerAddr) {
     const eth = await ctx.hre.ethers.provider.getBalance(r.sellerAddr);
-    report.check('the seller key holds the ETH of its two batches', eth >= needs.sellerEth || ctx.net.local, `${fmt(eth)} of about ${fmt(needs.sellerEth)} ETH${eth < needs.sellerEth ? byFork : ''}`);
+    report.check('the seller key holds the ETH of the batches it still sends', eth >= needs.sellerEth || ctx.net.local, `${fmt(eth)} of about ${fmt(needs.sellerEth)} ETH${eth < needs.sellerEth ? byFork : ''}`);
   }
+  // A derived key is sent its ETH once: until then it is planned for, and from then on it holds what it holds.
+  const keyHas = (funded: boolean, key: Roles['buyer']): Promise<bigint> | bigint => (funded && key ? ctx.hre.ethers.provider.getBalance(key.address) : a.keyEth);
+  const [buyerHas, edgeBuyerHas] = [await keyHas(progress.buyerFunded, r.buyer), await keyHas(progress.edgeBuyerFunded, r.edgeBuyer)];
   report.check(
-    `the ${fmt(a.keyEth)} ETH the owner sends each derived buyer key covers its gas`,
-    a.keyEth >= needs.buyerEth && a.keyEth >= needs.edgeBuyerEth,
-    `buyer key about ${fmt(needs.buyerEth)}, edge buyer key about ${fmt(needs.edgeBuyerEth)} ETH`,
+    `the ${fmt(a.keyEth)} ETH the owner sends each derived buyer key covers the gas it still spends`,
+    buyerHas >= needs.buyerEth && edgeBuyerHas >= needs.edgeBuyerEth,
+    `buyer key ${fmt(buyerHas)} of about ${fmt(needs.buyerEth)}, edge buyer key ${fmt(edgeBuyerHas)} of about ${fmt(needs.edgeBuyerEth)} ETH`,
   );
 }
 
@@ -198,8 +219,8 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
   say(`  close-claim from the start of E+2, ${iso(await ts(E + 2n))}: closeEpochs, then claimFor against StakingKPI's preview`);
   say(`  withdraw  optional: in the middle of an epoch after close-claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 3n))})`);
   if (s) {
-    const done = Object.keys(s.phases).join(', ') || 'nothing yet';
-    say(`  progress  done: ${done}${s.withdrawal ? `; withdrawn in epoch ${s.withdrawal.epoch}${s.withdrawal.claimed ? ', its epoch claimed' : ''}` : ''}`);
+    const done = PHASES.filter((p) => ctx.file.done(p)).join(', ') || 'nothing yet';
+    say(`  progress  done: ${done}${s.withdrawal ? `; withdrawn in epoch ${s.withdrawal.epoch}${ctx.file.done('withdraw') ? ', its epoch claimed' : ''}` : ''}`);
   }
 }
 
@@ -223,6 +244,10 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
   if (!s && isDeployed) {
     const left = (await epochStart(ctx, current + 1n)) - (await now(ctx));
     ctx.report.check(`epoch ${current} has at least ${span(MIN_EPOCH_LEFT)} left for setup and serve`, left >= MIN_EPOCH_LEFT || activation > current, `${span(left)} left`);
+  }
+  for (const p of PHASES) {
+    const failed = ctx.file.failedChecks(p);
+    if (failed) ctx.report.check(`PHASE=${p} of this run has no failed check`, false, `${failed} failed when it last ran: run it again`);
   }
   ctx.report.set('amounts', a);
   await printPlan(ctx, ctx.roles, a, current, grace, activation);

@@ -10,8 +10,9 @@
 //   - initialize: onlyHub, the five dependencies it wires, and re-wiring after
 //     the Hub re-registers one.
 //
-// Opt-in, consent, caps, funding and labels run against the real account stack
-// in v10-conviction-service.test.ts and v10-conviction-service-labels.test.ts.
+// Opt-in, consent, caps and funding run against the real account stack in
+// v10-conviction-service-assignments.test.ts and
+// v10-conviction-service-funding.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture } from '@nomicfoundation/hardhat-network-helpers';

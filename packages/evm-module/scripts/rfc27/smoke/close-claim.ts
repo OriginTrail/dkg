@@ -7,26 +7,26 @@
 import { eventsIn } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, min, sum } from '../report';
-import { EpochCloseNumbers, EpochReward, claimPreview, claimsByOthers, closeFromStorage, kpiNets, poolShareOf } from '../reads';
+import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
+import { rewardClaims } from './reward-claims';
+import { finalizedValue } from './finalize';
 import { need } from './roles';
 
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
-  const { report, c } = ctx;
+  const { report, c, file } = ctx;
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
   const s = await runState(ctx, 'serve');
   if (!ctx.file.done('finalize')) report.note('finalize has not completed: the epoch closes with whatever was finalized');
   if (doneEarlier(ctx, '')) return;
-  const E = s.E ?? 0n;
+  const { E, tokenId } = s;
   const P = E + 1n; // the pool epoch: the periods of E are due in it
-  if (s.tokenId === undefined || s.stakeRaw === undefined) throw new Error('the state holds no position');
-  const tokenId = s.tokenId;
   if (!(await opensAt(ctx, (await epochStart(ctx, E + 2n)) + 60n, `the close of epoch ${P}, once it has ended`))) return;
   const current = await c.chronos.getCurrentEpoch();
   report.say(`\nClose and claim in epoch ${current}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
 
   // The previews, before any close: the pool, the seller's gross, StakingKPI's nets.
-  const windowStart = s.stakeEpoch ?? E;
+  const windowStart = s.stakeEpoch;
   const [previewPool] = await c.qs.previewEpochClose(P);
   const previewGross = await c.qs.previewQueryInferenceGross(P, s.sellerId);
   const pre = await kpiNets(c, s.sellerId, windowStart, current - 1n);
@@ -42,7 +42,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     const data = c.qs.interface.encodeFunctionData('closeEpochs', [steps]);
     const [through] = c.qs.interface.decodeFunctionResult('closeEpochs', await ctx.tx.call(r.ownerAddr, qs, data));
     report.check(`closeEpochs(${steps}) would close through epoch ${current - 1n}`, BigInt(through) === current - 1n, `closes through ${through}`);
-    const res = await ctx.tx.run({ key: 'close-claim.close-epochs', label: `owner: closeEpochs(${steps})`, role: 'owner', signer: r.owner, to: qs, data });
+    const res = await ctx.tx.step({ key: 'close-claim.close-epochs', label: `owner: closeEpochs(${steps})`, role: 'owner', signer: r.owner, to: qs, data });
     const ev = eventsIn(res.receipt, c.qs, c.qs.getEvent('EpochClosed')).find((x) => x.epoch === P);
     if (res.receipt) report.check(`the close emitted EpochClosed for epoch ${P}`, !!ev);
     // An event's Result exposes its fields by name, not as own properties: copied one by one.
@@ -61,7 +61,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       };
     }
   } else {
-    report.note(`=     epoch ${P} is closed already, by another caller (closed through ${closedThrough}): its numbers come from storage`);
+    report.note(`=     epoch ${P} is closed already, by ${file.get('close-claim.close-epochs') ? 'this phase before it was interrupted' : 'another caller'} (closed through ${closedThrough}): its numbers come from storage`);
     close = { ...(await closeFromStorage(c, P)), from: 'storage' };
   }
   if (close) {
@@ -75,7 +75,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.set('epochClosed', { ...close, money, served: close.sumR, unused });
     report.say(`\n  Epoch ${P} closed: money ${fmt(money)} TRAC (wallet due ${fmt(close.walletDue)} + account due ${fmt(close.convictionDue)} + carry in ${fmt(close.carryIn)}),`);
     report.say(`  served (ΣR) ${fmt(close.sumR)}, unused ${fmt(unused)}, pool ${fmt(close.pool)} TRAC; λ ${close.lambdaBps} bps, ΣQueryInferenceScore ${fmt(close.sumScore)}`);
-    const ours = { wallet: s.amounts.walletValue, conviction: sum([s.costs.ca ?? 0n, s.costs.topUp ?? 0n, s.costs.edge ?? 0n]) };
+    const ours = { wallet: s.amounts.walletValue, conviction: sum([s.costs.ca, s.costs.topUp, s.costs.edge]) };
     report.check('the close pools what the preview said', close.pool === previewPool, `${fmt(close.pool)} TRAC`);
     report.check(
       close.sumR > 0n ? 'value was served, so the pool is the whole money, the unused share included' : 'no value was served, so the money carries on',
@@ -86,7 +86,8 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       close.walletDue >= ours.wallet && close.convictionDue >= ours.conviction,
       close.walletDue === ours.wallet && close.convictionDue === ours.conviction ? 'ours alone, beside the carry' : 'others funded periods too',
     );
-    if (s.finalizedValue !== undefined) report.check(`served includes our finalized ${fmt(s.finalizedValue)} TRAC`, close.sumR >= s.finalizedValue);
+    const finalized = await finalizedValue(ctx, s);
+    if (finalized > 0n) report.check(`served includes our finalized ${fmt(finalized)} TRAC`, close.sumR >= finalized);
     const lambda = requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps']);
     report.check(`λ in force in epoch ${P} is ${lambda.value} bps`, close.lambdaBps === lambda.value);
     const gross = await c.qs.queryInferenceGross(P, s.sellerId);
@@ -94,38 +95,41 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.check(`node ${s.sellerId}'s gross from the pool of epoch ${P} is what the preview said`, gross === previewGross && gross <= close.pool, `${fmt(gross)} TRAC`);
   }
 
-  // 2. claimFor on our position, against StakingKPI's preview. Claims another caller (the
-  //    upkeep cron) made before it are checked first, reconstructed from views.
+  // 2. claimFor on our position, against StakingKPI's preview. Claims made before it, by
+  //    another caller (the upkeep cron) or by this phase before it was interrupted, are
+  //    checked first, from the claims the chain recorded.
+  const claimStep = {
+    key: 'close-claim.claim',
+    label: `owner: StakingV10.claimFor(${tokenId})`,
+    role: 'owner',
+    signer: r.owner,
+    to: await c.sv10.getAddress(),
+    data: c.sv10.interface.encodeFunctionData('claimFor', [tokenId]),
+  };
+  const ours = file.get(claimStep.key);
+  if (ours) await ctx.tx.step(claimStep);
   const pos = await c.css.getPosition(tokenId);
   const per: EpochReward[] = [];
   let claimed = false;
   if (pos.lastClaimedEpoch >= windowStart) {
-    const by = await claimsByOthers(c, tokenId, s.sellerId, windowStart, pos.lastClaimedEpoch, s.stakeRaw, pos.cumulativeRewardsClaimed);
-    const windows = by?.windows.map(([a, b]) => (a === b ? `${a}` : `${a}..${b}`)).join(', ');
+    const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
+    const by = await rewardClaims(ctx.hre.ethers.provider, c, { tokenId, node: s.sellerId, stakeRaw: s.stakeRaw, firstEpoch: windowStart, fromBlock: staked.blockNumber });
+    const windows = by.claims.map((x) => (x.from === x.to ? `${x.from}` : `${x.from}..${x.to}`)).join(', ');
     report.check(
-      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by another caller (the upkeep cron): what it paid is StakingKPI's preview`,
-      !!by,
-      by
-        ? `paid ${fmt(by.total)} TRAC in ${by.windows.length} claim${by.windows.length > 1 ? 's' : ''}, of epochs ${windows}`
-        : `paid ${fmt(pos.cumulativeRewardsClaimed)} TRAC, which no sequence of claims over those epochs explains`,
+      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by ${by.claims.every((x) => x.tx === ours?.hash) ? 'this phase before it was interrupted' : 'another caller (the upkeep cron)'}: what each claim paid is StakingKPI's preview`,
+      by.through === pos.lastClaimedEpoch && by.total === pos.cumulativeRewardsClaimed && by.claims.every((x) => x.paid === x.previewed),
+      `paid ${fmt(by.total)} TRAC of ${fmt(pos.cumulativeRewardsClaimed)} in ${by.claims.length} claim${by.claims.length > 1 ? 's' : ''}, of epochs ${windows}, through ${by.through}`,
     );
-    if (by) per.push(...by.per);
-    report.set('claimsByOthers', by ?? null);
+    per.push(...by.per);
+    report.set('claimsByOthers', by);
     claimed = true;
   }
-  if (pos.lastClaimedEpoch < current - 1n) {
+  if (pos.lastClaimedEpoch < current - 1n && !ours) {
     const expect = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw, pre.nets);
     // The epochs the claim pays, as the preview gives them: what a dry run shows, and what the send checks.
     per.push(...expect.per);
     claimed = true;
-    const res = await ctx.tx.run({
-      key: 'close-claim.claim',
-      label: `owner: StakingV10.claimFor(${tokenId})`,
-      role: 'owner',
-      signer: r.owner,
-      to: await c.sv10.getAddress(),
-      data: c.sv10.interface.encodeFunctionData('claimFor', [tokenId]),
-    });
+    const res = await ctx.tx.step(claimStep);
     if (res.receipt) {
       const paid = eventsIn(res.receipt, c.sv10, c.sv10.getEvent('RewardsClaimed')).find((x) => x.tokenId === tokenId)?.amount ?? 0n;
       const after = await c.css.getPosition(tokenId);

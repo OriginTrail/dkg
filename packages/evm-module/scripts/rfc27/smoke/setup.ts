@@ -9,18 +9,19 @@ import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-servi
 import { eventsIn } from '../contracts';
 import { FORK_ETH } from '../fork';
 import { fmt, iso } from '../report';
-import { MIN_EPOCH_LEFT, plannedAmounts } from './config';
+import { MIN_EPOCH_LEFT, needsOf, plannedAmounts } from './config';
 import { HUB, PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt } from './context';
-import { checkBalances, checkDeployment, maxFeePerGas, verifySeller } from './check';
+import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
-import { Amounts, SmokeState } from './state';
+import { Amounts, SmokeState, setupMissing } from './state';
+import { movedBy, movement } from './tx';
 
 /** A plan's commitment, opaque to the contracts: the run's label and the plan's name. */
 export const planDigest = (ctx: PoolCtx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
 
-/** FORK-ONLY: the owner's ETH and TRAC, and the seller's ETH, from anvil's balance setters. */
+/** FORK-ONLY: the owner's ETH and TRAC, and the seller's ETH, from anvil's balance setters, with SEND=1: a dry run changes nothing. */
 export async function fundOnFork(ctx: PoolCtx, trac: bigint): Promise<void> {
-  if (!ctx.net.local) return;
+  if (!ctx.net.local || !ctx.env.send) return;
   const { ownerAddr, sellerAddr } = ctx.roles;
   const provider = ctx.hre.ethers.provider;
   if (ownerAddr && (await provider.getBalance(ownerAddr)) < FORK_ETH / 10n) {
@@ -76,7 +77,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const activation = await c.qis.activationEpoch();
   if (activation === 0n) throw new Error('the activation epoch is unset: the Hub owner sets it after the Hub transaction');
   if ((await c.chronos.getCurrentEpoch()) < activation && !(await opensAt(ctx, (await epochStart(ctx, activation)) + 120n, `funding, from the activation epoch ${activation}`))) return;
-  const fundedIn = s?.periods.ca || s?.periods.wallet ? s?.E : undefined;
+  const fundedIn = s?.periods.ca || s?.periods.wallet || s?.steps['setup.fund-account-period'] || s?.steps['setup.fund-wallet-period'] ? s?.E : undefined;
   const end = await epochStart(ctx, (await c.chronos.getCurrentEpoch()) + 1n);
   if (fundedIn === undefined && end - (await now(ctx)) < MIN_EPOCH_LEFT && !(await opensAt(ctx, end + 120n, 'setup, with a whole epoch for setup and serve'))) return;
   const current = await c.chronos.getCurrentEpoch();
@@ -93,7 +94,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     file.save();
     s = file.state;
   }
-  await fundOnFork(ctx, a.committed + a.walletValue + a.stake);
+  await fundOnFork(ctx, needsOf(a, 0n, await progressOf(ctx)).ownerTrac);
   await checkBalances(ctx, a);
   if (report.failed) throw new Error('a check failed: see above');
 
@@ -105,9 +106,15 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const vault = await c.css.getAddress();
   report.say(`\nSetup in epoch ${E} (ends ${iso(await epochStart(ctx, E + 1n))}), ${ctx.env.send ? 'sending' : 'dry run'}:`);
 
+  // What the steps move into the vault, and what they make due in E+1, read around each one.
+  const vaultAt = async (blockTag: number) => ({ vault: await c.token.balanceOf(vault, { blockTag }) });
+  const dueAt = async (blockTag: number) => {
+    const due = await c.qis.dueIn(E + 1n, { blockTag });
+    return { wallet: due.wallet, conviction: due.conviction };
+  };
+
   // 1. The position on the seller's node, at tier 0.
-  const vault0 = await c.token.balanceOf(vault);
-  const staked = await market.stake('setup', r.owner, seller.id, a.stake, s?.tokenId !== undefined ? `position ${s.tokenId}` : undefined);
+  const staked = await market.stake('setup', r.owner, seller.id, a.stake, { done: s?.tokenId !== undefined ? `position ${s.tokenId}` : undefined, reads: vaultAt });
   const [stakedEv] = eventsIn(staked.receipt, c.sv10, c.sv10.getEvent('Staked'));
   if (s && stakedEv && staked.receipt) {
     const block = await ctx.hre.ethers.provider.getBlock(staked.receipt.blockNumber);
@@ -116,16 +123,17 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     s.stakeEpoch = await c.chronos.epochAtTimestamp(BigInt(block?.timestamp ?? 0));
     file.save();
     const pos = await c.css.getPosition(stakedEv.tokenId);
+    // Resumed in a later epoch, another caller may have claimed since: only the claim's own effects differ then.
+    const claimedThrough = staked.replayed ? pos.lastClaimedEpoch >= s.stakeEpoch - 1n : pos.lastClaimedEpoch === s.stakeEpoch - 1n;
     report.check(
       `position ${s.tokenId}: ${fmt(a.stake)} TRAC on node ${seller.id} at tier 0, with no lock, claimed through epoch ${s.stakeEpoch - 1n}`,
-      pos.raw === a.stake && pos.identityId === seller.id && pos.lockTier === 0n && pos.expiryTimestamp === 0n && pos.lastClaimedEpoch === s.stakeEpoch - 1n,
+      pos.raw === a.stake + pos.cumulativeRewardsClaimed && pos.identityId === seller.id && pos.lockTier === 0n && pos.expiryTimestamp === 0n && claimedThrough,
     );
-    report.check('the stake moved into the vault', (await c.token.balanceOf(vault)) - vault0 === a.stake);
+    report.check('the stake moved into the vault', movedBy(staked, 'vault', a.stake), movement(staked, 'vault'));
   }
 
   // 2. The Conviction Account, opted in.
-  const vault1 = await c.token.balanceOf(vault);
-  const created = await market.createAccount('setup', r.owner, a.committed, s?.accountId !== undefined ? `account ${s.accountId}` : undefined);
+  const created = await market.createAccount('setup', r.owner, a.committed, { done: s?.accountId !== undefined ? `account ${s.accountId}` : undefined, reads: vaultAt });
   const [createdEv] = eventsIn(created.receipt, c.pc, c.pc.getEvent('AccountCreated'));
   if (s && createdEv) {
     s.accountId = createdEv.accountId;
@@ -137,7 +145,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
       acct.committedTRAC === a.committed && acct.lockDurationEpochs === a.lock && acct.discountBps === a.discountBps && (await c.nft.ownerOf(createdEv.accountId)) === r.ownerAddr,
     );
     const credits = eventsIn(created.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).filter((ev) => ev.shardId === 1n);
-    report.check('createAccount books nothing to the staker pool (10.2.0), and the commitment moved into the vault', credits.length === 0 && (await c.token.balanceOf(vault)) - vault1 === a.committed);
+    report.check('createAccount books nothing to the staker pool (10.2.0), and the commitment moved into the vault', credits.length === 0 && movedBy(created, 'vault', a.committed), movement(created, 'vault'));
   }
   const accountId = s?.accountId;
   const spending = accountId === undefined ? undefined : await c.cssvc.getServiceSpending(accountId);
@@ -167,7 +175,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   // 4. Gas for the derived buyer keys.
   for (const [k, w] of [['buyer', r.buyer], ['edge-buyer', r.edgeBuyer]] as const) {
     const bal = await ctx.hre.ethers.provider.getBalance(w.address);
-    await ctx.tx.run({
+    await ctx.tx.step({
       key: `setup.eth-${k}`,
       label: `owner: send ${fmt(a.keyEth)} ETH to the ${k} key ${w.address}`,
       role: 'owner',
@@ -181,10 +189,10 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
 
   // 5. The Conviction Account period of E: no TRAC moves, and its cost is due in E+1.
   const caPeriod = subscriptionIdOf(r.buyer.address, E);
-  const due0 = await c.qis.dueIn(E + 1n);
   const funded = await market.fundFromConviction('setup.fund-account-period', 'buyer key', r.buyer, accountId, E, r.caSession.address, a.caValue, planDigest(ctx, 'account plan'), {
     needs: ['setup.assign-buyer', 'setup.eth-buyer'],
     done: (await c.cssvc.subscriptionExists(caPeriod)) ? `period ${caPeriod} exists` : undefined,
+    reads: dueAt,
   });
   if (s && (await c.cssvc.subscriptionExists(caPeriod))) {
     s.periods.ca = caPeriod;
@@ -197,13 +205,11 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     const moved = eventsIn(funded.receipt, c.token, c.token.getEvent('Transfer')).length;
     const credits = eventsIn(funded.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).length;
     report.check('the account period moves no TRAC and books nothing to the staker pool', moved === 0 && credits === 0);
-    report.check(`its cost is due in epoch ${E + 1n}`, (await c.qis.dueIn(E + 1n)).conviction - due0.conviction === fundedEv.cost);
+    report.check(`its cost is due in epoch ${E + 1n}`, movedBy(funded, 'conviction', fundedEv.cost), movement(funded, 'conviction'));
   }
 
   // 6. The wallet-paid period of E, paid by the owner into the vault.
   const walletPeriod = subscriptionIdOf(r.ownerAddr, E);
-  const vault2 = await c.token.balanceOf(vault);
-  const due1 = await c.qis.dueIn(E + 1n);
   const walletFunded = await market.fundFromWallet(
     'setup',
     'owner',
@@ -212,7 +218,10 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     r.walletSession.address,
     a.walletValue,
     planDigest(ctx, 'wallet plan'),
-    (await c.cssvc.subscriptionExists(walletPeriod)) ? `period ${walletPeriod} exists` : undefined,
+    {
+      done: (await c.cssvc.subscriptionExists(walletPeriod)) ? `period ${walletPeriod} exists` : undefined,
+      reads: async (blockTag) => ({ ...(await vaultAt(blockTag)), ...(await dueAt(blockTag)) }),
+    },
   );
   if (s && (await c.cssvc.subscriptionExists(walletPeriod))) {
     s.periods.wallet = walletPeriod;
@@ -221,10 +230,13 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   if (walletFunded.receipt) {
     report.check(
       `the wallet period's ${fmt(a.walletValue)} TRAC moved into the vault and is due in epoch ${E + 1n}`,
-      (await c.token.balanceOf(vault)) - vault2 === a.walletValue && (await c.qis.dueIn(E + 1n)).wallet - due1.wallet === a.walletValue,
+      movedBy(walletFunded, 'vault', a.walletValue) && movedBy(walletFunded, 'wallet', a.walletValue),
+      `vault ${movement(walletFunded, 'vault')}, due ${movement(walletFunded, 'wallet')}`,
     );
   }
 
+  const missing = s ? setupMissing(s) : [];
+  if (ctx.env.send && missing.length) report.check('the state holds what setup records', false, `no ${missing.join(', ')}`);
   complete(ctx);
   if (ctx.env.send) report.say(`\nNext: PHASE=serve SEND=1, still in epoch ${E}, before ${iso(await epochStart(ctx, E + 1n))}.`);
 }

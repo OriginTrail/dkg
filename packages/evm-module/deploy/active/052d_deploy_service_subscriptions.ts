@@ -42,12 +42,12 @@ import { publishingConvictionAfterRun, versionAtLeast } from '../../utils/convic
  * funding, top-up and opt-in is refused, a service draw carrying no treasury
  * fee. Wallet periods take no fee and go on.
  *
- * This script refuses a run that would leave `PublishingConviction` 10.1.x:
- * that build has `coverServiceCost` but books every account's whole budget to
- * the staker pool up front, so an account funding through it would be counted
- * in both pools. A build older than 10.1.0 has no `coverServiceCost`, so
- * account fundings revert until 10.2.0 is registered, and the script deploys
- * with a note, so other deploys go on.
+ * A run that would leave `PublishingConviction` 10.1.x is refused by 000: that
+ * build has `coverServiceCost` but books every account's whole budget to the
+ * staker pool up front, so an account funding through it would be counted in
+ * both pools. A build older than 10.1.0 has no `coverServiceCost`, so account
+ * fundings revert until 10.2.0 is registered, and the script deploys with a
+ * note, so other deploys go on.
  */
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   if (hre.network.config.environment === 'mainnet') {
@@ -58,16 +58,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     return;
   }
   const after = await publishingConvictionAfterRun(hre);
-  if (!versionAtLeast(after.version, [10, 2, 0])) {
-    if (versionAtLeast(after.version, [10, 1, 0])) {
-      throw new Error(
-        `ServiceSubscriptions needs PublishingConviction 10.2.0 or later on ${hre.network.name}, but this run ` +
-          `would leave ${after.version} at ${after.address}, which books every account's budget to the staker ` +
-          'pool up front, so an account funding would be counted twice. Set ' +
-          `contracts.PublishingConviction.deployed to false in deployments/${hre.network.name}_contracts.json, ` +
-          'so this run redeploys it, and run the deploy again.',
-      );
-    }
+  if (!versionAtLeast(after.version, [10, 1, 0])) {
     console.log(
       `[ServiceSubscriptions] ${hre.network.name} keeps PublishingConviction ${after.version}, which has no ` +
         'coverServiceCost. Account fundings stay off there: they revert until PublishingConviction 10.2.0 is ' +
@@ -86,6 +77,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 export default func;
 func.tags = ['ServiceSubscriptions', 'ServiceSubscriptionsWallet', 'v10'];
 func.dependencies = [
+  'ServiceSpendingBuilds',
   'Hub',
   'Token',
   'ConvictionStakingStorage',

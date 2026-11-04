@@ -75,56 +75,6 @@ export async function claimPreview(
   return { total: per.reduce((a, r) => a + r.reward, 0n), per };
 }
 
-/** Every way to cut epochs from..to into consecutive claim windows, at most 2^15 of them. */
-function* windowSplits(from: bigint, to: bigint): Generator<[bigint, bigint][]> {
-  const n = Number(to - from) + 1;
-  if (n <= 0 || n > 16) return;
-  for (let cuts = 0; cuts < 1 << (n - 1); cuts++) {
-    const out: [bigint, bigint][] = [];
-    let start = from;
-    for (let i = 0; i < n - 1; i++) {
-      if (cuts & (1 << i)) {
-        out.push([start, from + BigInt(i)]);
-        start = from + BigInt(i) + 1n;
-      }
-    }
-    out.push([start, to]);
-    yield out;
-  }
-}
-
-/**
- * Other callers' claims of tier-0 position `tokenId` over epochs from..to,
- * reconstructed from views: the claim windows, each claim compounding into
- * the raw stake the next one reads, whose rewards sum to `paid`, the
- * position's cumulative rewards claimed. Exact, since a claim settles only
- * the epoch it runs in, and leaves the score inputs of every ended epoch as
- * the later claims read them. Undefined when no split of the epochs matches.
- */
-export async function claimsByOthers(
-  c: Contracts,
-  tokenId: bigint,
-  node: bigint,
-  from: bigint,
-  to: bigint,
-  stakeRaw: bigint,
-  paid: bigint,
-): Promise<(ClaimPreview & { windows: [bigint, bigint][] }) | undefined> {
-  const inputs = await inputsOf(c, tokenId, node, from, to);
-  for (const windows of windowSplits(from, to)) {
-    let raw = stakeRaw;
-    const per: EpochReward[] = [];
-    for (const [w0, w1] of windows) {
-      const rewards = inputs.filter((x) => x.epoch >= w0 && x.epoch <= w1).map((x) => rewardIn(x, raw));
-      per.push(...rewards);
-      raw += rewards.reduce((a, r) => a + r.reward, 0n);
-    }
-    const total = raw - stakeRaw;
-    if (total === paid) return { total, per, windows };
-  }
-  return undefined;
-}
-
 /** The score tier-0 position `tokenId` holds so far in `epoch` on `node`. */
 export async function positionScore(c: Contracts, tokenId: bigint, node: bigint, epoch: bigint, raw: bigint): Promise<bigint> {
   const key = delegatorKey(tokenId);
@@ -218,7 +168,7 @@ export async function predictSkip(c: Contracts, ref: ClaimRef, now: bigint): Pro
   if (ref.bucketIndex >= s.bucketCount) return 'UnknownBucket';
   const claim = await c.qis.getSellerClaim(ref.subscriptionId, ref.bucketIndex, ref.seller);
   if (claim.finalized) return 'AlreadyFinalized';
-  const epoch = BigInt(s.periodId);
+  const { epoch } = s;
   const current = await c.chronos.getCurrentEpoch();
   if (current > epoch + 1n) return 'Void';
   if (current <= epoch || now <= s.periodEnd + (await c.qis.receiptGraceSecondsAt(epoch))) return 'TooEarly';

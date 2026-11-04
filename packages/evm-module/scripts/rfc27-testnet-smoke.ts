@@ -40,7 +40,9 @@
 // What each phase does and checks is in its module, scripts/rfc27/smoke/. A
 // phase that opens later is deferred with the time it opens; finalize waits,
 // and says so, while the seller has not proved in E+1 (its claims are skipped
-// NoScore until it has), and is run again after the node's next proof.
+// NoScore until it has), and is run again after the node's next proof; withdraw
+// waits likewise until the position holds score in the epoch, as a withdrawal
+// without it would burn the position and record nothing to claim.
 //
 // Amounts, in TRAC: RFC27_SMOKE_STAKE (50), RFC27_SMOKE_CA_VALUE (3),
 // RFC27_SMOKE_CA_TOPUP (1), RFC27_SMOKE_EDGE_VALUE (0.5),
@@ -53,12 +55,19 @@
 //
 // The upkeep cron may call closeEpochs, finalizeClaims, claimFor or
 // claimWithdrawnEpoch first. Each phase detects that, and checks what the
-// other caller did, from storage, instead of failing.
+// other caller did, from storage and recorded events, instead of failing.
 //
 // Output: every check as PASS or FAIL, and the results in
 // cache/rfc27-smoke/<run>.<phase>.json (.dry-run.json for a dry run). A run
 // resumes from cache/rfc27-smoke/<run>.json, which git ignores: ids, epochs,
 // addresses and transaction hashes, never a key, bound to its network.
+//
+// Resuming: a phase stopped at any point is run again as it was. A transaction
+// the journal holds is not sent again; what it moved, read around it when it was
+// first mined, stands in its checks. A resumed setup needs only what its remaining
+// steps will spend. A phase with a failed check is not done: it exits nonzero, the
+// phases after it refuse to start, and running it again sends nothing it sent
+// already, until its checks pass.
 //
 // Safety:
 //   - Dry run by default: each transaction is simulated with eth_estimateGas
@@ -86,7 +95,11 @@
 // the Hub holds as RandomSampling, impersonated (a fork cannot produce a
 // proof). Without RFC27_SMOKE_OWNER_KEY the owner is an impersonated address,
 // and the derived keys come from a fork-only seed; the owner's ETH and TRAC
-// and the seller's ETH come from anvil's balance setters.
+// and the seller's ETH come from anvil's balance setters. Both switches and the
+// setters act with SEND=1 only: a dry run changes nothing on the fork, and says
+// what it would have stood in for. FORK_STOP_AFTER=<step>, or <step>:sent, ends
+// the process right after the journal records that step, as a crash would, to
+// resume from (test/rfc27-smoke-resume.test.ts does the same with no fork).
 
 import * as path from 'path';
 
@@ -96,7 +109,6 @@ import { Stack, decodeError, errorData, errorMessage } from './rfc27/contracts';
 import { Fork } from './rfc27/fork';
 import { guardNetwork } from './rfc27/network';
 import { Redactor, Report, iso, span } from './rfc27/report';
-import { TxRunner } from './rfc27/tx';
 import { deployed, phaseCheck } from './rfc27/smoke/check';
 import { phaseCloseClaim } from './rfc27/smoke/close-claim';
 import { RESULTS_DIR, SmokeEnv, readEnv } from './rfc27/smoke/config';
@@ -106,6 +118,7 @@ import { roles } from './rfc27/smoke/roles';
 import { phaseServe } from './rfc27/smoke/serve';
 import { phaseSetup } from './rfc27/smoke/setup';
 import { StateFile } from './rfc27/smoke/state';
+import { SmokeTx, stoppingAt } from './rfc27/smoke/tx';
 import { phaseWithdraw } from './rfc27/smoke/withdraw';
 
 const redactor = new Redactor();
@@ -118,7 +131,7 @@ async function main(): Promise<void> {
   env = readEnv();
   const net = await guardNetwork(hre, redactor);
   guarded = true;
-  if (!net.local && (env.warp || env.proofs)) throw new Error('refusing to run: FORK_WARP and FORK_PROOFS are for the local fork only');
+  if (!net.local && (env.warp || env.proofs || env.stopAfter)) throw new Error('refusing to run: FORK_WARP, FORK_PROOFS and FORK_STOP_AFTER are for the local fork only');
   const block = await hre.ethers.provider.getBlock('latest');
   if (!block) throw new Error('no latest block');
   report.set('network', { name: net.name, chainId: net.chainId, client: net.client, forkBlock: net.forkBlock, block: block.number, timestamp: block.timestamp });
@@ -133,7 +146,12 @@ async function main(): Promise<void> {
   report.say(`epoch ${current}, ends ${iso(next)}, in ${span(next - BigInt(block.timestamp))}; epoch length ${await base.chronos.epochLength()} s`);
   const fork = new Fork(hre, net, report);
   const file = new StateFile(env.stateFile, redactor, !env.send);
-  const ctx: Ctx = { hre, env, net, report, stack, base, fork, file, tx: new TxRunner(hre, report, env.send, file), roles: await roles({ hre, fork, redactor, c: base, run: env.run }) };
+  const stop = (): never => {
+    report.say(`\nFORK_STOP_AFTER=${env?.stopAfter}: stopping here, as a crash would`);
+    process.exit(75);
+  };
+  const journal = env.stopAfter ? stoppingAt(file, env.stopAfter, stop) : file;
+  const ctx: Ctx = { hre, env, net, report, stack, base, fork, file, tx: new SmokeTx(hre, report, env.send, journal), roles: await roles({ hre, fork, redactor, c: base, run: env.run }) };
 
   if (env.phase === 'check') return phaseCheck(ctx);
   if (!(await deployed(ctx))) throw new Error('the OT-RFC-27 contracts are not deployed yet: run PHASE=check once the deploy and the Hub owner\'s two transactions are in');

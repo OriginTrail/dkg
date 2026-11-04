@@ -1,12 +1,13 @@
 // The smoke test's run state: cache/rfc27-smoke/<run>.json, which git
 // ignores. Ids, epochs, addresses and transaction hashes, never a key, bound
 // to the network it ran on. Numeric fields are kept as decimal strings in the
-// file and decoded to bigint where it is loaded.
+// file and decoded to bigint where it is loaded. What the chain and the journal
+// already tell is not kept: what became of a seller's claims is read from them.
 
 import * as fs from 'fs';
 
 import { JsonObject, Redactor, toJson, writeJson } from '../report';
-import type { Journal, StepRecord } from '../tx';
+import type { Journal, Reads, StepRecord } from './tx';
 
 export const PHASES = ['check', 'setup', 'serve', 'finalize', 'close-claim', 'withdraw'] as const;
 export type PhaseName = (typeof PHASES)[number];
@@ -24,11 +25,7 @@ export type Amounts = {
   discountBps: bigint;
 };
 
-export type RefStatus = 'finalized' | 'finalized by another caller' | 'waiting on the seller' | 'void' | 'skipped';
-/** A seller's claim in one bucket of one period, and what became of it. */
-export type RefRecord = { subscriptionId: string; bucketIndex: bigint; seller: bigint; period: string; status?: RefStatus; reason?: string; value?: bigint };
-
-export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint; ownerTracAfter: bigint; block?: number; claimed: boolean };
+export type Withdrawal = { epoch: bigint; node: bigint; recordedScore: bigint; ownerTracAfter: bigint; block?: number };
 
 export type SmokeState = {
   version: 1;
@@ -53,14 +50,56 @@ export type SmokeState = {
   edgeNonce?: bigint;
   periods: { ca?: string; wallet?: string; edge?: string };
   costs: { ca?: bigint; topUp?: bigint; edge?: bigint };
-  refs?: RefRecord[];
-  finalizedValue?: bigint;
   withdrawal?: Withdrawal;
   /** Fork-only: the score each stand-in proof writes, and the epochs that have one. */
   fork?: { mirrorScore?: bigint; proofs: string[] };
   steps: Record<string, StepRecord>;
-  phases: Partial<Record<PhaseName, { status: 'done'; failedChecks: number }>>;
+  /** A phase that ran to its end: done, or failed when any of its checks did, and then to be run again. */
+  phases: Partial<Record<PhaseName, { status: 'done' | 'failed'; failedChecks: number }>>;
 };
+
+/** A run once setup has completed: what every later phase takes for granted. */
+export type SetupState = SmokeState & {
+  E: bigint;
+  tokenId: bigint;
+  stakeRaw: bigint;
+  stakeEpoch: bigint;
+  accountId: bigint;
+  accountExpiresAt: bigint;
+  buyerNonce: bigint;
+  periods: { ca: string; wallet: string };
+  costs: { ca: bigint };
+};
+
+/** A run once serve has completed too. */
+export type ServedState = SetupState & {
+  edgeNonce: bigint;
+  periods: { edge: string };
+  costs: { topUp: bigint; edge: bigint };
+};
+
+const missingOf = (fields: Record<string, unknown>): string[] => Object.keys(fields).filter((k) => fields[k] === undefined);
+
+/** What a completed setup must have recorded and `s` has not. */
+export const setupMissing = (s: SmokeState): string[] =>
+  missingOf({
+    E: s.E,
+    tokenId: s.tokenId,
+    stakeRaw: s.stakeRaw,
+    stakeEpoch: s.stakeEpoch,
+    accountId: s.accountId,
+    accountExpiresAt: s.accountExpiresAt,
+    buyerNonce: s.buyerNonce,
+    'periods.ca': s.periods.ca,
+    'periods.wallet': s.periods.wallet,
+    'costs.ca': s.costs.ca,
+  });
+
+/** What a completed serve must have recorded and `s` has not. */
+export const serveMissing = (s: SmokeState): string[] => missingOf({ edgeNonce: s.edgeNonce, 'periods.edge': s.periods.edge, 'costs.topUp': s.costs.topUp, 'costs.edge': s.costs.edge });
+
+export const isSetup = (s: SmokeState): s is SetupState => setupMissing(s).length === 0;
+export const isServed = (s: SetupState): s is ServedState => serveMissing(s).length === 0;
 
 // ---------------------------------------------------------------------------
 // Decoding: every field checked and typed where the file is loaded
@@ -103,7 +142,12 @@ function oneOf<T extends string>(o: Obj, k: string, values: readonly T[], where:
 }
 
 const AMOUNT_KEYS = ['stake', 'caValue', 'caTopUp', 'edgeValue', 'walletValue', 'keyEth', 'committed', 'committedFloor', 'lock', 'discountBps'] as const;
-const REF_STATUSES: readonly RefStatus[] = ['finalized', 'finalized by another caller', 'waiting on the seller', 'void', 'skipped'];
+
+function optReads(o: Obj, k: string, where: string): Reads | undefined {
+  if (o[k] === undefined || o[k] === null) return undefined;
+  const r = obj(o[k], `${where}.${k}`);
+  return Object.fromEntries(Object.keys(r).map((name) => [name, bi(r, name, `${where}.${k}`)]));
+}
 
 function decodeStep(x: unknown, where: string): StepRecord {
   const o = obj(x, where);
@@ -116,6 +160,9 @@ function decodeStep(x: unknown, where: string): StepRecord {
     gasLimit: bi(o, 'gasLimit', where),
     block: optNum(o, 'block', where),
     gasUsed: optBi(o, 'gasUsed', where),
+    before: optReads(o, 'before', where),
+    after: optReads(o, 'after', where),
+    expected: optReads(o, 'expected', where),
   };
 }
 
@@ -133,21 +180,10 @@ export function decodeState(raw: unknown): SmokeState {
   for (const [k, v] of Object.entries(obj(o.phases ?? {}, 'phases'))) {
     const p = obj(v, `phases.${k}`);
     const name = oneOf({ name: k }, 'name', PHASES, 'phases');
-    phases[name] = { status: oneOf(p, 'status', ['done'] as const, `phases.${k}`), failedChecks: optNum(p, 'failedChecks', `phases.${k}`) ?? 0 };
+    const failedChecks = optNum(p, 'failedChecks', `phases.${k}`) ?? 0;
+    const status = oneOf(p, 'status', ['done', 'failed'] as const, `phases.${k}`);
+    phases[name] = { status: failedChecks > 0 ? 'failed' : status, failedChecks };
   }
-  const refs = o.refs === undefined ? undefined : (Array.isArray(o.refs) ? o.refs : []).map((x, i): RefRecord => {
-    const r = obj(x, `refs[${i}]`);
-    const status = r.status === undefined ? undefined : oneOf(r, 'status', REF_STATUSES, `refs[${i}]`);
-    return {
-      subscriptionId: str(r, 'subscriptionId', `refs[${i}]`),
-      bucketIndex: bi(r, 'bucketIndex', `refs[${i}]`),
-      seller: bi(r, 'seller', `refs[${i}]`),
-      period: str(r, 'period', `refs[${i}]`),
-      status,
-      reason: optStr(r, 'reason', `refs[${i}]`),
-      value: optBi(r, 'value', `refs[${i}]`),
-    };
-  });
   let withdrawal: Withdrawal | undefined;
   if (o.withdrawal !== undefined) {
     const w = obj(o.withdrawal, 'withdrawal');
@@ -157,7 +193,6 @@ export function decodeState(raw: unknown): SmokeState {
       recordedScore: bi(w, 'recordedScore', 'withdrawal'),
       ownerTracAfter: bi(w, 'ownerTracAfter', 'withdrawal'),
       block: optNum(w, 'block', 'withdrawal'),
-      claimed: w.claimed === true,
     };
   }
   let fork: SmokeState['fork'];
@@ -195,8 +230,6 @@ export function decodeState(raw: unknown): SmokeState {
     edgeNonce: optBi(o, 'edgeNonce', 'state'),
     periods: { ca: optStr(periods, 'ca', 'periods'), wallet: optStr(periods, 'wallet', 'periods'), edge: optStr(periods, 'edge', 'periods') },
     costs: { ca: optBi(costs, 'ca', 'costs'), topUp: optBi(costs, 'topUp', 'costs'), edge: optBi(costs, 'edge', 'costs') },
-    refs,
-    finalizedValue: optBi(o, 'finalizedValue', 'state'),
     withdrawal,
     fork,
     steps,
@@ -243,10 +276,16 @@ export class StateFile implements Journal {
     return this.state?.phases[phase]?.status === 'done';
   }
 
-  /** The phase completed, with this many failed checks. */
-  markDone(phase: PhaseName, failedChecks: number): void {
+  /** How many checks failed when the phase last ran to its end, if any did. */
+  failedChecks(phase: PhaseName): number {
+    const p = this.state?.phases[phase];
+    return p?.status === 'failed' ? p.failedChecks : 0;
+  }
+
+  /** The phase ran to its end, with this many failed checks: with any, it is not done, and is run again. */
+  finish(phase: PhaseName, failedChecks: number): void {
     if (!this.state) return;
-    this.state.phases[phase] = { status: 'done', failedChecks };
+    this.state.phases[phase] = { status: failedChecks > 0 ? 'failed' : 'done', failedChecks };
     this.save();
   }
 

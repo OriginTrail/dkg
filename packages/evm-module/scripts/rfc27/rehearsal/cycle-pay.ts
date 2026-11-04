@@ -12,7 +12,7 @@ import { HUB, expectRevert, saveResults, send, succeeds } from './context';
 import type { CycleRun } from './cycle';
 import { approve, claimAll, walletRequest } from './operations';
 import { impersonate } from './plumbing';
-import { ExpectedReward, expectedReward, positions, stakerCredits } from './reads';
+import { ExpectedReward, closedWindows, expectedReward, positions, stakerCredits } from './reads';
 import { COMMITTED, LATE_COMMITTED, SELLERS, TRAC, WALLET_PERIOD_VALUE } from './scenario';
 
 export async function closeAndPay(run: CycleRun): Promise<void> {
@@ -79,8 +79,7 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   // The emergency switch, inside a reverted snapshot: with the settlement out
   // of the Hub, a claim and a withdrawal go through and pay the publishing pool
   // alone.
-  {
-    const snap = await ctx.fork.snapshot();
+  await ctx.fork.inSnapshot(async () => {
     await send(ctx, 'Hub owner: removeContractByName("QueryInferenceSettlement") (in a snapshot)', owner, HUB, h.interface.encodeFunctionData('removeContractByName', ['QueryInferenceSettlement']));
     const n1 = SELLERS[1];
     const k1 = `${n1}:${A + 1n}`;
@@ -129,8 +128,7 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
       fundingOpen,
       paused: pausedWhy,
     };
-    await ctx.fork.revert(snap);
-  }
+  });
 
   // The sellers' real delegators claim.
   const expected: Record<string, ExpectedReward> = {};
@@ -140,8 +138,8 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   for (const cl of claims) {
     const x = expected[String(cl.tokenId)];
     check(
-      `token ${cl.tokenId} (node ${cl.node}) is paid what StakingKPI previewed`,
-      cl.reward === x.total,
+      `token ${cl.tokenId} (node ${cl.node}) is paid what StakingKPI previewed, in its raw stake and in its rewards statistic`,
+      cl.rawDelta === x.total && cl.reward === x.total,
       `${fmt(cl.reward)} TRAC (preview ${fmt(x.total)}; epoch ${A + 1n}: ${fmt(x.per[String(A + 1n)] ?? 0n)})`,
     );
   }
@@ -212,13 +210,27 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   out.operatorFeeWithdrawal = { node: feeNode, amount: feePaid, gasUsed: feeWd.gasUsed };
 
   // Window booking: the account's closed windows, booked by anyone's settle.
+  const cursor0 = (await c.pcs.getAccount(accountId)).lastSettledWindow;
   const settled = await send(ctx, `keeper: settle(${accountId})`, keeper, await c.pc.getAddress(), c.pc.interface.encodeFunctionData('settle', [accountId]));
   const [sched] = eventsIn(settled.receipt, c.pc, c.pc.getEvent('EmissionScheduled'));
   if (!sched) throw new Error(`settle(${accountId}) emitted no EmissionScheduled`);
   const booking = stakerCredits(settled.receipt, c);
   const spent0 = await c.pcs.windowSpent(accountId, 0);
-  const fromW = sched.fromWindow;
-  const toW = sched.toWindow;
+  const settledBlock = await ctx.hre.ethers.provider.getBlock(settled.receipt.blockNumber);
+  if (!settledBlock) throw new Error(`no block ${settled.receipt.blockNumber}`);
+  const account = await c.pcs.getAccount(accountId);
+  const { fromWindow: fromW, toWindow: toW } = closedWindows({
+    cursor: cursor0,
+    createdAt: account.createdAtTimestamp,
+    epLen: await c.chronos.epochLength(),
+    lock: account.lockDurationEpochs,
+    at: BigInt(settledBlock.timestamp),
+  });
+  check(
+    `settle books every closed window, ${fromW}..${toW - 1n}, and moves the cursor past them`,
+    sched.fromWindow === fromW && sched.toWindow === toW && account.lastSettledWindow === toW,
+    `emitted ${sched.fromWindow}..${sched.toWindow - 1n}, cursor ${account.lastSettledWindow}`,
+  );
   let expectedBooked = 0n;
   for (let x = fromW; x < toW; x++) expectedBooked += B - (await c.pcs.windowSpent(accountId, x));
   check(

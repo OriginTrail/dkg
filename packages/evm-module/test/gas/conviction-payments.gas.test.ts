@@ -30,13 +30,13 @@ import hre from 'hardhat';
 import {
   Chronos,
   DKGPublishingConvictionNFT,
-  Hub,
   ParametersStorage,
   PublishingConviction,
   PublishingConvictionScheduleHarness,
   Token,
 } from '../../typechain';
-import { ACCOUNT_STACK_TAGS, TRAC, valueFor } from '../helpers/conviction-service';
+import { deployAccountStack } from '../helpers/account-stack';
+import { TRAC, valueFor } from '../helpers/conviction-service';
 import { deployScheduleHarness } from '../helpers/scheduled-accounts';
 
 type Case = { target: bigint; measured: bigint; above?: true };
@@ -70,20 +70,10 @@ const COMMITTED = 50_000n * TRAC;
 const BPS = 2_000n;
 
 async function deployFixture() {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const Harness = await deployScheduleHarness(Hub);
-  await Hub.setContractAddress('KnowledgeAssetsLifecycle', accounts[5].address);
-  return {
-    accounts,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    Harness,
-  };
+  const stack = await deployAccountStack();
+  const Harness = await deployScheduleHarness(stack.Hub);
+  await stack.Hub.setContractAddress('KnowledgeAssetsLifecycle', stack.accounts[5].address);
+  return { ...stack, Harness };
 }
 
 // Instrumented coverage runs say nothing about deployed gas.

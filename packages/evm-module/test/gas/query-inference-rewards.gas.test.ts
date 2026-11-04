@@ -22,20 +22,12 @@ import { BaseContract } from 'ethers';
 import hre from 'hardhat';
 
 import {
-  Chronos,
   ConvictionServiceStorage,
-  ConvictionStakingStorage,
-  DKGStakingConvictionNFT,
-  EpochStorage,
-  Hub,
-  Profile,
   QueryInferenceSettlement,
   QueryInferenceStorage,
-  RandomSamplingStorage,
   ServiceSubscriptionsWallet,
-  StakingV10,
-  Token,
 } from '../../typechain';
+import { deployAccountStack } from '../helpers/account-stack';
 import {
   ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
@@ -55,26 +47,17 @@ const skipUnderCoverage = process.argv.some((a) => a.includes('coverage'));
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {
-  await hre.deployments.fixture([
+  const { ES: EpochStorage, ...stack } = await deployAccountStack([
     ...ACCOUNT_STACK_TAGS,
     'ServiceSubscriptions',
     'QueryInferenceSettlement',
     'QueryInferenceActivation',
   ]);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const at = async <T>(name: string) => (await hre.ethers.getContractAt(name, await Hub.getContractAddress(name))) as T;
+  const at = async <T>(name: string) =>
+    (await hre.ethers.getContractAt(name, await stack.Hub.getContractAddress(name))) as T;
   return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    Profile: await hre.ethers.getContract<Profile>('Profile'),
-    StakingV10: await hre.ethers.getContract<StakingV10>('StakingV10'),
-    StakingNFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
-    RSS: await hre.ethers.getContract<RandomSamplingStorage>('RandomSamplingStorage'),
-    Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
+    ...stack,
+    EpochStorage,
     QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
     CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),

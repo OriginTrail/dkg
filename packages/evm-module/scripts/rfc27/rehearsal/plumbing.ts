@@ -44,9 +44,8 @@ export async function measureTx(ctx: Ctx, from: string, to: string, data: string
       await sleep(10_000 * (i + 1));
     }
   }
-  const attempt = async (gas: bigint): Promise<{ ok: boolean; gasUsed: bigint }> => {
-    const snap = await ctx.fork.snapshot();
-    try {
+  const attempt = (gas: bigint): Promise<{ ok: boolean; gasUsed: bigint }> =>
+    ctx.fork.inSnapshot(async () => {
       const hash = String(await rpc(ctx.hre, 'eth_sendTransaction', [{ from, to, data, gas: ethers.toQuantity(gas) }]));
       // A fork still fetching upstream state can take minutes to mine a large
       // claim; the snapshot is reverted only once the transaction is in.
@@ -56,10 +55,7 @@ export async function measureTx(ctx: Ctx, from: string, to: string, data: string
         await sleep(200);
       }
       throw new Error(`no receipt for ${hash} after 20 minutes`);
-    } finally {
-      await ctx.fork.revert(snap);
-    }
-  };
+    });
   const full = await attempt(hi);
   if (!full.ok) throw new Error(`the transaction fails even with a gas limit of ${hi}`);
   let lo = 21_000n;
