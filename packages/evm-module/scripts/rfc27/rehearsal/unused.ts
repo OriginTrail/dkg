@@ -3,7 +3,8 @@
 // Per closed epoch from activation: money = walletDue + convictionDue +
 // carryIn, served = ΣR finalized in it, unused = money − served, whoever
 // closed it (a keeper's closeEpochs or a claim on its way). The carry into
-// the activation epoch is 0, and each close carries money − pool on.
+// the activation epoch is 0, and each close carries its money on if no value
+// was served in it, and nothing otherwise.
 
 import { closeFromStorage } from '../reads';
 import { fmt, sum } from '../report';

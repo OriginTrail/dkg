@@ -22,6 +22,7 @@ import { hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
 import { deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 import { Contracts, Stack } from '../scripts/rfc27/contracts';
 import { Fork } from '../scripts/rfc27/fork';
+import { closeFromStorage } from '../scripts/rfc27/reads';
 import { Redactor, Report, fmt } from '../scripts/rfc27/report';
 import { phaseCheck } from '../scripts/rfc27/smoke/check';
 import { phaseCloseClaim } from '../scripts/rfc27/smoke/close-claim';
@@ -1555,6 +1556,155 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(by.detail).to.contain('in 1 claim');
       expect(checkOf(ctx, 'claimFor pays what the epochs\' nets give').ok).to.equal(true);
       expect(checkOf(ctx, 'the position is paid a share of epoch').ok).to.equal(true);
+    });
+  });
+
+  describe('every close so far, against the close rule', () => {
+    const MONEY = 5n * TRAC;
+    /** Another buyer's period of this epoch, due in the next, which ends with nothing finalized in it, and the clock in the one after: the empty epoch. */
+    const anEmptyEpochWithMoney = async () => {
+      use(await loadFixture(deployFixture));
+      const before = await fx.f.Chronos.getCurrentEpoch();
+      await fx.helpers.walletFund(fx.f.accounts[21], before, MONEY);
+      await toEpoch(before + 2n);
+      return before + 1n;
+    };
+    /** That epoch's close as it should not be: its pool took its money, and carried nothing on. The epochs before it are closed as they should be. */
+    const closeWrongly = async (empty: bigint) => {
+      const writer = fx.f.accounts[45];
+      await fx.f.Hub.setContractAddress('CloseWriter', writer.address);
+      const steps = empty - 1n - (await fx.f.QIS.closedThrough());
+      if (steps > 0n) await fx.f.QS.closeEpochs(steps);
+      return fx.f.QIS.connect(writer).closeEpoch(empty, MONEY, await fx.f.QIS.lambdaBpsAt(empty), 0n);
+    };
+    /** A whole run from here, past its finalization by the upkeep cron, and the clock in E+2. */
+    const aRun = async () => {
+      await fundExactly();
+      await phaseSetup(await ctxOf('setup'));
+      await phaseServe(await ctxOf('serve'));
+      const s = stateNow();
+      await toDeadline();
+      await scoreIn(s.E + 1n);
+      await upkeepFinalizes();
+      await toEpoch(s.E + 2n);
+      return s;
+    };
+    const upkeepCloses = () => fx.f.QS.connect(fx.f.accounts[20]).closeEpochs(64n);
+
+    it('takes a real carry across an empty epoch to the wei, closed by this run or by the upkeep cron', async () => {
+      for (const byCron of [false, true]) {
+        const empty = await anEmptyEpochWithMoney();
+        const s = await aRun();
+        if (byCron) await upkeepCloses();
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        passes(ctx);
+        expect(ctx.file.done('close-claim')).to.equal(true);
+        const P = s.E + 1n;
+        const due = await fx.f.QIS.dueIn(P);
+        expect((await fx.f.QIS.getEpochClose(empty)).pool).to.equal(0n);
+        expect((await fx.f.QIS.getEpochClose(P)).pool).to.equal(due.wallet + due.conviction + MONEY);
+        expect((await closeFromStorage(ctx.c, P)).carryIn).to.equal(MONEY);
+      }
+    });
+
+    it('fails an empty epoch whose stored pool took its money, closed through by the upkeep cron, naming it: the phase sends nothing and stays incomplete', async () => {
+      const empty = await anEmptyEpochWithMoney();
+      await closeWrongly(empty);
+      const s = await aRun();
+      await upkeepCloses();
+      const P = s.E + 1n;
+      const due = await fx.f.QIS.dueIn(P);
+      expect((await fx.f.QIS.getEpochClose(P)).pool).to.equal(due.wallet + due.conviction); // the later pool, missing that money
+      const blocks = await head();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, 'every close from').ok).to.equal(false);
+      expect(checkOf(ctx, 'every close from').detail).to.equal(`epoch ${empty} pools ${fmt(MONEY)} TRAC, and the rule gives 0.0 TRAC`);
+      expect(ctx.report.why).to.contain(`epoch ${empty} pools`);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect((await closeFromStorage(ctx.c, P)).carryIn).to.equal(MONEY); // no stored pool lowers it
+      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+    });
+
+    it('fails the same on this run\'s path, before it closes anything', async () => {
+      const empty = await anEmptyEpochWithMoney();
+      await closeWrongly(empty);
+      await aRun();
+      const closed = await fx.f.QIS.closedThrough();
+      const blocks = await head();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, 'every close from').detail).to.contain(`epoch ${empty} pools`);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(await fx.f.QIS.closedThrough()).to.equal(closed);
+    });
+
+    it('fails a close that lands wrong beside this run\'s own, and claims nothing', async () => {
+      const empty = await anEmptyEpochWithMoney();
+      await fx.f.QS.closeEpochs(empty - 1n - (await fx.f.QIS.closedThrough()));
+      await aRun();
+      const writer = fx.f.accounts[45];
+      await fx.f.Hub.setContractAddress('CloseWriter', writer.address);
+      const lambda = await fx.f.QIS.lambdaBpsAt(empty);
+      const owner = ownerBeside(fx.f.QS.interface.getFunction('closeEpochs').selector, () =>
+        fx.f.QIS.connect(writer).closeEpoch(empty, MONEY, lambda, 0n, { maxPriorityFeePerGas: 10n ** 11n, maxFeePerGas: 10n ** 12n }),
+      );
+      const ctx = await ctxOf('close-claim', { owner });
+      await phaseCloseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(failedLabels(ctx).join(' | ')).to.contain(`epoch ${empty} pools`);
+      expect(rawState().steps['close-claim.close-epochs']).to.not.equal(undefined);
+      expect(rawState().steps['close-claim.claim']).to.equal(undefined);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+    });
+
+    it('fails a carry the closes do not leave, though every pool holds', async () => {
+      await anEmptyEpochWithMoney();
+      await aRun();
+      await upkeepCloses();
+      const writer = fx.f.accounts[45];
+      await fx.f.Hub.setContractAddress('CarryWriter', writer.address);
+      await fx.f.QIS.connect(writer).setCarry(1n);
+      const closed = await fx.f.QIS.closedThrough();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(checkOf(ctx, 'every close from').detail).to.contain(`the carry after epoch ${closed} is`);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+    });
+
+    it('reads it all as of one block: a close landing meanwhile fails nothing', async () => {
+      use(await loadFixture(afterFinalize));
+      const s = stateNow();
+      await fx.helpers.walletFund(fx.f.accounts[21], s.E + 1n, MONEY); // due in E+2, which ends empty: its close moves the carry
+      await toEpoch(s.E + 3n);
+      await fx.f.QS.closeEpochs(s.E + 1n - (await fx.f.QIS.closedThrough()));
+      const ctx = await ctxOf('close-claim');
+      let landed = false;
+      ctx.c = {
+        ...ctx.c,
+        qis: new Proxy(ctx.c.qis, {
+          get: (t, k) =>
+            k === 'closedThrough'
+              ? async (...args: Parameters<typeof t.closedThrough>) => {
+                  const through = await t.closedThrough(...args);
+                  if (!landed) {
+                    landed = true;
+                    await fx.f.QS.connect(fx.f.accounts[20]).closeEpochs(1n);
+                  }
+                  return through;
+                }
+              : Reflect.get(t, k),
+        }),
+      };
+      await phaseCloseClaim(ctx);
+      expect(landed).to.equal(true);
+      expect(checkOf(ctx, 'every close from').ok).to.equal(true);
+      expect(await fx.f.QIS.carry()).to.equal(MONEY);
     });
   });
 

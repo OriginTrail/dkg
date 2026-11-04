@@ -3,14 +3,14 @@
 // (walletDue + convictionDue + carryIn), served value (sumR), unused share and
 // pool. Where the upkeep cron closed or claimed first, what it did is checked
 // from storage instead. Both of the run's claims must be finalized first, by the
-// run or by the upkeep cron, at what they were due, and the money due in E+1 must be
-// exactly what the periods of E were funded with: otherwise the cycle has failed, and
-// goes no further.
+// run or by the upkeep cron, at what they were due, the money due in E+1 must be
+// exactly what the periods of E were funded with, and every close so far what the close
+// rule gives: otherwise the cycle has failed, and goes no further.
 
 import { eventsIn } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, min, sum } from '../report';
-import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
+import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, closeRule, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
 import { firstBlockAt, netsFromInputs, pagedLogs, rewardClaims } from './reward-claims';
 import { checkFinalizations, finalizedValue, names, unfinalizedClaims } from './finalize';
@@ -55,6 +55,40 @@ async function checkDue(ctx: PoolCtx, s: SetupState): Promise<boolean> {
   );
 }
 
+/**
+ * Every close so far, and the carry they leave, against the close rule from activation, worked
+ * out from what no close writes: the money due in each epoch and the value finalized in it.
+ * All of it as of one block, as others can close meanwhile. A difference fails the phase, and
+ * names the first epoch that differs.
+ */
+async function checkCloses(ctx: PoolCtx): Promise<boolean> {
+  const { report, c } = ctx;
+  const at = { blockTag: await ctx.hre.ethers.provider.getBlockNumber() };
+  const activation = await c.qis.activationEpoch(at);
+  const closedThrough = await c.qis.closedThrough(at);
+  let carry = 0n;
+  let differs: string | undefined;
+  for (let x = activation; x <= closedThrough && !differs; x++) {
+    const due = await c.qis.dueIn(x, at);
+    const { sumR } = await c.qis.getEpochTotals(x, at);
+    const { pool, carryOut } = closeRule(due.wallet + due.conviction + carry, sumR);
+    const stored = await c.qis.getEpochClose(x, at);
+    if (!stored.closed || stored.pool !== pool) differs = `epoch ${x}${stored.closed ? '' : ', not closed,'} pools ${fmt(stored.pool)} TRAC, and the rule gives ${fmt(pool)} TRAC`;
+    carry = carryOut;
+  }
+  const carried = await c.qis.carry(at);
+  if (!differs && carried !== carry) differs = `the carry after epoch ${closedThrough} is ${fmt(carried)} TRAC, and the rule gives ${fmt(carry)} TRAC`;
+  const held = report.check(
+    closedThrough < activation
+      ? 'with no epoch closed yet, nothing is carried'
+      : `every close from epoch ${activation} through ${closedThrough}, and the carry they leave, are what the close rule gives from the money due and the value finalized`,
+    !differs,
+    differs ?? `carry ${fmt(carried)} TRAC`,
+  );
+  if (differs) report.fail(`${differs}, so this cycle goes no further: start a new run`);
+  return held;
+}
+
 export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   const { report, c, file } = ctx;
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
@@ -90,7 +124,8 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   report.set('preview', { pool: previewPool, sellerGross: previewGross, nets: [...pre.nets.entries()], splitBefore: [...pre.split.entries()] });
   report.note(`preview of epoch ${P}'s close: pool ${fmt(previewPool)} TRAC, node ${s.sellerId}'s gross ${fmt(previewGross)} TRAC, StakingKPI net ${fmt(pre.nets.get(P) ?? 0n)} TRAC`);
 
-  // 1. closeEpochs, unless another caller closed the epoch already.
+  // 1. closeEpochs, unless another caller closed the epoch already. What is closed by now is held to the rule first.
+  if (!(await checkCloses(ctx))) return;
   const closedThrough = await c.qis.closedThrough();
   let close: (EpochCloseNumbers & { from: string }) | undefined;
   if (closedThrough < P) {
@@ -101,7 +136,10 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.check(`closeEpochs(${steps}) would close through epoch ${current - 1n}`, BigInt(through) === current - 1n, `closes through ${through}`);
     const res = await ctx.tx.step({ key: 'close-claim.close-epochs', label: `owner: closeEpochs(${steps})`, role: 'owner', signer: r.owner, to: qs, data });
     const ev = eventsIn(res.receipt, c.qs, c.qs.getEvent('EpochClosed')).find((x) => x.epoch === P);
-    if (res.receipt) report.check(`the close emitted EpochClosed for epoch ${P}`, !!ev);
+    if (res.receipt) {
+      report.check(`the close emitted EpochClosed for epoch ${P}`, !!ev);
+      if (!(await checkCloses(ctx))) return;
+    }
     // An event's Result exposes its fields by name, not as own properties: copied one by one.
     if (ev) {
       close = {
@@ -122,18 +160,22 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     close = { ...(await closeFromStorage(c, P)), from: 'storage' };
   }
   if (close) {
-    const stored = await closeFromStorage(c, P);
-    report.check(
-      `epoch ${P}'s close as storage keeps it matches ${close.from === 'EpochClosed' ? 'its EpochClosed' : 'the chain of closes from activation'}`,
-      stored.closed && stored.pool === close.pool && stored.walletDue === close.walletDue && stored.convictionDue === close.convictionDue && stored.sumR === close.sumR && stored.carryIn === close.carryIn,
-    );
+    // Read from storage, the close has nothing else to be compared with here: the rule above holds it, and the money below.
+    const fromEvent = close.from === 'EpochClosed';
+    if (fromEvent) {
+      const stored = await closeFromStorage(c, P);
+      report.check(
+        `epoch ${P}'s close as storage keeps it matches its EpochClosed`,
+        stored.closed && stored.pool === close.pool && stored.walletDue === close.walletDue && stored.convictionDue === close.convictionDue && stored.sumR === close.sumR && stored.carryIn === close.carryIn,
+      );
+    }
     const money = close.walletDue + close.convictionDue + close.carryIn;
     const unused = money - close.sumR;
     report.set('epochClosed', { ...close, money, served: close.sumR, unused });
     report.say(`\n  Epoch ${P} closed: money ${fmt(money)} TRAC (wallet due ${fmt(close.walletDue)} + account due ${fmt(close.convictionDue)} + carry in ${fmt(close.carryIn)}),`);
     report.say(`  served (ΣR) ${fmt(close.sumR)}, unused ${fmt(unused)}, pool ${fmt(close.pool)} TRAC; λ ${close.lambdaBps} bps, ΣQueryInferenceScore ${fmt(close.sumScore)}`);
     const ours = { wallet: s.amounts.walletValue, conviction: sum([s.costs.ca, s.costs.topUp, s.costs.edge]) };
-    report.check('the close pools what the preview said', close.pool === previewPool, `${fmt(close.pool)} TRAC`);
+    if (fromEvent) report.check('the close pools what the preview said', close.pool === previewPool, `${fmt(close.pool)} TRAC`);
     report.check(
       close.sumR > 0n ? 'value was served, so the pool is the whole money, the unused share included' : 'no value was served, so the money carries on',
       close.sumR > 0n ? close.pool === money : close.pool === 0n,
@@ -149,7 +191,11 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.check(`λ in force in epoch ${P} is ${lambda.value} bps`, close.lambdaBps === lambda.value);
     const gross = await c.qs.queryInferenceGross(P, s.sellerId);
     report.set('sellerGross', gross);
-    report.check(`node ${s.sellerId}'s gross from the pool of epoch ${P} is what the preview said`, gross === previewGross && gross <= close.pool, `${fmt(gross)} TRAC`);
+    report.check(
+      `node ${s.sellerId}'s gross from the pool of epoch ${P} is ${fromEvent ? 'what the preview said, and ' : ''}within the pool`,
+      (!fromEvent || gross === previewGross) && gross <= close.pool,
+      `${fmt(gross)} TRAC`,
+    );
   }
 
   // 2. claimFor on our position, against the epochs' nets as what no claim writes gives them:
@@ -170,6 +216,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
   const pos = await c.css.getPosition(tokenId);
   const per: EpochReward[] = [];
   let claimed = false;
+  let claimedNow = false;
   if (pos.lastClaimedEpoch >= windowStart) {
     const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
     const by = await rewardClaims(ctx.hre.ethers.provider, c, { tokenId, node: s.sellerId, stakeRaw: s.stakeRaw, firstEpoch: windowStart, fromBlock: staked.blockNumber });
@@ -191,6 +238,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     claimed = true;
     const res = await ctx.tx.step(claimStep);
     if (res.receipt) {
+      claimedNow = true;
       const paid = eventsIn(res.receipt, c.sv10, c.sv10.getEvent('RewardsClaimed')).find((x) => x.tokenId === tokenId)?.amount ?? 0n;
       const after = await c.css.getPosition(tokenId);
       report.set('claim', { ...expect, paid, from: pos.lastClaimedEpoch + 1n, to: current - 1n });
@@ -206,7 +254,8 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       report.note(`epoch ${p.epoch}: position score ${p.score} of node score ${p.nodeScore}, net ${fmt(p.net)} TRAC, reward ${fmt(p.reward)} TRAC`);
     }
     const nets = await kpiNets(c, s.sellerId, windowStart, current - 1n);
-    report.check('every epoch the claim split holds the net StakingKPI previewed', [...pre.nets.entries()].every(([e, net]) => !nets.split.get(e) || nets.nets.get(e) === net));
+    // Only a claim sent after the previews can differ from them.
+    if (claimedNow) report.check('every epoch the claim split holds the net StakingKPI previewed', [...pre.nets.entries()].every(([e, net]) => !nets.split.get(e) || nets.nets.get(e) === net));
     const differing = [...inputs].filter(([e, net]) => nets.nets.get(e) !== net);
     report.check(
       'StakingKPI gives each epoch the net its publishing share, query/inference gross and operator fee give',
