@@ -308,6 +308,32 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(resumed, 'the stake moved into the vault').detail).to.equal(`${fmt(a.stake)} TRAC, by its own Transfer logs`);
     });
 
+    it('after the assignment is mined: the consent the replay signs is thrown away, and changes nothing', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.assign-buyer' })));
+      const raw = rawState();
+      const before = await fx.f.CSS.getAssignment(raw.accountId, derived('test/buyer').address);
+      const nonce = await fx.f.CSS.assignmentNonce(raw.accountId);
+      const steps = Object.keys(raw.steps).length;
+      const blocks = await head();
+      let resumed: PoolCtx | undefined;
+      const calls = await rpcCalls(async () => {
+        resumed = await ctxOf('setup');
+        await phaseSetup(resumed);
+      });
+      if (!resumed) throw new Error('no context');
+      passes(resumed);
+      // Each transaction sent is a step the journal did not hold: none for the replayed assignment.
+      const sent = Object.keys(rawState().steps).length - steps;
+      expect(calls.filter((m) => m === 'eth_sendRawTransaction')).to.have.length(sent);
+      expect((await head()) - blocks).to.equal(sent);
+      expect(rawState().steps['setup.assign-buyer'].hash).to.equal(raw.steps['setup.assign-buyer'].hash);
+      const after = await fx.f.CSS.getAssignment(raw.accountId, derived('test/buyer').address);
+      expect([after.nonce, after.assignedAt, after.revokedAt]).to.deep.equal([before.nonce, before.assignedAt, before.revokedAt]);
+      expect(await fx.f.CSS.assignmentNonce(raw.accountId)).to.equal(nonce);
+    });
+
     it('at each later step that moves money: every check passes, and nothing is sent twice', async () => {
       for (const stopAt of ['setup.create-account', 'setup.fund-account-period', 'setup.fund-wallet-period']) {
         use(await loadFixture(deployFixture));
