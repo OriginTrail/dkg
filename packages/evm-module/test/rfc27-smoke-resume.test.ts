@@ -191,6 +191,24 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       },
     } as unknown as Signer;
   };
+  /** The owner's key, sending with too little gas for the transaction to get anywhere: it is mined, and reverts. */
+  const ownerShortOfGas = (): Signer => {
+    const wallet = ownerWallet();
+    const provider = hre.network.provider;
+    return {
+      getAddress: () => wallet.getAddress(),
+      sendTransaction: async (tx: TransactionRequest) => {
+        await provider.send('evm_setAutomine', [false]);
+        try {
+          const sent = await wallet.sendTransaction({ ...tx, gasLimit: 40_000n });
+          await provider.send('evm_mine', []);
+          return sent;
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+      },
+    } as unknown as Signer;
+  };
   const inTheBlockOf = async (key: string, other: { hash: string }): Promise<number> => {
     const block = (await hre.ethers.provider.getTransactionReceipt(rawState().steps[key].hash))?.blockNumber;
     expect((await hre.ethers.provider.getTransactionReceipt(other.hash))?.blockNumber).to.equal(block);
@@ -418,6 +436,19 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(ctx, 'under the maximum stake').ok).to.equal(false);
       expect(await head()).to.equal(blocks);
       expect(fs.existsSync(stateFile)).to.equal(false);
+    });
+
+    it('after any step but the claim of the withdrawn epoch reverted: it stops on that transaction, every time', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      expect(await errorOf(phaseSetup(await ctxOf('setup', { owner: ownerShortOfGas() })))).to.match(/reverted on chain/);
+      const [key] = Object.keys(rawState().steps);
+      const { hash } = rawState().steps[key];
+      const blocks = await head();
+      for (let i = 0; i < 2; i++) {
+        expect(await errorOf(phaseSetup(await ctxOf('setup')))).to.contain(`transaction ${hash} of an earlier run reverted`);
+      }
+      expect(await head()).to.equal(blocks);
     });
 
     it('with too little TRAC for what is left: it still stops, sending nothing', async () => {
@@ -1488,22 +1519,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
 
       it('with the withdrawn epoch still to claim: the attempt is made again, and pays', async () => {
         const tokenId = await withdrawn();
-        const wallet = ownerWallet();
-        const provider = hre.network.provider;
-        const short = {
-          getAddress: () => wallet.getAddress(),
-          sendTransaction: async (tx: TransactionRequest) => {
-            await provider.send('evm_setAutomine', [false]);
-            try {
-              const sent = await wallet.sendTransaction({ ...tx, gasLimit: 40_000n });
-              await provider.send('evm_mine', []);
-              return sent;
-            } finally {
-              await provider.send('evm_setAutomine', [true]);
-            }
-          },
-        } as unknown as Signer;
-        expect(await errorOf(phaseWithdraw(await ctxOf('withdraw', { owner: short })))).to.match(/reverted on chain/);
+        expect(await errorOf(phaseWithdraw(await ctxOf('withdraw', { owner: ownerShortOfGas() })))).to.match(/reverted on chain/);
         const reverted = rawState().steps[CLAIM].hash;
         expect(await statusOf(reverted)).to.equal(0);
         const c = await (await Stack.at(hre, await fx.f.Hub.getAddress())).pool();
