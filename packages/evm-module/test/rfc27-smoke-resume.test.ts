@@ -521,7 +521,41 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       }
     });
 
-    it('reads no movement from a receipt with no Transfer in it', async () => {
+    it('fails setup, which is not done, when a step moved other than the run planned', async () => {
+      for (const [stopAt, amount, label] of [
+        ['setup.stake', 'stake', 'the stake moved into the vault'],
+        ['setup.create-account', 'committed', 'the commitment moved into the vault'],
+      ]) {
+        use(await loadFixture(deployFixture));
+        await fundExactly();
+        await stops(phaseSetup(await ctxOf('setup', { stopAt })));
+        editState((raw) => {
+          raw.amounts[amount] = String(BigInt(raw.amounts[amount]) + 1n);
+        });
+        const ctx = await ctxOf('setup');
+        await phaseSetup(ctx);
+        failsAndIsNotDone(ctx, 'setup', label);
+      }
+    });
+
+    it('fails setup, which is not done, at a wallet funding whose receipt moved another amount', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
+      const stranger = fx.f.accounts[22];
+      const value = 5n * TRAC;
+      await fx.f.Token.mint(stranger.address, value);
+      await fx.f.Token.connect(stranger).approve(await fx.f.SSW.getAddress(), value);
+      const funding = await fx.f.SSW.connect(stranger).fundFromWallet(walletRequestOf(await fx.f.Chronos.getCurrentEpoch(), { buckets: [bucket(0, CLASS_INFERENCE, value, 10n ** 15n)], sessionKey: hardhatWallet(61).address }));
+      editState((raw) => {
+        raw.steps['setup.fund-wallet-period'].hash = funding.hash;
+      });
+      const ctx = await ctxOf('setup');
+      await phaseSetup(ctx);
+      failsAndIsNotDone(ctx, 'setup', 'moved into the vault and is due');
+    });
+
+    it('nets what a receipt moved in and out of an account, and reads none from a receipt with no Transfer in it', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
       await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
@@ -530,6 +564,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       if (!receipt) throw new Error('no receipt');
       const c = await (await Stack.at(hre, await fx.f.Hub.getAddress())).base();
       expect(tracMoved(receipt, c.token, vault)).to.equal(a.walletValue);
+      expect(tracMoved(receipt, c.token, ownerWallet().address)).to.equal(-a.walletValue);
       const noTransfer = new Proxy(receipt, { get: (t, k) => (k === 'logs' ? t.logs.filter((l: { address: string }) => l.address.toLowerCase() !== String(c.token.target).toLowerCase()) : Reflect.get(t, k)) });
       expect(tracMoved(noTransfer, c.token, vault)).to.equal(0n);
     });
@@ -944,6 +979,21 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       await phaseSetup(resumed);
       passes(resumed);
       expect(resumed.file.done('setup')).to.equal(true);
+    });
+
+    it('takes a period of the run\'s own key on other terms for a clash too: PHASE=check says so, and a resume stops, sending nothing', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
+      editState((raw) => {
+        raw.amounts.walletValue = String(BigInt(raw.amounts.walletValue) + TRAC);
+      });
+      const check = await ctxOf('check', { send: false });
+      await phaseCheck(check);
+      expect(checkOf(check, 'if it has one, is this run\'s').ok).to.equal(false);
+      const blocks = await head();
+      expect(await errorOf(phaseSetup(await ctxOf('setup')))).to.match(/and this run funded its account period in that epoch: start a new run$/);
+      expect(await head()).to.equal(blocks);
     });
 
     it('says so at PHASE=check, for the second run and not the first', async () => {
