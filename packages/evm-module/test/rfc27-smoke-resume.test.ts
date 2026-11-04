@@ -1165,6 +1165,39 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       }
     });
 
+    /** The position's raw stake a wei short of what its claims paid: their receipts and the cumulative rewards stay as they are. */
+    const uncredited = async (tokenId: bigint) => {
+      const contract = fx.f.accounts[48];
+      await fx.f.Hub.setContractAddress('UncreditingContract', contract.address);
+      await fx.f.Vault.connect(contract).decreaseRaw(tokenId, 1n);
+    };
+    const failsOnTheRawStake = async (s: SetupState) => {
+      await uncredited(s.tokenId);
+      const blocks = await head();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(checkOf(ctx, 'the position was claimed for epochs').ok).to.equal(true);
+      expect(checkOf(ctx, 'compounded into the position\'s raw stake').ok).to.equal(false);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+    };
+
+    it('fails a replayed claim that did not reach the raw stake, though its receipts and the cumulative rewards are right', async () => {
+      use(await loadFixture(afterFinalize));
+      const s = stateNow();
+      await toEpoch(s.E + 2n);
+      await stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' })));
+      await failsOnTheRawStake(s);
+    });
+
+    it('fails the upkeep cron\'s claim that did not reach the raw stake, the same way', async () => {
+      use(await loadFixture(afterFinalize));
+      const s = stateNow();
+      await toEpoch(s.E + 2n);
+      await upkeepClaims(s.tokenId);
+      await failsOnTheRawStake(s);
+    });
+
     it('checks what the upkeep cron claimed, from the claims the chain recorded, and claims the rest itself', async () => {
       use(await loadFixture(afterFinalize));
       const s = stateNow();
