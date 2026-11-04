@@ -1376,15 +1376,17 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         expect(ctx.file.done('close-claim')).to.equal(false);
       });
 
-      it('takes another buyer\'s period of E funded in the epoch before, and top-ups, to the wei', async () => {
+      it('takes another buyer\'s period of E funded in the epoch before, and top-ups, to the wei, and leaves out periods of other epochs', async () => {
         use(await loadFixture(deployFixture));
         const before = await fx.f.Chronos.getCurrentEpoch();
         await fx.helpers.walletFund(fx.f.accounts[21], before + 1n, 5n * TRAC);
+        await fx.helpers.walletFund(fx.f.accounts[22], before, 3n * TRAC);
         await toEpoch(before + 1n);
         await fundExactly();
         await phaseSetup(await ctxOf('setup'));
         await phaseServe(await ctxOf('serve'));
         const s = stateNow();
+        await fx.helpers.walletFund(fx.f.accounts[23], s.E + 1n, 4n * TRAC);
         await toDeadline();
         await scoreIn(s.E + 1n);
         await upkeepFinalizes();
