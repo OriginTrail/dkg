@@ -1,16 +1,16 @@
 // A position's reward claims, as the chain recorded them: each claim moves its
 // LastClaimedEpochUpdated cursor, and pays what CumulativeRewardsClaimedUpdated
 // adds in the same transaction, or nothing when the window held no reward. Each
-// is replayed in order against StakingKPI's preview, compounding into the raw
-// stake the next one reads. That is exact, since a claim settles only the epoch
-// it runs in, and leaves the score inputs of every ended epoch as the later
-// claims read them.
+// is replayed in order against the epochs' nets, worked out from what no claim
+// writes, compounding into the raw stake the next one reads. That is exact, since
+// a claim settles only the epoch it runs in, and leaves the score inputs of every
+// ended epoch as the later claims read them.
 
 import type { Log, Provider } from 'ethers';
 import { ethers } from 'ethers';
 
 import type { Contracts } from '../contracts';
-import { EpochReward, claimPreview } from '../reads';
+import { EpochReward, claimPreview, poolShareOf } from '../reads';
 
 /** A public endpoint limits eth_getLogs to a range of 200 blocks. */
 const LOG_PAGE = 199;
@@ -25,12 +25,32 @@ export async function pagedLogs(provider: Pick<Provider, 'getBlockNumber' | 'get
   return logs;
 }
 
-/** One claim: the epochs it covered, what it paid, what the preview says of them, and where it ran. */
+/**
+ * A node's net of epoch `e`, as `StakingV10._nodeEpochReward` splits it, from what no
+ * claim writes: its share of the publishing pool by score, its query/inference gross,
+ * frozen at the epoch's close, and the operator fee in force at the epoch's end. Once a
+ * claim has split an epoch, StakingKPI gives back the net that claim stored, so it
+ * cannot be what that claim is checked against.
+ */
+export async function netFromInputs(c: Contracts, node: bigint, e: bigint): Promise<bigint> {
+  const { publishingShare, feeBps } = await poolShareOf(c, node, e, 0n, 0n);
+  const gross = publishingShare + (await c.qs.previewQueryInferenceGross(e, node));
+  return gross - (gross * feeBps) / (await c.params.maxOperatorFee());
+}
+
+/** The net of each epoch from..to, by `netFromInputs`. */
+export async function netsFromInputs(c: Contracts, node: bigint, from: bigint, to: bigint): Promise<Map<bigint, bigint>> {
+  const nets = new Map<bigint, bigint>();
+  for (let e = from; e <= to; e++) nets.set(e, await netFromInputs(c, node, e));
+  return nets;
+}
+
+/** One claim: the epochs it covered, what it paid, what the epochs' nets give, and where it ran. */
 export type RewardClaim = { from: bigint; to: bigint; paid: bigint; previewed: bigint; tx: string; block: number };
 
 export type RewardClaims = {
   claims: RewardClaim[];
-  /** Every claimed epoch, as the preview gives it. */
+  /** Every claimed epoch, as the epochs' nets give it. */
   per: EpochReward[];
   /** What the claims paid together. */
   total: bigint;
@@ -64,7 +84,7 @@ export async function rewardClaims(
   let raw = o.stakeRaw;
   let from = o.firstEpoch;
   for (const cursor of cursors) {
-    const preview = await claimPreview(c, o.tokenId, o.node, from, cursor.epoch, raw);
+    const preview = await claimPreview(c, o.tokenId, o.node, from, cursor.epoch, raw, await netsFromInputs(c, o.node, from, cursor.epoch));
     const paid = paidIn.get(cursor.tx) ?? 0n;
     claims.push({ from, to: cursor.epoch, paid, previewed: preview.total, tx: cursor.tx, block: cursor.block });
     per.push(...preview.per);

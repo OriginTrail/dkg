@@ -1,5 +1,5 @@
 // PHASE close-claim, as soon as E+1 has ended: closeEpochs, then claimFor on
-// our position against StakingKPI's preview, and from E+1's close its money
+// our position against the epochs' nets, and from E+1's close its money
 // (walletDue + convictionDue + carryIn), served value (sumR), unused share and
 // pool. Where the upkeep cron closed or claimed first, what it did is checked
 // from storage instead. Both of the run's claims must be finalized first, by the
@@ -10,7 +10,7 @@ import { requireParameter } from '../parameters';
 import { fmt, iso, min, sum } from '../report';
 import { EpochCloseNumbers, EpochReward, claimPreview, closeFromStorage, kpiNets, poolShareOf } from '../reads';
 import { PoolCtx, complete, doneEarlier, epochStart, opensAt, runState } from './context';
-import { rewardClaims } from './reward-claims';
+import { netsFromInputs, rewardClaims } from './reward-claims';
 import { finalizedValue, names, unfinalizedClaims } from './finalize';
 import { need } from './roles';
 
@@ -105,9 +105,11 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     report.check(`node ${s.sellerId}'s gross from the pool of epoch ${P} is what the preview said`, gross === previewGross && gross <= close.pool, `${fmt(gross)} TRAC`);
   }
 
-  // 2. claimFor on our position, against StakingKPI's preview. Claims made before it, by
-  //    another caller (the upkeep cron) or by this phase before it was interrupted, are
-  //    checked first, from the claims the chain recorded.
+  // 2. claimFor on our position, against the epochs' nets as what no claim writes gives them:
+  //    StakingKPI's are those of the first claim of each epoch, any position's. Claims made
+  //    before it, by another caller (the upkeep cron) or by this phase before it was
+  //    interrupted, are checked first, from the claims the chain recorded.
+  const inputs = await netsFromInputs(c, s.sellerId, windowStart, current - 1n);
   const claimStep = {
     key: 'close-claim.claim',
     label: `owner: StakingV10.claimFor(${tokenId})`,
@@ -126,7 +128,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     const by = await rewardClaims(ctx.hre.ethers.provider, c, { tokenId, node: s.sellerId, stakeRaw: s.stakeRaw, firstEpoch: windowStart, fromBlock: staked.blockNumber });
     const windows = by.claims.map((x) => (x.from === x.to ? `${x.from}` : `${x.from}..${x.to}`)).join(', ');
     report.check(
-      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by ${by.claims.every((x) => x.tx === ours?.hash) ? 'this phase before it was interrupted' : 'another caller (the upkeep cron)'}: what each claim paid is StakingKPI's preview`,
+      `the position was claimed for epochs ${windowStart}..${pos.lastClaimedEpoch} by ${by.claims.every((x) => x.tx === ours?.hash) ? 'this phase before it was interrupted' : 'another caller (the upkeep cron)'}: what each claim paid is the position's share of the epochs' nets`,
       by.through === pos.lastClaimedEpoch && by.total === pos.cumulativeRewardsClaimed && by.claims.every((x) => x.paid === x.previewed),
       `paid ${fmt(by.total)} TRAC of ${fmt(pos.cumulativeRewardsClaimed)} in ${by.claims.length} claim${by.claims.length > 1 ? 's' : ''}, of epochs ${windows}, through ${by.through}`,
     );
@@ -136,7 +138,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     claimed = true;
   }
   if (pos.lastClaimedEpoch < current - 1n && !ours) {
-    const expect = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw, pre.nets);
+    const expect = await claimPreview(c, tokenId, s.sellerId, pos.lastClaimedEpoch + 1n, current - 1n, pos.raw, inputs);
     // The epochs the claim pays, as the preview gives them: what a dry run shows, and what the send checks.
     per.push(...expect.per);
     claimed = true;
@@ -146,9 +148,9 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       const after = await c.css.getPosition(tokenId);
       report.set('claim', { ...expect, paid, from: pos.lastClaimedEpoch + 1n, to: current - 1n });
       report.check(
-        `claimFor pays what StakingKPI previewed for epochs ${pos.lastClaimedEpoch + 1n}..${current - 1n}`,
+        `claimFor pays what the epochs' nets give for epochs ${pos.lastClaimedEpoch + 1n}..${current - 1n}`,
         paid === expect.total && after.raw - pos.raw === paid && after.lastClaimedEpoch === current - 1n,
-        `paid ${fmt(paid)} TRAC, preview ${fmt(expect.total)} TRAC`,
+        `paid ${fmt(paid)} TRAC, the nets give ${fmt(expect.total)} TRAC`,
       );
     }
   }
@@ -158,6 +160,12 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
     }
     const nets = await kpiNets(c, s.sellerId, windowStart, current - 1n);
     report.check('every epoch the claim split holds the net StakingKPI previewed', [...pre.nets.entries()].every(([e, net]) => !nets.split.get(e) || nets.nets.get(e) === net));
+    const differing = [...inputs].filter(([e, net]) => nets.nets.get(e) !== net);
+    report.check(
+      'StakingKPI gives each epoch the net its publishing share, query/inference gross and operator fee give',
+      differing.length === 0,
+      differing.map(([e, net]) => `epoch ${e}: ${fmt(nets.nets.get(e) ?? 0n)} TRAC, those give ${fmt(net)} TRAC`).join('; ') || undefined,
+    );
     const pe = per.find((x) => x.epoch === P && x.scored);
     if (pe) {
       const share = await poolShareOf(c, s.sellerId, P, pe.score, pe.net);

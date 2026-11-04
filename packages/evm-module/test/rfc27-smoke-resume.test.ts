@@ -16,6 +16,7 @@ import { ethers } from 'ethers';
 import type { Signer, TransactionRequest } from 'ethers';
 import hre from 'hardhat';
 
+import type { ProfileStorage } from '../typechain';
 import { CLASS_INFERENCE, TRAC, bucket, walletRequestOf } from './helpers/conviction-service';
 import { hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
 import { deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
@@ -190,6 +191,19 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         }
       },
     } as unknown as Signer;
+  };
+  /** The fee in force on the seller's node over every epoch, as its history says from here on. */
+  const feeIs = async (feeBps: bigint) => {
+    const contract = fx.f.accounts[47];
+    await fx.f.Hub.setContractAddress('OperatorFeeWriter', contract.address);
+    const profiles = await hre.ethers.getContract<ProfileStorage>('ProfileStorage');
+    await profiles.connect(contract).setOperatorFees(fx.seller.identityId, [{ feePercentage: feeBps, effectiveDate: 1n }]);
+  };
+  /** `claim` run while half of every epoch's reward goes to the operator, which it does not: what it stores and what it pays are too small, and consistently so. */
+  const tooSmall = async (claim: () => Promise<unknown>) => {
+    await feeIs(5_000n);
+    await claim();
+    await feeIs(0n);
   };
   /** The owner's key, sending with too little gas for the transaction to get anywhere: it is mined, and reverts. */
   const ownerShortOfGas = (): Signer => {
@@ -1256,6 +1270,69 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       await failsOnTheRawStake(s);
     });
 
+    describe('with a claim whose stored net and payment are consistently too small', () => {
+      /** Fails on the nets alone: what the claim stored and paid agree with each other, and with the position. */
+      const failsOnTheNets = async (ctx: PoolCtx, label: string) => {
+        expect(checkOf(ctx, label).ok, label).to.equal(false);
+        expect(checkOf(ctx, 'StakingKPI gives each epoch the net').ok).to.equal(false);
+        expect(checkOf(ctx, 'compounded into the position\'s raw stake').ok).to.equal(true);
+        expect(ctx.file.done('close-claim')).to.equal(false);
+      };
+
+      it('fails the upkeep cron\'s, sending nothing', async () => {
+        use(await loadFixture(afterFinalize));
+        const s = stateNow();
+        await toEpoch(s.E + 2n);
+        await tooSmall(() => upkeepClaims(s.tokenId));
+        const blocks = await head();
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        await failsOnTheNets(ctx, 'the position was claimed for epochs');
+        expect(await head()).to.equal(blocks);
+      });
+
+      it('fails this run\'s, interrupted, sending nothing', async () => {
+        use(await loadFixture(afterFinalize));
+        const s = stateNow();
+        await toEpoch(s.E + 2n);
+        await tooSmall(async () => stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' }))));
+        const blocks = await head();
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        await failsOnTheNets(ctx, 'the position was claimed for epochs');
+        expect(await head()).to.equal(blocks);
+      });
+
+      it('fails this run\'s own, on a net another position\'s claim stored too small', async () => {
+        use(await loadFixture(afterFinalize));
+        const s = stateNow();
+        await toEpoch(s.E + 2n);
+        await tooSmall(() => upkeepClaims(fx.seller.tokenId));
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        expect(checkOf(ctx, 'claimFor pays what the epochs\' nets give').ok).to.equal(false);
+        expect(checkOf(ctx, 'StakingKPI gives each epoch the net').ok).to.equal(false);
+        expect(ctx.file.done('close-claim')).to.equal(false);
+      });
+    });
+
+    it('passes a correct claim to the wei, with a fee and a pool that floor, on the upkeep cron\'s and on one resumed', async () => {
+      for (const resumed of [false, true]) {
+        use(await loadFixture(afterFinalize));
+        const s = stateNow();
+        await feeIs(1_237n);
+        await fx.helpers.publishingPool(s.E + 1n, 7n * TRAC + 1n);
+        await toEpoch(s.E + 2n);
+        if (resumed) await stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' })));
+        else await upkeepClaims(s.tokenId);
+        const ctx = await ctxOf('close-claim');
+        await phaseCloseClaim(ctx);
+        passes(ctx);
+        expect(ctx.file.done('close-claim')).to.equal(true);
+        expect(checkOf(ctx, 'the position was claimed for epochs').ok).to.equal(true);
+      }
+    });
+
     it('checks what the upkeep cron claimed, from the claims the chain recorded, and claims the rest itself', async () => {
       use(await loadFixture(afterFinalize));
       const s = stateNow();
@@ -1268,7 +1345,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const by = checkOf(ctx, 'the position was claimed for epochs');
       expect(by.label).to.contain('another caller (the upkeep cron)');
       expect(by.detail).to.contain('in 1 claim');
-      expect(checkOf(ctx, 'claimFor pays what StakingKPI previewed').ok).to.equal(true);
+      expect(checkOf(ctx, 'claimFor pays what the epochs\' nets give').ok).to.equal(true);
       expect(checkOf(ctx, 'the position is paid a share of epoch').ok).to.equal(true);
     });
   });
@@ -1414,6 +1491,39 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('by that transaction\'s Transfer logs');
     });
 
+    it('fails the claim of a withdrawn epoch whose stored net and payment are consistently too small, by the run or by another caller', async () => {
+      for (const byAnother of [false, true]) {
+        use(await loadFixture(afterCloseClaim));
+        const { tokenId } = stateNow();
+        const e = await toMiddle();
+        await scoreIn(e);
+        await phaseWithdraw(await ctxOf('withdraw'));
+        await toEpoch(e + 1n);
+        await tooSmall(async () => {
+          if (byAnother) await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId);
+          else await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.claim-withdrawn-epoch' })));
+        });
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        expect(checkOf(ctx, byAnother ? 'claimed by another caller' : 'claimWithdrawnEpoch pays the owner').ok).to.equal(false);
+        expect(checkOf(ctx, 'stored net is what its publishing share').ok).to.equal(false);
+        expect(ctx.file.done('withdraw')).to.equal(false);
+      }
+    });
+
+    it('fails a withdrawal whose automatic claim reads a net another position\'s claim stored too small', async () => {
+      use(await loadFixture(afterCloseClaim));
+      const e = await toMiddle();
+      await scoreIn(e);
+      await toEpoch(e + 1n, (await fx.f.Chronos.epochLength()) / 2n);
+      await tooSmall(() => fx.f.StakingV10.connect(fx.f.accounts[20]).claimFor(fx.seller.tokenId));
+      await scoreIn(e + 1n);
+      const ctx = await ctxOf('withdraw');
+      await phaseWithdraw(ctx);
+      expect(checkOf(ctx, 'the withdrawal pays the stake').ok).to.equal(false);
+      expect(rawState().withdrawal).to.equal(undefined);
+    });
+
     describe('with a withdrawn epoch that earned nothing', () => {
       const CLAIM = 'withdraw.claim-withdrawn-epoch';
       /** The position withdrawn in an epoch with a score and no reward, and the clock in the next. */
@@ -1458,7 +1568,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
           else await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: CLAIM })));
           const ctx = await ctxOf('withdraw');
           // The views give the position a share, which the claim did not pay.
-          ctx.c = { ...ctx.c, kpi: new Proxy(ctx.c.kpi, { get: (t, k) => (k === 'getNetNodeRewards' ? async () => 10n * TRAC : Reflect.get(t, k)) }) };
+          ctx.c = { ...ctx.c, qs: new Proxy(ctx.c.qs, { get: (t, k) => (k === 'previewQueryInferenceGross' ? async () => 10n * TRAC : Reflect.get(t, k)) }) };
           await phaseWithdraw(ctx);
           expect(failedLabels(ctx).join(' | ')).to.contain(byAnother ? 'claimed by another caller' : 'claimWithdrawnEpoch pays the owner');
           expect(ctx.file.done('withdraw')).to.equal(false);
