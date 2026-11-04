@@ -130,6 +130,7 @@ export async function phaseCloseClaim(ctx: PoolCtx): Promise<void> {
       by.through === pos.lastClaimedEpoch && by.total === pos.cumulativeRewardsClaimed && by.claims.every((x) => x.paid === x.previewed),
       `paid ${fmt(by.total)} TRAC of ${fmt(pos.cumulativeRewardsClaimed)} in ${by.claims.length} claim${by.claims.length > 1 ? 's' : ''}, of epochs ${windows}, through ${by.through}`,
     );
+    report.check('what they paid compounded into the position\'s raw stake', pos.raw === s.stakeRaw + by.total, `raw ${fmt(pos.raw)} TRAC; staked ${fmt(s.stakeRaw)} + paid ${fmt(by.total)} TRAC`);
     per.push(...by.per);
     report.set('claimsByOthers', by);
     claimed = true;

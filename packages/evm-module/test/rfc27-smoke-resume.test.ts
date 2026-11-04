@@ -191,6 +191,24 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       },
     } as unknown as Signer;
   };
+  /** The owner's key, sending with too little gas for the transaction to get anywhere: it is mined, and reverts. */
+  const ownerShortOfGas = (): Signer => {
+    const wallet = ownerWallet();
+    const provider = hre.network.provider;
+    return {
+      getAddress: () => wallet.getAddress(),
+      sendTransaction: async (tx: TransactionRequest) => {
+        await provider.send('evm_setAutomine', [false]);
+        try {
+          const sent = await wallet.sendTransaction({ ...tx, gasLimit: 40_000n });
+          await provider.send('evm_mine', []);
+          return sent;
+        } finally {
+          await provider.send('evm_setAutomine', [true]);
+        }
+      },
+    } as unknown as Signer;
+  };
   const inTheBlockOf = async (key: string, other: { hash: string }): Promise<number> => {
     const block = (await hre.ethers.provider.getTransactionReceipt(rawState().steps[key].hash))?.blockNumber;
     expect((await hre.ethers.provider.getTransactionReceipt(other.hash))?.blockNumber).to.equal(block);
@@ -391,6 +409,46 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const check = await ctxOf('check', { send: false });
       await phaseCheck(check);
       expect(check.report.data.needs).to.include({ ownerTrac: String(needed) });
+    });
+
+    it('after a stake that filled the node\'s room, mined or only sent, with its position not recorded: the resume counts it once', async () => {
+      for (const stopAt of ['setup.stake', 'setup.stake:sent']) {
+        use(await loadFixture(deployFixture));
+        await fundExactly();
+        await stops(phaseSetup(await ctxOf('setup', { stopAt })));
+        expect(rawState().tokenId, stopAt).to.equal(undefined);
+        await fx.f.Params.setMaximumStake(await fx.f.Vault.getNodeStakeV10(fx.seller.identityId));
+        const resumed = await ctxOf('setup');
+        await phaseSetup(resumed);
+        passes(resumed);
+        expect(checkOf(resumed, 'under the maximum stake').ok, stopAt).to.equal(true);
+        expect(resumed.file.done('setup'), stopAt).to.equal(true);
+      }
+    });
+
+    it('with no room for a stake still to send: it refuses, sending nothing', async () => {
+      use(await loadFixture(deployFixture));
+      const { a } = await fundExactly();
+      await fx.f.Params.setMaximumStake((await fx.f.Vault.getNodeStakeV10(fx.seller.identityId)) + a.stake - 1n);
+      const blocks = await head();
+      const ctx = await ctxOf('setup');
+      expect(await errorOf(phaseSetup(ctx))).to.equal('the seller does not qualify: see the checks above');
+      expect(checkOf(ctx, 'under the maximum stake').ok).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(fs.existsSync(stateFile)).to.equal(false);
+    });
+
+    it('after any step but the claim of the withdrawn epoch reverted: it stops on that transaction, every time', async () => {
+      use(await loadFixture(deployFixture));
+      await fundExactly();
+      expect(await errorOf(phaseSetup(await ctxOf('setup', { owner: ownerShortOfGas() })))).to.match(/reverted on chain/);
+      const [key] = Object.keys(rawState().steps);
+      const { hash } = rawState().steps[key];
+      const blocks = await head();
+      for (let i = 0; i < 2; i++) {
+        expect(await errorOf(phaseSetup(await ctxOf('setup')))).to.contain(`transaction ${hash} of an earlier run reverted`);
+      }
+      expect(await head()).to.equal(blocks);
     });
 
     it('with too little TRAC for what is left: it still stops, sending nothing', async () => {
@@ -1165,6 +1223,39 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       }
     });
 
+    /** The position's raw stake a wei short of what its claims paid: their receipts and the cumulative rewards stay as they are. */
+    const uncredited = async (tokenId: bigint) => {
+      const contract = fx.f.accounts[48];
+      await fx.f.Hub.setContractAddress('UncreditingContract', contract.address);
+      await fx.f.Vault.connect(contract).decreaseRaw(tokenId, 1n);
+    };
+    const failsOnTheRawStake = async (s: SetupState) => {
+      await uncredited(s.tokenId);
+      const blocks = await head();
+      const ctx = await ctxOf('close-claim');
+      await phaseCloseClaim(ctx);
+      expect(checkOf(ctx, 'the position was claimed for epochs').ok).to.equal(true);
+      expect(checkOf(ctx, 'compounded into the position\'s raw stake').ok).to.equal(false);
+      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+    };
+
+    it('fails a replayed claim that did not reach the raw stake, though its receipts and the cumulative rewards are right', async () => {
+      use(await loadFixture(afterFinalize));
+      const s = stateNow();
+      await toEpoch(s.E + 2n);
+      await stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' })));
+      await failsOnTheRawStake(s);
+    });
+
+    it('fails the upkeep cron\'s claim that did not reach the raw stake, the same way', async () => {
+      use(await loadFixture(afterFinalize));
+      const s = stateNow();
+      await toEpoch(s.E + 2n);
+      await upkeepClaims(s.tokenId);
+      await failsOnTheRawStake(s);
+    });
+
     it('checks what the upkeep cron claimed, from the claims the chain recorded, and claims the rest itself', async () => {
       use(await loadFixture(afterFinalize));
       const s = stateNow();
@@ -1321,6 +1412,139 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       passes(ctx);
       expect(ctx.file.done('withdraw')).to.equal(true);
       expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('by that transaction\'s Transfer logs');
+    });
+
+    describe('with a withdrawn epoch that earned nothing', () => {
+      const CLAIM = 'withdraw.claim-withdrawn-epoch';
+      /** The position withdrawn in an epoch with a score and no reward, and the clock in the next. */
+      const withdrawn = async () => {
+        use(await loadFixture(afterCloseClaim));
+        const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+        await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+        await scoreIn(e);
+        const first = await ctxOf('withdraw');
+        await phaseWithdraw(first);
+        passes(first);
+        await toEpoch(e + 1n);
+        return { tokenId: stateNow().tokenId };
+      };
+
+      it('takes the exact zero its claim pays, and the run completes', async () => {
+        await withdrawn();
+        const owner = ownerWallet().address;
+        const before = await fx.f.Token.balanceOf(owner);
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        passes(ctx);
+        expect(ctx.file.done('withdraw')).to.equal(true);
+        expect(checkOf(ctx, 'claimWithdrawnEpoch pays the owner').detail).to.contain('0.0 TRAC, expected 0.0');
+        expect(await fx.f.Token.balanceOf(owner)).to.equal(before);
+      });
+
+      it('takes the exact zero another caller\'s claim paid, and the run completes', async () => {
+        const { tokenId } = await withdrawn();
+        await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId);
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        passes(ctx);
+        expect(ctx.file.done('withdraw')).to.equal(true);
+        expect(checkOf(ctx, 'claimed by another caller').detail).to.contain('0.0 TRAC, expected 0.0');
+      });
+
+      it('fails a claim that paid nothing while a share was due, by the run or by another caller', async () => {
+        for (const byAnother of [false, true]) {
+          const { tokenId } = await withdrawn();
+          if (byAnother) await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId);
+          else await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: CLAIM })));
+          const ctx = await ctxOf('withdraw');
+          // The views give the position a share, which the claim did not pay.
+          ctx.c = { ...ctx.c, kpi: new Proxy(ctx.c.kpi, { get: (t, k) => (k === 'getNetNodeRewards' ? async () => 10n * TRAC : Reflect.get(t, k)) }) };
+          await phaseWithdraw(ctx);
+          expect(failedLabels(ctx).join(' | ')).to.contain(byAnother ? 'claimed by another caller' : 'claimWithdrawnEpoch pays the owner');
+          expect(ctx.file.done('withdraw')).to.equal(false);
+        }
+      });
+
+      it('fails an expected zero that comes from a score other than the one recorded', async () => {
+        await withdrawn();
+        editState((raw) => {
+          raw.withdrawal.recordedScore = String(BigInt(raw.withdrawal.recordedScore) + 1n);
+        });
+        const ctx = await ctxOf('withdraw');
+        await phaseWithdraw(ctx);
+        expect(failedLabels(ctx).join(' | ')).to.contain('is the one its withdrawal recorded');
+        expect(ctx.file.done('withdraw')).to.equal(false);
+      });
+    });
+
+    describe('with this run\'s claim of the withdrawn epoch reverting', () => {
+      const CLAIM = 'withdraw.claim-withdrawn-epoch';
+      /** The position withdrawn, with something to claim of that epoch, and the clock in the next: the claim is what is left. */
+      const withdrawn = async () => {
+        use(await loadFixture(afterCloseClaim));
+        const e = await toMiddle();
+        await scoreIn(e);
+        await phaseWithdraw(await ctxOf('withdraw'));
+        await toEpoch(e + 1n);
+        return stateNow().tokenId;
+      };
+      const statusOf = async (hash: string) => (await hre.ethers.provider.getTransactionReceipt(hash))?.status;
+
+      for (const [when, stopAt] of [
+        ['it waits for its receipt', undefined],
+        ['it crashes once its attempt is sent', `${CLAIM}:sent`],
+      ]) {
+        it(`on a claim by the upkeep cron between its estimate and its mining, as ${when}: a resume takes the cron's, sending nothing`, async () => {
+          const tokenId = await withdrawn();
+          let cron: { hash: string } = { hash: '' };
+          const owner = ownerBeside(fx.f.StakingV10.interface.getFunction('claimWithdrawnEpoch').selector, async () => {
+            cron = await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId, { maxPriorityFeePerGas: 10n ** 11n, maxFeePerGas: 10n ** 12n });
+          });
+          const first = phaseWithdraw(await ctxOf('withdraw', { owner, stopAt }));
+          if (stopAt) await stops(first);
+          else expect(await errorOf(first)).to.match(/reverted on chain/);
+          expect(await statusOf(rawState().steps[CLAIM].hash)).to.equal(0);
+          expect(await statusOf(cron.hash)).to.equal(1);
+          await inTheBlockOf(CLAIM, cron);
+
+          const blocks = await head();
+          const resumed = await ctxOf('withdraw');
+          await phaseWithdraw(resumed);
+          passes(resumed);
+          expect(resumed.file.done('withdraw')).to.equal(true);
+          expect(await head()).to.equal(blocks);
+          expect(checkOf(resumed, 'claimed by another caller').detail).to.contain(cron.hash);
+        });
+      }
+
+      it('with the withdrawn epoch still to claim: the attempt is made again, and pays', async () => {
+        const tokenId = await withdrawn();
+        expect(await errorOf(phaseWithdraw(await ctxOf('withdraw', { owner: ownerShortOfGas() })))).to.match(/reverted on chain/);
+        const reverted = rawState().steps[CLAIM].hash;
+        expect(await statusOf(reverted)).to.equal(0);
+        const c = await (await Stack.at(hre, await fx.f.Hub.getAddress())).pool();
+        expect((await c.cws.getWithdrawal(tokenId))[0].epoch).to.not.equal(0n);
+
+        const resumed = await ctxOf('withdraw');
+        await phaseWithdraw(resumed);
+        passes(resumed);
+        expect(resumed.file.done('withdraw')).to.equal(true);
+        expect(rawState().steps[CLAIM].hash).to.not.equal(reverted);
+        expect(checkOf(resumed, 'claimWithdrawnEpoch pays the owner').ok).to.equal(true);
+      });
+    });
+
+    it('refuses a journaled withdrawal that does not hold all it is expected to do, and reads one that does as it was written', async () => {
+      use(await loadFixture(afterCloseClaim));
+      await scoreIn(await toMiddle());
+      await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.withdraw' })));
+      const { expected } = rawState().steps['withdraw.withdraw'];
+      expect(Object.keys(expected).sort()).to.deep.equal(['auto', 'epoch', 'raw', 'score']);
+      expect(decodeState(rawState()).steps['withdraw.withdraw'].expected?.raw).to.equal(BigInt(expected.raw));
+      editState((raw) => {
+        raw.steps['withdraw.withdraw'].expected = { epoch: expected.epoch, raw: expected.raw, auto: expected.auto, scor: expected.score };
+      });
+      expect(() => decodeState(rawState())).to.throw('expected.score is not an integer');
     });
 
     it('stays on its part while a check fails, and runs again sending nothing', async () => {

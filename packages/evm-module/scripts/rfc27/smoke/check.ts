@@ -127,8 +127,8 @@ export async function verifySeller(ctx: Ctx, a: Amounts): Promise<Seller> {
   );
   if (ok) {
     const [stake, max] = [await c.css.getNodeStakeV10(id), await c.params.maximumStake()];
-    // A stake already made is in the node's stake.
-    const adding = ctx.file.state?.tokenId !== undefined ? 0n : a.stake;
+    // A stake already made is in the node's stake, whether or not the run got to record its position.
+    const adding = (await progressOf(ctx)).staked ? 0n : a.stake;
     ok = report.check(`node ${id} takes the ${fmt(a.stake)} TRAC stake under the maximum stake`, stake + adding <= max, `node stake ${fmt(stake)} of ${fmt(max)} TRAC`);
   }
   return { id, ok };

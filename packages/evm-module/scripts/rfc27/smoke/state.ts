@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 
 import { JsonObject, Redactor, toJson, writeJson } from '../report';
-import type { Expected, Journal, StepRecord } from './tx';
+import type { Journal, StepRecord, WithdrawalExpected } from './tx';
 
 export const PHASES = ['check', 'setup', 'serve', 'finalize', 'close-claim', 'withdraw'] as const;
 export type PhaseName = (typeof PHASES)[number];
@@ -143,10 +143,11 @@ function oneOf<T extends string>(o: Obj, k: string, values: readonly T[], where:
 
 const AMOUNT_KEYS = ['stake', 'caValue', 'caTopUp', 'edgeValue', 'walletValue', 'keyEth', 'committed', 'committedFloor', 'lock', 'discountBps'] as const;
 
-function optExpected(o: Obj, k: string, where: string): Expected | undefined {
+function optExpected(o: Obj, k: string, where: string): WithdrawalExpected | undefined {
   if (o[k] === undefined || o[k] === null) return undefined;
-  const r = obj(o[k], `${where}.${k}`);
-  return Object.fromEntries(Object.keys(r).map((name) => [name, bi(r, name, `${where}.${k}`)]));
+  const at = `${where}.${k}`;
+  const r = obj(o[k], at);
+  return { epoch: bi(r, 'epoch', at), raw: bi(r, 'raw', at), auto: bi(r, 'auto', at), score: bi(r, 'score', at) };
 }
 
 function decodeStep(x: unknown, where: string): StepRecord {
