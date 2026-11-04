@@ -393,6 +393,33 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(check.report.data.needs).to.include({ ownerTrac: String(needed) });
     });
 
+    it('after a stake that filled the node\'s room, mined or only sent, with its position not recorded: the resume counts it once', async () => {
+      for (const stopAt of ['setup.stake', 'setup.stake:sent']) {
+        use(await loadFixture(deployFixture));
+        await fundExactly();
+        await stops(phaseSetup(await ctxOf('setup', { stopAt })));
+        expect(rawState().tokenId, stopAt).to.equal(undefined);
+        await fx.f.Params.setMaximumStake(await fx.f.Vault.getNodeStakeV10(fx.seller.identityId));
+        const resumed = await ctxOf('setup');
+        await phaseSetup(resumed);
+        passes(resumed);
+        expect(checkOf(resumed, 'under the maximum stake').ok, stopAt).to.equal(true);
+        expect(resumed.file.done('setup'), stopAt).to.equal(true);
+      }
+    });
+
+    it('with no room for a stake still to send: it refuses, sending nothing', async () => {
+      use(await loadFixture(deployFixture));
+      const { a } = await fundExactly();
+      await fx.f.Params.setMaximumStake((await fx.f.Vault.getNodeStakeV10(fx.seller.identityId)) + a.stake - 1n);
+      const blocks = await head();
+      const ctx = await ctxOf('setup');
+      expect(await errorOf(phaseSetup(ctx))).to.equal('the seller does not qualify: see the checks above');
+      expect(checkOf(ctx, 'under the maximum stake').ok).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(fs.existsSync(stateFile)).to.equal(false);
+    });
+
     it('with too little TRAC for what is left: it still stops, sending nothing', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
