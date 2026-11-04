@@ -54,7 +54,6 @@ interface AdmissionTrace {
   /** The step the request is in now. */
   phase: AsyncAdmissionPhase;
   closed?: boolean;
-  lateAnswerNoted?: boolean;
   /** The first answer, with the phase it was given in. */
   answer?: { status: number; code: string; phase: AsyncAdmissionPhase; atMs: number };
 }
@@ -96,21 +95,19 @@ export async function admissionStep<T>(
 /** The first answer a traced request sends wins; `body` is the serialized JSON the route sends. */
 export function noteAdmissionResponse(res: ServerResponse, status: number, body: string): void {
   const trace = traces.get(res);
-  if (trace === undefined || trace.answer !== undefined || trace.lateAnswerNoted) return;
+  if (trace === undefined || trace.answer !== undefined) return;
   const ok = status >= 200 && status < 300;
-  if (trace.closed) {
-    trace.lateAnswerNoted = true;
-    reportAdmissionTrace({
-      requestId: trace.diagnostic.requestId, route: trace.route, phase: ok ? 'enqueue' : trace.phase,
-    }, status, trace.clock() - trace.startedAtMs, 'answer_after_close');
-    return;
-  }
-  trace.answer = {
+  const answer = trace.answer = {
     status,
     code: ok ? '-' : errorCode(body),
     phase: ok ? 'enqueue' : trace.phase,
     atMs: trace.clock(),
   };
+  if (trace.closed) {
+    reportAdmissionTrace({
+      requestId: trace.diagnostic.requestId, route: trace.route, phase: answer.phase,
+    }, answer.status, answer.atMs - trace.startedAtMs, 'answer_after_close');
+  }
 }
 
 function errorCode(body: string): string {

@@ -57,6 +57,8 @@ describe('admission private trace diagnostics', () => {
           admissions++;
         });
         noteAdmissionResponse(res, 202, JSON.stringify({ jobId: 'PRIVATE_JOB' }));
+        noteAdmissionResponse(res, 503, JSON.stringify({ code: 'PRIVATE_DUPLICATE' }));
+        res.emit('close'); // A duplicate close must not replace the original HTTP outcome.
         res.end();
       })().finally(finished);
     });
@@ -82,7 +84,7 @@ describe('admission private trace diagnostics', () => {
         ['response_closed', 0, 'snapshot_preflight', before?.requestId],
         ['answer_after_close', 202, 'enqueue', before?.requestId],
       ]);
-      expect(JSON.stringify(warnings)).not.toMatch(/PRIVATE_ASSET|PRIVATE_JOB/);
+      expect(JSON.stringify(warnings)).not.toMatch(/PRIVATE_ASSET|PRIVATE_JOB|PRIVATE_DUPLICATE/);
       expect(asyncAdmissionUsage.take().http).toEqual([
         { route: 'publish_async', phase: 'snapshot_preflight', status: 0, code: 'client_closed', count: 1 },
       ]);
