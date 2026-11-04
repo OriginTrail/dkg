@@ -29,7 +29,7 @@ const JS_RADIUS = /borderRadius\s*:\s*(['"`]?)([^,}\n]+?)\1\s*[,}\n]/g;
 /** Hex colours anywhere in code: a quoted value, a var() fallback, a gradient
  *  stop. Not HTML entities (&#10530;) and not issue numbers in comments
  *  (comments are stripped first). */
-const JS_HEX = /(?<![&\w#])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![\w-])/g;
+const JS_HEX = /(?<![&\w#])#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/g;
 
 /** A radius value is hard-coded if it has a non-zero length that isn't a token. */
 function isRawRadius(value: string): boolean {
@@ -114,6 +114,12 @@ describe('design tokens', () => {
     expect(scan('x.tsx', "const s = { color: '#a0a0a0', borderRadius: 8 };").map((h) => h.kind)).toEqual(['colour', 'radius']);
     expect(scan('x.tsx', "const s = { borderRadius: 'var(--radius-pill)' };")).toEqual([]);
     expect(scan('layer-colors.ts', "export const C = '#94a3b8';")).toEqual([]);
+    // Every hex length: #rgb, #rgba, #rrggbb, #rrggbbaa.
+    for (const hex of ['#fff', '#ffff', '#ffffff', '#ffffff80']) {
+      expect(scan('x.tsx', `const s = { color: '${hex}' };`), hex).toHaveLength(1);
+      expect(scan('x.tsx', `const c = 'var(--x, ${hex})';`), `${hex} as fallback`).toHaveLength(1);
+    }
+    expect(scan('x.tsx', 'const a = <span>&#1234;</span>;')).toEqual([]);
     // Colours inside a longer string: var() fallbacks, gradients, shadows.
     expect(scan('x.tsx', "const c = 'var(--accent-orange, #f97316)';")).toHaveLength(1);
     expect(scan('x.tsx', "const g = 'linear-gradient(180deg, rgba(13,17,23,1) 0%, var(--x) 100%)';")).toHaveLength(1);
