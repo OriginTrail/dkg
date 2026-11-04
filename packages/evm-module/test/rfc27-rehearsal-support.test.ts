@@ -12,10 +12,11 @@ import { expectedParameterIn, requireParameter } from '../scripts/rfc27/paramete
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
+import { checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existing';
 import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
 import { claimAll } from '../scripts/rfc27/rehearsal/operations';
 import { closedWindows } from '../scripts/rfc27/rehearsal/reads';
-import type { Position } from '../scripts/rfc27/rehearsal/results';
+import type { ClaimResult, Position } from '../scripts/rfc27/rehearsal/results';
 
 /** A report that keeps its checks and prints nothing. */
 class QuietReport extends Report {
@@ -329,6 +330,85 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps'])).to.deep.equal({ key: 'latestLambdaBps', value: 5000n });
       expect(requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds'])).to.deep.equal({ key: 'latestReceiptGraceSeconds', value: 3600n });
       expect(requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value).to.equal(16n);
+    });
+  });
+
+  describe('the existing accounts and positions, against what the old contracts did', () => {
+    const TRAC = 10n ** 18n;
+    const old = [
+      { id: 8n, stakerCredits: [], events: ['AccountFinalSwept'] },
+      { id: 9n, stakerCredits: [{ start: 659n, end: 659n, amount: 500n * TRAC }], events: ['TokensAddedToEpochRange', 'AccountFinalSwept'] },
+      { id: 10n, stakerCredits: [{ start: 659n, end: 659n, amount: 200n * TRAC }], events: ['TokensAddedToEpochRange', 'AccountFinalSwept'] },
+    ];
+    const credits = () => old.flatMap((s) => s.stakerCredits).map((r) => ({ ...r }));
+    const swept = [8n, 9n, 10n];
+    const settleMany = (c: ReturnType<typeof credits>, s = swept) => {
+      const report = new QuietReport();
+      checkSettleMany(report, { credits: c, swept: s }, old);
+      return report;
+    };
+
+    it('passes when settleMany books the same ranges in the same order', () => {
+      expect(settleMany(credits()).failed).to.equal(0);
+    });
+
+    it('fails when a credit moves to another epoch, whose amount and count stay the same', () => {
+      const c = credits();
+      c[0] = { ...c[0], start: 660n, end: 660n };
+      const report = settleMany(c);
+      expect(report.failed).to.equal(1);
+      expect(report.checks[0].ok).to.equal(false);
+      expect(report.checks[0].detail).to.contain('700.0 TRAC in 2 credits (10.0.8: 700.0 in 2)');
+      expect(report.checks[0].detail).to.contain('credit 0: 500.0 TRAC over epochs 660..660, 10.0.8: 500.0 TRAC over epochs 659..659');
+    });
+
+    it('fails when a credit only ends in another epoch', () => {
+      const c = credits();
+      c[1] = { ...c[1], end: 660n };
+      expect(settleMany(c).failed).to.equal(1);
+    });
+
+    it('fails when the same credits come in another order', () => {
+      expect(settleMany(credits().reverse()).failed).to.equal(1);
+    });
+
+    it('fails when an amount moves between credits, whose sum stays the same', () => {
+      const c = credits();
+      c[0] = { ...c[0], amount: c[0].amount - 1n };
+      c[1] = { ...c[1], amount: c[1].amount + 1n };
+      expect(settleMany(c).failed).to.equal(1);
+    });
+
+    it('fails when a credit is missing or added', () => {
+      expect(settleMany(credits().slice(0, 1)).checks[0].detail).to.contain('credit 1: none, 10.0.8: 200.0 TRAC over epochs 659..659');
+      expect(settleMany([...credits(), { start: 659n, end: 659n, amount: 1n }]).failed).to.equal(1);
+    });
+
+    it('fails when settleMany sweeps other accounts than 10.0.8 settle did', () => {
+      const report = settleMany(credits(), [8n, 9n]);
+      expect(report.checks.filter((c) => !c.ok).map((c) => c.label)).to.deep.equal(['settleMany sweeps the accounts 10.0.8 settle swept']);
+      expect(settleMany(credits(), [8n, 10n, 9n]).failed).to.equal(1);
+    });
+
+    const claim = (tokenId: bigint, reward: bigint, rawDelta = reward): ClaimResult => ({ tokenId, node: 3n, reward, rawDelta, lastClaimedEpoch: 658n, gasUsed: 1n });
+    const oldClaims = [claim(1n, 5n), claim(2n, 7n)];
+    const claims = (c: ClaimResult[]) => {
+      const report = new QuietReport();
+      checkClaims(report, c, oldClaims);
+      return report;
+    };
+
+    it('passes when every position is claimed for what 10.0.4 paid', () => {
+      expect(claims([claim(1n, 5n), claim(2n, 7n)]).failed).to.equal(0);
+    });
+
+    it('fails when a position the 10.0.4 claims paid is left out', () => {
+      const report = claims([claim(1n, 5n)]);
+      expect(report.checks.filter((c) => !c.ok).map((c) => c.label)).to.deep.equal(['the claims are of the positions the 10.0.4 claims were of']);
+    });
+
+    it('fails when a claim credits another raw stake, whose statistic matches', () => {
+      expect(claims([claim(1n, 5n, 4n), claim(2n, 7n)]).checks.filter((c) => !c.ok).map((c) => c.label)).to.deep.equal(['token 1: the 10.1.0 claim pays what the 10.0.4 claim paid']);
     });
   });
 });
