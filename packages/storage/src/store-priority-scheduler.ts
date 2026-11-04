@@ -26,6 +26,7 @@ import {
 } from './store-operation-outcome.js';
 import {
   createRateLimitedStoreTimeoutDiagnosticReporter,
+  activeStoreAdmissionsSnapshot,
   type StoreSchedulerPriority,
   type StoreSchedulerTimeoutDiagnostic,
 } from './store-scheduler-timeout-diagnostics.js';
@@ -598,7 +599,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         this.reportTimeout?.(
           { priority: lane, operation, ...(entry.admission ? { admission: entry.admission } : {}) },
           () => this.getBackpressureSnapshot(),
-          () => this.activeAdmissionSnapshot(),
+          () => activeStoreAdmissionsSnapshot(this.activeAdmissions, this.now()),
         );
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error, this.now() - entry.queuedAt);
@@ -702,16 +703,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
         this.observeDepths();
         this.drain();
       });
-  }
-
-  private activeAdmissionSnapshot() {
-    const now = this.now();
-    return [...this.activeAdmissions].map(([entry, startedAt]) => ({
-      ...entry.admission!,
-      priority: entry.lane,
-      queueWaitMs: Math.max(0, Math.round(startedAt - entry.queuedAt)),
-      activeAgeMs: Math.max(0, Math.round(now - startedAt)),
-    })).sort((a, b) => b.activeAgeMs - a.activeAgeMs).slice(0, 3);
   }
 
   private removeQueued(entry: QueueEntry<unknown>): boolean {

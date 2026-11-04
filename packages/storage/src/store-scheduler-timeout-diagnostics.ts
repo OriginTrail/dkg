@@ -29,6 +29,19 @@ export interface StoreSchedulerTimeoutWaiter {
   admission?: AsyncAdmissionDiagnosticContext;
 }
 
+/** Project only bounded correlation metadata; never retain work closures in a diagnostic. */
+export function activeStoreAdmissionsSnapshot(
+  entries: Iterable<readonly [{ admission?: AsyncAdmissionDiagnosticContext; lane: StoreSchedulerPriority; queuedAt: number }, number]>,
+  now: number,
+): readonly StoreSchedulerActiveAdmission[] {
+  return [...entries].flatMap(([entry, startedAt]) => entry.admission ? [{
+    ...entry.admission,
+    priority: entry.lane,
+    queueWaitMs: Math.max(0, Math.round(startedAt - entry.queuedAt)),
+    activeAgeMs: Math.max(0, Math.round(now - startedAt)),
+  }] : []).sort((a, b) => b.activeAgeMs - a.activeAgeMs).slice(0, 3);
+}
+
 /** Admit first, then collect and project only diagnostics that can be emitted. */
 export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
   emit: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
