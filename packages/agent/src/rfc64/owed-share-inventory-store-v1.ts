@@ -71,7 +71,10 @@ export interface Rfc64OwedShareInventoryV1 {
 }
 
 export interface Rfc64OwedShareInventoryStoreV1 {
-  /** Every marker, those found at open first, then in the order they were written. */
+  /**
+   * Every marker, those found at open first, then in the order they were written. Nothing is read
+   * or decoded here, and a marker is the same frozen object in each list for as long as it is kept.
+   */
   list(): readonly Readonly<Rfc64OwedShareInventoryV1>[];
   /** Marker files found at open that could not be read; they are left where they are. */
   readonly unreadableAtOpen: number;

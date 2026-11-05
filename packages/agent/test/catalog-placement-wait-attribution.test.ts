@@ -224,6 +224,8 @@ describe('catalog placement wait attribution', () => {
     const { agent, clock, placementLines, repairs } = await startPlacementAgent('placement-wait-queue');
     const { seal } = await seedInventoryAssetV1(agent, 'queued', 82n);
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
+    // Deferred startup discovery completed an empty pass on the test clock.
+    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement.lastPassDurationMs).toBe(0);
     const blocker = Object.freeze({
       version: 1 as const,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -261,23 +263,26 @@ describe('catalog placement wait attribution', () => {
 
     await repairs().put(blocker);
     const blocked = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair: blocker });
-    expect(blocked.accepted).toBe(true);
-    await blockerEntered;
-    // The observer returns while its placement is queued behind the blocker.
-    await observe(agent, 'queued', seal, 'job-queued');
-    clock.now = 30_000;
-    expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement).toEqual({
-      depth: 1,
-      pending: 2,
-      oldestPendingAgeMs: 30_000,
-      waiters: 2,
-      oldestWaiterAgeMs: 30_000,
-      passRunning: true,
-      lastPassDurationMs: null,
-      cooldownSkips: 0,
-      failures: { failedMarkers: 0, parkedMarkers: 0, oldestFailureAgeMs: null, maxConsecutiveFailures: 0, kinds: [] },
-    });
-    releaseBlocker();
+    try {
+      expect(blocked.accepted).toBe(true);
+      await blockerEntered;
+      // The observer returns while its placement is queued behind the blocker.
+      await observe(agent, 'queued', seal, 'job-queued');
+      clock.now = 30_000;
+      expect(agent.readRfc64SwmCatalogProjectionSupervisorStatusV1()?.finalizedPrivatePlacement).toEqual({
+        depth: 1,
+        pending: 2,
+        oldestPendingAgeMs: 30_000,
+        waiters: 2,
+        oldestWaiterAgeMs: 30_000,
+        passRunning: true,
+        lastPassDurationMs: 0,
+        cooldownSkips: 0,
+        failures: { failedMarkers: 0, parkedMarkers: 0, oldestFailureAgeMs: null, maxConsecutiveFailures: 0, kinds: [] },
+      });
+    } finally {
+      releaseBlocker();
+    }
     await blocked.whenAttempted;
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 

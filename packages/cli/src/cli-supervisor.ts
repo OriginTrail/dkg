@@ -29,6 +29,51 @@ function supervisorWarn(message: string): void {
   void appendSupervisorLog(message).catch(() => {});
 }
 
+interface WorkerExit {
+  pid: number | undefined;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * The line a supervisor writes when its worker ended: how it ended, and what
+ * the supervisor does next. Read before the crash count takes this exit in.
+ */
+function describeWorkerExit(
+  { pid, code, signal }: WorkerExit,
+  crashes: number,
+  maxCrashRestarts: number,
+  options: { stopping?: boolean } = {},
+): string {
+  const { forced, originalExitCode } = decodeForcedExitCode(code);
+  const how = signal
+    ? `signal ${signal}`
+    : `exit code ${code}${forced ? ' (forced: its shutdown did not finish)' : ''}`;
+  let next: string;
+  if (options.stopping) {
+    next = 'the supervisor was asked to stop';
+  } else if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
+    next = 'restart requested, starting a new worker';
+  } else if (originalExitCode === 0) {
+    next = 'clean stop, the supervisor stops too';
+  } else if (crashes + 1 >= maxCrashRestarts) {
+    next = `giving up after ${maxCrashRestarts} crashes: no new worker will start, and the node stays down until it is started again`;
+  } else {
+    next = `crash ${crashes + 1} of ${maxCrashRestarts}, starting a new worker`;
+  }
+  return `[supervisor] worker ${pid ?? 'unknown'} ended with ${how}; ${next}`;
+}
+
+/**
+ * Says it where it can be read: a detached supervisor and worker run with every
+ * stream ignored, so `daemon.log` is the only record. Awaited, so that the line
+ * comes before the next worker's and survives the supervisor's own exit.
+ */
+async function reportWorkerExit(message: string): Promise<void> {
+  console.warn(message);
+  await appendSupervisorLog(message).catch(() => {});
+}
+
 interface SupervisorLivenessConfig {
   enabled: boolean;
   shutdownGraceMs: number;
@@ -168,8 +213,8 @@ async function runDaemonSupervisor(): Promise<void> {
     // packages/cli/src/daemon/supervisor-liveness.ts for the full rationale.
     const stopWatcher = await maybeStartSupervisorLivenessWatcher(child, livenessConfig);
 
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      child.once('exit', (code) => resolve(code));
+    const { code: rawExitCode, signal } = await new Promise<Omit<WorkerExit, 'pid'>>((resolve) => {
+      child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal }));
     });
     stopWatcher();
     const { forced, originalExitCode } = decodeForcedExitCode(rawExitCode);
@@ -179,6 +224,7 @@ async function runDaemonSupervisor(): Promise<void> {
           `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
       );
     }
+    await reportWorkerExit(describeWorkerExit({ pid: child.pid, code: rawExitCode, signal }, crashRestartCount, maxCrashRestarts));
 
     if (originalExitCode === DAEMON_EXIT_CODE_RESTART) {
       crashRestartCount = 0;
@@ -216,7 +262,9 @@ const foregroundWorkerIterationDependencies: ForegroundWorkerIterationDependenci
 };
 
 interface ForegroundWorkerIterationResult {
+  pid: number | undefined;
   rawExitCode: number | null;
+  signal: NodeJS.Signals | null;
   forced: boolean;
   originalExitCode: number | null;
 }
@@ -245,11 +293,11 @@ async function runForegroundWorkerIteration(input: {
       child,
       input.livenessConfig ?? resolveSupervisorLivenessConfig(input.childEnv),
     );
-    const rawExitCode = await new Promise<number | null>((resolve) => {
-      child.once('exit', (code) => resolve(code));
-      child.once('error', () => resolve(1));
+    const { code: rawExitCode, signal } = await new Promise<Omit<WorkerExit, 'pid'>>((resolve) => {
+      child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal }));
+      child.once('error', () => resolve({ code: 1, signal: null }));
     });
-    return { rawExitCode, ...decodeForcedExitCode(rawExitCode) };
+    return { pid: child.pid, rawExitCode, signal, ...decodeForcedExitCode(rawExitCode) };
   } finally {
     stopWatcher?.();
     input.onChild?.(null);
@@ -281,13 +329,19 @@ async function runForegroundSupervisor(
         livenessConfig,
         onChild: (child) => { currentChild = child; },
       });
-      const { rawExitCode, forced, originalExitCode } = decision;
+      const { pid, rawExitCode, signal, forced, originalExitCode } = decision;
       if (forced) {
         console.warn(
           `[supervisor] previous worker forced-exited (code ${rawExitCode}; original intent ${originalExitCode}). ` +
             `Shutdown cleanup deadlocked — see worker logs for [shutdown-timeout].`,
         );
       }
+      await reportWorkerExit(describeWorkerExit(
+        { pid, code: rawExitCode, signal },
+        crashRestartCount,
+        maxCrashRestarts,
+        { stopping: signalled },
+      ));
 
       if (signalled) process.exit(originalExitCode ?? 0);
 
@@ -314,6 +368,7 @@ async function runForegroundSupervisor(
 export {
   appendSupervisorLog,
   supervisorWarn,
+  describeWorkerExit,
   maybeStartSupervisorLivenessWatcher,
   runForegroundWorkerIteration,
   runDaemonSupervisor,

@@ -19,6 +19,7 @@ import {
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
 import { parseJobListPagingOptions, readJobList } from '../job-list-paging.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
+import { printAsyncJobFailure } from './async-job-failure.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -220,11 +221,14 @@ function formatLifecycleDetail(value: unknown): string {
   }
 }
 
-async function runAction(action: () => Promise<void>): Promise<void> {
+async function runAction(
+  action: () => Promise<void>,
+  printFailure: (err: unknown) => void = (err) => console.error(toErrorMessage(err)),
+): Promise<void> {
   try {
     await action();
   } catch (err) {
-    console.error(toErrorMessage(err));
+    printFailure(err);
     process.exit(1);
   }
 }
@@ -411,7 +415,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       console.log('Knowledge asset share job accepted:');
       console.log(`  Job ID:  ${result.jobId}`);
       console.log(`  State:   ${result.state}`);
-    }));
+    }, (err) => printAsyncJobFailure(err, 'share')));
 
   addContextGraphOption(
     kaCmd
@@ -533,7 +537,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       console.log(`  Status:     ${result.status}`);
       if (result.shareOperationId) console.log(`  Share op:   ${result.shareOperationId}`);
       if (result.intentKey) console.log(`  Intent key: ${result.intentKey}`);
-    }));
+    }, (err) => printAsyncJobFailure(err, 'publish', opts)));
 
   addSubGraphOption(addContextGraphOption(
     kaCmd

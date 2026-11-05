@@ -48,6 +48,14 @@ It is on by default. To turn it off, set `DKG_WRITE_PREFLIGHT_COALESCING=0` in t
 
 A share that fails with a retryable error gets up to 5 attempts in all. The wait starts at about 1 minute and doubles each time, up to 15 minutes. To change this, set `maxRetries`, `retryBaseMs` or `retryMaxMs` in a `promoteQueue` block in `~/.dkg/config.json`. A new attempt limit applies only to new jobs; each job shows its limit as `maxAttempts`. An invalid value stops the daemon from starting.
 
+A job's `attempts` counts the attempts made within its limit, so it never exceeds `maxAttempts`. Three recovery rules can run a job past its limit, and the attempts they add are shown on their own as `recoveryAttempts` (absent when there are none):
+
+- A failure whose prerequisite is temporarily unavailable keeps the job retrying, on the same backoff, until an hour after it was queued.
+- A synchronous share keeps retrying a recognized transient failure until it completes or needs inspection.
+- An attempt whose worker stopped before the share changed anything, for example in a restart, runs again.
+
+Recovering a job starts both counts from zero.
+
 A job that runs out of attempts stays `failed`. Read its last error, fix the cause, then recover it:
 
 ```bash

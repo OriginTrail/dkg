@@ -97,6 +97,7 @@ import {
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
+  respondRetryablePublishAuthorityError,
 } from './knowledge-assets-error-mapping.js';
 
 import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from './confirmed-catalog-obligation.js';
@@ -1608,6 +1609,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, noFundedPublisherWalletBody(msg));
         }
         if (respondIfPcaFundingUnknown(res, e)) return;
+        if (respondRetryablePublishAuthorityError(res, e, { contextGraphId, name, subGraphName })) return;
         // A transient chain-RPC transport failure (all endpoints exhausted /
         // receipt lookup failed / timeout) is retryable -> 503/504, matching
         // /api/context-graph/register. Keyed strictly on err.code, so an

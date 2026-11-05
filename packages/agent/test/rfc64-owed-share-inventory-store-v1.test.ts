@@ -77,6 +77,10 @@ describe('RFC-64 owed share inventory store', () => {
     const second = { ...MARKER, shareOperationId: 'swm-share-op-2' };
     await first.owedShareInventories.put(second);
     expect(first.owedShareInventories.list()).toEqual([MARKER, second]);
+    // The owner keeps a failed attempt's pause on this object, so it stays one object while kept.
+    const [kept] = first.owedShareInventories.list();
+    expect(first.owedShareInventories.list()[0]).toBe(kept);
+    expect(Object.isFrozen(kept)).toBe(true);
     await first.close();
     expect(() => first.owedShareInventories.list()).toThrow('closed');
 
