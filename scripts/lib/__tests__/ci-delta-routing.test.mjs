@@ -526,10 +526,11 @@ test('the Blazegraph lane covers agent live suites and scoped query catalogs', (
   const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
   assert.equal(job.if, "needs.changes.outputs.tornado_blazegraph == 'true'");
   assert.ok(job.steps.some(({ run = '' }) => run.includes('dkg-agent exec vitest run --config vitest.blazegraph.config.ts')));
-  assert.ok(job.steps.some(({ run = '' }) => run.includes('DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts')));
+  assert.ok(job.steps.some(({ run = '' }) => run.includes('DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run --no-file-parallelism test/scoped-catalog-backend.test.ts test/labelled-blank-node-graph-scope.test.ts')));
   for (const filePath of [
     'packages/query/src/scoped-content-graph-catalog.ts',
     'packages/query/test/scoped-catalog-backend.test.ts',
+    'packages/query/test/labelled-blank-node-graph-scope.test.ts',
     'packages/agent/test-live/rfc64-legacy-swm-boundary-v1.blazegraph.test.ts',
     'packages/agent/src/dkg-agent.ts',
     'packages/core/src/index.ts',

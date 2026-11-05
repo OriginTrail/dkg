@@ -14,6 +14,7 @@ import {
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
+import { graphPatternCopies } from './sparql-pattern-copies.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -190,8 +191,9 @@ export function wrapWithGraphUnion(
     ));
   }
   if (hasUnion) return unsupported('nested-union');
+  const copy = graphPatternCopies(scope);
   const branches = graphUris
-    .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${inner} } }`)
+    .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${copy()} } }`)
     .join(' UNION ');
   return ready(transitionGraphScope(scope, `${before} ${branches} ${after}`));
 }
@@ -323,16 +325,18 @@ export function wrapWithDeduplicatedGraphValues(
         const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
         return `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`;
       }
+      const copy = graphPatternCopies(input);
+      const firstPattern = copy();
       const rows = graphs
         .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
         .join(' ');
       return [
         `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
-        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
+        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${firstPattern} }`,
         'FILTER NOT EXISTS {',
         `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
         `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
-        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
+        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${copy()} }`,
         '}',
       ].join(' ');
     },
