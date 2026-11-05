@@ -13,7 +13,7 @@ import {
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
+import { applyGraphDataset } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
@@ -117,24 +117,12 @@ export function assertExplicitGraphIrisAllowed(
   }
 }
 
-function scopeGraphlessDescribe(
-  scope: PreparedGraphScope,
-  graphUris: readonly string[],
-): string | null {
-  if (scope.operation !== 'DESCRIBE' || scope.where !== null) return null;
-  return withDatasetClauses(scope, graphUris, 'FROM');
-}
-
 export function wrapWithGraph(
   scope: PreparedGraphScope,
   graphUri: string,
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
-  if (!scope.where) {
-    const describe = scopeGraphlessDescribe(scope, [graphUri]);
-    if (describe !== null) return ready(transitionGraphScope(scope, describe));
-    return unsupported('missing-where');
-  }
+  if (!scope.where) return unsupported('missing-where');
   const { openEnd, close } = scope.where;
   const before = scope.source.slice(0, openEnd);
   const inner = scope.source.slice(openEnd, close);
@@ -151,11 +139,7 @@ export function wrapWithGraphUnion(
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
-  if (!scope.where) {
-    const describe = scopeGraphlessDescribe(scope, graphUris);
-    if (describe !== null) return ready(transitionGraphScope(scope, describe));
-    return unsupported('missing-where');
-  }
+  if (!scope.where) return unsupported('missing-where');
   const { openEnd, close, hasUnion } = scope.where;
   const before = scope.source.slice(0, openEnd);
   const inner = scope.source.slice(openEnd, close);

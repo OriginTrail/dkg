@@ -101,7 +101,7 @@ describe('planGraphDataset', () => {
     ['ASK { ?s <urn:p>* ?o }', 'none', 'dataset-only'],
     ['CONSTRUCT { ?s ?p ?o } WHERE { { SELECT ?s ?p ?o WHERE { ?s ?p ?o } } }', 'dataset-only', 'dataset-only'],
     ['DESCRIBE ?s WHERE { ?s ?p ?o }', 'none', 'describe'],
-    ['DESCRIBE <urn:s>', 'none', 'describe'],
+    ['DESCRIBE <urn:s>', 'describe', 'describe'],
     ['DESCRIBE ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', 'dataset-only', 'describe'],
   ] as const)('%s takes %s on Oxigraph and %s elsewhere', (query, oxigraph, other) => {
     expect(planGraphDataset(scope(query), 'oxigraph')).toBe(oxigraph);
@@ -235,11 +235,6 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
       expect(rewritten).toContain('GRAPH ?__dkgDedupGraph');
     });
 
-    it('keeps a graphless DESCRIBE as it was', () => {
-      expect(ready(rewriteGraphSet(scope('DESCRIBE <urn:s>'), graphs, 'values-union', null)))
-        .toContain('DESCRIBE <urn:s> FROM <urn:g:1> FROM <urn:g:2>');
-    });
-
     it('refuses a caller GRAPH clause with a clear reason', () => {
       for (const query of ['DESCRIBE ?s WHERE { GRAPH <urn:g:1> { ?s <urn:p> ?o } }', 'DESCRIBE <urn:s> WHERE { GRAPH ?g { ?s <urn:p> ?o } }']) {
         expect(() => rewriteGraphSet(scope(query), graphs, 'values-union', null)).toThrow(/DESCRIBE cannot be combined with a GRAPH clause/);
@@ -251,6 +246,16 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
       const query = scope('DESCRIBE ?s WHERE { GRAPH <urn:g:1> { ?s <urn:p> ?o } }');
       expect(rewriteGraphSet(query, graphs, 'values-union', 'oxigraph')).toEqual({ kind: 'ready', value: query });
     });
+  });
+
+  it.each(['oxigraph', null] as const)('scopes a graphless DESCRIBE through the dataset on %s', (engine) => {
+    const query = scope('DESCRIBE <urn:s> LIMIT 1');
+    expect(ready(rewriteSingleGraph(query, graphs[0], engine)))
+      .toBe('DESCRIBE <urn:s> FROM <urn:g:1> LIMIT 1');
+    for (const policy of ['values-union', 'union-only', 'deduplicated-values-union'] as const) {
+      expect(ready(rewriteGraphSet(query, graphs, policy, engine)))
+        .toBe('DESCRIBE <urn:s> FROM <urn:g:1> FROM <urn:g:2> LIMIT 1');
+    }
   });
 
   it('leaves Oxigraph DESCRIBE on the rewrite it had', () => {

@@ -111,7 +111,7 @@ const pairsOf = (prefixes: readonly string[], pairs: readonly (readonly [string,
 interface PathForm {
   readonly name: string;
   readonly pattern: string;
-  /** Known nonzero-length matches; nullable paths may also return backend-specific zero-length rows. */
+  /** Complete nonzero-length result bag; zero-length rows use a direct-store oracle. */
   readonly pairs: readonly (readonly [string, string])[];
   readonly nullable?: true;
 }
@@ -123,7 +123,9 @@ const PATHS: readonly PathForm[] = [
   { name: '?', pattern: `?s <${L}>? ?o`, pairs: [['1', '2'], ['2', '3']], nullable: true },
   { name: '(a/b)+', pattern: `?s (<${A}>/<${B}>)+ ?o`, pairs: [['s', 'm2'], ['s', 'm4'], ['m2', 'm4']] },
   { name: '(a/b)*', pattern: `?s (<${A}>/<${B}>)* ?o`, pairs: [['s', 'm2'], ['s', 'm4'], ['m2', 'm4']], nullable: true },
-  { name: '(a|b)*', pattern: `?s (<${A}>|<${B}>)* ?o`, pairs: [['s', 'm1'], ['s', 'm2'], ['s', 'm3'], ['s', 'm4']], nullable: true },
+  { name: '(a|b)*', pattern: `?s (<${A}>|<${B}>)* ?o`, pairs: [
+    ['s', 'm1'], ['s', 'm2'], ['s', 'm3'], ['s', 'm4'], ['m1', 'm2'], ['m1', 'm3'], ['m1', 'm4'], ['m2', 'm3'], ['m2', 'm4'], ['m3', 'm4'],
+  ], nullable: true },
   { name: '(a|b)+', pattern: `?s (<${A}>|<${B}>)+ ?o`, pairs: [
     ['s', 'm1'], ['s', 'm2'], ['s', 'm3'], ['s', 'm4'], ['m1', 'm2'], ['m1', 'm3'], ['m1', 'm4'], ['m2', 'm3'], ['m2', 'm4'], ['m3', 'm4'],
   ] },
@@ -144,6 +146,30 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
   const select = async (sparql: string, options: QueryOptions) => (await read(sparql, options)).bindings;
   const quadsOf = async (sparql: string, options: QueryOptions) => (await read(sparql, options)).quads ?? [];
   const ask = async (sparql: string, options: QueryOptions) => (await read(sparql, options)).bindings[0]?.result;
+  const zeroLengthRows = new Map<string, Row[]>();
+
+  async function expectPathRows(found: Row[], path: PathForm, graphs: Route['graphs'], withGraph = false): Promise<void> {
+    const nonzero = graphs.flatMap(([g, prefix]) => pairsOf([prefix], path.pairs)
+      .map(row => withGraph ? { g, ...row } : row));
+    expect(bag(found.filter(row => row.s !== row.o))).toEqual(bag(nonzero));
+    const zero: Row[] = [];
+    if (path.nullable) {
+      for (const [g] of graphs) {
+        const key = `${g}\n${path.pattern}`;
+        let native = zeroLengthRows.get(key);
+        if (!native) {
+          // Bypass every DKG rewrite. A constant graph evaluated directly by
+          // this backend supplies its zero-length semantics independently.
+          native = (await store.query(`SELECT ?s ?o WHERE { GRAPH <${g}> { ${path.pattern} } FILTER(?s = ?o) }`)).bindings;
+          expect(native.length).toBeGreaterThan(0);
+          expect(native.filter(fromUnlistedGraph)).toEqual([]);
+          zeroLengthRows.set(key, native);
+        }
+        zero.push(...native.map(row => withGraph ? { g, ...row } : row));
+      }
+    }
+    expect(bag(found.filter(row => row.s === row.o))).toEqual(bag(zero));
+  }
 
   beforeAll(async () => {
     store = endpoint ? new BlazegraphStore(endpoint, { timeout: 20_000 }) : new OxigraphStore();
@@ -169,7 +195,8 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
   describe.each(ROUTES)('$name', (route) => {
     const prefixes = prefixesOf(route);
 
-    it.each(PATHS)('SELECT with $name stays on the list', async ({ name, pattern, pairs, nullable }) => {
+    it.each(PATHS)('SELECT with $name stays on the list', async (path) => {
+      const { name, pattern } = path;
       const sparql = `SELECT ?s ?o WHERE { ${pattern} }`;
       // Blazegraph doesn't accept this alternative inside a UNION branch.
       if (endpoint && route.branches && name === 'a|b+') {
@@ -178,8 +205,7 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       }
       const found = await select(sparql, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
-      const expected = bag(pairsOf(prefixes, pairs));
-      expect(bag(found)).toEqual(nullable ? expect.arrayContaining(expected) : expected);
+      await expectPathRows(found, path, route.graphs);
     });
 
     it('a path from a listed term stops where the list ends', async () => {
@@ -341,11 +367,11 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
   }
 
   describe.each(MAIN_ROUTES)('a caller GRAPH clause on $name', (route) => {
-    it.each(PATHS)('GRAPH ?g with $name stays on the list', async ({ pattern, pairs, nullable }) => {
+    it.each(PATHS)('GRAPH ?g with $name stays on the list', async (path) => {
+      const { pattern } = path;
       const found = await select(`SELECT ?g ?s ?o WHERE { GRAPH ?g { ${pattern} } }`, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
-      const expected = bag(route.graphs.flatMap(([g, prefix]) => pairsOf([prefix], pairs).map(row => ({ g, ...row }))));
-      expect(bag(found)).toEqual(nullable ? expect.arrayContaining(expected) : expected);
+      await expectPathRows(found, path, route.graphs, true);
     });
 
     it('GRAPH ?g names the graph holding each path', async () => {
@@ -374,7 +400,7 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       const values = route.graphs.map(([graph]) => `<${graph}>`).join(' ');
       const found = await select(`SELECT ?g ?s ?o WHERE { VALUES ?g { ${values} } GRAPH ?g { ?s (<${A}>|<${B}>)* ?o } }`, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
-      expect(found).toEqual(expect.arrayContaining(route.graphs.map(([g, prefix]) => ({ g, s: `${prefix}:s`, o: `${prefix}:m4` }))));
+      await expectPathRows(found, PATHS.find(path => path.name === '(a|b)*')!, route.graphs, true);
     });
 
     it('a nested SELECT inside GRAPH ?g stays on the list', async () => {
@@ -488,11 +514,11 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
   describe('a context graph with one graph', () => {
     const options: QueryOptions = { contextGraphId: SOLO_ID };
 
-    it.each(PATHS)('SELECT with $name stays on the list', async ({ pattern, pairs, nullable }) => {
+    it.each(PATHS)('SELECT with $name stays on the list', async (path) => {
+      const { pattern } = path;
       const found = await select(`SELECT ?s ?o WHERE { ${pattern} }`, options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
-      const expected = bag(pairsOf(['urn:listed:solo'], pairs));
-      expect(bag(found)).toEqual(nullable ? expect.arrayContaining(expected) : expected);
+      await expectPathRows(found, path, [[SOLO, 'urn:listed:solo']]);
     });
 
     it('a nested SELECT stays on the list', async () => {

@@ -57,6 +57,8 @@ export function planGraphDataset(
   scope: PreparedSparqlQuery,
   engine: SparqlEngineFamily | null,
 ): GraphDatasetRoute {
+  // With no WHERE pattern to rewrite, only the dataset can scope a description.
+  if (scope.operation === 'DESCRIBE' && !scope.where) return 'describe';
   const nestedSelect = hasNestedSelect(scope);
   // GRAPH wrappers do not cover projection/modifier expressions or default
   // patterns beside a caller GRAPH. Give those reads an authorized default graph.
@@ -119,7 +121,7 @@ export function applyGraphDataset<Reason extends string>(
   }
   const result = (route === 'describe' && !scope.where) || readsOnlyDeclaredNamedSet(scope) ? sparqlRewriteReady(scope)
     : rewrite(route === 'describe' ? 'dataset-only' : route);
-  if (route === 'none' || result.kind !== 'ready' || result.value.hasDatasetClause) return result;
+  if (route === 'none' || result.kind !== 'ready') return result;
   let rewritten = result.value;
   if (route === 'dataset-only' && engine !== 'oxigraph' && scope.graphVariables.length && hasRepeatedPath(scope)) {
     rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
