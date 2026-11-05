@@ -1,4 +1,16 @@
 /**
+ * The header's node status: Connecting until the first status arrives, then
+ * Syncing or Synced. Only Synced is a confirmation, so only it is green.
+ */
+export function headerNodeStatus(
+  statusLoaded: boolean,
+  synced: boolean,
+): { word: string; tone: 'success' | 'pending' } {
+  if (!statusLoaded) return { word: 'Connecting', tone: 'pending' };
+  return synced ? { word: 'Synced', tone: 'success' } : { word: 'Syncing', tone: 'pending' };
+}
+
+/**
  * Render the multiline tooltip surfaced on the global header status
  * pill (BUG-020). Operators previously had no way to see the
  * direct/relayed connection breakdown or the node uptime without

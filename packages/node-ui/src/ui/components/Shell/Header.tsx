@@ -3,7 +3,8 @@ import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 import { NotificationsBell } from './NotificationsBell.js';
-import { formatPeerStatusTooltip } from '../../lib/formatPeerStatus.js';
+import { Badge } from '../ds/Badge.js';
+import { formatPeerStatusTooltip, headerNodeStatus } from '../../lib/formatPeerStatus.js';
 
 /** OriginTrail wordmark — same paths as `v9-stable` packages/node-ui App.tsx sidebar. */
 const ORIGINTRAIL_WORDMARK = (
@@ -70,7 +71,10 @@ export function Header() {
   const uptimeMs = nodeStatus?.uptimeMs ?? 0;
   const statusLoaded = nodeStatus != null;
   const synced = statusLoaded && nodeStatus?.synced !== false;
-  const peerStatusLabel = formatPeerStatusTooltip(synced, connectedPeers, directConns, relayedConns, uptimeMs);
+  const nodeState = headerNodeStatus(statusLoaded, synced);
+  const peerStatusLabel = statusLoaded
+    ? formatPeerStatusTooltip(synced, connectedPeers, directConns, relayedConns, uptimeMs)
+    : 'Connecting to the node';
 
   return (
     <header className="v10-header">
@@ -107,10 +111,13 @@ export function Header() {
       <div className="v10-header-spacer" />
 
       <div className="v10-header-meta" title={peerStatusLabel}>
-        <span className={`v10-header-status-dot ${synced ? 'online' : 'offline'}`} />
-        <span>{synced ? 'synced' : 'syncing'}</span>
-        <span className="v10-header-meta-sep">·</span>
-        <span>{connectedPeers} peer{connectedPeers !== 1 ? 's' : ''}</span>
+        <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
+        {statusLoaded && (
+          <>
+            <span className="v10-header-meta-sep">·</span>
+            <span>{connectedPeers} peer{connectedPeers !== 1 ? 's' : ''}</span>
+          </>
+        )}
       </div>
 
       <div className="v10-header-actions">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatPeerStatusTooltip } from '../src/ui/lib/formatPeerStatus.js';
+import { formatPeerStatusTooltip, headerNodeStatus } from '../src/ui/lib/formatPeerStatus.js';
 
 /**
  * The status pill in the global header now exposes a multiline tooltip
@@ -9,6 +9,17 @@ import { formatPeerStatusTooltip } from '../src/ui/lib/formatPeerStatus.js';
  * a copy regression (e.g. "0 peers (0 direct, 0 relayed)" silently
  * becoming "0 peer (0 direct, 0 relayed)") is caught.
  */
+describe('headerNodeStatus', () => {
+  it('says Connecting, neutral, before any status has loaded', () => {
+    expect(headerNodeStatus(false, false)).toEqual({ word: 'Connecting', tone: 'pending' });
+  });
+
+  it('is green only when synced; Syncing stays neutral', () => {
+    expect(headerNodeStatus(true, true)).toEqual({ word: 'Synced', tone: 'success' });
+    expect(headerNodeStatus(true, false)).toEqual({ word: 'Syncing', tone: 'pending' });
+  });
+});
+
 describe('formatPeerStatusTooltip (BUG-020)', () => {
   it('reports the synced + plural peer counts with both connection breakdowns', () => {
     const out = formatPeerStatusTooltip(true, 12, 7, 5, 2 * 86_400_000);
