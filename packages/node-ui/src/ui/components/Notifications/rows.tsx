@@ -21,7 +21,7 @@ import type {
 } from '../../hooks/useNotificationsFeed.js';
 import { AgentDot } from '../AgentDot.js';
 import { ContextGraphChip } from '../ds/ContextGraphChip.js';
-import { BadgePercent, Check, KeyRound, Plus, X } from 'lucide-react';
+import { BadgePercent, Check, KeyRound, Plus, X, RefreshCw } from 'lucide-react';
 import { LayerGlyph } from '../ds/Badge.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
@@ -116,7 +116,7 @@ export function JoinRequestRow({
           <div className="v10-notif-row-error" role="status" aria-live="polite">
             {phase.message}{' '}
             <button type="button" className="v10-notif-retry" onClick={() => run(phase.action)}>
-              Retry
+              <RefreshCw size={12} />Retry
             </button>
           </div>
         )}

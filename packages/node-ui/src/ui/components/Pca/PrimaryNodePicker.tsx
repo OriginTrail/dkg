@@ -1,6 +1,6 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
-import { Check } from 'lucide-react';
+import { Check, RefreshCw } from 'lucide-react';
 import { Loading } from '../ds/Loading.js';
 
 // The picker's prop type is intentionally separate from the API's `DesignatableNode`: the picker
@@ -148,7 +148,7 @@ export function PrimaryNodePicker({
             data-testid="pca-primary-node-retry"
             onClick={onRetry}
           >
-            Retry
+            <RefreshCw size={12} />Retry
           </button>
           {/* Surface the best-effort default (core fell back to its own id) so it isn't
               invisible while the list is down. */}

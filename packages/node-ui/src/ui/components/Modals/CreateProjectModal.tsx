@@ -9,7 +9,7 @@ import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
-import { ChevronRight, X } from 'lucide-react';
+import { ChevronRight, X, RefreshCw } from 'lucide-react';
 
 function slugify(str: string): string {
   return str
@@ -570,7 +570,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
             <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
-              {identityLoading ? 'Retrying…' : 'Retry Loading Agent'}
+              {identityLoading ? 'Retrying…' : <><RefreshCw size={12} />Retry Loading Agent</>}
             </button>
           )}
           <button

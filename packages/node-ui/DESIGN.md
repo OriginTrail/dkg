@@ -121,7 +121,7 @@ Sizes `sm` 24 (11px text), `md` 32 (default, 12px text), `lg` 40. `icon` makes i
 
 One set, one icon per job:
 
-- **Lucide** (`lucide-react`) for actions and things: `X` closes, `RefreshCw` refreshes, `Copy` copies, `ChevronRight` and `ChevronDown` expand, `BadgePercent` means a discount.
+- **Lucide** (`lucide-react`) for actions and things: `X` closes, `RefreshCw` refreshes and retries, on every Refresh and Retry button, `Copy` copies, `ChevronRight` and `ChevronDown` expand, `BadgePercent` means a discount.
 - **`LayerGlyph`** for memory layers. Nothing else uses those shapes.
 - **`StatusGlyph`** for success, warning, danger and pending, including inside a sentence.
 

@@ -16,6 +16,7 @@ import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge, Count } from '../../components/ds/Badge.js';
+import { RefreshCw } from 'lucide-react';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -257,7 +258,7 @@ export function ConvictionOverview() {
         ) : walletsInconclusive ? (
           <p className="v10-pca-overview-caveat" role="status">
             Couldn't read this node's wallets, so coverage can't be confirmed.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}><RefreshCw size={12} />Retry</button>
           </p>
         ) : (
           <p className="v10-pca-overview-caveat">No operational publishing wallets were reported by this node.</p>
@@ -394,7 +395,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-discovered-error" role="status">
           <p className="v10-pca-overview-caveat">
             Couldn&apos;t verify this node&apos;s Publisher Conviction Accounts; approved PCA coverage may still exist.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshDiscovered()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshDiscovered()}><RefreshCw size={12} />Retry</button>
           </p>
         </section>
       )}
@@ -403,7 +404,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-wallet-bootstrap-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t load wallet contract bootstrap, so connected-wallet PCA discovery is paused.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}><RefreshCw size={12} />Retry</button>
           </p>
         </section>
       )}
@@ -412,7 +413,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-wallet-discovery-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t read PCAs owned by the connected wallet. Existing tracked PCAs are still shown.{' '}
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={connectedWalletPcas.refresh}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={connectedWalletPcas.refresh}><RefreshCw size={12} />Retry</button>
           </p>
         </section>
       )}

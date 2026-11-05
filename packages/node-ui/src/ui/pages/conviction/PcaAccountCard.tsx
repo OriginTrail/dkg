@@ -10,7 +10,7 @@ import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
-import { BadgePercent, Wallet } from 'lucide-react';
+import { BadgePercent, Wallet, RefreshCw } from 'lucide-react';
 
 /** The owner-mode union — re-exported from the owner-access model (no longer re-declared
  *  here) so existing importers keep a stable name. */
@@ -87,7 +87,7 @@ export function PcaAccountCard({
           <p>Couldn’t load PCA #{accountId}.</p>
           {onRetry && (
             <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => onRetry(accountId)}>
-              Retry
+              <RefreshCw size={12} />Retry
             </button>
           )}
         </div>

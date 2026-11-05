@@ -38,6 +38,13 @@ describe('icons', () => {
     expect(found).toEqual([]);
   });
 
+  it('puts the refresh icon on every text Refresh and Retry button', () => {
+    const found = files
+      .filter((file) => file.endsWith('.tsx'))
+      .flatMap((file) => [...readFileSync(file, 'utf8').matchAll(/(?<!\/)>\s*(Retry|Refresh)[^<{\n]*<\/button>/g)].map(([m]) => `${relative(UI, file)}: ${m}`));
+    expect(found).toEqual([]);
+  });
+
   it('draws no symbol characters from CSS', () => {
     const found = files
       .filter((file) => file.endsWith('.css'))

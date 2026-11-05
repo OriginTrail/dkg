@@ -696,11 +696,11 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           </p>
           {cgAuthError ? (
             <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
-              <RefreshCw size={12} /> Refresh page
+              <RefreshCw size={12} />Refresh page
             </button>
           ) : (
             <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
-              Retry
+              <RefreshCw size={12} />Retry
             </button>
           )}
         </div>
@@ -759,14 +759,14 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             <>
               <span>{cgError}</span>
               <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
-                <RefreshCw size={12} /> Refresh page
+                <RefreshCw size={12} />Refresh page
               </button>
             </>
           ) : (
             <>
               <span>Couldn’t refresh context-graph data — showing last known values.</span>
               <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
-                Retry
+                <RefreshCw size={12} />Retry
               </button>
             </>
           )}
@@ -800,7 +800,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
             ? 'The resource detail read reached its limit. Some relationships may be missing. Use a narrower query to inspect them.'
             : 'This resource is referenced here, but has no details in this view.')}
-          {detailRead.error && <button onClick={detailRead.refresh}>Retry resource details</button>}
+          {detailRead.error && <button onClick={detailRead.refresh}><RefreshCw size={12} />Retry resource details</button>}
           {!selectedEntity && <button onClick={handleDetailClose}>Close resource</button>}
         </div>
       )}

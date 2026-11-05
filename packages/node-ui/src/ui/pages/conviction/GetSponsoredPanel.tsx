@@ -11,7 +11,7 @@ import {
   nativeGasSymbol,
   isTestnetChain,
 } from '../../components/Pca/index.js';
-import { Check } from 'lucide-react';
+import { Check, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
 
@@ -177,7 +177,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             ) : walletsReadError && wallets.length === 0 ? (
               <p className="v10-modal-error ds-card-nested" role="alert">
                 Couldn’t load your wallets.{' '}
-                <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}>Retry</button>
+                <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}><RefreshCw size={12} />Retry</button>
               </p>
             ) : wallets.length === 0 ? (
               <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>

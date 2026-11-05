@@ -8,6 +8,7 @@ import {
 } from './useIdentityWalletManagement.js';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
+import { RefreshCw } from 'lucide-react';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -96,7 +97,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {query.status === 'error' && (
         <p className="v10-modal-warning ds-card-nested" role="alert">
           Couldn&apos;t load identity wallet management: {query.message}.{' '}
-          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}><RefreshCw size={12} />Retry</button>
         </p>
       )}
       {data && !data.hasProfile && (
@@ -118,7 +119,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {summaryState.status === 'error' && (
         <p className="v10-modal-warning ds-card-nested" role="alert">
           Couldn&apos;t verify identity keys: {summaryState.message}{' '}
-          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}><RefreshCw size={12} />Retry</button>
         </p>
       )}
 

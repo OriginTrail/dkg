@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useLayoutStore } from '../stores/layout.js';
 import { applyTheme } from '../lib/applyTheme.js';
+import { RefreshCw } from 'lucide-react';
 
 /** A failed status probe must never present fabricated operational health. */
 export function NodeUnavailableView() {
@@ -14,7 +15,7 @@ export function NodeUnavailableView() {
         <p>Live node data could not be loaded. The node may be stopped, timing out or returning errors.</p>
         <p>Node status, balances, graphs and integration readiness are unavailable. Check the daemon, then reload to retry the connection.</p>
         <button type="button" className="v10-modal-btn primary ds-btn ds-primary" onClick={() => window.location.reload()}>
-          Retry connection
+          <RefreshCw size={12} />Retry connection
         </button>
       </section>
     </main>

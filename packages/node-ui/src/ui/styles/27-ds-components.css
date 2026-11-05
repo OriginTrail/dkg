@@ -463,5 +463,7 @@ body.light .ds-seg-item.active {
   font-size: var(--fs-control); color: var(--text-tertiary);
 }
 .ds-loading.ds-block { display: flex; justify-content: center; min-height: 96px; height: 100%; padding: 16px; box-sizing: border-box; }
+/* Plain buttons have no flex gap, so the icon brings its own. */
+button:not(.ds-btn) > .lucide-refresh-cw { margin-right: 6px; }
 .ds-spin { animation: ds-spin 1s linear infinite; }
 @keyframes ds-spin { to { transform: rotate(360deg); } }

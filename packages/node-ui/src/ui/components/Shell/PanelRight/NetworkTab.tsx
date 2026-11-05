@@ -177,7 +177,7 @@ export function NetworkTab(props: {
           {directCount} direct / {relayedCount} relayed
         </span>
         <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
-          <RefreshCw size={12} /> Refresh
+          <RefreshCw size={12} />Refresh
         </button>
       </div>
 

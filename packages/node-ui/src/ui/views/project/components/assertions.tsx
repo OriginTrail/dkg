@@ -180,7 +180,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}>Retry</button></div>;
+  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
 
   if (!assertions.length && !page?.nextCursor && pageIndex === 0) {
     return (
@@ -279,7 +279,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
           setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });
         }}>Next assertions</button>
-        <button disabled={busy !== null} onClick={refresh}><RefreshCw size={12} /> Refresh assertions</button>
+        <button disabled={busy !== null} onClick={refresh}><RefreshCw size={12} />Refresh assertions</button>
       </nav>
     </div>
   );

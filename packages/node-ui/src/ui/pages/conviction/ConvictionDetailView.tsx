@@ -26,7 +26,7 @@ import { eqAddress } from '../../web3/address.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
-import { BadgePercent } from 'lucide-react';
+import { BadgePercent, RefreshCw } from 'lucide-react';
 import { Loading } from '../../components/ds/Loading.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
@@ -69,7 +69,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
         <div className="card ds-card">
           <div className="card-body v10-pca-card-error">
             <p>Couldn’t load PCA #{accountId}.</p>
-            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}><RefreshCw size={12} />Retry</button>
           </div>
         </div>
       </div>
@@ -219,7 +219,7 @@ function DetailBody({
           <div className="v10-modal-warning ds-card-nested" role="status">
             ⓘ {ownerOnlyReason}{' '}
             {walletsUnreadable ? (
-              <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}>Retry</button>
+              <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}><RefreshCw size={12} />Retry</button>
             ) : (
               'Wallet probe stays available.'
             )}

@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond } from 'lucide-react';
+import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond, RefreshCw } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -625,7 +625,7 @@ export function DashboardView() {
           {cgsError ? 'Context Graph list could not be loaded. ' : ''}
           {identityError ? 'Agent identity could not be loaded. ' : ''}
           {myCgs.length ? 'Showing the last available graphs; counts may be incomplete. ' : 'Graph availability is unknown. '}
-          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}>Retry</button>
+          <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}><RefreshCw size={12} />Retry</button>
         </div>
       ) : null}
       <div className="v10-dash-stats v10-dash-stats-3">
