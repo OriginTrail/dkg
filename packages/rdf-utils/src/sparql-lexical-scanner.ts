@@ -41,6 +41,12 @@ export type SparqlLexicalToken =
   })
   | (SparqlLexicalTokenBase & { readonly kind: 'string' });
 
+/** Language tags and named solution-set identifiers are payloads, not keywords. */
+export function isSparqlWordPayload(tokens: readonly SparqlLexicalToken[], index: number): boolean {
+  const previous = tokens[index - 1];
+  return previous?.kind === 'symbol' && (previous.logicalValue === '@' || previous.logicalValue === '%');
+}
+
 interface PreparedSparqlCommon {
   /** Exact unprocessed input. */
   readonly source: string;

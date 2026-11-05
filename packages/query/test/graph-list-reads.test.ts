@@ -483,6 +483,15 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       }
       expect(bag(outcome)).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), [['1', '2'], ['2', '3']])));
     });
+
+    if (endpoint) {
+      it.each(['limit', 'order', 'values', 'from', 'service', 'graph', 'union', 'with'])('preserves a named subquery called %s on Blazegraph', async (name) => {
+        for (const keyword of ['WHERE ', '']) {
+          const source = `SELECT ?s ?o WITH { SELECT ?s ?o WHERE { ?s <${L}> ?o } } AS %${name} ${keyword}{ INCLUDE %${name} }`;
+          expect(bag(await select(source, options))).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), [['1', '2'], ['2', '3']])));
+        }
+      });
+    }
   });
 
   describe('a minimum trust level', () => {

@@ -11,6 +11,32 @@ function query(source: string) {
 }
 
 describe('prepared query boundaries', () => {
+  it.each(['limit', 'order', 'values', 'offset', 'having', 'group', 'where', 'from', 'service', 'graph', 'union', 'with', String.raw`l\u0069mit`])('keeps named solution set %s outside keyword scanning', (name) => {
+    for (const keyword of ['WHERE ', '']) {
+      const body = `{ INCLUDE %${name} }`;
+      const source = `SELECT ?s WITH { SELECT ?s WHERE { ?s ?p ?o } } AS %${name} ${keyword}${body}`;
+      const result = query(source);
+      expect(source.slice(result.where!.openStart, result.where!.close + 1)).toBe(body);
+      expect(result.datasetInsertionOffset).toBe(source.indexOf('WITH'));
+      expect(result.where!.hasUnion).toBe(false);
+      expect(result.hasDatasetClause).toBe(false);
+      expect(result.hasServiceClause).toBe(false);
+      expect(result.hasGraphClause).toBe(false);
+      expect(result.solutionModifiers).toEqual({ hasLimit: false, hasOffset: false, hasOrderBy: false, insertionOffset: source.length });
+    }
+  });
+
+  it('does not use a WITH declaration as a missing outer pattern', () => {
+    expect(query('SELECT ?s WITH { SELECT ?s WHERE { ?s ?p ?o } } AS %limit').where).toBeNull();
+  });
+
+  it('keeps real modifiers after multiple named declarations', () => {
+    const source = 'SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %limit WITH { SELECT ?s { INCLUDE %limit } } AS %values { INCLUDE %values } ORDER BY ?s LIMIT 2 OFFSET 1';
+    const result = query(source);
+    expect(source.slice(result.where!.openStart, result.where!.close + 1)).toBe('{ INCLUDE %values }');
+    expect(result.solutionModifiers).toEqual({ hasLimit: true, hasOffset: true, hasOrderBy: true, insertionOffset: source.length });
+  });
+
   it.each(['group', 'having', 'order', 'limit', 'offset', 'values', 'where'])('keeps a projection language tag @%s outside keyword scanning', (tag) => {
     for (const keyword of ['WHERE ', '']) {
       const source = `SELECT ("demo"@${tag} AS ?label) ${keyword}{ ?s ?p ?o }`;

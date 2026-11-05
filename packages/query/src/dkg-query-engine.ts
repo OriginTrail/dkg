@@ -361,7 +361,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     if (prepared.status === 'malformed-uchar') {
       throw new Error('SPARQL rejected: malformed Unicode code-point escape');
     }
-    if (prepared.wordTokens.has('SERVICE')) {
+    const initialGraphScope = prepareGraphScope(prepared);
+    if (initialGraphScope.hasServiceClause) {
       throw new Error('SPARQL rejected: SERVICE clauses are not allowed');
     }
     const guard = validateReadOnlySparql(prepared);
@@ -371,7 +372,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     // Policy checks and rewrites retain the prepared source/logical views.
     // Active UCHAR syntax is materialized once, immediately before the final
     // caller query crosses the store boundary.
-    const initialGraphScope = prepareGraphScope(prepared);
     if (options?.contextGraphId) assertNoCallerDatasetClauses(initialGraphScope);
     if (options?.subGraphName) {
       const validation = validateSubGraphName(options.subGraphName);

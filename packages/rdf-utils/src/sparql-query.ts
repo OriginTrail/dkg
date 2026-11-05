@@ -1,5 +1,6 @@
 import { readSolutionModifiers, type SparqlSolutionModifiers } from './sparql-solution-modifiers.js';
 import {
+  isSparqlWordPayload,
   type SparqlLexicalToken,
   type ValidPreparedSparql,
 } from './sparql-lexical-scanner.js';
@@ -106,7 +107,7 @@ export function readSparqlQueryBoundaries(
     if (structure.parentheses.depthBefore[index] !== parenthesisDepth) continue;
     const token = tokens[index];
     const previous = tokens[index - 1];
-    if (previous?.kind === 'symbol' && previous.logicalValue === '@') continue;
+    if (isSparqlWordPayload(tokens, index)) continue;
     if (token?.kind === 'word' && token.upper === 'WITH' && datasetStart === null) datasetStart = token.start;
     if (token?.kind === 'word' && token.upper === 'WHERE') {
       const next = tokens[index + 1];
@@ -122,6 +123,8 @@ export function readSparqlQueryBoundaries(
       break;
     }
     if (token?.kind === 'symbol' && token.logicalValue === '{') {
+      // WITH introduces a declaration body, not the outer query pattern.
+      if (previous?.kind === 'word' && previous.upper === 'WITH' && !isSparqlWordPayload(tokens, index - 1)) continue;
       topLevelOpenings.push(index);
     }
   }
@@ -146,7 +149,7 @@ export function readSparqlQueryBoundaries(
     closingIndex,
   ).some((index) => {
     const token = tokens[index];
-    return token?.kind === 'word' && token.upper === 'UNION';
+    return token?.kind === 'word' && token.upper === 'UNION' && !isSparqlWordPayload(tokens, index);
   });
   const datasetInsertionOffset = operation?.kind === 'word' && operation.upper === 'CONSTRUCT'
     && explicitOpening < 0 && topLevelOpenings.length < 2 ? null : datasetStart ?? tokens[openingIndex].start;
@@ -192,7 +195,7 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
 
   for (let index = 0; index < prepared.tokens.length; index++) {
     const token = prepared.tokens[index];
-    if (token.kind !== 'word') continue;
+    if (token.kind !== 'word' || isSparqlWordPayload(prepared.tokens, index)) continue;
     if (token.upper === 'FROM') hasDatasetClause = true;
     if (token.upper === 'SERVICE') hasServiceClause = true;
     if (token.upper !== 'GRAPH') continue;
