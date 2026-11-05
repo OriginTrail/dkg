@@ -407,8 +407,18 @@ describe('graph-set deduplication routes', () => {
     String.raw`?\u005F_dkgDedupMatchGraph`,
   ])('preserves logical helper-variable collision checks: %s', (variable) => {
     expect(wrapWithDeduplicatedGraphValues(
-      scope(`SELECT ${variable} WHERE { ?s <urn:p:value> ?o }`), graphs,
+      scope(`SELECT ${variable} WHERE { ?s <urn:p:link>/<urn:p:to> ?o }`), graphs,
     )).toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+  });
+
+  it.each(['?__dkgDedupFilter0', '?__dkgDedupMatchGraph'])('accepts %s when the DISTINCT route emits no such helper', async (variable) => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const rewritten = rewrite(`SELECT ?s WHERE { ?s <urn:p:value> ${variable} FILTER(RAND() < 2) FILTER(ISIRI(?s)) }`);
+      const actual = await store.query(rewritten.source);
+      expect(bag(actual.bindings)).toEqual(bag([{ s: 'urn:s:1' }, { s: 'urn:s:2' }, { s: 'urn:s:3' }]));
+    } finally { await store.close(); }
   });
 
   it('preserves explicit GRAPH, empty sets, single graphs and safe IRI checks', () => {
