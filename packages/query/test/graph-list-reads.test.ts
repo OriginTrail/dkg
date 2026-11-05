@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { contextGraphLayerUri, MemoryLayer, TRUST_LEVEL_PREDICATE, TrustLevel } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, SparqlHttpStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
@@ -117,6 +117,7 @@ const PATHS: readonly PathForm[] = [
 describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, { timeout: 30_000 }, () => {
   let store: TripleStore;
   let engine: DKGQueryEngine;
+  let directPathExpressionSupported = true;
   const read = (sparql: string, options: QueryOptions): Promise<QueryResult> => engine.query(sparql, options);
   const select = async (sparql: string, options: QueryOptions) => (await read(sparql, options)).bindings;
   const quadsOf = async (sparql: string, options: QueryOptions) => (await read(sparql, options)).quads ?? [];
@@ -126,6 +127,15 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     store = endpoint ? new BlazegraphStore(endpoint, { timeout: 20_000 }) : new OxigraphStore();
     await store.insert(data);
     engine = new DKGQueryEngine(store);
+    // Blazegraph 2.1.5 rejects this shape before DKG rewriting; 2.1.6 accepts it.
+    // Probe the backend itself so unsupported syntax is never counted as a
+    // successful isolation check, and other errors still fail the suite.
+    try {
+      await store.query('SELECT ?hit WHERE { BIND(EXISTS { <urn:s> <urn:p>+ ?z } AS ?hit) }');
+    } catch (error) {
+      if (!endpoint || !(error instanceof Error) || !error.message.includes('UnsupportedOperationException')) throw error;
+      directPathExpressionSupported = false;
+    }
   }, 30_000);
 
   afterAll(async () => {
@@ -183,8 +193,18 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     });
 
     it('an expression over a path sees only the list', async () => {
-      const found = await select(`SELECT ?s ?hit WHERE { ?s <${L}> ?o BIND(EXISTS { <urn:unlisted:a:1> <${L}>+ ?z } AS ?hit) }`, route.options);
-      expect(found.map(row => row.hit).filter(hit => hit !== undefined && !hit.includes('false'))).toEqual([]);
+      const expression = (subject: string) => `EXISTS { ${subject} <${L}>+ ?z }`;
+      if (!directPathExpressionSupported) {
+        await expect(select(`SELECT ?s ?hit WHERE { ?s <${L}> ?o BIND(${expression('<urn:unlisted:a:1>')} AS ?hit) }`, route.options))
+          .rejects.toThrow(/Blazegraph query failed \(500\)/);
+        return;
+      }
+      const found = await select(`SELECT ?s ?hit ?listed WHERE { ?s <${L}> ?o BIND(${expression('<urn:unlisted:a:1>')} AS ?hit) BIND(${expression('?s')} AS ?listed) }`, route.options);
+      expect(found).toHaveLength(prefixes.length * 2);
+      for (const row of found) {
+        expect(row.hit).toContain('false');
+        expect(row.listed).toContain('true');
+      }
     });
 
     it.each([
@@ -249,6 +269,11 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     ] as const)('%s describes from the list alone', async (_name, sparql) => {
       const described = await quadsOf(sparql(prefixes[0]), route.options);
       expect(described.filter(fromUnlistedGraph)).toEqual([]);
+      // Changed dataset routes must retain allowed descriptions, not just hide forbidden ones.
+      if (endpoint || _name === 'DESCRIBE ?var over a nested SELECT' || _name === 'DESCRIBE <iri>') {
+        expect(described.some(item => item.predicate === L && prefixes.some(prefix => item.subject.startsWith(`${prefix}:`))))
+          .toBe(true);
+      }
     });
 
     it('DESCRIBE of an unlisted subject finds nothing', async () => {
@@ -330,6 +355,13 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
 
     it('a query with no WHERE keyword stays on the list', async () => {
       const found = await select(`SELECT ?s ?o { ?s <${L}>+ ?o }`, options);
+      expect(found.filter(fromUnlistedGraph)).toEqual([]);
+    });
+
+    it('a compact SELECT projection keeps its variable token when adding the dataset', async () => {
+      const found = await select(`SELECT ?s{ { SELECT ?s WHERE { ?s <${L}> ?o } } }`, options);
+      expect(found).toHaveLength(prefixesOf(MAIN_ROUTES[0]).length * 2);
+      expect(found.every(row => typeof row.s === 'string')).toBe(true);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
     });
 
@@ -453,11 +485,23 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
 
       it.each([
         ['CONSTRUCT', `CONSTRUCT { ?s <urn:p:reaches> ?o } WHERE { ?s <${L}>+ ?o }`],
-        ['DESCRIBE', `DESCRIBE ?s WHERE { ?s <${L}> ?o }`],
+        ['DESCRIBE', `DESCRIBE ?s WHERE { { SELECT ?s WHERE { ?s <${L}> ?o } } }`],
       ])('%s carries nothing from an unlisted graph', async (_query, sparql) => {
-        const response = await lookup(sparql, deps, config);
-        expect(response.status).toBe('OK');
-        expect(JSON.stringify(response)).not.toContain('unlisted');
+        const captured: QueryResult[] = [];
+        const query = engine.query.bind(engine);
+        const spy = vi.spyOn(engine, 'query').mockImplementation(async (...args) => {
+          const result = await query(...args);
+          captured.push(result);
+          return result;
+        });
+        try {
+          const response = await lookup(sparql, deps, config);
+          expect(response.status).toBe('OK');
+          const quads = captured.flatMap(result => result.quads ?? []);
+          expect(quads.length).toBeGreaterThan(0);
+          expect(quads.some(item => item.subject === 'urn:listed:root:1')).toBe(true);
+          expect(quads.filter(fromUnlistedGraph)).toEqual([]);
+        } finally { spy.mockRestore(); }
       });
     });
   });

@@ -65,6 +65,12 @@ export function planGraphDataset(
 /** Dataset clauses go after the projection or CONSTRUCT template, before any group. */
 function datasetClauseOffset(scope: PreparedSparqlQuery): number | null {
   const { tokens, prologue } = scope.prepared;
+  if (scope.operation === 'DESCRIBE' && scope.where === null) {
+    const modifiers = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'VALUES']);
+    const modifier = tokens.slice(prologue.endTokenIndex + 1)
+      .find(token => token.kind === 'word' && modifiers.has(token.upper));
+    return modifier?.start ?? tokens.at(-1)?.end ?? null;
+  }
   let index = prologue.endTokenIndex + 1;
   if (scope.operation === 'CONSTRUCT' && isSymbol(tokens[index], '{')) {
     index = scope.structure.braces.matchingTokenIndexes[index] + 1;
@@ -87,12 +93,16 @@ function datasetClauseOffset(scope: PreparedSparqlQuery): number | null {
 export function withDatasetClauses(
   scope: PreparedSparqlQuery,
   graphs: readonly string[],
-  keyword: 'FROM' | 'FROM NAMED',
+  keyword: 'FROM' | 'FROM NAMED' | readonly ('FROM' | 'FROM NAMED')[],
 ): string | null {
   const offset = datasetClauseOffset(scope);
   if (offset === null) return null;
-  const clauses = [...new Set(graphs)].map((graph) => `${keyword} <${assertSafeIri(graph)}>`).join(' ');
-  return `${scope.source.slice(0, offset)}${clauses} ${scope.source.slice(offset)}`;
+  const keywords = typeof keyword === 'string' ? [keyword] : keyword;
+  const clauses = keywords.flatMap(clause => [...new Set(graphs)]
+    .map(graph => `${clause} <${assertSafeIri(graph)}>`)).join(' ');
+  const before = scope.source.slice(0, offset);
+  const separator = /\s$/.test(before) ? '' : ' ';
+  return `${before}${separator}${clauses} ${scope.source.slice(offset)}`;
 }
 
 /**
@@ -111,9 +121,14 @@ export function applyGraphDataset<Reason extends string>(
   if (route === 'describe' && scope.hasGraphClause) {
     throw new ScopedQueryViolationError('DESCRIBE cannot be combined with a GRAPH clause on this store');
   }
-  const result = route === 'describe' && scope.where ? sparqlRewriteReady(scope) : rewrite(route);
+  const result = route === 'describe' ? sparqlRewriteReady(scope) : rewrite(route);
   if (route === 'none' || result.kind !== 'ready' || result.value.hasDatasetClause) return result;
-  const source = withDatasetClauses(result.value, graphs, route === 'describe' ? 'FROM' : 'FROM NAMED');
+  // A nested DESCRIBE still matches inside GRAPH, but its description reads the
+  // default graph. Both parts must see the same allowlist; FROM NAMED alone
+  // leaves the default graph empty and silently loses every description.
+  const keywords = route === 'describe' ? 'FROM'
+    : scope.operation === 'DESCRIBE' ? ['FROM', 'FROM NAMED'] as const : 'FROM NAMED';
+  const source = withDatasetClauses(result.value, graphs, keywords);
   if (source === null) return sparqlRewriteUnsupported('missing-where');
   const prepared = prepareSparql(source);
   if (prepared.status !== 'valid') throw new ScopedQueryViolationError('graph rewrite produced malformed SPARQL');

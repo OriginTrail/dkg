@@ -112,6 +112,7 @@ describe('withDatasetClauses', () => {
   it.each([
     ['SELECT ?s WHERE { ?s ?p ?o }', `SELECT ?s ${NAMED} WHERE { ?s ?p ?o }`],
     ['SELECT ?s { ?s ?p ?o }', `SELECT ?s ${NAMED} { ?s ?p ?o }`],
+    ['SELECT ?s{ ?s ?p ?o }', `SELECT ?s ${NAMED} { ?s ?p ?o }`],
     ['select distinct ?s where { ?s ?p ?o }', `select distinct ?s ${NAMED} where { ?s ?p ?o }`],
     ['SELECT (EXISTS { ?a ?b ?c } AS ?x) WHERE { ?s ?p ?o }', `SELECT (EXISTS { ?a ?b ?c } AS ?x) ${NAMED} WHERE { ?s ?p ?o }`],
     ['ASK { ?s ?p ?o }', `ASK ${NAMED} { ?s ?p ?o }`],
@@ -132,8 +133,12 @@ describe('withDatasetClauses', () => {
       .toBe(`DESCRIBE ?s ${DEFAULT} WHERE { ?s ?p ?o }`);
   });
 
-  it('has no place for clauses in a query without a group', () => {
-    expect(withDatasetClauses(scope('DESCRIBE <urn:s> LIMIT 1'), graphs, 'FROM')).toBeNull();
+  it.each([
+    ['DESCRIBE <urn:s>', `DESCRIBE <urn:s> ${DEFAULT} `],
+    ['DESCRIBE <urn:s> LIMIT 1', `DESCRIBE <urn:s> ${DEFAULT} LIMIT 1`],
+    ['DESCRIBE ?s VALUES ?s { <urn:s> }', `DESCRIBE ?s ${DEFAULT} VALUES ?s { <urn:s> }`],
+  ])('uses the same dataset writer for graphless %s', (query, expected) => {
+    expect(withDatasetClauses(scope(query), graphs, 'FROM')).toBe(expected);
   });
 
   it('refuses a graph IRI that could break out of its brackets', () => {
@@ -165,7 +170,6 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
   });
 
   it.each([
-    ['a path on an unknown engine', 'SELECT ?s ?o WHERE { ?s <urn:p>+ ?o }', null],
     ['a nested SELECT on an unknown engine', 'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', null],
     ['a nested SELECT on Oxigraph', 'SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', 'oxigraph'],
   ] as const)('lets the dataset alone select graphs for %s', (_name, query, engine) => {
@@ -173,6 +177,23 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
     expect(text).toContain(NAMED);
     expect(text).toContain('GRAPH ?__dkgViewGraph');
     expect(text).not.toContain('VALUES');
+  });
+
+  it('preserves mirror suppression and hidden-path multiplicity on the dataset route', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        ...graphs.map(graph => ({ subject: 'urn:s', predicate: 'urn:p', object: 'urn:m1', graph })),
+        ...graphs.map(graph => ({ subject: 'urn:m1', predicate: 'urn:q', object: 'urn:o', graph })),
+        { subject: 'urn:s', predicate: 'urn:p', object: 'urn:m2', graph: graphs[0] },
+        { subject: 'urn:m2', predicate: 'urn:q', object: 'urn:o', graph: graphs[0] },
+      ]);
+      const query = (text: string) => store.query(ready(rewriteGraphSet(scope(text), graphs, 'deduplicated-values-union', null)));
+      expect((await query('SELECT ?s WHERE { ?s <urn:p>+ ?o }')).bindings).toEqual([{ s: 'urn:s' }, { s: 'urn:s' }]);
+      expect((await query('SELECT ?s ?o WHERE { ?s <urn:p>+/<urn:q> ?o }')).bindings)
+        .toEqual([{ s: 'urn:s', o: 'urn:o' }, { s: 'urn:s', o: 'urn:o' }]);
+      expect((await query('SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p>+ ?o }')).bindings[0]?.n).toMatch(/^"2"/);
+    } finally { await store.close(); }
   });
 
   it('hides the helper variable from SELECT * on the dataset route', () => {

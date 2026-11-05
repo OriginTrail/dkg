@@ -14,7 +14,7 @@ import {
   type SparqlRewriteResult,
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { applyGraphDataset } from './sparql-graph-dataset.js';
+import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 import { literalSuffixLength } from './sparql-literal-suffix.js';
 
@@ -134,21 +134,7 @@ function scopeGraphlessDescribe(
   graphUris: readonly string[],
 ): string | null {
   if (scope.operation !== 'DESCRIBE' || scope.where !== null) return null;
-  if (scope.prepared.tokens.some(
-    (token) => token.kind === 'symbol' && token.logicalValue === '{',
-  )) return null;
-
-  const operationIndex = scope.prepared.prologue.endTokenIndex;
-  const tokens = scope.prepared.tokens.slice(operationIndex);
-  const modifiers = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET']);
-  const modifier = tokens.slice(1).find(
-    (token) => token.kind === 'word' && modifiers.has(token.upper),
-  );
-  const last = tokens.at(-1);
-  const insertion = modifier?.start ?? last?.end ?? scope.prepared.tokens[operationIndex]?.end;
-  if (insertion === undefined) return null;
-  const clauses = graphUris.map((graph) => `FROM <${assertSafeIri(graph)}>`).join(' ');
-  return `${scope.source.slice(0, insertion)} ${clauses} ${scope.source.slice(insertion)}`;
+  return withDatasetClauses(scope, graphUris, 'FROM');
 }
 
 export function wrapWithGraph(
@@ -352,7 +338,9 @@ function readDedupPattern(scope: PreparedGraphScope): {
 }
 
 /** Own the entire deduplication replacement: graph choice, FILTER placement and LIMIT ordering. */
-function buildDeduplicatedGraphSubselect(scope: PreparedGraphScope, graphs: readonly string[]): string {
+function buildDeduplicatedGraphSubselect(
+  scope: PreparedGraphScope, graphs: readonly string[], selection: 'values' | 'constant',
+): string {
   const { openEnd, close } = scope.where!;
   const { uniqueMappings, impureFilters } = readDedupPattern(scope);
   // Every visible mapping occurs once per graph; ASK also only needs one match.
@@ -369,19 +357,24 @@ function buildDeduplicatedGraphSubselect(scope: PreparedGraphScope, graphs: read
   }
   inner += scope.source.slice(from, close);
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
+  // Blazegraph can lose a GRAPH variable while planning a repeated path, even
+  // with FROM NAMED. Constant branches retain the graph identity needed by MIN
+  // and prevent a path in one graph from joining a triple in another.
+  const graphRead = (variable: string) => selection === 'constant'
+    ? graphs.map(graph => `{ VALUES ${variable} { <${assertSafeIri(graph)}> } GRAPH <${assertSafeIri(graph)}> { ${inner} } }`).join(' UNION ')
+    : `VALUES ${variable} { ${values} } GRAPH ${variable} { ${inner} }`;
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
   const graphPattern = distinct
-    ? `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`
+    ? graphRead(DEDUP_GRAPH_SENTINEL)
     : [
       // Blazegraph cannot correlate the old FILTER NOT EXISTS rank comparison here.
       // Pick one graph deterministically, then retain that graph's hidden-path multiplicity.
       `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE {`,
-      `  VALUES ${DEDUP_MATCH_GRAPH_SENTINEL} { ${values} }`,
-      `  GRAPH ${DEDUP_MATCH_GRAPH_SENTINEL} { ${inner} }`,
+      graphRead(DEDUP_MATCH_GRAPH_SENTINEL),
       `} GROUP BY ${variables} }`,
       // Every selected mapping exists in its graph. OPTIONAL is equivalent to a join
       // here, but avoids Oxigraph's much costlier plain-join plan.
-      `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} } }`,
+      `OPTIONAL { ${selection === 'constant' ? graphRead(DEDUP_GRAPH_SENTINEL) : `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`} }`,
     ].join(' ');
   const trailing = movedFilters.map(({ start, end }) => scope.source.slice(start, end)).join(' ');
   // Never cut off rows before a relocated FILTER has tested them.
@@ -394,9 +387,15 @@ export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
+  return wrapWithDeduplicatedGraphSelection(input, graphUris, 'values');
+}
+
+function wrapWithDeduplicatedGraphSelection(
+  input: PreparedGraphScope, graphUris: readonly string[], selection: 'values' | 'constant',
+): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
     input, graphUris, [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL],
-    (_inner, graphs) => buildDeduplicatedGraphSubselect(input, graphs),
+    (_inner, graphs) => buildDeduplicatedGraphSubselect(input, graphs, selection),
     isDedupSafeBasicGraphPattern,
   );
 }
@@ -420,7 +419,10 @@ export function wrapWithGraphValues(
 
 /** Scope a graph set through a hidden GRAPH variable that the query's dataset limits. */
 function wrapWithDatasetGraphVariable(input: PreparedGraphScope, graphUris: readonly string[]): GraphScopeRewriteResult {
-  return wrapWithProjectedGraphSubselect(input, graphUris, [VIEW_GRAPH_SENTINEL], (inner) => `GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`);
+  return wrapWithProjectedGraphSubselect(input, graphUris, [VIEW_GRAPH_SENTINEL], (inner) => {
+    const variables = input.whereVariables.map(variable => variable.source).join(' ');
+    return `{ SELECT ${variables} WHERE { GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} } }${graphSubselectLimit(input)} }`;
+  });
 }
 
 export type GraphSetRoutingPolicy =
@@ -436,10 +438,14 @@ export function rewriteGraphSet(
   engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
   return applyGraphDataset(scope, graphUris, engine, (route) => {
+    const deduplicateDataset = (input: PreparedGraphScope, graphs: readonly string[]) =>
+      wrapWithDeduplicatedGraphSelection(input, graphs, 'constant');
     const strategies = policy === 'union-only'
       ? [wrapWithGraphUnion]
       : route === 'dataset-only'
-        ? [wrapWithDatasetGraphVariable, wrapWithGraphUnion]
+        ? policy === 'deduplicated-values-union'
+          ? [deduplicateDataset, wrapWithDatasetGraphVariable, wrapWithGraphUnion]
+          : [wrapWithDatasetGraphVariable, wrapWithGraphUnion]
         : policy === 'deduplicated-values-union'
           ? [wrapWithDeduplicatedGraphValues, wrapWithGraphValues, wrapWithGraphUnion]
           : [wrapWithGraphValues, wrapWithGraphUnion];

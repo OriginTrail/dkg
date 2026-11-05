@@ -157,6 +157,19 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
       .toEqual({ 'urn:s:4': 2, 'urn:s:5': 2 });
   });
 
+  it('retains mirror suppression on repeated paths through the engine dataset route', async () => {
+    const engine = new DKGQueryEngine(store);
+    const read = async (source: string) => (await engine.query(source, { contextGraphId: id })).bindings;
+    expect(bag(await read(`SELECT ?s WHERE { ?s <${A}>+ ?o }`)))
+      .toEqual(bag(rows({ s: 'urn:s:1' }, { s: 'urn:s:2' }, { s: 'urn:s:3' })));
+    expect(integer((await read(`SELECT (COUNT(*) AS ?c) WHERE { ?s <${A}>+ ?o }`))[0]?.c)).toBe(3);
+    // Projecting away ?y must retain the two distinct mappings for s3.
+    expect(bag(await read(`SELECT ?s WHERE { ?s <${A}>+ ?x . ?s <${B}> ?y }`)))
+      .toEqual(bag(rows({ s: 'urn:s:1' }, { s: 'urn:s:3' }, { s: 'urn:s:3' })));
+    // Hidden path multiplicity comes from one graph, not every mirror.
+    expect(bag(await read(`SELECT ?s ?o WHERE { ?s <${LINK}>+/<${TO}> ?o }`))).toEqual(bag(HOPS));
+  });
+
   it('applies LIMIT to the deduplicated rows', async () => {
     const expected = bag(HOPS);
     const limited = bag(await select(`SELECT ?s ?o WHERE { ?s <${LINK}>/<${TO}> ?o } LIMIT 3`));
