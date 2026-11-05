@@ -11,5 +11,5 @@ interface SparqlEngineCapability {
 export function sparqlEngineOf(store: unknown): SparqlEngineFamily | null {
   return findTripleStoreCapability(store, (candidate): candidate is SparqlEngineCapability =>
     typeof candidate === 'object' && candidate !== null
-      && typeof (candidate as Partial<SparqlEngineCapability>).sparqlEngine === 'string')?.sparqlEngine ?? null;
+      && (candidate as Partial<SparqlEngineCapability>).sparqlEngine === 'oxigraph')?.sparqlEngine ?? null;
 }

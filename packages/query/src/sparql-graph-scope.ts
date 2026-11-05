@@ -16,7 +16,7 @@ import {
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
-import { isDedupSafeBasicGraphPattern, readDedupPattern } from './sparql-dedup-pattern.js';
+import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -200,8 +200,7 @@ interface ProjectedGraphPattern {
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
-  buildPattern: (inner: string, graphs: readonly string[]) => ProjectedGraphPattern,
-  acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
+  buildPattern: (inner: string, graphs: readonly string[]) => ProjectedGraphPattern | null,
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
@@ -217,9 +216,9 @@ function wrapWithProjectedGraphSubselect(
     ));
   }
   if (hasUnion) return unsupported('nested-union');
-  if (!acceptsScope(scope)) return unsupported('strategy-rejected');
-
-  const { pattern, distinct, helperVariables } = buildPattern(inner, graphs);
+  const built = buildPattern(inner, graphs);
+  if (!built) return unsupported('strategy-rejected');
+  const { pattern, distinct, helperVariables } = built;
   const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
   if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
     return unsupported('helper-variable-collision');
@@ -238,9 +237,11 @@ function wrapWithProjectedGraphSubselect(
 /** Own graph choice and FILTER placement inside the shared projection boundary. */
 function buildDeduplicatedGraphPattern(
   scope: PreparedGraphScope, graphs: readonly string[], selection: 'values' | 'dataset',
-): ProjectedGraphPattern {
+): ProjectedGraphPattern | null {
+  const plan = analyzeDedupPattern(scope);
+  if (!plan) return null;
   const { openEnd, close } = scope.where!;
-  const { uniqueMappings, impureFilters } = readDedupPattern(scope);
+  const { uniqueMappings, impureFilters } = plan;
   // Every visible mapping occurs once per graph; ASK also only needs one match.
   // DISTINCT removes mirrors before the caller's projection without erasing its bag multiplicity.
   const distinct = scope.operation === 'ASK' || uniqueMappings;
@@ -266,10 +267,9 @@ function buildDeduplicatedGraphPattern(
   // FILTER can be pushed onto the grouped left side by either engine, sampling
   // once for all identical mappings. Filtering these booleans after OPTIONAL
   // also discards its unmatched fallback row and expression errors.
-  const filterBindings = movedFilters.map(({ start, end }, index) => {
-    const token = scope.prepared.tokens.find(token => token.start === start)!;
-    return `BIND(${scope.source.slice(token.end, end)} AS ${dedupFilterVariable(index)})`;
-  }).join(' ');
+  const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
+    `BIND(${scope.source.slice(expressionStart, end)} AS ${dedupFilterVariable(index)})`,
+  ).join(' ');
   const graphPattern = distinct
     ? graphRead(DEDUP_GRAPH_SENTINEL)
     : [
@@ -307,7 +307,6 @@ function wrapWithDeduplicatedGraphSelection(
   return wrapWithProjectedGraphSubselect(
     input, graphUris,
     (_inner, graphs) => buildDeduplicatedGraphPattern(input, graphs, selection),
-    isDedupSafeBasicGraphPattern,
   );
 }
 

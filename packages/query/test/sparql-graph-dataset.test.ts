@@ -229,8 +229,9 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
 
   describe('DESCRIBE on an unknown engine', () => {
     it('reads the pattern and the description from the list', () => {
-      expect(ready(rewriteGraphSet(scope('DESCRIBE ?s WHERE { ?s <urn:p> ?o }'), graphs, 'deduplicated-values-union', null)))
-        .toBe(`DESCRIBE ?s ${DEFAULT} WHERE { ?s <urn:p> ?o }`);
+      const rewritten = ready(rewriteGraphSet(scope('DESCRIBE ?s WHERE { ?s <urn:p> ?o }'), graphs, 'deduplicated-values-union', null));
+      expect(rewritten).toContain(`${DEFAULT} ${NAMED} WHERE { { SELECT * WHERE {`);
+      expect(rewritten).toContain('GRAPH ?__dkgDedupGraph');
     });
 
     it('keeps a graphless DESCRIBE as it was', () => {
@@ -293,7 +294,7 @@ describe('rewriteSingleGraph and rewriteGraphRoute', () => {
 
   it('reads DESCRIBE from the one graph on an unknown engine', () => {
     expect(ready(rewriteSingleGraph(scope('DESCRIBE ?s WHERE { ?s ?p ?o }'), 'urn:g:1', null)))
-      .toBe('DESCRIBE ?s FROM <urn:g:1> WHERE { ?s ?p ?o }');
+      .toBe('DESCRIBE ?s FROM <urn:g:1> FROM NAMED <urn:g:1> WHERE { { SELECT * WHERE {  GRAPH <urn:g:1> {  ?s ?p ?o  }  } } }');
   });
 
   it('passes the engine to the fallback graph', () => {
@@ -306,7 +307,7 @@ describe('rewriteSingleGraph and rewriteGraphRoute', () => {
 
   it('keeps a graph list empty of graphs on the fallback', () => {
     expect(ready(rewriteGraphRoute(scope('DESCRIBE ?s WHERE { ?s ?p ?o }'), [], 'urn:g:1', 'union-only', 'compatibility', null)))
-      .toBe('DESCRIBE ?s FROM <urn:g:1> WHERE { ?s ?p ?o }');
+      .toBe('DESCRIBE ?s FROM <urn:g:1> FROM NAMED <urn:g:1> WHERE { { SELECT * WHERE {  GRAPH <urn:g:1> {  ?s ?p ?o  }  } } }');
   });
 });
 

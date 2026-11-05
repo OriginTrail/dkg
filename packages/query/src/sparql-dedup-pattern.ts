@@ -4,20 +4,15 @@ import { literalSuffixLength } from './sparql-literal-suffix.js';
 interface SourceRange {
   readonly start: number;
   readonly end: number;
+  readonly expressionStart: number;
 }
 
-export function isDedupSafeBasicGraphPattern(scope: PreparedSparqlQuery): boolean {
-  if (!scope.where) return false;
-  const forbidden = new Set([
-    'OPTIONAL', 'MINUS', 'SERVICE', 'VALUES', 'BIND', 'SELECT', 'GRAPH', 'EXISTS',
-  ]);
-  return !scope.prepared.tokens
-    .slice(scope.where.openingTokenIndex + 1, scope.where.closingTokenIndex)
-    .some((token) => (
-      (token.kind === 'word' && forbidden.has(token.upper))
-      || (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}'))
-    ));
-}
+const FORBIDDEN_PATTERN_WORDS = new Set([
+  'OPTIONAL', 'MINUS', 'SERVICE', 'VALUES', 'BIND', 'SELECT', 'GRAPH', 'EXISTS',
+]);
+const unsupportedToken = (token: SparqlLexicalToken) =>
+  (token.kind === 'word' && FORBIDDEN_PATTERN_WORDS.has(token.upper))
+  || (token.kind === 'symbol' && (token.logicalValue === '{' || token.logicalValue === '}'));
 
 // These FILTER expressions only test an existing mapping, so they answer the same
 // every time the pattern runs. A volatile or extension function might not, so the
@@ -29,25 +24,27 @@ const DEDUP_PURE_FILTER_WORDS = new Set([
   'ISIRI', 'ISURI', 'ISBLANK', 'ISLITERAL', 'ISNUMERIC',
 ]);
 
-function isPureFilterExpression(
+function classifyFilterExpression(
   tokens: readonly SparqlLexicalToken[],
   start: number,
   end: number,
-): boolean {
+): 'pure' | 'impure' | 'unsupported' {
+  let pure = true;
   for (let index = start; index < end; index++) {
     const token = tokens[index];
+    if (unsupportedToken(token)) return 'unsupported';
     if (token.kind === 'string') {
       const suffix = literalSuffixLength(tokens, index + 1);
-      if (suffix < 0) return false;
+      if (suffix < 0) return 'unsupported';
       index += suffix;
       continue;
     }
-    if (token.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(token.upper)) return false;
+    if (token.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(token.upper)) pure = false;
     const next = tokens[index + 1];
     if ((token.kind === 'iri' || token.kind === 'prefixed-name')
-      && next?.kind === 'symbol' && next.logicalValue === '(') return false;
+      && next?.kind === 'symbol' && next.logicalValue === '(') pure = false;
   }
-  return true;
+  return pure ? 'pure' : 'impure';
 }
 
 function isVisibleTripleToken(token: SparqlLexicalToken): boolean {
@@ -71,12 +68,11 @@ function isVisibleTripleToken(token: SparqlLexicalToken): boolean {
  * matches a mapping at most once. A path or blank node can match the same mapping
  * several ways, and those repeats are part of the caller's results.
  */
-export function readDedupPattern(scope: PreparedSparqlQuery): {
+export function analyzeDedupPattern(scope: PreparedSparqlQuery): {
   readonly uniqueMappings: boolean;
   readonly impureFilters: readonly SourceRange[];
-} {
-  const whole = { uniqueMappings: false, impureFilters: [] };
-  if (!scope.where) return whole;
+} | null {
+  if (!scope.where) return null;
   const tokens = scope.prepared.tokens;
   const end = scope.where.closingTokenIndex;
   const impureFilters: SourceRange[] = [];
@@ -94,13 +90,16 @@ export function readDedupPattern(scope: PreparedSparqlQuery): {
       const closing = isOpening(opening)
         ? scope.structure.parentheses.matchingTokenIndexes[opening] ?? -1
         : -1;
-      if (closing <= opening || closing >= end) return whole;
-      if (!isPureFilterExpression(tokens, index + 1, closing)) {
-        impureFilters.push({ start: token.start, end: tokens[closing].end });
+      if (closing <= opening || closing >= end) return null;
+      const classification = classifyFilterExpression(tokens, index + 1, closing);
+      if (classification === 'unsupported') return null;
+      if (classification === 'impure') {
+        impureFilters.push({ start: token.start, expressionStart: token.end, end: tokens[closing].end });
       }
       index = closing;
       continue;
     }
+    if (unsupportedToken(token)) return null;
     hasTriple = true;
     if (token.kind === 'string') {
       const suffix = literalSuffixLength(tokens, index + 1);
@@ -110,6 +109,6 @@ export function readDedupPattern(scope: PreparedSparqlQuery): {
       visible = false;
     }
   }
-  return hasTriple ? { uniqueMappings: visible, impureFilters } : whole;
+  return { uniqueMappings: hasTriple && visible, impureFilters: hasTriple ? impureFilters : [] };
 }
 

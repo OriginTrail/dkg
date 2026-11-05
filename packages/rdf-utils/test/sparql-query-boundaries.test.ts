@@ -10,6 +10,25 @@ function query(source: string) {
 }
 
 describe('prepared query boundaries', () => {
+  it.each(['group', 'having', 'order', 'limit', 'offset', 'values', 'where'])('keeps a projection language tag @%s outside keyword scanning', (tag) => {
+    for (const keyword of ['WHERE ', '']) {
+      const source = `SELECT ("demo"@${tag} AS ?label) ${keyword}{ ?s ?p ?o }`;
+      const result = query(source);
+      expect(result.where?.openStart).toBe(source.indexOf('{'));
+      expect(result.datasetInsertionOffset).toBe(keyword ? source.indexOf('WHERE') : source.indexOf('{'));
+    }
+  });
+
+  it.each([
+    ['SELECT (EXISTS { ?a ?b ?c } AS ?x) WHERE { ?s ?p ?o }', 'WHERE'],
+    ['CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'WHERE'],
+    ['SELECT ?s WITH { SELECT ?s WHERE { ?s ?p ?o } } AS %x { INCLUDE %x }', 'WITH'],
+    ['DESCRIBE <urn:s> LIMIT 1', 'LIMIT'],
+    ['DESCRIBE ?s VALUES ?s { <urn:s> }', 'VALUES'],
+  ])('owns the dataset boundary for %s', (source, boundary) => {
+    expect(query(source).datasetInsertionOffset).toBe(source.indexOf(boundary));
+  });
+
   it('resolves declared and default graph prefixes and preserves direct IRI identity', () => {
     const result = query('BASE <urn:base:> PREFIX : <urn:default:> PREFIX ex: <urn:example:> SELECT * WHERE { GRAPH :one {} GRAPH ex:two {} GRAPH <urn:direct> {} }');
     expect([...result.prefixes]).toEqual([['', 'urn:default:'], ['ex', 'urn:example:']]);

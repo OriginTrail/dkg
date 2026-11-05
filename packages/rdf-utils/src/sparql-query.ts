@@ -45,6 +45,8 @@ export interface PreparedSparqlQuery {
   readonly structure: SparqlStructure;
   readonly operation: string | null;
   readonly where: SparqlQueryGroupRange | null;
+  /** Insertion point after the projection/template, before the query pattern or modifiers. */
+  readonly datasetInsertionOffset: number | null;
   readonly queryVariables: readonly SparqlQueryVariable[];
   readonly whereVariables: readonly SparqlQueryVariable[];
   readonly prefixes: ReadonlyMap<string, string>;
@@ -82,25 +84,37 @@ function prefixesFromTokens(prepared: ValidPreparedSparql): Map<string, string> 
 // Solution modifiers and a trailing VALUES come after the pattern, which may have no WHERE keyword.
 const AFTER_QUERY_PATTERN_WORDS = new Set(['GROUP', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'VALUES']);
 
-function whereRange(
+function queryBoundaries(
   prepared: ValidPreparedSparql,
   structure: SparqlStructure,
-): SparqlQueryGroupRange | null {
+): { where: SparqlQueryGroupRange | null; datasetInsertionOffset: number | null } {
   const { tokens } = prepared;
+  const missing = { where: null, datasetInsertionOffset: null };
+  const operation = tokens[prepared.prologue.endTokenIndex];
+  let datasetStart: number | null = null;
+  let modifierStart: number | null = null;
   const topLevelOpenings: number[] = [];
   let explicitOpening = -1;
 
   for (const index of sparqlTokenIndexesAtDepth(structure.braces, 0)) {
+    if (index <= prepared.prologue.endTokenIndex || structure.parentheses.depthBefore[index] !== 0) continue;
     const token = tokens[index];
+    const previous = tokens[index - 1];
+    if (previous?.kind === 'symbol' && previous.logicalValue === '@') continue;
+    if (token?.kind === 'word' && token.upper === 'WITH' && datasetStart === null) datasetStart = token.start;
     if (token?.kind === 'word' && token.upper === 'WHERE') {
       const next = tokens[index + 1];
       if (next?.kind !== 'symbol' || next.logicalValue !== '{') {
-        return null;
+        return missing;
       }
+      datasetStart ??= token.start;
       explicitOpening = index + 1;
       break;
     }
-    if (token?.kind === 'word' && AFTER_QUERY_PATTERN_WORDS.has(token.upper)) break;
+    if (token?.kind === 'word' && AFTER_QUERY_PATTERN_WORDS.has(token.upper)) {
+      modifierStart = token.start;
+      break;
+    }
     if (token?.kind === 'symbol' && token.logicalValue === '{') {
       topLevelOpenings.push(index);
     }
@@ -111,9 +125,13 @@ function whereRange(
     : structure.braces.balanced
       ? (topLevelOpenings.at(-1) ?? -1)
       : -1;
-  if (openingIndex < 0) return null;
+  if (openingIndex < 0) return {
+    where: null,
+    datasetInsertionOffset: operation?.kind === 'word' && operation.upper === 'DESCRIBE'
+      ? modifierStart ?? tokens.at(-1)?.end ?? null : null,
+  };
   const closingIndex = structure.braces.matchingTokenIndexes[openingIndex] ?? -1;
-  if (closingIndex < 0) return null;
+  if (closingIndex < 0) return missing;
   const bodyDepth = structure.braces.depthBefore[openingIndex] + 1;
   const hasUnion = sparqlTokenIndexesAtDepth(
     structure.braces,
@@ -124,14 +142,16 @@ function whereRange(
     const token = tokens[index];
     return token?.kind === 'word' && token.upper === 'UNION';
   });
-  return {
+  const datasetInsertionOffset = operation?.kind === 'word' && operation.upper === 'CONSTRUCT'
+    && explicitOpening < 0 && topLevelOpenings.length < 2 ? null : datasetStart ?? tokens[openingIndex].start;
+  return { datasetInsertionOffset, where: {
     openStart: tokens[openingIndex].start,
     openEnd: tokens[openingIndex].end,
     close: tokens[closingIndex].start,
     hasUnion,
     openingTokenIndex: openingIndex,
     closingTokenIndex: closingIndex,
-  };
+  } };
 }
 
 function variablesInRange(
@@ -154,7 +174,7 @@ function variablesInRange(
 
 export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparqlQuery {
   const structure = indexSparqlStructure(prepared);
-  const where = whereRange(prepared, structure);
+  const { where, datasetInsertionOffset } = queryBoundaries(prepared, structure);
   const operationToken = prepared.tokens[prepared.prologue.endTokenIndex];
   const prefixes = prefixesFromTokens(prepared);
   const braceDepths = structure.braces.depthBefore;
@@ -234,6 +254,7 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
       ? operationToken.upper
       : null,
     where,
+    datasetInsertionOffset,
     queryVariables: variablesInRange(prepared, 0, prepared.tokens.length),
     whereVariables: where
       ? variablesInRange(prepared, where.openingTokenIndex + 1, where.closingTokenIndex)

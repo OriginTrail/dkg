@@ -78,6 +78,8 @@ const data: Quad[] = [
   ...['urn:listed:trust:1', 'urn:listed:trust2:1'].map((subject, index) => quad(subject, TRUST_LEVEL_PREDICATE, TRUSTED, TRUST_GRAPHS[index])),
   quad('urn:unlisted:a:1', TRUST_LEVEL_PREDICATE, TRUSTED, UNLISTED_GRAPHS[0]),
   quad('urn:listed:trust:3', L, 'urn:unlisted:bridge', UNLISTED_GRAPHS[0]),
+  quad('urn:listed:split:1', L, 'urn:listed:split:2', TRUST_GRAPHS[0]),
+  quad('urn:listed:split:1', TRUST_LEVEL_PREDICATE, TRUSTED, TRUST_GRAPHS[1]),
 ];
 
 type Row = Record<string, string>;
@@ -365,6 +367,12 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
     });
 
+    it('a projection language tag cannot hide the WHERE boundary', async () => {
+      const found = await select(`SELECT ("demo"@group AS ?label) WHERE { ?s <${L}> ?o }`, options);
+      expect(found).toHaveLength(prefixesOf(MAIN_ROUTES[0]).length * 2);
+      expect(found.every(row => row.label === '"demo"@group')).toBe(true);
+    });
+
     it('a pattern in ORDER BY leaves the main group on the list', async () => {
       const found = await select(`SELECT ?s ?o { ?s <${L}> ?o } ORDER BY (EXISTS { ?a ?b ?c })`, options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
@@ -409,6 +417,15 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
 
     it('DESCRIBE describes from the list alone', async () => {
       expect((await quadsOf(`DESCRIBE ?s WHERE { ?s <${L}> ?o }`, options)).filter(fromUnlistedGraph)).toEqual([]);
+    });
+
+    it('DESCRIBE cannot qualify content using trust metadata from another graph', async () => {
+      const selected = await select(`SELECT ?s WHERE { ?s <${L}> ?o }`, options);
+      expect(selected.map(row => row.s)).toContain('urn:listed:trust:1');
+      expect(selected.map(row => row.s)).not.toContain('urn:listed:split:1');
+      const described = await quadsOf(`DESCRIBE ?s WHERE { ?s <${L}> ?o }`, options);
+      expect(described.some(item => item.subject === 'urn:listed:split:1')).toBe(false);
+      if (endpoint) expect(described.some(item => item.subject === 'urn:listed:trust:1' && item.predicate === L)).toBe(true);
     });
   });
 

@@ -48,5 +48,7 @@ describe('sparqlEngineOf', () => {
     expect(sparqlEngineOf({ query: async () => ({ type: 'bindings', bindings: [] }) })).toBeNull();
     expect(sparqlEngineOf(null)).toBeNull();
     expect(sparqlEngineOf(undefined)).toBeNull();
+    expect(sparqlEngineOf({ sparqlEngine: 'other-engine' })).toBeNull();
+    expect(sparqlEngineOf({ sparqlEngine: '' })).toBeNull();
   });
 });
