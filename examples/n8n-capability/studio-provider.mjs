@@ -52,10 +52,11 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     if (!saved.provider_id) {
       let cursor, found = [];
       for (let page = 0; page < 8; page++) {
-        const list = await api('/workflows?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
+        const list = await api('/workflows?limit=10&excludePinnedData=true&name=' + encodeURIComponent(compiled.workflowName) + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''));
         found.push(...list.data.filter(w => w.name === compiled.workflowName)); cursor = list.nextCursor;
         if (!cursor) break;
       }
+      if (cursor) throw error('Native graph lookup is incomplete; reconcile before creating another workflow.');
       if (found.length > 1) throw error('Duplicate native graph definitions require operator inspection.');
       let created = found[0];
       if (!created) {

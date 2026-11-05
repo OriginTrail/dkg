@@ -1,3 +1,4 @@
+import { needsExport } from './dkg-components.mjs';
 /** Provision native templates with n8n's official local CLI; no API token is sent by this installer. */
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, renameSync, chmodSync } from 'node:fs';
@@ -41,6 +42,7 @@ if (existsSync(database)) {
   db.close();
 }
 if (!fixture && header.id === 'component-fixture-header') throw new Error('The existing PoC webhook credential reference was not found.');
+credentials.httpHeaderAuth = header;
 const components = [];
 const componentRef = item => `urn:demo:n8n:component:${item.descriptor.id}:${item.grant.workflowSha256.slice(0, 12)}`
   + (item.descriptor.version >= 2 ? ':' + createHash('sha256').update(item.source).digest('hex').slice(0, 12) : '');
@@ -60,7 +62,7 @@ for (const descriptor of componentRegistry) {
   if (!only || only.includes(descriptor.id)) writeFileSync(join(output, id + '.json'), JSON.stringify({ ...workflow, versionId: randomUUID() }), { mode: 0o600 });
   const item = { kind: 'component', descriptor, name: descriptor.name, source: componentProgramSource(descriptor.id),
     enabled: !descriptor.connection || !!credentials[descriptor.connection],
-    requiresExportAuthorization: !!descriptor.writes,
+    requiresExportAuthorization: needsExport(descriptor),
     kaRef: `urn:demo:n8n:component:${descriptor.id}:${n8nWorkflowSha256(workflow).slice(0, 12)}`,
     grant: { toolIri: 'urn:dkg:tool:n8n', workflowId: id, workflowSha256: n8nWorkflowSha256(workflow), ...componentContract, result } };
   item.kaRef = componentRef(item); components.push(item);

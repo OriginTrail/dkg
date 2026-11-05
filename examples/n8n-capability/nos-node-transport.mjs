@@ -1,0 +1,77 @@
+import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+
+const fail = message => Object.assign(new Error(message), { status: 409, code: 'DKG_COMPONENT_UNCONFIRMED' });
+export function createNosNodeClient(session, actor, send = fetch) {
+  if (!session || actor?.accountId !== session.accountId || actor?.role !== 'owner')
+    throw fail('An authenticated nOS owner must start this workflow.');
+  return async function call(path, body, query) {
+    const response = await send(`${session.controlPlaneUrl}/studio/${session.accountId}/service/node`, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(130_000),
+      headers: { 'content-type': 'application/json', 'x-nos-workflows-secret': session.secret() },
+      body: JSON.stringify({ approvedBy: actor.id, method: body === undefined ? 'GET' : 'POST', path,
+        ...(body === undefined ? {} : { body }), ...(query ? { query } : {}) }),
+    });
+    // Bound while reading, not after materializing an unbounded response.
+    let size = 0; const chunks = [];
+    for await (const chunk of response.body ?? []) {
+      size += chunk.byteLength;
+      if (size > 2 * 1024 * 1024) throw fail('Node response exceeds the Studio limit.');
+      chunks.push(chunk);
+    }
+    if (!response.ok) throw Object.assign(fail('nOS did not authorize or confirm the node operation.'), { status: response.status });
+    const answer = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (answer.kind !== 'answer') throw fail('Node outcome is unconfirmed. Retain the invocation identity.');
+    if (answer.status < 200 || answer.status >= 300)
+      throw Object.assign(fail('The node did not confirm the operation.'), { status: answer.status });
+    return answer.body;
+  };
+}
+
+export async function invokeNosProgram(call, request) {
+  const { selected, invocationId, inputs } = request;
+  const ref = selected.program;
+  const check = async () => {
+    const approval = await call('programs/bindings', undefined, { contextGraphId: selected.contextGraphId, operationIri: selected.operationIri });
+    if (approval.bindingDigest !== selected.bindingDigest || !approval.binding?.enabled || !isDeepStrictEqual(approval.binding.program, ref))
+      throw fail('Program binding changed.');
+  };
+  await check();
+  const source = await call('programs/source', undefined, { contextGraphId: ref.contextGraphId, programIri: ref.programIri, programLayer: ref.programLayer });
+  if (typeof source.source !== 'string' || createHash('sha256').update(source.source).digest('hex') !== ref.sourceHash || source.version !== selected.version)
+    throw fail('Program source changed.');
+  const receipt = await call('programs/execute', { contextGraphId: selected.contextGraphId, operationIri: selected.operationIri, invocationId, inputs });
+  if (receipt.persisted !== true || receipt.invocationId !== invocationId || receipt.executionIri !== 'urn:sr:execution:' + invocationId || !Array.isArray(receipt.outputs))
+    throw fail('Program execution receipt is incomplete.');
+  await check();
+  return { invocationId, executionIri: receipt.executionIri, operationIri: selected.operationIri,
+    sourceHash: ref.sourceHash, bindingDigest: selected.bindingDigest,
+    outputs: receipt.outputs.map(output => { try { return JSON.parse(output); } catch { return output; } }) };
+}
+
+export async function writeNosEvidence(call, payload, graph) {
+  if (!/^[A-Za-z0-9._:-]{1,256}$/.test(payload.name)) throw fail('Invalid evidence name.');
+  const path = 'knowledge-assets/' + payload.name, query = { contextGraphId: graph };
+  let metadata, created = false;
+  try { metadata = await call(path, undefined, query); }
+  catch (error) {
+    if (error.status !== 404) throw error;
+    if (!payload.allowCreate) throw fail('Previous write is unconfirmed; reconcile before creating another asset.');
+    await call('knowledge-assets', { contextGraphId: graph, name: payload.name, quads: payload.quads,
+      finalize: true, alsoShareSwm: false, alsoPublishVm: false });
+    created = true;
+  }
+  const readback = await call(path + '/wm/quads', undefined, query);
+  // RDF serializers may escape Unicode differently. Compare literal values, preserving
+  // the literal/IRI distinction, rather than the spelling of equivalent JSON escapes.
+  const term = value => value.startsWith('"') ? ['literal', JSON.parse(value)] : ['iri', value];
+  const quads = rows => [...new Set(rows.map(q => JSON.stringify([q.subject, q.predicate, term(q.object)])))].sort();
+  if (!Array.isArray(readback.quads) || !isDeepStrictEqual(quads(readback.quads), quads(payload.quads)))
+    throw fail('Stored evidence differs from this execution.');
+  const stored = readback.quads.find(q => q.predicate === 'urn:nos:workflow:payload');
+  if (!stored || createHash('sha256').update(JSON.parse(stored.object)).digest('hex') !== payload.digest)
+    throw fail('Stored evidence digest differs.');
+  metadata = await call(path, undefined, query);
+  if (metadata.status !== 'wm-sealed') throw fail('Evidence has not been sealed.');
+  return { contextGraphId: graph, name: payload.name, digest: payload.digest, metadata, created, readbackVerified: true };
+}

@@ -2,6 +2,7 @@
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
 import { programDescriptor } from './program-block.mjs';
+import { configuredDkgProfile, profileParameters } from './dkg-profile.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -40,11 +41,27 @@ export const componentRegistry = [
     query: json('Query parameters', {}), headers: json('Request headers', {}),
     body: { ...json('JSON request body', {}), shape: 'any' },
   }, { sampleItems: [{}], version: 2 }),
+  ...(configuredDkgProfile ? [
+    entry('dkg-read', 'DKG Read', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-read'),
+      { version: 2, connection: 'httpHeaderAuth', sampleItems: configuredDkgProfile.sampleItems?.['dkg-read'] ?? [{}] }),
+    entry('invoke-dkg-program', 'Invoke DKG Program', 'DKG', 'httpRequest', {
+      ...profileParameters(configuredDkgProfile, 'invoke-dkg-program'),
+      inputs: { ...json('Program arguments · $json is all incoming rows', ['{{ $json }}']), shape: 'any' },
+      outputMapping: { ...json('Returned result · $json is the Program output array', '{{ $json }}'), shape: 'any' },
+    }, { version: 2, connection: 'httpHeaderAuth', sampleItems: [{}] }),
+    entry('dkg-write', 'DKG Write', 'DKG', 'httpRequest', profileParameters(configuredDkgProfile, 'dkg-write'),
+      { version: 2, connection: 'httpHeaderAuth', writes: true, sampleItems: [{}] }),
+  ] : []),
   entry('google-sheets', 'Google Sheets', 'Integrations', 'googleSheets', { title: text('New spreadsheet title', 'nOS workflow export', { maxLength: 80 }) }, { connection: 'googleSheetsOAuth2Api', writes: true }),
   entry('google-drive', 'Google Drive', 'Integrations', 'googleDrive', { name: text('Drive file name', 'nOS-export.txt', { maxLength: 80 }) }, { input: 'file', connection: 'googleDriveOAuth2Api', writes: true, sampleItems: [{ file: { name: 'hello.txt', mimeType: 'text/plain', base64: 'SGVsbG8gREtHCg==' } }] }),
   entry('if', 'IF', 'Flow', 'if', { field: field('Field', 'name'), equals: text('Equals', 'Ana') }, { outputs: ['true', 'false'], mode: 'branch' }),
   entry('switch', 'Switch', 'Flow', 'switch', { field: field('Field', 'name'), equals: text('First route equals', 'Ana') }, { outputs: ['match', 'other'], mode: 'branch' }),
   entry('merge', 'Merge', 'Flow', 'merge', {}, { inputs: 2, mode: 'join' }),
+  entry('merge-fields', 'Merge by fields', 'Flow', 'merge', {
+    fieldA: field('Match field in input A', 'joinKey'),
+    fieldB: field('Match field in input B', 'joinKey'),
+    joinMode: choice('Rows to keep', 'keepEverything', ['keepEverything', 'keepMatches', 'keepNonMatches']),
+  }, { inputs: 2, mode: 'join', version: 2 }),
   entry('compare-datasets', 'Compare Datasets', 'Flow', 'compareDatasets', { field: field('Match field', 'name') }, { inputs: 2, outputs: ['only-a', 'same', 'different', 'only-b'], mode: 'join' }),
   entry('loop-items', 'Loop Over Items', 'Flow', 'splitInBatches', { batchSize: number('Batch size', 1) }, { outputs: ['done', 'loop'], mode: 'loop' }),
   entry('execute-workflow', 'Execute Sub-workflow', 'Flow', 'executeWorkflow', {}, { mode: 'subworkflow' }),
