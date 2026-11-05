@@ -37,6 +37,7 @@ import {
   ContextGraphQueryView,
   LayerDetailView,
 } from './project/components.js';
+import { RefreshCw } from 'lucide-react';
 
 interface ProjectViewProps {
   contextGraphId: string;
@@ -213,7 +214,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     DEFAULT_LAYER_TABS,
   );
   const [subGraphTabs, setSubGraphTabs] = useState<Record<string, SubGraphTab>>({});
-  const pageRef = useRef<HTMLElement | null>(null);
+  const pageRef = useRef<HTMLDivElement | null>(null);
   const detailOriginRef = useRef<DetailOrigin | null>(null);
   const pendingScrollRestoreRef = useRef<DetailOrigin['scroll'] | null>(null);
   const participantsRequestRef = useRef(0);
@@ -694,7 +695,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
           </p>
           {cgAuthError ? (
             <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
-              Refresh page
+              <RefreshCw size={12} /> Refresh page
             </button>
           ) : (
             <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={refreshContextGraphs}>
@@ -757,7 +758,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             <>
               <span>{cgError}</span>
               <button type="button" className="v10-retry-btn ds-btn ds-sm" onClick={() => window.location.reload()}>
-                Refresh page
+                <RefreshCw size={12} /> Refresh page
               </button>
             </>
           ) : (
@@ -792,7 +793,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         onRefresh={() => { rawMemory.refresh(); vmReceipts.refresh(); }}
       />
 
-      <main className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
+      <div className="v10-memory-explorer-page" data-view={activePage} data-cg-scroll-key="page" ref={pageRef}>
       {selectedUri && (detailRead.loading || detailRead.error || detailRead.partial || !selectedEntity) && (
         <div className="v10-layer-action-note" role="status">
           {detailRead.loading ? 'Loading resource details…' : detailRead.error ?? (detailRead.partial
@@ -960,7 +961,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
         </>
       )}
 
-      </main>
+      </div>
 
       <ImportFilesModal
         open={showImport}

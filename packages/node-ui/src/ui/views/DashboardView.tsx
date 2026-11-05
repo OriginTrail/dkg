@@ -715,7 +715,7 @@ export function DashboardView() {
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Share2 size={13} aria-hidden />
-              <h3>My Context Graphs</h3>
+              <h2>My Context Graphs</h2>
             </div>
             <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
           </div>
@@ -763,7 +763,7 @@ export function DashboardView() {
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
               <Wallet size={13} aria-hidden />
-              <h3>Wallets and Spending</h3>
+              <h2>Wallets and Spending</h2>
             </div>
           </div>
 

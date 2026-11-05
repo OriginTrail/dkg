@@ -10,7 +10,7 @@ import { useMemoryGraphEvents } from '../../../hooks/useNodeEvents.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
 import { LAYER_CONFIG } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
-import { FileText } from 'lucide-react';
+import { FileText, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../../components/ds/Badge.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
@@ -279,7 +279,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
           setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });
         }}>Next assertions</button>
-        <button disabled={busy !== null} onClick={refresh}>Refresh assertions</button>
+        <button disabled={busy !== null} onClick={refresh}><RefreshCw size={12} /> Refresh assertions</button>
       </nav>
     </div>
   );

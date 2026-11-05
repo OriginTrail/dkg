@@ -320,11 +320,11 @@ export function PanelCenter() {
   }, []);
 
   return (
-    <div className="v10-panel-center">
+    <main className="v10-panel-center">
       <TabBar />
       <div id="main-content" tabIndex={-1} className="v10-center-content" ref={contentRef}>
         <ViewContainer />
       </div>
-    </div>
+    </main>
   );
 }

@@ -93,7 +93,7 @@
   background: var(--bg-surface);
 }
 
-.v10-identity-wallet-card h4 {
+.v10-identity-wallet-card h3 {
   margin: 0;
   font-size: 13px;
   color: var(--text-primary);

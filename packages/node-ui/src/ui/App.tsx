@@ -208,7 +208,7 @@ function AppShell() {
   return (
     <div className="v10-app">
       <ApiTokenPrompt />
-      <button type="button" className="ds-skip-link" onClick={() => document.getElementById('main-content')?.focus()}>Skip to content</button>
+      <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById('main-content')?.focus()}>Skip to content</button></nav>
       <Header />
       <div className="v10-app-body">
         {narrow && (leftOpen || rightOpen) && (
@@ -216,7 +216,7 @@ function AppShell() {
         )}
         {leftOpen && (
           <>
-            <div className="v10-panel-left" style={{ width: leftWidth }}>
+            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
               <PanelLeft />
             </div>
             <div className="v10-resize-handle-h" ref={leftHandle} />
@@ -234,7 +234,7 @@ function AppShell() {
         {rightOpen && (
           <>
             <div className="v10-resize-handle-h" ref={rightHandle} />
-            <div className="v10-panel-right" style={{ width: rightWidth }}>
+            <div className="v10-panel-right" role="complementary" aria-label="Agents" style={{ width: rightWidth }}>
               <PanelRight />
             </div>
           </>

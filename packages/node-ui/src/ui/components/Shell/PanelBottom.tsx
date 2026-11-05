@@ -322,7 +322,7 @@ export function PanelBottom() {
 
   return (
     <div
-      className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
+      role="region" aria-label="Node log and transactions" className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
       style={!bottomCollapsed ? { height: panelHeight } : undefined}
     >
       {/* Resize handle — only visible when expanded and not maximised */}

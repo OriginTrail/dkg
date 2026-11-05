@@ -1,5 +1,5 @@
 import React, { useId, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, RefreshCw } from 'lucide-react';
 import { formatDuration } from './format.js';
 import { buildPeers, shortAgentUri, shortPeerId } from './peer-model.js';
 import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
@@ -176,7 +176,7 @@ export function NetworkTab(props: {
           {directCount} direct / {relayedCount} relayed
         </span>
         <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
-          Refresh
+          <RefreshCw size={12} /> Refresh
         </button>
       </div>
 

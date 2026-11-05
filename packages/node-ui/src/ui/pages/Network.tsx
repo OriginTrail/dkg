@@ -33,7 +33,7 @@ export function NetworkPage() {
   const agents = agentData?.agents ?? [];
 
   return (
-    <div className="network-page">
+    <main className="network-page">
       {/* This page renders standalone (outside the app shell), so without an
           explicit affordance the operator has no way back to the dashboard
           once they land here. Keep a back link at the top. */}
@@ -134,6 +134,6 @@ export function NetworkPage() {
           </table></div>
         )}
       </div>
-    </div>
+    </main>
   );
 }

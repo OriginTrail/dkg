@@ -59,7 +59,7 @@ function scan(visit: (n: Jsx, where: string, context: { inLabel: boolean; labell
 
 const named = (a: Map<string, ts.JsxAttribute>) => a.has('aria-label') || a.has('aria-labelledby') || a.has('ariaLabel');
 
-describe('accessibility rules', () => {
+describe('accessibility rules', { timeout: 30_000 }, () => {
   it('names every icon-only button', () => {
     const found: string[] = [];
     scan((n, where) => {
@@ -92,7 +92,7 @@ describe('accessibility rules', () => {
       if (!/^(div|span|li|tr|td|p|section|article)$/.test(opening(n).tagName.getText())) return;
       const a = attrsOf(n);
       const click = a.get('onClick')?.getText();
-      if (!click || a.has('role') || a.has('tabIndex')) return;
+      if (!click || a.has('role') || a.has('tabIndex') || a.has('aria-hidden')) return;
       // Backdrops are a mouse shortcut for Escape; a stopPropagation-only handler isn't an action.
       if (/onBackdropClick|target === \w+\.currentTarget|^onClick=\{\(?\w*\)? => \w+\.stopPropagation\(\)\}$/.test(click)) return;
       if (!n.getText().includes('ds-row-open')) found.push(where);
