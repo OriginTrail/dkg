@@ -164,9 +164,9 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
 
   it('keeps the rewrite on a flat read and adds the dataset on an unknown engine', () => {
     const text = ready(rewriteGraphSet(scope(flat), graphs, 'deduplicated-values-union', null));
-    expect(text).toContain(`SELECT ?s ?o ${NAMED} WHERE`);
+    expect(text).toContain(`SELECT ?s ?o ${DEFAULT} ${NAMED} WHERE`);
     expect(text).toContain('VALUES');
-    expect(text.replace(`${NAMED} `, '')).toBe(ready(wrapWithDeduplicatedGraphValues(scope(flat), graphs)));
+    expect(text.replace(`${DEFAULT} ${NAMED} `, '')).toBe(ready(wrapWithDeduplicatedGraphValues(scope(flat), graphs)));
   });
 
   it.each([
@@ -198,7 +198,7 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
 
   it('hides the helper variable from SELECT * on the dataset route', () => {
     const text = ready(rewriteGraphSet(scope('SELECT * WHERE { ?s <urn:p>+ ?o }'), graphs, 'values-union', null));
-    expect(text).toContain(`SELECT * ${NAMED} WHERE { { SELECT ?s ?o WHERE { GRAPH ?__dkgViewGraph {`);
+    expect(text).toContain(`SELECT * ${DEFAULT} ${NAMED} WHERE { { SELECT ?s ?o WHERE { GRAPH ?__dkgViewGraph {`);
   });
 
   it('keeps the outer modifiers and carries a plain LIMIT inside', () => {
@@ -276,7 +276,7 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
 
     it('adds the dataset to a constant GRAPH on an unknown engine', () => {
       expect(ready(rewriteGraphSet(scope('SELECT ?s WHERE { GRAPH <urn:g:1> { ?s ?p ?o } }'), graphs, 'values-union', null)))
-        .toBe(`SELECT ?s ${NAMED} WHERE { GRAPH <urn:g:1> { ?s ?p ?o } }`);
+        .toBe(`SELECT ?s ${DEFAULT} ${NAMED} WHERE { GRAPH <urn:g:1> { ?s ?p ?o } }`);
     });
   });
 });
@@ -289,7 +289,7 @@ describe('rewriteSingleGraph and rewriteGraphRoute', () => {
 
   it('adds the dataset on an unknown engine', () => {
     expect(ready(rewriteSingleGraph(scope('SELECT ?s WHERE { ?s ?p ?o }'), 'urn:g:1', null)))
-      .toBe('SELECT ?s FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1> {  ?s ?p ?o  } }');
+      .toBe('SELECT ?s FROM <urn:g:1> FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1> {  ?s ?p ?o  } }');
   });
 
   it('reads DESCRIBE from the one graph on an unknown engine', () => {
@@ -300,7 +300,7 @@ describe('rewriteSingleGraph and rewriteGraphRoute', () => {
   it('passes the engine to the fallback graph', () => {
     const union = 'SELECT ?s WHERE { { ?s <urn:p> ?o } UNION { ?s <urn:q> ?o } }';
     expect(ready(rewriteGraphRoute(scope(union), graphs, 'urn:g:1', 'values-union', 'compatibility', null)))
-      .toContain('SELECT ?s FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1>');
+      .toContain('SELECT ?s FROM <urn:g:1> FROM NAMED <urn:g:1> WHERE { GRAPH <urn:g:1>');
     expect(ready(rewriteGraphRoute(scope(union), graphs, 'urn:g:1', 'values-union', 'compatibility', 'oxigraph')))
       .not.toContain('FROM NAMED');
   });
@@ -346,5 +346,29 @@ describe('what reaches an Oxigraph store through the engine', () => {
       expect(text).toContain(`FROM NAMED <${ROOT}> FROM NAMED <${VM}>`);
       expect(text).not.toContain('VALUES');
     }
+  });
+});
+
+// Blazegraph itself leaves projected EXISTS unbound and rejects HAVING EXISTS
+// (verified on 2.1.5 and 2.1.6). Use the conforming in-process backend to verify
+// both dataset policies; live tests separately prove mixed GRAPH/default joins.
+describe.each(['oxigraph', null] as const)('outer default-graph expressions (%s)', engine => {
+  it('keeps authorized projection, HAVING and ORDER BY matches and excludes unlisted flags', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        { subject: 'urn:s:1', predicate: 'urn:p', object: 'urn:o', graph: graphs[0] },
+        { subject: 'urn:s:2', predicate: 'urn:p', object: 'urn:o', graph: graphs[1] },
+        { subject: 'urn:s:2', predicate: 'urn:flag', object: '"allowed"', graph: graphs[1] },
+        { subject: 'urn:s:1', predicate: 'urn:flag', object: '"hidden"', graph: 'urn:unlisted' },
+      ]);
+      const query = async (source: string) => (await store.query(ready(rewriteGraphSet(scope(source), graphs, 'deduplicated-values-union', engine)))).bindings;
+      const found = await query('SELECT ?s (EXISTS { ?s <urn:flag> ?flag } AS ?flagged) WHERE { ?s <urn:p> ?o } ORDER BY ?s');
+      expect(found).toHaveLength(2);
+      expect(found[0].flagged).toContain('false');
+      expect(found[1].flagged).toContain('true');
+      expect(await query('SELECT ?s WHERE { ?s <urn:p> ?o } GROUP BY ?s HAVING(EXISTS { ?s <urn:flag> ?flag })')).toEqual([{ s: 'urn:s:2' }]);
+      expect(await query('SELECT ?s WHERE { ?s <urn:p> ?o } ORDER BY DESC(EXISTS { ?s <urn:flag> ?flag }) ?s')).toEqual([{ s: 'urn:s:2' }, { s: 'urn:s:1' }]);
+    } finally { await store.close(); }
   });
 });

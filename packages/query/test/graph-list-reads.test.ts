@@ -92,18 +92,19 @@ const pairsOf = (prefixes: readonly string[], pairs: readonly (readonly [string,
 interface PathForm {
   readonly name: string;
   readonly pattern: string;
-  /** Rows every store returns, or null where zero-length matches are the store's own choice. */
-  readonly pairs: readonly (readonly [string, string])[] | null;
+  /** Known nonzero-length matches; nullable paths may also return backend-specific zero-length rows. */
+  readonly pairs: readonly (readonly [string, string])[];
+  readonly nullable?: true;
 }
 
 const PLUS: readonly (readonly [string, string])[] = [['1', '2'], ['2', '3'], ['1', '3']];
 const PATHS: readonly PathForm[] = [
   { name: '+', pattern: `?s <${L}>+ ?o`, pairs: PLUS },
-  { name: '*', pattern: `?s <${L}>* ?o`, pairs: null },
-  { name: '?', pattern: `?s <${L}>? ?o`, pairs: null },
+  { name: '*', pattern: `?s <${L}>* ?o`, pairs: PLUS, nullable: true },
+  { name: '?', pattern: `?s <${L}>? ?o`, pairs: [['1', '2'], ['2', '3']], nullable: true },
   { name: '(a/b)+', pattern: `?s (<${A}>/<${B}>)+ ?o`, pairs: [['s', 'm2'], ['s', 'm4'], ['m2', 'm4']] },
-  { name: '(a/b)*', pattern: `?s (<${A}>/<${B}>)* ?o`, pairs: null },
-  { name: '(a|b)*', pattern: `?s (<${A}>|<${B}>)* ?o`, pairs: null },
+  { name: '(a/b)*', pattern: `?s (<${A}>/<${B}>)* ?o`, pairs: [['s', 'm2'], ['s', 'm4'], ['m2', 'm4']], nullable: true },
+  { name: '(a|b)*', pattern: `?s (<${A}>|<${B}>)* ?o`, pairs: [['s', 'm1'], ['s', 'm2'], ['s', 'm3'], ['s', 'm4']], nullable: true },
   { name: '(a|b)+', pattern: `?s (<${A}>|<${B}>)+ ?o`, pairs: [
     ['s', 'm1'], ['s', 'm2'], ['s', 'm3'], ['s', 'm4'], ['m1', 'm2'], ['m1', 'm3'], ['m1', 'm4'], ['m2', 'm3'], ['m2', 'm4'], ['m3', 'm4'],
   ] },
@@ -149,7 +150,7 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
   describe.each(ROUTES)('$name', (route) => {
     const prefixes = prefixesOf(route);
 
-    it.each(PATHS)('SELECT with $name stays on the list', async ({ name, pattern, pairs }) => {
+    it.each(PATHS)('SELECT with $name stays on the list', async ({ name, pattern, pairs, nullable }) => {
       const sparql = `SELECT ?s ?o WHERE { ${pattern} }`;
       // Blazegraph doesn't accept this alternative inside a UNION branch.
       if (endpoint && route.branches && name === 'a|b+') {
@@ -158,12 +159,8 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       }
       const found = await select(sparql, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
-      if (pairs) expect(bag(found)).toEqual(bag(pairsOf(prefixes, pairs)));
-    });
-
-    it('zero-length forms keep their in-list matches', async () => {
-      const found = await select(`SELECT ?s ?o WHERE { ?s <${L}>* ?o }`, route.options);
-      expect(bag(found)).toEqual(expect.arrayContaining(bag(pairsOf(prefixes, PLUS))));
+      const expected = bag(pairsOf(prefixes, pairs));
+      expect(bag(found)).toEqual(nullable ? expect.arrayContaining(expected) : expected);
     });
 
     it('a path from a listed term stops where the list ends', async () => {
@@ -281,6 +278,12 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     it('DESCRIBE of an unlisted subject finds nothing', async () => {
       expect(await quadsOf('DESCRIBE <urn:unlisted:a:1>', route.options)).toEqual([]);
     });
+  });
+
+  it('a constant GRAPH can join authorized default patterns without seeing unlisted statements', async () => {
+    const found = await select(`SELECT ?s ?next WHERE { GRAPH <${ROOT}> { ?s <${L}> ?o } ?o <${L}> ?next }`, { contextGraphId: id });
+    expect(found).toEqual([{ s: 'urn:listed:root:1', next: 'urn:listed:root:3' }]);
+    expect(await select(`SELECT ?s WHERE { GRAPH <${ROOT}> { ?s <${L}> ?o } ?s <${NOTE}> ?note }`, { contextGraphId: id })).toEqual([]);
   });
 
   if (endpoint) {

@@ -1,6 +1,5 @@
 import {
   prepareSparqlQuery,
-  prepareSparql,
   type PreparedSparqlQuery,
   type SparqlGraphTarget as PreparedSparqlGraphTarget,
   type SparqlLexicalToken,
@@ -17,6 +16,9 @@ import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
+import { createGraphAccess, type GraphAccess } from './sparql-graph-access.js';
+import { transitionGraphScope } from './sparql-query-transition.js';
+export { transitionGraphScope } from './sparql-query-transition.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -66,22 +68,6 @@ export function requireGraphScopeRewrite(result: GraphScopeRewriteResult): Prepa
     throw new ScopedQueryViolationError('unable to locate a graph-scopable WHERE block');
   }
   throw new ScopedQueryViolationError(`graph rewrite is unsupported: ${result.reason}`);
-}
-
-/**
- * Own the state transition after a source edit. A no-op retains object identity;
- * every actual source change is prepared before it leaves this module.
- */
-export function transitionGraphScope(
-  scope: PreparedGraphScope,
-  source: string,
-): PreparedGraphScope {
-  if (source === scope.source) return scope;
-  const prepared = prepareSparql(source);
-  if (prepared.status !== 'valid') {
-    throw new ScopedQueryViolationError('graph rewrite produced malformed SPARQL');
-  }
-  return prepareGraphScope(prepared);
 }
 
 export function prepareGraphScope(
@@ -185,10 +171,8 @@ export function wrapWithGraphUnion(
   return ready(transitionGraphScope(scope, `${before} ${branches} ${after}`));
 }
 
-const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
 const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
-const DEDUP_MATCH_SENTINEL = '?__dkgDedupMatched';
 const dedupFilterVariable = (index: number) => `?__dkgDedupFilter${index}`;
 
 interface ProjectedGraphPattern {
@@ -236,7 +220,7 @@ function wrapWithProjectedGraphSubselect(
 
 /** Own graph choice and FILTER placement inside the shared projection boundary. */
 function buildDeduplicatedGraphPattern(
-  scope: PreparedGraphScope, graphs: readonly string[], selection: 'values' | 'dataset',
+  scope: PreparedGraphScope, access: GraphAccess,
 ): ProjectedGraphPattern | null {
   const plan = analyzeDedupPattern(scope);
   if (!plan) return null;
@@ -255,13 +239,6 @@ function buildDeduplicatedGraphPattern(
     from = end;
   }
   inner += scope.source.slice(from, close);
-  const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
-  // Bind the graph before evaluating a repeated path. A conditional graph
-  // read prevents Blazegraph from planning the path ahead of VALUES; the
-  // marker removes unmatched graphs. This stays constant-depth at large lists.
-  const graphRead = (variable: string, bindings = '') => selection === 'dataset'
-    ? `VALUES ${variable} { ${values} } OPTIONAL { GRAPH ${variable} { ${inner} ${bindings} } BIND(true AS ${DEDUP_MATCH_SENTINEL}) } FILTER(${DEDUP_MATCH_SENTINEL})`
-    : `VALUES ${variable} { ${values} } GRAPH ${variable} { ${inner} }`;
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
@@ -270,27 +247,17 @@ function buildDeduplicatedGraphPattern(
   const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
     `BIND(${scope.source.slice(expressionStart, end)} AS ${dedupFilterVariable(index)})`,
   ).join(' ');
-  const graphPattern = distinct
-    ? graphRead(DEDUP_GRAPH_SENTINEL)
-    : [
-      // Blazegraph cannot correlate the old FILTER NOT EXISTS rank comparison here.
-      // Pick one graph deterministically, then retain that graph's hidden-path multiplicity.
-      `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE {`,
-      graphRead(DEDUP_MATCH_GRAPH_SENTINEL),
-      `} GROUP BY ${variables} }`,
-      // Keep the dataset replay in its own subquery: flattening both path
-      // evaluations into one join group duplicates hidden-path mappings on
-      // Blazegraph. Project filter booleans so the shared outer boundary can
-      // discard rejected rows. Ordinary VALUES reads keep Oxigraph's fast plan.
-      selection === 'dataset'
-        ? `{ SELECT ${variables} ${DEDUP_GRAPH_SENTINEL} ${movedFilters.map((_, index) => dedupFilterVariable(index)).join(' ')} WHERE { ${graphRead(DEDUP_GRAPH_SENTINEL, filterBindings)} } }`
-        : `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} ${filterBindings} } }`,
-    ].join(' ');
-  const trailing = movedFilters.map((_, index) => `FILTER(${dedupFilterVariable(index)})`).join(' ');
-  const helperVariables = distinct ? [DEDUP_GRAPH_SENTINEL]
-    : [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL, ...movedFilters.map((_, index) => dedupFilterVariable(index))];
-  if (selection === 'dataset') helperVariables.push(DEDUP_MATCH_SENTINEL);
-  return { pattern: `${graphPattern} ${trailing}`, distinct, helperVariables };
+  const bindings = { pattern: filterBindings, helperVariables: movedFilters.map((_, index) => dedupFilterVariable(index)) };
+  const candidate = access.candidate(inner, distinct ? DEDUP_GRAPH_SENTINEL : DEDUP_MATCH_GRAPH_SENTINEL);
+  if (distinct) return { ...candidate, distinct };
+  // Choose one graph deterministically and replay its hidden-path multiplicity.
+  // The access implementation owns the barriers required by its backend plan.
+  const replay = access.replay(inner, DEDUP_GRAPH_SENTINEL, variables, bindings);
+  const trailing = bindings.helperVariables.map(variable => `FILTER(${variable})`).join(' ');
+  return {
+    pattern: `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE { ${candidate.pattern} } GROUP BY ${variables} } ${replay.pattern} ${trailing}`,
+    helperVariables: [...new Set([...candidate.helperVariables, ...replay.helperVariables])],
+  };
 }
 
 /** Scope a graph set, reading each mapping from one graph even when several hold it. */
@@ -298,15 +265,15 @@ export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  return wrapWithDeduplicatedGraphSelection(input, graphUris, 'values');
+  return wrapWithDeduplicatedGraphSelection(input, graphUris, createGraphAccess('values', [...new Set(graphUris)]));
 }
 
 function wrapWithDeduplicatedGraphSelection(
-  input: PreparedGraphScope, graphUris: readonly string[], selection: 'values' | 'dataset',
+  input: PreparedGraphScope, graphUris: readonly string[], access: GraphAccess,
 ): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
     input, graphUris,
-    (_inner, graphs) => buildDeduplicatedGraphPattern(input, graphs, selection),
+    () => buildDeduplicatedGraphPattern(input, access),
   );
 }
 
@@ -315,24 +282,8 @@ export function wrapWithGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  return wrapWithProjectedGraphSubselect(
-    input,
-    graphUris,
-    (inner, graphs) => {
-      const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-      return {
-        pattern: `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`,
-        helperVariables: [VIEW_GRAPH_SENTINEL],
-      };
-    },
-  );
-}
-
-/** Scope a graph set through a hidden GRAPH variable that the query's dataset limits. */
-function wrapWithDatasetGraphVariable(input: PreparedGraphScope, graphUris: readonly string[]): GraphScopeRewriteResult {
-  return wrapWithProjectedGraphSubselect(input, graphUris, (inner) => {
-    return { pattern: `GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`, helperVariables: [VIEW_GRAPH_SENTINEL] };
-  });
+  const access = createGraphAccess('values', [...new Set(graphUris)]);
+  return wrapWithProjectedGraphSubselect(input, graphUris, inner => access.fallback(inner));
 }
 
 export type GraphSetRoutingPolicy =
@@ -348,17 +299,14 @@ export function rewriteGraphSet(
   engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
   return applyGraphDataset(scope, graphUris, engine, (route) => {
-    const deduplicateDataset = (input: PreparedGraphScope, graphs: readonly string[]) =>
-      wrapWithDeduplicatedGraphSelection(input, graphs, 'dataset');
-    const strategies = policy === 'union-only'
-      ? [wrapWithGraphUnion]
-      : route === 'dataset-only'
-        ? policy === 'deduplicated-values-union'
-          ? [deduplicateDataset, wrapWithDatasetGraphVariable, wrapWithGraphUnion]
-          : [wrapWithDatasetGraphVariable, wrapWithGraphUnion]
-        : policy === 'deduplicated-values-union'
-          ? [wrapWithDeduplicatedGraphValues, wrapWithGraphValues, wrapWithGraphUnion]
-          : [wrapWithGraphValues, wrapWithGraphUnion];
+    const access = createGraphAccess(route === 'dataset-only' ? 'dataset' : 'values', [...new Set(graphUris)]);
+    const strategies = [wrapWithGraphUnion];
+    if (policy !== 'union-only') {
+      strategies.unshift((input, graphs) => wrapWithProjectedGraphSubselect(input, graphs, inner => access.fallback(inner)));
+      if (policy === 'deduplicated-values-union') {
+        strategies.unshift((input, graphs) => wrapWithDeduplicatedGraphSelection(input, graphs, access));
+      }
+    }
     let last = unsupported('strategy-rejected');
     for (const strategy of strategies) {
       const result = strategy(scope, graphUris);

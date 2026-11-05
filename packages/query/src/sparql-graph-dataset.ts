@@ -1,11 +1,10 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
-  prepareSparql,
-  prepareSparqlQuery,
   type PreparedSparqlQuery,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
+import { transitionGraphScope } from './sparql-query-transition.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
 
@@ -52,12 +51,42 @@ export function hasRepeatedPath(scope: PreparedSparqlQuery): boolean {
   });
 }
 
+/** Conservatively identify default patterns beside caller GRAPH blocks. */
+function hasDefaultPatternBesideGraph(scope: PreparedSparqlQuery): boolean {
+  if (!scope.hasGraphClause || !scope.where) return false;
+  const { tokens } = scope.prepared;
+  const graphEnds = new Map(scope.graphTargets.map(target => [
+    target.keywordTokenIndex, scope.structure.braces.matchingTokenIndexes[target.targetTokenIndex + 1],
+  ]));
+  for (let index = scope.where.openingTokenIndex + 1; index < scope.where.closingTokenIndex; index++) {
+    const graphEnd = graphEnds.get(index);
+    if (graphEnd !== undefined && graphEnd > index) { index = graphEnd; continue; }
+    const token = tokens[index];
+    // An already authorized VALUES/GRAPH read must stay byte-identical on
+    // Oxigraph instead of re-injecting a potentially large full allowlist.
+    if (token.kind === 'word' && token.upper === 'VALUES') {
+      let opening = index + 1;
+      while (opening < scope.where.closingTokenIndex && !isSymbol(tokens[opening], '{')) opening++;
+      const end = scope.structure.braces.matchingTokenIndexes[opening];
+      if (end !== undefined && end > opening) { index = end; continue; }
+      return true;
+    }
+    if (token.kind === 'variable' || token.kind === 'iri' || token.kind === 'prefixed-name') return true;
+  }
+  return false;
+}
+
 export function planGraphDataset(
   scope: PreparedSparqlQuery,
   engine: SparqlEngineFamily | null,
 ): GraphDatasetRoute {
   const nestedSelect = hasNestedSelect(scope);
-  if (engine === 'oxigraph') return nestedSelect ? 'dataset-only' : 'none';
+  // GRAPH wrappers do not cover projection/modifier expressions or default
+  // patterns beside a caller GRAPH. Give those reads an authorized default graph.
+  const outsideWhere = scope.prepared.tokens.some(token => token.kind === 'word' && token.upper === 'EXISTS'
+    && (!scope.where || token.start < scope.where.openEnd || token.start > scope.where.close));
+  if (engine === 'oxigraph') return nestedSelect ? 'dataset-only'
+    : outsideWhere || hasDefaultPatternBesideGraph(scope) ? 'guard' : 'none';
   if (scope.operation === 'DESCRIBE') return 'describe';
   return nestedSelect || hasRepeatedPath(scope) ? 'dataset-only' : 'guard';
 }
@@ -100,18 +129,14 @@ export function applyGraphDataset<Reason extends string>(
   if (route === 'describe' && rewritten.where) {
     const { openEnd, close } = rewritten.where;
     const source = `${rewritten.source.slice(0, openEnd)} { SELECT * WHERE { ${rewritten.source.slice(openEnd, close)} } } ${rewritten.source.slice(close)}`;
-    const prepared = prepareSparql(source);
-    if (prepared.status !== 'valid') throw new ScopedQueryViolationError('graph rewrite produced malformed SPARQL');
-    rewritten = prepareSparqlQuery(prepared);
+    rewritten = transitionGraphScope(rewritten, source);
   }
-  // A nested DESCRIBE still matches inside GRAPH, but its description reads the
-  // default graph. Both parts must see the same allowlist; FROM NAMED alone
-  // leaves the default graph empty and silently loses every description.
-  const keywords = scope.operation !== 'DESCRIBE' ? 'FROM NAMED'
-    : scope.where ? ['FROM', 'FROM NAMED'] as const : 'FROM';
+  // Expressions outside the GRAPH wrapper and mixed caller GRAPH/default
+  // patterns read the default dataset too. Scope both datasets to the same
+  // allowlist; FROM NAMED alone silently empties their valid matches.
+  const keywords = scope.operation === 'DESCRIBE' && !scope.where
+    ? 'FROM' : ['FROM', 'FROM NAMED'] as const;
   const source = withDatasetClauses(rewritten, graphs, keywords);
   if (source === null) return sparqlRewriteUnsupported('missing-where');
-  const prepared = prepareSparql(source);
-  if (prepared.status !== 'valid') throw new ScopedQueryViolationError('graph rewrite produced malformed SPARQL');
-  return sparqlRewriteReady(prepareSparqlQuery(prepared));
+  return sparqlRewriteReady(transitionGraphScope(rewritten, source));
 }
