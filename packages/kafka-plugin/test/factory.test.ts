@@ -44,6 +44,7 @@ describe('createKafkaPlugin factory wiring', () => {
       publisherControl: { getStatus: vi.fn() },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
+      requestAgentAddress: '0x' + 'a'.repeat(40),
       path: '/api/kafka/streams/register',
     } as never);
     expect(captured.statusCode).toBe(202);
@@ -65,9 +66,10 @@ describe('createKafkaPlugin factory wiring', () => {
       publisherControl: { getStatus: vi.fn() },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
+      requestAgentAddress: '0x' + 'a'.repeat(40),
       path: '/api/kafka/streams/register',
     } as never);
-    expect(publishAsync.mock.calls[0][2]).toEqual({ accessPolicy: 'public' });
+    expect(publishAsync.mock.calls[0][2]).toEqual({ accessPolicy: 'public', admittedByAgentAddress: '0x' + 'a'.repeat(40) });
   });
   it('respects custom basePath override', async () => {
     const plugin = createKafkaPlugin({ basePath: '/custom/kafka', contextGraphId: 'urn:cg:demo' });
@@ -81,6 +83,7 @@ describe('createKafkaPlugin factory wiring', () => {
       publisherControl: { getStatus: vi.fn() },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
       config: {},
+      requestAgentAddress: '0x' + 'a'.repeat(40),
       path: '/custom/kafka/register',
     } as never);
     expect(captured.statusCode).toBe(202);

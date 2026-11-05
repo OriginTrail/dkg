@@ -156,12 +156,14 @@ export const WORKSPACE_RULES = Object.freeze({
     // registry, node-ui, graph-viz, mcp-dkg and the three agent adapters.
     // kosava_node_ui: node-ui tests scan the CLI daemon sources
     // (packages/node-ui/test/helpers/read-cli-daemon.ts).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    // kosava_supporting: kafka-source consumes the plugin's registry contract;
+    // the conservative workspace dependency closure includes its CLI dependency.
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-store': {
@@ -171,7 +173,7 @@ export const WORKSPACE_RULES = Object.freeze({
     // and open node-ui's DashboardDB by relative path. Daemon runtime, not UI
     // surface: like the other packages the devnet boots, the browser suite
     // follows it after merge rather than on the PR.
-    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_hardhat_plugins'],
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/graph-viz': {
@@ -227,11 +229,13 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/kafka-plugin': {
-    lanes: ['kosava_hardhat_plugins'],
+    // The Source Worker imports the daemon-free registry wire contract.
+    lanes: ['kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/kafka-source': {
-    lanes: ['kosava_supporting'],
+    // The plugin's real-daemon E2E also exercises native consumer enrollment.
+    lanes: ['kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/evm-module': {

@@ -1,3 +1,4 @@
+import { registryFilterPattern, type RegistryFilters } from './registry-filters.js';
 const DKG_STREAMS = 'https://ontology.dkg.io/streams#';
 const SCHEMA = 'https://schema.org/';
 const DKG_ONT = 'http://dkg.io/ontology/';
@@ -83,11 +84,13 @@ export interface ListQueryParams {
   subGraphName?: string;
   limit: number;
   offset: number;
+  filters?: RegistryFilters;
 }
 
 export interface CountQueryParams {
   contextGraphId: string;
   subGraphName?: string;
+  filters?: RegistryFilters;
 }
 
 export interface SingleQueryParams {
@@ -145,27 +148,30 @@ function streamCandidatePattern(
     }
 ${registrationScopeClause(ualTerm, subGraphName, '    ')}
     ${ualTerm} <${PUBLISHED_AT}> ?receivedAt .
+    OPTIONAL { ${ualTerm} <http://www.w3.org/ns/prov#wasAttributedTo> ?publisher . FILTER(isIRI(?publisher)) }
   }
   GRAPH ?publicGraph { ?root ?markerP ?markerO . }
   GRAPH ?contentGraph { ?root a <${KAFKA_STREAM_TYPE}> . }`;
 }
 
-export function buildListQuery({ contextGraphId, subGraphName, limit, offset }: ListQueryParams): string {
+export function buildListQuery({ contextGraphId, subGraphName, limit, offset, filters }: ListQueryParams): string {
   assertSafeCgId(contextGraphId);
   if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
   // sparql-scan-allow: R3 -- compatibility offset pagination runs only on the metadata selector and each payload fetch is capped at 1000 exact targets
   return `SELECT DISTINCT ?ual ?root ?receivedAt ?contentGraph WHERE {
   ${streamCandidatePattern(contextGraphId, subGraphName, '?ual')}
+  ${registryFilterPattern(filters)}
 }
 ORDER BY DESC(?receivedAt) ?ual ?root ?contentGraph
 LIMIT ${limit} OFFSET ${offset}`;
 }
 
-export function buildCountQuery({ contextGraphId, subGraphName }: CountQueryParams): string {
+export function buildCountQuery({ contextGraphId, subGraphName, filters }: CountQueryParams): string {
   assertSafeCgId(contextGraphId);
   if (subGraphName !== undefined) assertSafeSubGraphName(subGraphName);
   return `SELECT (COUNT(DISTINCT ?ual) AS ?count) WHERE {
   ${streamCandidatePattern(contextGraphId, subGraphName, '?ual')}
+  ${registryFilterPattern(filters)}
 }`;
 }
 
@@ -183,6 +189,23 @@ export function buildSingleByUalQuery({ contextGraphId, subGraphName, ual }: Sin
   return `SELECT DISTINCT ?root ?p ?o WHERE {
   ${streamCandidatePattern(contextGraphId, subGraphName, `<${ual}>`)}
   GRAPH ?contentGraph { ?root ?p ?o . }
+}`;
+}
+
+/** Complete native attribution, independent of selection filters and paging. */
+export function buildPublisherQuery(contextGraphId: string, uals: readonly string[]): string {
+  assertSafeCgId(contextGraphId);
+  const values = [...new Set(uals)].map(ual => {
+    assertSafeUal(ual);
+    return `<${ual}>`;
+  });
+  if (values.length === 0) throw new Error('Publisher query requires at least one UAL');
+  return `SELECT DISTINCT ?ual ?publisher WHERE {
+  VALUES ?ual { ${values.join(' ')} }
+  GRAPH <${metaUri(contextGraphId)}> {
+    ?ual <http://www.w3.org/ns/prov#wasAttributedTo> ?publisher .
+    FILTER(isIRI(?publisher))
+  }
 }`;
 }
 
@@ -234,6 +257,7 @@ export function bindingsToKa(bindings: ReadonlyArray<BindingRow>): KafkaStreamKa
   const ctx: Record<string, string> = { ...baselineCtx };
   const types: string[] = [];
   const seenTypes = new Set<string>();
+  const seenTriples = new Set<string>();
   const properties: Record<string, unknown> = {};
   let id: string | undefined;
 
@@ -244,6 +268,9 @@ export function bindingsToKa(bindings: ReadonlyArray<BindingRow>): KafkaStreamKa
     const rawObject = unwrapBinding(row.o);
     const objectRaw = rawObject;
     if (!predicate || objectRaw === undefined) continue;
+    const triple = JSON.stringify([unwrapBinding(row.root), predicate, objectRaw]);
+    if (seenTriples.has(triple)) continue;
+    seenTriples.add(triple);
     if (predicate === PRIVATE_DATA_ANCHOR) continue;
     if (predicate === RDF_TYPE) {
       const typeIri = stripIriQuoting(objectRaw);
@@ -255,7 +282,10 @@ export function bindingsToKa(bindings: ReadonlyArray<BindingRow>): KafkaStreamKa
       continue;
     }
     const key = compactIriWithCtx(predicate, ctx, namespaceToPrefix);
-    appendProperty(properties, key, decodeRdfTerm(objectRaw));
+    const isRegistryReference = predicate === `${DKG_STREAMS}providerIri`
+      || predicate === `${DKG_STREAMS}schemaIri` || predicate === `${SCHEMA}about`;
+    const value = isRegistryReference ? { '@id': stripIriQuoting(objectRaw) } : decodeRdfTerm(objectRaw);
+    appendProperty(properties, key, value);
   }
 
   const sortedTypes = sortBaselineFirst(types);
@@ -271,6 +301,9 @@ export function bindingsToKa(bindings: ReadonlyArray<BindingRow>): KafkaStreamKa
     '@type': finalType,
     ...properties,
   };
+  if (ka['schema:about'] !== undefined && !Array.isArray(ka['schema:about'])) {
+    ka['schema:about'] = [ka['schema:about']];
+  }
   if (id) ka['@id'] = id;
   return ka;
 }
