@@ -30,6 +30,17 @@ describe(`labelled blank-node patterns on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       // Two distinct witnesses must retain two projected rows, not DISTINCT them.
       { graph: graphs[0], subject: `${prefix}:s0`, predicate: 'urn:p', object: '_:other' },
       { graph: graphs[0], subject: '_:other', predicate: 'urn:q', object: '"value0"' },
+      // This graph uses a renamed pattern: repeated labels must still join one
+      // witness, preserve legitimate duplicates, and exclude a disconnected q.
+      { graph: graphs[1], subject: `${prefix}:s1`, predicate: 'urn:p', object: '_:second' },
+      { graph: graphs[1], subject: '_:second', predicate: 'urn:q', object: '"value1"' },
+      { graph: graphs[1], subject: '_:disconnected', predicate: 'urn:q', object: '"decoy"' },
+      // The deduplicated route renames its earlier-graph anti-join. Disconnected
+      // witnesses there must not suppress a valid mapping from the next graph.
+      { graph: graphs[0], subject: `${prefix}:shared`, predicate: 'urn:p', object: '_:left' },
+      { graph: graphs[0], subject: '_:right', predicate: 'urn:q', object: '"shared"' },
+      { graph: graphs[1], subject: `${prefix}:shared`, predicate: 'urn:p', object: '_:joined' },
+      { graph: graphs[1], subject: '_:joined', predicate: 'urn:q', object: '"shared"' },
     ];
     try {
       await store.insert(data);
@@ -37,11 +48,11 @@ describe(`labelled blank-node patterns on ${endpoint ? 'Blazegraph' : 'Oxigraph'
         const query = `SELECT ?s ?o WHERE { ?s <urn:p> _:${label} . _:${label} <urn:q> ?o }`;
         const rows = await store.query(rewrite(query, graphs, route));
         expect(rows.bindings.map(row => `${row.s} ${row.o}`).sort()).toEqual([
-          `${prefix}:s0 "value0"`, `${prefix}:s0 "value0"`, `${prefix}:s1 "value1"`, `${prefix}:s2 "value2"`,
+          `${prefix}:s0 "value0"`, `${prefix}:s0 "value0"`, `${prefix}:s1 "value1"`, `${prefix}:s1 "value1"`, `${prefix}:s2 "value2"`, `${prefix}:shared "shared"`,
         ]);
       }
       const count = await store.query(rewrite('SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p> _:h . _:h <urn:q> ?o }', graphs, route));
-      expect(count.bindings[0]?.n).toMatch(/^"4"/);
+      expect(count.bindings[0]?.n).toMatch(/^"6"/);
     } finally {
       for (const graph of [...graphs, outside]) await store.dropGraph(graph);
       await store.close();
