@@ -1629,7 +1629,7 @@ export function operationStatusBadgeClass(status: string): string {
   if (status === 'success') return 'ds-tone-success';
   if (status === 'error') return 'ds-tone-danger';
   if (status === 'cancelled') return 'ds-tone-muted';
-  return 'ds-tone-warning';
+  return 'ds-tone-pending';
 }
 
 export function StatusBadge({ status }: { status: string }) {

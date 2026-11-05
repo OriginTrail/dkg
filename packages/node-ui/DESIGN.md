@@ -12,7 +12,7 @@ The rules behind the node UI's look and behaviour. The values live in code; this
 
 1. **Dark first.** Most operators use dark mode. Design and review in dark, then check light. Every colour token has a value for both.
 2. **One hue, one job.** A colour means one thing everywhere. If something needs to stand out and has no job of its own, use contrast and weight, not a new colour.
-3. **The shape says what it is.** Facts are pills, a status is an icon and text with no box, things you click are rectangles, things you open carry a mark (tile or avatar).
+3. **The shape says what it is.** A layer is a pill, a value or role is a 6px tag, a status is an icon and text with no box, things you click are rectangles, things you open carry a mark (tile or avatar).
 4. **Use the scale.** Corners, heights and type sizes come from the tokens. A value that isn't on the scale is either a new rule (add it here and to the tokens) or a mistake.
 5. **Make the complex readable.** Show the state that matters (which layer, who wrote it, does it need me) before the details.
 
@@ -49,8 +49,8 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | Token | Size | Use |
 |---|---|---|
 | `--fs-display` | 24 | Page totals, hero numbers |
-| `--fs-heading` | 18 | View titles |
-| `--fs-title` | 15 | Card and section titles |
+| `--fs-heading` | 20 | View titles |
+| `--fs-title` | 16 | Card and section titles |
 | `--fs-body` | 13 | Reading text |
 | `--fs-control` | 12 | Buttons, tabs, inputs, menus |
 | `--fs-label` | 11 | Badges, table headers, metadata |
@@ -70,7 +70,7 @@ Sentence case everywhere, including buttons, tabs and badges. Uppercase is only 
 | `--radius-nested` | 8 | Anything inside a card (stat cells, notes, legends, tables); menus and popovers |
 | `--radius-card` | 10 | Cards and panels |
 | `--radius-overlay` | 12 | Dialogs and overlays |
-| `--radius-pill` | full | Badges, counts, entity and agent chips |
+| `--radius-pill` | full | Layer badges, counts, entity and agent chips |
 
 `50%` is fine for things that are circles (avatars, dots). Use the `.ds-overlay`, `.ds-card` and `.ds-card-nested` classes for new surfaces.
 
@@ -107,7 +107,7 @@ Sizes `sm` 24, `md` 32 (default), `lg` 40. `icon` makes it square; an icon-only 
 
 A badge states a fact (status, role, type, layer). It is never the click target.
 
-- `<Badge tone>`: `success`, `warning` and `danger` draw as a status (icon and text, no box, as in nOS). `neutral` (default), `muted`, `role`, `kind` (entity types: neutral pill with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
+- `<Badge tone>`: `success`, `warning`, `danger` and `pending` draw as a status (icon and text, no box, as in nOS). Pending is a neutral clock for work under way; amber is only for something that needs attention. `neutral` (default), `muted`, `role` and `kind` draw as a tag (6px rectangle, as in nOS) and keep their colours (`kind` is for entity types: a neutral tag with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
 - `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 11.5px text. `LayerGlyph` draws the glyph on its own.
 - `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips.
 - The notification count sits on the bell's corner, never over the glyph, and the bell brightens while anything is unread.

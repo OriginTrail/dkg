@@ -15,13 +15,13 @@
   flex-shrink: 0;
   height: var(--h-badge-md);
   padding: 0 8px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-control);
   background: var(--badge-bg);
   color: var(--badge-fg);
   box-shadow: inset 0 0 0 1px var(--badge-ring);
   font-family: var(--font-sans);
-  font-size: var(--fs-label);
-  font-weight: 600;
+  font-size: var(--fs-layer);
+  font-weight: 500;
   line-height: 1;
   letter-spacing: 0;
   text-transform: none;
@@ -40,7 +40,7 @@
 .ds-badge.ds-tone-swm { --badge-fg: var(--layer-shared-text);   --badge-bg: var(--layer-shared-bg);   --badge-ring: var(--layer-shared-border); }
 .ds-badge.ds-tone-vm  { --badge-fg: var(--layer-verified-text); --badge-bg: var(--layer-verified-bg); --badge-ring: var(--layer-verified-border); }
 /* Layers match nOS, the source of truth: a full border, 11.5px text, nOS's own glyphs. */
-.ds-badge.ds-tone-wm, .ds-badge.ds-tone-swm, .ds-badge.ds-tone-vm { gap: 4px; padding: 0 9px; font-size: var(--fs-layer); }
+.ds-badge.ds-tone-wm, .ds-badge.ds-tone-swm, .ds-badge.ds-tone-vm { gap: 4px; padding: 0 9px; border-radius: var(--radius-pill); font-weight: 600; font-size: var(--fs-layer); }
 .ds-badge.ds-sm.ds-tone-wm, .ds-badge.ds-sm.ds-tone-swm, .ds-badge.ds-sm.ds-tone-vm { padding: 0 7px; font-size: var(--fs-micro); }
 .ds-layer-glyph { width: 12px; height: 12px; flex-shrink: 0; }
 .ds-badge.ds-sm .ds-layer-glyph { width: 10px; height: 10px; }
@@ -49,15 +49,17 @@
    The icon is a mask filled with the text colour, in the nOS shapes. */
 .ds-badge.ds-tone-success { --badge-fg: var(--text-success); --status-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='m8 12.5 2.5 2.5 5-5.5'/%3E%3C/svg%3E"); }
 .ds-badge.ds-tone-warning { --badge-fg: var(--text-warning); --status-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 2.5 20h19Z'/%3E%3Cpath d='M12 10v4M12 17v.5'/%3E%3C/svg%3E"); }
+.ds-badge.ds-tone-pending { --badge-fg: var(--text-tertiary); --status-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v5l3.5 2'/%3E%3C/svg%3E"); }
 .ds-badge.ds-tone-danger  { --badge-fg: var(--text-danger);  --status-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2h8l6 6v8l-6 6H8l-6-6V8Z'/%3E%3Cpath d='m9 9 6 6M15 9l-6 6'/%3E%3C/svg%3E"); }
-.ds-badge.ds-tone-success, .ds-badge.ds-tone-warning, .ds-badge.ds-tone-danger {
+.ds-badge.ds-tone-success, .ds-badge.ds-tone-warning, .ds-badge.ds-tone-danger, .ds-badge.ds-tone-pending {
   --badge-bg: transparent;
   --badge-ring: transparent;
   padding: 0;
   font-size: var(--fs-control);
+  font-weight: 600;
 }
-.ds-badge.ds-sm.ds-tone-success, .ds-badge.ds-sm.ds-tone-warning, .ds-badge.ds-sm.ds-tone-danger { padding: 0; gap: 4px; font-size: var(--fs-label); }
-.ds-badge.ds-tone-success::before, .ds-badge.ds-tone-warning::before, .ds-badge.ds-tone-danger::before {
+.ds-badge.ds-sm.ds-tone-success, .ds-badge.ds-sm.ds-tone-warning, .ds-badge.ds-sm.ds-tone-danger, .ds-badge.ds-sm.ds-tone-pending { padding: 0; gap: 4px; font-size: var(--fs-label); }
+.ds-badge.ds-tone-success::before, .ds-badge.ds-tone-warning::before, .ds-badge.ds-tone-danger::before, .ds-badge.ds-tone-pending::before {
   content: '';
   width: 14px;
   height: 14px;
@@ -66,7 +68,7 @@
   -webkit-mask: var(--status-mark) center / contain no-repeat;
   mask: var(--status-mark) center / contain no-repeat;
 }
-.ds-badge.ds-sm.ds-tone-success::before, .ds-badge.ds-sm.ds-tone-warning::before, .ds-badge.ds-sm.ds-tone-danger::before { width: 12px; height: 12px; }
+.ds-badge.ds-sm.ds-tone-success::before, .ds-badge.ds-sm.ds-tone-warning::before, .ds-badge.ds-sm.ds-tone-danger::before, .ds-badge.ds-sm.ds-tone-pending::before { width: 12px; height: 12px; }
 .ds-badge.ds-tone-success .ds-badge-dot, .ds-badge.ds-tone-warning .ds-badge-dot, .ds-badge.ds-tone-danger .ds-badge-dot { display: none; }
 /* These chips carry their own glyph, so they don't take the status icon. */
 .v10-pca-health-chip::before, .v10-pca-verdict-chip::before, .v10-pca-discount-applied::before { display: none !important; }

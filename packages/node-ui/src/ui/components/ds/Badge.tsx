@@ -1,9 +1,9 @@
 /**
  * Badge and Count — the read-only pills of the node UI (see DESIGN.md).
  *
- * A pill states a fact about something: role, type, layer, count. A status
- * (success, warning, danger) is an icon and text with no box, as in nOS, so it
- * never reads as a layer.
+ * Shapes follow nOS: a layer is a pill, a value or role is a 6px tag, and a
+ * status (success, warning, danger, pending) is an icon and text with no box,
+ * so a status never reads as a layer.
  * It is never the click target; things you can open use a chip with a mark
  * (AgentChip, context graph chip), things you can do use a Button.
  *
@@ -14,7 +14,7 @@ import React from 'react';
 
 export type BadgeTone =
   | 'neutral' | 'muted'
-  | 'success' | 'warning' | 'danger'
+  | 'success' | 'warning' | 'danger' | 'pending'
   | 'wm' | 'swm' | 'vm'
   | 'role'
   | 'kind';

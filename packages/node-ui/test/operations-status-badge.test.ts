@@ -11,7 +11,7 @@ describe('operation status badges', () => {
     expect(operationStatusBadgeClass('success')).toBe('ds-tone-success');
     expect(operationStatusBadgeClass('error')).toBe('ds-tone-danger');
     expect(operationStatusBadgeClass('cancelled')).toBe('ds-tone-muted');
-    expect(operationStatusBadgeClass('in_progress')).toBe('ds-tone-warning');
+    expect(operationStatusBadgeClass('in_progress')).toBe('ds-tone-pending');
 
     const html = renderToStaticMarkup(
       React.createElement(StatusBadge, { status: 'cancelled' }),
