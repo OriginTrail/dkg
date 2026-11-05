@@ -15,6 +15,7 @@ import { Count, LayerGlyph } from '../../../components/ds/Badge.js';
 import { Check, Diamond, LayoutDashboard, MoreHorizontal, Network, RefreshCw, Share2, Upload, X } from 'lucide-react';
 import { RANK_ICON } from './rank-icon.js';
 import { Loading } from '../../../components/ds/Loading.js';
+import { formatNumber, truncateAddress } from '../../../lib/format.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
@@ -261,7 +262,7 @@ function overviewAccessAgentStat(
 
   return {
     id: 'participants',
-    value: agents.size.toLocaleString(),
+    value: formatNumber(agents.size),
     label: 'Agents with access',
     tooltip: 'Includes the curator plus allowlisted participants reported by the node.',
   };
@@ -400,7 +401,7 @@ export function ProjectOverviewCard({
         : memory.partial || hasUnavailableLayer
           ? 'One or more layer counts are currently a lower bound.'
           : 'Canonical current-layer entity counts.';
-  const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : layerSum.toLocaleString();
+  const totalEntitiesValue = allLayerCountsUnavailable ? 'Unavailable' : formatNumber(layerSum);
   // Triples: canonical project-wide total via `useCanonicalTriples`
   // (GH #819 helper — single source of truth for all aggregate
   // triple-count surfaces).
@@ -427,8 +428,8 @@ export function ProjectOverviewCard({
     : memory.loading && triplesCount === 0
       ? '...'
       : triplesIsPartial
-        ? `${triplesCount.toLocaleString()}+`
-        : triplesCount.toLocaleString();
+        ? `${formatNumber(triplesCount)}+`
+        : formatNumber(triplesCount);
   const triplesTooltip = allLayerCountsUnavailable
     ? 'Live triple counts are unavailable.'
     : triplesIsPartial
@@ -441,7 +442,7 @@ export function ProjectOverviewCard({
   // outage cell uses (so the four cells share one failure idiom).
   const subGraphsValue = subGraphCount == null
     ? subGraphFetchFailed ? 'Unavailable' : '...'
-    : subGraphCount.toLocaleString();
+    : formatNumber(subGraphCount);
   const subGraphsTooltip = subGraphCount == null
     ? subGraphFetchFailed
       ? 'Sub-graph list is currently unavailable.'
@@ -479,8 +480,7 @@ export function ProjectOverviewCard({
     <div className="v10-po">
       {/* Identity row (§4.2.1 — locked spec) — label-pill pairs on
           the left, inline primer link on the right. Name + description
-          live in the persistent `ProjectHeaderStrip`; the role icon
-          comes from RANK_ICON, never from the data string itself. */}
+          live in the persistent `ProjectHeaderStrip`. */}
       <div className="v10-po-identity" data-section="identity">
         <div className="v10-po-identity-pairs">
           <div className="v10-po-identity-pair">
@@ -570,7 +570,7 @@ export function ProjectOverviewCard({
               <span className="v10-po-pipeline-step-count">
                 {item.status === 'error'
                   ? 'Unavailable'
-                  : `${item.count.toLocaleString()} ${layerNoun(item.key, item.count)}`}
+                  : `${formatNumber(item.count)} ${layerNoun(item.key, item.count)}`}
               </span>
             </button>
           ))}
@@ -659,7 +659,7 @@ export function ProjectOverviewCard({
                 // `aria-label` preserves a screen-reader-friendly
                 // form, since the visible separators aren't in the
                 // accessible name.
-                const shortAddress = `${display.slice(0, 6)}…${display.slice(-4)}`;
+                const shortAddress = truncateAddress(display);
                 const ariaLabelParts = [shortAddress];
                 if (isSelf) ariaLabelParts.push('you');
                 if (isCurator) ariaLabelParts.push('curator');
@@ -819,7 +819,7 @@ export function PendingJoinRequestsSection({
                 {requests.map(req => (
                   <div key={req.agentAddress} className="v10-po-join-item ds-card-nested">
                     <div className="v10-po-join-info">
-                      <span className="v10-po-join-name">{req.name || `${req.agentAddress.slice(0, 6)}…${req.agentAddress.slice(-4)}`}</span>
+                      <span className="v10-po-join-name">{req.name || truncateAddress(req.agentAddress)}</span>
                       <span className="v10-po-join-addr" title={req.agentAddress}>{req.agentAddress.slice(0, 10)}…</span>
                     </div>
                     <div className="v10-po-join-actions">

@@ -2,6 +2,7 @@ import { canonicalEntityUri } from '../../hooks/memory-graph-query.js';
 import type { MemoryEntity } from '../../hooks/useMemoryEntities.js';
 import { hasReceipt, type VmReceiptSummary } from '../../hooks/useVmReceiptSummary.js';
 import { formatRelativeTime } from './helpers.js';
+import { formatDateTime } from '../../lib/format.js';
 
 /** The subjects of Verifiable Memory's own triples, canonicalised. Entity
  *  fields merge every memory layer, so they can't say whether an entity is a
@@ -57,7 +58,7 @@ export function buildVmFacts(
   }
   if (summary.lastFinalizedAt !== null) {
     facts.push({ id: 'last', label: 'Last finalized', value: formatRelativeTime(summary.lastFinalizedAt), tone: 'ok',
-      tooltip: `${new Date(summary.lastFinalizedAt).toLocaleString()}: when the newest published assertion was finalized (sealed off-chain). It may have been published later.` });
+      tooltip: `${formatDateTime(summary.lastFinalizedAt)}: when the newest published assertion was finalized (sealed off-chain). It may have been published later.` });
   }
   facts.push(consensus);
   return facts;

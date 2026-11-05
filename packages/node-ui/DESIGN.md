@@ -211,6 +211,24 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, and a section on the reference page.
 4. Put the shared classes on the element (`ds-btn ds-primary ds-sm`, `ds-tab`, `ds-seg-item`, `ds-filter`, `ds-card`, `ds-card-nested`, `ds-input ds-sm`, or render `<Button>`) and keep the screen's own class only for layout. `27-ds-components.css` holds the shared rules and never lists screen classes; a screen that needs a variation refines it in its own stylesheet (`test/button-classes.test.ts` and `test/ds-classes.test.ts` check both directions).
 
+## Data display
+
+Read formats from `lib/format.ts`, so a value looks the same on every screen.
+
+| Value | Use | Shows |
+| --- | --- | --- |
+| Address, hash, peer ID | `truncateAddress(value, head, tail)` | `0x3489…E47D`, with the full value in a tooltip |
+| Date and time in full | `formatDateTime(value)` | `Nov 5, 2026, 2:03 PM`, for tooltips and detail rows |
+| Time in a dense row | `formatTime` (`hooks.ts`) | Time today, weekday this week, date after that |
+| Count | `formatNumber(value)` | The reader's own digit grouping |
+| Percentage from basis points | `formatBps(bps)` | `25%`, `12.5%` |
+| File size | `formatBytes(bytes)` (`hooks.ts`) | `1.2 MB` |
+| TRAC and ETH | `formatTrac`, `formatEth` | Token amounts with their tooltip |
+
+A missing value is `—`. Chart axes and ISO dates on the subgraph timeline set their own format.
+
+Tables use `data-table` inside `ds-table-scroll`, so a wide table scrolls inside its card, and add `ds-table-pin` when the first column names the row. Figures use tabular numbers so they line up.
+
 ## Feedback states
 
 Every view that waits on data shows one of four states, and says which.

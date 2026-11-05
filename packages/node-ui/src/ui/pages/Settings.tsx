@@ -20,6 +20,7 @@ import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 import { Toggle } from '../components/ds/Toggle.js';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
+import { truncateAddress } from '../lib/format.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -349,11 +350,6 @@ function LocalDataRetentionSection() {
       </div>
     </section>
   );
-}
-
-function truncateAddress(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
 function chainLabel(chainId: string | null | undefined): string {

@@ -15,6 +15,7 @@ import { Badge, LayerBadge } from '../components/ds/Badge.js';
 import { entityStatusTone } from '../lib/entity-status.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { FileText, GitPullRequest, Package, Signpost, SquareCheck } from 'lucide-react';
+import { truncateAddress } from '../lib/format.js';
 
 type RenderProps<P> = { props: P; renderNode: (value: unknown) => React.ReactNode };
 
@@ -385,12 +386,12 @@ function shortValue(obj: string): string {
 function shortHash(s: string): string {
   if (!s) return '';
   if (s.length <= 16) return s;
-  return `${s.slice(0, 8)}…${s.slice(-6)}`;
+  return truncateAddress(s, 8, 6);
 }
 
 function shortDid(did: string): string {
   if (!did) return '';
-  return did.length > 22 ? `${did.slice(0, 12)}…${did.slice(-6)}` : did;
+  return did.length > 22 ? truncateAddress(did, 12, 6) : did;
 }
 
 function basename(path: string): string {

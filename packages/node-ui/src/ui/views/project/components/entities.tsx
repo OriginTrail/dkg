@@ -20,6 +20,7 @@ import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
 import { kindColorForType } from '../../../entity-kind-colors.js';
 import { humanizeTypeName } from '../../../lib/formatLabels.js';
 import { FileText } from 'lucide-react';
+import { formatDateTime, formatNumber } from '../../../lib/format.js';
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -144,7 +145,7 @@ export function EntityList({
                 {ts != null && (
                   <span
                     className="v10-entity-card-timestamp"
-                    title={new Date(ts).toLocaleString()}
+                    title={formatDateTime(ts)}
                   >
                     {formatRelativeTime(ts)}
                   </span>
@@ -423,7 +424,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
         layer="vm"
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
-          { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
+          { id: 'triples', value: formatNumber(tripleCount), ...VM_TRIPLE_STAT },
           { id: 'types', value: typeCount, label: 'Entity types' },
         ]}
       />

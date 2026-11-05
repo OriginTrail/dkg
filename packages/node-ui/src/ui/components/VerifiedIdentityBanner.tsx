@@ -22,6 +22,7 @@ import { fetchStatus } from '../api.js';
 import { AgentChip } from './AgentChip.js';
 import { Badge, LayerGlyph } from './ds/Badge.js';
 import { Check, Copy } from 'lucide-react';
+import { formatDateTime } from '../lib/format.js';
 
 export interface VerifiedIdentityBannerProps {
   contextGraphId: string;
@@ -52,7 +53,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   // Trail still renders below.
   if (!identity.ual && !identity.owner && !identity.publishedAt && !onChain) return null;
 
-  const publishedAt = identity.publishedAt ? formatWhen(identity.publishedAt) : null;
+  const publishedAt = identity.publishedAt ? formatDateTime(identity.publishedAt) : null;
   const publisherAgentUri = identity.publisherPeerId && agents
     ? agentFromPeerId(identity.publisherPeerId, agents.agents)
     : null;
@@ -192,11 +193,3 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   );
 };
 
-function formatWhen(raw: string): string {
-  const d = new Date(raw.replace(/^"|"$/g, ''));
-  if (!Number.isFinite(d.getTime())) return raw;
-  return d.toLocaleString(undefined, {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: 'numeric', minute: '2-digit',
-  });
-}

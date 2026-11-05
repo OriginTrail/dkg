@@ -34,12 +34,12 @@ import {
 } from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
 import { StatusGlyph } from '../../components/ds/Badge.js';
+import { formatBps } from '../../lib/format.js';
 
 type Phase = 'form' | 'creating' | 'success' | 'reconcile';
 
 function pctFromBps(bps: number): string {
-  const p = bps / 100;
-  return `${p % 1 === 0 ? p.toFixed(0) : p.toFixed(1)}%`;
+  return formatBps(bps);
 }
 
 const AMOUNT_RE = /^\d+(\.\d+)?$/;

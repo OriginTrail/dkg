@@ -3,6 +3,7 @@ import { fetchExtractionStatus, fileUrl, authHeaders, type ExtractionStatus } fr
 import { useModalDismiss } from './useModalDismiss.js';
 import { X } from 'lucide-react';
 import { Loading } from '../ds/Loading.js';
+import { formatDateTime } from '../../lib/format.js';
 
 interface FilePreviewModalProps {
   open: boolean;
@@ -147,7 +148,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
               </span>
               {status.completedAt && (
                 <span className="v10-file-preview-meta-item">
-                  {new Date(status.completedAt).toLocaleString()}
+                  {formatDateTime(status.completedAt)}
                 </span>
               )}
             </div>

@@ -33,6 +33,7 @@ import { humanizeStatus, humanizeTypeName } from '../lib/formatLabels.js';
 import { LAYER_VAR } from '../layer-colors.js';
 import { Badge, LayerGlyph } from './ds/Badge.js';
 import { entityStatusTone } from '../lib/entity-status.js';
+import { formatDateTime } from '../lib/format.js';
 
 const LAYER_COLOR: Record<TrustLevel, string> = LAYER_VAR;
 
@@ -339,7 +340,7 @@ function ActivityRow({
           />
         </span>
       )}
-      <span className="v10-activity-feed-time" title={item.at ? item.at.toLocaleString() : 'no timestamp'}>
+      <span className="v10-activity-feed-time" title={item.at ? formatDateTime(item.at) : 'no timestamp'}>
         {relativeTime(item.at)}
       </span>
     </>

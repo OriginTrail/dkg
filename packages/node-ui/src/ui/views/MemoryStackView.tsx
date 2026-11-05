@@ -26,6 +26,7 @@ import { ContextGraphMark } from '../context-graph-colors.js';
 import { LayerGlyph } from '../components/ds/Badge.js';
 import { Loading } from '../components/ds/Loading.js';
 import { RefreshCw } from 'lucide-react';
+import { formatNumber } from '../lib/format.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -227,7 +228,7 @@ function LayerCell({
           {partial ? 'loaded ' : ''}entit{entityCount === 1 ? 'y' : 'ies'}
         </span>
         <span className="v10-memstack-cell-sep">·</span>
-        <span className="v10-memstack-cell-t">{tripleCount.toLocaleString()}</span>
+        <span className="v10-memstack-cell-t">{formatNumber(tripleCount)}</span>
         <span className="v10-memstack-cell-t-lbl">{partial ? 'loaded triples' : 'triples'}</span>
       </div>
       {recent.length > 0 ? (

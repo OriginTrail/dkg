@@ -17,6 +17,7 @@ import React from 'react';
 import { agentInitials, agentInitialsColor } from '@origintrail-official/dkg-graph-viz/agent-initials';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 import { Bot, Cpu, Feather, Sparkles, Terminal, User, type LucideIcon } from 'lucide-react';
+import { truncateAddress } from '../lib/format.js';
 
 export interface AgentChipProps {
   agent: AgentSummary | null | undefined;
@@ -55,9 +56,7 @@ const initials = agentInitials;
  * an ellipsis that hides nothing.
  */
 function truncateFallbackId(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.length <= 11) return trimmed;
-  return `${trimmed.slice(0, 6)}…${trimmed.slice(-4)}`;
+  return truncateAddress(raw);
 }
 
 export const AgentChip: React.FC<AgentChipProps> = ({

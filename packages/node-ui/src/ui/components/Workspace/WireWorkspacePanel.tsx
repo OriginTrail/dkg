@@ -32,6 +32,7 @@ import {
   type PlanInstallResult,
   type InstallResult,
 } from '../../lib/projectManifest.js';
+import { formatNumber } from '../../lib/format.js';
 
 interface WireWorkspacePanelProps {
   /** Context graph ID — used to call /api/context-graph/{id}/manifest/* . */
@@ -251,7 +252,7 @@ export function WireWorkspacePanel({
           padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
           border: '1px solid var(--border-default)', margin: 0,
         }}>
-          {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
+          {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${formatNumber(w.bytesWritten)} bytes)`).join('\n')}
           {installResult.skipped.length ? '\n\nSkipped:\n' + installResult.skipped.map((s) => `  - ${s}`).join('\n') : ''}
           {installResult.warnings.length ? '\n\nWarnings:\n' + installResult.warnings.map((w) => `  - ${w}`).join('\n') : ''}
         </pre>

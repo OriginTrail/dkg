@@ -3,7 +3,7 @@ import {
   ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
 } from 'recharts';
-import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
+import { useFetch, formatBytes, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
 import { Badge, type BadgeTone, StatusGlyph } from '../components/ds/Badge.js';
 import {
@@ -29,6 +29,7 @@ import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
 import { pressable } from '../lib/pressable.js';
 import { Loading } from '../components/ds/Loading.js';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
+import { formatDateTime } from '../lib/format.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -1010,7 +1011,7 @@ function OperationsTab() {
                   {...pressable(() => setSelectedOp(op.operation_id))}
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'var(--tint-strong)' : undefined }}
                 >
-                  <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
+                  <td title={op.started_at ? formatDateTime(op.started_at, { seconds: true }) : undefined}>{formatTime(op.started_at)}</td>
                   <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
@@ -1245,13 +1246,13 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>
           <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
-        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)' }}>
-          <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context Graph</b> {op.contextGraph_id}</span>}
-          {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
-          {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
-          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
-          {op.trac_cost != null && <span><b style={{ color: 'var(--text-secondary)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
+          <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.contextGraph_id}</span>}
+          {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
+          {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
+          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
+          {op.trac_cost != null && <span><b style={{ color: 'var(--text-muted)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
           {op.tx_hash && (
             <span>
               <b style={{ color: 'var(--text-secondary)' }}>TX</b>{' '}
@@ -1300,8 +1301,8 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                     <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
                     {desc && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
                     <span
-                      style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 'auto', flexShrink: 0 }}
-                      title={p.started_at ? new Date(p.started_at).toLocaleString() : undefined}
+                      style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
+                      title={p.started_at ? formatDateTime(p.started_at, { seconds: true }) : undefined}
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
                     </span>
@@ -1390,11 +1391,6 @@ function LogsTab() {
     setAutoScroll(atBottom);
   }, []);
 
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
 
   const highlightSearch = (line: string) => {
     if (!debouncedSearch) return line;
@@ -1484,7 +1480,7 @@ function LogsTab() {
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
             {loading ? <span style={{ marginLeft: 6, color: 'var(--text-tertiary)', fontSize: 10 }}>refreshing...</span> : ''}
           </span>
-          <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>daemon.log {data?.totalSize ? `(${formatSize(data.totalSize)})` : ''}</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>daemon.log {data?.totalSize ? `(${formatBytes(data.totalSize)})` : ''}</span>
         </div>
         <div
           ref={containerRef}

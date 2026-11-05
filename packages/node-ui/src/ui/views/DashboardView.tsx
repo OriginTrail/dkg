@@ -21,6 +21,7 @@ import { ContextGraphMark } from '../context-graph-colors.js';
 import { AgentDotStack } from '../components/AgentDot.js';
 import { Count } from '../components/ds/Badge.js';
 import { Loading } from '../components/ds/Loading.js';
+import { formatNumber, truncateAddress } from '../lib/format.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -443,7 +444,7 @@ function CgRow({
               ? (
                 // More layers can reveal residue and reduce canonical triple totals.
                 <span title="Loaded preview only — some memory layers are capped or unavailable; total triples may increase or decrease as layers load">
-                  {entities.total.toLocaleString()}+ <span className="v10-cg-dim">entities</span> · ~{triples.total.toLocaleString()} <span className="v10-cg-dim">triples · loaded preview</span>
+                  {formatNumber(entities.total)}+ <span className="v10-cg-dim">entities</span> · ~{formatNumber(triples.total)} <span className="v10-cg-dim">triples · loaded preview</span>
                 </span>
               )
               : <>{abbrev(entities.total)} <span className="v10-cg-dim">entities</span> · {abbrev(triples.total)} <span className="v10-cg-dim">triples</span></>}
@@ -607,7 +608,7 @@ export function DashboardView() {
 
   const walletSym = wb?.symbol || 'TRAC';
   const walletRows = wb?.balances ?? [];
-  const shortAddr = (a: string) => (a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a);
+  const shortAddr = truncateAddress;
 
 
   return (

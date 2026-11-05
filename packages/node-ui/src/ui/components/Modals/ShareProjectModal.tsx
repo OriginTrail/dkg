@@ -7,6 +7,7 @@ import {
 import { useModalDismiss } from './useModalDismiss.js';
 import { Count } from '../ds/Badge.js';
 import { X } from 'lucide-react';
+import { formatDateTime, truncateAddress } from '../../lib/format.js';
 
 interface NetworkAgent {
   agentUri: string;
@@ -24,8 +25,7 @@ interface ShareProjectModalProps {
 }
 
 function truncAddr(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+  return truncateAddress(addr);
 }
 
 /**
@@ -414,7 +414,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       {req.agentAddress}
                     </span>
                     <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>
-                      Requested {new Date(req.timestamp).toLocaleString()}
+                      Requested {formatDateTime(req.timestamp)}
                     </span>
                   </div>
                   <div style={{ display: 'flex', gap: 6 }}>

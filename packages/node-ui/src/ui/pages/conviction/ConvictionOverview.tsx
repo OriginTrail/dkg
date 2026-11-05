@@ -17,6 +17,7 @@ import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge, Count } from '../../components/ds/Badge.js';
 import { RefreshCw } from 'lucide-react';
+import { formatBps } from '../../lib/format.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -488,7 +489,7 @@ function DiscoveredStrip({
                   approved, so the account's tier isn't a discount this node realizes -
                   showing a percentage there reads as a false "you'd get this %". */}
               {(d.relation === 'agent' || d.relation === 'both') && typeof bps === 'number' && bps > 0 && (
-                <Badge size="sm">{(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</Badge>
+                <Badge size="sm">{formatBps(bps)}</Badge>
               )}
             </span>
             <button

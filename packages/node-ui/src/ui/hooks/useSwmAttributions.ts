@@ -29,6 +29,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { authHeaders } from '../api.js';
 import { agentHexForUri } from './useAgents.js';
 import { SIGNAL_HEX } from '../layer-colors.js';
+import { truncateAddress } from '../lib/format.js';
 
 export interface AgentAttribution {
   /** Canonical agent identifier. Peer-id for libp2p (`12D3…`), `did:dkg:agent:`
@@ -135,11 +136,9 @@ function bv(v: unknown): string | undefined {
 function agentLabel(agent: string): string {
   if (agent.startsWith('did:dkg:agent:')) {
     const tail = agent.slice('did:dkg:agent:'.length);
-    if (tail.startsWith('0x')) return tail.slice(0, 6) + '…' + tail.slice(-4);
-    return tail.slice(0, 6) + '…' + tail.slice(-6);
+    return tail.startsWith('0x') ? truncateAddress(tail) : truncateAddress(tail, 6, 6);
   }
-  if (agent.length > 18) return agent.slice(0, 8) + '…' + agent.slice(-6);
-  return agent;
+  return agent.length > 18 ? truncateAddress(agent, 8, 6) : agent;
 }
 
 function canonicaliseAgent(raw: string): string {

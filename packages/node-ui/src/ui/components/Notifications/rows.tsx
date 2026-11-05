@@ -23,6 +23,7 @@ import { AgentDot } from '../AgentDot.js';
 import { ContextGraphChip } from '../ds/ContextGraphChip.js';
 import { BadgePercent, Check, KeyRound, Plus, X, RefreshCw } from 'lucide-react';
 import { LayerGlyph } from '../ds/Badge.js';
+import { formatDateTime, bpsToPercent, truncateAddress } from '../../lib/format.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
 function cgLabel(name: string | undefined, cgId: string): string {
@@ -31,7 +32,7 @@ function cgLabel(name: string | undefined, cgId: string): string {
 }
 
 function shortAddr(addr: string): string {
-  return addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
+  return truncateAddress(addr);
 }
 
 // ─── Join request (actionable) ──────────────────────────────────────────────
@@ -108,7 +109,7 @@ export function JoinRequestRow({
         <div className="v10-notif-row-sub">
           <span className="v10-notif-addr" title={item.agentAddress}>{shortAddr(item.agentAddress)}</span>
           <span className="v10-notif-dot">·</span>
-          <span className="v10-notif-time" title={new Date(item.ts).toLocaleString()}>
+          <span className="v10-notif-time" title={formatDateTime(item.ts)}>
             {formatNotificationTimestamp(item.ts)}
           </span>
         </div>
@@ -256,7 +257,7 @@ export function ActivityDigestRow({
           {text} in <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" />
         </span>
       </span>
-      <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
+      <span className="v10-notif-time" aria-hidden="true" title={formatDateTime(item.ts)}>
         {when}
       </span>
     </button>
@@ -291,7 +292,7 @@ export function ConfirmationRow({
             : <>Your request to join <ContextGraphChip id={item.cgId} name={cg} className="v10-notif-cg-name" /> wasn’t approved</>}
         </span>
       </span>
-      <span className="v10-notif-time" title={new Date(item.ts).toLocaleString()}>
+      <span className="v10-notif-time" title={formatDateTime(item.ts)}>
         {formatNotificationTimestamp(item.ts)}
       </span>
     </>
@@ -335,7 +336,7 @@ export function PcaCostCoveredRow({
   item: Extract<ActivityItem, { kind: 'pca_cost_covered' }>;
 }) {
   const bps = convictionDiscountBps(item.covered);
-  const pct = bps != null ? (bps / 100).toFixed(bps % 100 === 0 ? 0 : 1) : null;
+  const pct = bps != null ? bpsToPercent(bps) : null;
   let saved: string | null = null;
   try {
     const base = BigInt(item.covered.baseCost);
@@ -368,7 +369,7 @@ export function PcaCostCoveredRow({
         <span className="v10-notif-row-title">{title}</span>
         <span className="v10-notif-row-detail">{detail}</span>
       </span>
-      <span className="v10-notif-time" aria-hidden="true" title={new Date(item.ts).toLocaleString()}>
+      <span className="v10-notif-time" aria-hidden="true" title={formatDateTime(item.ts)}>
         {when}
       </span>
     </div>

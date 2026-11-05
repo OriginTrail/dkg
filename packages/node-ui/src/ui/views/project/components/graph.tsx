@@ -15,6 +15,7 @@ import { Badge } from '../../../components/ds/Badge.js';
 import { Anchor, X } from 'lucide-react';
 import { useModalDismiss } from '../../../components/Modals/useModalDismiss.js';
 import { Loading } from '../../../components/ds/Loading.js';
+import { formatNumber } from '../../../lib/format.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -524,10 +525,10 @@ export function LayerGraphPanel({
   const overlay = hasOverlay || loadedNodeCount > 3000 ? (
     <>
       {loadedNodeCount > 3000 && <div className="v10-graph-legend" role="status">
-        <span>{showAllLoadedNodes ? `Showing all ${loadedNodeCount.toLocaleString()} loaded nodes.`
+        <span>{showAllLoadedNodes ? `Showing all ${formatNumber(loadedNodeCount)} loaded nodes.`
           : 'This large graph shows one connected view of up to 3,000 nodes.'}</span>
         <button onClick={() => setExpandedNodes(showAllLoadedNodes ? null : expansionScope)}>
-          {showAllLoadedNodes ? 'Use smaller graph view' : `Show all loaded nodes (${loadedNodeCount.toLocaleString()})`}
+          {showAllLoadedNodes ? 'Use smaller graph view' : `Show all loaded nodes (${formatNumber(loadedNodeCount)})`}
         </button>
       </div>}
       {layer === 'vm' && anchors.length > 0 && (

@@ -11,6 +11,7 @@ import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { BadgePercent, Wallet, RefreshCw } from 'lucide-react';
+import { formatBps } from '../../lib/format.js';
 
 /** The owner-mode union — re-exported from the owner-access model (no longer re-declared
  *  here) so existing importers keep a stable name. */
@@ -25,8 +26,7 @@ export type PcaAccountCardAccount = ResolvedPcaAccount & {
 
 function pct(bps: number | undefined): string {
   if (typeof bps !== 'number' || !Number.isFinite(bps)) return '—';
-  const p = bps / 100;
-  return `${p % 1 === 0 ? p.toFixed(0) : p.toFixed(1)}%`;
+  return formatBps(bps);
 }
 
 /**

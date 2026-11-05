@@ -97,6 +97,7 @@ select.input {
   background: var(--bg-panel);
 }
 .data-table td {
+  font-variant-numeric: tabular-nums;
   padding: 9px 14px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);

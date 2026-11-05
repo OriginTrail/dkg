@@ -20,6 +20,7 @@ import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { truncateId } from '../hooks/useVerifiedEntityIdentity.js';
 import { Badge, LayerGlyph } from './ds/Badge.js';
 import { Check, CircleDashed, Copy, X } from 'lucide-react';
+import { formatNumber, formatDateTime } from '../lib/format.js';
 
 export interface OnChainProvenanceCardProps {
   contextGraphId: string;
@@ -169,7 +170,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
           {receipt.finalizedAt && (
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">Finalized</span>
-              <span className="v10-vm-identity-val">{formatWhen(receipt.finalizedAt)}</span>
+              <span className="v10-vm-identity-val">{formatDateTime(receipt.finalizedAt)}</span>
             </div>
           )}
         </div>
@@ -180,13 +181,6 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
 
 function formatBlock(raw: string): string {
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n.toLocaleString() : raw;
+  return Number.isFinite(n) ? formatNumber(n) : raw;
 }
 
-function formatWhen(raw: string): string {
-  const d = new Date(raw.replace(/^"|"$/g, ''));
-  if (!Number.isFinite(d.getTime())) return raw;
-  return d.toLocaleString(undefined, {
-    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
-  });
-}

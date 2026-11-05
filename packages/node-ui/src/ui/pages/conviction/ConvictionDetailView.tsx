@@ -28,6 +28,7 @@ import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
 import { BadgePercent, RefreshCw } from 'lucide-react';
 import { Loading } from '../../components/ds/Loading.js';
+import { bpsToPercent } from '../../lib/format.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -173,7 +174,7 @@ function DetailBody({
   const health = healthForSnapshot(snapshot);
   const ownerTitle = access.writesEnabled ? undefined : ownerOnlyReason;
 
-  const pct = (snapshot.discountBps / 100).toFixed(snapshot.discountBps % 100 === 0 ? 0 : 1);
+  const pct = bpsToPercent(snapshot.discountBps);
   const walletSurfaceCopy = connectedWallet
     ? access.mode === 'wallet'
       ? access.wrongNetwork

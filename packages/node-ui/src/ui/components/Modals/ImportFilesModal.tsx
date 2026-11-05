@@ -3,6 +3,8 @@ import { importFile, type ImportFileResult } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { Check, File, FileCode, FileImage, FileSpreadsheet, FileText, Minus, Network, X } from 'lucide-react';
 import { pressable } from '../../lib/pressable.js';
+import { formatNumber } from '../../lib/format.js';
+import { formatBytes } from '../../hooks.js';
 
 interface ImportFilesModalProps {
   open: boolean;
@@ -26,12 +28,6 @@ interface UploadResult {
 }
 
 const SUPPORTED_EXTENSIONS = '.md, .docx, .pdf, .txt, .csv, .json, .ttl, .rdf, .owl, .py, .ts, .js, .tsx, .jsx, .java, .go, .rs, .c, .cpp, .html, .xml, .yaml, .yml';
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 function fileIcon(name: string): React.ReactNode {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
@@ -229,13 +225,13 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                       <div key={f.id} className="v10-import-file-item">
                         <span className="v10-import-file-icon">{fileIcon(f.file.name)}</span>
                         <span className="v10-import-file-name">{f.file.name}</span>
-                        <span className="v10-import-file-size">{formatSize(f.file.size)}</span>
+                        <span className="v10-import-file-size">{formatBytes(f.file.size)}</span>
                         <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} aria-label="Remove" title="Remove"><X size={14} /></button>
                       </div>
                     ))}
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 12 }}>
-                    {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatSize(files.reduce((s, f) => s + f.file.size, 0))} total
+                    {files.length} file{files.length !== 1 ? 's' : ''} selected · {formatBytes(files.reduce((s, f) => s + f.file.size, 0))} total
                   </div>
                 </>
               )}
@@ -286,7 +282,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                     {successCount > 0 && (
                       <>
                         Successfully imported {successCount} file{successCount !== 1 ? 's' : ''}.
-                        {totalTriples > 0 && <> Extracted <strong>{totalTriples.toLocaleString()}</strong> triples into working memory.</>}
+                        {totalTriples > 0 && <> Extracted <strong>{formatNumber(totalTriples)}</strong> triples into working memory.</>}
                       </>
                     )}
                     {skippedCount > 0 && (
@@ -301,7 +297,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                     {successCount} file{successCount !== 1 ? 's' : ''} imported
                     {skippedCount > 0 && <>, {skippedCount} stored without extraction</>}
                     , {errorCount} failed.
-                    {totalTriples > 0 && <> {totalTriples.toLocaleString()} triples extracted.</>}
+                    {totalTriples > 0 && <> {formatNumber(totalTriples)} triples extracted.</>}
                   </>
                 )}
               </div>
