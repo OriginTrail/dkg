@@ -99,6 +99,32 @@ export interface SwmAuthorInventoryRowV1 {
   readonly expiresAt: TimestampMsV1 | null;
 }
 
+// A signed head may validate and digest the same frozen row set several times.
+// Keep the derived bytes private: callers still receive an independent buffer.
+const MAX_CACHED_ROWS_BYTES_V1 = 2 * MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1;
+let immutableRowsBytesV1 = new WeakMap<readonly SwmAuthorInventoryRowV1[], Uint8Array>();
+let allocatedRowsBytesV1 = 0;
+
+function hasFrozenRowsV1(rows: readonly SwmAuthorInventoryRowV1[]): boolean {
+  try {
+    if (!Array.isArray(rows) || rows.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1) return false;
+    if (
+      !Object.isFrozen(rows)
+      || Object.getPrototypeOf(rows) !== Array.prototype
+      // Reflection may have grown and frozen a previously mutable array.
+      || rows.length > MAX_SWM_AUTHOR_INVENTORY_ROWS_V1
+    ) return false;
+    for (let index = 0; index < rows.length; index += 1) {
+      const row: unknown = rows[index];
+      if (typeof row !== 'object' || row === null || !Object.isFrozen(row)) return false;
+    }
+    return true;
+  } catch {
+    // Optional reuse must not turn a successful serialization into a failure.
+    return false;
+  }
+}
+
 /** Constant-size signed exact-set commitment. The rows remain a separate blob. */
 export interface SwmAuthorInventoryHeadV1 extends SwmAuthorInventoryScopeV1 {
   readonly version: DecimalU64V1;
@@ -246,12 +272,30 @@ export function compareSwmAuthorInventoryRowsV1(
 export function canonicalizeSwmAuthorInventoryRowsBytesV1(
   rows: readonly SwmAuthorInventoryRowV1[],
 ): Uint8Array {
+  // Decide eligibility before reading values: reflection may itself run Proxy
+  // traps. The validator/serializer below must still prove the scalar schema
+  // and dense own data properties before a new entry can be trusted.
+  const frozen = hasFrozenRowsV1(rows);
+  const cached = frozen ? immutableRowsBytesV1.get(rows) : undefined;
+  if (cached !== undefined) return cached.slice();
   assertSwmAuthorInventoryRowsV1(rows);
   try {
-    return UTF8.encode(canonicalizeJson(rows as unknown as CanonicalJsonValue, {
+    const bytes = UTF8.encode(canonicalizeJson(rows as unknown as CanonicalJsonValue, {
       maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
       maxDepth: 2,
     }));
+    if (frozen) {
+      // Weak keys avoid retaining dead snapshots. This conservative allocation
+      // budget also bounds stored bytes while many snapshots remain live.
+      if (allocatedRowsBytesV1 + bytes.byteLength > MAX_CACHED_ROWS_BYTES_V1) {
+        immutableRowsBytesV1 = new WeakMap();
+        allocatedRowsBytesV1 = 0;
+      }
+      immutableRowsBytesV1.set(rows, bytes);
+      allocatedRowsBytesV1 += bytes.byteLength;
+      return bytes.slice();
+    }
+    return bytes;
   } catch (cause) {
     fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
   }

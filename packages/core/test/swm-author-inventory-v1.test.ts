@@ -140,6 +140,97 @@ describe('SWM author inventory v1', () => {
     })).toBeInstanceOf(Uint8Array);
   });
 
+  it('keeps immutable row-set bytes and digests independent of returned buffers', () => {
+    const rows = Object.freeze([ROW_A, ROW_B]);
+    const expected = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
+    const expectedDigest = computeSwmAuthorInventoryRowsDigestV1([ROW_A, ROW_B]);
+    const first = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    first.fill(0);
+    const second = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    expect(second).toEqual(expected);
+    expect(second).not.toBe(first);
+    second.fill(1);
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toEqual(expected);
+    expect(computeSwmAuthorInventoryRowsDigestV1(rows)).toBe(expectedDigest);
+  });
+
+  it('revalidates a mutable array after a successful serialization', () => {
+    const rows = [ROW_A, ROW_B];
+    canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    rows.reverse();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow(/strictly ordered/);
+  });
+
+  it('does not trust mutable records inside a frozen array', () => {
+    const row = { ...ROW_A };
+    const rows = Object.freeze([row]);
+    const first = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    row.sealDigest = ROW_B.sealDigest;
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).not.toEqual(first);
+    Object.assign(row, { assertionVersion: '0' });
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows))
+      .toThrow(/assertionVersion must be positive/);
+  });
+
+  it('does not cache earlier bytes if immutability inspection freezes changed input', () => {
+    const row = { ...ROW_A };
+    let frozenDuringInspection = false;
+    const reflected = new Proxy(row, {
+      isExtensible(target) {
+        if (!frozenDuringInspection) {
+          frozenDuringInspection = true;
+          target.sealDigest = ROW_B.sealDigest;
+          Object.freeze(target);
+        }
+        return Reflect.isExtensible(target);
+      },
+    });
+    const rows = Object.freeze([reflected]);
+    canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    const currentBytes = canonicalizeSwmAuthorInventoryRowsBytesV1([{ ...row }]);
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toEqual(currentBytes);
+  });
+
+  it('fully validates a different frozen array even when its records were already encoded', () => {
+    canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_A, ROW_B]));
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_B, ROW_A])))
+      .toThrow(/strictly ordered/);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_A, ROW_A])))
+      .toThrow(/duplicate/);
+    const invalid = Object.freeze({ ...ROW_A, assertionVersion: '0' }) as SwmAuthorInventoryRowV1;
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([invalid])))
+      .toThrow(/assertionVersion must be positive/);
+  });
+
+  it('does not change valid serialization when optional immutability reflection fails', () => {
+    const rows = Object.freeze([ROW_A, ROW_B]);
+    const reflected = new Proxy(rows, {
+      isExtensible: () => { throw new Error('immutability inspection unavailable'); },
+    });
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(reflected))
+      .toEqual(canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(reflected))
+      .toEqual(canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
+  });
+
+  it('rejects a revoked proxy even after its immutable data was serialized successfully', () => {
+    const { proxy, revoke } = Proxy.revocable(Object.freeze([ROW_A, ROW_B]), {});
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(proxy))
+      .toEqual(canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]));
+    revoke();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(proxy)).toThrow();
+  });
+
+  it('continues to reject frozen records containing accessor properties', () => {
+    const row = Object.freeze(Object.defineProperty({ ...ROW_A }, 'sealDigest', {
+      get: () => ROW_A.sealDigest,
+      enumerable: true,
+    })) as SwmAuthorInventoryRowV1;
+    const rows = Object.freeze([row]);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow();
+  });
+
   it('rejects row reordering and duplicate active identities', () => {
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_B, ROW_A]))
       .toThrow(/strictly ordered/);
@@ -168,6 +259,30 @@ describe('SWM author inventory v1', () => {
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([row2, row10])).not.toThrow();
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([row10, row2]))
       .toThrow(/strictly ordered/);
+  });
+
+  it.each([false, true])('checks the row limit before inspecting entries (freeze during reflection: %s)', (freezeDuringReflection) => {
+    const rows: SwmAuthorInventoryRowV1[] = [];
+    if (!freezeDuringReflection) {
+      rows.length = MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1;
+      Object.freeze(rows);
+    }
+    let indexReads = 0;
+    const reflected = new Proxy(rows, {
+      isExtensible(target) {
+        if (freezeDuringReflection && !Object.isFrozen(target)) {
+          target.length = MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1;
+          Object.freeze(target);
+        }
+        return Reflect.isExtensible(target);
+      },
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) indexReads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(reflected)).toThrow(/row limit/);
+    expect(indexReads).toBe(0);
   });
 
   it('rejects count, digest, author, and temporal binding failures', () => {
