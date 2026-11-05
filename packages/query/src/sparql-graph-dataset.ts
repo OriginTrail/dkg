@@ -1,5 +1,6 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import {
+  isSparqlKeyword,
   type PreparedSparqlQuery,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
@@ -34,9 +35,8 @@ function isSymbol(token: SparqlLexicalToken | undefined, value: string): boolean
 }
 
 export function hasNestedSelect(scope: PreparedSparqlQuery): boolean {
-  return scope.prepared.tokens
-    .slice(scope.prepared.prologue.endTokenIndex + 1)
-    .some((token) => token.kind === 'word' && token.upper === 'SELECT');
+  const { tokens, prologue } = scope.prepared;
+  return tokens.some((_token, index) => index > prologue.endTokenIndex && isSparqlKeyword(tokens, index, 'SELECT'));
 }
 
 /**
@@ -49,7 +49,7 @@ export function hasRepeatedPath(scope: PreparedSparqlQuery): boolean {
     if (!isSymbol(token, '+') && !isSymbol(token, '*') && !isSymbol(token, '?')) return false;
     const before = tokens[index - 1];
     return before?.kind === 'iri' || before?.kind === 'prefixed-name' || isSymbol(before, ')')
-      || (before?.kind === 'word' && before.logicalValue === 'a');
+      || (before?.kind === 'word' && before.logicalValue === 'a' && isSparqlKeyword(tokens, index - 1, 'A'));
   });
 }
 
@@ -89,16 +89,14 @@ function readsOnlyDeclaredNamedSet(scope: PreparedSparqlQuery): boolean {
   if (!scope.where) return false;
   const { tokens } = scope.prepared;
   const inner = tokens.slice(scope.where.openingTokenIndex + 1, scope.where.closingTokenIndex);
-  if (inner.length !== 3 || inner[0].kind !== 'word' || inner[0].upper !== 'INCLUDE'
+  if (inner.length !== 3 || !isSparqlKeyword(tokens, scope.where.openingTokenIndex + 1, 'INCLUDE')
     || !isSymbol(inner[1], '%') || inner[2].kind !== 'word') return false;
   for (let index = scope.prepared.prologue.endTokenIndex + 1; index < scope.where.openingTokenIndex; index++) {
-    const token = tokens[index];
-    if (scope.structure.braces.depthBefore[index] !== 0 || token.kind !== 'word' || token.upper !== 'WITH') continue;
+    if (scope.structure.braces.depthBefore[index] !== 0 || !isSparqlKeyword(tokens, index, 'WITH')) continue;
     const closing = scope.structure.braces.matchingTokenIndexes[index + 1] ?? -1;
     if (closing < 0) continue;
-    const asToken = tokens[closing + 1];
     const name = tokens[closing + 3];
-    if (asToken?.kind === 'word' && asToken.upper === 'AS' && isSymbol(tokens[closing + 2], '%')
+    if (isSparqlKeyword(tokens, closing + 1, 'AS') && isSymbol(tokens[closing + 2], '%')
       && name?.kind === 'word' && name.logicalValue === inner[2].logicalValue) return true;
   }
   return false;

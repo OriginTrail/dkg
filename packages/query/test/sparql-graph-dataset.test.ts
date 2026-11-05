@@ -88,6 +88,8 @@ describe('hasNestedSelect', () => {
     'SELECT ?s WHERE { ?s <urn:p> "SELECT" }',
     'SELECT ?s WHERE { ?s ?p ?o } # SELECT',
     'PREFIX SELECT: <urn:> SELECT ?s WHERE { ?s SELECT:p ?o }',
+    'SELECT ("demo"@select AS ?label) WHERE { ?s ?p ?o }',
+    String.raw`SELECT ("demo"@s\u0065lect AS ?label) WHERE { ?s ?p ?o }`,
   ])('finds none in %s', (query) => {
     expect(hasNestedSelect(scope(query))).toBe(false);
   });

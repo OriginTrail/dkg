@@ -1,7 +1,7 @@
 import { readSparqlQueryBoundaries } from '../src/sparql.js';
 import { describe, expect, it } from 'vitest';
 import {
-  prepareSparql, prepareSparqlQuery, indexSparqlStructure, sparqlTokenIndexesAtDepth,
+  prepareSparql, prepareSparqlQuery, indexSparqlStructure, sparqlTokenIndexesAtDepth, isSparqlKeyword,
 } from '../src/sparql.js';
 
 function query(source: string) {
@@ -11,6 +11,11 @@ function query(source: string) {
 }
 
 describe('prepared query boundaries', () => {
+  it('shares keyword classification without treating payload words as syntax', () => {
+    const { tokens } = query('SELECT ("demo"@select AS ?label) WITH { SELECT ?s { ?s ?p ?o } } AS %select { INCLUDE %select }').prepared;
+    expect(tokens.filter((_token, index) => isSparqlKeyword(tokens, index, 'SELECT'))).toHaveLength(2);
+    expect(tokens.filter((_token, index) => isSparqlKeyword(tokens, index, 'INCLUDE'))).toHaveLength(1);
+  });
   it.each(['limit', 'order', 'values', 'offset', 'having', 'group', 'where', 'from', 'service', 'graph', 'union', 'with', String.raw`l\u0069mit`])('keeps named solution set %s outside keyword scanning', (name) => {
     for (const keyword of ['WHERE ', '']) {
       const body = `{ INCLUDE %${name} }`;

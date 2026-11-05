@@ -47,6 +47,12 @@ export function isSparqlWordPayload(tokens: readonly SparqlLexicalToken[], index
   return previous?.kind === 'symbol' && (previous.logicalValue === '@' || previous.logicalValue === '%');
 }
 
+/** Match a syntax keyword without interpreting a language tag or named-set identifier as one. */
+export function isSparqlKeyword(tokens: readonly SparqlLexicalToken[], index: number, keyword: string): boolean {
+  const token = tokens[index];
+  return token?.kind === 'word' && token.upper === keyword && !isSparqlWordPayload(tokens, index);
+}
+
 interface PreparedSparqlCommon {
   /** Exact unprocessed input. */
   readonly source: string;

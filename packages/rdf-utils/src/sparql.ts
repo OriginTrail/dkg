@@ -1,4 +1,5 @@
 export {
+  isSparqlKeyword,
   materializePreparedSparql,
   prepareSparql,
   type PreparedSparql,

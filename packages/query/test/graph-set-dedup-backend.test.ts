@@ -281,6 +281,32 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
     }
   });
 
+  it('preserves caller BIND assignments to its GRAPH variable on unknown engines', async () => {
+    for (const variable of ['?g', String.raw`?\u0067`]) {
+      const result = rewriteGraphSet(scope(`SELECT * WHERE { GRAPH ${variable} {
+        BIND(<${graphs[0]}> AS ${variable}) ?s <${A}>+ ?o FILTER(${variable} = <${graphs[0]}>)
+      } }`), graphs, 'values-union', null);
+      if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+      const found = (await store.query(materializePreparedSparql(result.value.prepared))).bindings;
+      expect(bag(found)).toEqual(bag([
+        { g: graphs[0], s: 'urn:s:1', o: '"x"' }, { g: graphs[0], s: 'urn:s:2', o: '"x"' },
+      ]));
+    }
+  });
+
+  it('preserves caller BIND expressions with an explicitly bound GRAPH variable', async () => {
+    const pattern = (path: string) => `GRAPH ?g { BIND(STR(?g) AS ?graphLabel) ?s <${A}>${path} ?o FILTER(?o = "x") }`;
+    const values = `VALUES ?g { ${graphs.map(g => `<${g}>`).join(' ')} }`;
+    // This fixture has only single-hop A paths. A native triple read supplies
+    // the backend's graph-variable expression semantics without DKG rewriting.
+    const native = (await store.query(`SELECT * ${graphs.map(g => `FROM NAMED <${g}>`).join(' ')} WHERE { ${values} ${pattern('')} }`)).bindings;
+    expect(native).toHaveLength(5);
+    const result = rewriteGraphSet(scope(`SELECT * WHERE { ${values} ${pattern('+')} }`), graphs, 'values-union', null);
+    if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+    const found = (await store.query(materializePreparedSparql(result.value.prepared))).bindings;
+    expect(bag(found)).toEqual(bag(native));
+  });
+
   it.each(['SELECT', String.raw`S\u0045LECT`])('preserves a direct %s subquery inside caller GRAPH on unknown engines', async (keyword) => {
     const result = rewriteGraphSet(scope(`SELECT ?g ?s WHERE { GRAPH ?g {
       # The direct subquery must remain a group beside the generated VALUES.
