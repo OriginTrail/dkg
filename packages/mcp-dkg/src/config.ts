@@ -56,7 +56,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { resolveDkgHome } from '@origintrail-official/dkg-core';
-import { canUseDiscoveredHomeToken, MISSING_TOKEN_HELP } from './auth-diagnostics.js';
+import { MISSING_TOKEN_HELP } from './auth-diagnostics.js';
 
 export interface DkgConfig {
   /** Base URL of the local DKG daemon. */
@@ -83,6 +83,19 @@ export interface DkgConfig {
 }
 
 const DEFAULT_API = 'http://localhost:9200';
+
+/** Discovered defaults and credentials belong only to their own local endpoint. */
+function matchesDiscoveredHomeEndpoint(api: string | null, homeApi: string): boolean {
+  if (!api) return true;
+  try {
+    const target = new URL(api);
+    const home = new URL(homeApi);
+    const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
+    return target.protocol === home.protocol && target.port === home.port
+      && loopback.has(target.hostname) && loopback.has(home.hostname)
+      && !target.username && !target.password && target.pathname === '/';
+  } catch { return false; }
+}
 
 /**
  * Expand a leading `~/` (or bare `~`) to the user's home directory.
@@ -166,7 +179,8 @@ function findConfigFile(start: string): string | null {
  *   - `defaultProject` ← `contextGraphs[0]`
  *
  * Returns `null` when `<DKG_HOME>/config.json` doesn't exist (so
- * loadConfig can fall through to the path-B yaml branch).
+ * loadConfig can fall through to the path-B yaml branch). Discovered homes
+ * also return null for a different explicit API, preserving env-only selection.
  *
  * Env vars (DKG_API / DKG_TOKEN / DKG_PROJECT / DKG_AGENT_URI)
  * still override the file values per the operator-precedence
@@ -197,6 +211,8 @@ function loadConfigFromDkgHome(dkgHome: string, discovered = false): DkgConfig |
 
   const apiPort = typeof daemonConfig.apiPort === 'number' ? daemonConfig.apiPort : 9200;
   const fileApi = `http://localhost:${apiPort}`;
+  const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
+  if (discovered && !matchesDiscoveredHomeEndpoint(envApi, fileApi)) return null;
   const contextGraphs = Array.isArray(daemonConfig.contextGraphs)
     ? daemonConfig.contextGraphs
     : [];
@@ -210,8 +226,7 @@ function loadConfigFromDkgHome(dkgHome: string, discovered = false): DkgConfig |
   // resolveTokenFromFile helper handles).
   const tokenPath = path.join(dkgHome, 'auth.token');
   let fileToken = '';
-  const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
-  if ((!discovered || canUseDiscoveredHomeToken(envApi, fileApi)) && fs.existsSync(tokenPath)) {
+  if (fs.existsSync(tokenPath)) {
     const tokenContent = readIfExists(tokenPath);
     if (tokenContent) {
       const line = tokenContent
