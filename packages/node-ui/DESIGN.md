@@ -6,7 +6,7 @@ The rules behind the node UI's look and behaviour. The values live in code; this
 - **Components:** `src/ui/components/ds/` (`Button`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
 - **Component CSS:** `src/ui/styles/27-ds-components.css`, loaded last
 - **Reference page (development only):** run `pnpm dev:ui` and open <http://127.0.0.1:5173/ui/design-system.html>. It renders every token and component live in both themes. `vite build` only bundles `index.html`, so the page is not part of the released UI.
-- **Checks:** `test/design-tokens.test.ts` (see [Checks](#checks))
+- **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` (see [Checks](#checks))
 
 ## Principles
 
@@ -31,7 +31,7 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Role and access | `--role`, `--role-text`, `--role-bg`, `--role-border` | Facts about you and the graph (curator, participant; public, curated, private). The role you hold is a tinted badge; access is an outline. |
 | Links | `--text-link`, `--link-underline` | Links are text colour with an underline. Blue is not a link colour. |
 | Focus | `--focus-ring` | Keyboard focus only, always as a 2px ring. Not a link colour, not a layer. |
-| Data | `--data-1` … `--data-8` | Charts and Context Graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
+| Data | `--data-1`, `--data-2`, `--data-3`, `--data-4`, `--data-5`, `--data-6`, `--data-7`, `--data-8` | Charts and Context Graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
 | Signal tints | `--success-bg`, `--warning-bg`, `--danger-bg` (+ `-bg-strong`, `-border`) | Washes of the signal accents for notices, result cards and highlighted rows. Text on them uses the matching `--text-*` signal. Mixed from the accents, so they follow the theme. |
 | Neutral tints | `--tint-faint`, `--tint-subtle`, `--tint-strong` | Hover rows, wells, tracks and inline code. A wash of the text colour, so they read in both themes (white-alpha disappears in light mode). |
 | Elevation | `--shadow-xs`, `--shadow-sm`, `--shadow-menu`, `--shadow-popover`, `--shadow-lift`, `--shadow-modal`, `--shadow-drawer`; `--scrim`, `--scrim-strong`, `--shade` | One shadow per kind of surface: sm for hovered cards, menu for dropdowns and floating panels, popover for popovers, lift for raised graph cards, modal for dialogs, drawer for side sheets. Scrim dims the page behind a modal or drawer; shade darkens an expanded row or inset well. |
@@ -147,6 +147,24 @@ The centre of the app works like browser tabs:
 - Every tab has a web address (`src/ui/lib/tab-routes.ts`): `/`, `/observability`, `/settings`, `/conviction`, `/graph/<id>`, `/agent/<graph>/<slug>`, `/pca/<n>`. Back, forward, refresh and bookmarks land on the same tab.
 - Open tabs, their order, the active tab and recently closed tabs are saved in the browser (`stores/tabs.ts`) and restored on refresh.
 - Tabs can be dragged or moved with Ctrl+Shift+←/→, closed with ×, middle-click or Delete, and reopened from the ⌄ menu. Dashboard is pinned first.
+
+## Other tokens
+
+Every token in `00-theme.css` is listed in this file, and `test/design-docs.test.ts` fails when one isn't.
+
+| Group | Tokens | Use |
+|---|---|---|
+| Layer colours | `--layer-shared-bg`, `--layer-shared-border`, `--layer-shared-text`, `--layer-verified-bg`, `--layer-verified-border`, `--layer-verified-text`, `--layer-working-bg`, `--layer-working-border`, `--layer-working-text` | Fills, outlines and text for the memory layers |
+| Signal variants | `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-info`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
+| Layout and scale | `--accent-vm-hover`, `--font-mono`, `--font-sans`, `--fs-layer`, `--header-h`, `--tab-h`, `--toolbar-h` | Fixed shell heights and the remaining scale steps |
+| Older names | `--accent-amber`, `--accent-blue`, `--accent-red`, `--amber`, `--amber-dim`, `--blue`, `--blue-dim`, `--border-light`, `--cyan`, `--cyan-dim`, `--green`, `--green-dark`, `--green-dim`, `--green-mid`, `--pink`, `--pink-dim`, `--purple`, `--purple-dim`, `--red`, `--red-dim`, `--surface`, `--surface-alt`, `--surface-hover`, `--text-dim`, `--text-muted` | Kept for existing CSS. Use the role tokens above in new work |
+
+## Changing the system
+
+- **A value:** edit the token. Everything using it updates.
+- **A rule:** change this file, the token or component, and the reference page in one PR. The design owner in `.github/CODEOWNERS` reviews it.
+- **Something new:** add it to `src/ui/components/ds/`, not to one page, and describe it here.
+- **Layers and status words:** nOS is the source of truth, and nothing keeps the two repos in step automatically. A change there needs a matching PR here.
 
 ## Checks
 
