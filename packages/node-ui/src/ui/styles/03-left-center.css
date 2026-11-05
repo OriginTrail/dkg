@@ -221,7 +221,6 @@
 .v10-center-tab:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .v10-center-tab-label { overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .v10-tab-mark-icon { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; color: currentColor; }
-.v10-center-tab .v10-agent-dot { font-size: var(--fs-micro); }
 .v10-center-tab-close {
   display: inline-grid;
   place-items: center;
