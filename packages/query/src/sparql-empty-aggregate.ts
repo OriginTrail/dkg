@@ -4,6 +4,7 @@ import {
   prepareSparqlQuery,
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { literalSuffixLength } from './sparql-literal-suffix.js';
 
 // The same serialization a store adapter gives the terms of a real answer.
 const INTEGER_ZERO = formatCanonicalRdfLiteralTerm({
@@ -156,13 +157,9 @@ function plainTriplesBlockEnd(
       terms += 1;
       index += 1;
       // "..."@lang and "..."^^<datatype>
-      if (isSymbol(tokens[index], '@') && tokens[index + 1]?.kind === 'word') {
-        index += 2;
-      } else if (isSymbol(tokens[index], '^') && isSymbol(tokens[index + 1], '^')) {
-        const datatype = tokens[index + 2]?.kind;
-        if (datatype !== 'iri' && datatype !== 'prefixed-name') return -1;
-        index += 3;
-      }
+      const suffix = literalSuffixLength(tokens, index);
+      if (suffix < 0) return -1;
+      index += suffix;
     } else if (isSymbol(token, '_') && tokens[index + 1]?.kind === 'prefixed-name') {
       // A labelled blank node, _:b
       terms += 1;

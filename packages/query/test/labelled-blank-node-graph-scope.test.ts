@@ -35,8 +35,8 @@ describe(`labelled blank-node patterns on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       { graph: graphs[1], subject: `${prefix}:s1`, predicate: 'urn:p', object: '_:second' },
       { graph: graphs[1], subject: '_:second', predicate: 'urn:q', object: '"value1"' },
       { graph: graphs[1], subject: '_:disconnected', predicate: 'urn:q', object: '"decoy"' },
-      // The deduplicated route renames its earlier-graph anti-join. Disconnected
-      // witnesses there must not suppress a valid mapping from the next graph.
+      // Graph selection must require a connected witness. Disconnected triples
+      // in the first graph must not suppress a valid mapping from the next one.
       { graph: graphs[0], subject: `${prefix}:shared`, predicate: 'urn:p', object: '_:left' },
       { graph: graphs[0], subject: '_:right', predicate: 'urn:q', object: '"shared"' },
       { graph: graphs[1], subject: `${prefix}:shared`, predicate: 'urn:p', object: '_:joined' },
@@ -79,6 +79,46 @@ describe(`labelled blank-node patterns on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       expect(result.bindings.sort((a, b) => a.s!.localeCompare(b.s!))).toEqual([
         { s: 'urn:item:0', o: '"value0"' }, { s: 'urn:item:1', o: '"value1"' },
       ]);
+    } finally {
+      for (const graph of graphs) await store.dropGraph(graph);
+      await store.close();
+    }
+  });
+
+  it('keeps label coordinates and template names safe after moving FILTERs', async () => {
+    const store = endpoint ? new BlazegraphStore(endpoint) : new OxigraphStore();
+    const prefix = `urn:blank-filter:${randomUUID()}`;
+    const graphs = [prefix + ':a', prefix + ':b'];
+    try {
+      await store.insert([
+        ...graphs.flatMap((graph, index) => [
+          { graph, subject: 'urn:item:keep', predicate: 'urn:p', object: `_:keep${index}` },
+          { graph, subject: `_:keep${index}`, predicate: 'urn:q', object: '"keep"' },
+          { graph, subject: 'urn:item:drop', predicate: 'urn:p', object: `_:drop${index}` },
+          { graph, subject: `_:drop${index}`, predicate: 'urn:q', object: '"drop"' },
+        ]),
+        { graph: graphs[0], subject: 'urn:item:keep', predicate: 'urn:p', object: '_:second' },
+        { graph: graphs[0], subject: '_:second', predicate: 'urn:q', object: '"keep"' },
+      ]);
+      // Both FILTERs move out of the repeated pattern. Their different lengths
+      // change the source positions before and between the repeated label uses.
+      const pattern = `FILTER(<http://www.w3.org/2001/XMLSchema#string>(?o) = "keep")
+        ?s <urn:p> _:__dkgCopy0 . FILTER(RAND() < 2) _:__dkgCopy0 <urn:q> ?o`;
+      const selectedQuery = rewrite(`SELECT ?s ?o WHERE { ${pattern} } LIMIT 10`, graphs, 'deduplicated');
+      expect(selectedQuery.match(/RAND\(\)/g)).toHaveLength(1);
+      expect(selectedQuery.match(/XMLSchema#string/g)).toHaveLength(1);
+      const selected = await store.query(selectedQuery);
+      expect(selected.bindings).toEqual([
+        { s: 'urn:item:keep', o: '"keep"' }, { s: 'urn:item:keep', o: '"keep"' },
+      ]);
+      // One selected solution isolates template/WHERE name separation.
+      const constructed = await store.query(rewrite(
+        `CONSTRUCT { _:__dkgCopy1 <urn:result> ?s } WHERE { ${pattern} } LIMIT 1`, graphs, 'deduplicated',
+      ));
+      expect(constructed.type).toBe('quads');
+      expect(constructed.quads).toHaveLength(1);
+      expect(constructed.quads!.every(quad => quad.predicate === 'urn:result' && quad.object === 'urn:item:keep')).toBe(true);
+      expect(constructed.quads![0].subject).toMatch(/^_:/);
     } finally {
       for (const graph of graphs) await store.dropGraph(graph);
       await store.close();
