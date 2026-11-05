@@ -219,23 +219,26 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
   });
 
   it.each(['values', 'dataset'])('samples each retained row when hidden paths repeat the same mapping (%s)', async (route) => {
-    await store.insert(Array.from({ length: 2000 }, (_, n) => [
-      quad('urn:sample:shared', 'urn:sample:link', `urn:sample:hop:${n}`, graphs[0]),
-      quad(`urn:sample:hop:${n}`, 'urn:sample:to', 'urn:sample:end', graphs[0]),
+    const count = 2000;
+    const link = `urn:sample:${route}:link`;
+    const to = `urn:sample:${route}:to`;
+    await store.insert(Array.from({ length: count }, (_, n) => [
+      quad('urn:sample:shared', link, `urn:sample:${route}:hop:${n}`, graphs[0]),
+      quad(`urn:sample:${route}:hop:${n}`, to, 'urn:sample:end', graphs[0]),
     ]).flat());
-    const pattern = `?s <urn:sample:link>${route === 'dataset' ? '+' : ''}/<urn:sample:to> ?o`;
+    const pattern = `?s <${link}>${route === 'dataset' ? '+' : ''}/<${to}> ?o`;
     const engine = new DKGQueryEngine(store);
     const read = route === 'dataset'
       ? async (query: string) => (await engine.query(query, { contextGraphId: id })).bindings : select;
-    expect(await read(`SELECT ?s WHERE { ${pattern} }`)).toHaveLength(2000);
+    expect(await read(`SELECT ?s WHERE { ${pattern} }`)).toHaveLength(count);
     // Blazegraph folds RAND() to one value even in an unrewritten query.
     // STRUUID is evaluated per row on both engines; its first hex digit gives
     // the same 50% sampling probability without relying on that backend quirk.
     const retained = await read(`SELECT ?s ?o WHERE { ${pattern} FILTER(REGEX(STRUUID(), "^[0-7]")) }`);
-    // Filtering once per grouped mapping produces 0 or 2000; independent row
-    // sampling stays well inside this range (over 13 standard deviations wide).
-    expect(retained.length).toBeGreaterThan(700);
-    expect(retained.length).toBeLessThan(1300);
+    // Filtering once per group produces 0 or count. Independent row sampling
+    // stays well inside this deliberately wide interval.
+    expect(retained.length).toBeGreaterThan(count * 0.25);
+    expect(retained.length).toBeLessThan(count * 0.75);
     expect(new Set(bag(retained))).toEqual(new Set([JSON.stringify({ o: 'urn:sample:end', s: 'urn:sample:shared' })]));
   });
 });
