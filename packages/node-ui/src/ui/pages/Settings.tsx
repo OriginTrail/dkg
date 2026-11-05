@@ -18,6 +18,7 @@ import { useNodeState } from '../hooks/useNodeState.js';
 import { Badge } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
+import { Toggle } from '../components/ds/Toggle.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -41,8 +42,8 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
         <span>RPC</span>
         <button
           type="button"
+          className="ds-btn ds-ghost ds-sm"
           onClick={() => setReveal((v) => !v)}
-          style={{ background: 'none', border: '1px solid var(--border-default)', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
           aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
           title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
         >
@@ -129,28 +130,14 @@ function NetworkTelemetrySection() {
               When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
             </div>
           </div>
-          <button
+          <Toggle
             ref={toggleRef}
-            type="button"
-            role="switch"
-            aria-checked={telemetryEnabled}
-            aria-busy={telemetrySaving}
-            aria-disabled={telemetrySaving}
+            checked={telemetryEnabled}
+            busy={telemetrySaving}
             aria-label="Share telemetry with the network"
             onClick={toggleTelemetry}
-            style={{
-              width: 38, height: 22, borderRadius: 'var(--radius-pill)', border: 'none', flexShrink: 0,
-              background: telemetryEnabled ? 'var(--accent-green)' : 'var(--border-default)',
-              transition: 'background .2s', position: 'relative', marginLeft: 16,
-              cursor: telemetrySaving ? 'wait' : 'pointer', opacity: telemetrySaving ? 0.6 : 1,
-            }}
-          >
-            <span style={{
-              position: 'absolute', top: 3, left: telemetryEnabled ? 19 : 3,
-              width: 16, height: 16, borderRadius: '50%', background: 'var(--text-on-identity)',
-              transition: 'left .2s', display: 'block',
-            }} />
-          </button>
+            style={{ marginLeft: 16, flexShrink: 0 }}
+          />
         </div>
         <div aria-live="polite">
           {telemetryError && (

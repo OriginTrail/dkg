@@ -51,6 +51,7 @@
   flex-direction: column;
 }
 .v10-peer-group-header {
+  min-height: var(--h-row);
   display: flex;
   align-items: center;
   gap: 6px;

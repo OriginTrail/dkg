@@ -274,10 +274,10 @@ export function PanelLeft() {
         <div className="v10-journey-empty-card ds-card" role="alert">
           <div>{listError ? 'Context Graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
           <div>{contextGraphs.length ? 'Showing the last available Context Graphs.' : 'Context Graph membership is unknown.'}</div>
-          <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
+          <button type="button" className="ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
         </div>
       )}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading Context Graphs…</div>}
+      {inventoryLoading && contextGraphs.length === 0 && <div role="status" className="v10-tree-status">Loading Context Graphs…</div>}
 
       {treeMode === 'explorer' && (
         <div className="v10-tree-content">

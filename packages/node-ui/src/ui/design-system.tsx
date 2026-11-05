@@ -12,6 +12,7 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { Badge, Count, LayerBadge, type BadgeTone } from './components/ds/Badge.js';
 import { Button, type ButtonVariant } from './components/ds/Button.js';
+import { Toggle } from './components/ds/Toggle.js';
 import { ContextGraphChip } from './components/ds/ContextGraphChip.js';
 import { AgentChip } from './components/AgentChip.js';
 import { AgentDot, AgentDotStack } from './components/AgentDot.js';
@@ -310,6 +311,14 @@ const App: React.FC = () => {
               <div className="ds-card-nested dsp-surface dsp-nested"><span className="dsp-muted">Nested · 8</span><b>36</b></div>
             </div>
           </div>
+        </div>
+      </Section>
+
+      <Section id="toggle" title="Toggle" lead="An on/off setting that takes effect straight away.">
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+          <Toggle checked={false} aria-label="Off example" />
+          <Toggle checked aria-label="On example" />
+          <Toggle checked busy aria-label="Saving example" />
         </div>
       </Section>
 

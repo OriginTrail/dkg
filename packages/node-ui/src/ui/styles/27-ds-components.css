@@ -421,3 +421,18 @@ body.light .ds-seg-item.active {
 .ds-table-scroll { overflow-x: auto; max-width: 100%; }
 .ds-table-pin tr { background: var(--bg-surface); }
 .ds-table-pin th:first-child, .ds-table-pin td:first-child { position: sticky; left: 0; z-index: 1; background: inherit; }
+
+/* Toggle: track 40x24, on is the primary action colour, off clears 3:1. */
+.ds-toggle {
+  position: relative; flex-shrink: 0; width: 40px; height: var(--h-control-sm); padding: 0;
+  border: 0; border-radius: var(--radius-pill); background: var(--border-control);
+  cursor: pointer; transition: background .15s;
+}
+.ds-toggle[aria-checked="true"] { background: var(--accent-primary); }
+.ds-toggle[aria-busy="true"] { opacity: .6; cursor: wait; }
+.ds-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.ds-toggle-knob {
+  position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--bg-surface); transition: left .15s;
+}
+.ds-toggle[aria-checked="true"] .ds-toggle-knob { left: 19px; }

@@ -51,6 +51,7 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
 
 /* Form inputs and selects */
 .input {
+  height: var(--h-control-md);
   padding: 6px 10px;
   font-size: 12px;
   background: var(--bg-elevated);

@@ -168,7 +168,7 @@
   color: var(--text-tertiary); font-size: 10px; cursor: pointer; white-space: nowrap;
 }
 .v10-query-catalog-visibility:hover { color: var(--text-secondary); }
-.v10-query-catalog-visibility input { margin: 0; accent-color: var(--text-warning); }
+.v10-query-catalog-visibility input { margin: 0; accent-color: var(--text-primary); }
 
 /* ── Item rows (shared by layer views) ── */
 .v10-item-row {

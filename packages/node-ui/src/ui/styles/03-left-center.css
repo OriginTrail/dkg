@@ -27,11 +27,12 @@
 }
 /* Sidebar places: Dashboard at the top, the node's places pinned to the
    bottom in a labelled group — every destination lives in the sidebar. */
+.v10-tree-status { padding: 6px 16px; font-size: var(--fs-control); color: var(--text-tertiary); }
 .v10-tree-dashboard {
   display: flex;
   align-items: center;
   width: calc(100% - 16px);
-  height: 28px;
+  height: var(--h-row);
   margin: 0 8px 4px;
   padding: 0 8px;
   gap: 8px;

@@ -3,7 +3,7 @@
 The rules behind the node UI's look and behaviour. The values live in code; this file explains what each one is for, so the next screen uses them the same way.
 
 - **Tokens:** `src/ui/styles/00-theme.css` (colours per theme, then the shape and size scale)
-- **Components:** `src/ui/components/ds/` (`Button`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
+- **Components:** `src/ui/components/ds/` (`Button`, `Toggle`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
 - **Component CSS:** `src/ui/styles/27-ds-components.css`, loaded last
 - **Reference page (development only):** run `pnpm dev:ui` and open <http://127.0.0.1:5173/ui/design-system.html>. It renders every token and component live in both themes. `vite build` only bundles `index.html`, so the page is not part of the released UI.
 - **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` (see [Checks](#checks))
@@ -94,8 +94,11 @@ Type sizes are whole pixels, here and in nOS. Sentence case everywhere, includin
 | `--h-control-sm` | 24 | Compact controls: toolbars, log filters, sidebar actions, entity chips |
 | `--h-control-md` | 32 | Default buttons, inputs and selects |
 | `--h-control-lg` | 40 | The main call to action on an empty state or dialog |
+| `--h-row` | 28 | Sidebar rows |
 
 Controls placed side by side share a height.
+
+Two parts of larger components sit off this scale on purpose: a tab's close mark is 20, and the round attach and send buttons inside the chat composer are 28. Round is only for those two; every other clickable thing is a rectangle.
 
 ## Components
 
@@ -112,7 +115,11 @@ Controls placed side by side share a height.
 | `swm` | Share to Shared Working Memory (cyan tint). |
 | `vm` | Publish to Verifiable Memory (the one purple fill). |
 
-Sizes `sm` 24, `md` 32 (default), `lg` 40. `icon` makes it square; an icon-only button always has an `aria-label`.
+Sizes `sm` 24 (11px text), `md` 32 (default, 12px text), `lg` 40. `icon` makes it square; an icon-only button always has an `aria-label`. Text that acts like a button is a `ghost` button, not a bare `<button>`.
+
+### Toggle
+
+`<Toggle checked busy aria-label>`: an on/off setting that takes effect straight away. On is the primary action colour, not green: it isn't a success. Use a checkbox when the choice is applied by a later button press. Checkboxes and radios use `accent-color: var(--text-primary)`.
 
 ### Labels: Badge, LayerBadge, Count
 
