@@ -435,8 +435,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     assertExplicitGraphIrisAllowed(initialGraphScope, explicitAllowedGraphs);
     const routedScope = requireGraphScopeRewrite(constrainGraphVariablesToAllowedSet(initialGraphScope, variableAllowedGraphs));
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
-      routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads),
-      plan.fallbackPolicy, this.sparqlEngine, variableAllowedGraphs);
+      routedScope, { ...target, discover: prefix => this.discoverGraphsByPrefix(prefix, reads),
+        fallbackPolicy: plan.fallbackPolicy, engine: this.sparqlEngine, authorizedDatasetGraphs: variableAllowedGraphs });
     const route = plan.policy.execution;
     if (route.kind === 'combined') {
       const dataScope = await resolve(route.data);
