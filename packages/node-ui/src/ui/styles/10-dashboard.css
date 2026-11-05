@@ -215,12 +215,10 @@
   background: var(--bg-elevated);
 }
 /* Role ladder (same as the overview pill): curator solid role blue with
-   the ◆ glyph, joined a blue tint with ✓. Text on the solid chip is the
+   a diamond, joined a blue tint with a check. Text on the solid chip is the
    surface colour, AA in both themes. */
 .v10-cg-badge-curator { background: var(--role); color: var(--bg-surface); border-color: var(--role); }
-.v10-cg-badge-curator::before { content: "◆"; }
 .v10-cg-badge-joined { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
-.v10-cg-badge-joined::before { content: "✓"; }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */

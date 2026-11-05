@@ -12,6 +12,7 @@ import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimit
 import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
 import { Badge } from '../../../components/ds/Badge.js';
+import { Anchor, X } from 'lucide-react';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -243,7 +244,7 @@ export function GraphSurface({
   const body = (expandedView: boolean) => (
     <>
       {/* Don't render the scope-bar + expand-button inside the expanded
-          modal — the modal has its own × close affordance and a dedicated
+          modal — the modal has its own close affordance and a dedicated
           subtitle. The previous CSS-only hide (display:none) left the
           duplicate expand button in the a11y tree. */}
       {showScopeLabel && !expandedView && (
@@ -293,7 +294,7 @@ export function GraphSurface({
                 onClick={() => setExpanded(false)}
                 aria-label={`Close expanded ${title}`}
               >
-                ×
+                <X size={14} />
               </button>
             </div>
             <div className="v10-graph-expanded-body">
@@ -691,7 +692,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}>◉</span>
+        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}><Anchor size={10} /></span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">

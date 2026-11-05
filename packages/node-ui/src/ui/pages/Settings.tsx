@@ -15,7 +15,7 @@ import { formatTracSymbol, formatTrac, formatTracTooltip } from '../lib/formatTr
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
 import { formatUptime } from '../lib/formatPeerStatus.js';
 import { useNodeState } from '../hooks/useNodeState.js';
-import { Badge } from '../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 import { Toggle } from '../components/ds/Toggle.js';
@@ -472,12 +472,12 @@ function GeneralSettingsTab() {
           )}
           {w?.error ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-danger)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-danger)', marginBottom: 2 }}><StatusGlyph tone="danger" /> Error</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid var(--warning-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-warning)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-warning)', marginBottom: 2 }}><StatusGlyph tone="warning" /> Testnet Mode</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}

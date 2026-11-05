@@ -6,7 +6,7 @@ import {
   IDENTITY_WALLET_ACTION_META,
   useIdentityWalletManagement,
 } from './useIdentityWalletManagement.js';
-import { Badge } from '../../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -174,7 +174,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {completed && (
         <div className="v10-identity-wallet-status" role="status" data-testid="identity-wallet-result">
           {completed.confirmed
-            ? `✓ ${IDENTITY_WALLET_ACTION_META[completed.action].label}: ${completed.address}. `
+            ? <><StatusGlyph tone="success" /> {`${IDENTITY_WALLET_ACTION_META[completed.action].label}: ${completed.address}. `}</>
             : `Transaction broadcast for ${completed.address}, but confirmation is unknown. Check it before retrying. `}
           {resultUrl && <a href={resultUrl} target="_blank" rel="noreferrer">View transaction ↗</a>}
           {completed.confirmed && IDENTITY_WALLET_ACTION_META[completed.action].role === 'operational' && (

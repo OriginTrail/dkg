@@ -56,7 +56,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-label` | 11 | Badges, table headers, metadata |
 | `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
 
-Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is only for small section kickers.
+Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
 
 ## Shape and size
 
@@ -116,6 +116,18 @@ Two parts of larger components sit off this scale on purpose: a tab's close mark
 | `vm` | Publish to Verifiable Memory (the one purple fill). |
 
 Sizes `sm` 24 (11px text), `md` 32 (default, 12px text), `lg` 40. `icon` makes it square; an icon-only button always has an `aria-label`. Text that acts like a button is a `ghost` button, not a bare `<button>`.
+
+### Icons
+
+One set, one icon per job:
+
+- **Lucide** (`lucide-react`) for actions and things: `X` closes, `RefreshCw` refreshes, `Copy` copies, `ChevronRight` and `ChevronDown` expand, `BadgePercent` means a discount.
+- **`LayerGlyph`** for memory layers. Nothing else uses those shapes.
+- **`StatusGlyph`** for success, warning, danger and pending, including inside a sentence.
+
+Sizes: 14 in controls and rows, 12 in small buttons and badges, 10 inside the smallest chips. Icons take the text colour. An icon-only button always has a name.
+
+No emoji or Unicode symbols as icons: they change from one platform to the next and can't take a size or colour. `test/icons.test.ts` enforces this. Text arrows in a sentence or link (`→`, `←`, `↗`) are typography and stay. Subgraph marks are the exception: they are text from the project profile, so their defaults (`⊚`, `⊘`, `•`) stay text.
 
 ### Toggle
 

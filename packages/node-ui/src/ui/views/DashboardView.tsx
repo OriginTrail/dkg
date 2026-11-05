@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react';
-import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet } from 'lucide-react';
+import { Lock, Globe, Share2, TrendingUp, UsersRound, Wallet, Check, Diamond } from 'lucide-react';
 import { useFetch } from '../hooks.js';
 import { api } from '../api-wrapper.js';
 import { useTabsStore } from '../stores/tabs.js';
@@ -459,6 +459,7 @@ function CgRow({
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
+          {isCurator ? <Diamond size={10} fill="currentColor" /> : <Check size={10} />}
           {isCurator ? 'Curator' : 'Joined'}
         </span>
       </span>

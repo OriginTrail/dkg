@@ -9,7 +9,8 @@ import {
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
-import { Badge } from '../../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
+import { BadgePercent, Wallet } from 'lucide-react';
 
 /** The owner-mode union — re-exported from the owner-access model (no longer re-declared
  *  here) so existing importers keep a stable name. */
@@ -115,8 +116,8 @@ export function PcaAccountCard({
   const titleBand = (
     <div className="v10-pca-card-title">
       <span className="v10-pca-card-id">PCA #{accountId}</span>
-      <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)} discount</Badge>
-      {ownerMode === 'wallet' && <Badge tone="role" size="sm" icon="✎">Wallet-managed</Badge>}
+      <Badge size="sm" icon={<BadgePercent size={12} />} className="v10-pca-card-discount">{pct(snapshot.discountBps)} discount</Badge>
+      {ownerMode === 'wallet' && <Badge tone="role" size="sm" icon={<Wallet size={12} />}>Wallet-managed</Badge>}
       {ownerMode === 'external' && <Badge tone="warning" size="sm">Tracked external</Badge>}
       <span className="v10-pca-card-spacer" />
       {account.health && <HealthChip state={account.health} />}
@@ -215,12 +216,12 @@ export function PcaAccountCard({
           )}
           {inconclusive ? (
             <p className="v10-pca-card-warn ds-card-nested">
-              ⚠ Couldn’t verify which of this node’s wallets are approved — retry. Until then, whether
+              <StatusGlyph tone="warning" /> Couldn’t verify which of this node’s wallets are approved — retry. Until then, whether
               this account discounts your publishes is unconfirmed.
             </p>
           ) : !selfCovers ? (
             <p className="v10-pca-card-warn ds-card-nested">
-              ⚠ 0 of this node’s wallets are approved here — it discounts nothing yet. Approve this
+              <StatusGlyph tone="warning" /> 0 of this node’s wallets are approved here — it discounts nothing yet. Approve this
               node’s operational wallets to start saving.
             </p>
           ) : null}
@@ -275,7 +276,7 @@ export function PcaAccountCard({
         <div className="v10-pca-card-title">
           <span className="v10-pca-card-id">PCA #{accountId}</span>
           <span className="v10-pca-card-sponsor">(approved for this node)</span>
-          <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)}</Badge>
+          <Badge size="sm" icon={<BadgePercent size={12} />} className="v10-pca-card-discount">{pct(snapshot.discountBps)}</Badge>
           <span className="v10-pca-card-spacer" />
           {inconclusive ? (
             <Badge tone="warning" size="sm">Couldn’t verify approvals</Badge>

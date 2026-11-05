@@ -18,7 +18,8 @@ import React, { useEffect, useState } from 'react';
 import { useRdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { truncateId } from '../hooks/useVerifiedEntityIdentity.js';
-import { Badge } from './ds/Badge.js';
+import { Badge, LayerGlyph } from './ds/Badge.js';
+import { Check, CircleDashed, Copy, X } from 'lucide-react';
 
 export interface OnChainProvenanceCardProps {
   contextGraphId: string;
@@ -69,9 +70,9 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
       aria-label="On-chain provenance"
     >
       <div className="v10-graph-prov-head">
-        <span className="v10-graph-prov-glyph">{verified ? '◉' : '◌'}</span>
+        <span className="v10-graph-prov-glyph">{verified ? <LayerGlyph layer="vm" /> : <CircleDashed size={12} />}</span>
         <span className="v10-graph-prov-title">On-chain provenance</span>
-        {verified && <Badge tone="vm" size="sm" icon="✓" className="v10-graph-prov-badge">Verified</Badge>}
+        {verified && <Badge tone="vm" size="sm" icon={<Check size={10} />} className="v10-graph-prov-badge">Verified</Badge>}
         <button
           type="button"
           className="v10-graph-prov-close"
@@ -79,7 +80,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
           aria-label="Dismiss"
           title="Dismiss"
         >
-          ×
+          <X size={14} />
         </button>
       </div>
 
@@ -106,7 +107,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">UAL</span>
               <span className="v10-vm-identity-val mono" title={receipt.ual}>{receipt.ual}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.ual!)} title="Copy UAL">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.ual!)} title="Copy UAL"><Copy size={12} /></button>
             </div>
           )}
 
@@ -126,7 +127,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.txHash}>{truncateId(receipt.txHash, 10, 8)}</span>
               )}
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.txHash!)} title="Copy transaction hash">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.txHash!)} title="Copy transaction hash"><Copy size={12} /></button>
             </div>
           )}
 
@@ -141,7 +142,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">KA id</span>
               <span className="v10-vm-identity-val mono" title={receipt.kaId}>{truncateId(receipt.kaId, 8, 8)}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} title="Copy KA id">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} title="Copy KA id"><Copy size={12} /></button>
             </div>
           )}
 
@@ -161,7 +162,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.author}>{truncateId(receipt.author, 6, 4)}</span>
               )}
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.author!)} title="Copy author address">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.author!)} title="Copy author address"><Copy size={12} /></button>
             </div>
           )}
 

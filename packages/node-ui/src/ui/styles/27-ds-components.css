@@ -29,7 +29,7 @@
   vertical-align: middle;
 }
 .ds-badge.ds-sm { height: var(--h-badge-sm); padding: 0 6px; gap: 4px; font-size: var(--fs-micro); }
-.ds-badge-icon { font-size: 1em; line-height: 1; }
+.ds-badge-icon { display: inline-flex; font-size: 1em; line-height: 1; }
 .ds-badge-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .ds-badge.ds-sm .ds-badge-dot { width: 5px; height: 5px; }
 .ds-badge-kind-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--badge-kind); flex-shrink: 0; }
@@ -60,6 +60,8 @@
 }
 .ds-badge.ds-sm.ds-tone-success, .ds-badge.ds-sm.ds-tone-warning, .ds-badge.ds-sm.ds-tone-danger, .ds-badge.ds-sm.ds-tone-pending { padding: 0; gap: 4px; font-size: var(--fs-label); }
 .ds-status-glyph { width: 14px; height: 14px; flex-shrink: 0; }
+/* Icons sit on the text line; a flex parent aligns them itself. */
+.lucide, .ds-status-glyph, .ds-layer-glyph { flex-shrink: 0; vertical-align: -2px; }
 .ds-badge.ds-sm .ds-status-glyph { width: 12px; height: 12px; }
 
 .ds-badge.ds-tone-role { --badge-fg: var(--role-text); --badge-bg: var(--role-bg); --badge-ring: var(--role-border); }

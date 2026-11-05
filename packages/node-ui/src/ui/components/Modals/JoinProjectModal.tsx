@@ -12,6 +12,7 @@ import { useNodeEvents } from '../../hooks/useNodeEvents.js';
 import { normalizeAccessPolicy } from '../../lib/contextGraphSidebar.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { X } from 'lucide-react';
 
 interface JoinProjectModalProps {
   open: boolean;
@@ -530,7 +531,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             title="Close (Esc)"
             style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -579,7 +580,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           title="Close (Esc)"
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
           <div id="dkg-join-cg-title" className="v10-modal-title">Join a Context Graph</div>

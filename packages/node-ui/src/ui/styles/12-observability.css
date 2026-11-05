@@ -33,7 +33,6 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
   color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline);
 }
 .network-page .card { margin-bottom: 12px; }
-.network-page .stat-label, .network-page .card-title { text-transform: none; letter-spacing: 0; }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0 12px; }
 .page-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
 

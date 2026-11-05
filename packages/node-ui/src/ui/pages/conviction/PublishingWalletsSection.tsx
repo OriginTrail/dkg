@@ -54,12 +54,12 @@ export function PublishingWalletsSection({
       const snap = await fetchPca(accountId, addr);
       const reg = snap.probedKey?.registered;
       // M8: a 200 that omits probedKey (or registered:null) means the adapter
-      // couldn't answer — render "couldn't determine", NOT a false "✗ NOT approved".
+      // couldn't answer — render "couldn't determine", NOT a false "NOT approved".
       setProbeResult(
         reg === true
-          ? `✓ ${addr} is an approved publishing wallet here.`
+          ? `${addr} is an approved publishing wallet here.`
           : reg === false
-            ? `✗ ${addr} is NOT approved here.`
+            ? `${addr} is NOT approved here.`
             : `Couldn’t determine whether ${addr} is approved here — retry.`,
       );
     } catch (err) {

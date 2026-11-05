@@ -19,7 +19,7 @@ export class ProjectViewPage {
   }
 
   async clickRefresh() {
-    await this.root.locator('button').filter({ hasText: '↻' }).first().click();
+    await this.root.getByRole('button', { name: /refresh/i }).first().click();
   }
 
   async switchSubTab(tab: 'Timeline' | 'Graph' | 'Knowledge') {

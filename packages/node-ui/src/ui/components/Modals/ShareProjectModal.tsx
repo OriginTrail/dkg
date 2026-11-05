@@ -6,6 +6,7 @@ import {
 } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { Count } from '../ds/Badge.js';
+import { X } from 'lucide-react';
 
 interface NetworkAgent {
   agentUri: string;
@@ -253,7 +254,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             title="Close (Esc)"
             style={{ flexShrink: 0, cursor: 'pointer' }}
           >
-            ×
+            <X size={14} />
           </button>
         </div>
 
@@ -287,7 +288,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <>
               {/* Allowed Agents — read-only audit list. Agents are added
                   exclusively via the text-invite + signed-join-request flow
-                  (see Invite code below + the Join requests tab). The ✕
+                  (see Invite code below + the Join requests tab). The remove
                   button revokes access for an existing participant. */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed agents</label>
@@ -321,7 +322,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                             }}
                             title="Remove agent"
                           >
-                            ×
+                            <X size={14} />
                           </button>
                         </div>
                       );

@@ -11,7 +11,9 @@ import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 import { AgentDot } from '../../../components/AgentDot.js';
 import { overviewRoleState, type OverviewAgentIdentity, type OverviewAgentStatus, type OverviewParticipantsStatus } from './overview-role.js';
 import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-colors.js';
-import { Count } from '../../../components/ds/Badge.js';
+import { Count, LayerGlyph } from '../../../components/ds/Badge.js';
+import { Check, Diamond, LayoutDashboard, MoreHorizontal, Network, RefreshCw, Share2, Upload, X } from 'lucide-react';
+import { RANK_ICON } from './rank-icon.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
@@ -48,7 +50,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Overview"
         onClick={() => switchTo('overview')}
       >
-        <span className="v10-layer-switch-icon">◎</span>
+        <span className="v10-layer-switch-icon"><LayoutDashboard size={14} /></span>
         <span className="v10-layer-switch-label">Overview</span>
       </button>
       <span className="v10-layer-switch-separator" aria-hidden="true" />
@@ -59,7 +61,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Working Memory"
         onClick={() => switchTo('wm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-working)' }}>◇</span>
+        <span className="v10-layer-switch-icon"><LayerGlyph layer="wm" /></span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">WM</span>
         {counts.wm > 0 && <Count value={counts.wm} className="v10-layer-switch-count" />}
@@ -71,7 +73,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Shared Working Memory"
         onClick={() => switchTo('swm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-shared)' }}>◈</span>
+        <span className="v10-layer-switch-icon"><LayerGlyph layer="swm" /></span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Shared Working Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">SWM</span>
         {counts.swm > 0 && <Count value={counts.swm} className="v10-layer-switch-count" />}
@@ -83,7 +85,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Verifiable Memory"
         onClick={() => switchTo('vm')}
       >
-        <span className="v10-layer-switch-icon" style={{ color: 'var(--layer-verified)' }}>◉</span>
+        <span className="v10-layer-switch-icon"><LayerGlyph layer="vm" /></span>
         <span className="v10-layer-switch-label v10-layer-switch-label-full">Verifiable Memory</span>
         <span className="v10-layer-switch-label v10-layer-switch-label-compact">VM</span>
         {counts.vm > 0 && <Count value={counts.vm} className="v10-layer-switch-count" />}
@@ -96,7 +98,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
         title="Subgraphs"
         onClick={() => switchTo('graph-overview')}
       >
-        <span className="v10-layer-switch-icon">⌬</span>
+        <span className="v10-layer-switch-icon"><Network size={14} /></span>
         <span className="v10-layer-switch-label">Subgraphs</span>
       </button>
       <div
@@ -118,7 +120,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
           title="More Context Graph views"
           onClick={() => setMoreOpen(open => !open)}
         >
-          <span className="v10-layer-switch-icon">⋯</span>
+          <span className="v10-layer-switch-icon"><MoreHorizontal size={14} /></span>
           <span className="v10-layer-switch-label">More</span>
         </button>
         {moreOpen && (
@@ -138,15 +140,15 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
       <div className="v10-layer-switcher-spacer" />
       <div className="v10-layer-switcher-actions">
         <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onShare} aria-label="Share Context Graph">
-          <span className="v10-layer-action-icon">⤴</span>
+          <span className="v10-layer-action-icon"><Share2 size={12} /></span>
           <span className="v10-layer-action-label">Share</span>
         </button>
         <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onImport} aria-label="Import into Context Graph">
-          <span className="v10-layer-action-icon">↑</span>
+          <span className="v10-layer-action-icon"><Upload size={12} /></span>
           <span className="v10-layer-action-label">Import</span>
         </button>
         <button className="v10-layer-action-btn ds-btn ds-sm" onClick={onRefresh} aria-label="Refresh Context Graph data">
-          <span className="v10-layer-action-icon">↻</span>
+          <span className="v10-layer-action-icon"><RefreshCw size={12} /></span>
         </button>
       </div>
     </div>
@@ -476,9 +478,8 @@ export function ProjectOverviewCard({
     <div className="v10-po">
       {/* Identity row (§4.2.1 — locked spec) — label-pill pairs on
           the left, inline primer link on the right. Name + description
-          live in the persistent `ProjectHeaderStrip`; the role glyph
-          (◆) is applied in CSS via `data-role`/`data-tone`, never in
-          the data string itself. */}
+          live in the persistent `ProjectHeaderStrip`; the role icon
+          comes from RANK_ICON, never from the data string itself. */}
       <div className="v10-po-identity" data-section="identity">
         <div className="v10-po-identity-pairs">
           <div className="v10-po-identity-pair">
@@ -489,6 +490,7 @@ export function ProjectOverviewCard({
               data-rank={role.rank}
               title={role.title}
             >
+              {RANK_ICON[role.rank]}
               {role.label}
             </span>
           </div>
@@ -668,6 +670,7 @@ export function ProjectOverviewCard({
                     aria-label={ariaLabelParts.join(' ')}
                   >
                     <AgentDot uri={canonical} label={display} size={16} title={full} />
+                    {isCurator && <Diamond className="v10-po-participant-role" size={11} fill="currentColor" />}
                     <span className="v10-po-participant-name">{shortAddress}</span>
                     {isSelf && <span className="v10-po-participant-tag">you</span>}
                     {isCurator && <span className="v10-po-participant-tag">curator</span>}
@@ -824,7 +827,7 @@ export function PendingJoinRequestsSection({
                         onClick={() => handleApprove(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                       >
-                        {processing === req.agentAddress ? '…' : '✓ Approve'}
+                        {processing === req.agentAddress ? '…' : <><Check size={12} /> Approve</>}
                       </button>
                       <button
                         className="v10-po-join-btn ds-btn ds-danger ds-sm"
@@ -832,7 +835,7 @@ export function PendingJoinRequestsSection({
                         disabled={processing === req.agentAddress}
                         aria-label="Reject join request"
                       >
-                        ✕
+                        <X size={12} />
                       </button>
                     </div>
                   </div>

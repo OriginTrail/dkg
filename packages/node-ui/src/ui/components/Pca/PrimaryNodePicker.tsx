@@ -1,5 +1,6 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
+import { Check } from 'lucide-react';
 
 // The picker's prop type is intentionally separate from the API's `DesignatableNode`: the picker
 // doesn't display `ask`, but the API always returns it (and requires it). This type is a structural
@@ -224,7 +225,7 @@ export function PrimaryNodePicker({
                       <span className="v10-pca-node-picker-stake">
                         {formatWeiToTrac(n.stake)} TRAC staked
                       </span>
-                      {isOwn && <span className="v10-pca-node-picker-own">✓ this node</span>}
+                      {isOwn && <span className="v10-pca-node-picker-own"><Check size={12} /> this node</span>}
                     </li>
                   );
                 })}

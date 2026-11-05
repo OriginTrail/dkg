@@ -27,6 +27,7 @@ import {
   CopyButton,
 } from '../../components/Pca/index.js';
 import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { StatusGlyph } from '../../components/ds/Badge.js';
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
@@ -320,7 +321,7 @@ export function ApproveWalletsModal({
               </div>
             ) : (
               <div className="v10-modal-warning ds-card-nested">
-                ⚠ We can only check the address is well-formed — we can’t verify it’s the node’s real
+                <StatusGlyph tone="warning" /> We can only check the address is well-formed — we can’t verify it’s the node’s real
                 signing wallet. A typo / admin / author address still “approves” and burns a cap slot.
                 Confirm it shows as approved in the other operator&apos;s Get added to a PCA panel.
               </div>
@@ -332,7 +333,7 @@ export function ApproveWalletsModal({
           // U1 — SOFT heads-up, not a command to remove: some of these may already be
           // approved here (no slot consumed), so we don't know the real overage pre-probe.
           <div className="v10-modal-warning ds-card-nested" role="status">
-            ⚠ Up to {cap} of these can be approved. Any already approved here are skipped (no slot
+            <StatusGlyph tone="warning" /> Up to {cap} of these can be approved. Any already approved here are skipped (no slot
             used); any genuinely beyond the {cap}-slot cap are marked “cap reached”.
           </div>
         )}
@@ -386,7 +387,7 @@ export function ApproveWalletsModal({
             (the footer "Retry to finish" button re-runs the loop; the now-unbound wallet registers). */}
         {done && counts.stranded > 0 && (
           <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-approve-stranded">
-            ⚠ {counts.stranded} wallet{counts.stranded === 1 ? ' was' : 's were'} removed from the old
+            <StatusGlyph tone="warning" /> {counts.stranded} wallet{counts.stranded === 1 ? ' was' : 's were'} removed from the old
             PCA but not yet re-approved on #{accountId} — temporarily UNCOVERED. Click “Retry to finish”
             to complete the move.
           </div>

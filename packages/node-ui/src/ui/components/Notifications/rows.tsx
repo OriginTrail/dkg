@@ -21,6 +21,8 @@ import type {
 } from '../../hooks/useNotificationsFeed.js';
 import { AgentDot } from '../AgentDot.js';
 import { ContextGraphChip } from '../ds/ContextGraphChip.js';
+import { BadgePercent, Check, KeyRound, Plus, X } from 'lucide-react';
+import { LayerGlyph } from '../ds/Badge.js';
 
 /** `shortId` — never render a blank CG name (ui-brief §3 / UX §3). */
 function cgLabel(name: string | undefined, cgId: string): string {
@@ -85,7 +87,7 @@ export function JoinRequestRow({
   if (phase.kind === 'done') {
     return (
       <div className="v10-notif-row v10-notif-row-terminal" role="status" aria-live="polite">
-        <span className="v10-notif-glyph" aria-hidden="true">✓</span>
+        <span className="v10-notif-glyph" aria-hidden="true"><Check size={14} /></span>
         <span className="v10-notif-terminal-text">{phase.label}</span>
       </div>
     );
@@ -95,7 +97,7 @@ export function JoinRequestRow({
 
   return (
     <div className="v10-notif-row v10-notif-row-join">
-      <span className="v10-notif-glyph v10-notif-glyph-join" aria-hidden="true">🔑</span>
+      <span className="v10-notif-glyph v10-notif-glyph-join" aria-hidden="true"><KeyRound size={14} /></span>
       <div className="v10-notif-row-body">
         <div className="v10-notif-row-title">Join request</div>
         <div className="v10-notif-row-detail">
@@ -195,10 +197,10 @@ export function JoinRequestRow({
 
 // ─── Activity digest (informational) ────────────────────────────────────────
 
-const ACTIVITY_GLYPH: Record<'created' | 'promoted' | 'published', string> = {
-  created: '+',
-  promoted: '⇡',
-  published: '◉',
+const ACTIVITY_GLYPH: Record<'created' | 'promoted' | 'published', React.ReactNode> = {
+  created: <Plus size={14} />,
+  promoted: <LayerGlyph layer="swm" />,
+  published: <LayerGlyph layer="vm" />,
 };
 
 /** Digest copy per kind, with singular/plural (mirrors ActivityFeed).
@@ -279,7 +281,7 @@ export function ConfirmationRow({
         className={`v10-notif-glyph ${approved ? 'v10-notif-glyph-approved' : 'v10-notif-glyph-rejected'}`}
         aria-hidden="true"
       >
-        {approved ? '✓' : '✕'}
+        {approved ? <Check size={14} /> : <X size={14} />}
       </span>
       <span className="v10-notif-row-body">
         <span className="v10-notif-row-title">{approved ? 'Request approved' : 'Request declined'}</span>
@@ -361,7 +363,7 @@ export function PcaCostCoveredRow({
       role="status"
       aria-label={`${title}, ${detail}${when ? `, ${when}` : ''}.`}
     >
-      <span className="v10-notif-glyph v10-notif-glyph-approved" aria-hidden="true">◉</span>
+      <span className="v10-notif-glyph v10-notif-glyph-approved" aria-hidden="true"><BadgePercent size={14} /></span>
       <span className="v10-notif-row-body" aria-hidden="true">
         <span className="v10-notif-row-title">{title}</span>
         <span className="v10-notif-row-detail">{detail}</span>

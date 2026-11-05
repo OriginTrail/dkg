@@ -5,7 +5,7 @@ import {
 } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
-import { Badge, type BadgeTone } from '../components/ds/Badge.js';
+import { Badge, type BadgeTone, StatusGlyph } from '../components/ds/Badge.js';
 import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
@@ -24,6 +24,7 @@ import {
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -415,8 +416,8 @@ function HealthTab() {
                     onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
                     style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
                   >
-                    <td style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '10px 14px' }}>
-                      <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
+                    <td style={{ fontSize: 12, color: 'var(--text-muted)', padding: '10px 14px' }}>
+                      <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
                       {h.operation_name}
                     </td>
                     <td style={{ color: 'var(--text-primary)', fontWeight: 600, padding: '10px 14px' }}>
@@ -464,7 +465,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
               background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
             }}
           >
-            <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
             <span style={{ fontWeight: 600, fontSize: 12, color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
             <StatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
@@ -741,7 +742,7 @@ export function HardwareTab() {
   ];
   const peersLv = levels.peers;
   const rpcLv = levels.rpc;
-  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6, fontSize: 13 }}>⚠</span>;
+  const warnIcon = (lv: Level) => lv === 'ok' ? null : <span role="img" aria-label={lv === 'crit' ? 'critical' : 'warning'} style={{ marginLeft: 6 }}><StatusGlyph tone={lv === 'crit' ? 'danger' : 'warning'} /></span>;
   const s1 = 'var(--data-1)';
   const grid = 'var(--border-subtle)', tick = 'var(--text-tertiary)';
   const warnLine = 'var(--text-warning)', critLine = 'var(--text-danger)';

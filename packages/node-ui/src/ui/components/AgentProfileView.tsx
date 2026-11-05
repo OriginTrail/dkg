@@ -19,6 +19,7 @@ import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { ActivityFeed } from './ActivityFeed.js';
 import { AgentChip } from './AgentChip.js';
+import { Copy } from 'lucide-react';
 
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 
@@ -108,7 +109,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                   }}
                   title="Copy wallet address"
                 >
-                  ⎘
+                  <Copy size={12} />
                 </button>
               </span>
             </div>

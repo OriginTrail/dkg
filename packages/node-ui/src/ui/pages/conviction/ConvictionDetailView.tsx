@@ -26,6 +26,7 @@ import { eqAddress } from '../../web3/address.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
+import { BadgePercent } from 'lucide-react';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -188,7 +189,7 @@ function DetailBody({
     <div className="v10-pca-detail" data-testid="pca-detail">
       <div className="v10-pca-detail-band">
         <span className="v10-pca-detail-id">PCA #{accountId}</span>
-        <Badge size="sm" icon="◉">{pct}% discount</Badge>
+        <Badge size="sm" icon={<BadgePercent size={12} />}>{pct}% discount</Badge>
         <span className="v10-pca-detail-committed">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC committed</span>
         <span className="v10-pca-card-spacer" />
         <HealthChip state={health} />

@@ -10,7 +10,7 @@ import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
 import { LAYER_VAR } from '../../../layer-colors.js';
-import { LayerGlyph } from '../../../components/ds/Badge.js';
+import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
@@ -19,6 +19,7 @@ import { AssertionsList } from './assertions.js';
 import { Badge, LayerBadge } from '../../../components/ds/Badge.js';
 import { kindColorForType } from '../../../entity-kind-colors.js';
 import { humanizeTypeName } from '../../../lib/formatLabels.js';
+import { FileText } from 'lucide-react';
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -363,7 +364,7 @@ function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: Memory
       {facts.map(f => (
         <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
           <dt>{f.label}</dt>
-          <dd>{f.value}{f.tone === 'warn' ? <span aria-label="needs attention" className="v10-vm-hero-fact-icon">⚠</span> : null}</dd>
+          <dd>{f.value}{f.tone === 'warn' ? <span role="img" aria-label="needs attention" className="v10-vm-hero-fact-icon"><StatusGlyph tone="warning" /></span> : null}</dd>
         </div>
       ))}
     </dl>
@@ -539,7 +540,6 @@ export function DocumentsList({
       id: encodeDocTabId(contextGraphId ?? '', ref ?? e.uri, contentType),
       label: e.label,
       closable: true,
-      icon: '📄',
     });
   };
 
@@ -565,7 +565,7 @@ export function DocumentsList({
           const size = fileEntity?.properties.get(DKG_SIZE)?.[0] ?? e.properties.get(DKG_SIZE)?.[0];
           return (
             <div key={e.uri} className="v10-item-row" onClick={() => handleOpenDoc(e)}>
-              <span className="v10-item-icon">📄</span>
+              <span className="v10-item-icon"><FileText size={14} /></span>
               <div className="v10-item-info">
                 <div className="v10-item-name">{e.label}</div>
                 <div className="v10-item-meta-row">

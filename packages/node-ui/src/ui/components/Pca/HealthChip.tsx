@@ -3,10 +3,11 @@ import React from 'react';
 // presentation file only consumes `PcaHealthState` for its pill (every other consumer
 // imports the derivation directly from `pca/health.js`, so no re-export here).
 import { type PcaHealthState } from '../../pca/health.js';
-import { Badge, type BadgeTone } from '../ds/Badge.js';
+import { Badge, type BadgeTone, StatusGlyph } from '../ds/Badge.js';
+import { Ban } from 'lucide-react';
 
 interface HealthMeta {
-  glyph: string;
+  glyph: React.ReactNode;
   label: string;
   tone: BadgeTone;
   /** Longer advisory shown on hover (`title`). */
@@ -15,25 +16,25 @@ interface HealthMeta {
 
 export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
   healthy: {
-    glyph: '✓',
+    glyph: <StatusGlyph tone="success" />,
     label: 'Healthy',
     tone: 'success',
     hint: 'Active, solvent, and not expiring soon.',
   },
   expiring: {
-    glyph: '⏳',
+    glyph: <StatusGlyph tone="pending" />,
     label: 'Expiring soon',
     tone: 'warning',
     hint: 'The lock period ends soon — top-up does NOT extend it; renew to keep the discount.',
   },
   expired: {
-    glyph: '✕',
+    glyph: <StatusGlyph tone="danger" />,
     label: 'Expired',
     tone: 'danger',
     hint: 'The lock period has ended — publishes no longer get this discount. Renew to continue.',
   },
   insolvent: {
-    glyph: '⚠',
+    glyph: <StatusGlyph tone="warning" />,
     label: 'Insolvent',
     // Danger tone (§6.4 / G5): insolvency is more severe than the warn-tone
     // Expiring-soon / Cap-near states — a depleted buffer means publishes pay
@@ -42,13 +43,13 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     hint: 'The spendable buffer is depleted — publishes will quietly pay the direct cost. Top up.',
   },
   swept: {
-    glyph: '⊘',
+    glyph: <Ban size={12} />,
     label: 'Fully swept',
     tone: 'neutral',
     hint: 'Every epoch budget has been swept to the staker reward pool.',
   },
   'cap-near': {
-    glyph: '⚠',
+    glyph: <StatusGlyph tone="warning" />,
     label: 'Cap near 100',
     tone: 'warning',
     hint: 'Approaching the 100 approved-publishing-wallet cap.',

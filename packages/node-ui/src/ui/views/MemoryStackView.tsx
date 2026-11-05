@@ -23,19 +23,20 @@ import { relativeTime } from '../hooks/useProjectActivity.js';
 import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
+import { LayerGlyph } from '../components/ds/Badge.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
   title: string;
   short: string;
-  icon: string;
+  icon: React.ReactNode;
   color: string;
   desc: string;
   tabPrefix: 'wm' | 'swm' | 'vm';
 }> = [
-  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: '◇', color: 'var(--layer-working)', desc: 'Private agent drafts', tabPrefix: 'wm' },
-  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: '◈', color: 'var(--layer-shared)', desc: 'Team proposals',       tabPrefix: 'swm' },
-  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: '◉', color: 'var(--layer-verified)', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
+  { key: 'working',  title: 'Working Memory',        short: 'WM',  icon: <LayerGlyph layer="wm" />, color: 'var(--layer-working)', desc: 'Private agent drafts', tabPrefix: 'wm' },
+  { key: 'shared',   title: 'Shared Working Memory', short: 'SWM', icon: <LayerGlyph layer="swm" />, color: 'var(--layer-shared)', desc: 'Team proposals',       tabPrefix: 'swm' },
+  { key: 'verified', title: 'Verifiable Memory',     short: 'VM',  icon: <LayerGlyph layer="vm" />, color: 'var(--layer-verified)', desc: 'On-chain knowledge',   tabPrefix: 'vm' },
 ];
 
 const TS_PREDS = [

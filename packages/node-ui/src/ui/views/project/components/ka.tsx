@@ -12,7 +12,7 @@ import { memoryGraphLabels } from '../../../lib/memoryLabels.js';
 import { trustColors, entityAuthorUri, transitionAgentUri, transitionAtISO, shortPred, entityMeta, getDescription, neighborhoodTriples, neutraliseBuiltinNamespaces, layerNoun, filterTriplesToEntities, formatTrailTimestamp, type KAPane } from '../helpers.js';
 import { GraphSurface, RdfGraph } from './graph.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
-import { LayerBadge } from '../../../components/ds/Badge.js';
+import { LayerBadge, LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -205,7 +205,7 @@ export function VerifyOnDkgButton({
     <div className={`v10-ka-verify v10-ka-verify-${action.kind}`}>
       <div className="v10-ka-verify-head">
         <span className="v10-ka-verify-arrow">
-          {action.kind === 'promote' ? '◈' : '◉'}
+          <LayerGlyph layer={action.kind === 'promote' ? 'swm' : 'vm'} />
         </span>
         <span className="v10-ka-verify-title">{action.label}</span>
       </div>
@@ -222,13 +222,13 @@ export function VerifyOnDkgButton({
           {busy ? action.busyCopy : action.label}
         </button>
       )}
-      {error && <div className="v10-ka-verify-err">✕ {error}</div>}
+      {error && <div className="v10-ka-verify-err"><StatusGlyph tone="danger" /> {error}</div>}
       {result && resultKind === 'promote' && isPromoteOutcome(result) && result.kind === 'success' && (
         <div className="v10-ka-verify-ok">
           <div className="v10-ka-verify-ok-row">
             <span className="v10-ka-verify-ok-lbl">Promoted</span>
             <span className="v10-ka-verify-ok-val">
-              ✓ {result.promotedCount} triple{result.promotedCount === 1 ? '' : 's'} now in Shared Memory
+              <StatusGlyph tone="success" /> {result.promotedCount} triple{result.promotedCount === 1 ? '' : 's'} now in Shared Memory
             </span>
           </div>
           <div className="v10-ka-verify-hint" style={{ marginTop: 6 }}>
@@ -258,7 +258,7 @@ export function VerifyOnDkgButton({
             <div className="v10-ka-verify-ok-row">
               <span className="v10-ka-verify-ok-lbl">Status</span>
               <span className="v10-ka-verify-ok-val">
-                {!confirmed ? '✕' : partial ? '⚠' : '✓'} {result.status}{!confirmed ? ' (NOT on-chain)' : partial ? ` (${PARTIAL_PUBLISH_STATUS_SUFFIX})` : ''}
+                <StatusGlyph tone={!confirmed ? 'danger' : partial ? 'warning' : 'success'} /> {result.status}{!confirmed ? ' (NOT on-chain)' : partial ? ` (${PARTIAL_PUBLISH_STATUS_SUFFIX})` : ''}
               </span>
             </div>
             {partial && (

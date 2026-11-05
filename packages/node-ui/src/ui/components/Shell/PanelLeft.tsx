@@ -1,5 +1,5 @@
 import React, { useCallback, useId, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Eye, X } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
@@ -64,7 +64,7 @@ function ProjectTreeItem({
           title="Hide this Context Graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
     </div>
@@ -114,7 +114,7 @@ function OracleCatalogueItem({
           title="Hide this Context Graph from the sidebar (reversible)"
           onClick={onHide}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
     </div>
@@ -369,7 +369,7 @@ export function PanelLeft() {
               onClick={unhideAll}
               title="Restore all Context Graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
+              <Eye size={12} /> Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
 
@@ -459,7 +459,7 @@ export function PanelLeft() {
               onClick={unhideAll}
               title="Restore all Context Graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
+              <Eye size={12} /> Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
         </div>

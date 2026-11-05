@@ -8,6 +8,7 @@ import { decodeTabId } from '../../lib/tab-target.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
+import { FileText } from 'lucide-react';
 
 
 const OperationsView = createRecoverableLazyView(() =>
@@ -170,7 +171,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         >
           ← Back to Project
         </button>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>📄 {docLabel}</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}><FileText size={14} /> {docLabel}</span>
         {showToggle && (
           <div
             role="group"
@@ -211,7 +212,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             justifyContent: 'center', gap: 10, height: '100%',
             color: 'var(--text-tertiary)', textAlign: 'center',
           }}>
-            <span style={{ fontSize: 28, opacity: 0.6 }}>📄</span>
+            <FileText size={28} style={{ opacity: 0.6 }} />
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
               Source file not available for this document
             </span>

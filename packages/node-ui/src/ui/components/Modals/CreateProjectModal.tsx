@@ -9,6 +9,7 @@ import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
+import { ChevronRight, X } from 'lucide-react';
 
 function slugify(str: string): string {
   return str
@@ -310,7 +311,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             title="Close (Esc)"
             style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -358,7 +359,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           title="Close (Esc)"
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
           <div id="dkg-create-cg-title" className="v10-modal-title">Create new Context Graph</div>
@@ -528,7 +529,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           </div>
 
           <div className="v10-form-advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
-            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}>▸</span>
+            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}><ChevronRight size={12} /></span>
             <span>Advanced settings</span>
           </div>
 

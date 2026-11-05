@@ -62,7 +62,7 @@ const STATUS_GLYPHS = {
 type StatusTone = keyof typeof STATUS_GLYPHS;
 const isStatusTone = (tone: BadgeTone): tone is StatusTone => tone in STATUS_GLYPHS;
 
-const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
+export const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
   <svg className="ds-status-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     {STATUS_GLYPHS[tone]}
   </svg>

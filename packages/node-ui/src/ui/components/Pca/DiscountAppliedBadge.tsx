@@ -3,6 +3,7 @@ import { Badge } from '../ds/Badge.js';
 // B8 — the CostCovered wire type now lives at the api boundary (api.ts); re-export it
 // here so existing `components/Pca` importers (the barrel + mocks) keep resolving it.
 import type { ConvictionCostCovered } from '../../api.js';
+import { BadgePercent } from 'lucide-react';
 export type { ConvictionCostCovered };
 
 /**
@@ -57,7 +58,7 @@ export function DiscountAppliedBadge({
     <Badge
       tone="success"
       size="sm"
-      icon="◉"
+      icon={<BadgePercent size={12} />}
       className={['v10-pca-discount-applied', className].filter(Boolean).join(' ')}
       data-testid="pca-discount-badge"
       role="status"

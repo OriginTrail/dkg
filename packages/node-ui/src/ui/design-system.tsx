@@ -10,13 +10,14 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-import { Badge, Count, LayerBadge, type BadgeTone } from './components/ds/Badge.js';
+import { Badge, Count, LayerBadge, type BadgeTone, LayerGlyph, StatusGlyph } from './components/ds/Badge.js';
 import { Button, type ButtonVariant } from './components/ds/Button.js';
 import { Toggle } from './components/ds/Toggle.js';
 import { ContextGraphChip } from './components/ds/ContextGraphChip.js';
 import { AgentChip } from './components/AgentChip.js';
 import { AgentDot, AgentDotStack } from './components/AgentDot.js';
 import { agentColorForUri, type AgentSummary } from './hooks/useAgents.js';
+import { BadgePercent, ChevronRight, Copy, RefreshCw, X } from 'lucide-react';
 
 type Theme = 'dark' | 'light';
 
@@ -139,7 +140,7 @@ const App: React.FC = () => {
       </header>
 
       <nav className="dsp-toc" aria-label="Sections">
-        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Inputs'].map((s) => (
+        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Toggle', 'Icons', 'Inputs'].map((s) => (
           <a key={s} href={`#${s.toLowerCase().replace(/\s+/g, '-')}`}>{s}</a>
         ))}
       </nav>
@@ -236,9 +237,9 @@ const App: React.FC = () => {
           </Row>
         ))}
         <Row label="Icon" note="square; always give it an aria-label">
-          <Button variant="ghost" icon size="sm" aria-label="Close">×</Button>
+          <Button variant="ghost" icon size="sm" aria-label="Close"><X size={14} /></Button>
           <Button variant="ghost" icon aria-label="More">⋯</Button>
-          <Button icon aria-label="Refresh">↻</Button>
+          <Button icon aria-label="Refresh"><RefreshCw size={14} /></Button>
         </Row>
       </Section>
 
@@ -319,6 +320,23 @@ const App: React.FC = () => {
           <Toggle checked={false} aria-label="Off example" />
           <Toggle checked aria-label="On example" />
           <Toggle checked busy aria-label="Saving example" />
+        </div>
+      </Section>
+
+      <Section id="icons" title="Icons" lead="Lucide for actions and things, LayerGlyph for memory layers, StatusGlyph for status. One icon per job.">
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 'var(--fs-control)' }}>
+          <span><X size={14} /> Close</span>
+          <span><RefreshCw size={14} /> Refresh</span>
+          <span><Copy size={14} /> Copy</span>
+          <span><ChevronRight size={14} /> Expand</span>
+          <span><BadgePercent size={14} /> Discount</span>
+          <span><LayerGlyph layer="wm" /> Working</span>
+          <span><LayerGlyph layer="swm" /> Shared</span>
+          <span><LayerGlyph layer="vm" /> Verifiable</span>
+          <span><StatusGlyph tone="success" /> Success</span>
+          <span><StatusGlyph tone="warning" /> Warning</span>
+          <span><StatusGlyph tone="danger" /> Danger</span>
+          <span><StatusGlyph tone="pending" /> Pending</span>
         </div>
       </Section>
 

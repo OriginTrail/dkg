@@ -10,6 +10,8 @@ import { useMemoryGraphEvents } from '../../../hooks/useNodeEvents.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
 import { LAYER_CONFIG } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
+import { FileText } from 'lucide-react';
+import { StatusGlyph } from '../../../components/ds/Badge.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
@@ -37,6 +39,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   useMemoryGraphEvents(contextGraphId, loadPage, { layers: [layer] });
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  const [resultWarn, setResultWarn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handlePromote = useCallback(async (assertion: AssertionInfo) => {
@@ -46,6 +49,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     // is produced by the daemon and uniquely identifies the row.
     setBusy(assertion.graphUri);
     setResult(null);
+    setResultWarn(false);
     setError(null);
     try {
       // No client-side CG pre-registration: atomic WM→SWM sharing is off-chain,
@@ -71,9 +75,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
         // count) via the direct canonical publish API, preserving 207 partial handling.
         const res = await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
+        setResultWarn(Boolean(res.contextGraphError));
         setResult(
           res.contextGraphError
-            ? `Published ${assertion.name} on-chain — ⚠ ${partialPublishWarning(res.contextGraphError)}`
+            ? `Published ${assertion.name} on-chain — ${partialPublishWarning(res.contextGraphError)}`
             : `Published ${assertion.name} to Verifiable Memory`,
         );
       }
@@ -90,6 +95,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   const handlePromoteAll = useCallback(async () => {
     setBusy('__all__');
     setResult(null);
+    setResultWarn(false);
     setError(null);
     // Issue #864 (Codex review on #874) — track the in-flight
     // assertion so mid-loop failures surface "<name>: …" instead of
@@ -136,13 +142,15 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // handling, uniform with the other batch-publish CTAs (carries the partial detail).
         const r = await publishAssertionsToVm(contextGraphId, bulkAssertions);
         const unknownNote = outcomeUnknownPublishNote(r);
-        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
+        const unknownTail = unknownNote ? ` — ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          setResultWarn(r.partial > 0 || Boolean(unknownNote));
           setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`);
         } else if (unknownNote && r.failures.length === 0) {
-          setResult(`⚠ ${unknownNote}`);
+          setResultWarn(true);
+          setResult(unknownNote);
         } else {
           throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
         }
@@ -216,9 +224,9 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {result && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}
+          style={{ padding: '6px 16px', fontSize: 11, color: resultWarn ? 'var(--text-warning)' : 'var(--text-success)' }}
         >
-          ✓ {result}
+          <StatusGlyph tone={resultWarn ? 'warning' : 'success'} /> {result}
         </div>
       )}
       {error && (
@@ -226,12 +234,12 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
           style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}
         >
-          ✕ {error}
+          <StatusGlyph tone="danger" /> {error}
         </div>
       )}
       {assertions.map(a => (
         <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
-          <span className="v10-item-icon">▤</span>
+          <span className="v10-item-icon"><FileText size={14} /></span>
           <div className="v10-item-info">
             <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
             {a.reservedUal && (

@@ -47,33 +47,28 @@
 }
 /* Role ladder: one blue, stronger with the role. Weight (solid → tint →
    outline → grey → dashed) says how much you can do; the glyph says which
-   role it is, so the pill reads without colour. ◆ stays the canonical
-   curator glyph (also used on participant rows). */
-.v10-po-badge[data-rank]::before { font-weight: 700; margin-right: 2px; }
+   role it is, so the pill reads without colour. The diamond stays the
+   curator mark (also used on participant rows). */
 .v10-po-badge[data-rank="curator"] {
   border-color: var(--role);
   background: var(--role);
   color: var(--bg-surface);
 }
-.v10-po-badge[data-rank="curator"]::before { content: "◆"; }
 .v10-po-badge[data-rank="joined"] {
   border-color: var(--role-border);
   background: var(--role-bg);
   color: var(--role-text);
 }
-.v10-po-badge[data-rank="joined"]::before { content: "✓"; }
 .v10-po-badge[data-rank="subscriber"] {
   border-color: var(--role-border);
   background: transparent;
   color: var(--role-text);
 }
-.v10-po-badge[data-rank="subscriber"]::before { content: "◉"; }
 .v10-po-badge[data-rank="viewer"] {
   border-color: color-mix(in srgb, var(--text-tertiary) 70%, transparent);
   background: transparent;
   color: var(--text-secondary);
 }
-.v10-po-badge[data-rank="viewer"]::before { content: "○"; }
 .v10-po-badge[data-rank="not-joined"] {
   border: 1px dashed color-mix(in srgb, var(--text-tertiary) 70%, transparent);
   background: transparent;
@@ -84,7 +79,6 @@
   background: var(--bg-elevated);
   color: var(--text-tertiary);
 }
-.v10-po-badge[data-rank="unknown"]::before { content: "?"; }
 /* Graph access: blue outline (same hue as role, lighter weight). */
 .v10-po-badge[data-cg-type="public"],
 .v10-po-badge[data-cg-type="curated"],
@@ -119,16 +113,9 @@
 }
 /* Each participant leads with its agent avatar (AgentDot), the same
    circle agents have in the graphs. "You" is bold (plus the ` · you`
-   tag); a curator also carries the canonical ◆ role glyph, rendered in
-   CSS so the data string the tests read stays just the suffix. */
+   tag); a curator also carries the diamond role mark. */
 .v10-po-participant.is-self { font-weight: 700; }
-.v10-po-participant.is-curator::before {
-  content: "◆";
-  order: 2;
-  font-size: 11px;
-  line-height: 1;
-  color: var(--role-text);
-}
+.v10-po-participant-role { order: 2; color: var(--role-text); }
 .v10-po-participant.is-curator .v10-po-participant-name { order: 3; }
 .v10-po-participant.is-curator .v10-po-participant-tag { order: 4; }
 .v10-po-participant-name {

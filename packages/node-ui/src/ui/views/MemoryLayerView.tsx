@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
-import { LayerGlyph } from '../components/ds/Badge.js';
+import { LayerGlyph, StatusGlyph } from '../components/ds/Badge.js';
 import { useFetch } from '../hooks.js';
 import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
@@ -11,6 +11,7 @@ import { useGraphPalette } from '../hooks/useGraphPalette.js';
 import { dataSlotHex } from '../graph-palette.js';
 import { graphOptions } from './memory-layer-graph-options.js';
 import { schemaTypeColors } from './schema-type-colors.js';
+import { RefreshCw } from 'lucide-react';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -728,7 +729,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
           Knowledge assets in Shared Working Memory ({assertions!.length} asset{assertions!.length === 1 ? '' : 's'} · {totalTriples} triples)
         </span>
         <div className="v10-publish-panel-header-actions">
-          <button className="v10-publish-panel-refresh ds-btn ds-ghost ds-sm ds-icon" onClick={refresh} title="Refresh">↻</button>
+          <button className="v10-publish-panel-refresh ds-btn ds-ghost ds-sm ds-icon" onClick={refresh} title="Refresh" aria-label="Refresh"><RefreshCw size={12} /></button>
           <button
             className="v10-btn-promote-all ds-btn ds-swm"
             disabled={publishing}
@@ -801,7 +802,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             </div>
             {partial > 0 && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                ⚠ {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
+                <StatusGlyph tone="warning" /> {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
               </div>
             )}
             {failures.length > 0 && (
@@ -812,7 +813,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             )}
             {unknownNote && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
-                ⚠ {unknownNote}
+                <StatusGlyph tone="warning" /> {unknownNote}
               </div>
             )}
             <div className="v10-publish-result-details">

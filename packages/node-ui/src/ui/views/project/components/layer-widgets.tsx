@@ -8,6 +8,8 @@ import { EmptyState, StatStrip, toneForLayer } from '../../../components/Context
 import { useVmPublishGate } from '../../../pages/conviction/useVmPublishGate.js';
 import { PublishEligibilityChipView } from '../../../pages/conviction/PublishEligibilityChip.js';
 import { DiscountAppliedBadge } from '../../../components/Pca/index.js';
+import { X } from 'lucide-react';
+import { StatusGlyph } from '../../../components/ds/Badge.js';
 
 // ─── Generative Widget Components ─────────────────────────────
 
@@ -31,7 +33,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
             </span>
           )}
           {onDismiss && (
-            <button className="v10-gen-widget-dismiss" onClick={onDismiss}>✕</button>
+            <button className="v10-gen-widget-dismiss" onClick={onDismiss} aria-label="Dismiss"><X size={12} /></button>
           )}
         </div>
       </div>
@@ -44,7 +46,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
 export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) {
   const profile = useProjectProfileContext();
   const breakdown = useMemo(() => {
-    const counts = new Map<string, { icon: string; count: number }>();
+    const counts = new Map<string, { icon: ReactNode; count: number }>();
     for (const e of entities) {
       const { icon, type } = entityMeta(e, profile);
       const existing = counts.get(type);
@@ -118,22 +120,27 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
  * the runner stays generic and never leaks promote wording onto publish).
  */
 function useLayerAction(
-  onResult?: (r: { ok: boolean; text: string } | null) => void,
+  onResult?: (r: LayerActionResult | null) => void,
   onComplete?: () => void,
 ) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [warn, setWarn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const run = useCallback(
-    async (body: () => Promise<string>, formatError: (err: unknown) => string) => {
+    async (body: () => Promise<LayerActionOutcome>, formatError: (err: unknown) => string) => {
       setBusy(true);
       setError(null);
       setResult(null);
+      setWarn(false);
       try {
-        const text = await body();
+        const outcome = await body();
+        const text = typeof outcome === 'string' ? outcome : outcome.text;
+        const isWarn = typeof outcome !== 'string' && outcome.warn;
         setResult(text);
-        onResult?.({ ok: true, text });
+        setWarn(isWarn);
+        onResult?.(isWarn ? { ok: true, text, warn: true } : { ok: true, text });
         onComplete?.();
       } catch (err) {
         const text = formatError(err);
@@ -146,16 +153,21 @@ function useLayerAction(
     [onResult, onComplete],
   );
 
-  return { busy, result, error, run };
+  return { busy, result, warn, error, run };
 }
+
+/** A result that went through with something to flag is a warning, not a success. */
+type LayerActionOutcome = string | { text: string; warn: boolean };
+type LayerActionResult = { ok: boolean; text: string; warn?: boolean };
 
 /** The GenWidget shell shared by the two CTAs: context line + result/error + optional
  *  extras (badge/chip/gate) + the action button(s). */
-function LayerActionShell({ title, footnote, context, result, error, extras, children }: {
+function LayerActionShell({ title, footnote, context, result, warn = false, error, extras, children }: {
   title: string;
   footnote: string;
   context: ReactNode;
   result: string | null;
+  warn?: boolean;
   error: string | null;
   extras?: ReactNode;
   children: ReactNode;
@@ -163,10 +175,10 @@ function LayerActionShell({ title, footnote, context, result, error, extras, chi
   return (
     <GenWidget title={title} footnote={footnote}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
-      {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: 'var(--text-success)', marginBottom: 8 }}>✓ {result}</div>}
+      {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}><StatusGlyph tone={warn ? 'warning' : 'success'} /> {result}</div>}
       {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
           successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
-      {error && <div data-testid="layer-action-error" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}>✕ {error}</div>}
+      {error && <div data-testid="layer-action-error" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}><StatusGlyph tone="danger" /> {error}</div>}
       {extras}
       <div className="v10-decision-actions">{children}</div>
     </GenWidget>
@@ -179,7 +191,7 @@ interface LayerActionProps {
   onComplete?: () => void;
   /** Lift the latest outcome to the parent strip so it survives this widget
    * unmounting when the promoted/published layer empties (entityCount → 0). */
-  onResult?: (r: { ok: boolean; text: string } | null) => void;
+  onResult?: (r: LayerActionResult | null) => void;
 }
 
 /** WM → SWM bulk-promote CTA. Off-chain; never touches the PCA eligibility probe. */
@@ -238,7 +250,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         disabled={busy}
         onClick={promote}
       >
-        {busy ? '...' : '✓ Share Complete KAs → Shared'}
+        {busy ? '...' : 'Share Complete KAs → Shared'}
       </button>
     </LayerActionShell>
   );
@@ -248,7 +260,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
  *  gate + the eligibility chip, and owns the confirmed post-publish discount badge (B8). */
 export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }: LayerActionProps) {
   const [costCovered, setCostCovered] = useState<ConvictionCostCovered | null>(null);
-  const { busy, result, error, run } = useLayerAction(onResult, onComplete);
+  const { busy, result, warn, error, run } = useLayerAction(onResult, onComplete);
   // Pure-policy hook: gate decision + resolved eligibility. ALL presentation lives here.
   const gate = useVmPublishGate(contextGraphId);
   const verdictId = useId();
@@ -273,16 +285,16 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
         const unknownNote = outcomeUnknownPublishNote(r);
-        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
+        const unknownTail = unknownNote ? ` — ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
           // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
           setCostCovered(r.convictionCostCovered ?? null);
-          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`;
+          return { text: `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`, warn: r.partial > 0 || Boolean(unknownNote) };
         }
         if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
-        if (unknownNote && r.failures.length === 0) return `⚠ ${unknownNote}`;
+        if (unknownNote && r.failures.length === 0) return { text: unknownNote, warn: true };
         throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
       },
       // Publish-appropriate: the raw message (matches the old catch, which fell through
@@ -295,6 +307,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
 
   return (
     <LayerActionShell
+      warn={warn}
       title="Publish"
       footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this Context Graph on-chain."
       context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
@@ -329,7 +342,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         aria-describedby={describedBy}
         onClick={publish}
       >
-        {busy ? '...' : '◉ Publish to Verifiable Memory'}
+        {busy ? '...' : 'Publish to Verifiable Memory'}
       </button>
     </LayerActionShell>
   );
@@ -350,14 +363,14 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
   // Latest promote/publish outcome, lifted from the action widget so the "✓ Promoted
   // N triples" feedback survives that widget unmounting the instant the acted-on layer
   // empties (entityCount → 0) and the strip swaps to the empty state.
-  const [lastAction, setLastAction] = useState<{ ok: boolean; text: string } | null>(null);
+  const [lastAction, setLastAction] = useState<LayerActionResult | null>(null);
   const actionResult = lastAction && (
     <div
       // #1464 — success vs failure must not collide on one testid (see LayerActionShell).
       data-testid={lastAction.ok ? 'layer-action-result' : 'layer-action-error'}
-      style={{ fontSize: 11, color: lastAction.ok ? 'var(--text-success)' : 'var(--text-danger)', marginBottom: 8 }}
+      style={{ fontSize: 11, color: !lastAction.ok ? 'var(--text-danger)' : lastAction.warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}
     >
-      {lastAction.ok ? '✓' : '✕'} {lastAction.text}
+      <StatusGlyph tone={!lastAction.ok ? 'danger' : lastAction.warn ? 'warning' : 'success'} /> {lastAction.text}
     </div>
   );
   if (entityCount === 0) {

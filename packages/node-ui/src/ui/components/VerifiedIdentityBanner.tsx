@@ -20,7 +20,8 @@ import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { useFetch } from '../hooks.js';
 import { fetchStatus } from '../api.js';
 import { AgentChip } from './AgentChip.js';
-import { Badge } from './ds/Badge.js';
+import { Badge, LayerGlyph } from './ds/Badge.js';
+import { Check, Copy } from 'lucide-react';
 
 export interface VerifiedIdentityBannerProps {
   contextGraphId: string;
@@ -68,9 +69,9 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   return (
     <div className="v10-vm-identity ds-card">
       <div className="v10-vm-identity-head">
-        <span className="v10-vm-identity-glyph">◉</span>
+        <span className="v10-vm-identity-glyph"><LayerGlyph layer="vm" /></span>
         <span className="v10-vm-identity-title">On-chain identity</span>
-        <Badge tone="vm" size="sm" icon="✓" className="v10-vm-identity-badge">Verified</Badge>
+        <Badge tone="vm" size="sm" icon={<Check size={10} />} className="v10-vm-identity-badge">Verified</Badge>
       </div>
 
       {onChainUal && (
@@ -84,7 +85,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             className="v10-vm-identity-copy"
             onClick={() => copy(onChainUal)}
             title="Copy UAL"
-          >⎘</button>
+          ><Copy size={12} /></button>
         </div>
       )}
 
@@ -111,7 +112,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             className="v10-vm-identity-copy"
             onClick={() => copy(receipt.txHash!)}
             title="Copy transaction hash"
-          >⎘</button>
+          ><Copy size={12} /></button>
           {receipt.blockNumber && (
             <span className="v10-vm-identity-opid mono">· block {receipt.blockNumber}</span>
           )}
@@ -129,7 +130,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             className="v10-vm-identity-copy"
             onClick={() => copy(receipt.kaId!)}
             title="Copy KA id"
-          >⎘</button>
+          ><Copy size={12} /></button>
         </div>
       )}
 
@@ -155,7 +156,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
                 className="v10-vm-identity-copy"
                 onClick={() => copy(identity.owner!)}
                 title="Copy owner id"
-              >⎘</button>
+              ><Copy size={12} /></button>
             </>
           )}
         </div>

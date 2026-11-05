@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { importFile, type ImportFileResult } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { Check, File, FileCode, FileImage, FileSpreadsheet, FileText, Minus, Network, X } from 'lucide-react';
 
 interface ImportFilesModalProps {
   open: boolean;
@@ -31,16 +32,14 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function fileIcon(name: string): string {
+function fileIcon(name: string): React.ReactNode {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
-  if (['md', 'txt'].includes(ext)) return '📝';
-  if (['pdf'].includes(ext)) return '📕';
-  if (['docx', 'doc'].includes(ext)) return '📄';
-  if (['csv', 'json', 'xml', 'yaml', 'yml'].includes(ext)) return '📊';
-  if (['ttl', 'rdf', 'owl'].includes(ext)) return '🔗';
-  if (['py', 'ts', 'js', 'tsx', 'jsx', 'java', 'go', 'rs', 'c', 'cpp'].includes(ext)) return '💻';
-  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return '🖼️';
-  return '📄';
+  if (['md', 'txt', 'pdf', 'docx', 'doc'].includes(ext)) return <FileText size={14} />;
+  if (['csv', 'json', 'xml', 'yaml', 'yml'].includes(ext)) return <FileSpreadsheet size={14} />;
+  if (['ttl', 'rdf', 'owl'].includes(ext)) return <Network size={14} />;
+  if (['py', 'ts', 'js', 'tsx', 'jsx', 'java', 'go', 'rs', 'c', 'cpp'].includes(ext)) return <FileCode size={14} />;
+  if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) return <FileImage size={14} />;
+  return <File size={14} />;
 }
 
 export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphName }: ImportFilesModalProps) {
@@ -188,7 +187,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             title="Close (Esc)"
             style={{ flexShrink: 0, cursor: status === 'uploading' ? 'not-allowed' : 'pointer' }}
           >
-            ×
+            <X size={14} />
           </button>
         </div>
 
@@ -230,7 +229,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                         <span className="v10-import-file-icon">{fileIcon(f.file.name)}</span>
                         <span className="v10-import-file-name">{f.file.name}</span>
                         <span className="v10-import-file-size">{formatSize(f.file.size)}</span>
-                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} title="Remove">×</button>
+                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} title="Remove"><X size={14} /></button>
                       </div>
                     ))}
                   </div>
@@ -311,7 +310,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                   {results.map((r, i) => (
                     <div key={i} className="v10-import-file-item">
                       <span className="v10-import-file-icon">
-                        {r.status === 'success' ? '✓' : r.status === 'skipped' ? '–' : '✗'}
+                        {r.status === 'success' ? <Check size={14} /> : r.status === 'skipped' ? <Minus size={14} /> : <X size={14} />}
                       </span>
                       <span className="v10-import-file-name">{r.fileName}</span>
                       <span className="v10-import-file-size" style={r.status === 'error' ? { color: 'var(--text-danger)' } : undefined}>
