@@ -171,7 +171,7 @@ describe('Context Graph IA and Overview', () => {
       more!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(container.textContent).toContain('Query Catalogue');
+    expect(container.textContent).toContain('Query catalogue');
     const query = container.querySelector<HTMLButtonElement>('.v10-layer-more-item');
     await act(async () => {
       query!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -197,17 +197,17 @@ describe('Context Graph IA and Overview', () => {
     await act(async () => {
       more!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    expect(container.textContent).toContain('Query Catalogue');
+    expect(container.textContent).toContain('Query catalogue');
 
     await act(async () => {
       document.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     });
-    expect(container.textContent).not.toContain('Query Catalogue');
+    expect(container.textContent).not.toContain('Query catalogue');
 
     await act(async () => root.unmount());
   });
 
-  it('renders Overview as a summary with one clickable Knowledge Pipeline', async () => {
+  it('renders Overview as a summary with one clickable Knowledge pipeline', async () => {
     const onSwitchLayer = vi.fn();
     const onOpenPrimer = vi.fn();
     const { container, root } = await render(
@@ -260,7 +260,7 @@ describe('Context Graph IA and Overview', () => {
       .map(node => node.textContent?.trim());
     expect(statLabels).toEqual(['Entities', 'Triples', 'Subgraphs', 'Agents with access']);
 
-    expect(container.textContent).toContain('Knowledge Pipeline');
+    expect(container.textContent).toContain('Knowledge pipeline');
     expect(container.textContent).toContain('published assertion bundles become Knowledge Assets');
     expect(container.querySelector('.v10-memory-strip')).toBeNull();
     expect(container.querySelectorAll('.v10-po-pipeline-step')).toHaveLength(3);
@@ -1299,7 +1299,7 @@ describe('Context Graph IA and Overview', () => {
     expect(footer).toBeTruthy();
     expect(footer!.textContent).toContain('New here?');
     expect(footer!.textContent).toContain('What is a Context Graph?');
-    expect(footer!.textContent).toContain('A short primer on context graphs, the WM → SWM → VM pipeline');
+    expect(footer!.textContent).toContain('A short primer on Context Graphs, the WM → SWM → VM pipeline');
 
     const link = container.querySelector<HTMLButtonElement>('.v10-po-primer-footer-link');
     expect(link).toBeTruthy();

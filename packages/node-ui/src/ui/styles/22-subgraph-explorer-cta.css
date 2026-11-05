@@ -142,7 +142,7 @@
 }
 .v10-subgraph-active-layer-pill-label {
   text-transform: uppercase;
-  font-size: 9px;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--text-tertiary);
@@ -226,7 +226,7 @@
   font-size: 11px;
 }
 .v10-ka-verify-ok-row:last-child { border-bottom: none; }
-.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: 9px; letter-spacing: 0.08em; }
+.v10-ka-verify-ok-lbl { color: var(--text-tertiary); text-transform: uppercase; font-size: var(--fs-micro); letter-spacing: 0.08em; }
 .v10-ka-verify-ok-val { color: var(--text-primary); font-weight: 600; }
 .v10-ka-verify-ok-val.mono {
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;

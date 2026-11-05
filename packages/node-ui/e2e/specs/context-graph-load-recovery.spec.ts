@@ -4,7 +4,7 @@ import { PRIMARY_CG } from '../helpers/real-node.js';
 // Healthy reads go to the real devnet. Inject only a temporary failed HTTP
 // response, then remove it and verify that Retry restores actual seeded data.
 for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
-  test(`context graph inventory recovers from unavailable ${endpoint}`, async ({ page, shell, dashboard }) => {
+  test(`Context Graph inventory recovers from unavailable ${endpoint}`, async ({ page, shell, dashboard }) => {
     const route = `**${endpoint}`;
     await page.route(route, intercepted => intercepted.fulfill({
       status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Temporary test outage' }),
@@ -14,8 +14,8 @@ for (const endpoint of ['/api/context-graph/list', '/api/agent/identity']) {
     const sidebar = page.locator('.v10-panel-left').last();
     await expect(dashboardRoot.getByRole('alert')).toContainText('could not be loaded');
     await expect(sidebar.getByRole('alert')).toContainText('unavailable');
-    await expect(sidebar).not.toContainText('No context graphs yet');
-    await expect(dashboardRoot).not.toContainText('No context graphs yet');
+    await expect(sidebar).not.toContainText('No Context Graphs yet');
+    await expect(dashboardRoot).not.toContainText('No Context Graphs yet');
     const count = dashboardRoot.locator('.stat-card').filter({ hasText: 'My Context Graphs' }).locator('.stat-value');
     await expect(count).not.toHaveText('0');
 

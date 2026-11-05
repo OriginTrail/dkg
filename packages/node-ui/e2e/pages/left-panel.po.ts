@@ -55,7 +55,7 @@ export class LeftPanelPage {
   }
 
   private memoryStackControl() {
-    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory Stack' });
+    return this.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Memory stack' });
   }
 
   async isVisible() {
@@ -72,7 +72,7 @@ export class LeftPanelPage {
       await sidebar.click();
       return;
     }
-    throw new Error('Memory Stack navigation control not found (expected .v10-tree-dashboard with "Memory Stack" label)');
+    throw new Error('Memory stack navigation control not found (expected .v10-tree-dashboard with "Memory stack" label)');
   }
 
   async isMemoryStackVisible() {
@@ -130,7 +130,7 @@ export class LeftPanelPage {
     const names: string[] = [];
     for (let i = 0; i < count; i++) {
       const text = await labels.nth(i).textContent();
-      if (text && !text.includes('No context graphs')) names.push(text.trim());
+      if (text && !text.includes('No Context Graphs')) names.push(text.trim());
     }
     return names;
   }

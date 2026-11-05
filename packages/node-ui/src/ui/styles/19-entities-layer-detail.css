@@ -182,7 +182,7 @@
 .v10-item-icon { font-size: 14px; width: 22px; text-align: center; flex-shrink: 0; color: var(--text-tertiary); }
 .v10-item-info { flex: 1; min-width: 0; }
 .v10-item-name { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.v10-item-ual { font-size: 9px; color: var(--text-tertiary); font-family: var(--font-mono); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v10-item-ual { font-size: var(--fs-micro); color: var(--text-tertiary); font-family: var(--font-mono); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v10-item-meta-row { display: flex; gap: 8px; margin-top: 1px; }
 .v10-item-type { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
 .v10-item-count { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }

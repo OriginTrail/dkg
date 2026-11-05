@@ -39,7 +39,7 @@ export class SettingsPage {
 
   /**
    * Wait until the Node-Identity card has hydrated from `/api/status`. The card
-   * paints immediately with "—" placeholders + an OFFLINE pill and only fills in
+   * paints immediately with "—" placeholders + a Connecting status and only fills in
    * once the async status fetch resolves. Under the high local worker count the
    * status endpoint can be slow, so identity assertions must wait for the real
    * value rather than racing the first paint (otherwise they read "—").
@@ -70,13 +70,9 @@ export class SettingsPage {
       .locator('xpath=following-sibling::*[1]');
   }
 
-  /** The "● ONLINE" / "● OFFLINE" status pill inside the Node Identity card. */
-  get onlinePill(): Locator {
-    return this.page.locator(sel.settings.onlinePill).filter({ hasText: /ONLINE|OFFLINE/ });
-  }
-
-  async getOnlinePillText(): Promise<string> {
-    return (await this.onlinePill.first().textContent())?.trim() ?? '';
+  /** The node status in the Node identity card, the same one the header shows. */
+  get nodeStatus(): Locator {
+    return this.page.locator(sel.settings.nodeStatus);
   }
 
   async getRetentionOptions(): Promise<string[]> {

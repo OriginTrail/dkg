@@ -194,7 +194,7 @@ describe('memory continuation and refresh with the scoped native store', () => {
     expect(memory.entityList).toHaveLength(7);
     expect(new Set(memory.graphTriples.map(triple => JSON.stringify(triple))).size).toBe(memory.graphTriples.length);
   });
-  it('ignores a pending old page after switching context graphs', async () => {
+  it('ignores a pending old page after switching Context Graphs', async () => {
     await seed(cg, 6); const next = `${owner}/new`; await seed(next, 1);
     await act(async () => root.render(React.createElement(Probe)));
     holdOldPage = true;

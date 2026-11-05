@@ -245,9 +245,9 @@ export const sel = {
 
   shareModal: {
     title: '.v10-modal-title',
-    inviteLabel: '.v10-form-label:has-text("Invite Code")',
-    allowedAgents: '.v10-form-label:has-text("Allowed Agents")',
-    pendingRequests: '.v10-form-label:has-text("Pending Join Requests")',
+    inviteLabel: '.v10-form-label:has-text("Invite code")',
+    allowedAgents: '.v10-form-label:has-text("Allowed agents")',
+    pendingRequests: '.v10-form-label:has-text("Pending join requests")',
     copyInviteBtn: 'button:has-text("Copy Invite")',
   },
 
@@ -267,7 +267,7 @@ export const sel = {
     cardTitle: '.settings-stack .card-title',
     fieldLabel: '.settings-field-label',
     fieldValue: '.settings-field-value',
-    onlinePill: '.settings-stack .card-body .mono',
+    nodeStatus: '.settings-node-status .ds-badge',
     telemetrySwitch: 'button[role="switch"][aria-label="Share telemetry with the network"]',
     telemetryDialog: '[role="dialog"][aria-label="Enable Telemetry Streaming?"]',
     retentionSelect: '#retention-select',

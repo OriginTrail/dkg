@@ -272,7 +272,7 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
-  it('always injects target context graph name alongside id and URI', async () => {
+  it('always injects target Context Graph name alongside id and URI', async () => {
     const { buildChatContextEntries } = await import('../src/ui/components/Shell/PanelRight.js');
 
     expect(buildChatContextEntries(

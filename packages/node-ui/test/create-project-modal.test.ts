@@ -449,7 +449,7 @@ describe('CreateProjectModal progress copy honesty', () => {
     });
     await flush();
 
-    expect(getCreateButton().textContent).toBe('Creating context graph locally…');
+    expect(getCreateButton().textContent).toBe('Creating Context Graph locally…');
     expect(createContextGraphMock).toHaveBeenCalledWith(
       cgId,
       'Local Only',
@@ -475,7 +475,7 @@ describe('CreateProjectModal progress copy honesty', () => {
     });
     await flush();
 
-    expect(getCreateButton().textContent).toBe('Registering context graph on the network…');
+    expect(getCreateButton().textContent).toBe('Registering Context Graph on the network…');
     expect(createContextGraphMock).toHaveBeenCalledWith(
       cgId,
       'Local Only',

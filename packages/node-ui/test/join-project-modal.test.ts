@@ -62,7 +62,7 @@ describe('JoinProjectModal invite parsing', () => {
       }]).kind).toBe('publicSubscribe');
     });
 
-    it('still requires a curator invite for a private or unknown bare context graph id', () => {
+    it('still requires a curator invite for a private or unknown bare Context Graph id', () => {
       const parsed = parseInviteCode('private-project');
       expect(resolveJoinIntent('private-project', [{
         id: 'private-project',
@@ -164,7 +164,7 @@ describe('JoinProjectModal invite parsing', () => {
 
     it('validates missing project id', () => {
       const parsed = parseInviteCode('');
-      expect(validateInvite(parsed)).toBe('Missing context graph ID');
+      expect(validateInvite(parsed)).toBe('Missing Context Graph ID');
     });
   });
 });
@@ -269,7 +269,7 @@ describe('formatJoinRequestError', () => {
     expect(msg).not.toContain('Curator rejected');
     expect(msg).toContain('dial failed');
     expect(msg).toContain('not curator');
-    expect(msg).toContain('none of them curate this context graph');
+    expect(msg).toContain('none of them curate this Context Graph');
   });
 
   it('treats broadcast-only `not curator` (no targeted curator reached) as a delivery failure', () => {
@@ -286,7 +286,7 @@ describe('formatJoinRequestError', () => {
 
     expect(msg).toContain("Couldn't deliver");
     expect(msg).not.toContain('Curator rejected');
-    expect(msg).toContain('none of them curate this context graph');
+    expect(msg).toContain('none of them curate this Context Graph');
   });
 
   it('falls back to err.message for non-502 errors', () => {

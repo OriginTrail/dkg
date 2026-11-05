@@ -359,7 +359,7 @@ function VmHeroFacts({ entities, vmTriples, contextGraphId }: { entities: Memory
   const vmSubjects = useMemo(() => vmSubjectsOf(vmTriples), [vmTriples]);
   const facts = useMemo(() => buildVmFacts(entities, summary, { loading, error }, vmSubjects), [entities, summary, loading, error, vmSubjects]);
   return (
-    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this context graph">
+    <dl className="v10-vm-hero-facts" aria-label="Verifiable Memory facts for this Context Graph">
       {facts.map(f => (
         <div key={f.id} className={`v10-vm-hero-fact tone-${f.tone}`} title={f.tooltip} data-fact={f.id}>
           <dt>{f.label}</dt>
@@ -423,7 +423,7 @@ export function VerifiableMemoryHeroBanner({ entities, vmTriples, contextGraphId
         items={[
           { id: 'assets', value: totalAssets, label: 'Knowledge Assets' },
           { id: 'triples', value: tripleCount.toLocaleString(), ...VM_TRIPLE_STAT },
-          { id: 'types', value: typeCount, label: 'Entity Types' },
+          { id: 'types', value: typeCount, label: 'Entity types' },
         ]}
       />
       <VmHeroFacts entities={entities} vmTriples={vmTriples} contextGraphId={contextGraphId} />

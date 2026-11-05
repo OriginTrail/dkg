@@ -27,12 +27,12 @@ import { subGraphMiniGraphOptions } from './subgraph-mini-graph.js';
 export function SubGraphExplorerHeader() {
   return (
     <div className="v10-subgraph-explorer-header">
-      <div className="v10-subgraph-explorer-title">Subgraph Explorer</div>
+      <div className="v10-subgraph-explorer-title">Subgraph explorer</div>
       <p className="v10-subgraph-explorer-intro">
         Subgraphs are optional topical partitions inside this Context Graph.
         An entity belongs to one or more memory layers and, optionally,
         to one or more subgraphs. Entities in no subgraph live in the
-        context graph root.
+        Context Graph root.
       </p>
     </div>
   );
@@ -1420,7 +1420,7 @@ export function SubGraphDetailView({
       if (resultType !== 'bindings') {
         throw new Error(
           `${q.name} returns ${resultType === 'boolean' ? 'an ASK result' : 'graph quads'} `
-          + 'and cannot be used as an entity filter. Open it in Query Catalogue instead.',
+          + 'and cannot be used as an entity filter. Open it in Query catalogue instead.',
         );
       }
       const bindings = result.bindings;
@@ -1620,7 +1620,7 @@ export function SubGraphDetailView({
                     className={`v10-subgraph-savedquery${isActive ? ' active' : ''}`}
                     onClick={() => isActive ? clearQuery() : runQuery(q)}
                     title={requiresParameters
-                      ? `${q.description || q.name} Open Query Catalogue to enter parameters.`
+                      ? `${q.description || q.name} Open Query catalogue to enter parameters.`
                       : q.description || q.name}
                     disabled={queryLoading && !isActive}
                   >

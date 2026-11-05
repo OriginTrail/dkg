@@ -185,7 +185,7 @@ function TransactionsContent() {
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Status</th>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Duration</th>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Time</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx Hash</th>
+            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx hash</th>
           </tr>
         </thead>
         <tbody>

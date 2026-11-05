@@ -280,12 +280,12 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 position: 'relative',
               }}
             >
-              Join Requests
+              Join requests
               {pendingRequests.length > 0 && (
                 <span style={{
                   position: 'absolute', top: 4, right: 4,
                   background: 'var(--accent-red)', color: 'var(--text-on-accent)',
-                  borderRadius: 'var(--radius-pill)', fontSize: 9, fontWeight: 700,
+                  borderRadius: 'var(--radius-pill)', fontSize: 10, fontWeight: 700,
                   padding: '1px 5px', minWidth: 16, textAlign: 'center',
                 }}>
                   {pendingRequests.length}
@@ -298,12 +298,12 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             <>
               {/* Allowed Agents — read-only audit list. Agents are added
                   exclusively via the text-invite + signed-join-request flow
-                  (see Invite Code below + the Join Requests tab). The ✕
+                  (see Invite code below + the Join requests tab). The ✕
                   button revokes access for an existing participant. */}
               <div className="v10-form-group">
-                <label className="v10-form-label">Allowed Agents</label>
+                <label className="v10-form-label">Allowed agents</label>
                 <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                  Only agents on this list can read and write to the context graph. To add someone, share the Invite Code below — they'll send a signed join request you can approve in the <strong>Join Requests</strong> tab.
+                  Only agents on this list can read and write to the Context Graph. To add someone, share the Invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
@@ -346,7 +346,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)', marginBottom: 8,
                   }}>
-                    No agents on allowlist — context graph is open to anyone who subscribes.
+                    No agents on allowlist — Context Graph is open to anyone who subscribes.
                   </div>
                 )}
               </div>
@@ -355,7 +355,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
               {/* Invite code */}
               <div className="v10-form-group">
-                <label className="v10-form-label">Invite Code</label>
+                <label className="v10-form-label">Invite code</label>
                 {invitePayload === null ? (
                   <div style={{
                     padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 11,
@@ -392,9 +392,9 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
           {activeTab === 'requests' && (
             <div className="v10-form-group">
-              <label className="v10-form-label">Pending Join Requests</label>
+              <label className="v10-form-label">Pending join requests</label>
               <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 8 }}>
-                Agents who submitted a signed request to join this context graph. Approve to add them to the allowlist.
+                Agents who submitted a signed request to join this Context Graph. Approve to add them to the allowlist.
               </div>
 
               {pendingRequests.length === 0 && (
@@ -423,7 +423,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     }}>
                       {req.agentAddress}
                     </span>
-                    <span style={{ fontSize: 9, color: 'var(--text-tertiary)' }}>
+                    <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>
                       Requested {new Date(req.timestamp).toLocaleString()}
                     </span>
                   </div>

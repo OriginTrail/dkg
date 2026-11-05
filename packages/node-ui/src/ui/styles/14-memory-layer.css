@@ -47,7 +47,7 @@
   color: var(--bg-root);
   font-weight: 600;
   border-radius: var(--radius-hair);
-  font-size: 9px;
+  font-size: var(--fs-micro);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }

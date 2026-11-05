@@ -39,13 +39,13 @@ describe('SubGraphExplorerHeader — locked intro copy (UX §4.4.1 Issue D)', ()
     expect(text).toContain('one or more memory layers');
     expect(text).toContain('one or more subgraphs');
     // The third sentence stays as the locked Root introduction.
-    expect(text).toContain('Entities in no subgraph live in the context graph root.');
+    expect(text).toContain('Entities in no subgraph live in the Context Graph root.');
   });
 
   it('renders the locked page title', () => {
     act(() => {
       root.render(React.createElement(SubGraphExplorerHeader));
     });
-    expect(container.querySelector('.v10-subgraph-explorer-title')?.textContent).toBe('Subgraph Explorer');
+    expect(container.querySelector('.v10-subgraph-explorer-title')?.textContent).toBe('Subgraph explorer');
   });
 });

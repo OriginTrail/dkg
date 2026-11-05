@@ -54,7 +54,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
     <section className="card ds-card v10-identity-wallets" data-testid="identity-wallets-section">
       <div className="card-header v10-identity-wallet-header">
         <div>
-          <h2 className="card-title">Node Identity Wallets</h2>
+          <h2 className="card-title">Node identity wallets</h2>
           <p className="v10-identity-wallet-description">
             Register and rotate operational or admin keys for node identity{' '}
             {data?.hasProfile ? data.identityId : '—'}.

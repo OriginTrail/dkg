@@ -61,7 +61,7 @@ function contextGraphQueryFilter(contextGraphId: string): string {
 
 function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
   const catalogSlug = 'whole-context-graph';
-  const catalogName = 'Context graph';
+  const catalogName = 'Context Graph';
   const catalogRank = -100;
   const subGraph = CONTEXT_GRAPH_QUERY_SUBGRAPH;
   const withQueryDefaults = (query: {
@@ -92,7 +92,7 @@ function contextGraphBuiltInCatalog(contextGraphId: string): QueryCatalog {
       withQueryDefaults({
         slug: 'all-triples',
         name: 'All triples',
-        description: 'Show triples across available non-private graphs in this context graph.',
+        description: 'Show triples across available non-private graphs in this Context Graph.',
         sparql: contextGraphQueryTemplate(contextGraphId),
         resultColumn: 'o',
         rank: 1,
@@ -114,7 +114,7 @@ LIMIT 100`,
       withQueryDefaults({
         slug: 'types',
         name: 'Types',
-        description: 'Count entities by RDF type across the context graph.',
+        description: 'Count entities by RDF type across the Context Graph.',
         sparql: `SELECT ?type (COUNT(DISTINCT ?s) AS ?entities) WHERE {
   GRAPH ?g { ?s a ?type }
   ${contextGraphQueryFilter(contextGraphId)}
@@ -532,7 +532,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       <div className="v10-mlv-header">
         <span className="v10-mlv-icon">⟐</span>
         <div>
-          <h2 className="v10-mlv-title">Query Catalogue</h2>
+          <h2 className="v10-mlv-title">Query catalogue</h2>
           <p className="v10-mlv-desc">
             Reusable SPARQL for this Context Graph. Use UI presets or save queries for people and local agents to reuse.
           </p>
@@ -542,7 +542,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
       <section className="v10-cg-query-zone ds-card v10-cg-query-zone-catalog" aria-labelledby="query-catalogue-saved-title">
         <div className="v10-cg-query-zone-header">
           <div>
-            <span className="v10-cg-query-eyebrow">Query Library</span>
+            <span className="v10-cg-query-eyebrow">Query library</span>
             <h3 id="query-catalogue-saved-title">Choose a query</h3>
             <p>Load a preset or saved query into the editor below.</p>
           </div>

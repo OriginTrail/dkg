@@ -13,6 +13,9 @@ import {
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { formatTracSymbol, formatTrac, formatTracTooltip } from '../lib/formatTrac.js';
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
+import { formatUptime, headerNodeStatus } from '../lib/formatPeerStatus.js';
+import { useAgentsStore } from '../stores/agents.js';
+import { Badge } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 
@@ -39,7 +42,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
         <button
           type="button"
           onClick={() => setReveal((v) => !v)}
-          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
+          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 10, fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
           aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
           title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
         >
@@ -113,7 +116,7 @@ function NetworkTelemetrySection() {
 
   return (
     <section className="card ds-card">
-      <div className="card-header"><h2 className="card-title">Network Telemetry</h2></div>
+      <div className="card-header"><h2 className="card-title">Network telemetry</h2></div>
       <div className="card-body">
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
           Local metrics are stored in SQLite and displayed in the Observability page.
@@ -283,7 +286,7 @@ function LocalDataRetentionSection() {
 
   return (
     <section className="card ds-card">
-      <div className="card-header"><h2 className="card-title">Local Data Retention</h2></div>
+      <div className="card-header"><h2 className="card-title">Local data retention</h2></div>
       <div className="card-body">
         <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
           Keep local data for
@@ -369,17 +372,6 @@ function LocalDataRetentionSection() {
   );
 }
 
-function formatUptime(ms: number): string {
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ${sec % 60}s`;
-  const hrs = Math.floor(min / 60);
-  if (hrs < 24) return `${hrs}h ${min % 60}m`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ${hrs % 24}h`;
-}
-
 function truncateAddress(addr: string): string {
   if (addr.length <= 12) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
@@ -419,8 +411,11 @@ function GeneralSettingsTab() {
   const [shutdownConfirm, setShutdownConfirm] = useState(false);
   const [shuttingDown, setShuttingDown] = useState(false);
 
-  const peerCount = s?.connectedPeers ?? 0;
-  const isOnline = s?.peerId != null;
+  // The header's live status, so the two can't disagree.
+  const nodeStatus = useAgentsStore((state) => state.nodeStatus);
+  const nodeStatusFailures = useAgentsStore((state) => state.nodeStatusFailures);
+  const peerCount = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
+  const nodeState = headerNodeStatus(nodeStatus != null, peerCount, nodeStatusFailures);
 
   const handleShutdown = useCallback(async () => {
     if (!shutdownConfirm) {
@@ -441,24 +436,20 @@ function GeneralSettingsTab() {
     <div className="settings-stack">
       {/* Node Identity */}
       <section className="card ds-card">
-        <div className="card-header"><h2 className="card-title">Node Identity</h2></div>
+        <div className="card-header"><h2 className="card-title">Node identity</h2></div>
         <div className="card-body">
           <Field label="Name" value={s?.name ?? '—'} />
           <Field label="Peer ID" value={s?.peerId ?? '—'} mono />
           <Field label="Role" value={s?.nodeRole ?? '—'} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-          <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-nested)', background: isOnline ? 'var(--green-dim)' : 'var(--danger-bg)', border: `1px solid ${isOnline ? 'var(--success-border)' : 'var(--danger-border)'}` }}>
-            <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
-              {isOnline ? '● ONLINE' : '● OFFLINE'}
-            </div>
+          <div className="settings-node-status ds-card-nested" style={{ padding: '10px 14px' }}>
+            <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
             <div
               style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}
               title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
-              {isOnline
-                ? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${s?.connections?.direct ?? 0} direct, ${s?.connections?.relayed ?? 0} relayed link${(s?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(s?.uptimeMs ?? 0)}`
-                : 'Node is not responding'}
+              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${nodeStatus?.connections?.direct ?? 0} direct, ${nodeStatus?.connections?.relayed ?? 0} relayed link${(nodeStatus?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(nodeStatus?.uptimeMs ?? 0)}`}
             </div>
           </div>
         </div>
@@ -469,13 +460,13 @@ function GeneralSettingsTab() {
 
       {/* Blockchain Config */}
       <section className="card ds-card">
-        <div className="card-header"><h2 className="card-title">Blockchain Config</h2></div>
+        <div className="card-header"><h2 className="card-title">Blockchain config</h2></div>
         <div className="card-body">
           <Field label="Chain" value={chainLabel(w?.chainId)} />
           {w?.balances?.length > 0 ? (
             w.balances.map((b: any, i: number) => (
               <div key={b.address} style={{ marginBottom: 10 }}>
-                <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational Wallet'} value={b.address} mono />
+                <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational wallet'} value={b.address} mono />
                 <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
                   <span
                     className="mono"
@@ -491,7 +482,7 @@ function GeneralSettingsTab() {
               </div>
             ))
           ) : (
-            <Field label="Operational Wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
+            <Field label="Operational wallet" value={w?.wallets?.[0] ? truncateAddress(w.wallets[0]) : '—'} mono />
           )}
           {w?.rpcUrl && (
             <RpcUrlField rpcUrl={w.rpcUrl} />
@@ -521,7 +512,7 @@ function GeneralSettingsTab() {
 
       {/* Danger Zone (full-width footer; last in the stack) */}
       <section className="card ds-card" style={{ borderColor: 'var(--danger-border)', background: 'var(--danger-bg)' }}>
-        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
+        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <button

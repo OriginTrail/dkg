@@ -53,7 +53,7 @@ describe('useVerifiableMemoryAnchors — receipt query', () => {
     if (originalFetch) globalThis.fetch = originalFetch;
   });
 
-  it('reads publish receipts from the context graph _meta', async () => {
+  it('reads publish receipts from the Context Graph _meta', async () => {
     function Probe({ id }: { id: string }) {
       useVerifiableMemoryAnchors(id);
       return null;

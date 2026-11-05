@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DashboardDB } from '../src/db.js';
 
-describe('DashboardDB context graph join policy', () => {
+describe('DashboardDB Context Graph join policy', () => {
   const directories: string[] = [];
 
   afterEach(() => {

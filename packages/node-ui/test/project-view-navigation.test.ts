@@ -412,7 +412,7 @@ vi.mock('../src/ui/views/project/components.js', () => ({
       onClick: () => onSelectSubGraph('demo'),
     }, 'Open demo subgraph'),
   SubGraphExplorerHeader: () =>
-    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph Explorer'),
+    React.createElement('div', { 'data-testid': 'subgraph-explorer-header' }, 'Subgraph explorer'),
   ContextGraphQueryView: () => null,
   LayerDetailView: ({ layer, activeTab, onTabChange, onSelectEntity, onNodeClick }: {
     layer: string;
@@ -692,7 +692,7 @@ describe('ProjectView entity detail navigation', () => {
     pushStateSpy.mockRestore();
   });
 
-  it('does not pass participants loaded for another context graph into Overview', async () => {
+  it('does not pass participants loaded for another Context Graph into Overview', async () => {
     await act(async () => {
       root.unmount();
     });
@@ -904,7 +904,7 @@ describe('ProjectView entity detail navigation', () => {
     expect(query('subgraph-detail').dataset.initialLayer).toBe('wm');
   });
 
-  it('keeps initialLayer === undefined on fresh entry from Subgraph Explorer overview (Bug H regression guard)', async () => {
+  it('keeps initialLayer === undefined on fresh entry from Subgraph explorer overview (Bug H regression guard)', async () => {
     // 1. Land on the Subgraphs tab — no activeSubGraph yet, the
     //    bar mounts layer-agnostic.
     await click('switch-subgraphs');

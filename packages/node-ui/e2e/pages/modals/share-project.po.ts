@@ -42,11 +42,11 @@ export class ShareProjectModal {
   }
 
   async openJoinRequestsTab() {
-    await this.page.getByRole('button', { name: /Join Requests/i }).click();
+    await this.page.getByRole('button', { name: /Join requests/i }).click();
   }
 
   async getInviteCodeText(): Promise<string | null> {
-    const group = this.page.locator('.v10-form-group').filter({ hasText: 'Invite Code' });
+    const group = this.page.locator('.v10-form-group').filter({ hasText: 'Invite code' });
     const code = group.locator('code, textarea, input, pre').first();
     if (!(await code.isVisible().catch(() => false))) return null;
     const tag = await code.evaluate((el) => el.tagName.toLowerCase());

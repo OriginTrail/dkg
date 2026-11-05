@@ -201,7 +201,7 @@ describe('notifications pane extraction', () => {
   });
 });
 
-describe('right-rail agent shell replaces Agent Hub', () => {
+describe('right-rail agent shell replaces Agent hub', () => {
   const app = readFile('App.tsx');
   const panelLeft = readFile('components/Shell/PanelLeft.tsx');
   const panelCenter = readFile('components/Shell/PanelCenter.tsx');
@@ -226,9 +226,9 @@ describe('right-rail agent shell replaces Agent Hub', () => {
     expect(app).toContain('[leftCollapsed, rightCollapsed]');
   });
 
-  it('hides the duplicate left-nav Agent Hub entry while keeping the internal route alive', () => {
+  it('hides the duplicate left-nav Agent hub entry while keeping the internal route alive', () => {
     expect(panelLeft).not.toContain("id: 'agent-hub'");
-    expect(panelLeft).not.toContain('Agent Hub');
+    expect(panelLeft).not.toContain('Agent hub');
     expect(panelCenter).toContain("activeTabId === 'agent-hub'");
   });
 

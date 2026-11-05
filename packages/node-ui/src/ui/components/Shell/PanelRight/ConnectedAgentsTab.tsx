@@ -338,7 +338,7 @@ export function ConnectedAgentsTab(props: {
 
       {showAddFlow ? (
         <div className="v10-agent-add-surface">
-          <div className="v10-agents-section-label">Connect Another Agent</div>
+          <div className="v10-agents-section-label">Connect another agent</div>
           {connectNotice && <div className="v10-local-agent-notice ds-card-nested">{connectNotice}</div>}
           {connectError && <div className="v10-local-agent-error ds-card-nested">{connectError}</div>}
           <div className="v10-local-agent-list" aria-label="Available agent integrations">
@@ -516,7 +516,7 @@ export function ConnectedAgentsTab(props: {
                         ? 'Wait for the current send to finish.'
                         : dropDisabledReason === 'unsupported'
                           ? `${selected.name} doesn't accept file attachments.`
-                          : 'Choose a context graph before attaching files.'}
+                          : 'Choose a Context Graph before attaching files.'}
                   </div>
                   <div className="v10-drop-overlay-hint">
                     {attachmentsEnabled
@@ -780,7 +780,7 @@ export function ConnectedAgentsTab(props: {
                             attachmentsEnabled
                               ? 'Attach files'
                               : dropDisabledReason === 'noProject'
-                                ? 'Choose a context graph to attach files'
+                                ? 'Choose a Context Graph to attach files'
                                 : dropDisabledReason === 'sending'
                                   ? 'Wait for the current message to send'
                                   : 'This agent does not support attachments'
@@ -803,11 +803,11 @@ export function ConnectedAgentsTab(props: {
                               // selection instead of the intended "Choose a
                               // project" placeholder.
                               ...(activeProjectId
-                                ? [{ value: '', label: 'No context graph (clear selection)' }]
+                                ? [{ value: '', label: 'No Context Graph (clear selection)' }]
                                 : []),
                               ...selectableProjects.map((project) => ({ value: project.id, label: project.name, mark: <ContextGraphMark id={project.id} name={project.name} /> })),
                             ]}
-                            placeholder={projectsLoading ? 'Loading context graphs…' : 'Choose a context graph'}
+                            placeholder={projectsLoading ? 'Loading Context Graphs…' : 'Choose a Context Graph'}
                             // Disable while loading. When no project is active
                             // and the list is empty there's nothing to pick
                             // yet, so disable then too — once a project is

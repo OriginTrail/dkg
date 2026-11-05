@@ -209,7 +209,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-conn-target { color: var(--text-secondary); font-weight: 500; }
 .v10-ka-triples-table { width: 100%; border-collapse: collapse; font-size: 10px; font-family: var(--font-mono); }
 .v10-ka-triples-table th {
-  padding: 6px 8px; text-align: left; font-size: 9px; font-weight: 600;
+  padding: 6px 8px; text-align: left; font-size: var(--fs-micro); font-weight: 600;
   text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-default); background: var(--bg-elevated);
 }
@@ -230,7 +230,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-event-dot.verified { border-color: var(--layer-verified); background: color-mix(in srgb, var(--layer-verified) 15%, transparent); }
 .v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
 .v10-ka-event-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
-.v10-ka-event-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
+.v10-ka-event-time { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
 
 /* ── Sub-graph Overview (Graph Overview tab) ──
    One "wall of graphs": a responsive grid of mini RdfGraph cards, one per

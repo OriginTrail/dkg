@@ -596,7 +596,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
             entityUri={entity.uri}
             enabled={entity.trustLevel === 'verified'}
           />
-          <div className="v10-ka-section-title">Provenance Trail</div>
+          <div className="v10-ka-section-title">Provenance trail</div>
           <ProvenanceTrail entity={entity} />
 
           {/* Verify on DKG — prominent CTA for WM/SWM entities */}
@@ -608,7 +608,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
 
           {/* Trust Summary */}
           <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 'var(--radius-control)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
-            <div className="v10-ka-section-title" style={{ marginBottom: 6 }}>Entity Summary</div>
+            <div className="v10-ka-section-title" style={{ marginBottom: 6 }}>Entity summary</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ color: 'var(--text-tertiary)' }}>Type</span>

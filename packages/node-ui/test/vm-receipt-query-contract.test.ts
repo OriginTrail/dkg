@@ -221,7 +221,7 @@ const vmFacts = (entities: Array<{ uri: string }>, summary: Parameters<typeof bu
   buildVmFacts(entities as any, summary, { loading: false, error: null }, vmSubjectsOf(entities.map(e => ({ subject: e.uri }))));
 
 describe('VM receipt loader against writer-shaped RDF through the scoped engine', () => {
-  it('loads one receipt per published assertion in this context graph only', async () => {
+  it('loads one receipt per published assertion in this Context Graph only', async () => {
     const { receipts, complete } = await load();
     expect(complete).toBe(true);
     expect(receipts.map(r => r.assertion).sort()).toEqual([LEGACY_ASRT, SUB_ASRT, V2_ASRT, REPUB_ASRT, REPUB_REV_ASRT, CURRENT_ASRT, REOPENED_ASRT, DRAFT_ASRT, SYNCED_UAL, TXCONF_UAL].sort());

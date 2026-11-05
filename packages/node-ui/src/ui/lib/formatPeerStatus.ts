@@ -58,11 +58,12 @@ export function formatPeerStatusTooltip(
   const lines = peers > 0
     ? ['Connected to the network', `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`]
     : ['No peers connected'];
-  if (uptimeMs > 0) lines.push(`Uptime ${formatUptimeShort(uptimeMs)}`);
+  if (uptimeMs > 0) lines.push(`Uptime ${formatUptime(uptimeMs)}`);
   return lines.join('\n');
 }
 
-function formatUptimeShort(ms: number): string {
+/** Uptime as days, hours and minutes, the same everywhere it shows. */
+export function formatUptime(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const d = Math.floor(totalSeconds / 86400);
   const h = Math.floor((totalSeconds % 86400) / 3600);

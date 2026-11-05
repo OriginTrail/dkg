@@ -183,7 +183,7 @@
   margin-left: 6px;
   padding: 1px 6px;
   border-radius: var(--radius-nested);
-  font-size: 9px; font-weight: 600;
+  font-size: var(--fs-micro); font-weight: 600;
   letter-spacing: 0.04em;
   background: color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--sg-color, var(--identity-fallback)) 35%, transparent);

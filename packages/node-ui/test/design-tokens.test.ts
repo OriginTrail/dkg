@@ -102,6 +102,16 @@ describe('design tokens', () => {
     expect(found, `Use a token instead (DESIGN.md · Colour / Shape and size):\n${found.join('\n')}`).toEqual([]);
   });
 
+  it('has no text below the 10px floor (DESIGN.md · Type)', () => {
+    const small = walk(UI).flatMap((full) => {
+      const file = relative(UI, full).split('\\').join('/');
+      if (isIgnored(file)) return [];
+      const text = readFileSync(full, 'utf8');
+      return [...text.matchAll(/font-size:\s*(?:[0-9]|9\.\d+)px|fontSize:\s*[0-9](?:\.\d+)?\b/g)].map((m) => `  ${file}  ${m[0]}`);
+    });
+    expect(small, `Use --fs-micro or larger:\n${small.join('\n')}`).toEqual([]);
+  });
+
   it('recognises hard-coded values and allows tokens', () => {
     expect(isRawRadius('8px')).toBe(true);
     expect(isRawRadius('0 6px 6px 0')).toBe(true);

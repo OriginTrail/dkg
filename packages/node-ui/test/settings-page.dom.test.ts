@@ -34,7 +34,7 @@ vi.mock('../src/ui/pages/identity-wallets/IdentityWalletsSection.js', () => ({
       React.createElement(
         'div',
         { className: 'card-header' },
-        React.createElement('h2', { className: 'card-title' }, 'Node Identity Wallets'),
+        React.createElement('h2', { className: 'card-title' }, 'Node identity wallets'),
       ),
       React.createElement(
         'div',
@@ -137,17 +137,17 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     return container;
   }
 
-  it('renders the kept cards (incl. Publisher Conviction) + Danger Zone in the approved order', async () => {
+  it('renders the kept cards (incl. Publisher Conviction) + Danger zone in the approved order', async () => {
     const c = await render();
     expect(cardTitles(c)).toEqual([
-      'Node Identity',
-      'Node Identity Wallets',
-      'Blockchain Config',
+      'Node identity',
+      'Node identity wallets',
+      'Blockchain config',
       // PCA card inserted directly after Blockchain Config (UX §3.2).
       'Publisher Conviction',
-      'Network Telemetry',
-      'Local Data Retention',
-      'Danger Zone',
+      'Network telemetry',
+      'Local data retention',
+      'Danger zone',
     ]);
   });
 
@@ -171,7 +171,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(c.querySelector('.settings-grid')).toBeNull();
   });
 
-  it('Local Data Retention is its OWN card with an associated label and the honest helper copy', async () => {
+  it('Local data retention is its OWN card with an associated label and the honest helper copy', async () => {
     const c = await render();
     const select = c.querySelector<HTMLSelectElement>('#retention-select');
     expect(select).toBeTruthy();
@@ -283,7 +283,7 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
     expect(c.querySelector<HTMLButtonElement>('button[role="switch"]')!.getAttribute('aria-checked')).toBe('false');
   });
 
-  it('Danger Zone shutdown is a two-step confirm (no shutdown on first click)', async () => {
+  it('Danger zone shutdown is a two-step confirm (no shutdown on first click)', async () => {
     const c = await render();
     const btn = Array.from(c.querySelectorAll('button')).find(
       (b) => (b.textContent ?? '').trim() === 'Shutdown Node',

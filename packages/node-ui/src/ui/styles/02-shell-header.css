@@ -94,7 +94,7 @@
   border-left: 1px solid var(--border-default);
 }
 .v10-header-logo-ot-by {
-  font-size: 9px;
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   letter-spacing: 0.02em;
   white-space: nowrap;

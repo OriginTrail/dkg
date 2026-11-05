@@ -183,7 +183,7 @@ export function validateInvite(
   invite: ParsedInvite,
   options: { allowBareContextGraphId?: boolean } = {},
 ): string | null {
-  if (!invite.cgId) return 'Missing context graph ID';
+  if (!invite.cgId) return 'Missing Context Graph ID';
   if (invite.hasUnparsedExtra) {
     return 'Invite contains a second line that is not a valid peer ID (12D3Koo…) or multiaddr (/ip4/…). Check for typos.';
   }
@@ -301,7 +301,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
         'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
     }
     if (/unknown CG/i.test(reasons)) {
-      return 'The curator doesn\'t recognise this context graph id — double-check the invite, ' +
+      return 'The curator doesn\'t recognise this Context Graph id — double-check the invite, ' +
         'or ask the curator to share an updated one.';
     }
     return null;
@@ -312,7 +312,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
   // the most actionable advice is "make sure the curator's daemon is
   // online and the invite carries the right peer id".
   if (/not curator/i.test(reasons)) {
-    return 'Your node reached other peers, but none of them curate this context graph. ' +
+    return 'Your node reached other peers, but none of them curate this Context Graph. ' +
       'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
   }
   return null;
@@ -443,7 +443,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         await refreshAndOpenContextGraph(cgId, existing);
         onClose();
       } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : 'Could not subscribe to this public context graph.');
+        setError(err instanceof Error ? err.message : 'Could not subscribe to this public Context Graph.');
         setPhase('idle');
       }
       return;
@@ -535,7 +535,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           <div className="v10-modal-header">
             <div id="dkg-join-wire-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
             <div className="v10-modal-subtitle">
-              Curator approved. Now wire a local workspace so this Cursor can collaborate on the context graph.
+              Curator approved. Now wire a local workspace so this Cursor can collaborate on the Context Graph.
             </div>
           </div>
           <div className="v10-modal-body">
@@ -575,7 +575,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           type="button"
           className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={onClose}
-          aria-label="Close join context graph dialog"
+          aria-label="Close join Context Graph dialog"
           title="Close (Esc)"
           style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
         >
@@ -607,7 +607,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               background: 'var(--success-bg)', border: '1px solid var(--success-border)',
               color: 'var(--accent-green)',
             }}>
-              Approved! Loading context graph…
+              Approved! Loading Context Graph…
             </div>
           )}
 
@@ -622,7 +622,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           )}
 
           <div className="v10-form-group">
-            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context Graph ID or Invite Code</label>
+            <label className="v10-form-label" htmlFor="dkg-cg-invite">Context Graph ID or Invite code</label>
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
@@ -634,7 +634,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               rows={3}
               disabled={sending || pending || approved}
               style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}
-              aria-label="Context graph invite code"
+              aria-label="Context Graph invite code"
               autoComplete="off"
               spellCheck={false}
             />

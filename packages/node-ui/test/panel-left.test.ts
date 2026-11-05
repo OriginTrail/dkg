@@ -196,8 +196,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     failed.mockRejectedValueOnce(new Error(`${endpoint} unavailable`));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
-    expect(container.textContent).not.toContain('No context graphs yet');
-    expect(container.textContent).not.toContain('No context graphs in this view yet.');
+    expect(container.textContent).not.toContain('No Context Graphs yet');
+    expect(container.textContent).not.toContain('No Context Graphs in this view yet.');
     const modes = container.querySelectorAll<HTMLButtonElement>('.v10-tree-mode-btn');
     await act(async () => { modes[1].click(); });
     expect(container.textContent).not.toContain('No discovered public Context Graphs yet');
@@ -207,7 +207,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await act(async () => { retry!.click(); });
     await flush();
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).toContain('No context graphs yet');
+    expect(container.textContent).toContain('No Context Graphs yet');
   });
 
   it('keeps the last graph list visible and marks it stale after refresh failure', async () => {
@@ -220,9 +220,9 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('does not show empty onboarding while the list is still loading', async () => {
     apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(() => {}));
     const { container } = await renderPanel({ graphs: [], stage: 1 });
-    expect(container.textContent).toContain('Loading context graphs');
+    expect(container.textContent).toContain('Loading Context Graphs');
     expect(container.querySelector('[role="alert"]')).toBeNull();
-    expect(container.textContent).not.toContain('No context graphs yet');
+    expect(container.textContent).not.toContain('No Context Graphs yet');
   });
 
   it('does not render the in-panel ◂ collapse button (global header toggle is the sole control)', async () => {
@@ -324,7 +324,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
     expect(labels).toContain('My Context Graphs');
-    expect(container.textContent).toContain('No context graphs in this view yet.');
+    expect(container.textContent).toContain('No Context Graphs in this view yet.');
     // The catalog-only CG should NOT render as a row in this section.
     expect(container.textContent).not.toContain('Catalog Only CG');
   });
