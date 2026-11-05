@@ -23,6 +23,7 @@ describe('prepared query boundaries', () => {
       const result = query(source);
       expect(source.slice(result.where!.openStart, result.where!.close + 1)).toBe(body);
       expect(result.datasetInsertionOffset).toBe(source.indexOf('WITH'));
+      expect(result.readsOnlyDeclaredNamedSet).toBe(true);
       expect(result.where!.hasUnion).toBe(false);
       expect(result.hasDatasetClause).toBe(false);
       expect(result.hasServiceClause).toBe(false);
@@ -39,7 +40,24 @@ describe('prepared query boundaries', () => {
     const source = 'SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %limit WITH { SELECT ?s { INCLUDE %limit } } AS %values { INCLUDE %values } ORDER BY ?s LIMIT 2 OFFSET 1';
     const result = query(source);
     expect(source.slice(result.where!.openStart, result.where!.close + 1)).toBe('{ INCLUDE %values }');
+    expect(result.readsOnlyDeclaredNamedSet).toBe(true);
     expect(result.solutionModifiers).toEqual({ hasLimit: true, hasOffset: true, hasOrderBy: true, insertionOffset: source.length });
+  });
+
+  it('matches decoded named-set identities across different source spellings', () => {
+    expect(query(String.raw`SELECT ?s W\u0049TH { SELECT ?s { ?s ?p ?o } } AS %l\u0069mit { INCL\u0055DE %limit }`)
+      .readsOnlyDeclaredNamedSet).toBe(true);
+  });
+
+  it.each([
+    'SELECT ?s { INCLUDE %x }',
+    'SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %y }',
+    'SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %X }',
+    'SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x ?s ?p ?o }',
+    'SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x',
+    'SELECT ?s { { SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x } } INCLUDE %x }',
+  ])('does not bypass rewriting for a non-sole or undeclared named set: %s', (source) => {
+    expect(query(source).readsOnlyDeclaredNamedSet).toBe(false);
   });
 
   it.each(['group', 'having', 'order', 'limit', 'offset', 'values', 'where'])('keeps a projection language tag @%s outside keyword scanning', (tag) => {

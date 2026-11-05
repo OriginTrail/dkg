@@ -1,5 +1,6 @@
 import { readSolutionModifiers, type SparqlSolutionModifiers } from './sparql-solution-modifiers.js';
 import {
+  isSparqlKeyword,
   isSparqlWordPayload,
   type SparqlLexicalToken,
   type ValidPreparedSparql,
@@ -48,6 +49,8 @@ export interface PreparedSparqlQuery {
   readonly where: SparqlQueryGroupRange | null;
   /** Insertion point after the projection/template, before the query pattern or modifiers. */
   readonly datasetInsertionOffset: number | null;
+  /** The outer pattern solely consumes a named solution set declared by this query. */
+  readonly readsOnlyDeclaredNamedSet: boolean;
   readonly queryVariables: readonly SparqlQueryVariable[];
   readonly whereVariables: readonly SparqlQueryVariable[];
   readonly prefixes: ReadonlyMap<string, string>;
@@ -181,6 +184,33 @@ function variablesInRange(
   return variables;
 }
 
+function readsOnlyDeclaredNamedSet(
+  prepared: ValidPreparedSparql,
+  structure: SparqlStructure,
+  where: SparqlQueryGroupRange | null,
+): boolean {
+  if (!where) return false;
+  const { tokens } = prepared;
+  const symbol = (index: number, value: string) => tokens[index]?.kind === 'symbol'
+    && tokens[index].logicalValue === value;
+  const include = where.openingTokenIndex + 1;
+  const includedName = tokens[include + 2];
+  if (where.closingTokenIndex !== include + 3 || !isSparqlKeyword(tokens, include, 'INCLUDE')
+    || !symbol(include + 1, '%') || includedName?.kind !== 'word') return false;
+  for (const index of sparqlTokenIndexesAtDepth(
+    structure.braces, 0, prepared.prologue.endTokenIndex + 1, where.openingTokenIndex,
+  )) {
+    if (structure.parentheses.depthBefore[index] !== 0
+      || !isSparqlKeyword(tokens, index, 'WITH') || !symbol(index + 1, '{')) continue;
+    const closing = structure.braces.matchingTokenIndexes[index + 1] ?? -1;
+    if (closing < 0) continue;
+    const name = tokens[closing + 3];
+    if (isSparqlKeyword(tokens, closing + 1, 'AS') && symbol(closing + 2, '%')
+      && name?.kind === 'word' && name.logicalValue === includedName.logicalValue) return true;
+  }
+  return false;
+}
+
 export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparqlQuery {
   const structure = indexSparqlStructure(prepared);
   const { where, datasetInsertionOffset } = readSparqlQueryBoundaries(prepared, structure);
@@ -264,6 +294,7 @@ export function prepareSparqlQuery(prepared: ValidPreparedSparql): PreparedSparq
       : null,
     where,
     datasetInsertionOffset,
+    readsOnlyDeclaredNamedSet: readsOnlyDeclaredNamedSet(prepared, structure, where),
     queryVariables: variablesInRange(prepared, 0, prepared.tokens.length),
     whereVariables: where
       ? variablesInRange(prepared, where.openingTokenIndex + 1, where.closingTokenIndex)

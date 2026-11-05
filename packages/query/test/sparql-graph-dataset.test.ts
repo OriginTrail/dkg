@@ -152,6 +152,18 @@ describe('withDatasetClauses', () => {
 describe('rewriteGraphSet with a known and an unknown engine', () => {
   const flat = 'SELECT ?s ?o WHERE { ?s <urn:p> ?o }';
 
+  it.each([
+    'WITH { SELECT ?s { ?s ?p ?o } } AS %limit WHERE { INCLUDE %limit }',
+    'WITH { SELECT ?s { ?s ?p ?o } } AS %limit WITH { SELECT ?s { INCLUDE %limit } } AS %values { INCLUDE %values }',
+    String.raw`W\u0049TH { SELECT ?s { ?s ?p ?o } } AS %l\u0069mit { INCL\u0055DE %limit }`,
+  ])('sets the dataset without wrapping the declared named-set read: %s', (tail) => {
+    const query = `SELECT ?s ${tail}`;
+    const expected = materializePreparedSparql(scope(`SELECT ?s ${DEFAULT} ${NAMED} ${tail}`).prepared);
+    for (const engine of ['oxigraph', null] as const) {
+      expect(ready(rewriteGraphSet(scope(query), graphs, 'deduplicated-values-union', engine))).toBe(expected);
+    }
+  });
+
   it('leaves a flat Oxigraph read exactly as it was', () => {
     expect(ready(rewriteGraphSet(scope(flat), graphs, 'deduplicated-values-union', 'oxigraph')))
       .toBe(ready(wrapWithDeduplicatedGraphValues(scope(flat), graphs)));

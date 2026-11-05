@@ -485,11 +485,15 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     });
 
     if (endpoint) {
-      it.each(['limit', 'order', 'values', 'from', 'service', 'graph', 'union', 'with'])('preserves a named subquery called %s on Blazegraph', async (name) => {
+      it.each(['limit', 'order', 'values', 'from', 'service', 'graph', 'union', 'with', String.raw`l\u0069mit`])('preserves a named subquery called %s on Blazegraph', async (name) => {
         for (const keyword of ['WHERE ', '']) {
           const source = `SELECT ?s ?o WITH { SELECT ?s ?o WHERE { ?s <${L}> ?o } } AS %${name} ${keyword}{ INCLUDE %${name} }`;
           expect(bag(await select(source, options))).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), [['1', '2'], ['2', '3']])));
         }
+      });
+      it.each(['values', String.raw`v\u0061lues`])('keeps chained named declarations scoped to the dataset (%s)', async (name) => {
+        const source = `SELECT ?s ?o WITH { SELECT ?s ?o { ?s <${L}> ?o } } AS %limit WITH { SELECT ?s ?o { INCLUDE %limit } } AS %${name} { INCLUDE %values }`;
+        expect(bag(await select(source, options))).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), [['1', '2'], ['2', '3']])));
       });
     }
   });
