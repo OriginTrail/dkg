@@ -83,7 +83,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
     error GetLatestKnowledgeAssetIdDeprecated();
 
     string private constant _NAME = "DKGKnowledgeAssets";
-    string private constant _VERSION = "10.1.0";
+    string private constant _VERSION = "10.1.1";
 
     string private _tokenURI;
 
@@ -304,6 +304,8 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
             _authorKaNumberHighWater[author] = mintedNumber + 1;
         }
 
+        // Emit before the receiver callback, which may append another authorized root.
+        emit KnowledgeAssetPublisherUpdated(knowledgeAssetId, publisher);
         _safeMint(author, knowledgeAssetId);
 
         emit KnowledgeAssetCreated(
@@ -411,6 +413,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
             );
         }
 
+        emit KnowledgeAssetPublisherUpdated(id, publisher);
         emit KnowledgeAssetUpdated(id, author, updateOperationId, merkleRoot, byteSize, tokenAmount);
     }
 
@@ -576,6 +579,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         }
         knowledgeAssets[id].merkleRoots = _merkleRoots;
 
+        emit KnowledgeAssetPublisherUpdated(id, newLen == 0 ? address(0) : _merkleRoots[newLen - 1].publisher);
         emit KnowledgeAssetMerkleRootsUpdated(id, _merkleRoots);
     }
 
@@ -648,6 +652,7 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
         // always zero the parallel slot.
         delete merkleRootAuthors[id][knowledgeAssets[id].merkleRoots.length - 1];
 
+        emit KnowledgeAssetPublisherUpdated(id, publisher);
         emit KnowledgeAssetMerkleRootAdded(id, merkleRoot);
     }
 
@@ -665,6 +670,10 @@ contract DKGKnowledgeAssets is INamed, IVersioned, HubDependent, ERC721, Guardia
             delete merkleRootAuthors[id][oldLen - 1];
         }
 
+        uint256 newLen = knowledgeAssets[id].merkleRoots.length;
+        emit KnowledgeAssetPublisherUpdated(
+            id, newLen == 0 ? address(0) : knowledgeAssets[id].merkleRoots[newLen - 1].publisher
+        );
         emit KnowledgeAssetMerkleRootRemoved(id, latestMerkleRoot);
     }
 
