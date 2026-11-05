@@ -112,6 +112,16 @@ describe('design tokens', () => {
     expect(small, `Use --fs-micro or larger:\n${small.join('\n')}`).toEqual([]);
   });
 
+  it('uses whole pixels for type sizes (DESIGN.md · Type)', () => {
+    const fractional = walk(UI).flatMap((full) => {
+      const file = relative(UI, full).split('\\').join('/');
+      if (isIgnored(file)) return [];
+      const text = readFileSync(full, 'utf8');
+      return [...text.matchAll(/(?:font-size|--fs-[a-z-]+):\s*\d+\.\d+px|fontSize:\s*\d+\.\d+/g)].map((m) => `  ${file}  ${m[0]}`);
+    });
+    expect(fractional, `Use a whole size on the type scale:\n${fractional.join('\n')}`).toEqual([]);
+  });
+
   it('recognises hard-coded values and allows tokens', () => {
     expect(isRawRadius('8px')).toBe(true);
     expect(isRawRadius('0 6px 6px 0')).toBe(true);

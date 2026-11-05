@@ -1519,7 +1519,7 @@ function LogsTab() {
             padding: '8px 0',
             background: 'var(--log-bg)',
             fontFamily: LOG_FONT,
-            fontSize: 10.5,
+            fontSize: 11,
             lineHeight: 1.5,
           }}
         >
@@ -1582,7 +1582,7 @@ function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode
   return (
     <div style={{
       maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 10.5, lineHeight: 1.5,
+      fontFamily: LOG_FONT, fontSize: 11, lineHeight: 1.5,
     }}>
       {children}
     </div>

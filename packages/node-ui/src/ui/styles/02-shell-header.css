@@ -152,6 +152,7 @@
 }
 .v10-header-spacer { flex: 1; }
 .v10-header-meta {
+  white-space: nowrap;
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);

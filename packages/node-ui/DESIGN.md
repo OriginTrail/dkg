@@ -56,7 +56,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-label` | 11 | Badges, table headers, metadata |
 | `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
 
-Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is only for small section kickers.
+Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is only for small section kickers.
 
 ## Shape and size
 
@@ -110,7 +110,7 @@ A badge states a fact (status, role, type, layer). It is never the click target.
 - `<Badge tone>`: `success`, `warning`, `danger` and `pending` draw as a status (icon and text, no box, as in nOS). Pending is a neutral clock for work under way; amber is only for something that needs attention. Badge draws the icon: pass `icon` for a chip with its own glyph, or `icon={null}` for none. Use `<Badge>`, not raw classes, or the status has no icon. `neutral` (default), `muted`, `role` and `kind` draw as a tag (6px rectangle, as in nOS) and keep their colours (`kind` is for entity types: a neutral tag with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
 - Status words match nOS: `Done`, `In progress`, `Failed`, `Ready` (`Ready to connect` stays), `Partial`, `Pending`, `Blocked`. `Partial` is also the word for an agent with one capability down.
 - The header status says only what the node reports: `Connecting` before the first status, `Connected` with the peer count (green), `No peers` (warning), and `Unavailable` (red) after three failed status checks in a row. Settings shows the same status. `/api/status` has no sync state, so the header does not say Synced.
-- `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 11.5px text. `LayerGlyph` draws the glyph on its own.
+- `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 12px text. `LayerGlyph` draws the glyph on its own.
 - `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips.
 - The notification count sits on the bell's corner, never over the glyph, and the bell brightens while anything is unread.
 
