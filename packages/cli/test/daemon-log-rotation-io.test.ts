@@ -378,4 +378,75 @@ describe('native alias recovery boundaries', () => {
     expect(await native.readFile(`${log}.2`, 'utf8')).toBe(original);
     expect((await native.readdir(dir)).sort()).toEqual(['daemon.log.1', 'daemon.log.2']);
   });
+
+  it('preserves a replacement source created after linking', async () => {
+    await native.writeFile(log, original);
+    fsMocks.link.mockImplementation(async (from: string, to: string) => {
+      await native.link(from, to);
+      if (from === log) {
+        await native.unlink(log);
+        await native.writeFile(log, replacement);
+      }
+    });
+
+    const result = await rotateDaemonLogIfNeeded(log, options);
+
+    expect(await native.readFile(log, 'utf8').catch(error => error.code)).toBe(replacement);
+    expect(await native.readFile(`${log}.1`, 'utf8')).toBe(original);
+    expect(result).toMatchObject({ rotated: false, trimmed: false, removedFiles: 0 });
+    expect(fsMocks.unlink).not.toHaveBeenCalled();
+    expect(fsMocks.writeFile).not.toHaveBeenCalled();
+    fsMocks.link.mockImplementation(native.link);
+    expect(await rotateDaemonLogIfNeeded(log, options)).toMatchObject({ rotated: true, trimmed: false });
+    expect(await native.readFile(`${log}.1`, 'utf8')).toBe(replacement);
+    expect(await native.readFile(`${log}.2`, 'utf8')).toBe(original);
+    expect((await native.readdir(dir)).sort()).toEqual(['daemon.log.1', 'daemon.log.2']);
+  });
+
+  it('preserves a replacement rollback destination after source removal fails', async () => {
+    await native.writeFile(log, original);
+    fsMocks.unlink.mockImplementation(async (path: string) => {
+      if (path === log) {
+        await native.unlink(`${log}.1`);
+        await native.writeFile(`${log}.1`, replacement);
+        throw Object.assign(new Error('source busy'), { code: 'EBUSY' });
+      }
+      return native.unlink(path);
+    });
+
+    const result = await rotateDaemonLogIfNeeded(log, options);
+
+    expect(await native.readFile(`${log}.1`, 'utf8').catch(error => error.code)).toBe(replacement);
+    expect(await native.readFile(log, 'utf8')).toBe(original);
+    expect(result).toMatchObject({ rotated: false, trimmed: false, removedFiles: 0 });
+    expect(fsMocks.unlink).not.toHaveBeenCalledWith(`${log}.1`);
+    expect(fsMocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('preserves all history after a below-threshold incomplete scan under retention pressure', async () => {
+    const live = 'live history\n';
+    await native.writeFile(log, live);
+    await native.writeFile(`${log}.1`, original);
+    await native.writeFile(`${log}.2`, replacement);
+    await native.utimes(`${log}.1`, 1, 1);
+    await native.utimes(`${log}.2`, 1, 1);
+    fsMocks.lstat.mockImplementation(async (path: string, options: { bigint: true }) => {
+      if (path === `${log}.1`) throw Object.assign(new Error('inspection failed'), { code: 'EIO' });
+      return native.lstat(path, options);
+    });
+
+    const result = await rotateDaemonLogIfNeeded(log, {
+      ...options, totalBytes: 100, retainMs: 1, now: () => 1_000_000,
+    });
+
+    expect(await native.readFile(`${log}.2`, 'utf8').catch(error => error.code)).toBe(replacement);
+    expect(await native.readFile(`${log}.1`, 'utf8')).toBe(original);
+    expect(await native.readFile(log, 'utf8')).toBe(live);
+    expect(result).toMatchObject({ rotated: false, trimmed: false, removedFiles: 0, newestCutTo: null });
+    expect(fsMocks.unlink).not.toHaveBeenCalled();
+    expect(fsMocks.writeFile).not.toHaveBeenCalled();
+    expect(fsMocks.open).not.toHaveBeenCalled();
+    expect(fsMocks.link).not.toHaveBeenCalled();
+  });
+
 });

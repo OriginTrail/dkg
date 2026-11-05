@@ -133,8 +133,24 @@ async function keepLogTail(logFile: string, size: number, keepBytes: number): Pr
 /** Neither trimming nor retention may change a still-linked source after a failed rollback. */
 class IncompleteLogMoveError extends Error {}
 
+/** Pathname checks narrow external races; Node does not provide compare-and-unlink. */
+async function assertLinkedLogEntries(from: string, to: string, identity: string): Promise<void> {
+  const [source, destination] = await Promise.all([statLogFile(from), statLogFile(to)]).catch(error => {
+    throw new IncompleteLogMoveError('Log move identity could not be verified', { cause: error });
+  });
+  if (!source.isFile() || !destination.isFile()
+    || source.identity !== identity || destination.identity !== identity) {
+    throw new IncompleteLogMoveError('Log identity changed during a move');
+  }
+}
+
 /** Claim the destination atomically: rename() can overwrite a file omitted by a stale scan. */
 async function moveLogWithoutReplacing(from: string, to: string): Promise<void> {
+  const source = await statLogFile(from).catch(() => null);
+  if (!source?.isFile() || source.identity === null) {
+    throw new IncompleteLogMoveError('Log source identity is unavailable for a move');
+  }
+  const identity = source.identity;
   try {
     await link(from, to);
   } catch (error) {
@@ -147,10 +163,14 @@ async function moveLogWithoutReplacing(from: string, to: string): Promise<void> 
     }
     throw error;
   }
+  await assertLinkedLogEntries(from, to, identity);
   try {
     await unlink(from);
   } catch (error) {
     try {
+      // A failed source removal can coincide with either entry being replaced.
+      // Roll back only while the original content still has both regular links.
+      await assertLinkedLogEntries(from, to, identity);
       await unlink(to);
     } catch {
       throw new IncompleteLogMoveError('Log move could not remove its source or roll back its link', { cause: error });
@@ -174,11 +194,7 @@ async function removeInterruptedMoveAliases(
         const retainedPath = seen.get(file.identity)!;
         // Scan identities can be stale after an operator replaces a path. Confirm
         // both regular entries still name the retained inode before removing one.
-        const [retained, duplicate] = await Promise.all([statLogFile(retainedPath), statLogFile(duplicatePath)]);
-        if (!retained.isFile() || !duplicate.isFile()
-          || retained.identity !== file.identity || duplicate.identity !== file.identity) {
-          throw new IncompleteLogMoveError('Log identity changed during alias recovery');
-        }
+        await assertLinkedLogEntries(retainedPath, duplicatePath, file.identity);
         await unlink(duplicatePath);
       } catch (error) {
         throw new IncompleteLogMoveError('Interrupted log move is still linked', { cause: error });
