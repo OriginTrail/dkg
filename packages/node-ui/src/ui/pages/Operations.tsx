@@ -1632,9 +1632,11 @@ export function operationStatusBadgeClass(status: string): string {
   return 'ds-tone-pending';
 }
 
-/** The word shown for an operation status: the same "Failed" as nOS. */
+/** The word shown for an operation status: the same Done and Failed as nOS. */
 export function operationStatusLabel(status: string): string {
-  return status === 'error' ? 'Failed' : humanizeStatus(status);
+  if (status === 'success') return 'Done';
+  if (status === 'error') return 'Failed';
+  return humanizeStatus(status);
 }
 
 export function StatusBadge({ status }: { status: string }) {

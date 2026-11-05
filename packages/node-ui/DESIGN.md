@@ -108,7 +108,7 @@ Sizes `sm` 24, `md` 32 (default), `lg` 40. `icon` makes it square; an icon-only 
 A badge states a fact (status, role, type, layer). It is never the click target.
 
 - `<Badge tone>`: `success`, `warning`, `danger` and `pending` draw as a status (icon and text, no box, as in nOS). Pending is a neutral clock for work under way; amber is only for something that needs attention. `neutral` (default), `muted`, `role` and `kind` draw as a tag (6px rectangle, as in nOS) and keep their colours (`kind` is for entity types: a neutral tag with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
-- Status words match nOS: `In progress`, `Failed`, `Ready` (`Ready to connect` stays), `Partial`, `Pending`, `Blocked`. `Partial` is also the word for an agent with one capability down.
+- Status words match nOS: `Done`, `In progress`, `Failed`, `Ready` (`Ready to connect` stays), `Partial`, `Pending`, `Blocked`. `Partial` is also the word for an agent with one capability down.
 - `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 11.5px text. `LayerGlyph` draws the glyph on its own.
 - `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips.
 - The notification count sits on the bell's corner, never over the glyph, and the bell brightens while anything is unread.

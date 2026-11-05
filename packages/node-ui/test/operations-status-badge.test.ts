@@ -21,7 +21,8 @@ describe('operation status badges', () => {
     expect(html).toContain('Cancelled'); // sentence case (DESIGN.md · Type)
   });
 
-  it('says Failed for an operation that ended in error, as nOS does', () => {
+  it('uses the nOS words Done and Failed', () => {
+    expect(operationStatusLabel('success')).toBe('Done');
     expect(operationStatusLabel('error')).toBe('Failed');
     expect(operationStatusLabel('in_progress')).toBe('In progress');
   });
