@@ -443,6 +443,23 @@ publisherCmd
   });
 
 publisherCmd
+  .command('clear-job <job-id>')
+  .description('Remove one finished publisher job through the running daemon')
+  .option('--allow-pending-transaction', 'Abandon tracking of a pending transaction; check its outcome on chain first (does not cancel it)')
+  .action(async (jobId: string, opts: { allowPendingTransaction?: boolean }) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.publisherClearJob(jobId, {
+        allowPendingTransaction: opts.allowPendingTransaction === true,
+      });
+      console.log(`Publisher job ${result.jobId}: ${result.outcome}`);
+    } catch (err) {
+      console.error(toErrorMessage(err));
+      process.exit(1);
+    }
+  });
+
+publisherCmd
   .command('clear <status>')
   .description('Clear terminal async publisher jobs by status')
   .action(async (status: string) => {

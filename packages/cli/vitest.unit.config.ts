@@ -58,6 +58,7 @@ export default defineConfig({
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
           'test/publisher-clear-job-route.test.ts',
+          'test/clear-job-cli.test.ts',
           // GH#2270 follow-up — who may force-clear a job whose transaction may still land.
           // A pure route-handler test, no hardhat, so it belongs in this lane.
           'test/publisher-clear-job-override-authz.test.ts',

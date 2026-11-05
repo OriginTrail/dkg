@@ -479,6 +479,15 @@ export function registerKnowledgeAssetCommand(program: Command): void {
     }));
 
   kaCmd
+    .command('clear-share-job <job-id>')
+    .description('Remove one finished SWM share job through the running daemon')
+    .action(async (jobId: string) => runAction(async () => {
+      const client = await ApiClient.connect();
+      const result = await client.knowledgeAssetClearShareJob(jobId);
+      console.log(`Share job ${result.jobId}: ${result.outcome}`);
+    }));
+
+  kaCmd
     .command('recover-share-job <job-id>')
     .description('Recover a failed async SWM share job')
     .action(async (jobId: string) => runAction(async () => {
