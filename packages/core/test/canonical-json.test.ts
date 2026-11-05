@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CanonicalJsonError,
+  assertCanonicalJsonValue,
   MAX_CANONICAL_JSON_BYTES,
   MAX_CANONICAL_JSON_DEPTH,
   canonicalizeJson,
@@ -11,6 +12,45 @@ import {
 } from '../src/canonical-json.js';
 
 describe('RFC 8785 canonical JSON', () => {
+  it('validates without output using the serializer byte, Unicode, depth and shape contract', () => {
+    const outcome = (operation: () => unknown) => {
+      try { operation(); return { accepted: true }; }
+      catch (error) {
+        const failure = error as Error;
+        return { accepted: false, name: failure.name, message: failure.message };
+      }
+    };
+    const cycle: unknown[] = [];
+    cycle.push(cycle);
+    const accessor = Object.defineProperty({}, 'value', { enumerable: true, get: () => 1 });
+    const hidden = Object.defineProperty({}, 'value', { value: 1 });
+    const sparse = [1, 2, 3];
+    Reflect.deleteProperty(sparse, '1');
+    const values: unknown[] = [
+      null, true, false, 0, -0, 1e30, 'ASCII', 'é-😀', '\u0000\b\t\n\f\r"\\',
+      '\ud800', '\udc00', '😀\ud800', { '\ud800': 'value' },
+      { a: [] }, [[]], { a: {} }, { é: '😀', z: [null, 1] },
+      { long: 'é'.repeat(4097) }, Number.NaN, Number.POSITIVE_INFINITY,
+      sparse, new Date(0), undefined, 1n, cycle, accessor, hidden,
+      { [Symbol('extra')]: 1 },
+    ];
+    for (const input of values) {
+      for (const options of [{}, { maxDepth: 0 }, { maxDepth: 1 }, { maxBytes: 7 }]) {
+        const value = input as CanonicalJsonValue;
+        expect(outcome(() => assertCanonicalJsonValue(value, options)))
+          .toEqual(outcome(() => canonicalizeJson(value, options)));
+      }
+    }
+    for (const value of ['é-😀', '"\\\u0000', { é: ['😀', null] }]) {
+      const bytes = new TextEncoder().encode(canonicalizeJson(value)).byteLength;
+      for (const maxBytes of [bytes - 1, bytes, bytes + 1]) {
+        expect(outcome(() => assertCanonicalJsonValue(value, { maxBytes })))
+          .toEqual(outcome(() => canonicalizeJson(value, { maxBytes })));
+      }
+    }
+    expect(assertCanonicalJsonValue({ validated: true })).toBeUndefined();
+  });
+
   it.each([
     '', 'plain ASCII', '\u007f\u0080\u07ff\u0800\uffff', '😀𐀀',
     'quotes" and slash\\ and controls\u0000\b\t\n\f\r',
