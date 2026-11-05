@@ -153,7 +153,7 @@ describe('header uses live status', () => {
 // behavioral coverage (approve/deny, read model, states, a11y) lives in the
 // dedicated component tests + the QA matrix.
 describe('notifications pane extraction', () => {
-  const header = readFile('components/Shell/Header.tsx');
+  const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
   const bell = readFile('components/Shell/NotificationsBell.tsx');
   const pane = readFile('components/Notifications/NotificationsPane.tsx');
   const rows = readFile('components/Notifications/rows.tsx');
@@ -304,20 +304,16 @@ describe('retired installable apps framework (V10)', () => {
   });
 });
 
-describe('synced status logic', () => {
+describe('header node status', () => {
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
-  it('uses statusLoaded guard before evaluating synced', () => {
-    expect(header).toContain('const statusLoaded = nodeStatus != null');
-    expect(header).toMatch(/const synced = statusLoaded && nodeStatus\?\.synced !== false/);
+  it('derives the status from loaded state, peers and failed checks, not a sync flag', () => {
+    expect(header).toContain('headerNodeStatus(nodeStatus != null, connectedPeers, nodeStatusFailures)');
+    expect(header).not.toContain('nodeStatus?.synced');
   });
 
-  it('shows synced/syncing text based on synced state', () => {
-    expect(header).toMatch(/synced \? ['"]synced['"] : ['"]syncing['"]/);
-  });
-
-  it('status dot uses online/offline class', () => {
-    expect(header).toContain("synced ? 'online' : 'offline'");
+  it('draws the status with the shared Badge', () => {
+    expect(header).toContain('<Badge tone={nodeState.tone}>{nodeState.word}</Badge>');
   });
 });
 

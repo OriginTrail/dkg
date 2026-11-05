@@ -12,6 +12,7 @@ import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrap
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
 import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
+import { isNodeStatusFailure } from './lib/formatPeerStatus.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
@@ -19,12 +20,15 @@ import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
+  const recordNodeStatusFailure = useAgentsStore((s) => s.recordNodeStatusFailure);
   // Status was previously polled every 10s with a raw `setInterval`,
   // even when the tab was hidden — burning ~6 requests/minute against
   // the daemon for nothing. Route through the visibility-aware
   // helper so a backgrounded tab stops polling entirely (BUG-007).
   useVisibilityPolling(() => {
-    api.fetchStatus().then(setNodeStatus).catch(() => {});
+    api.fetchStatus().then(setNodeStatus).catch((error) => {
+      if (isNodeStatusFailure(error)) recordNodeStatusFailure();
+    });
   }, 10_000);
 }
 

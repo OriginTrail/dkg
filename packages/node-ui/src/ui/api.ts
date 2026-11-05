@@ -94,7 +94,7 @@ export class LocalAgentApiError extends Error {
 }
 
 // --- Status ---
-export const fetchStatus = () => get<any>('/api/status');
+export const fetchStatus = () => getWithTimeout<any>('/api/status', 10_000);
 
 // --- LLM Settings ---
 export interface LlmSettingsResponse {

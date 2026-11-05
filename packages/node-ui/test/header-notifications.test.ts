@@ -143,16 +143,16 @@ describe('Header — notifications bell + status wiring', () => {
     expect(container.querySelector('.v10-header-notif-badge')?.textContent).toBe('2');
   });
 
-  it('status pill exposes the multiline tooltip with synced + peer breakdown (BUG-020 wiring)', async () => {
+  it('status pill exposes the multiline tooltip with connected + peer breakdown (BUG-020 wiring)', async () => {
     fetchNotificationsFeedMock.mockResolvedValue({ notifications: [], badgeCount: 0 });
     const container = await renderHeader();
     const meta = container.querySelector('.v10-header-meta') as HTMLElement | null;
     expect(meta).toBeTruthy();
     const tooltip = meta!.getAttribute('title') ?? '';
-    expect(tooltip).toContain('Synced with the network');
+    expect(tooltip).toContain('Connected to the network');
     expect(tooltip).toContain('3 peers (2 direct, 1 relayed)');
     expect(tooltip).toContain('Uptime');
-    expect(meta!.textContent).toContain('Synced');
+    expect(meta!.textContent).toContain('Connected');
     expect(meta!.textContent).toContain('3 peers');
   });
 
@@ -163,5 +163,13 @@ describe('Header — notifications bell + status wiring', () => {
     expect(meta?.querySelector('.ds-tone-pending')?.textContent).toBe('Connecting');
     expect(meta?.textContent).not.toContain('peer');
     expect(meta?.getAttribute('title')).toBe('Connecting to the node');
+  });
+
+  it('says No peers, with no count, when the node has none', async () => {
+    fetchNotificationsFeedMock.mockResolvedValue({ notifications: [], badgeCount: 0 });
+    const container = await renderHeader({ ...LOADED_NODE_STATUS, connectedPeers: 0 });
+    const meta = container.querySelector('.v10-header-meta') as HTMLElement | null;
+    expect(meta?.querySelector('.ds-tone-warning')?.textContent).toBe('No peers');
+    expect(meta?.textContent).not.toContain('0 peers');
   });
 });

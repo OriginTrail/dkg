@@ -1,13 +1,37 @@
+/** Failed status checks in a row before the header says Unavailable (30s at the 10s poll). */
+export const NODE_UNAVAILABLE_AFTER_FAILURES = 3;
+
+/** A 401 comes from a running node that wants a token, so it isn't a failed check. */
+export function isNodeStatusFailure(error: unknown): boolean {
+  return (error as { status?: unknown } | null | undefined)?.status !== 401;
+}
+
+export interface HeaderNodeStatus {
+  word: string;
+  tone: 'success' | 'warning' | 'danger' | 'pending';
+  showPeers: boolean;
+  /** Set when the peer tooltip doesn't apply, because no live status backs it. */
+  tooltip?: string;
+}
+
 /**
- * The header's node status: Connecting until the first status arrives, then
- * Syncing or Synced. Only Synced is a confirmation, so only it is green.
+ * The header's node status. It says only what the node reports, which is its
+ * peer connections: `/api/status` carries no sync state.
  */
 export function headerNodeStatus(
   statusLoaded: boolean,
-  synced: boolean,
-): { word: string; tone: 'success' | 'pending' } {
-  if (!statusLoaded) return { word: 'Connecting', tone: 'pending' };
-  return synced ? { word: 'Synced', tone: 'success' } : { word: 'Syncing', tone: 'pending' };
+  connectedPeers: number,
+  statusFailures: number,
+): HeaderNodeStatus {
+  if (statusFailures >= NODE_UNAVAILABLE_AFTER_FAILURES) {
+    return { word: 'Unavailable', tone: 'danger', showPeers: false, tooltip: 'The node is not responding' };
+  }
+  if (!statusLoaded) {
+    return { word: 'Connecting', tone: 'pending', showPeers: false, tooltip: 'Connecting to the node' };
+  }
+  return connectedPeers > 0
+    ? { word: 'Connected', tone: 'success', showPeers: true }
+    : { word: 'No peers', tone: 'warning', showPeers: false };
 }
 
 /**
@@ -26,14 +50,13 @@ export function headerNodeStatus(
  * `<br>`, so the choice of separator is part of the contract.
  */
 export function formatPeerStatusTooltip(
-  synced: boolean,
   peers: number,
   direct: number,
   relayed: number,
   uptimeMs: number,
 ): string {
   const lines = [
-    synced ? 'Synced with the network' : 'Syncing with the network',
+    peers > 0 ? 'Connected to the network' : 'No peers connected',
     `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`,
   ];
   if (uptimeMs > 0) lines.push(`Uptime ${formatUptimeShort(uptimeMs)}`);

@@ -56,6 +56,7 @@ const AGENT_PANEL_ICON = (
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
+  const nodeStatusFailures = useAgentsStore((s) => s.nodeStatusFailures);
   // Use the deduplicating shared hook (BUG-007): every other consumer
   // (Header, PanelRight, PanelLeft, modals, Dashboard's
   // useMyContextGraphs) used to fire its own `fetchCurrentAgent` on
@@ -69,12 +70,9 @@ export function Header() {
   const directConns = nodeStatus?.connections?.direct ?? 0;
   const relayedConns = nodeStatus?.connections?.relayed ?? 0;
   const uptimeMs = nodeStatus?.uptimeMs ?? 0;
-  const statusLoaded = nodeStatus != null;
-  const synced = statusLoaded && nodeStatus?.synced !== false;
-  const nodeState = headerNodeStatus(statusLoaded, synced);
-  const peerStatusLabel = statusLoaded
-    ? formatPeerStatusTooltip(synced, connectedPeers, directConns, relayedConns, uptimeMs)
-    : 'Connecting to the node';
+  const nodeState = headerNodeStatus(nodeStatus != null, connectedPeers, nodeStatusFailures);
+  const peerStatusLabel = nodeState.tooltip
+    ?? formatPeerStatusTooltip(connectedPeers, directConns, relayedConns, uptimeMs);
 
   return (
     <header className="v10-header">
@@ -112,7 +110,7 @@ export function Header() {
 
       <div className="v10-header-meta" title={peerStatusLabel}>
         <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
-        {statusLoaded && (
+        {nodeState.showPeers && (
           <>
             <span className="v10-header-meta-sep">·</span>
             <span>{connectedPeers} peer{connectedPeers !== 1 ? 's' : ''}</span>
