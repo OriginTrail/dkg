@@ -102,6 +102,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   let originalHome: string | undefined;
   let originalUserprofile: string | undefined;
   let originalAppdata: string | undefined;
+  let originalLocalAppdata: string | undefined;
   let originalDkgHome: string | undefined;
   let originalXdgConfigHome: string | undefined;
   let logSpy: ReturnType<typeof captureWrites>;
@@ -114,6 +115,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     originalHome = process.env.HOME;
     originalUserprofile = process.env.USERPROFILE;
     originalAppdata = process.env.APPDATA;
+    originalLocalAppdata = process.env.LOCALAPPDATA;
     // Codex Round-2 Bug A: mcpSetupAction now sets DKG_HOME for the
     // duration of the action so adapter-openclaw / dkg-core flows
     // pick up the resolved home. Save+restore it like HOME/APPDATA
@@ -134,6 +136,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     // path resolver lands inside the test sandbox on Win32. macOS
     // and Linux ignore APPDATA.
     process.env.APPDATA = join(tmpHome, 'AppData', 'Roaming');
+    process.env.LOCALAPPDATA = join(tmpHome, 'AppData', 'Local');
     logSpy = captureWrites(console, 'log');
     warnSpy = captureWrites(console, 'warn');
     errorSpy = captureWrites(console, 'error');
@@ -154,6 +157,8 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     else delete process.env.USERPROFILE;
     if (originalAppdata !== undefined) process.env.APPDATA = originalAppdata;
     else delete process.env.APPDATA;
+    if (originalLocalAppdata !== undefined) process.env.LOCALAPPDATA = originalLocalAppdata;
+    else delete process.env.LOCALAPPDATA;
     if (originalDkgHome !== undefined) process.env.DKG_HOME = originalDkgHome;
     else delete process.env.DKG_HOME;
     if (originalXdgConfigHome !== undefined) process.env.XDG_CONFIG_HOME = originalXdgConfigHome;

@@ -5,12 +5,13 @@ import { execSync } from 'node:child_process';
 import { resolveMcpConfigDestination } from './mcp-config-file.js';
 import { McpPhysicalConfig } from './mcp-physical-config.js';
 import { detectMcpRuntime } from './mcp-runtime.js';
+import { claudeDesktopConfigPath } from './mcp-claude-desktop-path.js';
 
 
 import { DKG_SERVER_KEY } from './mcp-config-document.js';
 export { DKG_SERVER_KEY, type McpClientConfigShape } from './mcp-config-document.js';
 export type McpClientLocation = 'native' | 'windows-wsl';
-type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null };
+type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null; LOCALAPPDATA: string | null };
 
 function homePaths(home: string, ...parts: string[]) {
   const configPath = join(home, ...parts);
@@ -65,6 +66,8 @@ export type ClientTarget = WithDisplayName<NativeTarget | WindowsTarget> & {
   configPath: string;
   /** Pretty path for display, with `~` substituted back in. */
   displayPath: string;
+  /** Paths checked for an application with more than one supported config location. */
+  checkedPaths?: string[];
 };
 
 /** Stable selector identity is independent of display names and detection results. */
@@ -205,6 +208,7 @@ function wslWindowsEnvPath(envVarName: string): string | null {
 export function detectClients(
   resolveWslWindowsEnvPath: (envVarName: string) => string | null =
     wslWindowsEnvPath,
+  reportMissing?: (message: string) => void,
 ): ClientTarget[] {
   const home = homedir();
   const appConfigRoot = nativeApplicationConfigRoot(home);
@@ -213,23 +217,36 @@ export function detectClients(
     location: 'native',
     ...client.nativePaths(home, appConfigRoot),
   }));
+  if (platform() === 'win32') {
+    const target = candidates.find((candidate) => candidate.id === 'claude-desktop')!;
+    Object.assign(target, claudeDesktopConfigPath(target.configPath, process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local')));
+    target.displayPath = tildify(target.configPath);
+  }
   if (detectMcpRuntime() === 'wsl') {
     const windows = {
       USERPROFILE: resolveWslWindowsEnvPath('USERPROFILE'),
       APPDATA: resolveWslWindowsEnvPath('APPDATA'),
+      LOCALAPPDATA: resolveWslWindowsEnvPath('LOCALAPPDATA'),
     };
     for (const client of MCP_CLIENT_REGISTRY) {
       if (!('windowsPath' in client)) continue;
       const configPath = client.windowsPath(windows);
       if (!configPath) continue;
+      const resolved = client.target.id === 'claude-desktop'
+        ? claudeDesktopConfigPath(configPath, windows.LOCALAPPDATA)
+        : { configPath };
       candidates.push({
         ...client.target,
         name: `${client.target.name} (Windows-side via WSL)`,
         location: 'windows-wsl',
-        configPath,
-        displayPath: configPath,
+        ...resolved,
+        displayPath: resolved.configPath,
       });
     }
   }
-  return candidates.filter((client) => existsSync(client.configPath) || existsSync(dirname(client.configPath)));
+  return candidates.filter((client) => {
+    if (existsSync(client.configPath) || existsSync(dirname(client.configPath))) return true;
+    reportMissing?.(`${client.name}: not detected (checked ${(client.checkedPaths ?? [client.configPath]).join(', ')}). Use dkg mcp setup --print-only for manual configuration.`);
+    return false;
+  });
 }

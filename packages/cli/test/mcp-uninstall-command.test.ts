@@ -144,6 +144,7 @@ function seedNativeClients(selectedPlatform: string) {
   const appData = join(fixture.home, 'roaming');
   const xdg = join(fixture.home, 'xdg-config');
   vi.stubEnv('APPDATA', appData);
+  vi.stubEnv('LOCALAPPDATA', join(fixture.home, 'local'));
   vi.stubEnv('XDG_CONFIG_HOME', xdg);
   vi.stubEnv('WSL_DISTRO_NAME', undefined);
   vi.stubEnv('WSL_INTEROP', undefined);

@@ -870,7 +870,7 @@ export async function mcpSetupAction(
 
   // ── Step 4: client detection + classification ─────────────────────
   console.log('');
-  const clients = selectMcpClientTargets((deps.detectClients ?? detectClients)());
+  const clients = selectMcpClientTargets((deps.detectClients ?? detectClients)(undefined, (message) => console.log(message)));
   if (clients.length === 0) {
     console.log('No MCP-aware clients detected.');
     console.log('  Print the canonical JSON for manual paste:');
