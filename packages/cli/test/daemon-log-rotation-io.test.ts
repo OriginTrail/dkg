@@ -1,7 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const fsMocks = vi.hoisted(() => ({
   stat: vi.fn(),
+  lstat: vi.fn(),
   open: vi.fn(),
   writeFile: vi.fn(),
   readFile: vi.fn(),
@@ -15,6 +18,7 @@ const fsMocks = vi.hoisted(() => ({
 
 vi.mock('node:fs/promises', () => ({
   stat: fsMocks.stat,
+  lstat: fsMocks.lstat,
   open: fsMocks.open,
   writeFile: fsMocks.writeFile,
   // Deliberately supplied so a regression to whole-file readFile() is visible.
@@ -54,8 +58,9 @@ describe('daemon log rotation I/O bound', () => {
       const file = files.get(path);
       if (!file) throw missing(path);
       if (!inodeIds.has(file)) inodeIds.set(file, nextInode++);
-      return { size: file.size, mtimeMs: file.mtimeMs, dev: 1n, ino: inodeIds.get(file), isFile: () => true };
+      return { size: file.size, mtimeMs: file.mtimeMs, dev: 1n, ino: inodeIds.get(file), isFile: () => true, isSymbolicLink: () => false };
     });
+    fsMocks.lstat.mockImplementation((...args: unknown[]) => fsMocks.stat(...args));
     fsMocks.readdir.mockImplementation(async (dir: string) => [...files.keys()]
       .filter((path) => path.startsWith(`${dir}/`))
       .map((path) => path.slice(dir.length + 1)));
@@ -306,4 +311,71 @@ describe('daemon log rotation I/O bound', () => {
     expect(files.get(`${LOG}.2`)).toEqual(expectedPrevious);
   });
 
+});
+
+
+/** Native files retain actual bytes while hooks deterministically change directory entries. */
+const native = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+
+describe('native alias recovery boundaries', () => {
+  let dir: string;
+  let log: string;
+  const original = 'original history\n'.repeat(12);
+  const replacement = 'replacement history\n'.repeat(10);
+  const options = { maxBytes: 100, keepBytes: 60, totalBytes: 1000 };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    for (const name of ['stat', 'lstat', 'open', 'writeFile', 'readFile', 'readdir', 'link', 'rename', 'unlink'] as const) {
+      fsMocks[name].mockImplementation(native[name]);
+    }
+    dir = await native.mkdtemp(join(tmpdir(), 'dkg-log-alias-'));
+    log = join(dir, 'daemon.log');
+  });
+  afterEach(async () => { await native.rm(dir, { recursive: true, force: true }); });
+
+  it('preserves a numbered symlink and its actual history target', async () => {
+    await native.writeFile(log, replacement);
+    await native.writeFile(`${log}.2`, original);
+    await native.symlink('daemon.log.2', `${log}.1`);
+
+    const result = await rotateDaemonLogIfNeeded(log, options);
+
+    expect(await native.readFile(`${log}.2`, 'utf8').catch(error => error.code)).toBe(original);
+    expect(await native.readFile(log, 'utf8')).toBe(replacement);
+    expect((await native.lstat(`${log}.1`)).isSymbolicLink()).toBe(true);
+    expect((await native.readdir(dir)).sort()).toEqual(['daemon.log', 'daemon.log.1', 'daemon.log.2']);
+    expect(result).toMatchObject({ rotated: false, trimmed: false, removedFiles: 0 });
+  });
+
+  it('preserves original and replacement history when the live identity changes after its scan', async () => {
+    await native.writeFile(log, original);
+    await native.link(log, `${log}.1`);
+    let replaced = false;
+    const replaceAfterScan = async (path: string, options: { bigint: true }) => {
+      const captured = await native.lstat(path, options);
+      if (path === log && !replaced) {
+        replaced = true;
+        await native.unlink(log);
+        await native.writeFile(log, replacement);
+      }
+      return captured;
+    };
+    fsMocks.stat.mockImplementation(replaceAfterScan);
+    fsMocks.lstat.mockImplementation(replaceAfterScan);
+
+    const result = await rotateDaemonLogIfNeeded(log, options);
+
+    expect(replaced).toBe(true);
+    expect(await native.readFile(`${log}.1`, 'utf8')).toBe(original);
+    expect(await native.readFile(log, 'utf8')).toBe(replacement);
+    expect(result).toMatchObject({ rotated: false, trimmed: false, removedFiles: 0 });
+    // With stable entries the next pass can rotate once without growing aliases.
+    fsMocks.stat.mockImplementation(native.stat);
+    fsMocks.lstat.mockImplementation(native.lstat);
+    expect(await rotateDaemonLogIfNeeded(log, options)).toMatchObject({ rotated: true, trimmed: false });
+    expect(await native.readFile(`${log}.1`, 'utf8')).toBe(replacement);
+    expect(await native.readFile(`${log}.2`, 'utf8')).toBe(original);
+    expect((await native.readdir(dir)).sort()).toEqual(['daemon.log.1', 'daemon.log.2']);
+  });
 });

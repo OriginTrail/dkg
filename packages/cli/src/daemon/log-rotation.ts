@@ -1,4 +1,4 @@
-import { link, open, readdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { link, open, readdir, lstat, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -61,12 +61,12 @@ interface RotatedLogFile {
 
 const MIB = 1024 * 1024;
 
-/** Bigint identities avoid rounding two filesystem inode numbers together. */
+/** Inspect the entry itself; bigint identities keep distinct inode numbers distinct. */
 async function statLogFile(path: string) {
-  const info = await stat(path, { bigint: true });
+  const info = await lstat(path, { bigint: true });
   const identity = typeof info.dev === 'bigint' && typeof info.ino === 'bigint'
     && info.ino > 0n ? `${info.dev}:${info.ino}` : null;
-  return { size: Number(info.size), mtimeMs: Number(info.mtimeMs), identity, isFile: () => info.isFile() };
+  return { size: Number(info.size), mtimeMs: Number(info.mtimeMs), identity, isFile: () => info.isFile(), isSymbolicLink: () => info.isSymbolicLink() };
 }
 
 function rotatedLogPath(logFile: string, index: number): string {
@@ -92,6 +92,7 @@ async function listRotatedLogFiles(logFile: string): Promise<RotatedLogFile[]> {
       if (error.code === 'ENOENT') return null;
       throw error;
     });
+    if (info?.isSymbolicLink()) throw new IncompleteLogMoveError('Rotated log is a symbolic link');
     if (info?.isFile()) files.push({ index: Number(suffix), size: info.size, mtimeMs: info.mtimeMs, identity: info.identity });
   }
   return files.sort((a, b) => a.index - b.index);
@@ -140,7 +141,7 @@ async function moveLogWithoutReplacing(from: string, to: string): Promise<void> 
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       // A stale scan may have omitted an existing link to the live log itself.
       const destination = await statLogFile(to).catch(() => null);
-      if (destination === null || destination.isFile()) {
+      if (destination === null || destination.isFile() || destination.isSymbolicLink()) {
         throw new IncompleteLogMoveError('Log destination appeared after its directory scan', { cause: error });
       }
     }
@@ -164,17 +165,26 @@ async function removeInterruptedMoveAliases(
   liveIdentity: string | null,
   files: readonly RotatedLogFile[],
 ): Promise<RotatedLogFile[]> {
-  const seen = new Set(liveIdentity === null ? [] : [liveIdentity]);
+  const seen = new Map(liveIdentity === null ? [] : [[liveIdentity, logFile]]);
   const unique: RotatedLogFile[] = [];
   for (const file of files) {
     if (file.identity !== null && seen.has(file.identity)) {
       try {
-        await unlink(rotatedLogPath(logFile, file.index));
+        const duplicatePath = rotatedLogPath(logFile, file.index);
+        const retainedPath = seen.get(file.identity)!;
+        // Scan identities can be stale after an operator replaces a path. Confirm
+        // both regular entries still name the retained inode before removing one.
+        const [retained, duplicate] = await Promise.all([statLogFile(retainedPath), statLogFile(duplicatePath)]);
+        if (!retained.isFile() || !duplicate.isFile()
+          || retained.identity !== file.identity || duplicate.identity !== file.identity) {
+          throw new IncompleteLogMoveError('Log identity changed during alias recovery');
+        }
+        await unlink(duplicatePath);
       } catch (error) {
         throw new IncompleteLogMoveError('Interrupted log move is still linked', { cause: error });
       }
     } else {
-      if (file.identity !== null) seen.add(file.identity);
+      if (file.identity !== null) seen.set(file.identity, rotatedLogPath(logFile, file.index));
       unique.push(file);
     }
   }
@@ -215,6 +225,9 @@ export async function rotateDaemonLogIfNeeded(
     throw error;
   });
   const previousBytes = before?.size ?? 0;
+  if (before && !before.isFile()) {
+    return { rotated: false, trimmed: false, previousBytes, removedFiles: 0, newestCutTo: null };
+  }
   let files = await listRotatedLogFiles(logFile).catch(() => null);
   let rotated = false;
   let trimmed = false;
