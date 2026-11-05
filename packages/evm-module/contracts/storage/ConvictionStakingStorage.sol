@@ -158,7 +158,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     //             unwind paths remove. This eliminates the incremental-vs-one-shot
     //             floor asymmetry that bricked redelegate/relock/exit/decreaseRaw,
     //             with the strict cancel/stake-delta invariants kept intact.
-    string private constant _VERSION = "10.0.6";
+    //   10.0.7 — Late epoch-pool credits (for example lazy PCA settlement)
+    //           must not leave the node reward cache permanently stale. Store
+    //           the gross node reward baseline so StakingV10 can reconcile a
+    //           later pool increase and credit only the incremental operator
+    //           fee.
+    string private constant _VERSION = "10.0.7";
 
     // Multiplier scale, matches DKGStakingConvictionNFT._convictionMultiplier
     // (returns 1e18-scaled values so fractional tiers like 1.5x and 3.5x
@@ -291,6 +296,7 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     // D3 — DelegatorsInfo-absorbed events.
     event IsOperatorFeeClaimedForEpochUpdated(uint72 indexed identityId, uint256 indexed epoch, bool isClaimed);
     event NetNodeEpochRewardsSet(uint72 indexed identityId, uint256 indexed epoch, uint256 amount);
+    event GrossNodeEpochRewardsSet(uint72 indexed identityId, uint256 indexed epoch, uint256 amount);
 
     Chronos public chronos;
 
@@ -427,6 +433,12 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
     uint256 public constant MAX_REWARD_CARRIES = 32;
 
     mapping(uint256 => RewardCarry[]) internal rewardCarries;
+
+    // Appended after all pre-existing state so upgrading the storage contract
+    // does not shift any of the V10 vault, tier, or migration-credit slots.
+    /// @notice Gross node reward baseline used to reconcile late additions to
+    ///         an epoch's pool without double-crediting operator fees.
+    mapping(uint72 => mapping(uint256 => uint256)) public grossNodeEpochRewards;
 
     event RewardCarryAdded(
         uint256 indexed tokenId,
@@ -1499,12 +1511,21 @@ contract ConvictionStakingStorage is INamed, IVersioned, Guardian {
         emit NetNodeEpochRewardsSet(identityId, epoch, amount);
     }
 
+    function setGrossNodeEpochRewards(uint72 identityId, uint256 epoch, uint256 amount) external onlyContracts {
+        grossNodeEpochRewards[identityId][epoch] = amount;
+        emit GrossNodeEpochRewardsSet(identityId, epoch, amount);
+    }
+
     function getIsOperatorFeeClaimedForEpoch(uint72 identityId, uint256 epoch) external view returns (bool) {
         return isOperatorFeeClaimedForEpoch[identityId][epoch];
     }
 
     function getNetNodeEpochRewards(uint72 identityId, uint256 epoch) external view returns (uint256) {
         return netNodeEpochRewards[identityId][epoch];
+    }
+
+    function getGrossNodeEpochRewards(uint72 identityId, uint256 epoch) external view returns (uint256) {
+        return grossNodeEpochRewards[identityId][epoch];
     }
 
     // ============================================================

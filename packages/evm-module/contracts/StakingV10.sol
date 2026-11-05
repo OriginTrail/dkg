@@ -9,9 +9,9 @@ import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {StakingRewardSettlement} from "./StakingRewardSettlement.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
-import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
@@ -140,7 +140,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           not ship to mainnet without orphaning existing position NFTs.
     //           Also carries the #1297 boost-expiry reward-boundary fix (which
     //           had landed under the unchanged 10.0.4 string).
-    string private constant _VERSION = "10.0.5";
+    //   10.0.6 — delegate node reward-cache reconciliation to the
+    //           StakingRewardSettlement helper so late PCA pool credits are
+    //           included without exceeding the EVM bytecode limit.
+    //   10.0.7 — persist per-score reward receipts in the settlement helper;
+    //           active and withdrawn positions can claim an exact late-pool
+    //           delta once, independent of permissionless claim ordering.
+    string private constant _VERSION = "10.0.7";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
     /// stake / redelegate / claim but the sharding table is full, so its
@@ -157,9 +163,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /// @notice 1e18 fixed-point scale shared with `ConvictionStakingStorage`.
     uint256 public constant SCALE18 = 1e18;
 
-    /// @notice EpochStorage shard ID for the reward pool.
-    uint256 private constant EPOCH_POOL_INDEX = 1;
-
     // ========================================================================
     // Hub-wired dependencies
     // ========================================================================
@@ -170,6 +173,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         exclusively (v4.0.0 consolidation).
     StakingStorage public stakingStorage;
     ConvictionStakingStorage public convictionStorage;
+    StakingRewardSettlement public rewardSettlement;
     Chronos public chronos;
     RandomSamplingStorage public randomSamplingStorage;
     ShardingTableStorage public shardingTableStorage;
@@ -181,7 +185,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         (operator-fee withdrawal request / finalize / cancel).
     IdentityStorage public identityStorage;
     IERC20 public token;
-    EpochStorage public epochStorage;
 
     // ========================================================================
     // Events
@@ -237,6 +240,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     function initialize() external onlyHub {
         stakingStorage = StakingStorage(hub.getContractAddress("StakingStorage"));
         convictionStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
+        rewardSettlement = StakingRewardSettlement(hub.getContractAddress("StakingRewardSettlement"));
         chronos = Chronos(hub.getContractAddress("Chronos"));
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         shardingTableStorage = ShardingTableStorage(hub.getContractAddress("ShardingTableStorage"));
@@ -246,7 +250,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         profileStorage = ProfileStorage(hub.getContractAddress("ProfileStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         token = IERC20(hub.getContractAddress("Token"));
-        epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -446,6 +449,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             pos.identityId,
             newLockTier
         );
+        rewardSettlement.migrateRewardAccount(oldTokenId, newTokenId);
 
         // v10.0.3 — the score settled this epoch lives in RSS under the OLD
         // tokenId's delegator key, which `_claim(newTokenId)` would never
@@ -588,6 +592,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         amount = pos.raw;
         require(amount > 0, "No raw");
         uint72 identityId = pos.identityId;
+
+        // The reward account outlives the NFT position. If a lazy PCA credit
+        // lands after this atomic withdrawal, anyone can reconcile it, but
+        // the helper pays only this recorded owner.
+        rewardSettlement.closeRewardAccount(tokenId, staker);
 
         // Delete the position: CSS handles effective-stake diff teardown,
         // pending-expiry delta cancel, per-node enumeration pop, per-node
@@ -748,6 +757,29 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         _claim(tokenId);
     }
 
+    /// @notice Permissionlessly reconcile a bounded slice of historical
+    ///         reward receipts after one or more late epoch-pool credits.
+    ///         The delta compounds into the live tokenId; the caller cannot
+    ///         redirect it.
+    function claimRewardDeltas(
+        uint256 tokenId,
+        uint256 start,
+        uint256 count
+    ) external returns (uint96 rewardDelta) {
+        ConvictionStakingStorage.Position memory pos = convictionStorage.getPosition(tokenId);
+        if (pos.identityId == 0) revert PositionNotFound();
+        uint256 delta = rewardSettlement.reconcileRewardSources(tokenId, start, count);
+        if (delta == 0) return 0;
+        // Settle the current-epoch score cursor BEFORE raising `raw`, exactly
+        // as `stake`, `relock`, `redelegate` and `_claim` do. Compounding into
+        // `raw` without it retroactively re-integrates the already-accrued part
+        // of the epoch at the higher stake, pushing the delegator score above
+        // the node score and bricking every later claim/withdraw with
+        // `DelegatorRewardInvariant`.
+        _prepareForStakeChangeV10(chronos.getCurrentEpoch(), tokenId, pos.identityId);
+        rewardDelta = _compoundReward(tokenId, pos.identityId, delta);
+    }
+
     /**
      * @dev Internal claim body shared between the external `claim` entry
      *      point and the atomic `withdraw` path. Advances the position's
@@ -883,7 +915,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
-            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18);
+            rewardTotal += rewardSettlement.settlePositionEpochReward(
+                tokenId,
+                e,
+                identityId,
+                delegatorKey,
+                delegatorScore18
+            );
         }
 
         // v10.0.3 — integrate matured reward carries (pointers to RSS score
@@ -908,9 +946,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                     carries[i].delegatorKey
                 );
                 if (carryScore18 == 0) continue;
-                rewardTotal += _nodeEpochReward(
+                rewardTotal += rewardSettlement.settlePositionEpochReward(
+                    tokenId,
                     uint256(carries[i].epoch),
                     carries[i].identityId,
+                    carries[i].delegatorKey,
                     carryScore18
                 );
             }
@@ -925,31 +965,30 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             return;
         }
 
-        if (rewardTotal > type(uint96).max) revert RewardOverflow();
-        uint96 rewardU96 = uint96(rewardTotal);
+        _compoundReward(tokenId, identityId, rewardTotal);
 
-        // D19 — compound into raw. CSS writes the per-epoch effective-stake
-        // diff and bumps nodeStakeV10 / totalStakeV10 in lockstep. The
-        // compounded TRAC earns the position's current multiplier.
+        convictionStorage.setLastClaimedEpoch(tokenId, uint32(claimToEpoch));
+    }
+
+    function _compoundReward(
+        uint256 tokenId,
+        uint72 identityId,
+        uint256 rewardTotal
+    ) internal returns (uint96 rewardU96) {
+        if (rewardTotal > type(uint96).max) revert RewardOverflow();
+        rewardU96 = uint96(rewardTotal);
+
         convictionStorage.increaseRaw(tokenId, rewardU96);
         convictionStorage.addCumulativeRewardsClaimed(tokenId, rewardU96);
 
-        // Sharding-table + Ask housekeeping — the reward compound grew
-        // node stake; a node previously under `minimumStake` may now be
-        // eligible for the sharding table. Reward is always an increase,
-        // so only the cross-above-minimum insert is needed.
-        {
-            uint256 newNodeStake = convictionStorage.getNodeStakeV10(identityId);
-            if (
-                !shardingTableStorage.nodeExists(identityId) &&
-                newNodeStake >= uint256(parametersStorage.minimumStake())
-            ) {
-                _tryAdmitNode(identityId);
-            }
+        uint256 newNodeStake = convictionStorage.getNodeStakeV10(identityId);
+        if (
+            !shardingTableStorage.nodeExists(identityId) &&
+            newNodeStake >= uint256(parametersStorage.minimumStake())
+        ) {
+            _tryAdmitNode(identityId);
         }
         ask.recalculateActiveSet();
-
-        convictionStorage.setLastClaimedEpoch(tokenId, uint32(claimToEpoch));
 
         emit RewardsClaimed(tokenId, rewardU96);
     }
@@ -1149,52 +1188,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // ========================================================================
     // Internal helpers — V10 score-per-stake settlement
     // ========================================================================
-
-    /**
-     * @dev Convert a delegator's epoch score on `identityId` into TRAC,
-     *      lazily materializing the node's operator-fee split for `(e,
-     *      identityId)` on first touch. Extracted from the `_claim` epoch
-     *      loop (v10.0.3) so reward carries share the exact same math.
-     *
-     *      H1 note — on epochs with `scorePerStake36 > 0 && nodeScore18 ==
-     *      0` this returns 0. That combination is essentially impossible in
-     *      production (score-per-stake can only be advanced by submitProof,
-     *      which also adds to node score), but defensive: there is no fee
-     *      to collect and no reward.
-     */
-    function _nodeEpochReward(
-        uint256 e,
-        uint72 identityId,
-        uint256 delegatorScore18
-    ) internal returns (uint256 epochReward) {
-        uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
-        if (nodeScore18 == 0) return 0;
-
-        uint256 netNodeRewards;
-        if (!convictionStorage.isOperatorFeeClaimedForEpoch(identityId, e)) {
-            uint256 allNodesScore18 = randomSamplingStorage.getAllNodesEpochScore(e);
-            if (allNodesScore18 > 0) {
-                uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
-                    * nodeScore18) / allNodesScore18;
-                uint96 operatorFeeAmount = uint96(
-                    (grossNodeRewards
-                        * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
-                        / parametersStorage.maxOperatorFee()
-                );
-                netNodeRewards = grossNodeRewards - operatorFeeAmount;
-                convictionStorage.setIsOperatorFeeClaimedForEpoch(identityId, e, true);
-                convictionStorage.setNetNodeEpochRewards(identityId, e, netNodeRewards);
-                // v4.0.0 — operator-fee balance lives on CSS now.
-                convictionStorage.increaseOperatorFeeBalance(identityId, operatorFeeAmount);
-            }
-        } else {
-            netNodeRewards = convictionStorage.getNetNodeEpochRewards(identityId, e);
-        }
-
-        if (delegatorScore18 > 0) {
-            epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
-        }
-    }
 
     /**
      * @dev D26 — settle the delegator's score accumulator for `epoch` up to

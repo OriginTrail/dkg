@@ -235,10 +235,11 @@ describe('@integration Regression G-6: reward-compounded redelegate stays live (
     expect(effStake % 2n).to.equal(1n);
 
     // sps36 == 1e18 ⇒ delegatorScore18 = effStake * 1e18 / 1e18 = effStake.
-    // Single node, opFee 0, gross = pool*nodeScore/allNodes = nodeScore (pool==nodeScore),
-    // so reward = delegatorScore18 * gross / nodeScore = effStake (ODD).
+    // Single node, opFee 0, and score conservation requires this sole
+    // delegator's score to equal the node score. With pool == nodeScore,
+    // gross == nodeScore and the reward remains effStake (ODD).
     const scorePerStake36 = SCALE18;
-    const nodeScore18 = hre.ethers.parseEther('100');
+    const nodeScore18 = effStake;
     const epochPool = nodeScore18;
     await injectEpochRewards(epochE, nodeA, scorePerStake36, nodeScore18, nodeScore18, epochPool);
 
