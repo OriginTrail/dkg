@@ -14,6 +14,7 @@ import {
   MAX_SEAL_TRIPLE_COUNT_V1,
 } from './canonical-graph-scoped-author-seal.js';
 import {
+  assertCanonicalJsonValue,
   canonicalizeJson,
   parseCanonicalJson,
   type CanonicalJsonValue,
@@ -252,6 +253,22 @@ export function canonicalizeSwmAuthorInventoryRowsBytesV1(
       maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
       maxDepth: 2,
     }));
+  } catch (cause) {
+    fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
+  }
+}
+
+/** Complete singleton wire validation without allocating canonical output bytes. */
+export function assertEncodableSwmAuthorInventoryRowV1(
+  value: unknown,
+): asserts value is SwmAuthorInventoryRowV1 {
+  const rows = [value];
+  assertSwmAuthorInventoryRowsV1(rows);
+  try {
+    assertCanonicalJsonValue(rows as unknown as CanonicalJsonValue, {
+      maxBytes: MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
+      maxDepth: 2,
+    });
   } catch (cause) {
     fail('swm-inventory-too-large', 'row set exceeds the canonical v1 byte limit', cause);
   }

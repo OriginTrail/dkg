@@ -6,6 +6,7 @@ import {
   SwmAuthorInventoryCodecErrorV1,
   assertSignedSwmAuthorInventoryHeadEnvelopeV1,
   assertSwmAuthorInventoryShareOperationIdV1,
+  assertEncodableSwmAuthorInventoryRowV1,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
@@ -100,6 +101,35 @@ function signedHead(
 }
 
 describe('SWM author inventory v1', () => {
+  it('validates one complete encodable row with the exact singleton codec error contract', () => {
+    const outcome = (operation: () => unknown) => {
+      try { operation(); return { accepted: true }; }
+      catch (error) {
+        const failure = error as Error & { code?: string; cause?: Error };
+        return { accepted: false, name: failure.name, code: failure.code,
+          message: failure.message, cause: failure.cause?.message };
+      }
+    };
+    const candidates: unknown[] = [
+      ROW_A, { ...ROW_A, expiresAt: null }, { ...ROW_A, shareOperationId: 'é-😀' },
+      ...['\ud800', '\udc00', '😀\ud800', '\udc00😀', 'e\u0301', 'x'.repeat(4097), '\u0000']
+        .map(shareOperationId => ({ ...ROW_A, shareOperationId })),
+      { ...ROW_A, assertionCoordinate: '\ud800' },
+      { ...ROW_A, assertionVersion: '01' }, { ...ROW_A, extra: true },
+      { ...ROW_A, publicTripleCount: '0', privateTripleCount: '0' },
+      { ...ROW_A, expiresAt: ROW_A.sharedAt }, null, [],
+    ];
+    for (const value of candidates) {
+      expect(outcome(() => assertEncodableSwmAuthorInventoryRowV1(value)))
+        .toEqual(outcome(() => canonicalizeSwmAuthorInventoryRowsBytesV1(
+          [value] as SwmAuthorInventoryRowV1[],
+        )));
+    }
+    const value: unknown = ROW_A;
+    assertEncodableSwmAuthorInventoryRowV1(value);
+    expectTypeOf(value).toEqualTypeOf<SwmAuthorInventoryRowV1>();
+  });
+
   it('brands only canonical bounded share operation ids', () => {
     const candidate: unknown = 'swm-operation-typed';
     assertSwmAuthorInventoryShareOperationIdV1(candidate);

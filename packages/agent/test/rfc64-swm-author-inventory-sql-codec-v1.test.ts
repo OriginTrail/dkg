@@ -70,7 +70,7 @@ describe('SWM author inventory typed SQL decoding', () => {
   });
 
   it.each(['\ud800', '\udc00', '😀\ud800', '\udc00😀', 'é-🙂', 'e\u0301', 'a'.repeat(4097)])(
-    'preserves the full canonical acceptance and error contract for fallback input %s', operation => {
+    'preserves the full canonical acceptance and error contract for Unicode and oversized input %s', operation => {
       const input = { ...row, shareOperationId: operation } as SwmAuthorInventoryRowV1;
       const expected = outcome(() => parseCanonicalSwmAuthorInventoryRowsV1(
         canonicalizeSwmAuthorInventoryRowsBytesV1([input]),
