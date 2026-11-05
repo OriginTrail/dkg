@@ -5,7 +5,8 @@ const codecs = vi.hoisted(() => ({
   /** Hold this many compressing lanes, then start their real codecs together. */
   holdLanes: 0, held: [] as Array<() => void>,
   refused: 0, gunzipRefusals: 0,
-  compress: undefined as undefined | ((bytes: Uint8Array) => Error | undefined),
+  compress: undefined as undefined | ((bytes: Uint8Array) => Error | undefined | Promise<Error | undefined>),
+  decompress: undefined as undefined | ((bytes: Uint8Array) => Error | undefined | Promise<Error | undefined>),
 }));
 vi.mock('node:os', async importOriginal => ({
   ...await importOriginal<typeof import('node:os')>(), availableParallelism: () => 4, freemem: () => 8 * 2 ** 30,
@@ -17,7 +18,7 @@ vi.mock('@origintrail-official/dkg-core', async importOriginal => {
     gzipBounded: async (...args: Parameters<typeof actual.gzipBounded>) => {
       // Only a verification lane compresses with this ceiling; the supplier's own codec calls pass through.
       if (args[1].maxOutputBytes !== 16 * 1024 * 1024) return actual.gzipBounded(...args);
-      const failure = codecs.compress?.(args[0]);
+      const failure = await codecs.compress?.(args[0]);
       if (failure) throw failure;
       if (codecs.holdLanes > 0) {
         await new Promise<void>(resolve => {
@@ -34,12 +35,14 @@ vi.mock('@origintrail-official/dkg-core', async importOriginal => {
       }
     },
     gunzipBounded: async (...args: Parameters<typeof actual.gunzipBounded>) => {
+      const failure = await codecs.decompress?.(args[0]);
+      if (failure) throw failure;
       if (codecs.gunzipRefusals > 0) { codecs.gunzipRefusals--; throw new actual.BoundedGzipCapacityError(); }
       return actual.gunzipBounded(...args);
     },
   };
 });
-afterEach(() => { Object.assign(codecs, { holdLanes: 0, refused: 0, gunzipRefusals: 0, compress: undefined }); codecs.held.length = 0; });
+afterEach(() => { Object.assign(codecs, { holdLanes: 0, refused: 0, gunzipRefusals: 0, compress: undefined, decompress: undefined }); codecs.held.length = 0; });
 
 it('finishes a job whose lanes all compress at once, more than the process has room for', async () => {
   const f = await checkpointFixture();
@@ -78,4 +81,34 @@ it('still fails the job on any other codec failure', async () => {
   codecs.compress = compress;
   await expect(f.run()).rejects.toBe(failure);
   expect(compress.mock.calls.length).toBeLessThanOrEqual(3);
+}, 30_000);
+
+it.each(['compress', 'decompress'] as const)('retires a %s capacity wait when another lane fails', async phase => {
+  const f = await checkpointFixture({ payloadBytes: [4000, 4000, 4000] });
+  const { BoundedGzipCapacityError } = await vi.importActual<typeof import('@origintrail-official/dkg-core')>('@origintrail-official/dkg-core');
+  const failure = new Error('sibling codec failed');
+  let waitingKey: string | undefined, attempts = 0, releaseFailure!: () => void;
+  const waiting = new Promise<void>(resolve => { releaseFailure = resolve; });
+  codecs[phase] = async bytes => {
+    const key = Buffer.from(bytes).toString('base64');
+    waitingKey ??= key;
+    if (key !== waitingKey) { await waiting; return failure; }
+    // A second attempt proves the lane has entered its capacity-wait loop before the sibling fails.
+    if (++attempts === 2) releaseFailure();
+    return new BoundedGzipCapacityError();
+  };
+  let settled = false;
+  const result = f.run().then(value => value, error => error).finally(() => { settled = true; });
+  try {
+    await waiting;
+    await expect.poll(() => settled, { timeout: 2_000 }).toBe(true);
+    expect(await result).toBe(failure);
+    expect(f.abort.signal.aborted).toBe(false); // The pool, not the caller/deadline, retired the wait.
+    const finalAttempts = attempts;
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(attempts).toBe(finalAttempts);
+  } finally {
+    f.abort.abort(failure);
+    await result;
+  }
 }, 30_000);

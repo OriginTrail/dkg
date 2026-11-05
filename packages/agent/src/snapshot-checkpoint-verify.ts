@@ -19,17 +19,18 @@ const CODEC_CAPACITY_WAIT_MS = 25;
 
 /**
  * The process refuses a codec it has no room for, and one lane's worst case is a third of that room.
- * A lane waits its turn rather than fail the job: every codec has a deadline, and the job's signal ends the wait.
+ * A lane waits its turn rather than fail the job; caller cancellation or another lane's failure ends the wait.
  */
 async function whenCodecCapacityFrees<T>(codec: () => Promise<T>, signal: AbortSignal): Promise<T> {
   for (;;) {
+    signal.throwIfAborted();
     try {
       return await codec();
     } catch (error) {
       if (!(error instanceof BoundedGzipCapacityError)) throw error;
-      await delay(CODEC_CAPACITY_WAIT_MS);
-      signal.throwIfAborted();
     }
+    try { await delay(CODEC_CAPACITY_WAIT_MS, undefined, { signal }); }
+    catch (error) { signal.throwIfAborted(); throw error; }
   }
 }
 
@@ -53,6 +54,7 @@ export async function verifySnapshotCheckpoint(options: {
   await withSnapshotVerificationPool({ contextGraphId: evidence.snapshot.contextGraphId, signal,
     maxWorkers: options.maxWorkers,
     run: async lane => {
+      const { signal } = lane;
       for (;;) {
         signal.throwIfAborted(); options.assertCurrent();
         const index = next++;
