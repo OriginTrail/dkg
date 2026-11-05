@@ -5,6 +5,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
+import { bindCallerGraphsBeforeRead } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
@@ -81,6 +82,26 @@ export function withDatasetClauses(
   return `${before}${separator}${clauses} ${scope.source.slice(offset)}`;
 }
 
+/** A sole INCLUDE consumes an already computed, query-local named solution set. */
+function readsOnlyDeclaredNamedSet(scope: PreparedSparqlQuery): boolean {
+  if (!scope.where) return false;
+  const { tokens } = scope.prepared;
+  const inner = tokens.slice(scope.where.openingTokenIndex + 1, scope.where.closingTokenIndex);
+  if (inner.length !== 3 || inner[0].kind !== 'word' || inner[0].upper !== 'INCLUDE'
+    || !isSymbol(inner[1], '%') || inner[2].kind !== 'word') return false;
+  for (let index = scope.prepared.prologue.endTokenIndex + 1; index < scope.where.openingTokenIndex; index++) {
+    const token = tokens[index];
+    if (scope.structure.braces.depthBefore[index] !== 0 || token.kind !== 'word' || token.upper !== 'WITH') continue;
+    const closing = scope.structure.braces.matchingTokenIndexes[index + 1] ?? -1;
+    if (closing < 0) continue;
+    const asToken = tokens[closing + 1];
+    const name = tokens[closing + 3];
+    if (asToken?.kind === 'word' && asToken.upper === 'AS' && isSymbol(tokens[closing + 2], '%')
+      && name?.kind === 'word' && name.logicalValue === inner[2].logicalValue) return true;
+  }
+  return false;
+}
+
 /**
  * Run a read's graph rewrite and set the dataset its route needs. DESCRIBE must
  * still match WHERE inside individual graphs, while descriptions use the allowed
@@ -96,10 +117,13 @@ export function applyGraphDataset<Reason extends string>(
   if (route === 'describe' && scope.hasGraphClause) {
     throw new ScopedQueryViolationError('DESCRIBE cannot be combined with a GRAPH clause on this store');
   }
-  const result = route === 'describe' && !scope.where ? sparqlRewriteReady(scope)
+  const result = (route === 'describe' && !scope.where) || readsOnlyDeclaredNamedSet(scope) ? sparqlRewriteReady(scope)
     : rewrite(route === 'describe' ? 'dataset-only' : route);
   if (route === 'none' || result.kind !== 'ready' || result.value.hasDatasetClause) return result;
   let rewritten = result.value;
+  if (route === 'dataset-only' && engine !== 'oxigraph' && scope.graphVariables.length && hasRepeatedPath(scope)) {
+    rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
+  }
   if (route === 'describe' && rewritten.where) {
     const { openEnd, close } = rewritten.where;
     const source = `${rewritten.source.slice(0, openEnd)} { SELECT * WHERE { ${rewritten.source.slice(openEnd, close)} } } ${rewritten.source.slice(close)}`;

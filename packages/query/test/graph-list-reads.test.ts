@@ -39,22 +39,24 @@ interface Route {
   readonly graphs: readonly (readonly [graph: string, prefix: string])[];
   /** Some of the route's graphs are read through constant GRAPH branches. */
   readonly branches?: true;
+  /** Exact nested-aggregate bindings, including branch/result merge multiplicity. */
+  readonly nestedCounts: readonly number[];
 }
 
 const MAIN_GRAPHS = [[ROOT, 'urn:listed:root'], [`${ROOT}/_verifiable_memory/a/1`, 'urn:listed:vm']] as const;
 const SUB_GRAPHS = [[`${ROOT}/${SUB}`, 'urn:listed:sub'], [`${ROOT}/${SUB}/_verifiable_memory/a/1`, 'urn:listed:subvm']] as const;
 const SHARED_GRAPHS = [[`${ROOT}/_shared_memory/a/1`, 'urn:listed:ka1'], [`${ROOT}/_shared_memory/a/2`, 'urn:listed:ka2']] as const;
 const ROUTES: readonly Route[] = [
-  { name: 'the default route', options: { contextGraphId: id }, graphs: MAIN_GRAPHS },
-  { name: 'the verifiable-memory view', options: { contextGraphId: id, view: 'verifiable-memory' }, graphs: MAIN_GRAPHS },
-  { name: 'a sub-graph', options: { contextGraphId: id, subGraphName: SUB }, graphs: SUB_GRAPHS },
-  { name: 'a sub-graph verifiable-memory view', options: { contextGraphId: id, subGraphName: SUB, view: 'verifiable-memory' }, graphs: SUB_GRAPHS },
-  { name: 'the shared-working-memory view', options: { contextGraphId: id, view: 'shared-working-memory' },
+  { name: 'the default route', nestedCounts: [4], options: { contextGraphId: id }, graphs: MAIN_GRAPHS },
+  { name: 'the verifiable-memory view', nestedCounts: [4], options: { contextGraphId: id, view: 'verifiable-memory' }, graphs: MAIN_GRAPHS },
+  { name: 'a sub-graph', nestedCounts: [4], options: { contextGraphId: id, subGraphName: SUB }, graphs: SUB_GRAPHS },
+  { name: 'a sub-graph verifiable-memory view', nestedCounts: [4], options: { contextGraphId: id, subGraphName: SUB, view: 'verifiable-memory' }, graphs: SUB_GRAPHS },
+  { name: 'the shared-working-memory view', nestedCounts: [6], options: { contextGraphId: id, view: 'shared-working-memory' },
     graphs: [[`${ROOT}/_shared_memory`, 'urn:listed:swm'], ...SHARED_GRAPHS] },
-  { name: 'the working-memory view', options: { contextGraphId: id, view: 'working-memory', agentAddress: AGENT },
+  { name: 'the working-memory view', nestedCounts: [4], options: { contextGraphId: id, view: 'working-memory', agentAddress: AGENT },
     graphs: [[contextGraphLayerUri(id, MemoryLayer.WorkingMemory, AGENT, 1), 'urn:listed:wm1'], [contextGraphLayerUri(id, MemoryLayer.WorkingMemory, AGENT, 2), 'urn:listed:wm2']] },
-  { name: 'the shared-memory route', options: { contextGraphId: id, graphSuffix: '_shared_memory' }, graphs: SHARED_GRAPHS, branches: true },
-  { name: 'data and shared memory together', options: { contextGraphId: id, includeSharedMemory: true },
+  { name: 'the shared-memory route', nestedCounts: [2, 2], options: { contextGraphId: id, graphSuffix: '_shared_memory' }, graphs: SHARED_GRAPHS, branches: true },
+  { name: 'data and shared memory together', nestedCounts: [2, 4], options: { contextGraphId: id, includeSharedMemory: true },
     graphs: [...MAIN_GRAPHS, ...SHARED_GRAPHS], branches: true },
 ];
 const MAIN_ROUTES = ROUTES.slice(0, 2);
@@ -206,6 +208,7 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     it('a path inside OPTIONAL binds only listed terms', async () => {
       const found = await select(`SELECT ?s ?x WHERE { ?s <${L}> ?o OPTIONAL { ?o <${L}>+ ?x } }`, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      expect(bag(found)).toEqual(bag(prefixes.flatMap(prefix => [{ s: `${prefix}:1`, x: `${prefix}:3` }, { s: `${prefix}:2` }])));
     });
 
     it('an expression over a path sees only the list', async () => {
@@ -240,15 +243,16 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     it('SELECT * over a nested SELECT stays on the list', async () => {
       const found = await select('SELECT * WHERE { { SELECT * WHERE { ?s ?p ?o } } }', route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      expect(found).toHaveLength(prefixes.length * chains('x', 'y').length);
       expect(Object.keys(found[0] ?? {}).filter(name => name.startsWith('__'))).toEqual([]);
     });
 
     it('a nested count covers only the list', async () => {
       const found = await select(`SELECT ?c WHERE { { SELECT (COUNT(*) AS ?c) WHERE { ?s <${L}> ?o } } }`, route.options);
       const counts = found.map(row => Number(/^"(\d+)"/.exec(row.c!)?.[1]));
-      // Each constant GRAPH branch counts its own graph; a graph variable covers the whole list at once.
-      if (route.branches) expect(Math.max(...counts)).toBeLessThanOrEqual(prefixes.length * 2);
-      else expect(counts).toEqual([prefixes.length * 2]);
+      // Constant branches retain their per-graph counts. The combined route
+      // merges the data aggregate with deduplicated shared-memory bindings.
+      expect(counts.sort((a, b) => a - b)).toEqual(route.nestedCounts);
     });
 
     it.each([
@@ -325,17 +329,23 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       it.each(MAIN_ROUTES)('reads stay on the list on $name', async (route) => {
         const engineOverUrl = overUrl();
         for (const sparql of [`SELECT ?s ?o WHERE { ?s <${L}>+ ?o }`, `SELECT ?s ?o WHERE { ?s (<${A}>|<${B}>)* ?o }`, `SELECT ?s ?o WHERE { { SELECT ?s ?o WHERE { ?s <${L}> ?o } } }`]) {
-          expect((await engineOverUrl.query(sparql, route.options)).bindings.filter(fromUnlistedGraph)).toEqual([]);
+          const found = (await engineOverUrl.query(sparql, route.options)).bindings;
+          expect(found.filter(fromUnlistedGraph)).toEqual([]);
+          expect(found.length).toBeGreaterThan(0);
         }
-        expect(((await engineOverUrl.query(`DESCRIBE ?s WHERE { ?s <${L}> ?o }`, route.options)).quads ?? []).filter(fromUnlistedGraph)).toEqual([]);
+        const described = (await engineOverUrl.query(`DESCRIBE ?s WHERE { ?s <${L}> ?o }`, route.options)).quads ?? [];
+        expect(described.filter(fromUnlistedGraph)).toEqual([]);
+        expect(described.some(item => item.subject === 'urn:listed:root:1' && item.predicate === L)).toBe(true);
       });
     });
   }
 
   describe.each(MAIN_ROUTES)('a caller GRAPH clause on $name', (route) => {
-    it.each(PATHS)('GRAPH ?g with $name stays on the list', async ({ pattern }) => {
+    it.each(PATHS)('GRAPH ?g with $name stays on the list', async ({ pattern, pairs, nullable }) => {
       const found = await select(`SELECT ?g ?s ?o WHERE { GRAPH ?g { ${pattern} } }`, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      const expected = bag(route.graphs.flatMap(([g, prefix]) => pairsOf([prefix], pairs).map(row => ({ g, ...row }))));
+      expect(bag(found)).toEqual(nullable ? expect.arrayContaining(expected) : expected);
     });
 
     it('GRAPH ?g names the graph holding each path', async () => {
@@ -343,15 +353,34 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       expect(bag(found)).toEqual(bag(route.graphs.flatMap(([g, prefix]) => pairsOf([prefix], PLUS).map(row => ({ g, ...row })))));
     });
 
+    it('preserves SELECT * bindings without introducing helper variables', async () => {
+      const found = await select(`SELECT * WHERE { VALUES ?__dkgCallerGraphMatch0 { 1 } GRAPH ?g { ?s <${L}>+ ?o } }`, route.options);
+      expect(found).toHaveLength(route.graphs.length * PLUS.length);
+      for (const row of found) expect(Object.keys(row).sort()).toEqual(['__dkgCallerGraphMatch0', 'g', 'o', 's']);
+    });
+
+    it('keeps caller graph FILTERs and duplicate VALUES on repeated alternative paths', async () => {
+      const [graph, prefix] = route.graphs[0];
+      const found = await select(`SELECT * WHERE {
+        VALUES (?g ?tag) { (<${graph}> "first") (<${graph}> "second") }
+        GRAPH ?g { ?s (<${A}>|<${B}>)+ ?o FILTER(?g = <${graph}>) }
+      }`, route.options);
+      const pairs = PATHS.find(path => path.name === '(a|b)+')!.pairs;
+      expect(bag(found)).toEqual(bag(['"first"', '"second"'].flatMap(tag =>
+        pairsOf([prefix], pairs).map(row => ({ g: graph, tag, ...row })))));
+    });
+
     it('caller VALUES naming listed graphs stays on the list', async () => {
       const values = route.graphs.map(([graph]) => `<${graph}>`).join(' ');
       const found = await select(`SELECT ?g ?s ?o WHERE { VALUES ?g { ${values} } GRAPH ?g { ?s (<${A}>|<${B}>)* ?o } }`, route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      expect(found).toEqual(expect.arrayContaining(route.graphs.map(([g, prefix]) => ({ g, s: `${prefix}:s`, o: `${prefix}:m4` }))));
     });
 
     it('a nested SELECT inside GRAPH ?g stays on the list', async () => {
       const found = await select('SELECT ?s ?p ?o WHERE { GRAPH ?g { { SELECT ?s ?p ?o WHERE { ?s ?p ?o } } } }', route.options);
       expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      expect(found).toEqual(expect.arrayContaining(route.graphs.flatMap(([graph, prefix]) => chains(prefix, graph).map(q => ({ s: q.subject, p: q.predicate, o: q.object })))));
     });
 
     it('a constant GRAPH with a path stays on the list', async () => {
@@ -382,7 +411,7 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
 
     it('a query with no WHERE keyword stays on the list', async () => {
       const found = await select(`SELECT ?s ?o { ?s <${L}>+ ?o }`, options);
-      expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      expect(bag(found)).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), PLUS)));
     });
 
     it('a compact SELECT projection keeps its variable token when adding the dataset', async () => {
@@ -400,7 +429,7 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
 
     it('a pattern in ORDER BY leaves the main group on the list', async () => {
       const found = await select(`SELECT ?s ?o { ?s <${L}> ?o } ORDER BY (EXISTS { ?a ?b ?c })`, options);
-      expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      expect(bag(found)).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), [['1', '2'], ['2', '3']])));
     });
 
     it.each([
@@ -419,12 +448,14 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     });
 
     it('a named subquery sees only the list or is refused', async () => {
-      const outcome = await select(`SELECT ?s ?o WITH { SELECT ?s ?o WHERE { ?s <${L}> ?o } } AS %x WHERE { INCLUDE %x }`, options)
-        .catch((error: unknown) => {
-          expect(String(error)).toMatch(/query failed|expected WHERE/);
-          return [] as Row[];
-        });
-      expect(outcome.filter(fromUnlistedGraph)).toEqual([]);
+      let outcome: Row[];
+      try {
+        outcome = await select(`SELECT ?s ?o WITH { SELECT ?s ?o WHERE { ?s <${L}> ?o } } AS %x WHERE { INCLUDE %x }`, options);
+      } catch (error) {
+        expect(String(error)).toMatch(/query failed|expected WHERE/);
+        return;
+      }
+      expect(bag(outcome)).toEqual(bag(pairsOf(prefixesOf(MAIN_ROUTES[0]), [['1', '2'], ['2', '3']])));
     });
   });
 
@@ -457,8 +488,11 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
   describe('a context graph with one graph', () => {
     const options: QueryOptions = { contextGraphId: SOLO_ID };
 
-    it.each(PATHS)('SELECT with $name stays on the list', async ({ pattern }) => {
-      expect((await select(`SELECT ?s ?o WHERE { ${pattern} }`, options)).filter(fromUnlistedGraph)).toEqual([]);
+    it.each(PATHS)('SELECT with $name stays on the list', async ({ pattern, pairs, nullable }) => {
+      const found = await select(`SELECT ?s ?o WHERE { ${pattern} }`, options);
+      expect(found.filter(fromUnlistedGraph)).toEqual([]);
+      const expected = bag(pairsOf(['urn:listed:solo'], pairs));
+      expect(bag(found)).toEqual(nullable ? expect.arrayContaining(expected) : expected);
     });
 
     it('a nested SELECT stays on the list', async () => {
@@ -513,7 +547,10 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       ])('SPARQL_QUERY with %s stays on the list', async (_query, sparql) => {
         const response = await lookup(sparql, deps, config);
         expect(response.status).toBe('OK');
-        expect(JSON.parse(response.bindings ?? '[]').filter(fromUnlistedGraph)).toEqual([]);
+        const found = JSON.parse(response.bindings ?? '[]') as Row[];
+        expect(found.filter(fromUnlistedGraph)).toEqual([]);
+        if (_query === 'a path in EXISTS') expect(found).toEqual([]);
+        else expect(found.length).toBeGreaterThan(0);
       });
 
       it.each([

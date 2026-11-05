@@ -1135,7 +1135,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
   ): Promise<ConstructResult> {
     return this.postQuery(
       sparql,
-      'application/n-quads, text/n-quads',
+      'application/n-quads, text/n-quads, text/x-nquads',
       'construct',
       storeOperation,
       options,
