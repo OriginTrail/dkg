@@ -90,7 +90,7 @@ try {
   assert.equal(authenticated.status, 200);
   const actor = await authenticated.json();
   const call = createNosNodeClient(session, actor, (url, init) => cp(new Request(url, init)));
-  const rows = await call('query', { contextGraphId: 'source', sparql: 'SELECT * WHERE {?s ?p ?o}' });
+  const rows = await call('query', { contextGraphId: 'source', sparql: 'SELECT * WHERE {?s ?p ?o} LIMIT 20' });
   const request = { selected, invocationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', inputs: rows.records };
   const calculated = await invokeNosProgram(call, request);
   assert.deepEqual(calculated.outputs, [{ calculated: true, total: 6 }]);
