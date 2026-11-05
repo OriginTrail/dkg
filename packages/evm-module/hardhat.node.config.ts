@@ -56,7 +56,10 @@ const config: HardhatUserConfig = {
       gas: 15_000_000,
       gasMultiplier: 1,
       blockGasLimit: 30_000_000,
-      hardfork: 'shanghai',
+      // Prague exercises the EIP-7702 delegated-EOA path used by the
+      // RandomSampling caller-boundary regression. Contract bytecode remains
+      // compiled for London below, preserving deployment compatibility.
+      hardfork: 'prague',
       accounts: { count: 200 },
       throwOnTransactionFailures: true,
       throwOnCallFailures: true,
