@@ -245,7 +245,12 @@ describe('SWM author inventory v1', () => {
     const bytes = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
     const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytes]);
     expect(() => parseCanonicalSwmAuthorInventoryRowsV1(bom)).toThrow(/strict canonical JSON/);
-    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(Buffer.from([0xff])))
+    // Replacement decoding would leave a valid JSON string and valid identifier.
+    const malformed = Buffer.from(bytes);
+    const operationOffset = malformed.indexOf(ROW_A.shareOperationId);
+    expect(operationOffset).toBeGreaterThanOrEqual(0);
+    malformed[operationOffset] = 0xff;
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(malformed))
       .toThrow(/strict canonical JSON/);
     expect(() => parseCanonicalSwmAuthorInventoryRowsV1(bytes, { maxBytes: bytes.byteLength - 1 }))
       .toThrow(/strict canonical JSON/);
