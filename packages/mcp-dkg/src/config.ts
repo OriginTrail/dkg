@@ -55,7 +55,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { resolveDkgHome } from '@origintrail-official/dkg-core';
+import { readDkgApiPortSync, resolveDkgHome } from '@origintrail-official/dkg-core';
 import { MISSING_TOKEN_HELP } from './auth-diagnostics.js';
 
 export interface DkgConfig {
@@ -209,7 +209,8 @@ function loadConfigFromDkgHome(dkgHome: string, discovered = false): DkgConfig |
     );
   }
 
-  const apiPort = typeof daemonConfig.apiPort === 'number' ? daemonConfig.apiPort : 9200;
+  const configuredPort = typeof daemonConfig.apiPort === 'number' ? daemonConfig.apiPort : 9200;
+  const apiPort = (discovered ? readDkgApiPortSync(dkgHome) : null) ?? configuredPort;
   const fileApi = `http://localhost:${apiPort}`;
   const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
   if (discovered && !matchesDiscoveredHomeEndpoint(envApi, fileApi)) return null;

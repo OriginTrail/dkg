@@ -42,11 +42,13 @@ describe('MCP default node home', () => {
     try {
       const address = server.address();
       if (!address || typeof address === 'string') throw new Error('HTTP server did not bind');
-      write(path.join(root, '.dkg/config.json'), JSON.stringify({ apiPort: address.port, contextGraphs: ['agent-context'] }));
+      write(path.join(root, '.dkg/config.json'), JSON.stringify({ apiPort: 0, contextGraphs: ['agent-context'] }));
       write(path.join(root, '.dkg/auth.token'), '# token\nnode-secret\n');
+      write(path.join(root, '.dkg/api.port'), String(address.port));
       const config = loadConfig(path.join(root, 'client-install'));
       expect(config.sourcePath).toBe(path.join(root, '.dkg/config.json'));
       expect(config.defaultProject).toBe('agent-context');
+      expect(config.api).toBe(`http://localhost:${address.port}`);
       // The production loader uses localhost; bind the test client to the same loopback service.
       const client = new DkgClient({ config: { ...config, api: `http://127.0.0.1:${address.port}` } });
       expect(await client.listProjects()).toEqual([{ id: 'agent-context' }]);
@@ -56,6 +58,21 @@ describe('MCP default node home', () => {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
+  });
+
+  it.each(['DKG_API', 'DEVNET_API'])('matches the recorded runtime port for explicit %s endpoints', (key) => {
+    write(path.join(root, '.dkg/config.json'), '{"apiPort":0,"contextGraphs":["runtime-graph"]}');
+    write(path.join(root, '.dkg/api.port'), '9300');
+    write(path.join(root, '.dkg/auth.token'), 'runtime-token');
+    vi.stubEnv(key, 'http://127.0.0.1:9300');
+    expect(loadConfig(root)).toMatchObject({ api: 'http://127.0.0.1:9300', token: 'runtime-token', defaultProject: 'runtime-graph' });
+  });
+
+  it.each(['0', '65536', '9300junk', '1.5', ''])('ignores invalid recorded runtime port %j and keeps the configured fallback', (recorded) => {
+    write(path.join(root, '.dkg/config.json'), '{"apiPort":9300}');
+    write(path.join(root, '.dkg/api.port'), recorded);
+    write(path.join(root, '.dkg/auth.token'), 'fallback-token');
+    expect(loadConfig(root)).toMatchObject({ api: 'http://localhost:9300', token: 'fallback-token' });
   });
 
   it('keeps workspace configuration ahead of the default node home', () => {
