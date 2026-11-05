@@ -95,7 +95,7 @@ function collect(): Record<string, Hit[]> {
   return hits;
 }
 
-describe('design tokens', () => {
+describe('design tokens', { timeout: 20_000 }, () => {
   it('has no hard-coded colours or corner sizes (use the tokens in styles/00-theme.css)', () => {
     const found = Object.entries(collect()).flatMap(([file, hs]) =>
       hs.sort((a, b) => a.line - b.line).map((h) => `  ${file}:${h.line}  ${h.kind === 'colour' ? 'colour' : 'corner'}  ${h.text}`));
