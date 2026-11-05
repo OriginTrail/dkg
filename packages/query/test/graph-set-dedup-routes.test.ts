@@ -275,21 +275,21 @@ describe('graph-set deduplication routes', () => {
   ])('runs an impure FILTER once per result row on the aggregate route: %s', (filter) => {
     const { source } = rewrite(`SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o ${filter} }`);
     expect(source).toContain('MIN(?__dkgDedupMatchGraph)');
-    expect(source.split(filter)).toHaveLength(2);
-    expect(source).toContain(`} } ${filter} }`);
+    expect(source).toContain(' AS ?__dkgDedupFilter0)');
+    expect(source).toContain('FILTER(?__dkgDedupFilter0)');
     expect(source).toContain('FILTER(true)');
   });
 
   it('moves a prefixed extension function, and leaves pure FILTERs in both copies', () => {
     const prefixed = rewrite('PREFIX f: <urn:custom:> SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(f:test(?s)) }').source;
-    expect(prefixed).toContain('} } FILTER(f:test(?s)) }');
+    expect(prefixed).toContain('BIND((f:test(?s)) AS ?__dkgDedupFilter0)');
     const pattern = '?s <urn:p:link>/<urn:p:to> ?o FILTER(REGEX(STR(?o), "end"))';
     const pure = rewrite(`SELECT ?s WHERE { ${pattern} }`).source;
     expect(pure.split(pattern)).toHaveLength(3);
     expect(pure).not.toContain('FILTER(true)');
     const mixed = rewrite('SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(?o = "end") FILTER(RAND() < 2) }').source;
     expect(mixed.split('FILTER(?o = "end") FILTER(true)')).toHaveLength(3);
-    expect(mixed).toContain('} } FILTER(RAND() < 2) }');
+    expect(mixed).toContain('BIND((RAND() < 2) AS ?__dkgDedupFilter0)');
   });
 
   it.each([
@@ -331,6 +331,7 @@ describe('graph-set deduplication routes', () => {
   it.each([
     ['DISTINCT', '?s <urn:sample:value> ?o'],
     ['aggregate', '?s <urn:sample:link>/<urn:sample:to> ?o'],
+    ['aggregate with repeated mappings', '?s <urn:sample:repeated-link>/<urn:sample:repeated-to> ?o'],
   ])('tests each row of a volatile FILTER on the %s route', async (_route, pattern) => {
     const store = new OxigraphStore();
     try {
@@ -339,11 +340,16 @@ describe('graph-set deduplication routes', () => {
         quad(`urn:sample:${n}`, 'urn:sample:value', `"v${n}"`, graphs[0]),
         quad(`urn:sample:${n}`, 'urn:sample:link', `urn:sample:hop:${n}`, graphs[0]),
         quad(`urn:sample:hop:${n}`, 'urn:sample:to', `"t${n}"`, graphs[0]),
+        quad('urn:sample:shared', 'urn:sample:repeated-link', `urn:sample:shared-hop:${n}`, graphs[0]),
+        quad(`urn:sample:shared-hop:${n}`, 'urn:sample:repeated-to', 'urn:sample:same-end', graphs[0]),
       ]).flat());
       const rewritten = rewrite(`SELECT ?s WHERE { ${pattern} FILTER(RAND() < 0.5) }`);
       const actual = await store.query(materializePreparedSparql(rewritten.prepared));
       expect(actual.bindings.length).toBeGreaterThan(700);
       expect(actual.bindings.length).toBeLessThan(1300);
+      if (_route === 'aggregate with repeated mappings') {
+        expect(new Set(actual.bindings.map(row => row.s))).toEqual(new Set(['urn:sample:shared']));
+      }
     } finally {
       await store.close();
     }
@@ -359,12 +365,18 @@ describe('graph-set deduplication routes', () => {
       ]);
       // COALESCE is deterministic but off the pure list, so this FILTER moves.
       const rewritten = rewrite('SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(COALESCE(?o = "target", false)) } LIMIT 1');
-      expect(rewritten.source.match(/LIMIT 1/g)).toHaveLength(1);
+      expect(rewritten.source.match(/LIMIT 1/g)).toHaveLength(2);
       const actual = await store.query(materializePreparedSparql(rewritten.prepared));
       expect(actual.bindings).toEqual([{ s: 'urn:s:target' }]);
     } finally {
       await store.close();
     }
+  });
+
+  it('rejects a collision with a per-row filter helper', () => {
+    expect(wrapWithDeduplicatedGraphValues(scope(
+      'SELECT ?__dkgDedupFilter0 WHERE { ?s <urn:p:link>/<urn:p:to> ?__dkgDedupFilter0 FILTER(RAND() < 0.5) }',
+    ), graphs)).toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
   });
 
   it.each([

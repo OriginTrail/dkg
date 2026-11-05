@@ -217,4 +217,25 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
     const hops = await engine.query(`SELECT ?s ?o WHERE { ?s <${LINK}>/<${TO}> ?o }`, options);
     expect(bag(hops.bindings)).toEqual(bag(HOPS));
   });
+
+  it.each(['values', 'dataset'])('samples each retained row when hidden paths repeat the same mapping (%s)', async (route) => {
+    await store.insert(Array.from({ length: 2000 }, (_, n) => [
+      quad('urn:sample:shared', 'urn:sample:link', `urn:sample:hop:${n}`, graphs[0]),
+      quad(`urn:sample:hop:${n}`, 'urn:sample:to', 'urn:sample:end', graphs[0]),
+    ]).flat());
+    const pattern = `?s <urn:sample:link>${route === 'dataset' ? '+' : ''}/<urn:sample:to> ?o`;
+    const engine = new DKGQueryEngine(store);
+    const read = route === 'dataset'
+      ? async (query: string) => (await engine.query(query, { contextGraphId: id })).bindings : select;
+    expect(await read(`SELECT ?s WHERE { ${pattern} }`)).toHaveLength(2000);
+    // Blazegraph folds RAND() to one value even in an unrewritten query.
+    // STRUUID is evaluated per row on both engines; its first hex digit gives
+    // the same 50% sampling probability without relying on that backend quirk.
+    const retained = await read(`SELECT ?s ?o WHERE { ${pattern} FILTER(REGEX(STRUUID(), "^[0-7]")) }`);
+    // Filtering once per grouped mapping produces 0 or 2000; independent row
+    // sampling stays well inside this range (over 13 standard deviations wide).
+    expect(retained.length).toBeGreaterThan(700);
+    expect(retained.length).toBeLessThan(1300);
+    expect(new Set(bag(retained))).toEqual(new Set([JSON.stringify({ o: 'urn:sample:end', s: 'urn:sample:shared' })]));
+  });
 });
