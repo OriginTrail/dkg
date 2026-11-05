@@ -108,7 +108,8 @@ export function dkgComponentStore(db, transport, approvedInputs, profile = confi
       )
     )
       throw fail("Invalid DKG component request.");
-    const match = /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(
+    const nativeRun = workflow.nativeMcp === true && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value.effectId ?? "");
+    const match = nativeRun ? [value.effectId, value.effectId] : /^urn:sr:effect:([a-f0-9-]{36}):[^\s]{1,100}$/.exec(
       value.effectId ?? "",
     );
     if (

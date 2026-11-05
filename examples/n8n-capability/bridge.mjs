@@ -10,6 +10,8 @@ import { timingSafeEqual } from 'node:crypto';
 import { persistProgramKnowledgeAsset } from '../../packages/cli/dist/semantic-runtime-execution-persistence.js';
 import { createWorkflowService } from './workflow-service.mjs';
 import { WORKFLOW_PREFIX } from './workflow-definition.mjs';
+import { createStudioMcpService } from './studio-mcp-service.mjs';
+import { createStudioMcpHttp, studioMcpFlags } from './studio-mcp-http.mjs';
 import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioService } from './studio-service.mjs';
 import { normalizeComponentInput } from './component-registry.mjs';
@@ -81,6 +83,10 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
     listCapabilities: async () => [...await list(), ...await listPrograms()],
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
+  const mcpFlags = studioMcpFlags();
+  if (mcpFlags.enabled && (!nosStudioSession || !provider)) throw new Error('Studio MCP requires an authenticated account companion.');
+  const mcp = mcpFlags.enabled ? createStudioMcpService({ provider, installation: config.n8nNative, accountId: nosStudioSession.accountId }) : null;
+  const mcpHttp = mcp ? createStudioMcpHttp({ service: mcp, session: nosStudioSession, agentEnabled: mcpFlags.agentEnabled }) : null;
   async function invoke(capability, input, invocationId) {
     const result = await client.programs.invoke({ graphId, operationIri: capability.kaRef, inputs: [input], invocationId });
     const stored = await loadExecutionOutputs(agent, graphId, result.executionIri, 'wm', owner);
@@ -93,13 +99,20 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
   }
   async function handle(req, res, path) {
     if (!path.startsWith('/spike/ka/')) return false;
+    if (path === prefix + '/studio/mcp') {
+      if (mcpHttp) await mcpHttp(req, res);
+      else json(res, 404, { error: 'Not found' });
+      return true;
+    }
     if(path === '/spike/ka/internal/dkg-component') {
       try {
         const token=readFileSync(config.n8nNative.webhookTokenFile,'utf8').trim();
         const expected=Buffer.from('Bearer '+token), supplied=Buffer.from(String(req.headers.authorization??''));
         if(!studio || req.method!=='POST' || req.headers.origin || token.length<32 || expected.length!==supplied.length || !timingSafeEqual(expected,supplied)) { json(res,403,{error:'Native DKG component access denied'});return true; }
         let body='',size=0;for await(const chunk of req) {size+=chunk.length;if(size>16384)throw Object.assign(new Error('Bounded DKG batch required'),{status:413});body+=chunk;}
-        json(res,200,await studio.dkgComponent(JSON.parse(body)));
+        const value = JSON.parse(body);
+        const nativeResult = mcp ? await mcp.dkgComponent(value) : undefined;
+        json(res,200,nativeResult === undefined ? await studio.dkgComponent(value) : nativeResult);
       } catch(e) { json(res,e.status??409,{code:e.code??'DKG_COMPONENT_UNCONFIRMED',error:e.message}); }
       return true;
     }

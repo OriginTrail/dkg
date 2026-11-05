@@ -15,6 +15,9 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     CREATE TABLE IF NOT EXISTS events (provider_id TEXT NOT NULL, execution_id TEXT NOT NULL,
     ka_ref TEXT NOT NULL, invocation_id TEXT NOT NULL, input_json TEXT, receipt_json TEXT, PRIMARY KEY(provider_id,execution_id));`);
   if (!db.prepare('PRAGMA table_info(events)').all().some(c => c.name === 'input_json')) db.exec('ALTER TABLE events ADD COLUMN input_json TEXT');
+  db.exec(`CREATE TABLE IF NOT EXISTS studio_saved_native (
+    ka_ref TEXT PRIMARY KEY, compiled_json TEXT NOT NULL, published_json TEXT NOT NULL,
+    withdrawn INTEGER NOT NULL DEFAULT 0);`);
   const error = message => Object.assign(new Error(message), { status: 409, code: 'INVALID_WORKFLOW' });
   const row = ref => db.prepare('SELECT * FROM workflows WHERE ka_ref=?').get(ref);
   async function api(path, method = 'GET', body) {
@@ -24,8 +27,13 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
       headers: { 'X-N8N-API-KEY': token, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     if (!res.ok) { await res.body?.cancel(); throw error('n8n did not confirm provisioning (' + res.status + '). Retry this save.'); }
-    const bytes = await res.text(); if (bytes.length > 1_048_576) throw error('n8n response exceeds the PoC limit.');
-    return JSON.parse(bytes);
+    let size = 0; const chunks = [];
+    for await (const chunk of res.body ?? []) {
+      size += chunk.byteLength;
+      if (size > 1_048_576) throw error('n8n response exceeds the PoC limit.');
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   }
   const installGrant = grant => {
     if (grant.kind === 'program-workflow-v1') return;
@@ -92,5 +100,15 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     if (!!native.active !== active) await api('/workflows/' + saved.provider_id + (active ? '/publish' : '/unpublish'), 'POST', {});
   }
   const fingerprint = path => createHash('sha256').update(readFileSync(path, 'utf8').trim()).digest('hex');
-  return { db, row, api, provision, setPublished, fingerprint, installGrant, close: () => db.close() };
+  // Record only after the owner's complete save succeeds. Failed provisioning is
+  // not a saved/approved workflow. Existing installations must save once again.
+  async function recordSavedNative(compiled) {
+    if (compiled.executor === 'dkg' || ['schedule', 'webhook'].includes(compiled.mode)) return;
+    const native = await api('/workflows/' + compiled.grant.workflowId);
+    const published = native.activeVersion ? { ...native.activeVersion, settings: native.settings } : native;
+    if (!native.active || n8nWorkflowSha256(published) !== compiled.grant.workflowSha256) throw error('Saved native revision is unavailable.');
+    db.prepare('INSERT INTO studio_saved_native (ka_ref,compiled_json,published_json) VALUES (?,?,?) ON CONFLICT(ka_ref) DO NOTHING')
+      .run(compiled.kaRef, JSON.stringify({ definition: compiled.definition, grant: compiled.grant, mode: compiled.mode, kaRef: compiled.kaRef }), JSON.stringify(published));
+  }
+  return { db, row, api, provision, setPublished, fingerprint, installGrant, recordSavedNative, close: () => db.close() };
 }

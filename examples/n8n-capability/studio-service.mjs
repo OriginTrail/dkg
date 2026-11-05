@@ -27,6 +27,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const compiled = readStudio(source.source);
     if (compiled.kaRef !== kaRef || sourceHash && sourceHash !== source.sourceHash) throw reject('The saved graph revision changed.');
     return { compiled, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
+      ...(compiled.grant.workflowSha256 ? { workflowSha256: compiled.grant.workflowSha256 } : {}),
       mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
       requiresExportAuthorization: compiled.requiresExportAuthorization || !!JSON.parse(provider.row(kaRef).grant_json).requiresExportAuthorization,
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(activation(kaRef)), readbackVerified: true } };
@@ -75,7 +76,9 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         typescript: { children: nativeRemote ? [] : [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
           operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()],
         maxCalls: compiled.executor === 'dkg' ? 256 : 16, maxConcurrency: 1, timeoutMs: 60000 } });
-      return (await get(compiled.kaRef, sourceHash)).workflow;
+      const saved = (await get(compiled.kaRef, sourceHash)).workflow;
+      await provider.recordSavedNative?.(compiled);
+      return saved;
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
   }
