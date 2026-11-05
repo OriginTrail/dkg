@@ -195,6 +195,33 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
       return materializePreparedSparql(result.value.prepared);
     };
     const read = async (source: string) => (await store.query(planned(source))).bindings;
+    it('preserves repeated named blank-node matches without exposing helper bindings', async () => {
+      for (const binding of ['hop', '__dkgBlankNode0']) {
+        const found = await read(`SELECT * WHERE {
+          _:subject <${LINK}> ?${binding} . _:subject <${LINK}>${mode === 'dataset' ? '+' : ''}/<${TO}> ?o
+          FILTER(?o = "t")
+        }`);
+        expect(bag(found)).toEqual(bag([
+          ...Array.from({ length: 2 }, () => ({ [binding]: 'urn:m:1', o: '"t"' })),
+          ...Array.from({ length: 2 }, () => ({ [binding]: 'urn:m:2', o: '"t"' })),
+          { [binding]: 'urn:m:3', o: '"t"' },
+        ]));
+      }
+      const rewritten = planned(`ASK WHERE { _:subject <${LINK}>${mode === 'dataset' ? '+' : ''}/<${TO}> ?o FILTER(?o = "t") } OFFSET 1`);
+      const result = await store.query(endpoint ? rewritten.replace(/^ASK/, 'SELECT *') : rewritten);
+      if (endpoint) expect(result.bindings).toEqual([{ o: '"t"' }]);
+      else expect(result).toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it.each([1, 2])('preserves ASK-planned row counts before HAVING COUNT > %s', async (threshold) => {
+      const rewritten = planned(`ASK WHERE { ${pattern} FILTER(?s = <urn:s:4>) }
+        GROUP BY ?s HAVING(COUNT(*) > ${threshold})`);
+      // These backends reject native ASK GROUP BY. SELECT executes the same
+      // ASK-planned bag and exposes whether the cardinality-sensitive group survives.
+      const result = await store.query(rewritten.replace(/^ASK/, 'SELECT ?s'));
+      expect(result.bindings).toEqual(threshold === 1 ? [{ s: 'urn:s:4' }] : []);
+    });
+
     it.each([0, 1, 2])('preserves hidden-path multiplicity for ASK OFFSET %s', async (offset) => {
       const rewritten = planned(`ASK WHERE {
         ${pattern} FILTER(?s = <urn:s:4>)
@@ -239,6 +266,20 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
     const result = await store.query(rewrite(`CONSTRUCT { ?s <urn:p:seen> "yes" } WHERE { ${where} }`));
     if (result.type !== 'quads') throw new Error(`Expected quads, got ${result.type}`);
     expect([...new Set(result.quads.map((item) => item.subject))].sort()).toEqual(subjects);
+  });
+
+  it('samples mirrored DISTINCT mappings only once per logical row', async () => {
+    const predicate = 'urn:mirror-sample:value';
+    await store.insert(graphs.slice(0, 2).flatMap(graph => Array.from({ length: 2000 }, (_, n) =>
+      quad(`urn:mirror-sample:${n}`, predicate, `"value-${n}"`, graph))));
+    expect(await select(`SELECT ?s ?o WHERE { ?s <${predicate}> ?o }`)).toHaveLength(2000);
+    const retained = await select(`SELECT ?s ?o WHERE {
+      ?s <${predicate}> ?o FILTER(REGEX(STRUUID(), "^[0-7]"))
+    }`);
+    // Two independent chances per row retain about 1500; one retains about 1000.
+    expect(retained.length).toBeGreaterThan(700);
+    expect(retained.length).toBeLessThan(1300);
+    expect(new Set(bag(retained)).size).toBe(retained.length);
   });
 
   it('reads through the engine with one row per triple', async () => {

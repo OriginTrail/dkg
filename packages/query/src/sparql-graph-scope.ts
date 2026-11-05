@@ -15,6 +15,7 @@ import {
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { applyGraphDataset, withDatasetClauses } from './sparql-graph-dataset.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
+import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
 import { hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { createGraphAccess, type GraphAccess } from './sparql-graph-access.js';
@@ -174,7 +175,6 @@ export function wrapWithGraphUnion(
 
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
 const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
-const dedupFilterVariable = (index: number) => `?__dkgDedupFilter${index}`;
 
 interface ProjectedGraphPattern {
   readonly pattern: string;
@@ -225,41 +225,47 @@ function buildDeduplicatedGraphPattern(
 ): ProjectedGraphPattern | null {
   const plan = analyzeDedupPattern(scope);
   if (!plan) return null;
-  const { openEnd, close } = scope.where!;
   const { uniqueMappings, filters } = plan;
-  // Only an unmodified ASK ignores multiplicity. OFFSET and aggregate
-  // modifiers must see the selected graph's complete row bag.
-  const plainAsk = scope.operation === 'ASK'
-    && scope.where!.closingTokenIndex === scope.prepared.tokens.length - 1;
-  const distinct = uniqueMappings || plainAsk;
-  const movedFilters = distinct ? [] : filters;
-  // Only the aggregate route repeats its pattern. Move every supported FILTER after it,
-  // leaving no-op separators behind, so each result row is tested exactly once.
-  let inner = '';
-  let from = openEnd;
-  for (const { start, end } of movedFilters) {
-    inner += `${scope.source.slice(from, start)}FILTER(true)`;
-    from = end;
-  }
-  inner += scope.source.slice(from, close);
+  // Deduplicate only mappings known to be unique within one graph. ASK uses
+  // the same row semantics, including its modifiers and volatile FILTERs.
+  const distinct = uniqueMappings;
+  const movedFilters = filters;
+  // Every retained row evaluates each moved FILTER once. Hidden blank-node
+  // variables stay private across graph selection and replay.
+  const rendered = renderDedupPattern(scope, movedFilters);
+  const inner = rendered.pattern;
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  const usedVariables = new Set(scope.queryVariables.map(variable => variable.logicalName));
+  const filterVariables = movedFilters.map(() => {
+    let suffix = 0;
+    while (usedVariables.has(`__dkgDedupFilter${suffix}`)) suffix++;
+    const name = `__dkgDedupFilter${suffix}`;
+    usedVariables.add(name);
+    return `?${name}`;
+  });
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
   // once for all identical mappings. Filtering these booleans after OPTIONAL
   // also discards its unmatched fallback row and expression errors.
   const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
-    `BIND(${scope.source.slice(expressionStart, end)} AS ${dedupFilterVariable(index)})`,
+    `BIND(${scope.source.slice(expressionStart, end)} AS ${filterVariables[index]})`,
   ).join(' ');
-  const bindings = { pattern: filterBindings, helperVariables: movedFilters.map((_, index) => dedupFilterVariable(index)) };
+  const bindings = { pattern: filterBindings, helperVariables: filterVariables };
   const candidate = access.candidate(inner, distinct ? DEDUP_GRAPH_SENTINEL : DEDUP_MATCH_GRAPH_SENTINEL);
-  if (distinct) return { ...candidate, distinct };
+  if (distinct) {
+    const helperVariables = [...candidate.helperVariables, ...rendered.helperVariables];
+    if (!movedFilters.length) return { ...candidate, distinct, helperVariables };
+    const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
+    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate.pattern} } } ${filterBindings} ${trailing}`,
+      helperVariables: [...helperVariables, ...filterVariables] };
+  }
   // Choose one graph deterministically and replay its hidden-path multiplicity.
   // The access implementation owns the barriers required by its backend plan.
   const replay = access.replay(inner, DEDUP_GRAPH_SENTINEL, variables, bindings);
   const trailing = bindings.helperVariables.map(variable => `FILTER(${variable})`).join(' ');
   return {
     pattern: `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE { ${candidate.pattern} } GROUP BY ${variables} } ${replay.pattern} ${trailing}`,
-    helperVariables: [...new Set([...candidate.helperVariables, ...replay.helperVariables])],
+    helperVariables: [...new Set([...candidate.helperVariables, ...replay.helperVariables, ...rendered.helperVariables])],
   };
 }
 

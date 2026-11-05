@@ -182,7 +182,6 @@ describe('graph-set deduplication routes', () => {
       const rewritten = rewrite(query);
       expect(rewritten.source).toContain('{ SELECT DISTINCT');
       expect(rewritten.source).not.toContain('__dkgDedupMatchGraph');
-      expect(rewritten.source).not.toContain('FILTER(true)');
       const actual = await store.query(materializePreparedSparql(rewritten.prepared));
       expect(bag(actual.bindings)).toEqual(bag(await lowestGraphRows(store, query)));
     } finally {
@@ -242,6 +241,7 @@ describe('graph-set deduplication routes', () => {
 
   it.each([
     'SELECT ?s WHERE { _:x <urn:p:value> ?s }',
+    'ASK WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
     'ASK WHERE { ?s <urn:p:link>/<urn:p:to> ?o } OFFSET 1',
     'CONSTRUCT { ?s <urn:p:seen> ?o } WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
     'DESCRIBE ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
@@ -253,7 +253,6 @@ describe('graph-set deduplication routes', () => {
 
   it.each([
     'ASK WHERE { ?s <urn:p:value> ?o }',
-    'ASK WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
     'ASK WHERE { ?s <urn:p:value> ?o FILTER(RAND() < 2) }',
     'CONSTRUCT { ?s <urn:p:value> ?o } WHERE { ?s <urn:p:value> ?o }',
     'DESCRIBE ?s WHERE { ?s <urn:p:value> ?o . ?s <urn:p:other> ?other }',
@@ -336,14 +335,14 @@ describe('graph-set deduplication routes', () => {
   ])('tests each row of a volatile FILTER on the %s route', async (_route, pattern) => {
     const store = new OxigraphStore();
     try {
-      // Oxigraph samples per row here. Evaluating the FILTER once for the query would give all rows or none.
-      await store.insert(Array.from({ length: 2000 }, (_, n) => [
-        quad(`urn:sample:${n}`, 'urn:sample:value', `"v${n}"`, graphs[0]),
-        quad(`urn:sample:${n}`, 'urn:sample:link', `urn:sample:hop:${n}`, graphs[0]),
-        quad(`urn:sample:hop:${n}`, 'urn:sample:to', `"t${n}"`, graphs[0]),
-        quad('urn:sample:shared', 'urn:sample:repeated-link', `urn:sample:shared-hop:${n}`, graphs[0]),
-        quad(`urn:sample:shared-hop:${n}`, 'urn:sample:repeated-to', 'urn:sample:same-end', graphs[0]),
-      ]).flat());
+      // Two graph copies must not give one logical row extra sampling chances.
+      await store.insert(graphs.slice(0, 2).flatMap(graph => Array.from({ length: 2000 }, (_, n) => [
+        quad(`urn:sample:${n}`, 'urn:sample:value', `"v${n}"`, graph),
+        quad(`urn:sample:${n}`, 'urn:sample:link', `urn:sample:hop:${n}`, graph),
+        quad(`urn:sample:hop:${n}`, 'urn:sample:to', `"t${n}"`, graph),
+        quad('urn:sample:shared', 'urn:sample:repeated-link', `urn:sample:shared-hop:${n}`, graph),
+        quad(`urn:sample:shared-hop:${n}`, 'urn:sample:repeated-to', 'urn:sample:same-end', graph),
+      ]).flat()));
       const rewritten = rewrite(`SELECT ?s WHERE { ${pattern} FILTER(RAND() < 0.5) }`);
       const actual = await store.query(materializePreparedSparql(rewritten.prepared));
       expect(actual.bindings.length).toBeGreaterThan(700);
@@ -374,10 +373,14 @@ describe('graph-set deduplication routes', () => {
     }
   });
 
-  it('rejects a collision with a per-row filter helper', () => {
-    expect(wrapWithDeduplicatedGraphValues(scope(
-      'SELECT ?__dkgDedupFilter0 WHERE { ?s <urn:p:link>/<urn:p:to> ?__dkgDedupFilter0 FILTER(RAND() < 0.5) }',
-    ), graphs)).toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+  it('preserves caller variables when allocating private per-row filter bindings', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(data);
+      const rewritten = rewrite('SELECT ?__dkgDedupFilter0 WHERE { ?s <urn:p:link>/<urn:p:to> ?__dkgDedupFilter0 FILTER(RAND() < 2) }');
+      const actual = await store.query(materializePreparedSparql(rewritten.prepared));
+      expect(actual.bindings).toEqual([{ __dkgDedupFilter0: '"end"' }, { __dkgDedupFilter0: '"end"' }]);
+    } finally { await store.close(); }
   });
 
   it.each([
