@@ -28,7 +28,7 @@ import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import {
   materializePreparedSparql,
   prepareSparql,
-} from '@origintrail-official/dkg-rdf-utils/sparql';
+} from '@origintrail-official/dkg-core/sparql-lexer';
 import type {
   QueryResult,
   QueryOptions,
