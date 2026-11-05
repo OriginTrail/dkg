@@ -49,8 +49,8 @@ function classifyLine(line: string): 'error' | 'warn' | 'info' | 'debug' {
 }
 
 const LEVEL_COLORS: Record<string, string> = {
-  error: 'var(--accent-red)',
-  warn:  'var(--accent-amber)',
+  error: 'var(--text-danger)',
+  warn:  'var(--text-warning)',
   info:  'var(--text-primary)',
   debug: 'var(--text-tertiary)',
 };
@@ -209,7 +209,7 @@ function TransactionsContent() {
                     <span style={{
                       padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
                       background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
-                      color: op.status === 'success' ? 'var(--accent-green)' : op.status === 'error' ? 'var(--accent-red)' : 'var(--accent-amber)',
+                      color: op.status === 'success' ? 'var(--text-success)' : op.status === 'error' ? 'var(--text-danger)' : 'var(--accent-amber)',
                     }}>{op.status}</span>
                   </td>
                   <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
@@ -238,7 +238,7 @@ function TransactionsContent() {
                         <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
                         {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
                         {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
-                        {op.error_message && <span style={{ color: 'var(--accent-red)' }}><b>Error:</b> {op.error_message}</span>}
+                        {op.error_message && <span style={{ color: 'var(--text-danger)' }}><b>Error:</b> {op.error_message}</span>}
                       </div>
                       {(op.phases ?? []).length > 0 && (
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>

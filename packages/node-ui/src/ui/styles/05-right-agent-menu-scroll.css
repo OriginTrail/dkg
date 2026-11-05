@@ -115,9 +115,8 @@
   background: var(--bg-hover);
 }
 .v10-select-trigger:focus-visible {
-  outline: none;
-  border-color: var(--accent-blue);
-  box-shadow: 0 0 0 1px var(--accent-blue);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 .v10-select.open .v10-select-trigger {
   border-color: var(--border-strong);
@@ -290,9 +289,9 @@
   border: 1px solid var(--border-default);
 }
 .v10-local-agent-warning.connecting {
-  color: var(--text-info);
-  background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-surface));
-  border-color: color-mix(in srgb, var(--accent-blue) 28%, var(--border-subtle));
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-color: var(--border-default);
 }
 .v10-local-agent-warning.offline {
   color: var(--text-warning);

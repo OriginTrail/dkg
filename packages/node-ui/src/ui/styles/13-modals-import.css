@@ -15,7 +15,7 @@
 }
 .v10-file-preview-meta-item {
   font-size: 10px; padding: 2px 8px; border-radius: var(--radius-xs);
-  background: var(--bg-surface, var(--bg-secondary)); color: var(--text-tertiary);
+  background: var(--bg-surface); color: var(--text-tertiary);
   font-family: var(--font-mono);
 }
 .v10-file-preview-content { flex: 1; overflow: auto; min-height: 200px; }
@@ -31,14 +31,15 @@
   display: flex; gap: 12px; padding: 12px 24px; border-top: 1px solid var(--border-subtle); flex-shrink: 0;
 }
 .v10-file-preview-download {
-  font-size: 11px; color: var(--accent); text-decoration: none; font-weight: 500;
+  font-size: 11px; color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); font-weight: 500;
 }
 .v10-file-preview-download:hover { text-decoration: underline; }
 
 /* Clickable assertion name */
 .v10-assertion-item-name.clickable {
   background: none; border: none; padding: 0; cursor: pointer;
-  font-family: var(--font-mono); font-size: 12px; color: var(--accent);
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-link);
+  text-decoration: underline; text-decoration-color: var(--link-underline);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;
 }
 .v10-assertion-item-name.clickable:hover { text-decoration: underline; }
@@ -163,7 +164,7 @@ body.light .v10-modal-box {
 }
 .v10-import-dropzone:hover,
 .v10-import-dropzone.drag-over {
-  border-color: var(--accent-blue, var(--border-strong));
+  border-color: var(--border-strong);
   background: var(--bg-hover);
 }
 .v10-import-dropzone-label {
@@ -210,7 +211,7 @@ body.light .v10-modal-box {
   line-height: 1;
   flex-shrink: 0;
 }
-.v10-import-file-remove:hover { color: var(--accent-red); }
+.v10-import-file-remove:hover { color: var(--text-danger); }
 .v10-import-option {
   display: flex;
   align-items: center;
@@ -238,7 +239,7 @@ body.light .v10-modal-box {
 }
 .v10-import-progress-fill {
   height: 100%;
-  background: var(--accent-blue);
+  background: var(--text-primary);
   border-radius: var(--radius-hair);
   transition: width 0.3s ease;
 }

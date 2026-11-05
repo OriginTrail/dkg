@@ -61,7 +61,7 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
   outline: none;
   transition: border-color 0.15s;
 }
-.input:focus { border-color: var(--accent-blue); }
+.input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .input.mono { font-family: var(--font-mono); }
 select.input {
   appearance: none;
@@ -135,7 +135,7 @@ select.input {
 
 /* Tx link icon */
 .tx-link-icon { color: var(--text-tertiary); opacity: 0.6; transition: opacity 0.15s; }
-.tx-link-icon:hover { opacity: 1; color: var(--accent-blue); }
+.tx-link-icon:hover { opacity: 1; color: var(--text-primary); }
 
 /* Stat cards */
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:16px 18px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}

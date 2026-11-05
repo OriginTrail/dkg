@@ -86,7 +86,7 @@
   font-size: 10px; color: var(--text-ghost);
   font-style: italic;
 }
-.v10-memstack-project-status.error { color: var(--accent-red); }
+.v10-memstack-project-status.error { color: var(--text-danger); }
 
 .v10-memstack-cell {
   display: flex; flex-direction: column; gap: 6px;

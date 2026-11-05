@@ -46,7 +46,7 @@
 .v10-md-ul .v10-md-li input[type="checkbox"] {
   margin-right: 6px;
   vertical-align: middle;
-  accent-color: var(--accent-blue);
+  accent-color: var(--text-primary);
 }
 .v10-md-link {
   color: var(--text-link);

@@ -226,7 +226,7 @@
 .v10-gen-widget-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .v10-gen-widget-right { display: flex; align-items: center; gap: 10px; }
 .v10-gen-widget-agent { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
-.v10-gen-widget-agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent-blue); }
+.v10-gen-widget-agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--role); }
 .v10-gen-widget-dismiss {
   font-size: 14px; color: var(--text-tertiary); padding: 2px 4px; border-radius: var(--radius-xs);
   transition: all 0.15s; cursor: pointer; border: none; background: none;

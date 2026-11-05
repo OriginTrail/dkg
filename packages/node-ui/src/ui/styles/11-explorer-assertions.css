@@ -376,7 +376,7 @@
 .v10-publish-select-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 8px 12px; border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-primary);
+  background: var(--bg-surface);
 }
 .v10-publish-select-all {
   display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-secondary); cursor: pointer;

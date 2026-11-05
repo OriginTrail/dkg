@@ -5,6 +5,7 @@ import {
   type PendingJoinRequest,
 } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { Count } from '../ds/Badge.js';
 
 interface NetworkAgent {
   agentUri: string;
@@ -258,39 +259,27 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
         <div className="v10-modal-body">
           {/* Tabs */}
-          <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderBottom: '1px solid var(--border-default)' }}>
+          <div role="tablist" aria-label="Share options" style={{ display: 'flex', gap: 16, marginBottom: 16, borderBottom: '1px solid var(--border-default)' }}>
             <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'allowlist'}
+              className="ds-tab"
+              style={{ height: 'var(--h-control-md)' }}
               onClick={() => setActiveTab('allowlist')}
-              style={{
-                padding: '8px 16px', fontSize: 12, fontWeight: activeTab === 'allowlist' ? 600 : 400,
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: activeTab === 'allowlist' ? 'var(--text-primary)' : 'var(--text-tertiary)',
-                borderBottom: activeTab === 'allowlist' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-              }}
             >
               Allowlist
             </button>
             <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === 'requests'}
+              className="ds-tab"
+              style={{ height: 'var(--h-control-md)' }}
               onClick={() => setActiveTab('requests')}
-              style={{
-                padding: '8px 16px', fontSize: 12, fontWeight: activeTab === 'requests' ? 600 : 400,
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: activeTab === 'requests' ? 'var(--text-primary)' : 'var(--text-tertiary)',
-                borderBottom: activeTab === 'requests' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-                position: 'relative',
-              }}
             >
               Join requests
-              {pendingRequests.length > 0 && (
-                <span style={{
-                  position: 'absolute', top: 4, right: 4,
-                  background: 'var(--accent-red)', color: 'var(--text-on-accent)',
-                  borderRadius: 'var(--radius-pill)', fontSize: 10, fontWeight: 700,
-                  padding: '1px 5px', minWidth: 16, textAlign: 'center',
-                }}>
-                  {pendingRequests.length}
-                </span>
-              )}
+              {pendingRequests.length > 0 && <Count value={pendingRequests.length} tone="attention" />}
             </button>
           </div>
 
@@ -321,7 +310,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                         }}>
                           <span style={{ color: 'var(--text-primary)' }}>
                             {peer ? (
-                              <><span style={{ fontFamily: 'var(--font-body)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>{truncAddr(addr)}</span></>
+                              <><span style={{ fontFamily: 'var(--font-sans)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 10 }}>{truncAddr(addr)}</span></>
                             ) : addr}
                           </span>
                           <button

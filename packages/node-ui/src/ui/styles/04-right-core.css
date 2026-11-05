@@ -181,12 +181,12 @@
   transition: background 0.15s;
 }
 .v10-agent-card:hover { background: var(--bg-elevated); }
-.v10-agent-card.self { border-color: var(--accent-blue); border-left: 3px solid var(--accent-blue); }
+.v10-agent-card.self { border-color: var(--role); border-left: 3px solid var(--role); }
 .v10-agent-card-header { display: flex; align-items: center; gap: 6px; }
 .v10-agent-card-dot {
   width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 }
-.v10-agent-card-dot.self { background: var(--accent-blue); }
+.v10-agent-card-dot.self { background: var(--role); }
 .v10-agent-card-dot.connected { background: var(--accent-green); }
 .v10-agent-card-dot.known { background: var(--text-tertiary); }
 .v10-agent-card-dot.degraded { background: var(--accent-amber); }

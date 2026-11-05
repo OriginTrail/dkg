@@ -94,9 +94,10 @@
 
 /* explorer link affordance reusing the identity-value type */
 .v10-graph-prov-link {
-  color: var(--accent-blue);
-  text-decoration: none;
+  color: var(--text-link);
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
 }
 .v10-graph-prov-link:hover {
-  text-decoration: underline;
+  text-decoration-color: currentColor;
 }

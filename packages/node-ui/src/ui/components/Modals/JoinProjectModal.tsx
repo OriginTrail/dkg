@@ -605,7 +605,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             <div style={{
               padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 12,
               background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-              color: 'var(--accent-green)',
+              color: 'var(--text-success)',
             }}>
               Approved! Loading Context Graph…
             </div>

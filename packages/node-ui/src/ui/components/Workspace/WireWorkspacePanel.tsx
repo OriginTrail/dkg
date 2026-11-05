@@ -235,7 +235,7 @@ export function WireWorkspacePanel({
         <div style={{
           padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
           background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-          color: 'var(--accent-green)',
+          color: 'var(--text-success)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
           Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
@@ -248,8 +248,8 @@ export function WireWorkspacePanel({
         </div>
         <pre style={{
           fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
-          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-primary)', margin: 0,
+          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)', margin: 0,
         }}>
           {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
           {installResult.skipped.length ? '\n\nSkipped:\n' + installResult.skipped.map((s) => `  - ${s}`).join('\n') : ''}
@@ -275,8 +275,8 @@ export function WireWorkspacePanel({
 
         <pre style={{
           fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
-          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-primary)', margin: 0, whiteSpace: 'pre-wrap',
+          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)', margin: 0, whiteSpace: 'pre-wrap',
         }}>
           {planResult.markdown}
         </pre>

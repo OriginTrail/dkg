@@ -154,7 +154,7 @@ function NetworkTelemetrySection() {
         </div>
         <div aria-live="polite">
           {telemetryError && (
-            <div style={{ fontSize: 11, color: 'var(--accent-red)', marginTop: 4 }}>{telemetryError}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-danger)', marginTop: 4 }}>{telemetryError}</div>
           )}
         </div>
       </div>
@@ -217,10 +217,10 @@ function NetworkTelemetrySection() {
                 style={{
                   padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 12, fontWeight: 700,
                   cursor: 'pointer', border: '1px solid var(--success-border)',
-                  background: 'var(--success-bg)', color: 'var(--accent-green)',
+                  background: 'var(--success-bg)', color: 'var(--text-success)',
                 }}
               >
-                Enable Streaming
+                Enable streaming
               </button>
             </div>
           </div>
@@ -307,7 +307,7 @@ function LocalDataRetentionSection() {
           </select>
           <span aria-live="polite">
             {retentionSaved && (
-              <span style={{ fontSize: 10, color: 'var(--accent-green)', fontWeight: 600 }}>Saved</span>
+              <span style={{ fontSize: 10, color: 'var(--text-success)', fontWeight: 600 }}>Saved</span>
             )}
           </span>
           {storeBytes != null && (
@@ -325,7 +325,7 @@ function LocalDataRetentionSection() {
               background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
             }}
           >
-            <div style={{ fontSize: 11, color: 'var(--accent-amber)', fontWeight: 600, marginBottom: 4 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-warning)', fontWeight: 600, marginBottom: 4 }}>
               Reduce retention to {pendingRetention} days?
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 8 }}>
@@ -338,7 +338,7 @@ function LocalDataRetentionSection() {
                 onClick={confirmRetention}
                 style={{
                   padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 11, fontWeight: 700, cursor: 'pointer',
-                  border: '1px solid var(--warning-border)', background: 'var(--warning-bg)', color: 'var(--accent-amber)',
+                  border: '1px solid var(--warning-border)', background: 'var(--warning-bg)', color: 'var(--text-warning)',
                 }}
               >
                 Prune &amp; Save
@@ -364,7 +364,7 @@ function LocalDataRetentionSection() {
         )}
         <div aria-live="polite">
           {retentionError && (
-            <div style={{ fontSize: 11, color: 'var(--accent-red)', marginTop: 4 }}>{retentionError}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-danger)', marginTop: 4 }}>{retentionError}</div>
           )}
         </div>
       </div>
@@ -485,13 +485,13 @@ function GeneralSettingsTab() {
           )}
           {w?.error ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent-red)', marginBottom: 2 }}>⚠ Error</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{w.error}</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-danger)', marginBottom: 2 }}>⚠ Error</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--warning-bg)', border: '1px solid var(--warning-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent-amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid var(--warning-border)' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-warning)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
         </div>
@@ -508,7 +508,7 @@ function GeneralSettingsTab() {
 
       {/* Danger Zone (full-width footer; last in the stack) */}
       <section className="card ds-card" style={{ borderColor: 'var(--danger-border)', background: 'var(--danger-bg)' }}>
-        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--accent-red)' }}>Danger zone</h2></div>
+        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--text-danger)' }}>Danger zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <button

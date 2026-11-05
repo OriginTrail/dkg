@@ -360,7 +360,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   transition: background 0.15s, width 0.1s;
 }
 .v10-resize-handle-h:hover,
-.v10-resize-handle-h.active { background: var(--accent-green); width: 3px; }
+.v10-resize-handle-h.active { background: var(--border-prominent); width: 3px; }
 /* Vertical twin for the bottom panel (drag the top edge up/down). */
 .v10-resize-handle-v {
   height: 1px;
@@ -370,7 +370,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   transition: background 0.15s, height 0.1s;
 }
 .v10-resize-handle-v:hover,
-.v10-resize-handle-v.active { background: var(--accent-green); height: 3px; }
+.v10-resize-handle-v.active { background: var(--border-prominent); height: 3px; }
 
 /* ── Responsive: narrow / split-screen viewports (F8) ──
    The shell is a fixed three-column desktop layout (left tree · center ·

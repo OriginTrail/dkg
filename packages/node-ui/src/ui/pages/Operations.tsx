@@ -398,7 +398,7 @@ function HealthTab() {
             <div className="empty-state-icon" style={{ background: 'var(--success-bg)', borderColor: 'var(--success-border)' }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
             </div>
-            <div className="empty-state-title" style={{ color: 'var(--accent-green)' }}>No errors in this period</div>
+            <div className="empty-state-title" style={{ color: 'var(--text-success)' }}>No errors in this period</div>
             <div className="empty-state-desc">All operations completed successfully. Nice work.</div>
           </div>
         ) : (
@@ -475,12 +475,12 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 11, color: 'var(--accent-red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 11, color: 'var(--text-danger)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 11, color: 'var(--accent-red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 11, color: 'var(--text-danger)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -836,7 +836,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
       <div style={{ display: 'flex', gap: 4, marginBottom: 3, flexWrap: 'wrap' }}>
         {phases.map((p: any, i: number) => {
           const color = p.status === 'error'
-            ? 'var(--accent-red)'
+            ? 'var(--text-danger)'
             : p.status === 'cancelled'
               ? CANCELLED_COLOR
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
@@ -903,7 +903,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
                 ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
               </span>
               {phases[hover].status === 'error' && (
-                <span style={{ color: 'var(--accent-red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+                <span style={{ color: 'var(--text-danger)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
               )}
               {phases[hover].status === 'cancelled' && (
                 <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>CANCELLED</span>
@@ -1277,7 +1277,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 12, color: 'var(--accent-red)' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 12, color: 'var(--text-danger)' }}>
             {op.error_message}
           </div>
         )}

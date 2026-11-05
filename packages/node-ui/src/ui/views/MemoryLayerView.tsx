@@ -352,7 +352,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {loading && <p className="v10-mlv-status">Loading...</p>}
-      {error && <p className="v10-mlv-status" style={{ color: 'var(--accent-red)' }}>Error: {error}</p>}
+      {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
 
       {!loading && results.length === 0 && (
         <div className="v10-mlv-empty">

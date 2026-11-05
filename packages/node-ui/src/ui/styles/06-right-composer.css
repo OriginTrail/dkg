@@ -173,7 +173,7 @@
   border-color: color-mix(in srgb, var(--accent-red) 35%, var(--border-subtle));
 }
 .v10-attachment-chip[data-status="uploading"] {
-  border-color: color-mix(in srgb, var(--accent-blue) 35%, var(--border-subtle));
+  border-color: var(--border-strong);
 }
 .v10-attachment-chip-badge {
   flex-shrink: 0;
@@ -326,8 +326,8 @@
   line-height: 1.5;
 }
 .v10-local-agent-notice {
-  background: color-mix(in srgb, var(--accent-blue) 12%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, var(--accent-blue) 30%, var(--border-subtle));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
   color: var(--text-secondary);
 }
 .v10-local-agent-error {

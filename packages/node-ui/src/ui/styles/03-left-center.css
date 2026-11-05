@@ -242,8 +242,8 @@
 .v10-center-tab:focus-within .v10-center-tab-close { visibility: visible; opacity: 1; }
 .v10-center-tab-close:hover { background: var(--bg-active); color: var(--text-primary); }
 .v10-center-tab.dragging { opacity: .35; }
-.v10-center-tab.drop-before { box-shadow: inset 2px 0 0 var(--focus-ring); }
-.v10-center-tab.drop-after { box-shadow: inset -2px 0 0 var(--focus-ring); }
+.v10-center-tab.drop-before { box-shadow: inset 2px 0 0 var(--border-prominent); }
+.v10-center-tab.drop-after { box-shadow: inset -2px 0 0 var(--border-prominent); }
 .v10-center-tabs-all {
   display: inline-flex;
   align-items: center;
