@@ -98,7 +98,7 @@ describe('MCP default node home', () => {
     expect(loadConfig(root)).toMatchObject({ api: 'http://localhost:9300', token: 'development-token' });
   });
 
-  it.each(['https://remote.example:9300', 'http://localhost:9400'])('does not forward automatically discovered credentials to %s', (api) => {
+  it.each(['https://remote.example:9300', 'http://remote.example:9300', 'http://localhost:9400'])('does not forward automatically discovered credentials to %s', (api) => {
     write(path.join(root, '.dkg/config.json'), '{"apiPort":9300,"contextGraphs":["local-only"]}');
     write(path.join(root, '.dkg/auth.token'), 'local-secret');
     vi.stubEnv('DKG_API', api);

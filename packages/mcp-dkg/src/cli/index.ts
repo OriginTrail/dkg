@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline/promises';
 
 import { loadConfig } from '../config.js';
+import { readDkgApiPortSync } from '@origintrail-official/dkg-core';
 import { DkgClient, DkgHttpError } from '../client.js';
 import { fetchManifest } from '../manifest/fetch.js';
 import { planInstall, writeInstall, buildReviewMarkdown } from '../manifest/install.js';
@@ -115,6 +116,7 @@ interface JoinOptions {
   daemonUrl: string;
   token?: string;
   tokenFile: string;
+  tokenFileExplicit: boolean;
   yes: boolean;
   dryRun: boolean;
   noSubscribe: boolean;
@@ -155,6 +157,7 @@ function parseJoinArgs(args: string[]): JoinOptions {
     // at a file that doesn't exist, so the first MCP/hook calls 401'd
     // until the user noticed and edited the YAML by hand.
     tokenFile: values['token-file'] ?? path.join(os.homedir(), '.dkg', 'auth.token'),
+    tokenFileExplicit: values['token-file'] !== undefined,
     yes: values.yes,
     dryRun: values['dry-run'],
     noSubscribe: values['no-subscribe'],
@@ -216,6 +219,18 @@ async function prompt(question: string, defaultValue?: string): Promise<string> 
   }
 }
 
+// Configured homes are resolved by loadConfig. The legacy token-only fallback
+// is local and uses its recorded runtime port, or the first-run default.
+function canUseImplicitTokenFile(api: string, tokenFile: string): boolean {
+  if (fs.existsSync(path.join(path.dirname(tokenFile), 'config.json'))) return false;
+  try {
+    const url = new URL(api);
+    const port = readDkgApiPortSync(path.dirname(tokenFile)) ?? 9200;
+    return url.protocol === 'http:' && url.port === String(port) && url.pathname === '/'
+      && !url.username && !url.password && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  } catch { return false; }
+}
+
 async function cmdJoin(args: string[]): Promise<number> {
   let opts: JoinOptions;
   try {
@@ -238,13 +253,13 @@ async function cmdJoin(args: string[]): Promise<number> {
 
   // ── 1. Sanity-check the daemon ──
   console.log(`[join] checking local daemon at ${opts.daemonUrl}...`);
-  const config = loadConfig(opts.workspace);
+  const config = loadConfig(opts.workspace, { api: opts.daemonUrl });
   // Resolve the bearer token BEFORE the first daemon call so fresh
   // machines don't 401 on the very first `listProjects()`. Priority:
   //
   //   1. --token / DKG_TOKEN / DEVNET_TOKEN (explicit opts.token)
   //   2. existing .dkg/config.yaml (config.token from loadConfig)
-  //   3. --token-file (explicit or default ~/.dkg/auth.token)
+  //   3. explicit --token-file, or a token-only home at its local runtime/default port
   //
   // Previously (3) was silently ignored here, so `dkg-mcp join` on a
   // first-run machine with only a daemon-written auth.token file would
@@ -254,7 +269,7 @@ async function cmdJoin(args: string[]): Promise<number> {
   // exist yet the first time you run `join` — so we also read the CLI
   // tokenFile ourselves.
   let resolvedToken = opts.token ?? config.token ?? null;
-  if (!resolvedToken && opts.tokenFile) {
+  if (!resolvedToken && opts.tokenFile && (opts.tokenFileExplicit || canUseImplicitTokenFile(opts.daemonUrl, opts.tokenFile))) {
     try {
       const raw = fs.readFileSync(opts.tokenFile, 'utf-8');
       const lines = raw.split(/\r?\n/).filter((l) => l && !l.startsWith('#'));
@@ -529,11 +544,11 @@ async function cmdStatus(args: string[]): Promise<number> {
       token:   { type: 'string' },
     },
   });
-  const daemonUrl = values.daemon ?? process.env.DKG_API ?? 'http://localhost:9200';
+  const config = loadConfig(undefined, { api: values.daemon });
+  const daemonUrl = config.api;
   const token = values.token ?? process.env.DKG_TOKEN ?? process.env.DEVNET_TOKEN ?? '';
-  const config = loadConfig();
   const client = new DkgClient({
-    config: { ...config, api: daemonUrl, token: token || config.token },
+    config: { ...config, token: token || config.token },
   });
 
   console.log(`Daemon:    ${daemonUrl}`);
