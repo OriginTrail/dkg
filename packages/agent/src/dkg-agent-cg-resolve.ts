@@ -262,12 +262,7 @@ type ListContextGraphsUncachedResult = {
   cacheable: boolean;
 };
 type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
-class ListContextGraphsBudgetExceeded extends Error {
-  constructor(label: string) {
-    super(`${label} exceeded listContextGraphs budget`);
-    this.name = 'ListContextGraphsBudgetExceeded';
-  }
-}
+import { ListContextGraphsBudgetExceeded } from './context-graph-list-budget-error.js';
 import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
@@ -2495,7 +2490,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       const controller = new AbortController();
-      const timeoutError = new ListContextGraphsBudgetExceeded(label);
+      const timeoutError = new ListContextGraphsBudgetExceeded(label, budgetMs);
       const timeout = new Promise<never>((_, reject) => {
         timer = setTimeout(
           () => {
