@@ -11,7 +11,7 @@ const UI = resolve(__dirname, '../src/ui');
 
 /** Screen class → the shared classes every element using it must also carry. */
 const PRIMITIVES: Record<string, string[]> = {
-  'ds-tab': ['tab-item', 'v10-layer-switch-btn', 'v10-bottom-tab', 'v10-layer-expand-tab', 'v10-content-tab'],
+  'ds-tab': ['v10-layer-switch-btn', 'v10-bottom-tab', 'v10-layer-expand-tab', 'v10-content-tab'],
   'ds-seg': ['v10-mlv-view-toggle'],
   'ds-seg-item': ['v10-agent-mode-tab', 'v10-tree-mode-btn', 'v10-mlv-toggle-btn'],
   'ds-filter': ['v10-subgraph-chip', 'v10-subgraph-filter-chip'],

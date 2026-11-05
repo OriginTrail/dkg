@@ -6,6 +6,7 @@ import {
   IDENTITY_WALLET_ACTION_META,
   useIdentityWalletManagement,
 } from './useIdentityWalletManagement.js';
+import { Badge } from '../../components/ds/Badge.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -61,8 +62,8 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           </p>
         </div>
         <div className="v10-identity-wallet-counts" aria-label="Identity wallet counts">
-          <span className="badge badge-info">{summary?.operationalCount ?? '—'} operational</span>
-          <span className="badge badge-info">{summary?.adminCount ?? '—'} admin</span>
+          <Badge tone="role" size="sm">{summary?.operationalCount ?? '—'} operational</Badge>
+          <Badge tone="role" size="sm">{summary?.adminCount ?? '—'} admin</Badge>
         </div>
       </div>
 
@@ -82,9 +83,9 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           />
         )}
         {connected && summaryState.status === 'ready' && (
-          <span className={`badge ${connectedIsAdmin ? 'badge-success' : 'badge-warn'}`}>
-            {connectedIsAdmin ? 'authorized admin signer' : 'not an admin for this identity'}
-          </span>
+          <Badge tone={connectedIsAdmin ? 'success' : 'warning'} size="sm">
+            {connectedIsAdmin ? 'Authorized admin signer' : 'Not an admin for this identity'}
+          </Badge>
         )}
       </div>
 

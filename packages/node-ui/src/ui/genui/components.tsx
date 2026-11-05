@@ -199,7 +199,7 @@ export const FileCardImpl: React.FC<RenderProps<{
     </div>
     <div className="v10-genui-card-subtitle">{props.path}</div>
     <div className="v10-genui-chips">
-      {props.packageName ? <span className="v10-genui-chip tone-info"><span className="v10-genui-chip-label">pkg</span><span className="v10-genui-chip-value">{props.packageName}</span></span> : null}
+      {props.packageName ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">pkg</span><span className="v10-genui-chip-value">{props.packageName}</span></span> : null}
       {typeof props.lineCount === 'number' ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">lines</span><span className="v10-genui-chip-value">{props.lineCount}</span></span> : null}
     </div>
   </div>
@@ -246,7 +246,7 @@ export const PRCardImpl: React.FC<RenderProps<{
       {(() => {
         const href = safeHref(props.url);
         return href
-          ? <a className="v10-genui-chip tone-info" href={href} target="_blank" rel="noopener noreferrer"><span className="v10-genui-chip-label">view</span><span className="v10-genui-chip-value">github</span></a>
+          ? <a className="v10-genui-chip" href={href} target="_blank" rel="noopener noreferrer"><span className="v10-genui-chip-label">view</span><span className="v10-genui-chip-value">github</span></a>
           : null;
       })()}
     </div>

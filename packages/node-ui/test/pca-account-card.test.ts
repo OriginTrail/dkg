@@ -121,7 +121,7 @@ describe('PcaAccountCard', () => {
         }),
       }),
     );
-    expect(container.textContent).toContain('couldn’t verify approvals');
+    expect(container.textContent).toContain('Couldn’t verify approvals');
     expect(container.textContent).not.toContain('1 of 3 wallets approved');
     await unmount();
   });
@@ -152,7 +152,7 @@ describe('PcaAccountCard', () => {
       (b) => b.textContent === 'Approve wallets',
     )!;
     expect(approveBtn).toBeUndefined();
-    expect(external.container.textContent).toContain('tracked external');
+    expect(external.container.textContent).toContain('Tracked external');
     await external.unmount();
   });
 
@@ -171,7 +171,7 @@ describe('PcaAccountCard', () => {
       React.createElement(PcaAccountCard, { account, onApproveWallets }),
     );
     expect(container.querySelector('[data-owner-mode="wallet"]')).toBeTruthy();
-    expect(container.textContent).toContain('wallet-managed');
+    expect(container.textContent).toContain('Wallet-managed');
     expect(container.textContent).toContain('connected wallet');
     const approveBtn = Array.from(container.querySelectorAll('button')).find(
       (b) => b.textContent === 'Approve wallets',

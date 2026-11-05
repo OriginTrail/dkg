@@ -2,24 +2,27 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
+import { Badge } from '../components/ds/Badge.js';
+import { humanizeStatus } from '../lib/formatLabels.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
   if (a.connectionStatus === 'self') {
-    return <span className="badge">Self</span>;
+    return <Badge size="sm">Self</Badge>;
   }
   if (a.connectionStatus === 'connected') {
     const label = a.connectionTransport === 'relayed' ? 'Relayed' : 'Direct';
     const duration = a.connectedSinceMs ? ` · ${formatDuration(a.connectedSinceMs)}` : '';
     return (
-      <span
-        className="badge badge-success"
+      <Badge
+        tone="success"
+        size="sm"
         title={`${a.connectionDirection ?? ''} ${label.toLowerCase()} connection${duration}`}
       >
         {label}{duration}
-      </span>
+      </Badge>
     );
   }
-  return <span className="badge badge-error">Disconnected</span>;
+  return <Badge tone="danger" size="sm">Disconnected</Badge>;
 }
 
 export function NetworkPage() {
@@ -97,7 +100,7 @@ export function NetworkPage() {
               {connections.map((c: any, i: number) => (
                 <tr key={i}>
                   <td className="mono">{shortId(c.peerId, 12)}</td>
-                  <td><span className={`badge ${c.transport === 'direct' ? 'badge-success' : 'badge-info'}`}>{c.transport}</span></td>
+                  <td><Badge tone={c.transport === 'direct' ? 'success' : 'neutral'} size="sm">{humanizeStatus(String(c.transport))}</Badge></td>
                   <td>{c.direction}</td>
                   <td className="mono" style={{ fontSize: 11 }}>{c.remoteAddr}</td>
                   <td>{formatDuration(c.durationMs)}</td>

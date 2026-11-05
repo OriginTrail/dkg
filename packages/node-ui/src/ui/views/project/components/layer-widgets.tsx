@@ -233,7 +233,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     >
       <button
         data-testid="widget-promote-all-btn"
-        className="v10-decision-btn approve ds-btn ds-primary"
+        className="v10-decision-btn ds-btn ds-primary"
         style={{ borderColor: 'var(--layer-shared-border)', color: 'var(--layer-shared-text)', background: 'var(--layer-shared-bg)', opacity: busy ? 0.5 : 1 }}
         disabled={busy}
         onClick={promote}

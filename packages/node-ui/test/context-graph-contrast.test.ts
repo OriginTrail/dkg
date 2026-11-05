@@ -205,8 +205,8 @@ describe('Context Graph contrast tokens', () => {
     // classes now carry the matching ds-* classes on the element itself.
     for (const [file, cls] of [
       ['components/Workspace/WireWorkspacePanel.tsx', 'v10-modal-btn primary ds-btn ds-primary'],
-      ['views/project/components/overview.tsx', 'v10-po-join-btn approve ds-btn ds-primary ds-sm'],
-      ['views/project/components/overview.tsx', 'v10-po-join-btn reject ds-btn ds-danger ds-sm'],
+      ['views/project/components/overview.tsx', 'v10-po-join-btn ds-btn ds-primary ds-sm'],
+      ['views/project/components/overview.tsx', 'v10-po-join-btn ds-btn ds-danger ds-sm'],
       ['views/MemoryLayerView.tsx', 'v10-btn-publish ds-btn ds-vm'],
     ] as const) {
       expect(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/ui', file), 'utf8'), `${file}: ${cls}`).toContain(`"${cls}"`);

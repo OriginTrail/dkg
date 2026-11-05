@@ -820,14 +820,14 @@ export function PendingJoinRequestsSection({
                     </div>
                     <div className="v10-po-join-actions">
                       <button
-                        className="v10-po-join-btn approve ds-btn ds-primary ds-sm"
+                        className="v10-po-join-btn ds-btn ds-primary ds-sm"
                         onClick={() => handleApprove(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                       >
                         {processing === req.agentAddress ? '…' : '✓ Approve'}
                       </button>
                       <button
-                        className="v10-po-join-btn reject ds-btn ds-danger ds-sm"
+                        className="v10-po-join-btn ds-btn ds-danger ds-sm"
                         onClick={() => handleReject(req.agentAddress)}
                         disabled={processing === req.agentAddress}
                         aria-label="Reject join request"

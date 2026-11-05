@@ -9,6 +9,7 @@ import {
 import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import type { ResolvedPcaAccount } from '../../hooks/usePcaOverview.js';
 import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess.js';
+import { Badge } from '../../components/ds/Badge.js';
 
 /** The owner-mode union — re-exported from the owner-access model (no longer re-declared
  *  here) so existing importers keep a stable name. */
@@ -114,9 +115,9 @@ export function PcaAccountCard({
   const titleBand = (
     <div className="v10-pca-card-title">
       <span className="v10-pca-card-id">PCA #{accountId}</span>
-      <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)} discount</span>
-      {ownerMode === 'wallet' && <span className="badge badge-info">✎ wallet-managed</span>}
-      {ownerMode === 'external' && <span className="badge badge-warn">tracked external</span>}
+      <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)} discount</Badge>
+      {ownerMode === 'wallet' && <Badge tone="role" size="sm" icon="✎">Wallet-managed</Badge>}
+      {ownerMode === 'external' && <Badge tone="warning" size="sm">Tracked external</Badge>}
       <span className="v10-pca-card-spacer" />
       {account.health && <HealthChip state={account.health} />}
     </div>
@@ -274,14 +275,14 @@ export function PcaAccountCard({
         <div className="v10-pca-card-title">
           <span className="v10-pca-card-id">PCA #{accountId}</span>
           <span className="v10-pca-card-sponsor">(approved for this node)</span>
-          <span className="badge badge-info v10-pca-card-discount">◉ {pct(snapshot.discountBps)}</span>
+          <Badge size="sm" icon="◉" className="v10-pca-card-discount">{pct(snapshot.discountBps)}</Badge>
           <span className="v10-pca-card-spacer" />
           {inconclusive ? (
-            <span className="badge badge-warn">⚠ couldn’t verify approvals</span>
+            <Badge tone="warning" size="sm" icon="⚠">Couldn’t verify approvals</Badge>
           ) : !allApproved && account.walletCount > 0 ? (
-            <span className="badge badge-warn">
-              ⚠ {account.approvedCount} of {account.walletCount} wallets approved
-            </span>
+            <Badge tone="warning" size="sm" icon="⚠">
+              {account.approvedCount} of {account.walletCount} wallets approved
+            </Badge>
           ) : null}
         </div>
         {ownerLine}

@@ -15,7 +15,7 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
-import { Count } from '../../components/ds/Badge.js';
+import { Badge, Count } from '../../components/ds/Badge.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -222,7 +222,7 @@ export function ConvictionOverview() {
       <header className="v10-pca-overview-head">
         <div className="v10-pca-overview-titlerow">
           <h2 className="v10-pca-overview-title">Publisher Conviction</h2>
-          {role && <span className="badge v10-pca-role-chip">Node role: {role}</span>}
+          {role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {role}</Badge>}
         </div>
         <p className="v10-pca-overview-explainer">
           {role === 'edge'
@@ -487,7 +487,7 @@ function DiscoveredStrip({
                   approved, so the account's tier isn't a discount this node realizes -
                   showing a percentage there reads as a false "you'd get this %". */}
               {(d.relation === 'agent' || d.relation === 'both') && typeof bps === 'number' && bps > 0 && (
-                <span className="badge badge-info"> {(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</span>
+                <Badge size="sm">{(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</Badge>
               )}
             </span>
             <button

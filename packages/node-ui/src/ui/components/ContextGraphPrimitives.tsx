@@ -21,7 +21,7 @@ const EMPTY_STATE_ACCENTS: Record<EmptyStateTone, string> = {
   danger: 'var(--text-danger)',
   query: 'var(--text-secondary)', // navigation, not a layer: neutral
   // Warning tone (PCA edge/fall-through empty states). Resolves to the same
-  // `--text-warning` token as `.badge-warn` / `.v10-modal-warning` — the
+  // `--text-warning` token as the warning Badge / `.v10-modal-warning` — the
   // theme-aware amber (#fbbf24 dark / #8e4706 light), NOT the SWM
   // `--layer-shared` layer-identity accent used by the `swm` tone.
   warning: 'var(--text-warning)',

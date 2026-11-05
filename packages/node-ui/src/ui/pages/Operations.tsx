@@ -22,6 +22,7 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { Badge } from '../components/ds/Badge.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
@@ -143,11 +144,11 @@ export function ObservabilitySection() {
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`tab-item ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
-        <button className={`tab-item ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
-        <button className={`tab-item ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
-        <button className={`tab-item ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
-        <button className={`tab-item ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
+        <button className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
+        <button className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
+        <button className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
+        <button className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
       </div>
       {tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
     </div>
@@ -270,10 +271,10 @@ function ReplicationTab() {
                   <tr key={c.context_graph_id}>
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
-                    <td>{c.core_hosted ? <span className="badge badge-info" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">host</span> : <span className="badge">member</span>}</td>
+                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
                     <td>{wm}</td>
                     <td>{head ?? '—'}</td>
-                    <td>{lag == null ? '—' : <span className={`badge ${lag === 0 ? 'badge-success' : 'badge-warn'}`}>{lag}</span>}</td>
+                    <td>{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
                     <td>{c.last_event_ts ? formatTime(c.last_event_ts) : '—'}</td>
                   </tr>
                 );
@@ -326,7 +327,7 @@ function ReplicationTab() {
                 {events.map((e, i) => (
                   <tr key={i}>
                     <td>{formatTime(e.ts)}</td>
-                    <td><span className={`badge ${e.action === 'defer' ? 'badge-warn' : ''}`} style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)', boxShadow: 'none' } : undefined}>{humanizeStatus(String(e.action))}</span></td>
+                    <td><Badge tone={e.action === 'defer' ? 'warning' : 'neutral'} size="sm" style={e.action === 'promote' ? { background: 'var(--layer-verified-bg)', color: 'var(--layer-verified-text)', boxShadow: 'none' } : undefined}>{humanizeStatus(String(e.action))}</Badge></td>
                     <td>{e.ordinal ?? '—'}</td>
                     <td className="mono">{e.from_watermark != null && e.to_watermark != null ? `${e.from_watermark}->${e.to_watermark}` : '—'}</td>
                     <td className="mono" style={{ maxWidth: 280, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.ual ?? ''}>{e.ual ?? '—'}</td>
@@ -421,7 +422,7 @@ function HealthTab() {
                     <td style={{ color: 'var(--text-primary)', fontWeight: 600, padding: '10px 14px' }}>
                       {h.phase}
                     </td>
-                    <td style={{ padding: '10px 14px' }}><span className="badge badge-error">{h.error_count}</span></td>
+                    <td style={{ padding: '10px 14px' }}><Badge tone="danger" size="sm">{h.error_count}</Badge></td>
                     <td style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
                     <td style={{ padding: '10px 14px' }}>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
                   </tr>
@@ -1025,7 +1026,7 @@ function OperationsTab() {
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'rgba(59,130,246,.1)' : undefined }}
                 >
                   <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
-                  <td><span className="badge" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name) }}>{op.operation_name}</span></td>
+                  <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
                   <td>{formatDuration(op.duration_ms)}</td>
