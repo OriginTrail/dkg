@@ -262,9 +262,11 @@
 }
 
 /* Layer tabs keep their layer colour on the underline. */
+/* No room for counts beside the side panels; the Overview shows them. */
+.v10-center-content[data-narrow] .v10-layer-switch-count { display: none; }
 .v10-layer-switch-btn.active[data-layer="wm"]  { border-bottom-color: var(--layer-working); }
 .v10-layer-switch-btn.active[data-layer="swm"] { border-bottom-color: var(--layer-shared); }
 .v10-layer-switch-btn.active[data-layer="vm"]  { border-bottom-color: var(--layer-verified); }
 @media (max-width: 920px) {
-  .v10-layer-switcher .v10-layer-switch-btn { min-width: 30px; padding: 0; justify-content: center; gap: 0; }
+  .v10-layer-switcher .v10-layer-switch-btn { flex-shrink: 0; min-width: 30px; padding: 0 6px; justify-content: center; gap: 4px; }
 }

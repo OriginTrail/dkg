@@ -348,7 +348,7 @@
 
 @media (max-width: 920px) {
   .v10-layer-switcher { padding: 0 2px; }
-  .v10-layer-switch-btn { width: 30px; }
+  .v10-layer-switch-btn { min-width: 30px; }
   .v10-layer-switch-label { display: none; }
   .v10-layer-switch-separator { margin: 0 2px; }
   .v10-layer-switcher-spacer { flex: 0 0 2px; min-width: 2px; }
