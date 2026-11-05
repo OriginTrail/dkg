@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import {
   MAX_SWM_AUTHOR_INVENTORY_ROWS_V1,
@@ -140,6 +140,163 @@ describe('SWM author inventory v1', () => {
     })).toBeInstanceOf(Uint8Array);
   });
 
+  it('keeps immutable row-set bytes and digests independent of returned buffers', () => {
+    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
+      canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]),
+    );
+    const expected = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
+    const expectedDigest = computeSwmAuthorInventoryRowsDigestV1([ROW_A, ROW_B]);
+    const first = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    first.fill(0);
+    const second = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    expect(second).toEqual(expected);
+    expect(second).not.toBe(first);
+    second.fill(1);
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toEqual(expected);
+    expect(computeSwmAuthorInventoryRowsDigestV1(rows)).toBe(expectedDigest);
+  });
+
+  // The real 16 MiB allocation boundary also runs under coverage instrumentation.
+  it('evicts cached bytes at the allocation budget while snapshots remain live', async () => {
+    // Isolate the cache so the boundary does not depend on earlier test calls.
+    vi.resetModules();
+    const codec = await import('../src/swm-author-inventory-v1.js');
+    const canonicalJson = await import('../src/canonical-json.js');
+    const encode = codec.canonicalizeSwmAuthorInventoryRowsBytesV1;
+    const rows = Array.from({ length: 5_000 }, (_, index) => Object.freeze({
+      ...ROW_A,
+      assertionCoordinate: `draft-${index}`,
+      shareOperationId: `swm-operation-${index}`,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/${index + 1}`,
+    })) as SwmAuthorInventoryRowV1[];
+    const serializer = vi.spyOn(canonicalJson, 'canonicalizeJson');
+    const rowSetEncodings = () => serializer.mock.calls.filter(([value]) => Array.isArray(value)).length;
+    try {
+      const expected = encode(rows);
+      const text = new TextDecoder().decode(expected);
+      expect(rowSetEncodings()).toBe(1);
+      serializer.mockClear();
+      const snapshots = [codec.parseCanonicalSwmAuthorInventoryRowsV1(text)];
+      const expectedDigest = codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!);
+      expect(rowSetEncodings()).toBe(0);
+      const entriesWithinBudget = Math.floor(
+        2 * codec.MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1 / expected.byteLength,
+      );
+      expect(entriesWithinBudget).toBeGreaterThan(1);
+      for (let index = 1; index < entriesWithinBudget; index += 1) {
+        snapshots.push(codec.parseCanonicalSwmAuthorInventoryRowsV1(text));
+        expect(Buffer.compare(encode(snapshots[index]!), expected)).toBe(0);
+      }
+      expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
+      expect(rowSetEncodings()).toBe(0);
+
+      // Keep every weak key live, and cross the byte budget with one more entry.
+      snapshots.push(codec.parseCanonicalSwmAuthorInventoryRowsV1(text));
+      expect(Buffer.compare(encode(snapshots.at(-1)!), expected)).toBe(0);
+      expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
+      expect(rowSetEncodings()).toBe(1);
+      expect(codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!)).toBe(expectedDigest);
+      // Evicted identities use the original uncached path until parsed again.
+      expect(rowSetEncodings()).toBe(2);
+      expect(snapshots).toHaveLength(entriesWithinBudget + 1);
+    } finally {
+      serializer.mockRestore();
+    }
+  }, 30_000);
+
+  it('revalidates a mutable array after a successful serialization', () => {
+    const rows = [ROW_A, ROW_B];
+    canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    rows.reverse();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow(/strictly ordered/);
+  });
+
+  it('reuses parser-owned snapshots while fully encoding caller-frozen arrays', async () => {
+    const codec = await import('../src/swm-author-inventory-v1.js');
+    const canonicalJson = await import('../src/canonical-json.js');
+    const encode = codec.canonicalizeSwmAuthorInventoryRowsBytesV1;
+    const bytes = encode([ROW_A, ROW_B]);
+    const owned = codec.parseCanonicalSwmAuthorInventoryRowsV1(bytes);
+    const callerOwned = Object.freeze([...owned]);
+    const serializer = vi.spyOn(canonicalJson, 'canonicalizeJson');
+    try {
+      expect(encode(owned)).toEqual(bytes);
+      expect(encode(owned)).toEqual(bytes);
+      expect(serializer).not.toHaveBeenCalled();
+      expect(encode(callerOwned)).toEqual(bytes);
+      expect(encode(callerOwned)).toEqual(bytes);
+      expect(serializer).toHaveBeenCalledTimes(2);
+    } finally {
+      serializer.mockRestore();
+    }
+  });
+
+  it('keeps parsed snapshots independent of mutable binary input and Buffer views', () => {
+    const bytes = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
+    for (const input of [bytes.slice(), Buffer.from(bytes).subarray()]) {
+      const owned = parseCanonicalSwmAuthorInventoryRowsV1(input);
+      input.fill(0);
+      expect(canonicalizeSwmAuthorInventoryRowsBytesV1(owned)).toEqual(bytes);
+      expect(computeSwmAuthorInventoryRowsDigestV1(owned))
+        .toBe(computeSwmAuthorInventoryRowsDigestV1([ROW_A, ROW_B]));
+    }
+  });
+
+  it('preserves strict binary UTF-8, BOM and caller byte limits', () => {
+    const bytes = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
+    const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytes]);
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(bom)).toThrow(/strict canonical JSON/);
+    // Replacement decoding would leave a valid JSON string and valid identifier.
+    const malformed = Buffer.from(bytes);
+    const operationOffset = malformed.indexOf(ROW_A.shareOperationId);
+    expect(operationOffset).toBeGreaterThanOrEqual(0);
+    malformed[operationOffset] = 0xff;
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(malformed))
+      .toThrow(/strict canonical JSON/);
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(bytes, { maxBytes: bytes.byteLength - 1 }))
+      .toThrow(/strict canonical JSON/);
+  });
+
+  it('does not trust mutable records inside a frozen array', () => {
+    const row = { ...ROW_A };
+    const rows = Object.freeze([row]);
+    const first = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
+    row.sealDigest = ROW_B.sealDigest;
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).not.toEqual(first);
+    Object.assign(row, { assertionVersion: '0' });
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows))
+      .toThrow(/assertionVersion must be positive/);
+  });
+
+  it('fully validates a different frozen array even when its records were already encoded', () => {
+    canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_A, ROW_B]));
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_B, ROW_A])))
+      .toThrow(/strictly ordered/);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_A, ROW_A])))
+      .toThrow(/duplicate/);
+    const invalid = Object.freeze({ ...ROW_A, assertionVersion: '0' }) as SwmAuthorInventoryRowV1;
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([invalid])))
+      .toThrow(/assertionVersion must be positive/);
+  });
+
+  it('rejects a revoked proxy even after its immutable data was serialized successfully', () => {
+    const { proxy, revoke } = Proxy.revocable(Object.freeze([ROW_A, ROW_B]), {});
+    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(proxy))
+      .toEqual(canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]));
+    revoke();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(proxy)).toThrow();
+  });
+
+  it('continues to reject frozen records containing accessor properties', () => {
+    const row = Object.freeze(Object.defineProperty({ ...ROW_A }, 'sealDigest', {
+      get: () => ROW_A.sealDigest,
+      enumerable: true,
+    })) as SwmAuthorInventoryRowV1;
+    const rows = Object.freeze([row]);
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow();
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow();
+  });
+
   it('rejects row reordering and duplicate active identities', () => {
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_B, ROW_A]))
       .toThrow(/strictly ordered/);
@@ -168,6 +325,21 @@ describe('SWM author inventory v1', () => {
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([row2, row10])).not.toThrow();
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1([row10, row2]))
       .toThrow(/strictly ordered/);
+  });
+
+  it('checks the row limit before inspecting caller-owned entries', () => {
+    const rows: SwmAuthorInventoryRowV1[] = [];
+    rows.length = MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1;
+    Object.freeze(rows);
+    let indexReads = 0;
+    const reflected = new Proxy(rows, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) indexReads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(reflected)).toThrow(/row limit/);
+    expect(indexReads).toBe(0);
   });
 
   it('rejects count, digest, author, and temporal binding failures', () => {
