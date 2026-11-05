@@ -17,7 +17,7 @@ const DEFAULT_GLYPH = 'ds-status-glyph';
 
 describe('status badge icons', () => {
   it('draws the default glyph once on every status tone, in both sizes', () => {
-    for (const tone of ['success', 'warning', 'danger'] as const) {
+    for (const tone of ['success', 'warning', 'danger', 'pending'] as const) {
       for (const size of ['sm', 'md'] as const) {
         expect(count(render(React.createElement(Badge, { tone, size }, 'Label')), DEFAULT_GLYPH), `${tone} ${size}`).toBe(1);
       }
@@ -74,7 +74,7 @@ describe('status badge icons', () => {
       if (statSync(full).isDirectory()) return walk(full);
       return name.endsWith('.tsx') ? [full] : [];
     });
-    const raw = walk(ui).filter((file) => !file.endsWith('Badge.tsx') && /ds-badge[^\n]*ds-tone-(?:success|warning|danger|\$\{)/.test(readFileSync(file, 'utf8')));
+    const raw = walk(ui).filter((file) => !file.endsWith('Badge.tsx') && /ds-badge[^\n]*ds-tone-(?:success|warning|danger|pending|\$\{)/.test(readFileSync(file, 'utf8')));
     expect(raw).toEqual([]);
   });
 });

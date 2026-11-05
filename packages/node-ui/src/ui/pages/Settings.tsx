@@ -443,7 +443,7 @@ function GeneralSettingsTab() {
           <Field label="Role" value={s?.nodeRole ?? '—'} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-          <div className="settings-node-status ds-card-nested" style={{ padding: '10px 14px' }}>
+          <div className="settings-node-status ds-card-nested">
             <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
             <div
               style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}

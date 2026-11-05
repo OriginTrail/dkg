@@ -225,3 +225,4 @@ select.input {
   color: var(--text-primary);
   margin-bottom: 4px;
 }
+.settings-node-status { padding: 10px 14px; }

@@ -261,10 +261,10 @@ describe('Context Graph contrast tokens', () => {
     }
     // Statuses have no box: text sits straight on the surface. That background
     // comes from the grouped status rule, so the check must see grouped rules.
-    for (const tone of ['success', 'warning', 'danger']) {
+    for (const tone of ['success', 'warning', 'danger', 'pending']) {
       expect(effectiveProperties(['ds-badge', `ds-tone-${tone}`])['--badge-bg'], tone).toBe('transparent');
     }
-    const groupedStatusRule = /(\.ds-tone-danger\s*\{\s*)--badge-bg:\s*transparent/;
+    const groupedStatusRule = /(\.ds-tone-pending\s*\{\s*)--badge-bg:\s*transparent/;
     expect(css).toMatch(groupedStatusRule);
     const unreadable = parseRules(css.replace(groupedStatusRule, '$1--badge-bg: var(--text-success)'));
     expect(badgeContrast('success', '--bg-surface', rootVars, unreadable)).toBeLessThan(4.5);
