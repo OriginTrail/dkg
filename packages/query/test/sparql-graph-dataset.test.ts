@@ -96,18 +96,27 @@ describe('hasNestedSelect', () => {
 });
 
 describe('planGraphDataset', () => {
+  const both = ['FROM', 'FROM NAMED'] as const;
+  const expected = (graphAccess: 'values' | 'dataset', datasetClauses: readonly string[],
+    transforms: Partial<{ preservePattern: boolean; bindCallerGraphs: boolean; wrapDescriptionPattern: boolean }> = {}) => ({
+    graphAccess, datasetClauses, preservePattern: false, bindCallerGraphs: false, wrapDescriptionPattern: false, ...transforms,
+  });
   it.each([
-    ['SELECT ?s WHERE { ?s ?p ?o }', 'none', 'guard'],
-    ['SELECT ?s WHERE { ?s <urn:p>+ ?o }', 'none', 'dataset-only'],
-    ['SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', 'dataset-only', 'dataset-only'],
-    ['ASK { ?s <urn:p>* ?o }', 'none', 'dataset-only'],
-    ['CONSTRUCT { ?s ?p ?o } WHERE { { SELECT ?s ?p ?o WHERE { ?s ?p ?o } } }', 'dataset-only', 'dataset-only'],
-    ['DESCRIBE ?s WHERE { ?s ?p ?o }', 'none', 'describe'],
-    ['DESCRIBE <urn:s>', 'describe', 'describe'],
-    ['DESCRIBE ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', 'dataset-only', 'describe'],
-  ] as const)('%s takes %s on Oxigraph and %s elsewhere', (query, oxigraph, other) => {
-    expect(planGraphDataset(scope(query), 'oxigraph')).toBe(oxigraph);
-    expect(planGraphDataset(scope(query), null)).toBe(other);
+    ['SELECT ?s WHERE { ?s ?p ?o }', expected('values', []), expected('values', both)],
+    ['SELECT ?s WHERE { ?s <urn:p>+ ?o }', expected('values', []), expected('dataset', both)],
+    ['SELECT ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', both), expected('dataset', both)],
+    ['ASK { ?s <urn:p>* ?o }', expected('values', []), expected('dataset', both)],
+    ['CONSTRUCT { ?s ?p ?o } WHERE { { SELECT ?s ?p ?o WHERE { ?s ?p ?o } } }', expected('dataset', both), expected('dataset', both)],
+    ['DESCRIBE ?s WHERE { ?s ?p ?o }', expected('values', []), expected('dataset', both, { wrapDescriptionPattern: true })],
+    ['DESCRIBE <urn:s>', expected('dataset', ['FROM'], { preservePattern: true }), expected('dataset', ['FROM'], { preservePattern: true })],
+    ['DESCRIBE ?s WHERE { { SELECT ?s WHERE { ?s ?p ?o } } }', expected('dataset', both), expected('dataset', both, { wrapDescriptionPattern: true })],
+    ['SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x }', expected('dataset', both, { preservePattern: true }), expected('dataset', both, { preservePattern: true })],
+    ['SELECT * WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } }', expected('values', []), expected('dataset', both, { bindCallerGraphs: true })],
+    ['SELECT * WHERE { GRAPH ?g { ?s <urn:p>+ ?o } }', expected('values', []), expected('dataset', both)],
+    ['SELECT * WHERE { GRAPH ?g { BIND(<urn:g> AS ?g) ?s <urn:p>+ ?o } }', expected('values', []), expected('dataset', both, { bindCallerGraphs: true })],
+  ] as const)('fully plans %s', (query, oxigraph, other) => {
+    expect(planGraphDataset(scope(query), 'oxigraph')).toEqual(oxigraph);
+    expect(planGraphDataset(scope(query), null)).toEqual(other);
   });
 });
 
@@ -441,7 +450,7 @@ describe('content discovery for static GRAPH queries', () => {
   });
 
   it('keeps ordinary FILTER variables outside dataset routing on Oxigraph', () => {
-    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(BOUND(?s)) }`), 'oxigraph')).toBe('none');
-    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(EXISTS { ?s <urn:flag> ?flag }) }`), 'oxigraph')).toBe('guard');
+    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(BOUND(?s)) }`), 'oxigraph').datasetClauses).toEqual([]);
+    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(EXISTS { ?s <urn:flag> ?flag }) }`), 'oxigraph').datasetClauses).toEqual(['FROM', 'FROM NAMED']);
   });
 });

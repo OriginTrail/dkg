@@ -1,6 +1,8 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { VariableAllocator } from './sparql-rewrite-names.js';
 
+export type GraphAccessMode = 'values' | 'dataset';
+
 interface FilterBindings {
   readonly pattern: string;
   /** These booleans must cross the replay subquery's projection boundary. */
@@ -14,7 +16,7 @@ export interface GraphAccess {
   fallback(inner: string): string;
 }
 
-export function createGraphAccess(mode: 'values' | 'dataset', graphs: readonly string[], allocate: VariableAllocator): GraphAccess {
+export function createGraphAccess(mode: GraphAccessMode, graphs: readonly string[], allocate: VariableAllocator): GraphAccess {
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
   const viewGraph = allocate('__dkgViewGraph');
   if (mode === 'values') {

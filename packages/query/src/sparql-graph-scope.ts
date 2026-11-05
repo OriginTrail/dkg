@@ -276,9 +276,9 @@ export function rewriteGraphSet(
   policy: GraphSetRoutingPolicy,
   engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
-  return applyGraphDataset(scope, graphUris, engine, (route) => {
+  return applyGraphDataset(scope, graphUris, engine, (graphAccess) => {
     const allocate = createVariableAllocator(scope);
-    const access = createGraphAccess(route === 'dataset-only' ? 'dataset' : 'values', [...new Set(graphUris)], allocate);
+    const access = createGraphAccess(graphAccess, [...new Set(graphUris)], allocate);
     const strategies = [wrapWithGraphUnion];
     if (policy !== 'union-only') {
       strategies.unshift((input, graphs) => wrapWithProjectedGraphSubselect(input, graphs, inner => ({ pattern: access.fallback(inner) })));
