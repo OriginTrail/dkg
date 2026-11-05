@@ -363,6 +363,7 @@ export default defineConfig({
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
+          'test/daemon-startup-wait.test.ts',
           'test/oxigraph-server.test.ts',
           'test/oxigraph-server-native.test.ts',
           'test/oxigraph-server-wal.test.ts',

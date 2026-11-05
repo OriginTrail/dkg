@@ -14,7 +14,7 @@ Common commands:
 ```bash
 dkg init                                 # interactive setup: node name, role, relay, triple-store backend (default: oxigraph-server)
 dkg init --role core --network <name>    # initialize a Core Node that will create an on-chain node profile on startup
-dkg start [-f]                           # start the node daemon (-f for foreground)
+dkg start [-f] [--timeout <ms>]          # start the node daemon (-f for foreground; detached readiness defaults to 120000ms)
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
@@ -117,6 +117,14 @@ dkg doctor [--json] [--no-orphan-scan]     # diagnose install state, version ske
 dkg update [--check] [--allow-prerelease]  # update node software
 dkg rollback                               # roll back to previous version
 ```
+
+Detached `dkg start` waits up to 120 seconds for a live daemon and a successful
+HTTP readiness response. Use `--timeout <ms>` for slower store recovery. If the
+wait expires while the supervisor remains alive, the command exits with code 1
+and says the daemon is **still starting**; it does not stop it. Check `dkg status`
+and the indicated log before starting another node. A supervisor that exits
+before readiness is reported as a startup failure. `--foreground` does not use
+this detached readiness deadline.
 
 Uninstall client IDs are `cursor`, `claude-code`, `claude-desktop`, `windsurf`,
 `vscode`, `cline`, and `codex-cli`. An ID selects all detected locations of that
