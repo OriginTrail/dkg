@@ -68,11 +68,11 @@ describe('Claude Desktop relocated Windows user data', () => {
     if (location === 'windows-wsl') { fixture.platform = 'linux'; fixture.runtime = 'wsl'; }
     const windows = { APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: join(root, 'windows-user') };
     const resolver = (key: string) => windows[key as keyof typeof windows] ?? null;
-    expect(detectClients(resolver).filter((target) => target.id === 'claude-desktop').map((target) => target.configPath)).toEqual([latest]);
+    expect(detectClients({ resolveWslWindowsEnvPath: resolver }).filter((target) => target.id === 'claude-desktop').map((target) => target.configPath)).toEqual([latest]);
     const untouched = readFileSync(latest, 'utf8');
     await mcpUninstallAction({ yes: true, client: `claude-desktop:${location}` }, {
-      detectClients: (_resolver, missing, selection) => {
-        const targets = detectClients(resolver, missing, selection);
+      detectClients: (options = {}) => {
+        const targets = detectClients({ ...options, resolveWslWindowsEnvPath: resolver });
         // Discovery models the selected platform; persistence writes actual host temporary files.
         fixture.runtime = process.platform === 'win32' ? 'windows' : process.platform === 'linux' ? 'linux' : 'posix';
         return targets;
@@ -95,14 +95,14 @@ describe('Claude Desktop relocated Windows user data', () => {
     fixture.platform = 'linux'; fixture.runtime = 'wsl';
     write(config('claude_wsl'));
     const windows = { APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: join(root, 'windows-user') };
-    const targets = detectClients((key) => windows[key as keyof typeof windows] ?? null);
+    const targets = detectClients({ resolveWslWindowsEnvPath: (key) => windows[key as keyof typeof windows] ?? null });
     expect(targets.filter((target) => target.id === 'claude-desktop')).toMatchObject([{ configPath: config('claude_wsl'), location: 'windows-wsl' }]);
   });
 
   it('explains both checked locations when another client is found but Desktop is absent', () => {
     write(join(fixture.home, '.claude.json'));
     const report = vi.fn();
-    expect(detectClients(undefined, report).some((target) => target.id === 'claude-code')).toBe(true);
+    expect(detectClients({ reportMissing: report }).some((target) => target.id === 'claude-code')).toBe(true);
     expect(report).toHaveBeenCalledWith({ id: 'claude-desktop', name: 'Claude Desktop', location: 'native',
       checkedPaths: [join(roaming, 'Claude', 'claude_desktop_config.json'), join(local, 'Claude-Data', 'claude_*', 'claude_desktop_config.json')] });
   });

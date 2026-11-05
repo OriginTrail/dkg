@@ -211,11 +211,15 @@ export interface MissingMcpClient {
  * The resolver arg is test-only so WSL Windows path discovery can
  * be exercised without real cmd.exe / wslpath binaries.
  */
-export function detectClients(
-  resolveWslWindowsEnvPath: (envVarName: string) => string | null = wslWindowsEnvPath,
-  reportMissing?: (client: MissingMcpClient) => void,
-  selection: 'preferred' | 'all' = 'preferred',
-): ClientTarget[] {
+export interface DetectMcpClientsOptions {
+  resolveWslWindowsEnvPath?: (envVarName: string) => string | null;
+  reportMissing?: (client: MissingMcpClient) => void;
+  selection?: 'preferred' | 'all';
+}
+
+export function detectClients({
+  resolveWslWindowsEnvPath = wslWindowsEnvPath, reportMissing, selection = 'preferred',
+}: DetectMcpClientsOptions = {}): ClientTarget[] {
   const home = homedir();
   const context: NativePathContext = {
     home, root: nativeApplicationConfigRoot(home), platform: platform(),

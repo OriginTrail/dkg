@@ -283,7 +283,7 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
   it('formats structured missing-client paths with manual setup guidance', async () => {
     const checkedPaths = [join(tmpHome, 'Roaming', 'Claude', 'claude_desktop_config.json'), join(tmpHome, 'Local', 'Claude-Data', 'claude_*', 'claude_desktop_config.json')];
     await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps({
-      detectClients: (_resolver, reportMissing) => {
+      detectClients: ({ reportMissing } = {}) => {
         reportMissing?.({ id: 'claude-desktop', name: 'Claude Desktop', location: 'native', checkedPaths });
         return [];
       },
@@ -3187,11 +3187,11 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
       mkdirSync(join(winUserProfile, '.codex'), { recursive: true });
 
       const { detectClients } = await import('../src/mcp-client-registry.js');
-      const detected = detectClients((envVarName) => {
+      const detected = detectClients({ resolveWslWindowsEnvPath: (envVarName) => {
         if (envVarName === 'USERPROFILE') return winUserProfile;
         if (envVarName === 'APPDATA') return winAppData;
         return null;
-      });
+      } });
 
       expect(
         detected.some((c) => c.name === 'Cursor (Windows-side via WSL)'),
