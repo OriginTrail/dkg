@@ -41,6 +41,10 @@ describe(`labelled blank-node patterns on ${endpoint ? 'Blazegraph' : 'Oxigraph'
       { graph: graphs[0], subject: '_:right', predicate: 'urn:q', object: '"shared"' },
       { graph: graphs[1], subject: `${prefix}:shared`, predicate: 'urn:p', object: '_:joined' },
       { graph: graphs[1], subject: '_:joined', predicate: 'urn:q', object: '"shared"' },
+      // A complete mirror must be suppressed only by the deduplicated route;
+      // its two original within-graph witnesses above must both survive.
+      { graph: graphs[2], subject: `${prefix}:s0`, predicate: 'urn:p', object: '_:b0' },
+      { graph: graphs[2], subject: '_:b0', predicate: 'urn:q', object: '"value0"' },
     ];
     try {
       await store.insert(data);
@@ -48,11 +52,12 @@ describe(`labelled blank-node patterns on ${endpoint ? 'Blazegraph' : 'Oxigraph'
         const query = `SELECT ?s ?o WHERE { ?s <urn:p> _:${label} . _:${label} <urn:q> ?o }`;
         const rows = await store.query(rewrite(query, graphs, route));
         expect(rows.bindings.map(row => `${row.s} ${row.o}`).sort()).toEqual([
-          `${prefix}:s0 "value0"`, `${prefix}:s0 "value0"`, `${prefix}:s1 "value1"`, `${prefix}:s1 "value1"`, `${prefix}:s2 "value2"`, `${prefix}:shared "shared"`,
+          `${prefix}:s0 "value0"`, `${prefix}:s0 "value0"`,
+          ...(route === 'union' ? [`${prefix}:s0 "value0"`] : []), `${prefix}:s1 "value1"`, `${prefix}:s1 "value1"`, `${prefix}:s2 "value2"`, `${prefix}:shared "shared"`,
         ]);
       }
       const count = await store.query(rewrite('SELECT (COUNT(*) AS ?n) WHERE { ?s <urn:p> _:h . _:h <urn:q> ?o }', graphs, route));
-      expect(count.bindings[0]?.n).toMatch(/^"6"/);
+      expect(count.bindings[0]?.n).toMatch(new RegExp(`^"${route === 'union' ? 7 : 6}"`));
     } finally {
       for (const graph of [...graphs, outside]) await store.dropGraph(graph);
       await store.close();
