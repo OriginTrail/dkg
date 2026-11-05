@@ -177,7 +177,7 @@ function TransactionsContent() {
 
   return (
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
         <thead>
           <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
@@ -259,7 +259,7 @@ function TransactionsContent() {
             );
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 }

@@ -399,6 +399,9 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     z-index: 40;
     box-shadow: var(--shadow-menu);
   }
+  .v10-app-body > .v10-panel-left,
+  .v10-app-body > .v10-panel-right { max-width: calc(100% - var(--h-control-lg)); }
+  .v10-panel-scrim { position: absolute; inset: 0; z-index: 39; border: 0; padding: 0; background: var(--scrim); }
   .v10-app-body > .v10-panel-left { left: 0; }
   .v10-app-body > .v10-panel-right { right: 0; }
   /* The drag-to-resize handles are pointless at this width and, with the

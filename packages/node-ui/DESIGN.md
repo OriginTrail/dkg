@@ -127,6 +127,12 @@ A leading mark says "this opens":
 - **Context Graph:** `<ContextGraphChip>`, a monogram tile in the graph's data colour plus the name, in a pill.
 - **Agent:** `<AgentChip size>` (24 / 28 / 40) with a circle of initials, and `<AgentDot>` / `<AgentDotStack>` for avatars alone. Agents are drawn the same way in the graph canvas.
 
+### Small screens
+
+- Under 860px the side panels float over the page: both start closed, one opens at a time, and a tap outside closes it.
+- Tables go inside `.ds-table-scroll` so they scroll within their card. Wide tables add `.ds-table-pin` to keep the first column in view.
+- A view that must stack when side panels leave it little room uses `.v10-center-content[data-narrow]`, set below 560px of content width.
+
 ### Inputs
 
 `.ds-input` for text fields, selects and text areas: 6px corners, 32px tall (`.ds-sm` 24px) to match the buttons beside them, 12px text, one focus ring. The chat composer is a card, not an input.

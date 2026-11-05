@@ -223,7 +223,7 @@ describe('right-rail agent shell replaces Agent hub', () => {
 
   it('emits a resize signal after side rail toggles so measured panes recalculate', () => {
     expect(app).toContain("window.dispatchEvent(new Event('resize'))");
-    expect(app).toContain('[leftCollapsed, rightCollapsed]');
+    expect(app).toContain('[leftOpen, rightOpen]');
   });
 
   it('hides the duplicate left-nav Agent hub entry while keeping the internal route alive', () => {

@@ -79,6 +79,9 @@
   .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
   .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }
 }
+.v10-center-content[data-narrow] .v10-layer-widgets-strip { flex-direction: column; }
+.v10-center-content[data-narrow] .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
+.v10-center-content[data-narrow] .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }
 
 /* Enhanced entity list — sortable, scrollable, with type pill */
 .v10-entity-list {

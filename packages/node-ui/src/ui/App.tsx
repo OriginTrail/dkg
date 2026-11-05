@@ -1,11 +1,11 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
 import { PanelBottom } from './components/Shell/PanelBottom.js';
 import { PanelRight } from './components/Shell/PanelRight.js';
-import { useLayoutStore, maxBottomHeight } from './stores/layout.js';
+import { useLayoutStore, useShellPanels, maxBottomHeight } from './stores/layout.js';
 import { useAgentsStore } from './stores/agents.js';
 import { useTabsStore } from './stores/tabs.js';
 import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrapper.js';
@@ -140,7 +140,12 @@ function AppShell() {
   useLiveStatus();
   useKeyboardShortcuts();
   useShellRouting();
-  const { leftCollapsed, rightCollapsed, bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
+  const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
+  const { narrow, leftOpen, rightOpen } = useShellPanels();
+  const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
+  const { pathname } = useLocation();
+  // Going somewhere from a floating panel shows the page, not the panel.
+  useEffect(() => { closeNarrowPanel(); }, [pathname, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
@@ -170,7 +175,7 @@ function AppShell() {
       window.dispatchEvent(new Event('resize'));
     });
     return () => window.cancelAnimationFrame(id);
-  }, [leftCollapsed, rightCollapsed]);
+  }, [leftOpen, rightOpen]);
 
   const onDragLeft = useCallback((delta: number) => {
     const w = useLayoutStore.getState().leftWidth;
@@ -205,7 +210,10 @@ function AppShell() {
       <ApiTokenPrompt />
       <Header />
       <div className="v10-app-body">
-        {!leftCollapsed && (
+        {narrow && (leftOpen || rightOpen) && (
+          <button type="button" className="v10-panel-scrim" aria-label="Close panel" onClick={closeNarrowPanel} />
+        )}
+        {leftOpen && (
           <>
             <div className="v10-panel-left" style={{ width: leftWidth }}>
               <PanelLeft />
@@ -222,7 +230,7 @@ function AppShell() {
           <PanelBottom />
         </div>
 
-        {!rightCollapsed && (
+        {rightOpen && (
           <>
             <div className="v10-resize-handle-h" ref={rightHandle} />
             <div className="v10-panel-right" style={{ width: rightWidth }}>

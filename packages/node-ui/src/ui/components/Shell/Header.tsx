@@ -1,5 +1,5 @@
 import React from 'react';
-import { useLayoutStore } from '../../stores/layout.js';
+import { useLayoutStore, useShellPanels } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 import { NotificationsBell } from './NotificationsBell.js';
@@ -54,7 +54,8 @@ const AGENT_PANEL_ICON = (
 );
 
 export function Header() {
-  const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
+  const { theme, setTheme, toggleLeft, toggleRight } = useLayoutStore();
+  const { leftOpen, rightOpen } = useShellPanels();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
   const nodeStatusFailures = useAgentsStore((s) => s.nodeStatusFailures);
   // Use the deduplicating shared hook (BUG-007): every other consumer
@@ -85,7 +86,7 @@ export function Header() {
       </div>
 
       <button
-        className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!leftCollapsed ? ' active-toggle' : ''}`}
+        className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${leftOpen ? ' active-toggle' : ''}`}
         onClick={toggleLeft}
         title="Toggle sidebar"
       >
@@ -130,7 +131,7 @@ export function Header() {
         </button>
 
         <button
-          className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!rightCollapsed ? ' active-toggle' : ''}`}
+          className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${rightOpen ? ' active-toggle' : ''}`}
           onClick={toggleRight}
           title="Toggle agent panel"
         >

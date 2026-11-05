@@ -784,7 +784,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             <div className="v10-mlv-result-count">
               {rows.length} {resultType === 'quads' ? `quad${rows.length === 1 ? '' : 's'}` : `result${rows.length === 1 ? '' : 's'}`}
             </div>
-            <table className="v10-mlv-table">
+            <div className="ds-table-scroll"><table className="v10-mlv-table">
               <thead>
                 <tr>
                   {columns.map((column) => (
@@ -806,7 +806,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
         )}
       </div>

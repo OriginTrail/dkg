@@ -42,6 +42,8 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
   display: flex;
   align-items: stretch;
   height: var(--tab-h);
+  overflow-x: auto;
+  scrollbar-width: none;
   gap: 0;
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 0;
@@ -72,6 +74,8 @@ select.input {
 }
 
 /* Filter bar */
+.tab-group > .ds-tab { flex: none; }
+.filters .input { max-width: 100%; min-width: 0; }
 .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 
 /* Data table */

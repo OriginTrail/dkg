@@ -537,7 +537,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
 
           {pane === 'triples' && (
             <div style={{ marginTop: 8, overflowX: 'auto', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)' }}>
-              <table className="v10-ka-triples-table">
+              <div className="ds-table-scroll"><table className="v10-ka-triples-table">
                 <thead>
                   <tr><th>Subject</th><th>Predicate</th><th>Object</th></tr>
                 </thead>
@@ -550,7 +550,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
               <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
                 {Math.min(entityTriples.length, 50)} of {entityTriples.length} triples shown
               </div>

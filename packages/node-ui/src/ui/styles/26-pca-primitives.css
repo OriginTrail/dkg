@@ -215,6 +215,7 @@
 @media (max-width: 640px) {
   .v10-pca-handshake { grid-template-columns: 1fr; }
 }
+.v10-center-content[data-narrow] .v10-pca-handshake { grid-template-columns: 1fr; }
 .v10-pca-handshake-half {
   display: flex;
   flex-direction: column;

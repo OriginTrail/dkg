@@ -74,7 +74,7 @@ export function NetworkPage() {
             <div className="empty-state-desc">Connections will appear here as your node links with peers on the network.</div>
           </div>
         ) : (
-          <table className="data-table">
+          <div className="ds-table-scroll ds-table-pin"><table className="data-table">
             <thead>
               <tr>
                 <th>Peer</th>
@@ -95,7 +95,7 @@ export function NetworkPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
 
@@ -110,7 +110,7 @@ export function NetworkPage() {
             <div className="empty-state-desc">Agents will be listed here as they are discovered through the network.</div>
           </div>
         ) : (
-          <table className="data-table">
+          <div className="ds-table-scroll"><table className="data-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -131,7 +131,7 @@ export function NetworkPage() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </div>

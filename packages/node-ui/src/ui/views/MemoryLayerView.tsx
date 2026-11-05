@@ -368,7 +368,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       {!loading && results.length > 0 && viewMode === 'table' && (
         <div className="v10-mlv-table-wrap ds-card-nested">
           <div className="v10-mlv-result-count">{results.length} triples</div>
-          <table className="v10-mlv-table">
+          <div className="ds-table-scroll"><table className="v10-mlv-table">
             <thead>
               <tr>
                 <th>Subject</th>
@@ -385,7 +385,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </div>
       )}
 

@@ -332,6 +332,14 @@
   .v10-cg-query-save-panel { grid-template-columns: 1fr; }
   .v10-cg-query-save-actions { justify-content: flex-end; }
 }
+.v10-center-content[data-narrow] .v10-vm-search-header { flex-direction: column; align-items: stretch; }
+.v10-center-content[data-narrow] .v10-cg-query-zone-header { flex-direction: column; align-items: stretch; }
+.v10-center-content[data-narrow] .v10-vm-search-controls,
+.v10-center-content[data-narrow] .v10-mlv-query-bar,
+.v10-center-content[data-narrow] .v10-cg-query-editor { grid-template-columns: 1fr; display: flex; flex-direction: column; }
+.v10-center-content[data-narrow] .v10-cg-query-actions { flex-direction: row; }
+.v10-center-content[data-narrow] .v10-cg-query-save-panel { grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-cg-query-save-actions { justify-content: flex-end; }
 
 /* ── Assertion List (WM → SWM) ── */
 .v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden; }

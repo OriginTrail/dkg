@@ -260,7 +260,7 @@ function ReplicationTab() {
         {cursors.length === 0 ? (
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No subscriptions</div></div>
         ) : (
-          <table className="data-table">
+          <div className="ds-table-scroll"><table className="data-table">
             <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
@@ -280,7 +280,7 @@ function ReplicationTab() {
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
 
@@ -291,7 +291,7 @@ function ReplicationTab() {
         {perCg.length === 0 ? (
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
         ) : (
-          <table className="data-table">
+          <div className="ds-table-scroll"><table className="data-table">
             <thead><tr><th>Context Graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
@@ -310,7 +310,7 @@ function ReplicationTab() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
 
@@ -321,7 +321,7 @@ function ReplicationTab() {
           {events.length === 0 ? (
             <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
           ) : (
-            <table className="data-table">
+            <div className="ds-table-scroll"><table className="data-table">
               <thead><tr><th>Time</th><th>Action</th><th>Ordinal</th><th>Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
               <tbody>
                 {events.map((e, i) => (
@@ -335,7 +335,7 @@ function ReplicationTab() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           )}
         </div>
       )}
@@ -402,7 +402,7 @@ function HealthTab() {
             <div className="empty-state-desc">All operations completed successfully. Nice work.</div>
           </div>
         ) : (
-          <table className="data-table">
+          <div className="ds-table-scroll"><table className="data-table">
             <thead>
               <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last error</th><th>Last occurred</th></tr>
             </thead>
@@ -439,7 +439,7 @@ function HealthTab() {
                 );
               })}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
     </div>
@@ -970,7 +970,7 @@ function OperationsTab() {
           placeholder="Filter by Operation ID..."
           value={opIdFilter}
           onChange={e => setOpIdFilter(e.target.value)}
-          style={{ minWidth: 240, flex: 1 }}
+          style={{ flex: '1 1 200px', minWidth: 0 }}
         />
         <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{total} total</span>
       </div>
@@ -1005,7 +1005,7 @@ function OperationsTab() {
             <div className="empty-state-desc">Operations will appear here as your node processes publish, query, and other DKG requests.</div>
           </div>
         ) : (
-          <table className="data-table">
+          <div className="ds-table-scroll ds-table-pin"><table className="data-table">
             <thead>
               <tr>
                 <th>Time</th>
@@ -1042,7 +1042,7 @@ function OperationsTab() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </div>
 
