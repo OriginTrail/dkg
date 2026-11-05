@@ -161,7 +161,9 @@ describe('daemon log rotation I/O bound', () => {
     const now = Date.now();
     files.set(LOG, { size: 200, mtimeMs: now });
     const newest = { size: 40, mtimeMs: now - 1 };
+    const expectedNewest = { ...newest };
     const older = { size: 30, mtimeMs: now - 2 };
+    const expectedOlder = { ...older };
     files.set(`${LOG}.1`, newest);
     files.set(`${LOG}.2`, older);
     const error = Object.assign(new Error('temporary scan failure'), { code: 'EIO' });
@@ -176,8 +178,8 @@ describe('daemon log rotation I/O bound', () => {
     const result = await rotateDaemonLogIfNeeded(LOG, { maxBytes: 100, keepBytes: 60, totalBytes: 500 });
     expect(result.rotated).toBe(false);
     expect(result.trimmed).toBe(false);
-    expect(files.get(`${LOG}.1`)).toEqual(newest);
-    expect(files.get(`${LOG}.2`)).toEqual(older);
+    expect(files.get(`${LOG}.1`)).toEqual(expectedNewest);
+    expect(files.get(`${LOG}.2`)).toEqual(expectedOlder);
     expect(files.get(LOG)?.size).toBe(200);
     expect(fsMocks.link).not.toHaveBeenCalled();
     expect(fsMocks.unlink).not.toHaveBeenCalled();
@@ -187,7 +189,9 @@ describe('daemon log rotation I/O bound', () => {
     const now = Date.now();
     files.set(LOG, { size: 200, mtimeMs: now });
     const newest = { size: 40, mtimeMs: now - 1 };
+    const expectedNewest = { ...newest };
     const older = { size: 30, mtimeMs: now - 2 };
+    const expectedOlder = { ...older };
     files.set(`${LOG}.1`, newest);
     files.set(`${LOG}.2`, older);
     const link = fsMocks.link.getMockImplementation()!;
@@ -203,28 +207,29 @@ describe('daemon log rotation I/O bound', () => {
     });
     const options = { maxBytes: 100, keepBytes: 60, totalBytes: 500 };
     expect(await rotateDaemonLogIfNeeded(LOG, options)).toMatchObject({ rotated: false, trimmed: true });
-    expect(files.get(`${LOG}.1`)).toEqual(newest);
+    expect(files.get(`${LOG}.1`)).toEqual(expectedNewest);
     expect(files.has(`${LOG}.2`)).toBe(false);
-    expect(files.get(`${LOG}.3`)).toEqual(older);
+    expect(files.get(`${LOG}.3`)).toEqual(expectedOlder);
     expect(files.get(LOG)?.size).toBe(60);
     fsMocks.link.mockImplementation(link);
     // Normal logging crosses the rotation threshold again.
     files.set(LOG, { size: 150, mtimeMs: now + 1 });
     expect(await rotateDaemonLogIfNeeded(LOG, options)).toMatchObject({ rotated: true, trimmed: false });
     expect(files.get(`${LOG}.1`)?.size).toBe(150);
-    expect(files.get(`${LOG}.2`)).toEqual(newest);
-    expect(files.get(`${LOG}.4`)).toEqual(older);
+    expect(files.get(`${LOG}.2`)).toEqual(expectedNewest);
+    expect(files.get(`${LOG}.4`)).toEqual(expectedOlder);
   });
 
   it('never replaces a destination absent from an otherwise successful directory scan', async () => {
     const now = Date.now();
     files.set(LOG, { size: 200, mtimeMs: now });
     const existing = { size: 40, mtimeMs: now - 1 };
+    const expectedExisting = { ...existing };
     files.set(`${LOG}.1`, existing);
     fsMocks.readdir.mockResolvedValueOnce(['daemon.log']);
     const result = await rotateDaemonLogIfNeeded(LOG, { maxBytes: 100, keepBytes: 60, totalBytes: 500 });
     expect(result).toMatchObject({ rotated: false, trimmed: false });
-    expect(files.get(`${LOG}.1`)).toEqual(existing);
+    expect(files.get(`${LOG}.1`)).toEqual(expectedExisting);
     expect(files.get(LOG)?.size).toBe(200);
   });
 
@@ -232,12 +237,13 @@ describe('daemon log rotation I/O bound', () => {
     const now = Date.now();
     files.set(LOG, { size: 200, mtimeMs: now });
     const previous = { size: 40, mtimeMs: now - 1 };
+    const expectedPrevious = { ...previous };
     files.set(`${LOG}.1`, previous);
     fsMocks.link.mockRejectedValue(Object.assign(new Error('unsupported'), { code: 'ENOTSUP' }));
     expect(await rotateDaemonLogIfNeeded(LOG, { maxBytes: 100, keepBytes: 60, totalBytes: 500 }))
       .toMatchObject({ rotated: false, trimmed: true });
     expect(files.get(LOG)?.size).toBe(60);
-    expect(files.get(`${LOG}.1`)).toEqual(previous);
+    expect(files.get(`${LOG}.1`)).toEqual(expectedPrevious);
   });
 
   it('rolls back a claimed name when removing the source fails, then safely trims', async () => {
@@ -287,15 +293,17 @@ describe('daemon log rotation I/O bound', () => {
 
   it('keeps distinct inode identities beyond Number precision distinct', async () => {
     const live = { size: 200, mtimeMs: Date.now() };
+    const expectedLive = { ...live };
     const previous = { size: 40, mtimeMs: Date.now() - 1 };
+    const expectedPrevious = { ...previous };
     files.set(LOG, live);
     files.set(`${LOG}.1`, previous);
     inodeIds.set(live, 9_007_199_254_740_992n);
     inodeIds.set(previous, 9_007_199_254_740_993n);
     expect(await rotateDaemonLogIfNeeded(LOG, { maxBytes: 100, keepBytes: 60, totalBytes: 500 }))
       .toMatchObject({ rotated: true, trimmed: false });
-    expect(files.get(`${LOG}.1`)).toEqual(live);
-    expect(files.get(`${LOG}.2`)).toEqual(previous);
+    expect(files.get(`${LOG}.1`)).toEqual(expectedLive);
+    expect(files.get(`${LOG}.2`)).toEqual(expectedPrevious);
   });
 
 });
