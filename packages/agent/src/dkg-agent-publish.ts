@@ -118,6 +118,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import {
+  controlStoreOptions,
   deleteByPatternWithoutCount,
   GraphManager,
   PrivateContentStore,
@@ -4766,9 +4767,10 @@ export class PublishMethods extends DKGAgentBase {
 
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    // This seal point read gates publisher admission; keep it off the bulk-read lane.
     const metaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-      { source: 'agent.asyncVmPublish.seal' },
+      controlStoreOptions('publisher', 'agent.asyncVmPublish.seal'),
     );
     const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
     const seal = parseAssertionSealQuads(metaQuads, assertionUri);

@@ -1,8 +1,7 @@
 /**
  * S2 step 6 + S4 step 6 orchestration tests for `runHermesSetup`.
  *
- * Per `agent-docs/hermes-parity/test-matrix.md`, these are the H-AC
- * rows that exercise the wiring between `runHermesSetup` and the
+ * These tests exercise the wiring between `runHermesSetup` and the
  * shared `@origintrail-official/dkg-core` lifecycle helpers extracted
  * in S1 (`startDaemon`, `fundWalletsBestEffort`, `requestFaucetFunding`).
  * The mock pattern mirrors `packages/adapter-openclaw/test/setup.test.ts`:
@@ -12,9 +11,8 @@
  *
  * The matrix originally specified DI stubs at the action-handler
  * boundary. We mock at the dkg-core module boundary instead because:
- *   1. `runHermesSetup` is the canonical entrypoint per
- *      `setup-entrypoint-contract.md`, and tests should exercise it
- *      directly to lock the contract surface.
+ *   1. `runHermesSetup` is the canonical entrypoint, and tests should
+ *      exercise it directly to lock the contract surface.
  *   2. The dual-mock pattern is already established and reviewed for
  *      adapter-openclaw faucet tests; consistency simplifies review.
  *
