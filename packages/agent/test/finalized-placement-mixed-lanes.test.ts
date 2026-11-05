@@ -91,7 +91,7 @@ describe('mixed finalized placement lanes', () => {
     expect(resolveFinalizedPlacementDecisionV1(current, () => f.readAuthority(CG))).toMatchObject({ status: 'ready', inventoryScope: { era: '2' } });
   });
 
-  it('evaluates a thousand unchanged cooling repairs in linear work', async () => {
+  it('evaluates a thousand unchanged cooling repairs on one lane read a slice, not one a repair', async () => {
     const rows = Array.from({ length: 1000 }, (_, index) => ({ ...privateRepair(), assertionCoordinate: `cooling-${index}` }));
     const f = fixture(0, { readPrivateFailure: () => ({ kind: 'unknown', consecutiveFailures: 2,
       sameKindFailures: 2, firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: 10_000, parked: false }) });
@@ -100,8 +100,9 @@ describe('mixed finalized placement lanes', () => {
     f.readAuthority.mockClear();
     f.owner.start(ctx); await f.owner.whenIdle();
     expect(f.repairPrivate).not.toHaveBeenCalled();
-    expect(f.readAuthority.mock.calls.length).toBeGreaterThanOrEqual(rows.length);
-    expect(f.readAuthority.mock.calls.length).toBeLessThanOrEqual(3 * rows.length);
+    // GH#3134: a pass reads a graph's authority once between two of its awaits.
+    expect(f.readAuthority.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(f.readAuthority.mock.calls.length).toBeLessThan(rows.length / 10);
   });
 
   it('lets foreground callbacks run before a cooling backlog finishes', async () => {

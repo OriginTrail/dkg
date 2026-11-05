@@ -831,10 +831,10 @@ function createV10ACKProviderForPublisher(
   const chain = (publisher as unknown as {
     chain?: {
       isV10Ready?: () => boolean;
-      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint) => Promise<boolean>;
+      verifyACKIdentity?: (recoveredAddress: string, claimedIdentityId: bigint, options?: { signal?: AbortSignal }) => Promise<boolean>;
       verifyACKIdentityDetailed?: (
         recoveredAddress: string,
-        claimedIdentityId: bigint,
+        claimedIdentityId: bigint, options?: { signal?: AbortSignal },
       ) => Promise<{ valid: boolean; reason?: 'key-not-registered' | 'not-in-sharding-table' | 'rpc-error' }>;
       getMinimumRequiredSignatures?: () => Promise<number>;
       getEvmChainId?: () => Promise<bigint>;
@@ -855,12 +855,12 @@ function createV10ACKProviderForPublisher(
     gossipPublish: transport.gossipPublish,
     sendP2P: transport.sendP2P,
     getConnectedCorePeers: transport.getConnectedCorePeers,
-    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId),
+    verifyIdentity: async (recoveredAddress: string, claimedIdentityId: bigint, options) => chain.verifyACKIdentity!(recoveredAddress, claimedIdentityId, options),
     // Prefer the structured verifier when the chain adapter exposes it
     // so the rejection log can report the specific failing gate.
     ...(typeof chain.verifyACKIdentityDetailed === 'function' ? {
-      verifyIdentityDetailed: async (recoveredAddress: string, claimedIdentityId: bigint) =>
-        chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId),
+      verifyIdentityDetailed: async (recoveredAddress: string, claimedIdentityId: bigint, options) =>
+        chain.verifyACKIdentityDetailed!(recoveredAddress, claimedIdentityId, options),
     } : {}),
     log: transport.log,
   });
