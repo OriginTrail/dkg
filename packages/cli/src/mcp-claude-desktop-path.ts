@@ -4,8 +4,8 @@ import { dirname, join } from 'node:path';
 const CONFIG = 'claude_desktop_config.json';
 
 /** Classic and relocated Windows installs share one logical Claude Desktop target. */
-export function claudeDesktopConfigPath(classic: string, localAppData: string | null): {
-  configPath: string;
+export function claudeDesktopConfigPaths(classic: string, localAppData: string | null): {
+  configPaths: string[];
   checkedPaths: string[];
 } {
   const candidates = [classic];
@@ -28,8 +28,9 @@ export function claudeDesktopConfigPath(classic: string, localAppData: string | 
   // Prefer a real config over an empty directory, then the most recently modified
   // config. The path tie-break makes equal timestamps independent of readdir order.
   existing.sort((a, b) => b.modified - a.modified || a.configPath.localeCompare(b.configPath));
+  const preferred = existing[0]?.configPath ?? candidates.find((candidate) => existsSync(dirname(candidate))) ?? classic;
   return {
-    configPath: existing[0]?.configPath ?? candidates.find((candidate) => existsSync(dirname(candidate))) ?? classic,
+    configPaths: [preferred, ...candidates.filter((candidate) => candidate !== preferred)],
     checkedPaths,
   };
 }

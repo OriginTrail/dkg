@@ -280,6 +280,18 @@ describe('mcpSetupAction — bundled init + daemon-start + register flow', () =>
     };
   }
 
+  it('formats structured missing-client paths with manual setup guidance', async () => {
+    const checkedPaths = [join(tmpHome, 'Roaming', 'Claude', 'claude_desktop_config.json'), join(tmpHome, 'Local', 'Claude-Data', 'claude_*', 'claude_desktop_config.json')];
+    await mcpSetupAction({ start: false, fund: false, verify: false }, makeDeps({
+      detectClients: (_resolver, reportMissing) => {
+        reportMissing?.({ id: 'claude-desktop', name: 'Claude Desktop', location: 'native', checkedPaths });
+        return [];
+      },
+    }));
+    const logged = logSpy.calls.map((call) => call.join(' ')).join('\n');
+    for (const text of ['Claude Desktop: not detected', ...checkedPaths, 'dkg mcp setup --print-only']) expect(logged).toContain(text);
+  });
+
   it('on a clean machine: creates config, starts daemon, writes client entry', async () => {
     // Pre-create a Cursor-style config dir so `detectClients` finds Cursor
     // as a candidate. Real users have ~/.cursor/ from installing Cursor.

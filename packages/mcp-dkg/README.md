@@ -328,4 +328,4 @@ The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MC
 
 ### Relocated Claude Desktop data on Windows
 
-Setup also detects `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json`, including Windows-side profiles from WSL. With several existing configs, it selects the most recently modified one; check the displayed path with `--dry-run`. For a custom location, use Claude Desktop **Settings → Developer → Edit Config** and the entry from `dkg mcp setup --print-only`; preserve `env.DKG_HOME` and restart the client.
+Setup also detects `%LOCALAPPDATA%\Claude-Data\claude_*\claude_desktop_config.json`, including Windows-side profiles from WSL. With several existing configs, it selects the most recently modified one; check the displayed path with `--dry-run`. Uninstall inspects all supported profiles to remove older DKG registrations too. For a custom location, use Claude Desktop **Settings → Developer → Edit Config** and the entry from `dkg mcp setup --print-only`; preserve `env.DKG_HOME` and restart the client.

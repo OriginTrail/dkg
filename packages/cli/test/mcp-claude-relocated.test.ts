@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { detectClients, selectMcpClientTargets } from '../src/mcp-client-registry.js';
 import { applyRegistrationEditToBody } from '../src/mcp-config-document.js';
+import { mcpUninstallAction } from '../src/mcp-uninstall.js';
 
 const fixture = vi.hoisted(() => ({ home: '', platform: 'win32', runtime: 'windows' }));
 vi.mock('node:os', async (original) => ({ ...await original<typeof import('node:os')>(), homedir: () => fixture.home, platform: () => fixture.platform }));
@@ -56,6 +57,32 @@ describe('Claude Desktop relocated Windows user data', () => {
     expect(desktop().map((target) => target.configPath)).toEqual([config('claude_active')]);
   });
 
+  it.each(['native', 'windows-wsl'] as const)('removes registrations from every older config through real %s discovery and uninstall', async (location) => {
+    const classic = join(roaming, 'Claude', 'claude_desktop_config.json');
+    const older = config('claude_old');
+    const latest = config('claude_latest');
+    const preserved = { preferences: { theme: 'dark' }, coworkUserFilesPath: 'keep', mcpServers: { other: { command: 'keep' } } };
+    for (const file of [classic, older]) write(file, { ...preserved, mcpServers: { ...preserved.mcpServers, dkg: { command: 'dkg' } } });
+    write(latest, preserved);
+    utimesSync(classic, 10, 10); utimesSync(older, 20, 20); utimesSync(latest, 30, 30);
+    if (location === 'windows-wsl') { fixture.platform = 'linux'; fixture.runtime = 'wsl'; }
+    const windows = { APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: join(root, 'windows-user') };
+    const resolver = (key: string) => windows[key as keyof typeof windows] ?? null;
+    expect(detectClients(resolver).filter((target) => target.id === 'claude-desktop').map((target) => target.configPath)).toEqual([latest]);
+    const untouched = readFileSync(latest, 'utf8');
+    await mcpUninstallAction({ yes: true, client: `claude-desktop:${location}` }, {
+      detectClients: (_resolver, missing, selection) => {
+        const targets = detectClients(resolver, missing, selection);
+        // Discovery models the selected platform; persistence writes actual host temporary files.
+        fixture.runtime = process.platform === 'win32' ? 'windows' : process.platform === 'linux' ? 'linux' : 'posix';
+        return targets;
+      },
+      log: () => {},
+    });
+    for (const file of [classic, older]) expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(preserved);
+    expect(readFileSync(latest, 'utf8')).toBe(untouched);
+  });
+
   it('keeps classic installs and permits a fresh relocated profile directory', () => {
     write(join(roaming, 'Claude', 'claude_desktop_config.json'));
     expect(desktop()[0].configPath).toBe(join(roaming, 'Claude', 'claude_desktop_config.json'));
@@ -76,8 +103,8 @@ describe('Claude Desktop relocated Windows user data', () => {
     write(join(fixture.home, '.claude.json'));
     const report = vi.fn();
     expect(detectClients(undefined, report).some((target) => target.id === 'claude-code')).toBe(true);
-    expect(report).toHaveBeenCalledWith(expect.stringContaining(join(local, 'Claude-Data', 'claude_*')));
-    expect(report).toHaveBeenCalledWith(expect.stringContaining('dkg mcp setup --print-only'));
+    expect(report).toHaveBeenCalledWith({ id: 'claude-desktop', name: 'Claude Desktop', location: 'native',
+      checkedPaths: [join(roaming, 'Claude', 'claude_desktop_config.json'), join(local, 'Claude-Data', 'claude_*', 'claude_desktop_config.json')] });
   });
 
   it('does not scan relocated Windows data for native macOS clients', () => {

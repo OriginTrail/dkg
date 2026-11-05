@@ -5,17 +5,18 @@ import { execSync } from 'node:child_process';
 import { resolveMcpConfigDestination } from './mcp-config-file.js';
 import { McpPhysicalConfig } from './mcp-physical-config.js';
 import { detectMcpRuntime } from './mcp-runtime.js';
-import { claudeDesktopConfigPath } from './mcp-claude-desktop-path.js';
-
+import { claudeDesktopConfigPaths } from './mcp-claude-desktop-path.js';
 
 import { DKG_SERVER_KEY } from './mcp-config-document.js';
 export { DKG_SERVER_KEY, type McpClientConfigShape } from './mcp-config-document.js';
 export type McpClientLocation = 'native' | 'windows-wsl';
 type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null; LOCALAPPDATA: string | null };
 
-function homePaths(home: string, ...parts: string[]) {
-  const configPath = join(home, ...parts);
-  return { configPath, displayPath: tildify(configPath) };
+/** Preferred setup destination comes first; removal can inspect every candidate. */
+interface ClientPaths { configPaths: string[]; checkedPaths?: string[] }
+interface NativePathContext { home: string; root: string; localAppData: string | null; platform: NodeJS.Platform }
+function configPaths(root: string, ...parts: string[]): ClientPaths {
+  return { configPaths: [join(root, ...parts)] };
 }
 
 const JSON_MCP = { format: 'json', serverContainer: 'mcpServers' } as const;
@@ -25,32 +26,35 @@ const TOML_SERVERS = { format: 'toml', serverContainer: 'mcp_servers' } as const
 /** One entry owns each client's identity, storage shape, paths and skill delivery. */
 const MCP_CLIENT_REGISTRY = [
   { target: { id: 'cursor', name: 'Cursor', ...JSON_MCP },
-    nativePaths: (home: string) => homePaths(home, '.cursor', 'mcp.json'),
-    windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.cursor', 'mcp.json'),
+    nativePaths: ({ home }: NativePathContext) => configPaths(home, '.cursor', 'mcp.json'),
+    windowsPath: (env: WindowsPaths) => env.USERPROFILE ? configPaths(env.USERPROFILE, '.cursor', 'mcp.json') : null,
     skillPath: ['.cursor', 'skills', 'dkg-node', 'SKILL.md'],
   },
   { target: { id: 'claude-code', name: 'Claude Code', ...JSON_MCP },
-    nativePaths: (home: string) => homePaths(home, '.claude.json'),
+    nativePaths: ({ home }: NativePathContext) => configPaths(home, '.claude.json'),
     skillPath: ['.claude', 'skills', 'dkg-node', 'SKILL.md'],
   },
   { target: { id: 'claude-desktop', name: 'Claude Desktop', ...JSON_MCP },
-    nativePaths: (_home: string, root: string) => appConfigPaths(root, 'Claude', 'claude_desktop_config.json'),
-    windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Claude', 'claude_desktop_config.json'),
+    nativePaths: ({ root, localAppData, platform: host }: NativePathContext): ClientPaths => host === 'win32'
+      ? claudeDesktopConfigPaths(join(root, 'Claude', 'claude_desktop_config.json'), localAppData)
+      : configPaths(root, 'Claude', 'claude_desktop_config.json'),
+    windowsPath: (env: WindowsPaths) => env.APPDATA
+      ? claudeDesktopConfigPaths(join(env.APPDATA, 'Claude', 'claude_desktop_config.json'), env.LOCALAPPDATA) : null,
   },
   { target: { id: 'windsurf', name: 'Windsurf', ...JSON_MCP },
-    nativePaths: (home: string) => homePaths(home, '.codeium', 'windsurf', 'mcp_config.json'),
-    windowsPath: (env: WindowsPaths) => env.USERPROFILE && join(env.USERPROFILE, '.codeium', 'windsurf', 'mcp_config.json'),
+    nativePaths: ({ home }: NativePathContext) => configPaths(home, '.codeium', 'windsurf', 'mcp_config.json'),
+    windowsPath: (env: WindowsPaths) => env.USERPROFILE ? configPaths(env.USERPROFILE, '.codeium', 'windsurf', 'mcp_config.json') : null,
   },
   { target: { id: 'vscode', name: 'VSCode', ...JSONC_SERVERS },
-    nativePaths: (_home: string, root: string) => appConfigPaths(root, 'Code', 'User', 'mcp.json'),
-    windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'mcp.json'),
+    nativePaths: ({ root }: NativePathContext) => configPaths(root, 'Code', 'User', 'mcp.json'),
+    windowsPath: (env: WindowsPaths) => env.APPDATA ? configPaths(env.APPDATA, 'Code', 'User', 'mcp.json') : null,
   },
   { target: { id: 'cline', name: 'Cline', ...JSON_MCP },
-    nativePaths: (_home: string, root: string) => appConfigPaths(root, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
-    windowsPath: (env: WindowsPaths) => env.APPDATA && join(env.APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+    nativePaths: ({ root }: NativePathContext) => configPaths(root, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json'),
+    windowsPath: (env: WindowsPaths) => env.APPDATA ? configPaths(env.APPDATA, 'Code', 'User', 'globalStorage', 'saoudrizwan.claude-dev', 'settings', 'cline_mcp_settings.json') : null,
   },
   { target: { id: 'codex-cli', name: 'Codex CLI', ...TOML_SERVERS },
-    nativePaths: (home: string) => homePaths(home, '.codex', 'config.toml'),
+    nativePaths: ({ home }: NativePathContext) => configPaths(home, '.codex', 'config.toml'),
     // A WSL process has no Windows-compatible Node/CLI launch command for Codex.
   },
 ] as const;
@@ -141,11 +145,6 @@ function nativeApplicationConfigRoot(home: string): string {
   }
 }
 
-function appConfigPaths(root: string, ...suffix: string[]) {
-  const configPath = join(root, ...suffix);
-  return { configPath, displayPath: tildify(configPath) };
-}
-
 /**
  * Discover MCP-aware clients on the machine. We look at the standard
  * config-file locations rather than probing for installed binaries — a
@@ -198,6 +197,13 @@ function wslWindowsEnvPath(envVarName: string): string | null {
   }
 }
 
+export interface MissingMcpClient {
+  id: McpClientId;
+  name: string;
+  location: McpClientLocation;
+  checkedPaths: string[];
+}
+
 /**
  * Exported for Codex Round-13 Fix 20 tests — direct unit testing
  * of WSL2 client-detection branch without going through the full
@@ -206,22 +212,27 @@ function wslWindowsEnvPath(envVarName: string): string | null {
  * be exercised without real cmd.exe / wslpath binaries.
  */
 export function detectClients(
-  resolveWslWindowsEnvPath: (envVarName: string) => string | null =
-    wslWindowsEnvPath,
-  reportMissing?: (message: string) => void,
+  resolveWslWindowsEnvPath: (envVarName: string) => string | null = wslWindowsEnvPath,
+  reportMissing?: (client: MissingMcpClient) => void,
+  selection: 'preferred' | 'all' = 'preferred',
 ): ClientTarget[] {
   const home = homedir();
-  const appConfigRoot = nativeApplicationConfigRoot(home);
-  const candidates: ClientTarget[] = MCP_CLIENT_REGISTRY.map((client) => ({
-    ...client.target,
-    location: 'native',
-    ...client.nativePaths(home, appConfigRoot),
-  }));
-  if (platform() === 'win32') {
-    const target = candidates.find((candidate) => candidate.id === 'claude-desktop')!;
-    Object.assign(target, claudeDesktopConfigPath(target.configPath, process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local')));
-    target.displayPath = tildify(target.configPath);
-  }
+  const context: NativePathContext = {
+    home, root: nativeApplicationConfigRoot(home), platform: platform(),
+    localAppData: process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local'),
+  };
+  const candidates: ClientTarget[] = [];
+  const add = (target: WithDisplayName<NativeTarget | WindowsTarget>, paths: ClientPaths) => {
+    const selected = selection === 'all' ? paths.configPaths : paths.configPaths.slice(0, 1);
+    const found = selected.filter((path) => existsSync(path) || existsSync(dirname(path)));
+    for (const configPath of found) candidates.push({
+      ...target, configPath, checkedPaths: paths.checkedPaths,
+      displayPath: target.location === 'native' ? tildify(configPath) : configPath,
+    });
+    if (!found.length) reportMissing?.({ id: target.id, name: target.name, location: target.location,
+      checkedPaths: paths.checkedPaths ?? paths.configPaths });
+  };
+  for (const client of MCP_CLIENT_REGISTRY) add({ ...client.target, location: 'native' }, client.nativePaths(context));
   if (detectMcpRuntime() === 'wsl') {
     const windows = {
       USERPROFILE: resolveWslWindowsEnvPath('USERPROFILE'),
@@ -230,23 +241,9 @@ export function detectClients(
     };
     for (const client of MCP_CLIENT_REGISTRY) {
       if (!('windowsPath' in client)) continue;
-      const configPath = client.windowsPath(windows);
-      if (!configPath) continue;
-      const resolved = client.target.id === 'claude-desktop'
-        ? claudeDesktopConfigPath(configPath, windows.LOCALAPPDATA)
-        : { configPath };
-      candidates.push({
-        ...client.target,
-        name: `${client.target.name} (Windows-side via WSL)`,
-        location: 'windows-wsl',
-        ...resolved,
-        displayPath: resolved.configPath,
-      });
+      const paths = client.windowsPath(windows);
+      if (paths) add({ ...client.target, name: `${client.target.name} (Windows-side via WSL)`, location: 'windows-wsl' }, paths);
     }
   }
-  return candidates.filter((client) => {
-    if (existsSync(client.configPath) || existsSync(dirname(client.configPath))) return true;
-    reportMissing?.(`${client.name}: not detected (checked ${(client.checkedPaths ?? [client.configPath]).join(', ')}). Use dkg mcp setup --print-only for manual configuration.`);
-    return false;
-  });
+  return candidates;
 }
