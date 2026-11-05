@@ -548,4 +548,5 @@ export { ProtocolReadLimitError } from './bounded-stream-read.js';
 export * from './async-admission-usage.js';
 export * from './async-admission-diagnostic-context.js';
 
-export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent } from './context-graph-membership.js';
+export { canonicalContextGraphAgentDid, contextGraphBelongsToAgent, type ContextGraphMembership } from './context-graph-membership.js';
+export { selectContextGraphName, type ContextGraphName, type ContextGraphNamePolicy } from './context-graph-name.js';

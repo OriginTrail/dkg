@@ -52,7 +52,7 @@ describe('MCP mine membership', () => {
 
   it('fails visibly when legacy curator ownership cannot be resolved, while explicit membership needs no identity probe', async () => {
     const identity = vi.fn(async () => { throw new Error('identity unavailable'); });
-    const legacy = new FakeClient({ listProjects: async () => [{ id: 'owned', curator: did, callerInvolved: null }], getAgentIdentity: identity });
+    const legacy = new FakeClient({ listProjects: async () => [{ id: 'owned', curator: did }], getAgentIdentity: identity });
     const tools = new FakeServer();
     registerReadTools(tools.asMcpServer(), legacy.asDkgClient(), makeConfig());
     const failed = await tools.call('dkg_list_context_graphs', {});

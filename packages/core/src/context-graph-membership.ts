@@ -10,9 +10,16 @@ export function canonicalContextGraphAgentDid(did: string): string {
   return isEvmAgentDidSubject(value) ? toAgentDid(value) : value.toLowerCase();
 }
 
+export interface ContextGraphMembership {
+  /** Explicit caller-scoped curator/participant decision from the daemon. */
+  callerInvolved?: boolean;
+  /** Legacy curator identity when the caller decision is absent. */
+  curator?: string;
+}
+
 /** Membership comes from the caller-scoped daemon result, or an exact legacy curator match. */
 export function contextGraphBelongsToAgent(
-  graph: { callerInvolved?: unknown; curator?: unknown },
+  graph: ContextGraphMembership,
   agentDid: string | null | undefined,
 ): boolean {
   if (graph.callerInvolved === true) return true;

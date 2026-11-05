@@ -12,7 +12,7 @@ describe('context graph caller membership', () => {
     expect(contextGraphBelongsToAgent({ callerInvolved: false, curator: did }, did)).toBe(false);
   });
   it('does not invent membership from incomplete or foreign identity', () => {
-    for (const graph of [{}, { curator: '' }, { curator: 42 }, { curator: 'foreign' }]) expect(contextGraphBelongsToAgent(graph, did)).toBe(false);
+    for (const graph of [{}, { curator: '' }, { curator: 'foreign' }]) expect(contextGraphBelongsToAgent(graph, did)).toBe(false);
     expect(contextGraphBelongsToAgent({ curator: did }, null)).toBe(false);
     expect(canonicalContextGraphAgentDid('did:dkg:agent:PeerMixedCase')).toBe('did:dkg:agent:PeerMixedCase');
   });

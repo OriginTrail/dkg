@@ -1,3 +1,4 @@
+import { selectContextGraphName } from '@origintrail-official/dkg-core';
 /**
  * DKG MCP read-tool registrations. Every tool:
  *   - Takes a `DkgClient` + resolved `DkgConfig` so it can honour the
@@ -101,8 +102,8 @@ export function registerReadTools(
             const star = pinned && r.id === pinned ? ' ★' : '';
             const role = r.role ? ` · ${r.role}` : '';
             const layer = r.layer ? ` · ${r.layer}` : '';
-            const unresolvedName = r.nameKnown === false || !r.name?.trim() || (r.nameKnown !== true && r.name === r.id && /^0x[0-9a-f]{64}$/i.test(r.id));
-            return `- **${r.id}**${star} — ${unresolvedName ? '(name unresolved)' : r.name}${role}${layer}${
+            const name = selectContextGraphName(r, { legacyHashSource: 'id', knownNameIsAuthoritative: true, blankNameIsUnresolved: true });
+            return `- **${r.id}**${star} — ${name ?? '(name unresolved)'}${role}${layer}${
               r.description ? `\n    ${r.description}` : ''
             }`;
           })
