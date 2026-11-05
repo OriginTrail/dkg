@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ChangelogStore, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { resolveQueryReadPlan } from '../src/query-read-plan.js';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import {
   hasNestedSelect,
@@ -370,5 +371,35 @@ describe.each(['oxigraph', null] as const)('outer default-graph expressions (%s)
       expect(await query('SELECT ?s WHERE { ?s <urn:p> ?o } GROUP BY ?s HAVING(EXISTS { ?s <urn:flag> ?flag })')).toEqual([{ s: 'urn:s:2' }]);
       expect(await query('SELECT ?s WHERE { ?s <urn:p> ?o } ORDER BY DESC(EXISTS { ?s <urn:flag> ?flag }) ?s')).toEqual([{ s: 'urn:s:2' }, { s: 'urn:s:1' }]);
     } finally { await store.close(); }
+  });
+});
+
+describe('content discovery for static GRAPH queries', () => {
+  const meta = 'did:dkg:context-graph:discovery/_meta';
+  const graph = `GRAPH <${meta}> { ?ka <urn:rootEntity> ?s }`;
+  it.each([
+    [`SELECT ?s WHERE { ${graph} }`, false],
+    [`SELECT ?s WHERE { ${graph} FILTER(BOUND(?s)) }`, false],
+    [`SELECT ?s WHERE { ${graph} BIND(1 AS ?n) VALUES ?x { <urn:x> } }`, false],
+    [`SELECT ?s WHERE { ${graph} OPTIONAL { GRAPH <${meta}> { ?ka ?p ?o } } }`, false],
+    [`SELECT ?s WHERE { ${graph} ?s <urn:flag> ?flag }`, true],
+    [`SELECT ?s WHERE { ${graph} FILTER(EXISTS { ?s <urn:flag> ?flag }) }`, true],
+    [`SELECT ?s WHERE { ${graph} FILTER(EXISTS { GRAPH <${meta}> { ?s ?p ?o } }) }`, false],
+    [`SELECT ?s (EXISTS { ?s <urn:flag> ?flag } AS ?hit) WHERE { ${graph} }`, true],
+    [`SELECT ?s (EXISTS { GRAPH <${meta}> { ?s ?p ?o } } AS ?hit) WHERE { ${graph} }`, false],
+    ...['WHERE', ''].flatMap(where => [
+      [`SELECT ?s WHERE { { SELECT ?s (EXISTS { ?s <urn:flag> ?flag } AS ?hit) ${where} { ${graph} } } }`, true] as const,
+      [`SELECT ?s WHERE { { SELECT ?s (EXISTS { GRAPH <${meta}> { ?s ?p ?o } } AS ?hit) ${where} { ${graph} } } }`, false] as const,
+    ]),
+  ] as const)('discovers content only when needed: %s', (source, needed) => {
+    const plan = resolveQueryReadPlan(scope(source), { contextGraphId: 'discovery' }, null);
+    expect(plan.kind).toBe('scoped');
+    if (plan.kind !== 'scoped') throw new Error('Expected a scoped read');
+    expect(plan.discovery.contentPrefixes.length > 0).toBe(needed);
+  });
+
+  it('keeps ordinary FILTER variables outside dataset routing on Oxigraph', () => {
+    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(BOUND(?s)) }`), 'oxigraph')).toBe('none');
+    expect(planGraphDataset(scope(`SELECT ?s WHERE { ${graph} FILTER(EXISTS { ?s <urn:flag> ?flag }) }`), 'oxigraph')).toBe('guard');
   });
 });

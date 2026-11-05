@@ -58,10 +58,27 @@ const ROUTES: readonly Route[] = [
     graphs: [...MAIN_GRAPHS, ...SHARED_GRAPHS], branches: true },
 ];
 const MAIN_ROUTES = ROUTES.slice(0, 2);
+// Isolate provenance references to foreign subjects from the path fixtures,
+// whose forbidden-term assertions intentionally treat every unlisted URI as a leak.
+const METADATA_ID = `${id}-metadata`;
+const METADATA_ROOT = `did:dkg:context-graph:${METADATA_ID}`;
+const METADATA_ROUTES = [
+  { name: 'data', options: { contextGraphId: METADATA_ID }, meta: `${METADATA_ROOT}/_meta`,
+    content: `${METADATA_ROOT}/_verifiable_memory/a/1`, prefix: 'urn:metadata:vm' },
+  { name: 'sub-graph', options: { contextGraphId: METADATA_ID, subGraphName: SUB }, meta: `${METADATA_ROOT}/_meta`,
+    content: `${METADATA_ROOT}/${SUB}/_verifiable_memory/a/1`, prefix: 'urn:metadata:subvm' },
+  { name: 'shared memory', options: { contextGraphId: METADATA_ID, graphSuffix: '_shared_memory' }, meta: `${METADATA_ROOT}/_shared_memory_meta`,
+    content: `${METADATA_ROOT}/_shared_memory/a/1`, prefix: 'urn:metadata:shared' },
+];
 const prefixesOf = (route: Route) => route.graphs.map(([, prefix]) => prefix);
 
 const TRUSTED = `"${TrustLevel.ConsensusVerified}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
 const data: Quad[] = [
+  ...METADATA_ROUTES.flatMap(({ name, meta, content, prefix }) => [
+    ...chains(prefix, content),
+    quad(`urn:ka:${name.replaceAll(' ', '-')}`, 'urn:rootEntity', `${prefix}:1`, meta),
+    quad('urn:ka:foreign', 'urn:rootEntity', 'urn:unlisted:a:1', meta),
+  ]),
   ...[...new Map(ROUTES.flatMap(route => route.graphs)).entries()].flatMap(([graph, prefix]) => [
     ...chains(prefix, graph),
     // What an unlisted graph says about a listed term: one more hop, and statements either side of it.
@@ -278,6 +295,11 @@ describe(`reads scoped to a graph list on ${endpoint ? 'Blazegraph' : 'Oxigraph'
     it('DESCRIBE of an unlisted subject finds nothing', async () => {
       expect(await quadsOf('DESCRIBE <urn:unlisted:a:1>', route.options)).toEqual([]);
     });
+  });
+
+  it.each(METADATA_ROUTES)('metadata joins discover $name content while excluding other scopes', async ({ options, meta, prefix }) => {
+    const found = await select(`SELECT ?s ?o WHERE { GRAPH <${meta}> { ?ka <urn:rootEntity> ?s } ?s <${L}> ?o }`, options);
+    expect(found).toEqual([{ s: `${prefix}:1`, o: `${prefix}:2` }]);
   });
 
   it('a constant GRAPH can join authorized default patterns without seeing unlisted statements', async () => {

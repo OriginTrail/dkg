@@ -1,12 +1,16 @@
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import { requireGraphScopeRewrite, rewriteGraphRoute, rewriteGraphSet, type PreparedGraphScope } from './sparql-graph-scope.js';
 
-/** Authorized explicit GRAPH scopes already own their routing; discover only unscoped queries. */
+/**
+ * Explicit GRAPH queries use the read plan's authorized dataset. For mixed
+ * default patterns that plan discovers content first; keep its filtered list
+ * instead of replacing it with an unfiltered prefix scan here.
+ */
 export async function resolveLegacyRouteScope(scope: PreparedGraphScope, root: string,
   family: 'data' | 'shared-memory', discover: (prefix: string) => Promise<string[]>,
   fallbackPolicy: 'compatibility' | 'preserve-scope' = 'compatibility',
-  engine: SparqlEngineFamily | null = null, allowedGraphs: readonly string[] = []): Promise<PreparedGraphScope> {
-  if (scope.hasGraphClause) return requireGraphScopeRewrite(rewriteGraphSet(scope, allowedGraphs, 'union-only', engine));
+  engine: SparqlEngineFamily | null = null, authorizedDatasetGraphs: readonly string[] = []): Promise<PreparedGraphScope> {
+  if (scope.hasGraphClause) return requireGraphScopeRewrite(rewriteGraphSet(scope, authorizedDatasetGraphs, 'union-only', engine));
   const data = family === 'data';
   const graphs = await discover(data ? `${root}/_verifiable_memory/` : `${root}/`);
   return requireGraphScopeRewrite(rewriteGraphRoute(scope,

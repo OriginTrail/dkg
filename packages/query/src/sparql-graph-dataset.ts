@@ -4,6 +4,7 @@ import {
   type SparqlLexicalToken,
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
+import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
@@ -51,31 +52,6 @@ export function hasRepeatedPath(scope: PreparedSparqlQuery): boolean {
   });
 }
 
-/** Conservatively identify default patterns beside caller GRAPH blocks. */
-function hasDefaultPatternBesideGraph(scope: PreparedSparqlQuery): boolean {
-  if (!scope.hasGraphClause || !scope.where) return false;
-  const { tokens } = scope.prepared;
-  const graphEnds = new Map(scope.graphTargets.map(target => [
-    target.keywordTokenIndex, scope.structure.braces.matchingTokenIndexes[target.targetTokenIndex + 1],
-  ]));
-  for (let index = scope.where.openingTokenIndex + 1; index < scope.where.closingTokenIndex; index++) {
-    const graphEnd = graphEnds.get(index);
-    if (graphEnd !== undefined && graphEnd > index) { index = graphEnd; continue; }
-    const token = tokens[index];
-    // An already authorized VALUES/GRAPH read must stay byte-identical on
-    // Oxigraph instead of re-injecting a potentially large full allowlist.
-    if (token.kind === 'word' && token.upper === 'VALUES') {
-      let opening = index + 1;
-      while (opening < scope.where.closingTokenIndex && !isSymbol(tokens[opening], '{')) opening++;
-      const end = scope.structure.braces.matchingTokenIndexes[opening];
-      if (end !== undefined && end > opening) { index = end; continue; }
-      return true;
-    }
-    if (token.kind === 'variable' || token.kind === 'iri' || token.kind === 'prefixed-name') return true;
-  }
-  return false;
-}
-
 export function planGraphDataset(
   scope: PreparedSparqlQuery,
   engine: SparqlEngineFamily | null,
@@ -83,10 +59,8 @@ export function planGraphDataset(
   const nestedSelect = hasNestedSelect(scope);
   // GRAPH wrappers do not cover projection/modifier expressions or default
   // patterns beside a caller GRAPH. Give those reads an authorized default graph.
-  const outsideWhere = scope.prepared.tokens.some(token => token.kind === 'word' && token.upper === 'EXISTS'
-    && (!scope.where || token.start < scope.where.openEnd || token.start > scope.where.close));
   if (engine === 'oxigraph') return nestedSelect ? 'dataset-only'
-    : outsideWhere || hasDefaultPatternBesideGraph(scope) ? 'guard' : 'none';
+    : hasOuterDefaultGraphPattern(scope) || (scope.hasGraphClause && hasTopLevelDefaultGraphPattern(scope)) ? 'guard' : 'none';
   if (scope.operation === 'DESCRIBE') return 'describe';
   return nestedSelect || hasRepeatedPath(scope) ? 'dataset-only' : 'guard';
 }
