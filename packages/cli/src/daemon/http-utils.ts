@@ -29,7 +29,8 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { type DKGAgent, isListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { isListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,

@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
-import { ListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent';
+import { ListContextGraphsBudgetExceeded } from '@origintrail-official/dkg-agent/context-graph-list-budget-error';
 import type { ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
 import {

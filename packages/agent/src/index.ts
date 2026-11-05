@@ -684,4 +684,4 @@ export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryRe
 
 export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
 
-export { ListContextGraphsBudgetExceeded, isListContextGraphsBudgetExceeded } from './context-graph-list-budget-error.js';
+export { ListContextGraphsBudgetExceeded, isListContextGraphsBudgetExceeded, type ListContextGraphsBudgetExceededLike } from './context-graph-list-budget-error.js';
