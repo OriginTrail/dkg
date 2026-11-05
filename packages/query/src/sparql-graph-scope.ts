@@ -330,11 +330,11 @@ function readDedupPattern(scope: PreparedGraphScope): {
 function buildDeduplicatedGraphPattern(scope: PreparedGraphScope, graphs: readonly string[]): ProjectedGraphPattern {
   const { openEnd, close } = scope.where!;
   const { uniqueMappings, filters } = readDedupPattern(scope);
-  // Plain ASK only needs one match. OFFSET makes even ASK depend on hidden
-  // path multiplicity, so those queries retain the selected graph's row bag.
-  const hasOffset = scope.prepared.tokens.slice(scope.where!.closingTokenIndex + 1)
-    .some(token => token.kind === 'word' && token.upper === 'OFFSET');
-  const distinct = uniqueMappings || (scope.operation === 'ASK' && !hasOffset);
+  // Only an unmodified ASK ignores multiplicity. OFFSET and aggregate
+  // modifiers must see the selected graph's complete row bag.
+  const plainAsk = scope.operation === 'ASK'
+    && scope.where!.closingTokenIndex === scope.prepared.tokens.length - 1;
+  const distinct = uniqueMappings || plainAsk;
   const movedFilters = distinct ? [] : filters;
   // Only the aggregate route repeats its pattern. Move every supported FILTER after it,
   // leaving no-op separators behind, so each result row is tested exactly once.
