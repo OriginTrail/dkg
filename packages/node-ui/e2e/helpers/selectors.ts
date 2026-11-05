@@ -9,7 +9,7 @@ export const sel = {
     version: '.v10-header-logo-version',
     sidebarToggle: 'button[title="Toggle sidebar"]',
     agentName: '.v10-header-agent-name',
-    statusDot: '.v10-header-status-dot',
+    status: '.v10-header-meta .ds-badge',
     meta: '.v10-header-meta',
     notifWrap: '.v10-header-notif-wrap',
     notifBadge: '.v10-header-notif-badge',

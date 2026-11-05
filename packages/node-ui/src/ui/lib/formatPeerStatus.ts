@@ -1,7 +1,7 @@
 /** Failed status checks in a row before the header says Unavailable (30s at the 10s poll). */
 export const NODE_UNAVAILABLE_AFTER_FAILURES = 3;
 
-/** A 401 comes from a running node that wants a token, so it isn't a failed check. */
+/** A 401 comes from a running node that wants a token: not a failed check, and it clears the count. */
 export function isNodeStatusFailure(error: unknown): boolean {
   return (error as { status?: unknown } | null | undefined)?.status !== 401;
 }
@@ -24,7 +24,7 @@ export function headerNodeStatus(
   statusFailures: number,
 ): HeaderNodeStatus {
   if (statusFailures >= NODE_UNAVAILABLE_AFTER_FAILURES) {
-    return { word: 'Unavailable', tone: 'danger', showPeers: false, tooltip: 'The node is not responding' };
+    return { word: 'Unavailable', tone: 'danger', showPeers: false, tooltip: 'The node is not responding. Checking again every 10 seconds.' };
   }
   if (!statusLoaded) {
     return { word: 'Connecting', tone: 'pending', showPeers: false, tooltip: 'Connecting to the node' };
@@ -55,10 +55,9 @@ export function formatPeerStatusTooltip(
   relayed: number,
   uptimeMs: number,
 ): string {
-  const lines = [
-    peers > 0 ? 'Connected to the network' : 'No peers connected',
-    `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`,
-  ];
+  const lines = peers > 0
+    ? ['Connected to the network', `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`]
+    : ['No peers connected'];
   if (uptimeMs > 0) lines.push(`Uptime ${formatUptimeShort(uptimeMs)}`);
   return lines.join('\n');
 }

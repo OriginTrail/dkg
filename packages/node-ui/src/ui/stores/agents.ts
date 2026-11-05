@@ -20,6 +20,7 @@ interface AgentsState {
   setActiveAgent: (name: string) => void;
   setNodeStatus: (s: any) => void;
   recordNodeStatusFailure: () => void;
+  clearNodeStatusFailures: () => void;
 }
 
 export const useAgentsStore = create<AgentsState>((set) => ({
@@ -32,4 +33,5 @@ export const useAgentsStore = create<AgentsState>((set) => ({
   setActiveAgent: (name) => set({ activeAgentName: name }),
   setNodeStatus: (s) => set({ nodeStatus: s, nodeStatusFailures: 0 }),
   recordNodeStatusFailure: () => set((state) => ({ nodeStatusFailures: state.nodeStatusFailures + 1 })),
+  clearNodeStatusFailures: () => set({ nodeStatusFailures: 0 }),
 }));

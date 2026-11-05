@@ -12,8 +12,8 @@ import { useAgentsStore } from '../src/ui/stores/agents.js';
  * (BUG-020) that breaks down peers into direct/relayed and surfaces
  * uptime so operators don't have to jump into Settings to diagnose
  * sync issues. The helper is pure — these tests pin the exact shape so
- * a copy regression (e.g. "0 peers (0 direct, 0 relayed)" silently
- * becoming "0 peer (0 direct, 0 relayed)") is caught.
+ * a copy regression (e.g. "2 peers (1 direct, 1 relayed)" silently
+ * becoming "2 peer (1 direct, 1 relayed)") is caught.
  */
 describe('headerNodeStatus', () => {
   it('says Connecting, neutral, before any status has loaded', () => {
@@ -34,7 +34,7 @@ describe('headerNodeStatus', () => {
 
   it('gives Connecting and Unavailable their own tooltip, so old peer data never shows', () => {
     expect(headerNodeStatus(false, 0, 0).tooltip).toBe('Connecting to the node');
-    expect(headerNodeStatus(true, 12, NODE_UNAVAILABLE_AFTER_FAILURES).tooltip).toBe('The node is not responding');
+    expect(headerNodeStatus(true, 12, NODE_UNAVAILABLE_AFTER_FAILURES).tooltip).toBe('The node is not responding. Checking again every 10 seconds.');
     expect(headerNodeStatus(true, 12, 0).tooltip).toBeUndefined();
   });
 });
@@ -57,6 +57,16 @@ describe('node status failure count', () => {
     store.setNodeStatus({ connectedPeers: 2 });
     expect(useAgentsStore.getState().nodeStatusFailures).toBe(0);
   });
+
+  it('clears on a 401, which proves the node is running', () => {
+    const store = useAgentsStore.getState();
+    store.recordNodeStatusFailure();
+    store.recordNodeStatusFailure();
+    store.clearNodeStatusFailures();
+    store.recordNodeStatusFailure();
+    expect(useAgentsStore.getState().nodeStatusFailures).toBe(1);
+    store.clearNodeStatusFailures();
+  });
 });
 
 describe('formatPeerStatusTooltip (BUG-020)', () => {
@@ -71,8 +81,7 @@ describe('formatPeerStatusTooltip (BUG-020)', () => {
   });
 
   it('says no peers are connected when there are none', () => {
-    const out = formatPeerStatusTooltip(0, 0, 0, 0);
-    expect(out).toMatch(/^No peers connected/);
+    expect(formatPeerStatusTooltip(0, 0, 0, 0)).toBe('No peers connected');
   });
 
   it('singularises "1 peer" (no trailing s) and keeps the parenthetical breakdown plural-agnostic', () => {
@@ -81,9 +90,8 @@ describe('formatPeerStatusTooltip (BUG-020)', () => {
     expect(out).not.toContain('1 peers');
   });
 
-  it('uses "peers" for 0 (zero is plural in English)', () => {
-    const out = formatPeerStatusTooltip(0, 0, 0, 0);
-    expect(out).toContain('0 peers (0 direct, 0 relayed)');
+  it('keeps the uptime but drops the empty breakdown when there are no peers', () => {
+    expect(formatPeerStatusTooltip(0, 0, 0, 4 * 60 * 1000).split('\n')).toEqual(['No peers connected', 'Uptime 4m']);
   });
 
   it('omits the Uptime line when uptimeMs is 0 (avoids "Uptime 0m" noise on cold start)', () => {

@@ -19,36 +19,26 @@ test.describe('Header', () => {
     expect(name!.length).toBeGreaterThan(0);
   });
 
-  test('shows green sync status dot', async ({ header }) => {
-    await expect(header.statusDot).toBeVisible();
+  test('shows the node status', async ({ header }) => {
+    await expect(header.status).toBeVisible();
   });
 
-  test('status dot reports a sync state (online/offline class)', async ({ header }) => {
-    // `synced` can legitimately be either state on the devnet depending on
-    // sync/tip timing, so the durable assertion is "the dot reports SOMETHING"
-    // — the online/offline class pair must be exhaustive — not "the daemon is
-    // synced", which depends on transient sync state.
-    await expect(header.statusDot).toBeVisible();
-    const cls = await header.statusDot.evaluate((el) => el.className);
-    expect(cls).toMatch(/\b(online|offline)\b/);
+  test('status says what the node reports: its peer connections', async ({ header }) => {
+    // A single-node devnet has no peers, so assert the union, not one state.
+    await expect(header.status).toHaveText(/^(Connected|No peers)$/, { timeout: 5_000 });
   });
 
-  test('displays a sync status text (synced or syncing)', async ({ page }) => {
-    // Same rationale as above — the single-node devnet may show either
-    // state. Assert the union, not a specific token.
-    await expect(page.getByText(/^(synced|syncing)$/)).toBeVisible();
-  });
-
-  test('displays peer count with number and label', async ({ header, page }) => {
-    // The durable invariant here is that the field renders WITH a numeric value
-    // (parseable to >= 0) — a non-finite / missing peer count is the regression
-    // this catches. The stronger ">1 peer on the 3-node devnet" assertion lives
-    // in peer-connectivity.spec.ts; this test stays count-agnostic on purpose.
-    await page.locator('.v10-header-meta').waitFor({ state: 'visible', timeout: 5_000 });
-    await page.getByText(/\d+ peer/).waitFor({ state: 'visible', timeout: 5_000 });
-    const peers = await header.getPeerCount();
-    expect(Number.isFinite(peers)).toBe(true);
-    expect(peers).toBeGreaterThanOrEqual(0);
+  test('shows the peer count only while connected', async ({ header, page }) => {
+    // The stronger ">1 peer on the 3-node devnet" assertion lives in
+    // peer-connectivity.spec.ts; this test stays count-agnostic on purpose.
+    await expect(header.status).toHaveText(/^(Connected|No peers)$/, { timeout: 5_000 });
+    const peerCount = page.locator('.v10-header-meta').getByText(/\d+ peers?$/);
+    if ((await header.status.textContent()) === 'Connected') {
+      await expect(peerCount).toBeVisible();
+      expect(await header.getPeerCount()).toBeGreaterThan(0);
+    } else {
+      await expect(peerCount).toHaveCount(0);
+    }
   });
 
   test('notification badge renders only when there are unread notifs', async ({ header, page }) => {

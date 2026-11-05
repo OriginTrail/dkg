@@ -9,7 +9,7 @@ export class HeaderPage {
   readonly version: Locator;
   readonly sidebarToggle: Locator;
   readonly agentName: Locator;
-  readonly statusDot: Locator;
+  readonly status: Locator;
   readonly meta: Locator;
   readonly notifWrap: Locator;
   readonly notifBadge: Locator;
@@ -26,7 +26,7 @@ export class HeaderPage {
     this.version = page.locator(sel.header.version);
     this.sidebarToggle = page.locator(sel.header.sidebarToggle);
     this.agentName = page.locator(sel.header.agentName);
-    this.statusDot = page.locator(sel.header.statusDot);
+    this.status = page.locator(sel.header.status);
     this.meta = page.locator(sel.header.meta);
     this.notifWrap = page.locator(sel.header.notifWrap);
     this.notifBadge = page.locator(sel.header.notifBadge);
@@ -61,10 +61,6 @@ export class HeaderPage {
     const text = await this.meta.textContent();
     const match = text?.match(/(\d+)\s*peer/);
     return match ? parseInt(match[1], 10) : 0;
-  }
-
-  async isSynced() {
-    return this.statusDot.evaluate((el) => el.classList.contains('online'));
   }
 
   async getUnreadCount() {

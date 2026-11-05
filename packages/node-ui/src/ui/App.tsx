@@ -21,6 +21,7 @@ import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
   const recordNodeStatusFailure = useAgentsStore((s) => s.recordNodeStatusFailure);
+  const clearNodeStatusFailures = useAgentsStore((s) => s.clearNodeStatusFailures);
   // Status was previously polled every 10s with a raw `setInterval`,
   // even when the tab was hidden — burning ~6 requests/minute against
   // the daemon for nothing. Route through the visibility-aware
@@ -28,6 +29,7 @@ function useLiveStatus() {
   useVisibilityPolling(() => {
     api.fetchStatus().then(setNodeStatus).catch((error) => {
       if (isNodeStatusFailure(error)) recordNodeStatusFailure();
+      else clearNodeStatusFailures();
     });
   }, 10_000);
 }
