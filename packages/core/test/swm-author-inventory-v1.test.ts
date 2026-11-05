@@ -156,6 +156,7 @@ describe('SWM author inventory v1', () => {
     expect(computeSwmAuthorInventoryRowsDigestV1(rows)).toBe(expectedDigest);
   });
 
+  // The real 16 MiB allocation boundary also runs under coverage instrumentation.
   it('evicts cached bytes at the allocation budget while snapshots remain live', async () => {
     // Isolate the cache so the boundary does not depend on earlier test calls.
     vi.resetModules();
@@ -201,7 +202,7 @@ describe('SWM author inventory v1', () => {
     } finally {
       serializer.mockRestore();
     }
-  });
+  }, 30_000);
 
   it('revalidates a mutable array after a successful serialization', () => {
     const rows = [ROW_A, ROW_B];
