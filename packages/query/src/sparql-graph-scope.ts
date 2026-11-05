@@ -14,6 +14,7 @@ import {
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
+import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { literalSuffixLength } from './sparql-literal-suffix.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
@@ -200,7 +201,6 @@ export function wrapWithGraphUnion(
 const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
 const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
-const dedupFilterVariable = (index: number) => `?__dkgDedupFilter${index}`;
 
 interface SourceRange {
   readonly start: number;
@@ -328,32 +328,40 @@ function readDedupPattern(scope: PreparedGraphScope): {
 
 /** Own graph choice and FILTER placement inside the shared projection boundary. */
 function buildDeduplicatedGraphPattern(scope: PreparedGraphScope, graphs: readonly string[]): ProjectedGraphPattern {
-  const { openEnd, close } = scope.where!;
   const { uniqueMappings, filters } = readDedupPattern(scope);
-  // Only an unmodified ASK ignores multiplicity. OFFSET and aggregate
-  // modifiers must see the selected graph's complete row bag.
-  const plainAsk = scope.operation === 'ASK'
-    && scope.where!.closingTokenIndex === scope.prepared.tokens.length - 1;
-  const distinct = uniqueMappings || plainAsk;
-  const movedFilters = distinct ? [] : filters;
-  // Only the aggregate route repeats its pattern. Move every supported FILTER after it,
-  // leaving no-op separators behind, so each result row is tested exactly once.
-  let inner = '';
-  let from = openEnd;
-  for (const { start, end } of movedFilters) {
-    inner += `${scope.source.slice(from, start)}FILTER(true)`;
-    from = end;
-  }
-  inner += scope.source.slice(from, close);
+  // Deduplicate only mappings known to be unique within one graph. ASK uses
+  // the same row semantics, including its modifiers and volatile FILTERs.
+  const distinct = uniqueMappings;
+  const movedFilters = filters;
+  // Every retained row evaluates each moved FILTER once. Hidden blank-node
+  // variables stay private across graph selection and replay.
+  const rendered = renderDedupPattern(scope, movedFilters);
+  const inner = rendered.pattern;
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  const usedVariables = new Set(scope.queryVariables.map(variable => variable.logicalName));
+  const filterVariables = movedFilters.map(() => {
+    let suffix = 0;
+    while (usedVariables.has(`__dkgDedupFilter${suffix}`)) suffix++;
+    const name = `__dkgDedupFilter${suffix}`;
+    usedVariables.add(name);
+    return `?${name}`;
+  });
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
   // once for all identical mappings. Filtering these booleans after OPTIONAL
   // also discards its unmatched fallback row and expression errors.
   const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
-    `BIND(${scope.source.slice(expressionStart, end)} AS ${dedupFilterVariable(index)})`,
+    `BIND(${scope.source.slice(expressionStart, end)} AS ${filterVariables[index]})`,
   ).join(' ');
+  if (distinct && movedFilters.length) {
+    const candidate = `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`;
+    const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
+    return {
+      pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate} } } ${filterBindings} ${trailing}`,
+      helperVariables: [DEDUP_GRAPH_SENTINEL, ...rendered.helperVariables, ...filterVariables],
+    };
+  }
   const graphPattern = distinct
     ? `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`
     : [
@@ -367,9 +375,9 @@ function buildDeduplicatedGraphPattern(scope: PreparedGraphScope, graphs: readon
       // here, but avoids Oxigraph's much costlier plain-join plan.
       `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} ${filterBindings} } }`,
     ].join(' ');
-  const trailing = movedFilters.map((_, index) => `FILTER(${dedupFilterVariable(index)})`).join(' ');
-  const helperVariables = distinct ? [DEDUP_GRAPH_SENTINEL]
-    : [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL, ...movedFilters.map((_, index) => dedupFilterVariable(index))];
+  const trailing = movedFilters.map((_, index) => `FILTER(${filterVariables[index]})`).join(' ');
+  const helperVariables = distinct ? [DEDUP_GRAPH_SENTINEL, ...rendered.helperVariables]
+    : [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL, ...rendered.helperVariables, ...filterVariables];
   return { pattern: `${graphPattern} ${trailing}`, distinct, helperVariables };
 }
 
