@@ -283,6 +283,7 @@ modes auto-renewal can't recover from:
 | `dkg stop` | Graceful daemon shutdown |
 | `dkg status` | Node health, peer count, identity |
 | `dkg logs` | Tail the daemon log |
+| `dkg debug cpu-profile [--seconds <n>]` | Record a CPU profile of the running node (node-admin token; 10 s default, 60 s max) and print where the node wrote it |
 | `dkg peers` | List connected peers and transport info |
 | `dkg peer info <peer-id>` | Inspect a peer's identity and addresses |
 | `dkg send <name> <msg>` | Encrypted direct message to a peer |
@@ -479,6 +480,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
+- `POST /api/diagnostics/cpu-profile` — node-admin CPU profile of the daemon's main thread, written to `<DKG home>/diagnostics` ([Troubleshooting](../../docs/use-dkg/troubleshooting.md#slow-or-stalled-node-record-a-cpu-profile))
 - `POST /api/knowledge-assets/{name}/swm/share-async`, `GET /api/knowledge-assets/swm/share-jobs`, `GET /api/publisher/jobs`, `GET /api/publisher/stats` — async share and publish queues (client contract: [Async Share and Publish Jobs](../../docs/build/async-jobs.md); paging: [Listing async jobs](../../docs/references/api.md#listing-async-jobs))
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 

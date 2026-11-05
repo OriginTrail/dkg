@@ -289,6 +289,7 @@ export type {
   FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
 export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
+export { isRetryableContextGraphAuthorityUnavailableError } from './internal/context-graph-authority/context-graph-authority.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';

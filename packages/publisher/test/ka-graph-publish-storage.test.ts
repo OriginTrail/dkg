@@ -4,7 +4,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   TypedEventBus,
-  createOperationContext,
+  createOperationContext, contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
@@ -14,7 +14,7 @@ import {
   DKGPublisher,
   computePrivateRootV10,
   generatedPrivateCatalogTripleKeys,
-  skolemizeKnowledgeAsset,
+  skolemizeKnowledgeAsset, withMaterializationLock,
 } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'rootless-publish';
@@ -37,6 +37,26 @@ describe('graph-scoped KA publish storage', () => {
       eventBus: new TypedEventBus(),
       keypair: await generateEd25519Keypair(),
     });
+  });
+
+  it('serializes intentional local publication with the same KA materialization owner', async () => {
+    let publish!: ReturnType<DKGPublisher['publish']>, reachedChain!: () => void;
+    const atChain = new Promise<void>(resolve => { reachedChain = resolve; });
+    const vmGraph = knowledgeAssetLayerGraphUri(CONTEXT_GRAPH, MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(UAL, 1));
+    await withMaterializationLock(contextGraphMetaUri(CONTEXT_GRAPH), UAL, async () => {
+      publish = publisher.publish({ contextGraphId: CONTEXT_GRAPH,
+        quads: [quad('urn:local', 'urn:value', '"one"')], publisherPeerId: 'local-fixture',
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: UAL, assertionVersion: 1,
+        publicTripleCount: 1, privateTripleCount: 0,
+        onPhase: (phase, state) => { if (phase === 'chain' && state === 'start') reachedChain(); },
+      });
+      await Promise.race([atChain, publish]);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(await store.countQuads(vmGraph)).toBe(0);
+    });
+    await expect(publish).resolves.toMatchObject({ status: 'tentative', ual: UAL });
+    expect(await store.countQuads(vmGraph)).toBe(1);
   });
 
   it('stores one exact VM graph with constant-size metadata and one private commitment', async () => {

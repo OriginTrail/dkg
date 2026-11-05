@@ -25,6 +25,11 @@
     "test/retention-runtime-scope.test.ts",
     "test/daemon-queue-retention-live.test.ts",
     "test/async-admission-usage-retention.test.ts",
-    "test/store-control-path-config.test.ts"
+    "test/store-control-path-config.test.ts",
+    "test/cpu-profile.test.ts",
+    "test/cpu-profile-command.test.ts",
+    "test/cpu-profile-real.test.ts",
+    "test/cpu-profile-live.test.ts",
+    "test/fixtures/cpu-profile-real.fixture.ts"
   ]
 }

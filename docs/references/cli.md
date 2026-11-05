@@ -18,6 +18,7 @@ dkg start [-f]                           # start the node daemon (-f for foregro
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
+dkg debug cpu-profile [--seconds <n>]    # record a CPU profile of the node (node-admin token; 10 s default, 60 s max)
 dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 

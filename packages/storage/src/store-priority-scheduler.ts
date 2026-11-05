@@ -3,10 +3,12 @@ import { performance } from 'node:perf_hooks';
 import { availableParallelism } from 'node:os';
 import {
   backpressureRegistry,
+  currentAsyncAdmissionDiagnosticContext,
   getMetrics,
   ObservableScheduler,
   type SchedulerPressureOutcome,
   type SchedulerPressureTicket,
+  type AsyncAdmissionDiagnosticContext,
 } from '@origintrail-official/dkg-core';
 import {
   isStoreWorkPriority,
@@ -23,6 +25,7 @@ import {
 } from './store-operation-outcome.js';
 import {
   createRateLimitedStoreTimeoutDiagnosticReporter,
+  activeStoreAdmissionsSnapshot,
   type StoreSchedulerPriority,
   type StoreSchedulerTimeoutDiagnostic,
 } from './store-scheduler-timeout-diagnostics.js';
@@ -186,6 +189,7 @@ interface QueueEntry<T> {
   operation: string;
   storeOperation?: StoreOperation;
   queuedAt: number;
+  admission?: AsyncAdmissionDiagnosticContext;
   pressureTicket: SchedulerPressureTicket;
   work: () => Promise<T>;
   resolve: (value: T) => void;
@@ -377,6 +381,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly shareSingleOrdinarySlot: boolean;
   private readonly controlId?: string;
   private contendedNormalDispatches = 0;
+  private readonly activeAdmissions = new Map<QueueEntry<unknown>, number>();
   // Wait and rejection figures for the periodic line. The lanes come from `queues`:
   // STORE_WORK_PRIORITIES can still be uninitialised when the singleton below is built.
   readonly stats: StoreSchedulerStats;
@@ -560,6 +565,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         operation,
         storeOperation: metadata?.storeOperation,
         queuedAt: this.now(),
+        admission: currentAsyncAdmissionDiagnosticContext(),
         pressureTicket,
         work: AsyncResource.bind(work),
         resolve,
@@ -590,8 +596,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
           entry.storeOperation === undefined ? undefined : { storeOperation: entry.storeOperation },
         );
         this.reportTimeout?.(
-          { priority: lane, operation },
+          { priority: lane, operation, ...(entry.admission ? { admission: entry.admission } : {}) },
           () => this.getBackpressureSnapshot(),
+          () => activeStoreAdmissionsSnapshot(this.activeAdmissions, this.now()),
         );
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error, this.now() - entry.queuedAt);
@@ -658,6 +665,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     this.cleanupQueuedEntry(entry);
     this.increment(entry.priority);
     const startedAt = this.now();
+    if (entry.admission) this.activeAdmissions.set(entry, startedAt);
     this.pressureStart(entry.pressureTicket);
     const waitMs = Math.max(0, startedAt - entry.queuedAt);
     const attributes = {
@@ -687,6 +695,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         entry.reject(err);
       })
       .finally(() => {
+        this.activeAdmissions.delete(entry);
         getMetrics().storeSchedulerActive.add(-1, attributes);
         this.pressureFinish(entry.pressureTicket, pressureOutcome);
         this.decrement(entry.priority);

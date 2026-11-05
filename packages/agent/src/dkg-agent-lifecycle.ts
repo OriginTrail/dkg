@@ -3,7 +3,7 @@ import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } fro
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { isCommittedSubscription, waitForSubscriptionActivation, type OwnedSubscriptionActivation } from './context-graph-subscription-activation-state.js';
-import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
+import type { DurableRecoverySlice } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -1426,9 +1426,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           reservedSlotOnly: admission.reservedSlotOnly,
           signal: admissionBoundary.signal,
           logInfo,
-          // A control-plane fetch refused at once is counted, one warning per interval and at node stop.
+          // A control-plane fetch or durable sync refused at once is counted, one warning per interval and at node stop.
           reportRefusal: syncRefusalReporter(
-            { label, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
+            { label, lane, source, contextGraphId }, this.controlPlaneRefusals, logInfo, this.node.stopSignal,
           ),
         },
         timedWork,
@@ -5072,7 +5072,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
-  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoveryRoundOutcome> {
+  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoverySlice> {
     const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
     return runGraphOwnedDurableRecovery({ ...request, host,
       authority: host.resolveOrdinaryAuthority(request.ctx, {}) });
@@ -6610,7 +6610,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }),
         executeSlice: async (peerId, recovery) => {
           if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
-            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } };
+            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' }, admission: 'not-started' };
           }
           return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
             recovery,
@@ -6623,11 +6623,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
             signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
           });
-          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found');
+          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found', exact.admission);
         },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),
+        stopSignal: () => this.node.stopSignal ?? undefined,
+        inRecoveryScope: () => (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+        // The terms of the round's own admission (`executeSlice` above).
+        admissionAvailable: () => !syncAdmissionWouldBeRefused(resolveAgentSyncGlobalBackpressure(this.config), {
+          contextGraphId, lane: 'durable', priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
+          priorityClass: syncPriorityClass(FOREGROUND_CATCHUP_SYNC_PRIORITY), source: 'vm-recovery',
+        }),
       },
     });
   }

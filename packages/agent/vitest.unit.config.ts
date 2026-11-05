@@ -35,6 +35,7 @@ export default defineConfig({
       "test/snapshot-native-store.test.ts",
       "test/public-snapshot-checkpoint-audit.test.ts",
       "test/sync-verify-worker-lifecycle.test.ts",
+      "test/sync-verify-worker-native-addons.test.ts",
       "test/public-checkpoint-job-ownership.test.ts",
       "test/finalized-placement-decision.test.ts",
       "test/finalized-placement-mixed-lanes.test.ts",
@@ -124,11 +125,13 @@ export default defineConfig({
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
+      "test/async-vm-publish-seal-control.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/named-ka-vm-lifecycle.test.ts",
       "test/storage-ack-ledger-timestamp-writer.test.ts",
       "test/storage-ack-admission.test.ts",
       "test/storage-ack-admission-live.test.ts",
+      "test/storage-ack-round-retirement.test.ts",
       "test/named-ka-vm-lifecycle-construction.test.ts",
       "test/observed-store-mutation.test.ts",
       "test/durable-integrity-seal-assertion-version.test.ts",
@@ -237,6 +240,7 @@ export default defineConfig({
       "test/durable-sync-authority-boundary.test.ts",
       "test/durable-recovery-owner.test.ts",
       "test/durable-recovery-owned-round.test.ts",
+      "test/durable-recovery-turns.test.ts",
       "test/remove-sub-graph-index-hint.test.ts",
       "test/store-content-fence.test.ts",
       "test/durable-recovery-missing-assets.test.ts",
@@ -468,6 +472,8 @@ export default defineConfig({
       "test/rootless-update-error.test.ts",
       "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
+      // #3044 — a publish repeats its recipient read within the share's bound.
+      "test/publish-recipient-authority-repeat.test.ts",
       // #3081 — the steps the queued executor reports after the confirmation (observation only).
       "test/queued-publish-tail-steps.test.ts",
       // #3081 — a publication does not wait for the retirement of its shared copy's marker.
@@ -487,6 +493,8 @@ export default defineConfig({
       "test/messenger-substrate.test.ts",
       "test/messenger-outbox-budget.test.ts",
       "test/context-graph-join-policy.test.ts",
+      // #3366 — a busy store is no verdict on a joining agent's key.
+      "test/join-admission-store-busy.test.ts",
       "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/store-admission-retry.test.ts",
@@ -501,6 +509,7 @@ export default defineConfig({
       "test/context-graph-list-wire-only.test.ts",
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
+      "test/participant-join-approval-proof.test.ts",
       "test/join-approval-metadata-refetch.test.ts",
       // #3421 — a join approval whose member list is still pending, and the
       // members a curator's join admission recognises.
