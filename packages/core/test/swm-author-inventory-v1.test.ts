@@ -141,7 +141,9 @@ describe('SWM author inventory v1', () => {
   });
 
   it('keeps immutable row-set bytes and digests independent of returned buffers', () => {
-    const rows = Object.freeze([ROW_A, ROW_B]);
+    const rows = parseCanonicalSwmAuthorInventoryRowsV1(
+      canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]),
+    );
     const expected = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
     const expectedDigest = computeSwmAuthorInventoryRowsDigestV1([ROW_A, ROW_B]);
     const first = canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
@@ -166,31 +168,35 @@ describe('SWM author inventory v1', () => {
       shareOperationId: `swm-operation-${index}`,
       kaUal: `did:dkg:otp:20430/${AUTHOR}/${index + 1}`,
     })) as SwmAuthorInventoryRowV1[];
-    const snapshots = [Object.freeze([...rows])];
     const serializer = vi.spyOn(canonicalJson, 'canonicalizeJson');
     const rowSetEncodings = () => serializer.mock.calls.filter(([value]) => Array.isArray(value)).length;
     try {
-      const expected = encode(snapshots[0]!);
-      const expectedDigest = codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!);
+      const expected = encode(rows);
+      const text = new TextDecoder().decode(expected);
       expect(rowSetEncodings()).toBe(1);
+      serializer.mockClear();
+      const snapshots = [codec.parseCanonicalSwmAuthorInventoryRowsV1(text)];
+      const expectedDigest = codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!);
+      expect(rowSetEncodings()).toBe(0);
       const entriesWithinBudget = Math.floor(
         2 * codec.MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1 / expected.byteLength,
       );
       expect(entriesWithinBudget).toBeGreaterThan(1);
       for (let index = 1; index < entriesWithinBudget; index += 1) {
-        snapshots.push(Object.freeze([...rows]));
+        snapshots.push(codec.parseCanonicalSwmAuthorInventoryRowsV1(text));
         expect(Buffer.compare(encode(snapshots[index]!), expected)).toBe(0);
       }
       expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
-      expect(rowSetEncodings()).toBe(entriesWithinBudget);
+      expect(rowSetEncodings()).toBe(0);
 
       // Keep every weak key live, and cross the byte budget with one more entry.
-      snapshots.push(Object.freeze([...rows]));
+      snapshots.push(codec.parseCanonicalSwmAuthorInventoryRowsV1(text));
       expect(Buffer.compare(encode(snapshots.at(-1)!), expected)).toBe(0);
       expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
-      expect(rowSetEncodings()).toBe(entriesWithinBudget + 2);
+      expect(rowSetEncodings()).toBe(1);
       expect(codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!)).toBe(expectedDigest);
-      expect(rowSetEncodings()).toBe(entriesWithinBudget + 2);
+      // Evicted identities use the original uncached path until parsed again.
+      expect(rowSetEncodings()).toBe(2);
       expect(snapshots).toHaveLength(entriesWithinBudget + 1);
     } finally {
       serializer.mockRestore();
@@ -204,6 +210,47 @@ describe('SWM author inventory v1', () => {
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toThrow(/strictly ordered/);
   });
 
+  it('reuses parser-owned snapshots while fully encoding caller-frozen arrays', async () => {
+    const codec = await import('../src/swm-author-inventory-v1.js');
+    const canonicalJson = await import('../src/canonical-json.js');
+    const encode = codec.canonicalizeSwmAuthorInventoryRowsBytesV1;
+    const bytes = encode([ROW_A, ROW_B]);
+    const owned = codec.parseCanonicalSwmAuthorInventoryRowsV1(bytes);
+    const callerOwned = Object.freeze([...owned]);
+    const serializer = vi.spyOn(canonicalJson, 'canonicalizeJson');
+    try {
+      expect(encode(owned)).toEqual(bytes);
+      expect(encode(owned)).toEqual(bytes);
+      expect(serializer).not.toHaveBeenCalled();
+      expect(encode(callerOwned)).toEqual(bytes);
+      expect(encode(callerOwned)).toEqual(bytes);
+      expect(serializer).toHaveBeenCalledTimes(2);
+    } finally {
+      serializer.mockRestore();
+    }
+  });
+
+  it('keeps parsed snapshots independent of mutable binary input and Buffer views', () => {
+    const bytes = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
+    for (const input of [bytes.slice(), Buffer.from(bytes).subarray()]) {
+      const owned = parseCanonicalSwmAuthorInventoryRowsV1(input);
+      input.fill(0);
+      expect(canonicalizeSwmAuthorInventoryRowsBytesV1(owned)).toEqual(bytes);
+      expect(computeSwmAuthorInventoryRowsDigestV1(owned))
+        .toBe(computeSwmAuthorInventoryRowsDigestV1([ROW_A, ROW_B]));
+    }
+  });
+
+  it('preserves strict binary UTF-8, BOM and caller byte limits', () => {
+    const bytes = canonicalizeSwmAuthorInventoryRowsBytesV1([ROW_A, ROW_B]);
+    const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), bytes]);
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(bom)).toThrow(/strict canonical JSON/);
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(Buffer.from([0xff])))
+      .toThrow(/strict canonical JSON/);
+    expect(() => parseCanonicalSwmAuthorInventoryRowsV1(bytes, { maxBytes: bytes.byteLength - 1 }))
+      .toThrow(/strict canonical JSON/);
+  });
+
   it('does not trust mutable records inside a frozen array', () => {
     const row = { ...ROW_A };
     const rows = Object.freeze([row]);
@@ -215,25 +262,6 @@ describe('SWM author inventory v1', () => {
       .toThrow(/assertionVersion must be positive/);
   });
 
-  it('does not cache earlier bytes if immutability inspection freezes changed input', () => {
-    const row = { ...ROW_A };
-    let frozenDuringInspection = false;
-    const reflected = new Proxy(row, {
-      isExtensible(target) {
-        if (!frozenDuringInspection) {
-          frozenDuringInspection = true;
-          target.sealDigest = ROW_B.sealDigest;
-          Object.freeze(target);
-        }
-        return Reflect.isExtensible(target);
-      },
-    });
-    const rows = Object.freeze([reflected]);
-    canonicalizeSwmAuthorInventoryRowsBytesV1(rows);
-    const currentBytes = canonicalizeSwmAuthorInventoryRowsBytesV1([{ ...row }]);
-    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toEqual(currentBytes);
-  });
-
   it('fully validates a different frozen array even when its records were already encoded', () => {
     canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_A, ROW_B]));
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([ROW_B, ROW_A])))
@@ -243,17 +271,6 @@ describe('SWM author inventory v1', () => {
     const invalid = Object.freeze({ ...ROW_A, assertionVersion: '0' }) as SwmAuthorInventoryRowV1;
     expect(() => canonicalizeSwmAuthorInventoryRowsBytesV1(Object.freeze([invalid])))
       .toThrow(/assertionVersion must be positive/);
-  });
-
-  it('does not change valid serialization when optional immutability reflection fails', () => {
-    const rows = Object.freeze([ROW_A, ROW_B]);
-    const reflected = new Proxy(rows, {
-      isExtensible: () => { throw new Error('immutability inspection unavailable'); },
-    });
-    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(reflected))
-      .toEqual(canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
-    expect(canonicalizeSwmAuthorInventoryRowsBytesV1(reflected))
-      .toEqual(canonicalizeSwmAuthorInventoryRowsBytesV1(rows));
   });
 
   it('rejects a revoked proxy even after its immutable data was serialized successfully', () => {
@@ -304,21 +321,12 @@ describe('SWM author inventory v1', () => {
       .toThrow(/strictly ordered/);
   });
 
-  it.each([false, true])('checks the row limit before inspecting entries (freeze during reflection: %s)', (freezeDuringReflection) => {
+  it('checks the row limit before inspecting caller-owned entries', () => {
     const rows: SwmAuthorInventoryRowV1[] = [];
-    if (!freezeDuringReflection) {
-      rows.length = MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1;
-      Object.freeze(rows);
-    }
+    rows.length = MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1;
+    Object.freeze(rows);
     let indexReads = 0;
     const reflected = new Proxy(rows, {
-      isExtensible(target) {
-        if (freezeDuringReflection && !Object.isFrozen(target)) {
-          target.length = MAX_SWM_AUTHOR_INVENTORY_ROWS_V1 + 1;
-          Object.freeze(target);
-        }
-        return Reflect.isExtensible(target);
-      },
       get(target, key, receiver) {
         if (typeof key === 'string' && /^\d+$/.test(key)) indexReads += 1;
         return Reflect.get(target, key, receiver);
