@@ -55,6 +55,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { resolveDkgHome } from '@origintrail-official/dkg-core';
+import { canUseDiscoveredHomeToken, MISSING_TOKEN_HELP } from './auth-diagnostics.js';
 
 export interface DkgConfig {
   /** Base URL of the local DKG daemon. */
@@ -171,7 +173,7 @@ function findConfigFile(start: string): string | null {
  * contract — operators with custom shell exports get the same
  * behaviour they did before.
  */
-function loadConfigFromDkgHome(dkgHome: string): DkgConfig | null {
+function loadConfigFromDkgHome(dkgHome: string, discovered = false): DkgConfig | null {
   const jsonPath = path.join(dkgHome, 'config.json');
   if (!fs.existsSync(jsonPath)) return null;
 
@@ -208,7 +210,8 @@ function loadConfigFromDkgHome(dkgHome: string): DkgConfig | null {
   // resolveTokenFromFile helper handles).
   const tokenPath = path.join(dkgHome, 'auth.token');
   let fileToken = '';
-  if (fs.existsSync(tokenPath)) {
+  const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
+  if ((!discovered || canUseDiscoveredHomeToken(envApi, fileApi)) && fs.existsSync(tokenPath)) {
     const tokenContent = readIfExists(tokenPath);
     if (tokenContent) {
       const line = tokenContent
@@ -222,7 +225,6 @@ function loadConfigFromDkgHome(dkgHome: string): DkgConfig | null {
   // existing loadConfig precedence semantics for operator-set
   // overrides — env wins for things the file doesn't pin or that
   // the operator explicitly wants to redirect).
-  const envApi = asString(process.env.DKG_API) ?? asString(process.env.DEVNET_API);
   const envToken =
     asString(process.env.DKG_TOKEN) ??
     asString(process.env.DEVNET_TOKEN) ??
@@ -301,6 +303,10 @@ export function loadConfig(cwd: string = process.cwd()): DkgConfig {
   let fromFile: Record<string, unknown> = {};
   let sourcePath: string | null = null;
   const configPath = findConfigFile(cwd);
+  if (!dkgHome && !configPath) {
+    const fromDefaultHome = loadConfigFromDkgHome(resolveDkgHome({ daemonUrl: envApi ?? undefined }), true);
+    if (fromDefaultHome) return fromDefaultHome;
+  }
   if (configPath) {
     sourcePath = configPath;
     const raw = readIfExists(configPath);
@@ -394,7 +400,7 @@ export function describeConfig(cfg: DkgConfig): string {
     cfg.sourcePath ? `config=${cfg.sourcePath}` : 'config=<none>',
     cfg.defaultProject ? `project=${cfg.defaultProject}` : 'project=<unset>',
     cfg.agentUri ? `agent=${cfg.agentUri}` : 'agent=<unset>',
-    cfg.token ? 'token=[set]' : 'token=[empty]',
+    cfg.token ? 'token=[set]' : `token=[empty] — ${MISSING_TOKEN_HELP}`,
   ];
   return pieces.join(' · ');
 }
