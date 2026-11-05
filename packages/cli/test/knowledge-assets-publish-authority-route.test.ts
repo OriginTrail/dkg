@@ -13,6 +13,7 @@ import {
   createRecipientAuthorityChangedError,
 } from '../../agent/src/internal/context-graph-authority/context-graph-authority.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { ApiClient } from '../src/api-client.js';
 
 const CG_ID = 'publish-authority-cg';
 const ASSERTION_NAME = 'private-asset';
@@ -32,6 +33,10 @@ describe('POST /api/knowledge-assets/:name/vm/publish — a briefly unavailable 
   });
 
   async function startWithPublishFailure(failure: unknown) {
+    return startWithPublish(async () => { throw failure; });
+  }
+
+  async function startWithPublish(publish: (...args: any[]) => Promise<any>) {
     const agent = {
       async listContextGraphs() {
         return [{ id: CG_ID, uri: `did:dkg:context-graph:${CG_ID}`, name: CG_ID, subscribed: true, synced: true }];
@@ -40,7 +45,7 @@ describe('POST /api/knowledge-assets/:name/vm/publish — a briefly unavailable 
         return cgId === CG_ID;
       },
       resolveAgentByToken: () => undefined,
-      publishFromFinalizedAssertion: async () => { throw failure; },
+      publishFromFinalizedAssertion: publish,
     };
     server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -134,5 +139,36 @@ describe('POST /api/knowledge-assets/:name/vm/publish — a briefly unavailable 
     expect(res.status).toBe(500);
     expect(res.retryAfter).toBeNull();
     expect(res.body).toEqual({ error: `Context graph "${CG_ID}" participant authority is invalid` });
+  });
+
+  it('the real client retries the real route on pre-submit authority failure, keeping the same asset', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const submitted: string[] = [];
+    const publish = vi.fn(async (_graph: string, name: string) => {
+      if (publish.mock.calls.length === 1) throw createRecipientAuthorityChangedError(CG_ID, 'revision-moved');
+      submitted.push(name);
+      return { kaId: '42', status: 'confirmed', onChainResult: { txHash: '0xreceipt', blockNumber: 1 } };
+    });
+    await startWithPublish(publish);
+    const result = await new ApiClient(baseUrl).knowledgeAssetPublish(CG_ID, ASSERTION_NAME);
+    expect(result).toMatchObject({ kaId: '42', txHash: '0xreceipt' });
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish.mock.calls.map(([graph, name]) => [graph, name])).toEqual([
+      [CG_ID, ASSERTION_NAME], [CG_ID, ASSERTION_NAME],
+    ]);
+    expect(submitted).toEqual([ASSERTION_NAME]);
+  });
+
+  it.each(['receipt lookup failed', 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE'])('does not repeat a submitted publish after %s', async code => {
+    const submitted: string[] = [];
+    const publish = vi.fn(async (_graph: string, name: string) => {
+      submitted.push(name);
+      // A later read/receipt error gives no evidence that another submission is safe.
+      throw Object.assign(new Error(code), { code, retryable: true });
+    });
+    await startWithPublish(publish);
+    await expect(new ApiClient(baseUrl).knowledgeAssetPublish(CG_ID, ASSERTION_NAME)).rejects.toThrow(code);
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect(submitted).toEqual([ASSERTION_NAME]);
   });
 });

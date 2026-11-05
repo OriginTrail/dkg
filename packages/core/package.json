@@ -102,6 +102,7 @@
   },
   "files": [
     "dist",
+    "runtime",
     "README.md",
     "LICENSE"
   ],

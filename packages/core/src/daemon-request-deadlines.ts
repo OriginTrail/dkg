@@ -132,63 +132,14 @@ export function resolveDaemonRequestDeadlines(
   });
 }
 
-/** The daemon's code while a read cannot resolve a Context Graph's authority. */
-export const DAEMON_READ_AUTHORITY_UNAVAILABLE_CODE = 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE';
-/** The same answer from an operation's own authority check: a subscribe, a private publish. */
-export const DAEMON_AUTHORITY_UNAVAILABLE_CODE = 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE';
-export const DAEMON_RETRYABLE_AUTHORITY_CODES: readonly string[] = Object.freeze([
-  DAEMON_READ_AUTHORITY_UNAVAILABLE_CODE,
-  DAEMON_AUTHORITY_UNAVAILABLE_CODE,
-]);
-
-/**
- * The wait before each retry, in order, when the daemon asks for no longer one.
- * Its length is the number of retries. Their 15 s in all, or 18 s at the
- * `Retry-After: 3` of a read, outlast the windows of about 13 s seen against slow
- * public RPC endpoints. The harnesses keep the same bound in
- * `scripts/lib/qa/authority-retry.mjs`, which has to run without a build.
- */
-export const DAEMON_AUTHORITY_RETRY_DELAYS_MS: readonly number[] = Object.freeze([1_000, 2_000, 4_000, 8_000]);
-/** The longest single wait: an answer that asks for more is reported as it came. */
-export const DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS = 15_000;
-
-/** Whether an answer is the retryable authority 503 under one of `codes`. */
-export function isRetryableDaemonAuthorityAnswer(
-  status: number,
-  body: unknown,
-  codes: readonly string[] = DAEMON_RETRYABLE_AUTHORITY_CODES,
-): boolean {
-  if (status !== 503 || body === null || typeof body !== 'object') return false;
-  const { code, retryable } = body as { code?: unknown; retryable?: unknown };
-  return retryable === true && typeof code === 'string' && codes.includes(code);
-}
-
-/** A `Retry-After` value in ms: delta-seconds or an HTTP-date. Anything else counts as absent. */
-export function parseDaemonRetryAfterMs(
-  header: string | null | undefined,
-  nowMs: number = Date.now(),
-): number | undefined {
-  if (typeof header !== 'string') return undefined;
-  const value = header.trim();
-  if (/^[0-9]+$/.test(value)) return Number(value) * 1_000;
-  if (!/^[A-Z][a-z]{2}, [0-9]{2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT$/.test(value)) return undefined;
-  const at = Date.parse(value);
-  return Number.isNaN(at) ? undefined : Math.max(0, at - nowMs);
-}
-
-/**
- * The wait before retry `retry` (from 0), in ms: its back-off, or what the daemon
- * asked for when that is longer, so a retry never comes before the daemon asked.
- * `null` when the client stops here: the retries are spent, or the daemon asked
- * for more than one wait may take.
- */
-export function daemonAuthorityRetryDelayMs(
-  retry: number,
-  retryAfter: string | null | undefined,
-  nowMs: number = Date.now(),
-): number | null {
-  const backoff = DAEMON_AUTHORITY_RETRY_DELAYS_MS[retry];
-  if (backoff === undefined) return null;
-  const delay = Math.max(backoff, parseDaemonRetryAfterMs(retryAfter, nowMs) ?? 0);
-  return delay <= DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS ? delay : null;
-}
+// Preserve the public client API while scripts execute this same build-free policy.
+export {
+  READ_AUTHORITY_CODE as DAEMON_READ_AUTHORITY_UNAVAILABLE_CODE,
+  AUTHORITY_CODE as DAEMON_AUTHORITY_UNAVAILABLE_CODE,
+  RETRYABLE_AUTHORITY_CODES as DAEMON_RETRYABLE_AUTHORITY_CODES,
+  AUTHORITY_RETRY_DELAYS_MS as DAEMON_AUTHORITY_RETRY_DELAYS_MS,
+  AUTHORITY_RETRY_MAX_DELAY_MS as DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS,
+  isRetryableAuthorityAnswer as isRetryableDaemonAuthorityAnswer,
+  retryAfterMs as parseDaemonRetryAfterMs,
+  authorityRetryDelayMs as daemonAuthorityRetryDelayMs,
+} from '../runtime/daemon-authority-retry.mjs';
