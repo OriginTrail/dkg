@@ -34,6 +34,14 @@ function stored(value: SwmAuthorInventoryRowV1): SqlRowV1 {
   };
 }
 
+function outcome<T>(operation: () => T) {
+  try { return { kind: 'accepted', value: operation() }; }
+  catch (error) {
+    const failure = error as Error & { code?: string };
+    return { kind: 'rejected', name: failure.name, code: failure.code, message: failure.message };
+  }
+}
+
 describe('SWM author inventory typed SQL decoding', () => {
   it.each(['synthetic-share', 'quoted-"-backslash-\\', 'é-🙂', 'x'.repeat(256)])(
     'preserves the canonical wire model and owned immutable values for %s', operation => {
@@ -47,6 +55,27 @@ describe('SWM author inventory typed SQL decoding', () => {
       (sql.projection_digest as Uint8Array).fill(0);
       sql.share_operation_id = 'later-sql-value';
       expect(decoded).toEqual(input);
+    },
+  );
+
+  it('matches canonical validation for every ASCII operation character, including JSON escapes', () => {
+    for (let unit = 0; unit < 128; unit++) {
+      const input = { ...row, shareOperationId: `left-${String.fromCharCode(unit)}-right` } as SwmAuthorInventoryRowV1;
+      const expected = outcome(() => parseCanonicalSwmAuthorInventoryRowsV1(
+        canonicalizeSwmAuthorInventoryRowsBytesV1([input]),
+      )[0]);
+      const actual = outcome(() => decodeStoredSwmAuthorInventoryRowV1(stored(input)));
+      expect(actual, `ASCII code unit ${unit}`).toEqual(expected);
+    }
+  });
+
+  it.each(['\ud800', '\udc00', '😀\ud800', '\udc00😀', 'é-🙂', 'e\u0301', 'a'.repeat(4097)])(
+    'preserves the full canonical acceptance and error contract for fallback input %s', operation => {
+      const input = { ...row, shareOperationId: operation } as SwmAuthorInventoryRowV1;
+      const expected = outcome(() => parseCanonicalSwmAuthorInventoryRowsV1(
+        canonicalizeSwmAuthorInventoryRowsBytesV1([input]),
+      )[0]);
+      expect(outcome(() => decodeStoredSwmAuthorInventoryRowV1(stored(input)))).toEqual(expected);
     },
   );
 

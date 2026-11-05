@@ -1,7 +1,9 @@
 import type { SQLInputValue } from 'node:sqlite';
 
 import {
+  assertSwmAuthorInventoryRowV1,
   canonicalizeSwmAuthorInventoryRowsBytesV1,
+  MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1,
   type Digest32V1,
   type SwmAuthorInventoryRowV1,
 } from '@origintrail-official/dkg-core';
@@ -79,10 +81,25 @@ export function decodeStoredSwmAuthorInventoryRowV1(
       : sqlBlobToDecimalU64V1(row.expires_at_u64be),
   } as SwmAuthorInventoryRowV1;
   // This fresh record contains only scalar values copied from typed SQL columns.
-  // Keep full canonical validation (including Unicode and byte bounds), without
-  // parsing our own canonical bytes just to obtain another copy of the record.
-  canonicalizeSwmAuthorInventoryRowsBytesV1([decoded]);
+  // Short ASCII scalars have no unpaired surrogates and a bounded JSON encoding.
+  // Keep the full row assertion; all other records use the canonical encoder.
+  if (shortAsciiSqlRecordFitsCanonicalLimit(decoded)) assertSwmAuthorInventoryRowV1(decoded);
+  else canonicalizeSwmAuthorInventoryRowsBytesV1([decoded]);
   return Object.freeze(decoded);
+}
+
+/** Only the fresh, scalar-only SQL record above may enter this eligibility check. */
+function shortAsciiSqlRecordFitsCanonicalLimit(row: SwmAuthorInventoryRowV1): boolean {
+  let upperBytes = 4; // Singleton array and object delimiters.
+  for (const [key, value] of Object.entries(row)) {
+    // Bound the scan before checking ASCII. Longer strings retain the original
+    // scalar-validation order rather than adding an unbounded preliminary scan.
+    if (value !== null && (typeof value !== 'string' || value.length > 4096
+      || /\P{ASCII}/u.test(value))) return false;
+    // Six bytes per code unit bounds JSON escaping; punctuation is overcounted.
+    upperBytes += 6 * key.length + 6 + (value === null ? 4 : 6 * value.length);
+  }
+  return upperBytes <= MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1;
 }
 
 export function assertBoundedSqlBlobV1(
