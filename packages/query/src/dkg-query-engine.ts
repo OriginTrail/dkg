@@ -685,7 +685,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       return this.execAndNormalize(graphSetRewrite.value, reads);
     }
     // Residual shapes the graph-set policy declines (an inner top-level
-    // UNION, no locatable WHERE block, or a sentinel-variable collision) keep
+    // UNION or no locatable WHERE block) keep
     // the original union / per-graph fallback so the #789 form-aware
     // cross-graph merge below is preserved unchanged.
     // Fallback: the inner body contains a UNION so we cannot safely wrap

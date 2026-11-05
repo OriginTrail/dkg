@@ -195,6 +195,21 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
       return materializePreparedSparql(result.value.prepared);
     };
     const read = async (source: string) => (await store.query(planned(source))).bindings;
+    it.each(['__dkgDedupGraph', '__dkgDedupMatchGraph', '__dkgDedupMatched', '__dkgViewGraph', '__dkgDedupFilter0', '__dkgBlankNode0'])('preserves caller bindings named %s, including escaped spellings', async (name) => {
+      for (const variable of [`?${name}`, `?\\u005F${name.slice(1)}`]) {
+        const mirrored = await read(`SELECT * WHERE { ?s <${A}>${mode === 'dataset' ? '+' : ''} ${variable} FILTER(${variable} = "x") }`);
+        expect(bag(mirrored)).toEqual(bag(['urn:s:1', 'urn:s:2', 'urn:s:3'].map(s => ({ s, [name]: '"x"' }))));
+        const found = await read(`SELECT * WHERE {
+          _:subject <${LINK}> ?hop . _:subject <${LINK}>${mode === 'dataset' ? '+' : ''}/<${TO}> ${variable}
+          FILTER(${variable} = "t")
+        }`);
+        expect(bag(found)).toEqual(bag([
+          ...Array.from({ length: 2 }, () => ({ hop: 'urn:m:1', [name]: '"t"' })),
+          ...Array.from({ length: 2 }, () => ({ hop: 'urn:m:2', [name]: '"t"' })),
+          { hop: 'urn:m:3', [name]: '"t"' },
+        ]));
+      }
+    });
     it('preserves repeated named blank-node matches without exposing helper bindings', async () => {
       for (const binding of ['hop', '__dkgBlankNode0']) {
         const found = await read(`SELECT * WHERE {
@@ -248,6 +263,22 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
         .toEqual(bag(expected));
     });
 
+  });
+
+  it.each(['caller GRAPH', 'union-only'])('keeps repeated blank-node labels private in %s branches on unknown engines', async (route) => {
+    for (const label of ['subject', '__dkgBranch0', String.raw`\u0073ubject`]) {
+      const pattern = `_:${label} <${LINK}>+ ?hop . _:${label} <${LINK}>/<${TO}> ?o FILTER(?o = "t")`;
+      const query = `SELECT * WHERE { ${route === 'caller GRAPH' ? `GRAPH ?g { ${pattern} }` : pattern} }`;
+      const result = rewriteGraphSet(scope(query), graphs, route === 'caller GRAPH' ? 'values-union' : 'union-only', null);
+      if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+      const found = (await store.query(materializePreparedSparql(result.value.prepared))).bindings;
+      const expected = [
+        ...Array.from({ length: 2 }, () => ({ g: graphs[0], hop: 'urn:m:1', o: '"t"' })),
+        ...Array.from({ length: 2 }, () => ({ g: graphs[0], hop: 'urn:m:2', o: '"t"' })),
+        { g: graphs[1], hop: 'urn:m:3', o: '"t"' },
+      ];
+      expect(bag(found)).toEqual(bag(route === 'caller GRAPH' ? expected : expected.map(({ hop, o }) => ({ hop, o }))));
+    }
   });
 
   it.each([

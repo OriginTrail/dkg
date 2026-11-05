@@ -19,6 +19,7 @@ import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
 import { analyzeDedupPattern } from './sparql-dedup-pattern.js';
 import { hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
 import { createGraphAccess, type GraphAccess } from './sparql-graph-access.js';
+import { createBlankNodeRenamer, createVariableAllocator, type VariableAllocator } from './sparql-rewrite-names.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 export { transitionGraphScope } from './sparql-query-transition.js';
 
@@ -50,7 +51,6 @@ export type GraphScopeUnsupportedReason =
   | 'missing-where'
   | 'nested-union'
   | 'strategy-rejected'
-  | 'helper-variable-collision'
   | 'no-projected-variables';
 
 function ready(scope: PreparedGraphScope): GraphScopeRewriteResult {
@@ -151,19 +151,16 @@ export function wrapWithGraphUnion(
     ));
   }
   if (hasUnion) return unsupported('nested-union');
+  const branchSource = createBlankNodeRenamer(scope);
   const branches = graphUris
-    .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${inner} } }`)
+    .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ${branchSource(openEnd, close)} } }`)
     .join(' UNION ');
   return ready(transitionGraphScope(scope, `${before} ${branches} ${after}`));
 }
 
-const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
-const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
-
 interface ProjectedGraphPattern {
   readonly pattern: string;
   readonly distinct?: boolean;
-  readonly helperVariables: readonly string[];
 }
 
 function wrapWithProjectedGraphSubselect(
@@ -187,11 +184,7 @@ function wrapWithProjectedGraphSubselect(
   if (hasUnion) return unsupported('nested-union');
   const built = buildPattern(inner, graphs);
   if (!built) return unsupported('strategy-rejected');
-  const { pattern, distinct, helperVariables } = built;
-  const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
-  if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
-    return unsupported('helper-variable-collision');
-  }
+  const { pattern, distinct } = built;
 
   const innerVariables = scope.whereVariables;
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
@@ -205,7 +198,7 @@ function wrapWithProjectedGraphSubselect(
 
 /** Own graph choice and FILTER placement inside the shared projection boundary. */
 function buildDeduplicatedGraphPattern(
-  scope: PreparedGraphScope, access: GraphAccess,
+  scope: PreparedGraphScope, access: GraphAccess, allocate: VariableAllocator,
 ): ProjectedGraphPattern | null {
   const plan = analyzeDedupPattern(scope);
   if (!plan) return null;
@@ -216,17 +209,9 @@ function buildDeduplicatedGraphPattern(
   const movedFilters = filters;
   // Every retained row evaluates each moved FILTER once. Hidden blank-node
   // variables stay private across graph selection and replay.
-  const rendered = renderDedupPattern(scope, movedFilters);
-  const inner = rendered.pattern;
+  const inner = renderDedupPattern(scope, movedFilters, allocate);
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
-  const usedVariables = new Set(scope.queryVariables.map(variable => variable.logicalName));
-  const filterVariables = movedFilters.map(() => {
-    let suffix = 0;
-    while (usedVariables.has(`__dkgDedupFilter${suffix}`)) suffix++;
-    const name = `__dkgDedupFilter${suffix}`;
-    usedVariables.add(name);
-    return `?${name}`;
-  });
+  const filterVariables = movedFilters.map((_filter, index) => allocate(`__dkgDedupFilter${index}`));
   // BIND evaluates on every retained row on the right of the rejoin. A raw
   // FILTER can be pushed onto the grouped left side by either engine, sampling
   // once for all identical mappings. Filtering these booleans after OPTIONAL
@@ -234,22 +219,21 @@ function buildDeduplicatedGraphPattern(
   const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
     `BIND(${scope.source.slice(expressionStart, end)} AS ${filterVariables[index]})`,
   ).join(' ');
-  const bindings = { pattern: filterBindings, helperVariables: filterVariables };
-  const candidate = access.candidate(inner, distinct ? DEDUP_GRAPH_SENTINEL : DEDUP_MATCH_GRAPH_SENTINEL);
+  const bindings = { pattern: filterBindings, projectedVariables: filterVariables };
+  const graph = allocate('__dkgDedupGraph');
+  const matchGraph = distinct ? graph : allocate('__dkgDedupMatchGraph');
+  const candidate = access.candidate(inner, matchGraph);
   if (distinct) {
-    const helperVariables = [...candidate.helperVariables, ...rendered.helperVariables];
-    if (!movedFilters.length) return { ...candidate, distinct, helperVariables };
+    if (!movedFilters.length) return { pattern: candidate, distinct };
     const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
-    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate.pattern} } } ${filterBindings} ${trailing}`,
-      helperVariables: [...helperVariables, ...filterVariables] };
+    return { pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate} } } ${filterBindings} ${trailing}` };
   }
   // Choose one graph deterministically and replay its hidden-path multiplicity.
   // The access implementation owns the barriers required by its backend plan.
-  const replay = access.replay(inner, DEDUP_GRAPH_SENTINEL, variables, bindings);
-  const trailing = bindings.helperVariables.map(variable => `FILTER(${variable})`).join(' ');
+  const replay = access.replay(inner, graph, variables, bindings);
+  const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
   return {
-    pattern: `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE { ${candidate.pattern} } GROUP BY ${variables} } ${replay.pattern} ${trailing}`,
-    helperVariables: [...new Set([...candidate.helperVariables, ...replay.helperVariables, ...rendered.helperVariables])],
+    pattern: `{ SELECT ${variables} (MIN(${matchGraph}) AS ${graph}) WHERE { ${candidate} } GROUP BY ${variables} } ${replay} ${trailing}`,
   };
 }
 
@@ -258,15 +242,16 @@ export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  return wrapWithDeduplicatedGraphSelection(input, graphUris, createGraphAccess('values', [...new Set(graphUris)]));
+  const allocate = createVariableAllocator(input);
+  return wrapWithDeduplicatedGraphSelection(input, graphUris, createGraphAccess('values', [...new Set(graphUris)], allocate), allocate);
 }
 
 function wrapWithDeduplicatedGraphSelection(
-  input: PreparedGraphScope, graphUris: readonly string[], access: GraphAccess,
+  input: PreparedGraphScope, graphUris: readonly string[], access: GraphAccess, allocate: VariableAllocator,
 ): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
     input, graphUris,
-    () => buildDeduplicatedGraphPattern(input, access),
+    () => buildDeduplicatedGraphPattern(input, access, allocate),
   );
 }
 
@@ -275,8 +260,8 @@ export function wrapWithGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  const access = createGraphAccess('values', [...new Set(graphUris)]);
-  return wrapWithProjectedGraphSubselect(input, graphUris, inner => access.fallback(inner));
+  const access = createGraphAccess('values', [...new Set(graphUris)], createVariableAllocator(input));
+  return wrapWithProjectedGraphSubselect(input, graphUris, inner => ({ pattern: access.fallback(inner) }));
 }
 
 export type GraphSetRoutingPolicy =
@@ -292,12 +277,13 @@ export function rewriteGraphSet(
   engine: SparqlEngineFamily | null = null,
 ): GraphScopeRewriteResult {
   return applyGraphDataset(scope, graphUris, engine, (route) => {
-    const access = createGraphAccess(route === 'dataset-only' ? 'dataset' : 'values', [...new Set(graphUris)]);
+    const allocate = createVariableAllocator(scope);
+    const access = createGraphAccess(route === 'dataset-only' ? 'dataset' : 'values', [...new Set(graphUris)], allocate);
     const strategies = [wrapWithGraphUnion];
     if (policy !== 'union-only') {
-      strategies.unshift((input, graphs) => wrapWithProjectedGraphSubselect(input, graphs, inner => access.fallback(inner)));
+      strategies.unshift((input, graphs) => wrapWithProjectedGraphSubselect(input, graphs, inner => ({ pattern: access.fallback(inner) })));
       if (policy === 'deduplicated-values-union') {
-        strategies.unshift((input, graphs) => wrapWithDeduplicatedGraphSelection(input, graphs, access));
+        strategies.unshift((input, graphs) => wrapWithDeduplicatedGraphSelection(input, graphs, access, allocate));
       }
     }
     let last = unsupported('strategy-rejected');

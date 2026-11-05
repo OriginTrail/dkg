@@ -409,10 +409,10 @@ describe('graph-set deduplication routes', () => {
   it.each([
     '?__dkgDedupGraph', '$__dkgDedupGraph', '?__dkgDedupMatchGraph',
     String.raw`?\u005F_dkgDedupMatchGraph`,
-  ])('preserves logical helper-variable collision checks: %s', (variable) => {
+  ])('allocates private variables around caller logical names: %s', (variable) => {
     expect(wrapWithDeduplicatedGraphValues(
       scope(`SELECT ${variable} WHERE { ?s <urn:p:link>/<urn:p:to> ?o }`), graphs,
-    )).toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+    )).toMatchObject({ kind: 'ready' });
   });
 
   it.each(['?__dkgDedupFilter0', '?__dkgDedupMatchGraph'])('accepts %s when the DISTINCT route emits no such helper', async (variable) => {

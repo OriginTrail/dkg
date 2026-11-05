@@ -1,53 +1,43 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
+import type { VariableAllocator } from './sparql-rewrite-names.js';
 
-export interface GraphRead {
+interface FilterBindings {
   readonly pattern: string;
-  readonly helperVariables: readonly string[];
+  /** These booleans must cross the replay subquery's projection boundary. */
+  readonly projectedVariables: readonly string[];
 }
 
-/** Backend barriers and their helpers travel together with each graph read. */
+/** Backend barriers share the rewrite's private-variable allocator. */
 export interface GraphAccess {
-  candidate(inner: string, graph: string): GraphRead;
-  replay(inner: string, graph: string, variables: string, bindings: GraphRead): GraphRead;
-  fallback(inner: string): GraphRead;
+  candidate(inner: string, graph: string): string;
+  replay(inner: string, graph: string, variables: string, bindings: FilterBindings): string;
+  fallback(inner: string): string;
 }
 
-const VIEW_GRAPH = '?__dkgViewGraph';
-const MATCHED = '?__dkgDedupMatched';
-
-export function createGraphAccess(mode: 'values' | 'dataset', graphs: readonly string[]): GraphAccess {
+export function createGraphAccess(mode: 'values' | 'dataset', graphs: readonly string[], allocate: VariableAllocator): GraphAccess {
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
+  const viewGraph = allocate('__dkgViewGraph');
   if (mode === 'values') {
-    const candidate = (inner: string, graph: string): GraphRead => ({
-      pattern: `VALUES ${graph} { ${values} } GRAPH ${graph} { ${inner} }`,
-      helperVariables: [graph],
-    });
+    const candidate = (inner: string, graph: string) => `VALUES ${graph} { ${values} } GRAPH ${graph} { ${inner} }`;
     return {
       candidate,
-      replay: (inner, graph, _variables, bindings) => ({
-        pattern: `OPTIONAL { GRAPH ${graph} { ${inner} ${bindings.pattern} } }`,
-        helperVariables: [graph, ...bindings.helperVariables],
-      }),
-      fallback: inner => candidate(inner, VIEW_GRAPH),
+      replay: (inner, graph, _variables, bindings) => `OPTIONAL { GRAPH ${graph} { ${inner} ${bindings.pattern} } }`,
+      fallback: inner => candidate(inner, viewGraph),
     };
   }
   // The conditional read binds the graph before Blazegraph evaluates a repeated
   // path. Its marker removes unmatched graphs without expanding a UNION per graph.
-  const candidate = (inner: string, graph: string): GraphRead => ({
-    pattern: `VALUES ${graph} { ${values} } OPTIONAL { GRAPH ${graph} { ${inner} } BIND(true AS ${MATCHED}) } FILTER(${MATCHED})`,
-    helperVariables: [graph, MATCHED],
-  });
+  const matched = allocate('__dkgDedupMatched');
+  const candidate = (inner: string, graph: string) =>
+    `VALUES ${graph} { ${values} } OPTIONAL { GRAPH ${graph} { ${inner} } BIND(true AS ${matched}) } FILTER(${matched})`;
   return {
     candidate,
     replay: (inner, graph, variables, bindings) => {
       const read = candidate(`${inner} ${bindings.pattern}`, graph);
       // An independent replay subquery prevents Blazegraph from duplicating
       // hidden-path mappings by flattening both path evaluations into one group.
-      return {
-        pattern: `{ SELECT ${variables} ${graph} ${bindings.helperVariables.join(' ')} WHERE { ${read.pattern} } }`,
-        helperVariables: [...read.helperVariables, ...bindings.helperVariables],
-      };
+      return `{ SELECT ${variables} ${graph} ${bindings.projectedVariables.join(' ')} WHERE { ${read} } }`;
     },
-    fallback: inner => ({ pattern: `GRAPH ${VIEW_GRAPH} { ${inner} }`, helperVariables: [VIEW_GRAPH] }),
+    fallback: inner => `GRAPH ${viewGraph} { ${inner} }`,
   };
 }

@@ -221,11 +221,11 @@ describe('rewriteGraphSet with a known and an unknown engine', () => {
     expect(text).not.toContain('GRAPH ?');
   });
 
-  it('falls back to constant GRAPH branches, with the dataset, on a helper collision', () => {
+  it('allocates a fresh graph helper beside the authorized dataset', () => {
     const text = ready(rewriteGraphSet(scope('SELECT ?__dkgViewGraph ?s WHERE { ?s <urn:p>+ ?o }'), graphs, 'values-union', null));
     expect(text).toContain(NAMED);
-    expect(text).toContain('GRAPH <urn:g:1>');
-    expect(text).toContain('GRAPH <urn:g:2>');
+    expect(text).toContain('GRAPH ?__dkgViewGraph0');
+    expect(text).not.toContain('UNION');
   });
 
   describe('DESCRIBE on an unknown engine', () => {
