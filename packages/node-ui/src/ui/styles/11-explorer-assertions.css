@@ -13,7 +13,7 @@
 .v10-vm-search-panel {
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  padding: 12px;
+  padding: var(--pad-nested);
   margin-bottom: 16px;
 }
 .v10-vm-search-header {
@@ -74,7 +74,7 @@
 .v10-cg-query-zone {
   border: 1px solid var(--border-subtle);
   background: var(--bg-panel);
-  padding: 16px;
+  padding: var(--pad-card);
 }
 .v10-cg-query-zone-editor {
   flex: 0 0 auto;
@@ -203,7 +203,7 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 10px;
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
 }
@@ -244,7 +244,7 @@
   grid-template-columns: minmax(160px, 0.6fr) minmax(220px, 1fr) auto;
   gap: 10px;
   align-items: end;
-  padding: 12px;
+  padding: var(--pad-nested);
   margin: -4px 0 16px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-panel);

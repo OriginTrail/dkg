@@ -99,7 +99,7 @@
 .v10-pca-card-explorer { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; font-size: 13px; }
 .v10-pca-card-warn {
   margin: 10px 0 0;
-  padding: 8px 10px;
+  padding: var(--pad-nested-sm);
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-warning);

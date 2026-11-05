@@ -6,7 +6,7 @@
   gap: 8px;
   flex-wrap: wrap;
   min-width: 0;
-  padding: 6px 8px;
+  padding: var(--pad-nested-sm);
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
 }
@@ -78,7 +78,7 @@
   left: 0;
   z-index: 35;
   width: min(320px, 90vw);
-  padding: 8px;
+  padding: var(--pad-nested-sm);
   border: 1px solid var(--border-strong);
   background: var(--bg-surface);
   box-shadow: var(--shadow-menu);
@@ -93,7 +93,7 @@
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
-  padding: 7px 10px;
+  padding: var(--pad-nested-sm);
   cursor: pointer;
 }
 .v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }

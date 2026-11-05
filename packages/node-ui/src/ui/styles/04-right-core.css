@@ -176,7 +176,7 @@
 }
 .v10-agent-add-surface { padding-top: 8px; }
 .v10-agent-card {
-  padding: 10px 12px; margin-bottom: 4px;
+  padding: var(--pad-nested); margin-bottom: 4px;
   border: 1px solid var(--border-subtle); background: var(--bg-surface);
   transition: background 0.15s;
 }
@@ -241,7 +241,7 @@
 }
 .v10-local-agent-detail {
   margin-top: 12px;
-  padding: 14px;
+  padding: var(--pad-compact);
   border: 1px solid var(--border-default);
   background: color-mix(in srgb, var(--bg-surface) 86%, var(--bg-elevated));
   display: flex;

@@ -203,22 +203,22 @@ function ReplicationTab() {
 
       {/* KPI cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <div className="card ds-card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Promotions</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>landed in VM this period</div>
         </div>
-        <div className="card ds-card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Success rate</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{successPct}</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>promote / (promote + defer)</div>
         </div>
-        <div className="card ds-card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Promotion latency</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
         </div>
-        <div className="card ds-card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Active fetches</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>core-first catch-up pulls</div>
@@ -226,7 +226,7 @@ function ReplicationTab() {
       </div>
 
       {/* Timeline */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
           Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
         </div>
@@ -252,7 +252,7 @@ function ReplicationTab() {
       </div>
 
       {/* Cursor inspector */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
           Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
@@ -285,7 +285,7 @@ function ReplicationTab() {
       </div>
 
       {/* Per-CG activity */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
@@ -316,7 +316,7 @@ function ReplicationTab() {
 
       {/* Event stream drawer */}
       {selectedCg && (
-        <div className="card ds-card" style={{ padding: 16 }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
           {events.length === 0 ? (
             <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
@@ -388,7 +388,7 @@ function HealthTab() {
         />
       </div>
 
-      <div className="card ds-card" style={{ padding: 16 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
@@ -630,8 +630,8 @@ function OperationStatsSection() {
           {/* Operation charts */}
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -646,8 +646,8 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -662,8 +662,8 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -678,8 +678,8 @@ function OperationStatsSection() {
                 </ResponsiveContainer>
               </div>
 
-              <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
+              <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -762,8 +762,8 @@ export function HardwareTab() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
-          <div key={stat.label} className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
+          <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
               <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
@@ -776,13 +776,13 @@ export function HardwareTab() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
-        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
+        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
-        <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
+        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
@@ -795,8 +795,8 @@ export function HardwareTab() {
         // percentages on the same 0–100 scale, with their warning thresholds.
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
           {hwCharts.map(c => (
-            <div key={c.key} className="card ds-card" style={{ padding: '12px 14px' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
+            <div key={c.key} className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
@@ -1253,7 +1253,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       </div>
 
       {/* Header: Operation metadata as compact inline badges */}
-      <div className="card ds-card" style={{ padding: 16, marginBottom: 12 }}>
+      <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
           <span style={{ fontSize: 15, fontWeight: 700 }}>{op.operation_name}</span>
           <StatusBadge status={op.status} />
@@ -1286,12 +1286,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       {/* Phase timeline + Phase details */}
       {phases.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
-          <div className="card ds-card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase timeline</div>
             <PhaseTimeline phases={phases} op={op} />
           </div>
 
-          <div className="card ds-card" style={{ padding: 16 }}>
+          <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
             <div className="card-title" style={{ marginBottom: 10 }}>Phase details</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {

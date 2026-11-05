@@ -8,14 +8,14 @@ p { font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
 
 /* Cards */
 .card{background:var(--bg-surface);border:1px solid var(--border-default);overflow:hidden;transition:border-color .15s}
-.card-header{padding:14px 18px;border-bottom:1px solid var(--border-default);display:flex;align-items:center;justify-content:space-between}
+.card-header{padding:var(--pad-card);border-bottom:1px solid var(--border-default);display:flex;align-items:center;justify-content:space-between}
 .card-title{font-size:12px;font-weight:700;color:var(--text-primary);letter-spacing:.04em;text-transform:uppercase}
 
 /* ── Settings page (cleanup): the page migrates the keep-cards onto the
    canonical .card idiom above. These add the body padding the idiom omits,
    the single-column page stack, and token-driven field rows (replacing the
    previously-undefined .settings-card/.settings-grid/.prov-field-* hooks). */
-.card-body{padding:14px 18px}
+.card-body{padding:var(--pad-card)}
 .settings-stack{display:flex;flex-direction:column;gap:16px;max-width:720px}
 .settings-field-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-tertiary);margin-bottom:3px}
 .settings-field-value{font-size:12px;color:var(--text-primary);word-break:break-word}
@@ -196,7 +196,7 @@ select.input {
 .v10-modal-btn.primary:disabled { opacity: 0.4; }
 
 .v10-modal-error {
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
   margin-bottom: 16px;
@@ -206,8 +206,8 @@ select.input {
 }
 
 .v10-modal-warning {
-  padding: 10px 14px;
-  background: var(--warning-bg);
+  padding: var(--pad-nested);
+  background: var(--amber-dim);
   border: 1px solid var(--warning-border);
   margin-bottom: 16px;
   font-size: 12px;
@@ -216,7 +216,7 @@ select.input {
 }
 
 .v10-modal-tip {
-  padding: 12px 14px;
+  padding: var(--pad-nested);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   margin-bottom: 16px;

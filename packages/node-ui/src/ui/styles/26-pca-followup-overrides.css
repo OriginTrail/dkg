@@ -165,7 +165,7 @@
   gap: 10px;
   flex-wrap: wrap;
   margin-top: 8px;
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   border: 1px solid var(--border-strong);
   background: var(--tint-subtle);
   color: var(--text-secondary);

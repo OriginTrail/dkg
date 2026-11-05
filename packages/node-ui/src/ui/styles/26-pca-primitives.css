@@ -132,7 +132,7 @@
 
 /* ----- Device confirm progress (H-C placeholder for H-D flows) ----- */
 .v10-pca-device-progress {
-  padding: 10px 12px;
+  padding: var(--pad-compact);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   max-width: 100%;
@@ -217,7 +217,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: var(--pad-nested);
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
 }

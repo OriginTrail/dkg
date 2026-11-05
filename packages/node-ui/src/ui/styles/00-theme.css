@@ -199,6 +199,11 @@
   --radius-nested: 8px;
   --radius-card: 10px;
   --radius-overlay: 12px;
+  /* Card padding (see DESIGN.md): surfaces, compact surfaces, nested surfaces. */
+  --pad-card: 16px;
+  --pad-compact: 12px;
+  --pad-nested: 10px 14px;
+  --pad-nested-sm: 8px 10px;
   --radius-pill: 999px;
   /* Elevation. One shadow per kind of surface; all are black so they
      work on both themes. */

@@ -24,7 +24,7 @@
 .v10-dash-section {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  padding: 16px 18px;
+  padding: var(--pad-card);
   /* Same hover lift/glow as the stat cards so the lower panels feel
      part of the same surface family (round-2 feedback). */
   transition: border-color .15s, box-shadow .15s;

@@ -39,7 +39,7 @@
 
 .v10-identity-wallet-signer {
   justify-content: space-between;
-  padding: 10px;
+  padding: var(--pad-nested);
   margin-bottom: 14px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
@@ -88,7 +88,7 @@
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  padding: 14px;
+  padding: var(--pad-compact);
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
 }

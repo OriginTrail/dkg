@@ -283,7 +283,7 @@
   .v10-local-agent-msg-time { opacity: 1; transition: none; }
 }
 .v10-local-agent-warning {
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   font-size: 11px;
   line-height: 1.55;
   border: 1px solid var(--border-default);

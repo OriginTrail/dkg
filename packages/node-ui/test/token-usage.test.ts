@@ -41,6 +41,12 @@ describe('token usage', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('card padding comes from the padding tokens, never a number', () => {
+    const inline = /className="[^"]*\bds-card\b[^"]*" style=\{\{ padding: (?!0\b|'var\(--pad-)/;
+    const offenders = codeFiles.filter((f) => inline.test(readFileSync(f, 'utf-8'))).map((f) => f.slice(UI.length + 1));
+    expect(offenders).toEqual([]);
+  });
+
   it('blue stays off links, focus and tints: only the role tokens carry it', () => {
     const uses = cssFiles
       .filter((f) => !f.endsWith('00-theme.css'))

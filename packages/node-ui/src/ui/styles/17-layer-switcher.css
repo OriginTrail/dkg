@@ -184,7 +184,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   border: 1px solid color-mix(in srgb, var(--v10-stat-accent) 18%, var(--border-default));
   background: color-mix(in srgb, var(--v10-stat-accent) 5%, var(--bg-surface));
   /* ui-lead item 7 — Dashboard-style hover: border tints toward

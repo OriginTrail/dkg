@@ -24,7 +24,7 @@
 .v10-pca-create-hint { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: 1.45; }
 .v10-pca-create-warn {
   margin: 10px 0 0;
-  padding: 8px 10px;
+  padding: var(--pad-nested-sm);
   font-size: 11px;
   line-height: 1.5;
   color: var(--text-warning);

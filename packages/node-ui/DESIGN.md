@@ -74,6 +74,17 @@ Type sizes are whole pixels, here and in nOS. Sentence case everywhere, includin
 
 `50%` is fine for things that are circles (avatars, dots). Use the `.ds-overlay`, `.ds-card` and `.ds-card-nested` classes for new surfaces.
 
+### Card padding
+
+| Token | px | Use |
+|---|---|---|
+| `--pad-card` | 16 | Cards and their header and body |
+| `--pad-compact` | 12 | Small cards in a dense grid: stat tiles, chart tiles |
+| `--pad-nested` | 10 / 14 | Anything inside a card |
+| `--pad-nested-sm` | 8 / 10 | Small nested rows and notes |
+
+`ds-card` sets the corner, not the padding, because a card with a header or a table pads its parts instead: use `padding: 0` on the card and `--pad-card` on the parts. Never write a card's padding as a number.
+
 ### Heights
 
 | Token | px | Use |

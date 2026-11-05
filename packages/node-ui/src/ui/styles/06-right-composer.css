@@ -6,7 +6,7 @@
   flex: 1;
   flex-direction: column;
   min-width: 0;
-  padding: 10px 12px;
+  padding: var(--pad-compact);
   gap: 8px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
@@ -321,7 +321,7 @@
 }
 .v10-local-agent-notice,
 .v10-local-agent-error {
-  padding: 10px 12px;
+  padding: var(--pad-nested);
   font-size: 11px;
   line-height: 1.5;
 }
