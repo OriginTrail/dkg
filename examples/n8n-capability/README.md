@@ -485,3 +485,10 @@ the approved workbook input. Confirmed Write retries reuse their durable receipt
 only an unconfirmed write calls the transport again with `allowCreate: false`.
 The transport owns actual DKG content readback; the generic component additionally
 checks graph, asset name, content digest and sealed status before retaining it.
+
+### Development Studio MCP adapter
+
+See [STUDIO-MCP.md](./STUDIO-MCP.md) for the default-off native execution adapter,
+exact pins, trusted agent attribution, durable run lookup and the proposed
+#1227/#1247 gateway contract. This is separate from manual Studio's Program path;
+standing authority and live customer qualification are still pending.

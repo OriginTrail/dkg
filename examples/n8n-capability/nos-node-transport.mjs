@@ -9,7 +9,10 @@ export function createNosNodeClient(session, actor, send = fetch) {
     const response = await send(`${session.controlPlaneUrl}/studio/${session.accountId}/service/node`, {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(130_000),
       headers: { 'content-type': 'application/json', 'x-nos-workflows-secret': session.secret() },
-      body: JSON.stringify({ approvedBy: actor.id, method: body === undefined ? 'GET' : 'POST', path,
+      body: JSON.stringify({ approvedBy: actor.id,
+        ...(actor.startedBy ? { startedBy: actor.startedBy, runKey: actor.runKey, agentVersion: actor.agentVersion,
+          toolDigest: actor.toolDigest, approvalDecisionId: actor.approvalDecisionId } : {}),
+        method: body === undefined ? 'GET' : 'POST', path,
         ...(body === undefined ? {} : { body }), ...(query ? { query } : {}) }),
     });
     // Bound while reading, not after materializing an unbounded response.
