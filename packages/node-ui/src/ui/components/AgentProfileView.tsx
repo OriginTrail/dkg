@@ -107,7 +107,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
                     e.stopPropagation();
                     navigator.clipboard?.writeText(agent.walletAddress!).catch(() => {});
                   }}
-                  title="Copy wallet address"
+                  aria-label="Copy wallet address" title="Copy wallet address"
                 >
                   <Copy size={12} />
                 </button>

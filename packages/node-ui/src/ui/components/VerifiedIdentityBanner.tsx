@@ -84,7 +84,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             type="button"
             className="v10-vm-identity-copy"
             onClick={() => copy(onChainUal)}
-            title="Copy UAL"
+            aria-label="Copy UAL" title="Copy UAL"
           ><Copy size={12} /></button>
         </div>
       )}
@@ -111,7 +111,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             type="button"
             className="v10-vm-identity-copy"
             onClick={() => copy(receipt.txHash!)}
-            title="Copy transaction hash"
+            aria-label="Copy transaction hash" title="Copy transaction hash"
           ><Copy size={12} /></button>
           {receipt.blockNumber && (
             <span className="v10-vm-identity-opid mono">· block {receipt.blockNumber}</span>
@@ -129,7 +129,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
             type="button"
             className="v10-vm-identity-copy"
             onClick={() => copy(receipt.kaId!)}
-            title="Copy KA id"
+            aria-label="Copy KA id" title="Copy KA id"
           ><Copy size={12} /></button>
         </div>
       )}
@@ -155,7 +155,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
                 type="button"
                 className="v10-vm-identity-copy"
                 onClick={() => copy(identity.owner!)}
-                title="Copy owner id"
+                aria-label="Copy owner id" title="Copy owner id"
               ><Copy size={12} /></button>
             </>
           )}

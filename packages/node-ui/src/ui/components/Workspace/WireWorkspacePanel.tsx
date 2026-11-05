@@ -327,7 +327,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>
-        <input
+        <input aria-label="Workspace path"
           className="v10-form-input ds-input"
           type="text"
           value={workspaceRoot}
@@ -345,7 +345,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Coding tool to wire</label>
-        <select
+        <select aria-label="Coding tool to wire"
           className="v10-form-select ds-input"
           value={toolSelection}
           onChange={(e) => setToolSelection(e.target.value as ToolSelection)}
@@ -367,7 +367,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Your agent identity</label>
-        <input
+        <input aria-label="Your agent identity"
           className="v10-form-input ds-input"
           type="text"
           value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
@@ -383,7 +383,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Nickname for this agent</label>
-        <input
+        <input aria-label="Nickname for this agent"
           className="v10-form-input ds-input"
           type="text"
           value={nickname}

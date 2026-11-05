@@ -320,7 +320,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                               background: 'none', border: 'none', cursor: 'pointer',
                               color: 'var(--text-tertiary)', fontSize: 12, padding: '0 4px',
                             }}
-                            title="Remove agent"
+                            aria-label="Remove agent" title="Remove agent"
                           >
                             <X size={14} />
                           </button>

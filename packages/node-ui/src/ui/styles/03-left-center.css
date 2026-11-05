@@ -84,7 +84,8 @@
    quiet by default and lets the user dismiss any leftover project from
    their sidebar without a daemon-side delete. */
 .v10-tree-hide-btn { flex-shrink: 0; margin-left: 6px; width: 18px; opacity: 0; }
-.v10-tree-section-header:hover .v10-tree-hide-btn { opacity: 1; }
+.v10-tree-section-header:hover .v10-tree-hide-btn,
+.v10-tree-section-header:focus-within .v10-tree-hide-btn { opacity: 1; }
 .v10-tree-catalogue-btn { flex-shrink: 0; }
 
 /* "My Projects" / "Participating Projects" group dividers. Token
@@ -290,7 +291,8 @@
   text-align: left;
   cursor: pointer;
 }
-.v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); outline: none; }
+.v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
+.v10-tab-menu-item:focus-visible { outline-offset: -2px; }
 .v10-tab-menu-item.active { color: var(--text-primary); }
 .v10-tab-menu-item:disabled { opacity: .4; cursor: default; }
 .v10-tab-menu-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -48,7 +48,6 @@
   color: var(--text-primary);
 }
 .v10-composer-attach:focus-visible {
-  outline: none;
   background: var(--bg-hover);
   color: var(--text-primary);
 }

@@ -322,7 +322,7 @@ export function PanelCenter() {
   return (
     <div className="v10-panel-center">
       <TabBar />
-      <div className="v10-center-content" ref={contentRef}>
+      <div id="main-content" tabIndex={-1} className="v10-center-content" ref={contentRef}>
         <ViewContainer />
       </div>
     </div>

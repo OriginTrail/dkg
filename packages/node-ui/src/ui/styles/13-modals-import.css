@@ -118,6 +118,11 @@
 }
 .v10-form-select:focus { border-color: var(--border-strong); }
 .v10-form-advanced-toggle {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
   display: flex;
   align-items: center;
   gap: 6px;

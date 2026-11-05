@@ -726,7 +726,7 @@ export function ConnectedAgentsTab(props: {
                             ? `${selected.name} is still connecting...`
                             : `${selected.name} bridge offline...`
                       }
-                      className="v10-agent-input"
+                      aria-label={`Message ${selected.name}`} className="v10-agent-input"
                       value={localInput}
                       onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => onLocalInputChange(e.target.value)}
                       onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {

@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, lazy, Suspense } from 'react';
+import { useCallback, useMemo, useState, lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
 import { useMemoryEntities, canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
@@ -13,6 +13,7 @@ import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
 import { Badge } from '../../../components/ds/Badge.js';
 import { Anchor, X } from 'lucide-react';
+import { useModalDismiss } from '../../../components/Modals/useModalDismiss.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -219,15 +220,8 @@ export function GraphSurface({
   renderGraph: (expanded: boolean) => ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
-
-  useEffect(() => {
-    if (!expanded) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExpanded(false);
-    };
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
-  }, [expanded]);
+  const closeExpanded = useCallback(() => setExpanded(false), []);
+  const { dialogRef, onBackdropClick } = useModalDismiss(expanded, closeExpanded);
 
   const expandButton = (
     <button
@@ -278,11 +272,9 @@ export function GraphSurface({
           role="dialog"
           aria-modal="true"
           aria-label={`${title} expanded`}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setExpanded(false);
-          }}
+          onClick={onBackdropClick}
         >
-          <div className={`v10-graph-expanded-panel ds-card v10-graph-shell-${tone}`}>
+          <div ref={dialogRef} className={`v10-graph-expanded-panel ds-card v10-graph-shell-${tone}`}>
             <div className="v10-graph-expanded-head">
               <div>
                 <div className="v10-graph-expanded-title">{title}</div>

@@ -53,9 +53,7 @@
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  outline: none;
 }
-.v10-log-filter:focus { border-color: var(--focus-ring); }
 .v10-log-level-select {
   appearance: none;
   -webkit-appearance: none;
@@ -64,13 +62,11 @@
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  outline: none;
   flex-shrink: 0;
   cursor: pointer;
   transition: border-color 0.15s;
 }
 .v10-log-level-select:hover { border-color: var(--border-default); color: var(--text-primary); }
-.v10-log-level-select:focus { outline: none; border-color: var(--focus-ring); }
 .v10-log-output {
   flex: 1;
   overflow: auto;

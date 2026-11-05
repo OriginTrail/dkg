@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback } from 'react';
 import { importFile, type ImportFileResult } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { Check, File, FileCode, FileImage, FileSpreadsheet, FileText, Minus, Network, X } from 'lucide-react';
+import { pressable } from '../../lib/pressable.js';
 
 interface ImportFilesModalProps {
   open: boolean;
@@ -198,7 +199,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             <>
               <div
                 className={`v10-import-dropzone ds-card ${dragOver ? 'drag-over' : ''}`}
-                onClick={() => inputRef.current?.click()}
+                role="button" aria-label="Choose files to import" {...pressable(() => inputRef.current?.click())}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
@@ -229,7 +230,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                         <span className="v10-import-file-icon">{fileIcon(f.file.name)}</span>
                         <span className="v10-import-file-name">{f.file.name}</span>
                         <span className="v10-import-file-size">{formatSize(f.file.size)}</span>
-                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} title="Remove"><X size={14} /></button>
+                        <button className="v10-import-file-remove" onClick={() => removeFile(f.id)} aria-label="Remove" title="Remove"><X size={14} /></button>
                       </div>
                     ))}
                   </div>

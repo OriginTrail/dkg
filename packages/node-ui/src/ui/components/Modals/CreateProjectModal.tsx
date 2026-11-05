@@ -496,7 +496,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </label>
               {ontology === 'community' && (
                 <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
-                  <select
+                  <select aria-label="Community ontology"
                     className="v10-form-select ds-input"
                     value={starterSlug}
                     onChange={(e) => setStarterSlug(e.target.value)}
@@ -528,16 +528,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             </div>
           </div>
 
-          <div className="v10-form-advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
+          <button type="button" className="v10-form-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced(!showAdvanced)}>
             <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}><ChevronRight size={12} /></span>
             <span>Advanced settings</span>
-          </div>
+          </button>
 
           {showAdvanced && (
             <div className="v10-form-advanced-body ds-card-nested" style={{ opacity: 0.5, pointerEvents: 'none' }}>
               <div className="v10-form-group">
                 <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={quorum} disabled>
+                <select aria-label="Consensus quorum" className="v10-form-select ds-input" value={quorum} disabled>
                   <option value="off">Off — no consensus verification required</option>
                   <option value="2of3">2 of 3 — lightweight consensus</option>
                   <option value="3of5">3 of 5 — standard consensus (recommended for teams)</option>
@@ -546,7 +546,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </div>
               <div className="v10-form-group">
                 <label className="v10-form-label">SWM TTL <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={swmTtl} disabled>
+                <select aria-label="SWM TTL" className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
                   <option value="1d">1 day</option>
@@ -555,7 +555,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
                 <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={swmCap} disabled>
+                <select aria-label="SWM size cap" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>

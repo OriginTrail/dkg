@@ -128,7 +128,7 @@ export function EntityList({
           >
             <span className="v10-entity-card-icon">{icon}</span>
             <div className="v10-entity-card-main">
-              <div className="v10-entity-card-title">{e.label}</div>
+              <button type="button" className="v10-entity-card-title ds-row-open">{e.label}</button>
               <div className="v10-entity-card-meta">
                 {(author || authorUri) && (
                   <AgentChip
@@ -567,7 +567,7 @@ export function DocumentsList({
             <div key={e.uri} className="v10-item-row" onClick={() => handleOpenDoc(e)}>
               <span className="v10-item-icon"><FileText size={14} /></span>
               <div className="v10-item-info">
-                <div className="v10-item-name">{e.label}</div>
+                <button type="button" className="v10-item-name ds-row-open">{e.label}</button>
                 <div className="v10-item-meta-row">
                   {contentType && <span className="v10-item-type">{contentType}</span>}
                   {size && <span className="v10-item-count">· {Math.round(parseInt(size) / 1024)}KB</span>}

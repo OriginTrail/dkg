@@ -3,6 +3,7 @@ import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
 import { opTypeText } from '../../op-type-colors.js';
+import { pressable } from '../../lib/pressable.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -196,7 +197,7 @@ function TransactionsContent() {
             return (
               <React.Fragment key={op.operation_id}>
                 <tr
-                  onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
+                  aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'var(--tint-subtle)' : undefined }}
                 >
                   <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>

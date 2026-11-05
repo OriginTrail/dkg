@@ -25,6 +25,8 @@ import {
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 import { ChevronDown, ChevronRight } from 'lucide-react';
+import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
+import { pressable } from '../lib/pressable.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -108,7 +110,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-      <select
+      <select aria-label="Period"
         className="input"
         value={isCustom ? '__custom__' : value}
         onChange={e => {
@@ -121,7 +123,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
         <option value="__custom__">Custom...</option>
       </select>
       {(showCustom || isCustom) && (
-        <input
+        <input aria-label="Custom period"
           className="input mono"
           placeholder="e.g. 2d, 45m, 3h"
           value={customInput || (isCustom ? value : '')}
@@ -298,7 +300,7 @@ function ReplicationTab() {
               {perCg.map((r) => (
                 <tr
                   key={r.context_graph_id}
-                  onClick={() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id)}
+                  {...pressable(() => setSelectedCg(selectedCg === r.context_graph_id ? null : r.context_graph_id))}
                   style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover)' : undefined }}
                 >
                   <td className="mono">{r.context_graph_id}</td>
@@ -380,7 +382,7 @@ function HealthTab() {
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
         <PeriodSelect value={period} onChange={setPeriod} />
-        <input
+        <input aria-label="Search errors and operation IDs"
           className="input mono"
           placeholder="Search errors, operation IDs..."
           value={search}
@@ -413,7 +415,7 @@ function HealthTab() {
                 return (
                 <React.Fragment key={rowKey}>
                   <tr
-                    onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
+                    aria-expanded={expandedPhase === rowKey} {...pressable(() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); })}
                     style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
                   >
                     <td style={{ fontSize: 12, color: 'var(--text-muted)', padding: '10px 14px' }}>
@@ -459,7 +461,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
       {operations.map((op: any) => (
         <div key={`${op.operation_id}-${op.phase_started_at}`} style={{ borderBottom: '1px solid var(--border-default)' }}>
           <div
-            onClick={() => onToggleOp(op.operation_id)}
+            role="button" aria-expanded={expandedOp === op.operation_id} {...pressable(() => onToggleOp(op.operation_id))}
             style={{
               display: 'flex', alignItems: 'center', gap: 10, padding: '10px 20px', cursor: 'pointer',
               background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
@@ -582,8 +584,8 @@ function OperationStatsSection() {
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
         <PeriodSelect value={period} onChange={setPeriod} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
-          <select className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
+          <span style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
+          <select aria-label="Granularity" className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
         </div>
@@ -929,6 +931,7 @@ function OperationsTab() {
   const [statusFilter, setStatusFilter] = useState('');
   const [opIdFilter, setOpIdFilter] = useState('');
   const [selectedOp, setSelectedOp] = useState<string | null>(null);
+  const drawer = useModalDismiss(Boolean(selectedOp), () => setSelectedOp(null));
   const [page, setPage] = useState(0);
 
   useEffect(() => { setPage(0); }, [nameFilter, statusFilter, opIdFilter]);
@@ -953,20 +956,20 @@ function OperationsTab() {
   return (
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-        <select className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} title="Filter by operation type">
+        <select aria-label="Operation type" className="input" value={nameFilter} onChange={(e) => setNameFilter(e.target.value)} title="Filter by operation type">
           <option value="">All types</option>
           {Object.entries(OP_TYPE_DESCRIPTIONS).map(([type, desc]) => (
             <option key={type} value={type} title={desc}>{type} — {desc}</option>
           ))}
         </select>
-        <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+        <select aria-label="Status" className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="">All statuses</option>
           <option value="success">{operationStatusLabel('success')}</option>
           <option value="error">{operationStatusLabel('error')}</option>
           <option value="cancelled">{operationStatusLabel('cancelled')}</option>
           <option value="in_progress">{operationStatusLabel('in_progress')}</option>
         </select>
-        <input
+        <input aria-label="Filter by operation ID"
           className="input mono"
           placeholder="Filter by Operation ID..."
           value={opIdFilter}
@@ -1023,7 +1026,7 @@ function OperationsTab() {
               {operations.map((op: any) => (
                 <tr
                   key={op.operation_id}
-                  onClick={() => setSelectedOp(op.operation_id)}
+                  {...pressable(() => setSelectedOp(op.operation_id))}
                   style={{ cursor: 'pointer', background: selectedOp === op.operation_id ? 'var(--tint-strong)' : undefined }}
                 >
                   <td title={op.started_at ? new Date(op.started_at).toLocaleString() : undefined}>{formatTime(op.started_at)}</td>
@@ -1112,13 +1115,13 @@ function OperationsTab() {
       {selectedOp && (
         <>
           <div
-            onClick={() => setSelectedOp(null)}
+            onClick={drawer.onBackdropClick}
             style={{
               position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 900,
               animation: 'fadeIn .15s ease-out',
             }}
           />
-          <div style={{
+          <div ref={drawer.dialogRef} role="dialog" aria-modal="true" aria-label="Operation detail" style={{
             position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
             background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 901,
             overflowY: 'auto', padding: '20px 24px',
@@ -1246,8 +1249,8 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Operation detail</span>
         <button
           onClick={onBack}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, display: 'flex' }}
-          title="Close"
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 4, display: 'flex' }}
+          aria-label="Close" title="Close"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -1436,26 +1439,26 @@ function LogsTab() {
   return (
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
-        <input
+        <input aria-label="Search node log"
           className="input"
           placeholder="Search node log..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           style={{ flex: 1, minWidth: 200 }}
         />
-        <select className="input" value={showLevel} onChange={(e) => setShowLevel(e.target.value as any)}>
+        <select aria-label="Log level" className="input" value={showLevel} onChange={(e) => setShowLevel(e.target.value as any)}>
           <option value="all">All levels</option>
           <option value="warn">Warnings + Errors</option>
           <option value="error">Errors only</option>
         </select>
-        <select className="input" value={lineCount} onChange={(e) => setLineCount(Number(e.target.value))}>
+        <select aria-label="Line count" className="input" value={lineCount} onChange={(e) => setLineCount(Number(e.target.value))}>
           <option value={200}>200 lines</option>
           <option value={500}>500 lines</option>
           <option value={1000}>1,000 lines</option>
           <option value={3000}>3,000 lines</option>
           <option value={5000}>5,000 lines</option>
         </select>
-        <select className="input" value={refreshInterval} onChange={(e) => setRefreshInterval(Number(e.target.value))}>
+        <select aria-label="Refresh interval" className="input" value={refreshInterval} onChange={(e) => setRefreshInterval(Number(e.target.value))}>
           <option value={1000}>1s refresh</option>
           <option value={3000}>3s refresh</option>
           <option value={5000}>5s refresh</option>
@@ -1656,10 +1659,10 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={copy}
-      title="Copy to clipboard"
+      title="Copy to clipboard" aria-label="Copy to clipboard"
       style={{
-        background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px',
-        color: copied ? 'var(--accent-green)' : 'var(--text-tertiary)', fontSize: 11,
+        background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px', minWidth: 24, minHeight: 24, justifyContent: 'center',
+        color: copied ? 'var(--green)' : 'var(--text-dim)', fontSize: 11,
         display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
         transition: 'color .15s',
       }}

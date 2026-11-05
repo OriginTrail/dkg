@@ -256,7 +256,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
           </div>
 
           <div className="v10-vm-search-controls">
-            <input
+            <input aria-label="Search Verifiable Memory"
               type="text"
               className="v10-mlv-query-input ds-input"
               placeholder="Search verifiable memory..."
@@ -264,7 +264,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               onChange={(e) => setDraftSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') runVerifiedSearch(); }}
             />
-            <select
+            <select aria-label="Search field"
               className="v10-vm-search-select ds-input"
               value={draftField}
               onChange={(e) => setDraftField(e.target.value as 'any' | 'subject' | 'predicate' | 'object')}
@@ -274,7 +274,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               <option value="predicate">Predicate</option>
               <option value="object">Object</option>
             </select>
-            <select
+            <select aria-label="Row limit"
               className="v10-vm-search-select ds-input"
               value={String(draftLimit)}
               onChange={(e) => setDraftLimit(Number.parseInt(e.target.value, 10) || 50)}
@@ -294,7 +294,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       {(layer !== 'vm' || showAdvancedQuery) && (
         <div className="v10-mlv-query-bar">
           {queryPresetOptions?.length ? (
-            <select
+            <select aria-label="Query preset"
               className="v10-vm-search-select ds-input"
               value={selectedPresetLabel}
               onChange={(e) => {
@@ -312,7 +312,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               ))}
             </select>
           ) : (
-            <input
+            <input aria-label="Custom SPARQL query"
               type="text"
               className="v10-mlv-query-input ds-input"
               placeholder="Custom SPARQL query..."

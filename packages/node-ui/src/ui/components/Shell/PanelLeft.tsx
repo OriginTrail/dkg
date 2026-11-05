@@ -57,11 +57,11 @@ function ProjectTreeItem({
         onClick={onSelect}
       >
         <ContextGraphMark id={cg.id} name={cg.name} />
-        <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
+        <button type="button" className="v10-tree-section-label ds-row-open">{cg.name || cg.id.slice(0, 16)}</button>
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label="Hide this Context Graph from the sidebar (reversible)" title="Hide this Context Graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
           <X size={14} />
@@ -111,7 +111,7 @@ function OracleCatalogueItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label="Hide this Context Graph from the sidebar (reversible)" title="Hide this Context Graph from the sidebar (reversible)"
           onClick={onHide}
         >
           <X size={14} />

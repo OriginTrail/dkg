@@ -72,7 +72,6 @@
   color: var(--text-primary);
 }
 .v10-peer-group-header:focus-visible {
-  outline: none;
   color: var(--text-primary);
 }
 .v10-peer-group-chevron {

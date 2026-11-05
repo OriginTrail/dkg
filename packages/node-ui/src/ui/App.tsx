@@ -208,6 +208,7 @@ function AppShell() {
   return (
     <div className="v10-app">
       <ApiTokenPrompt />
+      <button type="button" className="ds-skip-link" onClick={() => document.getElementById('main-content')?.focus()}>Skip to content</button>
       <Header />
       <div className="v10-app-body">
         {narrow && (leftOpen || rightOpen) && (

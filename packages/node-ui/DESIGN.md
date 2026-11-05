@@ -210,3 +210,15 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 2. A new colour or size is a new token in `00-theme.css`, with a value for both themes and a line in this file saying what job it does.
 3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, and a section on the reference page.
 4. Put the shared classes on the element (`ds-btn ds-primary ds-sm`, `ds-tab`, `ds-seg-item`, `ds-filter`, `ds-card`, `ds-card-nested`, `ds-input ds-sm`, or render `<Button>`) and keep the screen's own class only for layout. `27-ds-components.css` holds the shared rules and never lists screen classes; a screen that needs a variation refines it in its own stylesheet (`test/button-classes.test.ts` and `test/ds-classes.test.ts` check both directions).
+
+## Accessibility
+
+The target is WCAG 2.2 AA. `test/a11y-rules.test.ts` checks the first four rules below from the code.
+
+- **Names:** every control has a name. An icon-only button has an `aria-label`, and a form control has a `<label>` or an `aria-label`. A placeholder or `title` isn't a name.
+- **Keyboard:** everything clickable works from the keyboard. Use a `<button>` first. A row holding other controls puts a `ds-row-open` button on its title, and a table row uses `pressable()`.
+- **Focus:** keyboard focus always shows the 2px `--focus-ring`. A control revealed on hover is also revealed on focus.
+- **Dialogs:** every dialog has a name and uses `useModalDismiss`, which moves focus in, keeps it there, closes on Escape and returns focus on close.
+- **Targets:** at least 24 by 24, the small control height. The exceptions are a tab's close mark, which is documented above, and text links with clear space around them.
+- **Motion:** `prefers-reduced-motion` turns animation and transitions off everywhere.
+- **Skip link:** a "Skip to content" button at the start of the page moves focus to `#main-content`.

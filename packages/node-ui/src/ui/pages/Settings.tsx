@@ -19,6 +19,7 @@ import { Badge, StatusGlyph } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 import { Toggle } from '../components/ds/Toggle.js';
+import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -62,7 +63,6 @@ function NetworkTelemetrySection() {
   const [telemetrySaving, setTelemetrySaving] = useState(false);
   const [telemetryError, setTelemetryError] = useState<string | null>(null);
   const [showConsentModal, setShowConsentModal] = useState(false);
-  const modalRef = React.useRef<HTMLDivElement>(null);
   const toggleRef = React.useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -104,16 +104,8 @@ function NetworkTelemetrySection() {
     }
   }, []);
 
-  // Consent modal a11y: focus first control on open, Escape cancels,
-  // restore focus to the toggle on close.
-  useEffect(() => {
-    if (!showConsentModal) return;
-    const first = modalRef.current?.querySelector<HTMLElement>('button');
-    first?.focus();
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setShowConsentModal(false); toggleRef.current?.focus(); } };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [showConsentModal]);
+  const closeConsent = useCallback(() => setShowConsentModal(false), []);
+  const { dialogRef } = useModalDismiss(showConsentModal, closeConsent);
 
   return (
     <section className="card ds-card">
@@ -153,7 +145,7 @@ function NetworkTelemetrySection() {
           alignItems: 'center', justifyContent: 'center',
         }}>
           <div
-            ref={modalRef}
+            ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-label="Enable Telemetry Streaming?"
