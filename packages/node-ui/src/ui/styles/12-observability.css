@@ -183,7 +183,7 @@ select.input {
 
 .v10-modal-warning {
   padding: var(--pad-nested);
-  background: var(--amber-dim);
+  background: var(--warning-bg);
   border: 1px solid var(--warning-border);
   margin-bottom: 16px;
   font-size: 12px;

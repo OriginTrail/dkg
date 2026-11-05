@@ -393,7 +393,7 @@ function HealthTab() {
 
       <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 'var(--lh-body)' }}>
+        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 'var(--lh-body)' }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
@@ -412,7 +412,7 @@ function HealthTab() {
                     aria-expanded={expandedPhase === rowKey} {...pressable(() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); })}
                     style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
                   >
-                    <td style={{ fontSize: 12, color: 'var(--text-muted)', padding: '10px 14px' }}>
+                    <td style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '10px 14px' }}>
                       <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
                       {h.operation_name}
                     </td>
@@ -461,7 +461,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
               background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
             }}
           >
-            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
             <span style={{ fontWeight: 600, fontSize: 12, color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
             <StatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
@@ -578,7 +578,7 @@ function OperationStatsSection() {
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
         <PeriodSelect value={period} onChange={setPeriod} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
+          <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
           <select aria-label="Granularity" className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
@@ -628,7 +628,7 @@ function OperationStatsSection() {
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
               <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -644,7 +644,7 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -660,7 +660,7 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -676,7 +676,7 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
@@ -754,7 +754,7 @@ export function HardwareTab() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
           <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
               <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
@@ -768,12 +768,12 @@ export function HardwareTab() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
         <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
         <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
@@ -787,7 +787,7 @@ export function HardwareTab() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
           {hwCharts.map(c => (
             <div key={c.key} className="card ds-card" style={{ padding: 'var(--pad-compact)' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
@@ -901,7 +901,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               )}
             </div>
             {desc && (
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'normal', lineHeight: 'var(--lh-snug)' }}>
+              <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 3, whiteSpace: 'normal', lineHeight: 'var(--lh-snug)' }}>
                 {desc}
               </div>
             )}
@@ -1105,7 +1105,7 @@ function OperationsTab() {
           />
           <div ref={drawer.dialogRef} role="dialog" aria-modal="true" aria-label="Operation detail" style={{
             position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
-            background: 'var(--bg)', borderLeft: '1px solid var(--border)', zIndex: 'var(--z-modal)',
+            background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 'var(--z-modal)',
             overflowY: 'auto', padding: '20px 24px',
             boxShadow: 'var(--shadow-drawer)',
             animation: 'slideInRight .2s ease-out',
@@ -1231,7 +1231,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Operation detail</span>
         <button
           onClick={onBack}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 4, display: 'flex' }}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, display: 'flex' }}
           aria-label="Close" title="Close"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -1246,13 +1246,13 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>
           <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
-        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
-          <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.contextGraph_id}</span>}
-          {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
-          {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
-          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
-          {op.trac_cost != null && <span><b style={{ color: 'var(--text-muted)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)' }}>
+          <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {formatDateTime(op.started_at, { seconds: true })}</span>
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context Graph</b> {op.contextGraph_id}</span>}
+          {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
+          {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
+          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
+          {op.trac_cost != null && <span><b style={{ color: 'var(--text-secondary)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
           {op.tx_hash && (
             <span>
               <b style={{ color: 'var(--text-secondary)' }}>TX</b>{' '}
@@ -1301,7 +1301,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                     <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
                     {desc && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
                     <span
-                      style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
+                      style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 'auto', flexShrink: 0 }}
                       title={p.started_at ? formatDateTime(p.started_at, { seconds: true }) : undefined}
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
@@ -1441,8 +1441,8 @@ function LogsTab() {
           title="Refresh now"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', background: 'var(--surface)',
-            color: 'var(--text-muted)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
+            color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
             transition: 'all var(--motion-base)',
           }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-green)'; e.currentTarget.style.color = 'var(--accent-green)'; }}
@@ -1456,9 +1456,9 @@ function LogsTab() {
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border)'}`,
-            background: autoScroll ? 'var(--green-dim)' : 'var(--surface)',
-            color: autoScroll ? 'var(--green)' : 'var(--text-muted)',
+            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border-default)'}`,
+            background: autoScroll ? 'var(--success-bg)' : 'var(--bg-surface)',
+            color: autoScroll ? 'var(--accent-green)' : 'var(--text-secondary)',
             fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all var(--motion-base)',
           }}
         >
@@ -1621,7 +1621,7 @@ function CopyButton({ text }: { text: string }) {
       title="Copy to clipboard" aria-label="Copy to clipboard"
       style={{
         background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px', minWidth: 24, minHeight: 24, justifyContent: 'center',
-        color: copied ? 'var(--green)' : 'var(--text-dim)', fontSize: 11,
+        color: copied ? 'var(--accent-green)' : 'var(--text-tertiary)', fontSize: 11,
         display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
         transition: 'color var(--motion-base)',
       }}
