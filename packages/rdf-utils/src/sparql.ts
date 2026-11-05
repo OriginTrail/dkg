@@ -18,6 +18,7 @@ export {
 
 export {
   prepareSparqlQuery,
+  readSparqlQueryBoundaries,
   type PreparedSparqlQuery,
   type SparqlQueryGroupRange,
   type SparqlQueryVariable,

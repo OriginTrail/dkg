@@ -1,3 +1,4 @@
+import { readSparqlQueryBoundaries } from '../src/sparql.js';
 import { describe, expect, it } from 'vitest';
 import {
   prepareSparql, prepareSparqlQuery, indexSparqlStructure, sparqlTokenIndexesAtDepth,
@@ -140,5 +141,43 @@ describe('lexical percent escapes and comparison boundaries', () => {
     expect(prepared.tokens.filter(t => t.kind === 'iri')).toEqual([]);
     expect(prepared.tokens.filter(t => t.kind === 'symbol' && t.logicalValue === '<')).toHaveLength(1);
     expect(prepared.tokens.filter(t => t.kind === 'variable').map(t => t.raw)).toContain('?limit');
+  });
+});
+
+describe('query boundaries within a token range', () => {
+  it.each([
+    ['SELECT (EXISTS { ?a ?b ?c } AS ?hit) WHERE { ?s ?p ?o }', '{ ?s ?p ?o }'],
+    ['SELECT (EXISTS { ?a ?b ?c } AS ?hit) { ?s ?p ?o }', '{ ?s ?p ?o }'],
+    ['SELECT (EXISTS { ?a ?b ?c } AS ?hit) { ?s ?p ?o } ORDER BY (EXISTS { ?x ?y ?z }) LIMIT 2', '{ ?s ?p ?o }'],
+    ['SELECT ("text"@where AS ?label) { ?s ?p ?o } VALUES ?s { <urn:s> }', '{ ?s ?p ?o }'],
+    ['SELECT ?s { ?s ?p ?o } GROUP BY ?s HAVING(EXISTS { ?s ?x ?y })', '{ ?s ?p ?o }'],
+    ['SELECT ?s WITH { SELECT ?s { ?s ?p ?o } } AS %x { INCLUDE %x }', '{ INCLUDE %x }'],
+    [String.raw`SELECT ?s WHERE \u007B ?s ?p ?o \u007D`, String.raw`\u007B ?s ?p ?o \u007D`],
+  ])('shares outer and nested recognition without rebasing coordinates: %s', (source, body) => {
+    const outer = query(source);
+    const prefix = 'SELECT * WHERE { { ';
+    const wrapped = query(`${prefix}${source} } GRAPH <urn:later> { ?later ?p ?o } } ORDER BY ?later`);
+    const operationTokenIndex = wrapped.prepared.tokens.findIndex(token => token.start === prefix.length);
+    const endTokenIndex = wrapped.prepared.tokens.findIndex(token => token.start >= prefix.length + source.length);
+    const nested = readSparqlQueryBoundaries(wrapped.prepared, wrapped.structure, { operationTokenIndex, endTokenIndex });
+    expect(outer.where).not.toBeNull();
+    expect(nested.where).not.toBeNull();
+    if (!outer.where || !nested.where) throw new Error('Expected query patterns');
+    expect(outer.source.slice(outer.where.openStart, outer.prepared.tokens[outer.where.closingTokenIndex].end)).toBe(body);
+    expect(wrapped.source.slice(nested.where.openStart, wrapped.prepared.tokens[nested.where.closingTokenIndex].end)).toBe(body);
+    expect(nested.where.openStart).toBe(outer.where.openStart + prefix.length);
+    expect(nested.where.openEnd).toBe(outer.where.openEnd + prefix.length);
+    expect(nested.where.close).toBe(outer.where.close + prefix.length);
+    expect(nested.where.openingTokenIndex).toBe(outer.where.openingTokenIndex + operationTokenIndex);
+    expect(nested.where.closingTokenIndex).toBe(outer.where.closingTokenIndex + operationTokenIndex);
+    expect(nested.datasetInsertionOffset).toBe(outer.datasetInsertionOffset! + prefix.length);
+  });
+
+  it('does not take a missing nested pattern from its next sibling', () => {
+    const scope = query('SELECT * WHERE { { SELECT ?s } { ?later ?p ?o } }');
+    const operationTokenIndex = scope.prepared.tokens.findIndex((token, index) => index > 0 && token.kind === 'word' && token.upper === 'SELECT');
+    const endTokenIndex = scope.prepared.tokens.findIndex((token, index) => index > operationTokenIndex && token.logicalValue === '}');
+    expect(readSparqlQueryBoundaries(scope.prepared, scope.structure, { operationTokenIndex, endTokenIndex }))
+      .toEqual({ where: null, datasetInsertionOffset: null });
   });
 });

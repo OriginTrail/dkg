@@ -1,4 +1,4 @@
-import type { PreparedSparqlQuery } from '@origintrail-official/dkg-rdf-utils/sparql';
+import { readSparqlQueryBoundaries, type PreparedSparqlQuery } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 export function hasTopLevelDefaultGraphPattern(scope: PreparedSparqlQuery): boolean {
   const where = scope.where;
@@ -15,13 +15,11 @@ function nextGroupOpening(
   start: number,
   limit: number,
   depth: number,
-  parenthesisDepth?: number,
 ): number {
   for (let index = start; index < limit; index++) {
     const token = scope.prepared.tokens[index];
     if (
       scope.structure.braces.depthBefore[index] === depth
-      && (parenthesisDepth === undefined || scope.structure.parentheses.depthBefore[index] === parenthesisDepth)
       && token.kind === 'symbol'
       && token.logicalValue === '{'
     ) return index;
@@ -48,25 +46,11 @@ function groupHasDefaultGraphPattern(
   // Projection variables are not default patterns, but projection/modifier
   // EXISTS expressions can read them. Keep their groups separate from WHERE.
   if (first?.kind === 'word' && first.upper === 'SELECT') {
-    const parenthesisDepth = scope.structure.parentheses.depthBefore[firstIndex];
-    let searchStart = firstIndex + 1;
-    for (let index = searchStart; index < closingIndex; index++) {
-      const token = tokens[index];
-      if (
-        scope.structure.braces.depthBefore[index] === contentDepth
-        && scope.structure.parentheses.depthBefore[index] === parenthesisDepth
-        && token.kind === 'word'
-        && token.upper === 'WHERE'
-      ) {
-        searchStart = index + 1;
-        break;
-      }
-    }
-    const nestedOpening = nextGroupOpening(scope, searchStart, closingIndex, contentDepth, parenthesisDepth);
-    if (nestedOpening < 0) return true;
-    const nestedClosing = scope.structure.braces.matchingTokenIndexes[nestedOpening] ?? -1;
-    return nestedClosing < 0 || groupHasDefaultGraphPattern(scope, nestedOpening, nestedClosing)
-      || rangeHasDefaultGraphExpression(scope, firstIndex, closingIndex, nestedOpening, nestedClosing);
+    const { where } = readSparqlQueryBoundaries(scope.prepared, scope.structure,
+      { operationTokenIndex: firstIndex, endTokenIndex: closingIndex });
+    if (!where) return true;
+    return groupHasDefaultGraphPattern(scope, where.openingTokenIndex, where.closingTokenIndex)
+      || rangeHasDefaultGraphExpression(scope, firstIndex, closingIndex, where.openingTokenIndex, where.closingTokenIndex);
   }
 
   for (let index = openingIndex + 1; index < closingIndex; index++) {
