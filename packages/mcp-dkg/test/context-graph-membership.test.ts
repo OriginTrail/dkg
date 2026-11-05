@@ -33,6 +33,23 @@ describe('MCP mine membership', () => {
     expect(filterContextGraphsForScope(rows, 'all')).toEqual(rows);
   });
 
+  it.each([
+    { id: 'team', name: 'team', nameKnown: true, expected: 'team' },
+    { id: 'team', name: 'team', expected: 'team' },
+    { id: `0x${'a'.repeat(64)}`, name: `0x${'a'.repeat(64)}`, nameKnown: false, expected: '(name unresolved)' },
+    { id: `0x${'a'.repeat(64)}`, name: `0x${'a'.repeat(64)}`, expected: '(name unresolved)' },
+    { id: `0x${'a'.repeat(64)}`, name: `0x${'a'.repeat(64)}`, nameKnown: true, expected: `0x${'a'.repeat(64)}` },
+    { id: `0x${'a'.repeat(64)}`, name: 'Resolved graph', expected: 'Resolved graph' },
+    { id: 'team', name: 'stale name', nameKnown: false, expected: '(name unresolved)' },
+  ])('renders known names and only marks unresolved daemon/legacy names: $expected ($nameKnown)', async ({ expected, ...row }) => {
+    const tools = new FakeServer();
+    const client = new FakeClient({ listProjects: async () => [{ ...row, callerInvolved: true }] });
+    registerReadTools(tools.asMcpServer(), client.asDkgClient(), makeConfig({ defaultProject: null }));
+    const result = await tools.call('dkg_list_context_graphs', {});
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toContain(`- **${row.id}** — ${expected}`);
+  });
+
   it('fails visibly when legacy curator ownership cannot be resolved, while explicit membership needs no identity probe', async () => {
     const identity = vi.fn(async () => { throw new Error('identity unavailable'); });
     const legacy = new FakeClient({ listProjects: async () => [{ id: 'owned', curator: did, callerInvolved: null }], getAgentIdentity: identity });

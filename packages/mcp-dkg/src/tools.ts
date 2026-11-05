@@ -101,7 +101,8 @@ export function registerReadTools(
             const star = pinned && r.id === pinned ? ' ★' : '';
             const role = r.role ? ` · ${r.role}` : '';
             const layer = r.layer ? ` · ${r.layer}` : '';
-            return `- **${r.id}**${star} — ${r.name && r.name !== r.id ? r.name : '(name unresolved)'}${role}${layer}${
+            const unresolvedName = r.nameKnown === false || !r.name?.trim() || (r.nameKnown !== true && r.name === r.id && /^0x[0-9a-f]{64}$/i.test(r.id));
+            return `- **${r.id}**${star} — ${unresolvedName ? '(name unresolved)' : r.name}${role}${layer}${
               r.description ? `\n    ${r.description}` : ''
             }`;
           })
