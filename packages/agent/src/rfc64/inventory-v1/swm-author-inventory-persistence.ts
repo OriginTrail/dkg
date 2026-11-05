@@ -4,7 +4,6 @@ import {
   assertCanonicalDeterministicUalV1,
   assertSwmAuthorInventorySnapshotBindingV1,
   canonicalizeSignedSwmAuthorInventoryHeadEnvelopeBytesV1,
-  canonicalizeSwmAuthorInventoryRowsBytesV1,
   compareSwmAuthorInventoryRowsV1,
   computeSwmAuthorInventoryScopeDigestV1,
   deriveSwmAuthorInventoryScopeFromHeadV1,
@@ -594,14 +593,36 @@ export class SwmAuthorInventoryPersistenceV1 {
   }
 }
 
+const SWM_ROW_FIELDS = Object.keys({
+  assertionCoordinate: true,
+  assertionVersion: true,
+  kaUal: true,
+  shareOperationId: true,
+  projectionDigest: true,
+  publicTripleCount: true,
+  privateTripleCount: true,
+  sealDigest: true,
+  sharedAt: true,
+  expiresAt: true,
+} satisfies Record<keyof SwmAuthorInventoryRowV1, true>) as (keyof SwmAuthorInventoryRowV1)[];
+
+/**
+ * Rows come from validated, privately owned snapshots or their projection.
+ * Exact equality to the bound next snapshot also rejects invalid merged sets.
+ */
 function swmAuthorInventoryRowsEqualV1(
   left: SwmAuthorInventorySnapshotV1['rows'],
   right: SwmAuthorInventorySnapshotV1['rows'],
 ): boolean {
-  return sqlBlobsEqualV1(
-    canonicalizeSwmAuthorInventoryRowsBytesV1(left),
-    canonicalizeSwmAuthorInventoryRowsBytesV1(right),
-  );
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const leftRow = left[index]!;
+    const rightRow = right[index]!;
+    for (const field of SWM_ROW_FIELDS) {
+      if (leftRow[field] !== rightRow[field]) return false;
+    }
+  }
+  return true;
 }
 
 function swmAuthorInventorySnapshotsEqualV1(

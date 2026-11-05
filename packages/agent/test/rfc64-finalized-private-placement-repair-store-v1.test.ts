@@ -611,3 +611,54 @@ it('keeps unread SQLite history intact while runtime backoff continues, until op
   expect(reopened.readFailure(repair)).toEqual({ ...failure, consecutiveFailures: 0,
     sameKindFailures: 0, nextAttemptAtMs: null, parked: false });
 });
+
+describe('GH#3134 — a listing decodes each stored row once', () => {
+  async function storeWith(...markers: Rfc64FinalizedPrivatePlacementRepairV1[]) {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-decoded-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    for (const marker of markers) await store.put(marker);
+    return { store, dataDir };
+  }
+
+  it('lists an unchanged row as the same frozen marker, a new row decoded and a removed one gone', async () => {
+    const seal = await authorSealV1(995n);
+    const confirmed = { ...repair, version: 2 as const, inventoryScope: null,
+      subGraphName: null, authorAddress: seal.authorAddress, kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion, sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal), seal };
+    const { store } = await storeWith(repair, confirmed);
+    const first = await store.listAsync(new AbortController().signal);
+    const second = store.list();
+    const third = await store.listAsync(new AbortController().signal);
+    expect(first).toHaveLength(2);
+    first.forEach((marker, index) => {
+      expect(second[index]).toBe(marker);
+      expect(third[index]).toBe(marker);
+    });
+    expect(first.every((marker) => Object.isFrozen(marker))).toBe(true);
+    const other = { ...repair, assertionCoordinate: 'asset-2' as AssertionCoordinateV1 };
+    await store.put(other);
+    const fourth = await store.listAsync(new AbortController().signal);
+    expect(fourth).toHaveLength(3);
+    for (const marker of first) expect(fourth).toContain(marker);
+    expect(fourth).toContainEqual(other);
+    await store.delete(repair);
+    const fifth = store.list();
+    expect(fifth).toHaveLength(2);
+    expect(fifth).not.toContainEqual(repair);
+    expect(fifth.find((marker) => marker.version === 2)).toBe(first.find((marker) => marker.version === 2));
+  });
+
+  it('decodes and checks a row again when its bytes change under the same digest', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const { store, dataDir } = await storeWith(repair);
+    expect(await store.listAsync(new AbortController().signal)).toEqual([repair]);
+    const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
+    try {
+      db.exec(`UPDATE rfc64_finalized_private_placement_repairs_v1
+        SET repair_json = replace(repair_json, '"asset-1"', '"asset-9"')`);
+    } finally { db.close(); }
+    await expect(store.listAsync(new AbortController().signal)).rejects.toThrow(/not canonical or digest-bound/);
+    expect(() => store.list()).toThrow(/not canonical or digest-bound/);
+  });
+});
