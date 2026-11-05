@@ -8,6 +8,8 @@ import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ApiClient } from '../src/api-client.js';
+import type { TerminalJobClearOutcome } from '@origintrail-official/dkg-publisher';
+import { respondTerminalClearOutcome } from '../src/daemon/routes/terminal-clear-response.js';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
 import { registerKnowledgeAssetCommand } from '../src/commands/knowledge-asset.js';
 
@@ -21,6 +23,7 @@ describe('single-job clear commands through the CLI and HTTP client', () => {
   let home: string;
   let server: Server;
   let port: number;
+  let terminalOutcome: TerminalJobClearOutcome | undefined;
   let response: { status: number; body: object };
   let calls: Array<{ path?: string; method?: string; authorization?: string; body: object }>;
 
@@ -28,12 +31,14 @@ describe('single-job clear commands through the CLI and HTTP client', () => {
     home = await mkdtemp(join(tmpdir(), 'dkg-clear-job-'));
     await writeFile(join(home, 'auth.token'), token);
     calls = [];
+    terminalOutcome = undefined;
     response = { status: 200, body: { outcome: 'cleared', jobId } };
     server = createServer(async (req, res) => {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
       calls.push({ path: req.url, method: req.method, authorization: req.headers.authorization,
         body: JSON.parse(Buffer.concat(chunks).toString() || '{}') });
+      if (terminalOutcome) { respondTerminalClearOutcome(res, terminalOutcome, jobId); return; }
       res.writeHead(response.status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(response.body));
     });
@@ -63,9 +68,9 @@ describe('single-job clear commands through the CLI and HTTP client', () => {
 
   it.each(commands.flatMap(command => ['cleared', 'already_absent', 'rejected'].map(outcome => ({ ...command, outcome }))))(
     'executes the registered action and reports its outcome: $args $outcome', async ({ args, path, body, outcome }) => {
-      response = outcome === 'rejected'
-        ? { status: 409, body: { outcome, reason: 'nonterminal', error: 'Job is nonterminal' } }
-        : { status: 200, body: { outcome, jobId } };
+      terminalOutcome = outcome === 'rejected'
+        ? { outcome, reason: 'nonterminal' }
+        : { outcome: outcome as 'cleared' | 'already_absent' };
       vi.spyOn(ApiClient, 'connect').mockResolvedValue(new ApiClient(port, token));
       const output = vi.spyOn(console, 'log').mockImplementation(() => {});
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -77,7 +82,7 @@ describe('single-job clear commands through the CLI and HTTP client', () => {
       if (outcome === 'rejected') {
         await expect(result).rejects.toThrow('command exited');
         expect(exit).toHaveBeenCalledExactlyOnceWith(1);
-        expect(error).toHaveBeenCalledWith('Job is nonterminal');
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('nonterminal'));
       } else {
         await result;
         expect(output).toHaveBeenCalledWith(expect.stringContaining(outcome));
@@ -115,14 +120,26 @@ describe('single-job clear commands through the CLI and HTTP client', () => {
       authorization: `Bearer ${token}`, body: { jobId, allowPendingTransaction: true } }]);
   });
 
-  it.each(commands.flatMap(command => ['nonterminal', 'unknown', 'malformed'].map(reason => ({ ...command, reason }))))(
+  it.each(commands.flatMap(command => (['nonterminal', 'unknown', 'malformed'] as const).map(reason => ({ ...command, reason }))))(
     'fails with the daemon refusal: $args $reason', async ({ args, reason }) => {
-      response = { status: reason === 'malformed' ? 400 : 409,
-        body: { outcome: 'rejected', jobId, reason, error: `Cannot clear job: ${reason}` } };
+      terminalOutcome = { outcome: 'rejected', reason };
       await expect(invoke([...args, jobId])).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining(reason) });
       expect(calls).toHaveLength(1);
     },
   );
+
+  it('preserves the pending-transaction explanation alongside its structured reason', async () => {
+    terminalOutcome = { outcome: 'rejected', reason: 'pending_transaction' };
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue(new ApiClient(port, token));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('command exited'); });
+    const program = new Command().exitOverride();
+    registerPublisherCommand(program);
+    await expect(program.parseAsync(['publisher', 'clear-job', jobId], { from: 'user' })).rejects.toThrow('command exited');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('pending_transaction'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('may have sent a transaction'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('allowPendingTransaction'));
+  });
 
   it.each(commands)('does not create an offline store when the daemon is unreachable: $args', async ({ args }) => {
     await new Promise<void>(resolve => server.close(() => resolve()));

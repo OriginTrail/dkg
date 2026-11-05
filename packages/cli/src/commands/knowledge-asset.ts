@@ -19,7 +19,7 @@ import {
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
 import { parseJobListPagingOptions, readJobList } from '../job-list-paging.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
-import { printAsyncJobFailure } from './async-job-failure.js';
+import { printAsyncJobFailure, printClearJobFailure } from './async-job-failure.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
   'queued',
@@ -485,7 +485,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetClearShareJob(jobId);
       console.log(`Share job ${result.jobId}: ${result.outcome}`);
-    }));
+    }, printClearJobFailure));
 
   kaCmd
     .command('recover-share-job <job-id>')
