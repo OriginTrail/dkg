@@ -94,7 +94,7 @@
     "retimeable-signal": "1.0.1",
     "semver": "^7.7.4",
     "typescript": "^5.7",
-    "undici": "^7.29.1"
+    "undici": "^8.12.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7",
