@@ -194,12 +194,12 @@ const dedupFilterVariable = (index: number) => `?__dkgDedupFilter${index}`;
 interface ProjectedGraphPattern {
   readonly pattern: string;
   readonly distinct?: boolean;
+  readonly helperVariables: readonly string[];
 }
 
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
-  helperVariables: readonly string[],
   buildPattern: (inner: string, graphs: readonly string[]) => ProjectedGraphPattern,
   acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
 ): GraphScopeRewriteResult {
@@ -219,6 +219,7 @@ function wrapWithProjectedGraphSubselect(
   if (hasUnion) return unsupported('nested-union');
   if (!acceptsScope(scope)) return unsupported('strategy-rejected');
 
+  const { pattern, distinct, helperVariables } = buildPattern(inner, graphs);
   const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
   if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
     return unsupported('helper-variable-collision');
@@ -226,7 +227,6 @@ function wrapWithProjectedGraphSubselect(
 
   const innerVariables = scope.whereVariables;
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
-  const { pattern, distinct } = buildPattern(inner, graphs);
   const variables = innerVariables.map(variable => variable.source).join(' ');
   const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
   return ready(transitionGraphScope(
@@ -287,7 +287,10 @@ function buildDeduplicatedGraphPattern(
         : `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} ${filterBindings} } }`,
     ].join(' ');
   const trailing = movedFilters.map((_, index) => `FILTER(${dedupFilterVariable(index)})`).join(' ');
-  return { pattern: `${graphPattern} ${trailing}`, distinct };
+  const helperVariables = distinct ? [DEDUP_GRAPH_SENTINEL]
+    : [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL, ...movedFilters.map((_, index) => dedupFilterVariable(index))];
+  if (selection === 'dataset') helperVariables.push(DEDUP_MATCH_SENTINEL);
+  return { pattern: `${graphPattern} ${trailing}`, distinct, helperVariables };
 }
 
 /** Scope a graph set, reading each mapping from one graph even when several hold it. */
@@ -302,9 +305,7 @@ function wrapWithDeduplicatedGraphSelection(
   input: PreparedGraphScope, graphUris: readonly string[], selection: 'values' | 'dataset',
 ): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
-    input, graphUris, [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL,
-      ...(selection === 'dataset' ? [DEDUP_MATCH_SENTINEL] : []),
-      ...readDedupPattern(input).impureFilters.map((_, index) => dedupFilterVariable(index))],
+    input, graphUris,
     (_inner, graphs) => buildDeduplicatedGraphPattern(input, graphs, selection),
     isDedupSafeBasicGraphPattern,
   );
@@ -318,18 +319,20 @@ export function wrapWithGraphValues(
   return wrapWithProjectedGraphSubselect(
     input,
     graphUris,
-    [VIEW_GRAPH_SENTINEL],
     (inner, graphs) => {
       const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-      return { pattern: `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }` };
+      return {
+        pattern: `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`,
+        helperVariables: [VIEW_GRAPH_SENTINEL],
+      };
     },
   );
 }
 
 /** Scope a graph set through a hidden GRAPH variable that the query's dataset limits. */
 function wrapWithDatasetGraphVariable(input: PreparedGraphScope, graphUris: readonly string[]): GraphScopeRewriteResult {
-  return wrapWithProjectedGraphSubselect(input, graphUris, [VIEW_GRAPH_SENTINEL], (inner) => {
-    return { pattern: `GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }` };
+  return wrapWithProjectedGraphSubselect(input, graphUris, (inner) => {
+    return { pattern: `GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`, helperVariables: [VIEW_GRAPH_SENTINEL] };
   });
 }
 
