@@ -1,4 +1,4 @@
-import { describe, expect, expectTypeOf, it } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import {
   MAX_SWM_AUTHOR_INVENTORY_ROWS_V1,
@@ -152,6 +152,49 @@ describe('SWM author inventory v1', () => {
     second.fill(1);
     expect(canonicalizeSwmAuthorInventoryRowsBytesV1(rows)).toEqual(expected);
     expect(computeSwmAuthorInventoryRowsDigestV1(rows)).toBe(expectedDigest);
+  });
+
+  it('evicts cached bytes at the allocation budget while snapshots remain live', async () => {
+    // Isolate the cache so the boundary does not depend on earlier test calls.
+    vi.resetModules();
+    const codec = await import('../src/swm-author-inventory-v1.js');
+    const canonicalJson = await import('../src/canonical-json.js');
+    const encode = codec.canonicalizeSwmAuthorInventoryRowsBytesV1;
+    const rows = Array.from({ length: 5_000 }, (_, index) => Object.freeze({
+      ...ROW_A,
+      assertionCoordinate: `draft-${index}`,
+      shareOperationId: `swm-operation-${index}`,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/${index + 1}`,
+    })) as SwmAuthorInventoryRowV1[];
+    const snapshots = [Object.freeze([...rows])];
+    const serializer = vi.spyOn(canonicalJson, 'canonicalizeJson');
+    const rowSetEncodings = () => serializer.mock.calls.filter(([value]) => Array.isArray(value)).length;
+    try {
+      const expected = encode(snapshots[0]!);
+      const expectedDigest = codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!);
+      expect(rowSetEncodings()).toBe(1);
+      const entriesWithinBudget = Math.floor(
+        2 * codec.MAX_SWM_AUTHOR_INVENTORY_ROWS_BYTES_V1 / expected.byteLength,
+      );
+      expect(entriesWithinBudget).toBeGreaterThan(1);
+      for (let index = 1; index < entriesWithinBudget; index += 1) {
+        snapshots.push(Object.freeze([...rows]));
+        expect(Buffer.compare(encode(snapshots[index]!), expected)).toBe(0);
+      }
+      expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
+      expect(rowSetEncodings()).toBe(entriesWithinBudget);
+
+      // Keep every weak key live, and cross the byte budget with one more entry.
+      snapshots.push(Object.freeze([...rows]));
+      expect(Buffer.compare(encode(snapshots.at(-1)!), expected)).toBe(0);
+      expect(Buffer.compare(encode(snapshots[0]!), expected)).toBe(0);
+      expect(rowSetEncodings()).toBe(entriesWithinBudget + 2);
+      expect(codec.computeSwmAuthorInventoryRowsDigestV1(snapshots[0]!)).toBe(expectedDigest);
+      expect(rowSetEncodings()).toBe(entriesWithinBudget + 2);
+      expect(snapshots).toHaveLength(entriesWithinBudget + 1);
+    } finally {
+      serializer.mockRestore();
+    }
   });
 
   it('revalidates a mutable array after a successful serialization', () => {
