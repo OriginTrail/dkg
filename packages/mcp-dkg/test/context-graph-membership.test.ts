@@ -52,7 +52,8 @@ describe('MCP mine membership', () => {
 
   it('returns the same owned graph through listing and catalog tools over authenticated HTTP', async () => {
     const routes: string[] = [];
-    http = createServer((request, response) => {
+    const catalogGraphs: unknown[] = [];
+    http = createServer(async (request, response) => {
       routes.push(request.url ?? '');
       if (request.headers.authorization !== 'Bearer test-token') {
         response.writeHead(401); response.end(); return;
@@ -60,7 +61,14 @@ describe('MCP mine membership', () => {
       response.setHeader('content-type', 'application/json');
       if (request.url === '/api/context-graph/list') response.end(JSON.stringify({ contextGraphs: rows }));
       else if (request.url === '/api/agent/identity') response.end(JSON.stringify({ agentDid: did, agentAddress: address }));
-      else { response.writeHead(503); response.end(JSON.stringify({ error: 'catalog not available in this fixture' })); }
+      else {
+        if (request.url === '/api/profile/query-catalog/read' && request.method === 'POST') {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          catalogGraphs.push(JSON.parse(Buffer.concat(chunks).toString()).contextGraphId);
+        }
+        response.writeHead(503); response.end(JSON.stringify({ error: 'catalog not available in this fixture' }));
+      }
     });
     await new Promise<void>((resolve) => http!.listen(0, '127.0.0.1', resolve));
     const bound = http.address();
@@ -83,6 +91,6 @@ describe('MCP mine membership', () => {
     expect(routes.filter((route) => route === '/api/agent/identity')).toHaveLength(1);
     const catalog = await tools.call('dkg_query_catalog_context_graphs', {});
     expect(catalog.structuredContent).toMatchObject({ accessibleCount: 2, inspectedCount: 2 });
-    expect(routes.filter((route) => route.includes('discovered'))).toHaveLength(0);
+    expect(catalogGraphs.sort()).toEqual(['joined', 'owned']);
   });
 });

@@ -4,7 +4,7 @@ import { canonicalContextGraphAgentDid, contextGraphBelongsToAgent } from '../sr
 const address = '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const did = `did:dkg:agent:${address}`;
 describe('context graph caller membership', () => {
-  it.each([did, address, `"${did}"`, `<${did}>`, `DID:DKG:AGENT:${address.toUpperCase()}`])('matches the same curator identity %s', (curator) => {
+  it.each([did, address, address.toUpperCase(), `"${did}"`, `<${did}>`, `DID:DKG:AGENT:${address.toUpperCase()}`])('matches the same curator identity %s', (curator) => {
     expect(contextGraphBelongsToAgent({ curator }, did)).toBe(true);
   });
   it('lets explicit caller involvement override legacy curator data in both directions', () => {
