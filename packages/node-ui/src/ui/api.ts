@@ -2481,7 +2481,7 @@ async function mapLocalAgentIntegrationRecord(
     detail = hermesRuntimeDetail
       ?? health?.error
       ?? record.runtime?.lastError
-      ?? `${record.name} is attached to this node, but one capability is unavailable.`;
+      ?? 'One capability is unavailable.';
   } else if (persistentChat && record.runtime?.status === 'connecting') {
     status = 'connecting';
     statusLabel = 'Connecting';
