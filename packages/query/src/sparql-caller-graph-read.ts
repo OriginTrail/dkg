@@ -4,6 +4,15 @@ import { transitionGraphScope } from './sparql-query-transition.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { createBlankNodeRenamer } from './sparql-rewrite-names.js';
 
+const MAX_CALLER_GRAPH_BRANCHES = 128;
+
+/** Bound UNION nesting instead of giving the parser a linear chain of branches. */
+function balancedUnion(branches: readonly string[], start = 0, end = branches.length): string {
+  if (end - start <= 16) return branches.slice(start, end).join(' UNION ');
+  const middle = start + Math.floor((end - start) / 2);
+  return `{ ${balancedUnion(branches, start, middle)} } UNION { ${balancedUnion(branches, middle, end)} }`;
+}
+
 /** A generated binding must not precede a caller assignment in the same group. */
 function assignsGraphVariable(scope: PreparedSparqlQuery, opening: number, closing: number, variable: string): boolean {
   const { tokens } = scope.prepared;
@@ -18,12 +27,26 @@ function assignsGraphVariable(scope: PreparedSparqlQuery, opening: number, closi
   return false;
 }
 
+export function hasCallerGraphAssignments(scope: PreparedSparqlQuery): boolean {
+  return scope.graphTargets.some(target => {
+    if (target.kind !== 'variable') return false;
+    const opening = target.targetTokenIndex + 1;
+    const closing = scope.structure.braces.matchingTokenIndexes[opening] ?? -1;
+    return closing >= 0 && assignsGraphVariable(scope, opening, closing, target.variable.logicalName);
+  });
+}
+
 /** Keep the graph identity of caller paths on engines that flatten GRAPH ?g. */
 export function bindCallerGraphsBeforeRead(
   scope: PreparedSparqlQuery, graphs: readonly string[],
 ): PreparedSparqlQuery {
   const { tokens } = scope.prepared;
   const allowed = [...new Set(graphs)].map(graph => `<${assertSafeIri(graph)}>`);
+  // Bound the entire expansion, including queries with several GRAPH operands.
+  // Larger native plans can overflow even when the textual UNION is balanced.
+  if (allowed.length * scope.graphTargets.filter(target => target.kind === 'variable').length > MAX_CALLER_GRAPH_BRANCHES) {
+    throw new ScopedQueryViolationError(`caller GRAPH rewrite requires at most ${MAX_CALLER_GRAPH_BRANCHES} graph branches on this store`);
+  }
   const branchSource = createBlankNodeRenamer(scope);
   let from = 0;
   let source = '';
@@ -46,7 +69,7 @@ export function bindCallerGraphsBeforeRead(
       const pattern = needsOwnGroup ? `{ ${inner} }` : inner;
       return `{ GRAPH ${graph} { VALUES ${variable} { ${graph} } ${pattern} } }`;
     });
-    source += scope.source.slice(from, start) + `{ ${branches.join(' UNION ')} }`;
+    source += scope.source.slice(from, start) + `{ ${balancedUnion(branches)} }`;
     from = tokens[closing].end;
   }
   return transitionGraphScope(scope, source + scope.source.slice(from));

@@ -6,7 +6,7 @@ import {
 } from '@origintrail-official/dkg-rdf-utils/sparql';
 import type { SparqlEngineFamily } from '@origintrail-official/dkg-storage';
 import { hasOuterDefaultGraphPattern, hasTopLevelDefaultGraphPattern } from './sparql-default-graph-pattern.js';
-import { bindCallerGraphsBeforeRead } from './sparql-caller-graph-read.js';
+import { bindCallerGraphsBeforeRead, hasCallerGraphAssignments } from './sparql-caller-graph-read.js';
 import { transitionGraphScope } from './sparql-query-transition.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { sparqlRewriteReady, sparqlRewriteUnsupported, type SparqlRewriteResult } from './sparql-rewrite-result.js';
@@ -50,6 +50,24 @@ export function hasRepeatedPath(scope: PreparedSparqlQuery): boolean {
     const before = tokens[index - 1];
     return before?.kind === 'iri' || before?.kind === 'prefixed-name' || isSymbol(before, ')')
       || (before?.kind === 'word' && before.logicalValue === 'a' && isSparqlKeyword(tokens, index - 1, 'A'));
+  });
+}
+
+/** Atomic paths retain their GRAPH binding; compound paths need constant targets. */
+function needsConstantCallerGraphs(scope: PreparedSparqlQuery): boolean {
+  if (hasNestedSelect(scope) || hasCallerGraphAssignments(scope)) return true;
+  const { tokens } = scope.prepared;
+  return tokens.some((token, index) => {
+    if (!isSymbol(token, '+') && !isSymbol(token, '*') && !isSymbol(token, '?')) return false;
+    if (isSymbol(tokens[index - 2], '!')) return true;
+    if (!isSymbol(tokens[index - 1], ')')) return false;
+    const opening = scope.structure.parentheses.matchingTokenIndexes[index - 1] ?? -1;
+    if (opening < 0) return false;
+    const path = tokens.slice(opening + 1, index - 1);
+    // Multiplication after a function call is not a compound property path.
+    return path.length > 0 && path.every(part => part.kind === 'iri' || part.kind === 'prefixed-name'
+      || (part.kind === 'word' && part.logicalValue === 'a')
+      || (part.kind === 'symbol' && ['/', '|', '^', '!', '(', ')', '*', '+', '?'].includes(part.logicalValue)));
   });
 }
 
@@ -103,7 +121,8 @@ export function applyGraphDataset<Reason extends string>(
     : rewrite(route === 'describe' ? 'dataset-only' : route);
   if (route === 'none' || result.kind !== 'ready') return result;
   let rewritten = result.value;
-  if (route === 'dataset-only' && engine !== 'oxigraph' && scope.graphVariables.length && hasRepeatedPath(scope)) {
+  if (route === 'dataset-only' && engine !== 'oxigraph' && scope.graphVariables.length
+    && hasRepeatedPath(scope) && needsConstantCallerGraphs(scope)) {
     rewritten = bindCallerGraphsBeforeRead(rewritten, graphs);
   }
   if (route === 'describe' && rewritten.where) {

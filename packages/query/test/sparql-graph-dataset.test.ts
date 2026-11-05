@@ -152,6 +152,29 @@ describe('withDatasetClauses', () => {
 describe('rewriteGraphSet with a known and an unknown engine', () => {
   const flat = 'SELECT ?s ?o WHERE { ?s <urn:p> ?o }';
 
+  it('refuses oversized compound GRAPH expansion instead of truncating its authorization list', () => {
+    const allowed = Array.from({ length: 1400 }, (_, index) => `urn:large:${index}`);
+    const source = scope('SELECT ?g ?s ?o WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } } LIMIT 10');
+    expect(() => rewriteGraphSet(source, allowed, 'values-union', null)).toThrow(/at most 128 graph branches/);
+    // A verified native Oxigraph route does not need constant-graph expansion.
+    expect(rewriteGraphSet(source, allowed, 'values-union', 'oxigraph').kind).toBe('ready');
+  });
+
+  it('bounds the total expansion across multiple GRAPH operands', () => {
+    const source = scope('SELECT * WHERE { GRAPH ?g { ?s (<urn:a>|<urn:b>)+ ?o } GRAPH ?h { ?s (<urn:a>|<urn:b>)+ ?o } }');
+    const allowed = Array.from({ length: 65 }, (_, index) => `urn:large:${index}`);
+    expect(() => rewriteGraphSet(source, allowed, 'values-union', null)).toThrow(/at most 128 graph branches/);
+  });
+
+  it.each(['STRLEN("demo")', 'ABS(-2)'])('keeps a large atomic-path read scalable beside %s arithmetic', (expression) => {
+    const source = scope(`SELECT * WHERE { GRAPH ?g { ?s <urn:p>+ ?o } BIND(${expression} * 2 AS ?n) }`);
+    const allowed = Array.from({ length: 1400 }, (_, index) => `urn:large:${index}`);
+    const text = ready(rewriteGraphSet(source, allowed, 'values-union', null));
+    expect(text).not.toContain('UNION');
+    expect(text).toContain(`BIND(${expression} * 2 AS ?n)`);
+    expect(text).toContain('FROM NAMED <urn:large:1399>');
+  });
+
   it.each([
     'WITH { SELECT ?s { ?s ?p ?o } } AS %limit WHERE { INCLUDE %limit }',
     'WITH { SELECT ?s { ?s ?p ?o } } AS %limit WITH { SELECT ?s { INCLUDE %limit } } AS %values { INCLUDE %values }',

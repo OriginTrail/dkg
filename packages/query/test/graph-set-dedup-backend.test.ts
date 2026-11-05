@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { BlazegraphStore, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, sparqlEngineOf, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { prepareGraphScope, rewriteGraphSet, wrapWithDeduplicatedGraphValues } from '../src/sparql-graph-scope.js';
@@ -407,6 +407,36 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
       expect(found.bindings).toEqual(Array.from({ length: 3 }, () => ({ s: 'urn:scale:s', o: 'urn:scale:end' })));
     } finally {
       await store.update(selected.map(graph => `DROP SILENT GRAPH <${graph}>`).join('; '));
+    }
+  });
+
+  it.each([
+    ['<urn:scale:link>+', 1400],
+    ['(<urn:scale:link>|<urn:scale:other>)+', 64],
+  ] as const)('keeps caller GRAPH reads executable for %s across %i graphs', async (path, callerGraphScale) => {
+    const contextGraphId = `${id}-caller-scale-${path.includes('|') ? 'alt' : 'plus'}`;
+    const root = `did:dkg:context-graph:${contextGraphId}`;
+    const selected = [root, ...Array.from({ length: callerGraphScale - 1 }, (_, n) => `${root}/_verifiable_memory/a/${n}`)];
+    const forbidden = `${root}-unlisted`;
+    const facade = new Proxy(store, { get(target, key) {
+      if (key === 'sparqlEngine') return undefined;
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    expect(sparqlEngineOf(facade)).toBeNull();
+    try {
+      await store.insert([
+        ...selected.map(graph => quad('urn:scale:s', 'urn:scale:link', 'urn:scale:o', graph)),
+        quad('urn:scale:forbidden', 'urn:scale:link', 'urn:scale:o', forbidden),
+      ]);
+      const engine = new DKGQueryEngine(facade);
+      const pattern = `GRAPH ?g { ?s ${path} ?o }`;
+      const page = await engine.query(`SELECT ?g ?s ?o WHERE { ${pattern} } ORDER BY ?g LIMIT 10 OFFSET 3`, { contextGraphId });
+      expect(page.bindings).toEqual([...selected].sort().slice(3, 13).map(g => ({ g, s: 'urn:scale:s', o: 'urn:scale:o' })));
+      const count = await engine.query(`SELECT (COUNT(*) AS ?n) WHERE { ${pattern} }`, { contextGraphId });
+      expect(integer(count.bindings?.[0]?.n)).toBe(selected.length);
+    } finally {
+      await store.update([...selected, forbidden].map(graph => `DROP SILENT GRAPH <${graph}>`).join('; '));
     }
   });
 });
