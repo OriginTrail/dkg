@@ -163,7 +163,7 @@
 .v10-po-join-name { font-size: 12px; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; }
 .v10-po-join-addr { font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-po-join-actions { display: flex; gap: 6px; flex-shrink: 0; }
-.v10-po-join-btn:disabled { opacity: 0.5; }
+.v10-po-join-btn:disabled { opacity: var(--opacity-disabled); }
 .v10-po-pipeline {
   display: flex;
   flex-direction: column;

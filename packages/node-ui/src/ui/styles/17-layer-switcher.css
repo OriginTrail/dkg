@@ -122,6 +122,8 @@
   justify-content: flex-start;
   gap: 6px;
 }
+.card .v10-empty-state.inline { padding: var(--pad-card); }
+.card .v10-empty-state.inline .v10-empty-state-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .v10-empty-state-icon {
   display: inline-flex;
   align-items: center;

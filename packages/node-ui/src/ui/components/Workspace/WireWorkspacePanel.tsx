@@ -267,7 +267,7 @@ export function WireWorkspacePanel({
   if (planResult) {
     return (
       <div>
-        {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+        {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
         <div style={{ marginBottom: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
           Review the install plan. Files are only written when you click Install.
@@ -323,7 +323,7 @@ export function WireWorkspacePanel({
           : 'Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.'}
       </div>
 
-      {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>

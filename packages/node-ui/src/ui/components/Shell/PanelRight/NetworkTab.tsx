@@ -5,6 +5,7 @@ import { buildPeers, shortAgentUri, shortPeerId } from './peer-model.js';
 import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
 import { Badge } from '../../ds/Badge.js';
 import { humanizeStatus } from '../../../lib/formatLabels.js';
+import { Loading } from '../../ds/Loading.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -180,7 +181,7 @@ export function NetworkTab(props: {
         </button>
       </div>
 
-      {loading && <p className="v10-agents-loading">Loading peers...</p>}
+      {loading && <Loading label="Loading peers…" />}
       {!loading && connected.length === 0 && recentlySeen.length === 0 && connections.total === 0 && (
         <div className="v10-agent-empty-state">No network peers detected yet.</div>
       )}

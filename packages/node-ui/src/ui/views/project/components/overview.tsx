@@ -14,6 +14,7 @@ import { useContextGraphColor, ContextGraphMark } from '../../../context-graph-c
 import { Count, LayerGlyph } from '../../../components/ds/Badge.js';
 import { Check, Diamond, LayoutDashboard, MoreHorizontal, Network, RefreshCw, Share2, Upload, X } from 'lucide-react';
 import { RANK_ICON } from './rank-icon.js';
+import { Loading } from '../../../components/ds/Loading.js';
 
 export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onRefresh }: {
   active: LayerView;
@@ -393,7 +394,7 @@ export function ProjectOverviewCard({
     !memory.loading && layerStatuses.length === 3 && unavailableLayerCount === 3;
   const hasUnavailableLayer = !memory.loading && unavailableLayerCount > 0;
   const statusHint = memory.loading
-    ? 'Loading memory layers...'
+    ? 'Loading memory layers…'
     : allLayerCountsUnavailable || memory.error
         ? 'Live memory counts are unavailable.'
         : memory.partial || hasUnavailableLayer
@@ -640,7 +641,7 @@ export function ProjectOverviewCard({
             const emptyCopy = isPublicAccess
               ? 'This Context Graph is public — anyone can subscribe.'
               : participantsStatus === 'loading'
-                ? 'Loading participant agents...'
+                ? 'Loading participant agents…'
                 : participantsStatus === 'error'
                   ? 'Participant list unavailable.'
                   : 'No participant agents recorded yet.';
@@ -809,7 +810,7 @@ export function PendingJoinRequestsSection({
         <Count value={requests.length} tone={requests.length > 0 ? 'attention' : 'neutral'} />
       </header>
       {status === 'loading'
-        ? <div className="v10-po-join-empty">Loading join requests...</div>
+        ? <Loading label="Loading join requests…" className="v10-po-join-empty" />
         : status === 'error'
           ? <div className="v10-po-join-empty">Join requests are currently unavailable.</div>
           : requests.length === 0

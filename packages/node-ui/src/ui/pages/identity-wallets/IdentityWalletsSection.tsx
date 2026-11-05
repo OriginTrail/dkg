@@ -7,6 +7,7 @@ import {
   useIdentityWalletManagement,
 } from './useIdentityWalletManagement.js';
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
+import { Loading } from '../../components/ds/Loading.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -90,7 +91,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       </div>
 
       {query.status === 'loading' && (
-        <p className="v10-identity-wallet-status" role="status">Loading node identity wallets…</p>
+        <Loading label="Loading node identity wallets…" />
       )}
       {query.status === 'error' && (
         <p className="v10-modal-warning ds-card-nested" role="alert">

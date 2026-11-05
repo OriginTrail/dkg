@@ -13,6 +13,7 @@ import { trustColors, entityAuthorUri, transitionAgentUri, transitionAtISO, shor
 import { GraphSurface, RdfGraph } from './graph.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { LayerBadge, LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
+import { Loading } from '../../../components/ds/Loading.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -565,7 +566,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
               className="v10-ka-graph-shell"
               renderGraph={(expanded) => (
                 renderHoodTriples.length > 0 ? (
-                  <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+                  <Suspense fallback={<Loading label="Loading graph…" block className="v10-graph-placeholder" />}>
                     <RdfGraph
                       key={`${entity.uri}:${expanded ? 'expanded' : 'inline'}`}
                       data={renderHoodTriples}

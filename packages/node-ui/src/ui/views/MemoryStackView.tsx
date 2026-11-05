@@ -24,6 +24,7 @@ import { useHiddenContextGraphIds } from '../hooks/useHiddenContextGraphIds.js';
 import { MemoryReadStatus } from '../components/MemoryReadStatus.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
 import { LayerGlyph } from '../components/ds/Badge.js';
+import { Loading } from '../components/ds/Loading.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -71,7 +72,7 @@ export function MemoryStackView() {
           {contextGraphs.length > 0 ? 'Showing the last available Context Graphs.' : 'Context Graph inventory is unknown.'}</span>
         <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry Context Graphs</button>
       </div>}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading Context Graphs…</div>}
+      {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading Context Graphs…" />}
       {visible.length === 0 ? (!inventoryError && !inventoryLoading && (
         <div className="v10-memstack-empty ds-card-nested">
           No visible Context Graphs. Create one from the sidebar or un-hide dismissed ones.

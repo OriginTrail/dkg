@@ -38,6 +38,7 @@ import {
   LayerDetailView,
 } from './project/components.js';
 import { RefreshCw } from 'lucide-react';
+import { Loading } from '../components/ds/Loading.js';
 
 interface ProjectViewProps {
   contextGraphId: string;
@@ -707,7 +708,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
     }
     return (
       <div className="v10-view-placeholder">
-        <p style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading Context Graph...</p>
+        <Loading label="Loading Context Graph…" />
       </div>
     );
   }
@@ -886,7 +887,7 @@ export function ProjectView({ contextGraphId }: ProjectViewProps) {
             onParticipantsChanged={refreshParticipants}
           />
           {rawMemory.loading && (
-            <div className="v10-me-loading"><div className="v10-me-loading-text">Loading memory...</div></div>
+            <Loading block label="Loading memory…" />
           )}
           {rawMemory.error && (
             <div className="v10-me-error">Error: {rawMemory.error}</div>

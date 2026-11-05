@@ -169,7 +169,6 @@
   font-size: 16px;
   line-height: 1;
 }
-.v10-agents-loading { padding: 16px; color: var(--text-tertiary); font-size: 12px; text-align: center; }
 .v10-agents-section-label {
   font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-tertiary); margin: 12px 0 6px; padding: 0 2px;

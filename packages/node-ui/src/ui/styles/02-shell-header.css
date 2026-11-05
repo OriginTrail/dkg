@@ -50,7 +50,7 @@
 }
 .v10-token-prompt-submit:disabled {
   cursor: default;
-  opacity: 0.6;
+  opacity: var(--opacity-disabled);
 }
 
 /* ── Inline stale-refresh banner for an open project (GH #905) ── */
@@ -332,7 +332,7 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
 
 /* Join request actions */
 .v10-notif-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.v10-notif-btn:disabled { opacity: 0.5; }
+.v10-notif-btn:disabled { opacity: var(--opacity-disabled); }
 .v10-notif-deny-confirm { display: inline-flex; align-items: center; gap: 6px; }
 .v10-notif-deny-confirm-label { font-size: 11px; color: var(--text-danger); font-weight: 600; }
 

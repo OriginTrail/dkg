@@ -97,7 +97,7 @@
   cursor: pointer;
 }
 .v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
-.v10-wallet-provider:disabled { opacity: 0.55; cursor: not-allowed; }
+.v10-wallet-provider:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 .v10-wallet-provider-icon {
   width: 16px;
   height: 16px;
@@ -157,4 +157,4 @@
   padding: 0;
   cursor: pointer;
 }
-.v10-wallet-pill-link:disabled { opacity: 0.6; cursor: not-allowed; }
+.v10-wallet-pill-link:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }

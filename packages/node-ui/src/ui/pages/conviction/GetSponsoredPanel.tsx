@@ -13,6 +13,7 @@ import {
 } from '../../components/Pca/index.js';
 import { Check } from 'lucide-react';
 import { StatusGlyph } from '../../components/ds/Badge.js';
+import { Loading } from '../../components/ds/Loading.js';
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
 // chains we have a known faucet for render a button; others show the copy alone.
@@ -172,7 +173,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
                 reads, on the edge's ONLY path to a discount, as "I can't get
                 sponsored". Empty copy shows ONLY when loaded AND truly zero. */}
             {walletsLoading && !wb ? (
-              <p className="v10-pca-handshake-empty" role="status">Loading your wallets…</p>
+              <Loading label="Loading your wallets…" />
             ) : walletsReadError && wallets.length === 0 ? (
               <p className="v10-modal-error ds-card-nested" role="alert">
                 Couldn’t load your wallets.{' '}

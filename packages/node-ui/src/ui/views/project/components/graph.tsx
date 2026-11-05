@@ -14,6 +14,7 @@ import { agentHexForUri } from '../../../hooks/useAgents.js';
 import { Badge } from '../../../components/ds/Badge.js';
 import { Anchor, X } from 'lucide-react';
 import { useModalDismiss } from '../../../components/Modals/useModalDismiss.js';
+import { Loading } from '../../../components/ds/Loading.js';
 
 export const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -576,10 +577,10 @@ export function LayerGraphPanel({
         renderGraph={() => (
           <div className="v10-layer-empty-shell">
             <EmptyState
+              busy
               compact
               tone="swm"
-              icon={LAYER_CONFIG.swm.icon}
-              title="Loading Shared Working Memory attribution..."
+              title="Loading Shared Working Memory attribution…"
               description="Agent colors are being prepared before the graph renders."
             />
           </div>
@@ -600,7 +601,7 @@ export function LayerGraphPanel({
       onSingletonClick={(uri) => onNodeClick?.(nodeLayerContext ? { id: uri, trustLayer: nodeLayerContext } : { id: uri })}
       renderGraph={(expanded) => (
         canvasTriples.length > 0 ? (
-          <Suspense fallback={<span className="v10-graph-placeholder">Loading graph...</span>}>
+          <Suspense fallback={<Loading label="Loading graph…" block className="v10-graph-placeholder" />}>
             <RdfGraph
               // A theme switch restyles the canvas in place (RdfGraph applies a
               // changed options.style); the key only covers mount-only options.

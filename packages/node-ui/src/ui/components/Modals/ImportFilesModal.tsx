@@ -193,7 +193,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error ds-card-nested">{error}</div>}
+          {error && <div role="alert" className="v10-modal-error ds-card-nested">{error}</div>}
 
           {status === 'idle' && (
             <>

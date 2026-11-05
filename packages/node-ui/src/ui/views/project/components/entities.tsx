@@ -271,10 +271,10 @@ export function LayerContent({
           {isInitialVerifiableMemoryLoad ? (
             <div className="v10-layer-widgets-strip empty">
               <EmptyState
+                busy
                 compact
                 tone="vm"
-                icon={LAYER_CONFIG.vm.icon}
-                title="Loading Verifiable Memory..."
+                title="Loading Verifiable Memory…"
                 description="Knowledge Assets are being read from the verified layer."
               />
             </div>

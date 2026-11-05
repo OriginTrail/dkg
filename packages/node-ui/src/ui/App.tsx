@@ -17,6 +17,7 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
+import { Loading } from './components/ds/Loading.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -269,7 +270,7 @@ export function App() {
       <Route path="/network" element={
         <>
           <ApiTokenPrompt />
-          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+          <React.Suspense fallback={<Loading block label="Loading…" />}>
             <NetworkDebugPage />
           </React.Suspense>
         </>

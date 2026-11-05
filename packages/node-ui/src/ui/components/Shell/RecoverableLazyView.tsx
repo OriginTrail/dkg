@@ -1,4 +1,5 @@
 import React, { Suspense } from 'react';
+import { Loading } from '../ds/Loading.js';
 
 type LoadingLabel<Props> = string | ((props: Props) => string);
 
@@ -49,7 +50,7 @@ export function createRecoverableLazyView<Props extends object>(
   function RecoverableLazyView(props: Props) {
     const loadingLabel = typeof label === 'function' ? label(props) : label;
     return (
-      <Suspense fallback={<div className="lazy-spinner">Loading {loadingLabel}...</div>}>
+      <Suspense fallback={<Loading block label={`Loading ${loadingLabel}…`} />}>
         <LazyView {...props} />
       </Suspense>
     );

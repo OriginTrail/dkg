@@ -590,7 +590,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         </div>
 
         <div className="v10-modal-body">
-          {error && <div className="v10-modal-error ds-card-nested">{error}</div>}
+          {error && <div role="alert" className="v10-modal-error ds-card-nested">{error}</div>}
 
           {pending && (
             <div style={{

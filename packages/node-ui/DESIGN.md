@@ -211,6 +211,17 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, and a section on the reference page.
 4. Put the shared classes on the element (`ds-btn ds-primary ds-sm`, `ds-tab`, `ds-seg-item`, `ds-filter`, `ds-card`, `ds-card-nested`, `ds-input ds-sm`, or render `<Button>`) and keep the screen's own class only for layout. `27-ds-components.css` holds the shared rules and never lists screen classes; a screen that needs a variation refines it in its own stylesheet (`test/button-classes.test.ts` and `test/ds-classes.test.ts` check both directions).
 
+## Feedback states
+
+Every view that waits on data shows one of four states, and says which.
+
+| State | Use | Rule |
+| --- | --- | --- |
+| Loading | `<Loading label="Loading peers…" />`, `block` to fill a view | Name what's loading and end with `…`. `EmptyState busy` when a sentence of context helps. |
+| Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Say what will appear, or what to do next. One line of text is enough inside a list. |
+| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form | Say what failed and offer a way forward. Never leave a view loading after a failure. |
+| Disabled | `disabled` on the control | `--opacity-disabled`, the one disabled look. Say why nearby when the reason isn't obvious. |
+
 ## Accessibility
 
 The target is WCAG 2.2 AA. `test/a11y-rules.test.ts` checks the first four rules below from the code.

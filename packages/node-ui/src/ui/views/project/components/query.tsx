@@ -550,11 +550,11 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
 
         {profile?.loading && (
           <EmptyState
+            busy
             compact
             inline
             tone="query"
-            icon="?"
-            title="Loading saved queries..."
+            title="Loading saved queries…"
             description="Built-in presets are available while saved queries load from this node profile."
           />
         )}
@@ -746,10 +746,10 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         )}
         {executionMatchesSession && loading && (
           <EmptyState
+            busy
             compact
             tone="query"
-            icon="?"
-            title="Loading query results..."
+            title="Loading query results…"
           />
         )}
         {executionMatchesSession && error && (

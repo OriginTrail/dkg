@@ -171,10 +171,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     return (
       <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
         <EmptyState
+          busy
           compact
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title="Loading assertions..."
+          title="Loading assertions…"
         />
       </div>
     );

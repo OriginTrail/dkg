@@ -30,7 +30,7 @@ button {
   cursor: pointer;
   outline: none;
 }
-button:disabled { opacity: 0.4; cursor: not-allowed; }
+button:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
 input, textarea {
   font-family: var(--font-mono);

@@ -4,6 +4,8 @@ import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
 import { Badge } from '../components/ds/Badge.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { Link2, UsersRound } from 'lucide-react';
+import { EmptyState } from '../components/ContextGraphPrimitives.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
   if (a.connectionStatus === 'self') {
@@ -66,13 +68,7 @@ export function NetworkPage() {
       <div className="card ds-card">
         <div className="card-header"><div className="card-title">Active connections</div></div>
         {connections.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5l7 7-7 7"/></svg>
-            </div>
-            <div className="empty-state-title">No active connections</div>
-            <div className="empty-state-desc">Connections will appear here as your node links with peers on the network.</div>
-          </div>
+          <EmptyState compact inline icon={<Link2 size={16} />} title="No active connections" description="Connections will appear here as your node links with peers on the network." />
         ) : (
           <div className="ds-table-scroll ds-table-pin"><table className="data-table">
             <thead>
@@ -102,13 +98,7 @@ export function NetworkPage() {
       <div className="card ds-card">
         <div className="card-header"><div className="card-title">Discovered agents</div></div>
         {agents.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            </div>
-            <div className="empty-state-title">No agents discovered</div>
-            <div className="empty-state-desc">Agents will be listed here as they are discovered through the network.</div>
-          </div>
+          <EmptyState compact inline icon={<UsersRound size={16} />} title="No agents discovered" description="Agents will be listed here as they are discovered through the network." />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
             <thead>

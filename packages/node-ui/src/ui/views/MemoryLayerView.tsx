@@ -12,6 +12,7 @@ import { dataSlotHex } from '../graph-palette.js';
 import { graphOptions } from './memory-layer-graph-options.js';
 import { schemaTypeColors } from './schema-type-colors.js';
 import { RefreshCw } from 'lucide-react';
+import { Loading } from '../components/ds/Loading.js';
 
 const RdfGraph = lazy(() =>
   import('@origintrail-official/dkg-graph-viz/react').then(m => ({ default: m.RdfGraph }))
@@ -352,7 +353,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
         </div>
       )}
 
-      {loading && <p className="v10-mlv-status">Loading...</p>}
+      {loading && <Loading label="Loading…" />}
       {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
 
       {!loading && results.length === 0 && (
@@ -396,7 +397,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
             <span>{triples.length} triples</span>
             {activeQuery && <span className="v10-mlv-graph-info-custom">filtered</span>}
           </div>
-          <Suspense fallback={<div className="v10-mlv-graph-loading">Loading graph renderer...</div>}>
+          <Suspense fallback={<Loading label="Loading graph renderer…" block className="v10-mlv-graph-loading" />}>
             <RdfGraph
               data={triples}
               format="triples"
@@ -543,7 +544,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
     }
   }, [assertions, contextGraphId, refresh, onPromoted]);
 
-  if (loading) return <div className="v10-assertion-list-loading">Loading assertions...</div>;
+  if (loading) return <Loading label="Loading assertions…" block />;
   if (!assertions?.length) return null;
 
   return (
@@ -708,7 +709,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   const selectedTriples = assertions?.filter(a => selected.has(a.graphUri)).reduce((sum, a) => sum + (a.tripleCount ?? 0), 0) ?? 0;
   const isEmpty = !loading && (!assertions || assertions.length === 0);
 
-  if (loading) return <div className="v10-assertion-list-loading">Loading SWM contents...</div>;
+  if (loading) return <Loading label="Loading SWM contents…" block />;
   if (isEmpty) {
     return (
       <div className="v10-publish-panel ds-card">

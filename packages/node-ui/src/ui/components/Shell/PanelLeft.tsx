@@ -24,6 +24,7 @@ import {
 } from '../../lib/contextGraphSidebar.js';
 import { DASHBOARD_ICON, placeIcon } from './nav-icons.js';
 import { NODE_PLACE_IDS, PLACES } from '../../lib/tab-target.js';
+import { Loading } from '../ds/Loading.js';
 
 const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: placeIcon(id) }));
 
@@ -277,7 +278,7 @@ export function PanelLeft() {
           <button type="button" className="ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
         </div>
       )}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status" className="v10-tree-status">Loading Context Graphs…</div>}
+      {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading Context Graphs…" />}
 
       {treeMode === 'explorer' && (
         <div className="v10-tree-content">

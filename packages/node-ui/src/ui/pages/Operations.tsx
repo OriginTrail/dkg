@@ -24,9 +24,11 @@ import {
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
-import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight, RefreshCw, Activity, ChartColumn, Check, FileText, Search } from 'lucide-react';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
 import { pressable } from '../lib/pressable.js';
+import { Loading } from '../components/ds/Loading.js';
+import { EmptyState } from '../components/ContextGraphPrimitives.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -234,10 +236,7 @@ function ReplicationTab() {
           Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
         </div>
         {buckets.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-title">No reconciliation activity</div>
-            <div className="empty-state-desc">No chain-driven VM promotions recorded in this period.</div>
-          </div>
+          <EmptyState compact inline title="No reconciliation activity" description="No chain-driven VM promotions recorded in this period." />
         ) : (
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
@@ -261,7 +260,7 @@ function ReplicationTab() {
           Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
         </p>
         {cursors.length === 0 ? (
-          <div className="empty-state empty-state--compact"><div className="empty-state-title">No subscriptions</div></div>
+          <EmptyState compact inline title="No subscriptions" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
             <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
@@ -292,7 +291,7 @@ function ReplicationTab() {
         <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
-          <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
+          <EmptyState compact inline title="No activity in this period" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
             <thead><tr><th>Context Graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
@@ -322,7 +321,7 @@ function ReplicationTab() {
         <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title" style={{ marginBottom: 8 }}>Event stream — {selectedCg}</div>
           {events.length === 0 ? (
-            <div className="empty-state empty-state--compact"><div className="empty-state-title">No events</div></div>
+            <EmptyState compact inline title="No events" />
           ) : (
             <div className="ds-table-scroll"><table className="data-table">
               <thead><tr><th>Time</th><th>Action</th><th>Ordinal</th><th>Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
@@ -397,13 +396,7 @@ function HealthTab() {
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon" style={{ background: 'var(--success-bg)', borderColor: 'var(--success-border)' }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-            </div>
-            <div className="empty-state-title" style={{ color: 'var(--text-success)' }}>No errors in this period</div>
-            <div className="empty-state-desc">All operations completed successfully. Nice work.</div>
-          </div>
+          <EmptyState compact inline tone="success" icon={<Check size={16} />} title="No errors in this period" description="All operations completed successfully. Nice work." />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
             <thead>
@@ -699,13 +692,7 @@ function OperationStatsSection() {
             </div>
           ) : (
             <div className="card ds-card" style={{ marginBottom: 14 }}>
-              <div className="empty-state empty-state--compact">
-                <div className="empty-state-icon">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-                </div>
-                <div className="empty-state-title">Not enough data for charts</div>
-                <div className="empty-state-desc">Charts will render once enough operations have been processed.</div>
-              </div>
+              <EmptyState compact inline icon={<ChartColumn size={16} />} title="Not enough data for charts" description="Charts will render once enough operations have been processed." />
             </div>
           )}
         </>
@@ -1001,13 +988,7 @@ function OperationsTab() {
 
       <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
         {operations.length === 0 ? (
-          <div className="empty-state empty-state--rich" style={{ margin: 16 }}>
-            <div className="empty-state-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-            </div>
-            <div className="empty-state-title">No operations recorded</div>
-            <div className="empty-state-desc">Operations will appear here as your node processes publish, query, and other DKG requests.</div>
-          </div>
+          <EmptyState compact inline icon={<Activity size={16} />} title="No operations recorded" description="Operations will appear here as your node processes publish, query, and other DKG requests." />
         ) : (
           <div className="ds-table-scroll ds-table-pin"><table className="data-table">
             <thead>
@@ -1131,7 +1112,7 @@ function OperationsTab() {
             {detail?.operation ? (
               <OperationDetail op={detail.operation} logs={detail.logs} phases={detail.phases ?? []} explorerUrl={explorerUrl} onBack={() => setSelectedOp(null)} />
             ) : (
-              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-tertiary)' }}>Loading...</div>
+              <Loading block label="Loading operation…" />
             )}
           </div>
           <style>{`
@@ -1343,13 +1324,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
         </div>
         {logs.length === 0 ? (
-          <div className="empty-state empty-state--compact">
-            <div className="empty-state-icon">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-            </div>
-            <div className="empty-state-title">No logs available</div>
-            <div className="empty-state-desc">This operation has no log entries recorded.</div>
-          </div>
+          <EmptyState compact inline icon={<FileText size={16} />} title="No logs available" description="This operation has no log entries recorded." />
         ) : (
           <LogContainer maxHeight={350}>
             {logs.map((l: any) => (
@@ -1526,19 +1501,9 @@ function LogsTab() {
           }}
         >
           {lines.length === 0 ? (
-            <div className="empty-state empty-state--compact">
-              {loading ? (
-                <div className="empty-state-desc">Loading...</div>
-              ) : (
-                <>
-                  <div className="empty-state-icon">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                  </div>
-                  <div className="empty-state-title">No log lines found</div>
-                  <div className="empty-state-desc">Try adjusting the search filters or check back later.</div>
-                </>
-              )}
-            </div>
+            loading
+              ? <Loading block label="Loading log lines…" />
+              : <EmptyState compact inline icon={<Search size={16} />} title="No log lines found" description="Try adjusting the search filters or check back later." />
           ) : (
             lines.map((line, i) => (
               <StyledDaemonLine key={i} line={line} lineNum={i + 1} highlight={debouncedSearch ? highlightSearch : undefined} />

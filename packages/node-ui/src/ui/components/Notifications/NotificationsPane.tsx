@@ -16,6 +16,7 @@ import type { UseNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
 import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
 import { Count } from '../ds/Badge.js';
+import { Loading } from '../ds/Loading.js';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
@@ -111,7 +112,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
         {status === 'identity-pending' ? (
           <div className="v10-notif-pane-state" role="status">Verifying access…</div>
         ) : status === 'loading' && isEmpty ? (
-          <div className="v10-notif-pane-state" role="status">Loading notifications…</div>
+          <Loading label="Loading notifications…" />
         ) : status === 'error' && isEmpty ? (
           <div className="v10-notif-pane-error" role="status" aria-live="polite">
             Couldn’t load notifications.{' '}

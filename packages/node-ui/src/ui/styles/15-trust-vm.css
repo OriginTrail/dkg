@@ -51,8 +51,6 @@
 /* ── Trust Summary ── */
 
 /* ── Loading / Error / Empty ── */
-.v10-me-loading { display: flex; align-items: center; justify-content: center; flex: 1; }
-.v10-me-loading-text { font-size: 12px; color: var(--text-tertiary); }
 
 /* ── Sub-graph Bar ── */
 /* PR #793 round 2 (ui-locked option a) — capsule chrome dropped.

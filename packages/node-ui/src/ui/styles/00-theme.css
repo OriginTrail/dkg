@@ -261,6 +261,7 @@
   --h-control-md: 32px;
   --h-control-lg: 40px;
   --h-row: 28px;
+  --opacity-disabled: .5;
   --fs-micro: 10px;
   --fs-label: 11px;
   --fs-layer: 12px;

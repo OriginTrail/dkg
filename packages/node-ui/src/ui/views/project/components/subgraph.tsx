@@ -501,9 +501,9 @@ export function SubGraphOverviewGrid({
   if (loading && cards.length === 0) {
     return (
       <EmptyState
+        busy
         compact
-        icon="#"
-        title="Loading subgraphs..."
+        title="Loading subgraphs…"
         className="v10-sgov-state"
       />
     );

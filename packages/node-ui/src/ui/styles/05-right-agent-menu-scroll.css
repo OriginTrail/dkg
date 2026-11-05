@@ -122,7 +122,7 @@
   border-color: var(--border-strong);
 }
 .v10-select-trigger:disabled {
-  opacity: 0.6;
+  opacity: var(--opacity-disabled);
   cursor: not-allowed;
 }
 .v10-select-value {

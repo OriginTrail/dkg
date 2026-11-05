@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { fetchExtractionStatus, fileUrl, authHeaders, type ExtractionStatus } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { X } from 'lucide-react';
+import { Loading } from '../ds/Loading.js';
 
 interface FilePreviewModalProps {
   open: boolean;
@@ -120,7 +121,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
           <button type="button" className="v10-modal-close ds-btn ds-ghost ds-icon" onClick={onClose} aria-label="Close file preview" title="Close (Esc)"><X size={14} /></button>
         </div>
 
-        {loading && <div className="v10-file-preview-loading">Loading file preview...</div>}
+        {loading && <Loading label="Loading file preview…" block />}
 
         {error && (
           <div className="v10-file-preview-error ds-card-nested">

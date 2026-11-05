@@ -65,7 +65,7 @@
   border-color: var(--sg-color, var(--text-tertiary));
   color: var(--text-primary);
 }
-.v10-subgraph-savedquery:disabled { opacity: 0.5; cursor: default; }
+.v10-subgraph-savedquery:disabled { opacity: var(--opacity-disabled); cursor: default; }
 .v10-subgraph-savedquery-glyph {
   font-size: 10px; color: var(--sg-color, var(--text-tertiary));
 }

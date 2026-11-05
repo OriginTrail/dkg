@@ -27,6 +27,7 @@ import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerA
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 import { Badge } from '../../components/ds/Badge.js';
 import { BadgePercent } from 'lucide-react';
+import { Loading } from '../../components/ds/Loading.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -61,7 +62,7 @@ export function ConvictionDetailView({ accountId }: { accountId: string }) {
 
   useWalletBootstrap();
 
-  if (loading && !snapshot) return <div className="lazy-spinner">Loading PCA #{accountId}…</div>;
+  if (loading && !snapshot) return <Loading block label={`Loading PCA #${accountId}…`} />;
   if (error || !snapshot) {
     return (
       <div className="v10-pca-detail">

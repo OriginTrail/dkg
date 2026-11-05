@@ -333,11 +333,10 @@
 
 /* ── Assertion List (WM → SWM) ── */
 .v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden; }
-.v10-assertion-list-loading { font-size: 12px; color: var(--text-tertiary); padding: 8px 0; }
 .v10-assertion-list-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-default); }
 .v10-assertion-list-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
 .v10-btn-promote-all:hover { opacity: .85; }
-.v10-btn-promote-all:disabled { opacity: .5; }
+.v10-btn-promote-all:disabled { opacity: var(--opacity-disabled); }
 .v10-assertion-items { max-height: 220px; overflow-y: auto; }
 .v10-assertion-item {
   display: flex; align-items: center; justify-content: space-between;
@@ -351,7 +350,7 @@
 }
 .v10-assertion-item-count { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
 .v10-btn-promote { flex-shrink: 0; }
-.v10-btn-promote:disabled { opacity: .5; }
+.v10-btn-promote:disabled { opacity: var(--opacity-disabled); }
 .v10-promote-result { padding: 8px 12px; font-size: 12px; }
 .v10-promote-result.success { color: var(--text-success); background: var(--success-bg); }
 .v10-promote-result.error { color: var(--text-danger); background: var(--danger-bg); }
@@ -388,7 +387,7 @@
 .v10-publish-entity-check input { cursor: pointer; }
 .v10-assertion-item.selected { background: var(--bg-active); }
 .v10-btn-publish:hover { opacity: .85; }
-.v10-btn-publish:disabled { opacity: .5; }
+.v10-btn-publish:disabled { opacity: var(--opacity-disabled); }
 .v10-publish-result-card {
   margin: 0 12px 12px; padding: 12px; border-radius: var(--radius-control); font-size: 12px;
 }

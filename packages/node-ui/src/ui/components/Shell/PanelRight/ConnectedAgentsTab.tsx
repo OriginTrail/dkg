@@ -535,7 +535,7 @@ export function ConnectedAgentsTab(props: {
             >
               {shouldShowConversationLoader && (
                 <div className="v10-agent-empty-state">
-                  Loading the latest conversation from DKG memory...
+                  Loading the latest conversation from DKG memory…
                 </div>
               )}
               {(!shouldShowConversationLoader && localMessages.length === 0) && (() => {

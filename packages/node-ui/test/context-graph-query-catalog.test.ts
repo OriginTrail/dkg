@@ -317,7 +317,7 @@ describe('ContextGraphQueryView', () => {
   it('shows profile loading and saved-query empty catalogue states', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved queries...');
+    await waitForText(container, 'Loading saved queries…');
     expect(container.textContent).toContain('All triples');
     expect(container.textContent).not.toContain('No saved queries yet.');
 
@@ -515,7 +515,7 @@ describe('ContextGraphQueryView', () => {
   it('keeps local saves visible while profile queries are loading', async () => {
     const { container, root } = await renderWithProfile(profile({ loading: true }));
 
-    await waitForText(container, 'Loading saved queries...');
+    await waitForText(container, 'Loading saved queries…');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {

@@ -20,6 +20,7 @@ import { dashboardSizePresentation } from './dashboard-size-presentation.js';
 import { ContextGraphMark } from '../context-graph-colors.js';
 import { AgentDotStack } from '../components/AgentDot.js';
 import { Count } from '../components/ds/Badge.js';
+import { Loading } from '../components/ds/Loading.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -720,7 +721,7 @@ export function DashboardView() {
             <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
           </div>
           {cgsResolving ? (
-            <p className="v10-cg-empty">Loading Context Graphs…</p>
+            <Loading label="Loading Context Graphs…" className="v10-cg-empty" />
           ) : inventoryFailed && myCgs.length === 0 ? (
             <p className="v10-cg-empty">Context Graphs could not be confirmed. Retry the failed request above.</p>
           ) : myCgs.length === 0 ? (
@@ -776,7 +777,7 @@ export function DashboardView() {
 
           <div className="v10-ws-subhead">Node wallets</div>
           {wbLoading && !wb ? (
-            <p className="v10-cg-empty">Loading wallets…</p>
+            <Loading label="Loading wallets…" className="v10-cg-empty" />
           ) : walletRows.length > 0 ? (
             <div className="v10-ws-wtable">
               <div className="v10-ws-wrow v10-ws-whead">

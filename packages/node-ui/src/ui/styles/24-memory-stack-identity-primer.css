@@ -304,7 +304,7 @@
   transition: color 0.15s;
 }
 .v10-project-strip-name:disabled {
-  cursor: default; opacity: 1;
+  cursor: default; opacity: var(--opacity-disabled);
 }
 .v10-project-strip-name:not(:disabled):hover {
   color: var(--sg-color, var(--text-tertiary));

@@ -107,31 +107,6 @@ select.input {
 
 /* Badges */
 /* Empty states */
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 48px 24px;
-  text-align: center;
-}
-.empty-state--compact { padding: 28px 16px; }
-.empty-state--rich    { padding: 40px 24px; }
-.empty-state-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-.empty-state-title { font-size: 13px; font-weight: 700; color: var(--text-primary); }
-.empty-state-desc  { font-size: 12px; color: var(--text-secondary); max-width: 340px; line-height: 1.6; }
 
 /* Tx link icon */
 .tx-link-icon { color: var(--text-tertiary); opacity: 0.6; transition: opacity 0.15s; }
@@ -193,7 +168,7 @@ select.input {
   gap: 8px;
 }
 .v10-modal-btn.primary:hover { opacity: 0.85; }
-.v10-modal-btn.primary:disabled { opacity: 0.4; }
+.v10-modal-btn.primary:disabled { opacity: var(--opacity-disabled); }
 
 .v10-modal-error {
   padding: var(--pad-nested);

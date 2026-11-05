@@ -9,6 +9,7 @@ import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
 import { FileText } from 'lucide-react';
+import { Loading } from '../ds/Loading.js';
 
 
 const OperationsView = createRecoverableLazyView(() =>
@@ -224,7 +225,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
           </div>
         ) : (
           <>
-            {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
+            {loading && <Loading label="Loading document…" />}
             {error && <div style={{ color: 'var(--text-danger)', fontSize: 12 }}>Failed to load: {error}</div>}
             {!loading && isImage && blobUrl && (
               <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />

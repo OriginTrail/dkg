@@ -62,14 +62,14 @@ it('loads views on demand while preserving tab selection and mounted view state'
     expect(loads).toEqual({ agentHub: 0, project: 0, layer: 0, stack: 0 });
 
     await open('agent-hub');
-    expect(container.textContent).toContain('Loading agent hub...');
+    expect(container.textContent).toContain('Loading agent hub…');
     await vi.waitFor(() => expect(loads.agentHub).toBe(1));
     await act(async () => agentHubGate.resolve());
     expect(container.querySelector('#agent-hub')?.textContent).toBe('Agent hub ready');
     await act(async () => container.querySelector<HTMLButtonElement>('.v10-center-tab')!.click());
 
     await open('project:first');
-    expect(container.textContent).toContain('Loading project...');
+    expect(container.textContent).toContain('Loading project…');
     await vi.waitFor(() => expect(loads.project).toBe(1));
     // The shell stays interactive during the first chunk load. Resolving it
     // after navigating away must not restore the old selected tab.

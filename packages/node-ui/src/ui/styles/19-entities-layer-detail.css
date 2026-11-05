@@ -243,7 +243,7 @@
 
 /* Primary CTA variant — prominent solid button for the main publish-to-VM action */
 .v10-decision-btn.primary-cta.publish-vm { text-shadow: none; }
-.v10-decision-btn.primary-cta.publish-vm:disabled { opacity: 0.45; }
+.v10-decision-btn.primary-cta.publish-vm:disabled { opacity: var(--opacity-disabled); }
 
 /* ── Graph view inside layer detail ── */
 .v10-graph-shell {

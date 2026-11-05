@@ -18,6 +18,8 @@ import { AgentChip } from './components/AgentChip.js';
 import { AgentDot, AgentDotStack } from './components/AgentDot.js';
 import { agentColorForUri, type AgentSummary } from './hooks/useAgents.js';
 import { BadgePercent, ChevronRight, Copy, RefreshCw, X } from 'lucide-react';
+import { Loading } from './components/ds/Loading.js';
+import { EmptyState } from './components/ContextGraphPrimitives.js';
 
 type Theme = 'dark' | 'light';
 
@@ -140,7 +142,7 @@ const App: React.FC = () => {
       </header>
 
       <nav className="dsp-toc" aria-label="Sections">
-        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Toggle', 'Icons', 'Inputs'].map((s) => (
+        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Toggle', 'Icons', 'Feedback', 'Inputs'].map((s) => (
           <a key={s} href={`#${s.toLowerCase().replace(/\s+/g, '-')}`}>{s}</a>
         ))}
       </nav>
@@ -337,6 +339,15 @@ const App: React.FC = () => {
           <span><StatusGlyph tone="warning" /> Warning</span>
           <span><StatusGlyph tone="danger" /> Danger</span>
           <span><StatusGlyph tone="pending" /> Pending</span>
+        </div>
+      </Section>
+
+      <Section id="feedback" title="Feedback" lead="Loading, empty, error and disabled: one look each.">
+        <div style={{ display: 'grid', gap: 12 }}>
+          <Loading label="Loading peers…" />
+          <EmptyState compact inline title="No active connections" description="Connections will appear here as your node links with peers." />
+          <EmptyState compact tone="danger" title="Could not load peers" description="The node didn't respond." actions={[{ label: 'Retry', onClick: () => undefined }]} />
+          <div><Button disabled>Disabled</Button></div>
         </div>
       </Section>
 

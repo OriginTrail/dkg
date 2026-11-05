@@ -2,6 +2,7 @@ import React from 'react';
 import { usePcaAvailability } from '../hooks/usePcaAvailability.js';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { ConvictionOverview } from './conviction/ConvictionOverview.js';
+import { Loading } from '../components/ds/Loading.js';
 
 const PCA_DOCS_URL = 'https://docs.origintrail.io/';
 
@@ -17,7 +18,7 @@ export function PublishingConvictionPage() {
   return (
     <div data-testid="pca-view">
       {status === 'loading' ? (
-        <div className="lazy-spinner">Loading publisher conviction...</div>
+        <Loading label="Loading publisher conviction…" block />
       ) : status === 'unavailable' ? (
         <div className="v10-pca-unavailable" data-testid="pca-unavailable">
           <EmptyState

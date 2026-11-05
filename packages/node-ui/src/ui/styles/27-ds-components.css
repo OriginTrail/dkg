@@ -141,7 +141,7 @@
   outline-offset: 2px;
 }
 .ds-btn:disabled {
-  opacity: .45;
+  opacity: var(--opacity-disabled);
   cursor: not-allowed;
 }
 
@@ -456,3 +456,12 @@ body.light .ds-seg-item.active {
 }
 .ds-skip-link:focus { transform: none; }
 .v10-center-content:focus { outline: none; }
+
+/* Loading: the words say what is coming, the spinner says it's on its way. */
+.ds-loading {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: var(--fs-control); color: var(--text-tertiary);
+}
+.ds-loading.ds-block { display: flex; justify-content: center; min-height: 96px; height: 100%; padding: 16px; box-sizing: border-box; }
+.ds-spin { animation: ds-spin 1s linear infinite; }
+@keyframes ds-spin { to { transform: rotate(360deg); } }

@@ -24,7 +24,7 @@
 }
 
 .v10-identity-wallet-btn.ds-btn { max-width: 100%; height: auto; min-height: var(--h-control-md); white-space: normal; }
-.v10-identity-wallet-btn:disabled { opacity: 0.5; }
+.v10-identity-wallet-btn:disabled { opacity: var(--opacity-disabled); }
 
 .v10-identity-wallet-counts,
 .v10-identity-wallet-signer,

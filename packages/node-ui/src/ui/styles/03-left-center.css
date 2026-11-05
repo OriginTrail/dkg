@@ -27,7 +27,6 @@
 }
 /* Sidebar places: Dashboard at the top, the node's places pinned to the
    bottom in a labelled group — every destination lives in the sidebar. */
-.v10-tree-status { padding: 6px 16px; font-size: var(--fs-control); color: var(--text-tertiary); }
 .v10-tree-dashboard {
   display: flex;
   align-items: center;
@@ -295,7 +294,7 @@
 .v10-tab-menu-item:hover:not(:disabled), .v10-tab-menu-item:focus-visible { background: var(--bg-hover); color: var(--text-primary); }
 .v10-tab-menu-item:focus-visible { outline-offset: -2px; }
 .v10-tab-menu-item.active { color: var(--text-primary); }
-.v10-tab-menu-item:disabled { opacity: .4; cursor: default; }
+.v10-tab-menu-item:disabled { opacity: var(--opacity-disabled); cursor: default; }
 .v10-tab-menu-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .v10-tab-menu-hint { margin-left: auto; padding-left: 12px; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); }
 .v10-tab-menu-sep { height: 1px; margin: 4px 0; background: var(--border-subtle); }
