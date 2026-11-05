@@ -64,7 +64,7 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
         compact
         items={breakdown.map(([type, { icon, count }]) => ({
           id: type,
-          label: `${icon} ${type}`,
+          label: <>{icon} {type}</>,
           value: count,
         }))}
       />

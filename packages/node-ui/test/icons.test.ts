@@ -31,6 +31,13 @@ describe('icons', () => {
     expect(found).toEqual([]);
   });
 
+  it('never prints an icon into a string, where it would read [object Object]', () => {
+    const found = files
+      .filter((file) => /\.tsx?$/.test(file))
+      .flatMap((file) => [...readFileSync(file, 'utf8').matchAll(/\$\{[\w.]*[iI]con\}/g)].map(([m]) => `${relative(UI, file)}: ${m}`));
+    expect(found).toEqual([]);
+  });
+
   it('draws no symbol characters from CSS', () => {
     const found = files
       .filter((file) => file.endsWith('.css'))

@@ -115,7 +115,7 @@ Two parts of larger components sit off this scale on purpose: a tab's close mark
 | `swm` | Share to Shared Working Memory (cyan tint). |
 | `vm` | Publish to Verifiable Memory (the one purple fill). |
 
-Sizes `sm` 24 (11px text), `md` 32 (default, 12px text), `lg` 40. `icon` makes it square; an icon-only button always has an `aria-label`. Text that acts like a button is a `ghost` button, not a bare `<button>`.
+Sizes `sm` 24 (11px text), `md` 32 (default, 12px text), `lg` 40. `icon` makes it square; an icon-only button always has an `aria-label`. Text that acts like a button is a `ghost` button, not a bare `<button>`. A button keeps at least 8px from the text above or below it.
 
 ### Icons
 
@@ -220,5 +220,6 @@ The target is WCAG 2.2 AA. `test/a11y-rules.test.ts` checks the first four rules
 - **Focus:** keyboard focus always shows the 2px `--focus-ring`. A control revealed on hover is also revealed on focus.
 - **Dialogs:** every dialog has a name and uses `useModalDismiss`, which moves focus in, keeps it there, closes on Escape and returns focus on close.
 - **Targets:** at least 24 by 24, the small control height. The exceptions are a tab's close mark, which is documented above, and text links with clear space around them.
+- **Agent initials:** black or white, whichever reads better on the agent's colour (`agentInitialsColor`). One of the two always clears 4.5:1, in the UI and on graph nodes.
 - **Motion:** `prefers-reduced-motion` turns animation and transitions off everywhere.
 - **Skip link:** a "Skip to content" button at the start of the page moves focus to `#main-content`.

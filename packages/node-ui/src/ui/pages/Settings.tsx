@@ -39,7 +39,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
   const display = reveal ? rpcUrl : redactRpcUrl(rpcUrl);
   return (
     <div style={{ marginBottom: 14 }}>
-      <div className="settings-field-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div className="settings-field-label" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <span>RPC</span>
         <button
           type="button"

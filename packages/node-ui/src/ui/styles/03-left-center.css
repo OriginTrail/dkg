@@ -153,6 +153,7 @@
   background: var(--bg-surface);
   text-align: center;
 }
+.v10-journey-empty-card > button { margin-top: 8px; }
 .v10-jec-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
 .v10-jec-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin-bottom: 10px; }
 
