@@ -49,7 +49,7 @@
      force-graph layer composited on top of it in the inline view —
      only zooming the graph (which redraws the canvas) revealed the
      shelf underneath. */
-  z-index: 20;
+  z-index: var(--z-raised);
   width: min(280px, calc(100% - 24px));
   max-height: 28%;
   display: flex;
@@ -99,7 +99,7 @@
 .v10-graph-expanded-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
   display: flex;
   padding: 24px;
   background: var(--scrim-strong);
@@ -175,7 +175,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-back {
   align-self: flex-start; border: 1px solid var(--border-default); border-radius: var(--radius-xs);
   background: none; color: var(--text-secondary); font-size: 11px; font-weight: 600;
-  padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all 0.15s;
+  padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all var(--motion-base);
 }
 .v10-ka-back:hover { color: var(--text-primary); border-color: var(--border-strong); }
 .v10-ka-header-left { display: flex; flex-direction: column; gap: 2px; }
@@ -190,7 +190,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
   color: var(--text-tertiary); margin-bottom: 8px;
 }
-.v10-ka-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.7; }
+.v10-ka-desc { font-size: 12px; color: var(--text-secondary); line-height: var(--lh-loose); }
 .v10-ka-desc p { margin-bottom: 8px; }
 .v10-ka-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 10px; font-family: var(--font-mono); color: var(--text-tertiary); }
 .v10-ka-meta-item { display: flex; align-items: center; gap: 4px; }
@@ -201,7 +201,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-conn {
   display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px;
   border-radius: var(--radius-xs); cursor: pointer; border: none; background: none; color: inherit;
-  font-family: var(--font-sans); font-size: 11px; transition: background 0.1s;
+  font-family: var(--font-sans); font-size: 11px; transition: background var(--motion-fast);
 }
 .v10-ka-conn:hover { background: var(--bg-hover); }
 .v10-ka-conn-pred { color: var(--text-tertiary); font-family: var(--font-mono); font-size: 10px; min-width: 80px; }
@@ -264,7 +264,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   background: var(--tint-faint);
   border: 1px solid var(--border-subtle);
   overflow: hidden;
-  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--motion-base) ease, transform var(--motion-base) ease, box-shadow var(--motion-base) ease;
 }
 .v10-sgov-card:hover {
   transform: translateY(-1px);
@@ -308,7 +308,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .v10-sgov-card-desc {
-  font-size: 10px; color: var(--text-tertiary); line-height: 1.4;
+  font-size: 10px; color: var(--text-tertiary); line-height: var(--lh-snug);
   margin-top: 2px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
   overflow: hidden;
@@ -317,7 +317,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   appearance: none; background: transparent; color: var(--text-tertiary);
   border: 1px solid var(--border-subtle); border-radius: var(--radius-control);
   padding: 2px 6px; cursor: pointer; font-size: 12px; line-height: 1;
-  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  transition: color var(--motion-fast) ease, border-color var(--motion-fast) ease, background var(--motion-fast) ease;
 }
 .v10-sgov-card-open:hover {
   color: var(--sg-color, var(--text-primary));
@@ -366,7 +366,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-minibar-seg {
   height: 100%;
-  transition: opacity 0.15s ease, filter 0.15s ease;
+  transition: opacity var(--motion-base) ease, filter var(--motion-base) ease;
 }
 .v10-minibar-seg.dim { opacity: 0.3; filter: grayscale(0.6); }
 .v10-minibar-legend {

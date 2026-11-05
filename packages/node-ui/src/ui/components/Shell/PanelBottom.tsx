@@ -350,7 +350,7 @@ export function PanelBottom() {
           {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
         </button>
         <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
-          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
+          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform var(--motion-base)' }}>
             {CHEVRON_DOWN}
           </span>
         </button>

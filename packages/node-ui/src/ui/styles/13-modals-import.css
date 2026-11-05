@@ -21,7 +21,7 @@
 .v10-file-preview-iframe { width: 100%; height: 60vh; border: none; display: block; }
 .v10-file-preview-image { max-width: 100%; max-height: 60vh; display: block; margin: 16px auto; }
 .v10-file-preview-text {
-  margin: 0; padding: 16px 24px; font-size: 12px; line-height: 1.6;
+  margin: 0; padding: 16px 24px; font-size: 12px; line-height: var(--lh-loose);
   font-family: var(--font-mono); color: var(--text-primary);
   white-space: pre-wrap; word-break: break-word; overflow-y: auto; max-height: 60vh;
 }
@@ -138,7 +138,7 @@
 .v10-form-adv-chevron {
   font-size: 10px;
   color: var(--text-tertiary);
-  transition: transform 0.15s;
+  transition: transform var(--motion-base);
   display: inline-block;
 }
 .v10-form-adv-chevron.open { transform: rotate(90deg); }
@@ -163,7 +163,7 @@ body.light .v10-modal-box {
   padding: 24px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all var(--motion-slow);
   margin-bottom: 16px;
 }
 .v10-import-dropzone:hover,
@@ -245,7 +245,7 @@ body.light .v10-modal-box {
   height: 100%;
   background: var(--text-primary);
   border-radius: var(--radius-hair);
-  transition: width 0.3s ease;
+  transition: width var(--motion-slow) ease;
 }
 .v10-import-progress-text {
   font-size: 11px;
@@ -256,7 +256,7 @@ body.light .v10-modal-box {
   padding: 10px 14px;
   border-radius: var(--radius-control);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: var(--lh-loose);
 }
 .v10-import-result.success {
   background: var(--success-bg);

@@ -393,7 +393,7 @@ function HealthTab() {
 
       <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
-        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
+        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 'var(--lh-body)' }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
@@ -753,7 +753,7 @@ export function HardwareTab() {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
-          <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+          <div key={stat.label} className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
@@ -767,12 +767,12 @@ export function HardwareTab() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
-        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
           <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
-        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
+        <div className="card ds-card" style={{ padding: 'var(--pad-compact)', opacity: loading ? 0.5 : 1, transition: 'opacity var(--motion-slow)' }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
@@ -862,7 +862,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               style={{
                 width: `${pct}%`, background: color, minWidth: 3,
                 opacity: 1,
-                transition: 'opacity .15s, width .2s',
+                transition: 'opacity var(--motion-base), width var(--motion-slow)',
                 cursor: 'default',
               }}
             />
@@ -901,7 +901,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               )}
             </div>
             {desc && (
-              <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'normal', lineHeight: 'var(--lh-snug)' }}>
                 {desc}
               </div>
             )}
@@ -1099,13 +1099,13 @@ function OperationsTab() {
           <div
             onClick={drawer.onBackdropClick}
             style={{
-              position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 900,
+              position: 'fixed', inset: 0, background: 'var(--scrim)', zIndex: 'var(--z-modal)',
               animation: 'fadeIn .15s ease-out',
             }}
           />
           <div ref={drawer.dialogRef} role="dialog" aria-modal="true" aria-label="Operation detail" style={{
             position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
-            background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 901,
+            background: 'var(--bg)', borderLeft: '1px solid var(--border)', zIndex: 'var(--z-modal)',
             overflowY: 'auto', padding: '20px 24px',
             boxShadow: 'var(--shadow-drawer)',
             animation: 'slideInRight .2s ease-out',
@@ -1183,7 +1183,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                   }`}
                   style={{
                     position: 'absolute', left: `${left}%`, width: `${Math.min(width, 100 - left)}%`,
-                    height: '100%', borderRadius: 'var(--radius-hair)', opacity: isInProgress ? 0.7 : 1, transition: 'width .3s ease',
+                    height: '100%', borderRadius: 'var(--radius-hair)', opacity: isInProgress ? 0.7 : 1, transition: 'width var(--motion-slow) ease',
                     background: isError ? 'repeating-linear-gradient(45deg, var(--accent-red), var(--accent-red) 3px, var(--danger-stripe) 3px, var(--danger-stripe) 6px)' : color,
                   }}
                 />
@@ -1441,9 +1441,9 @@ function LogsTab() {
           title="Refresh now"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
-            color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
-            transition: 'all .15s',
+            borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', background: 'var(--surface)',
+            color: 'var(--text-muted)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            transition: 'all var(--motion-base)',
           }}
           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-green)'; e.currentTarget.style.color = 'var(--accent-green)'; }}
           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-default)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
@@ -1456,10 +1456,10 @@ function LogsTab() {
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border-default)'}`,
-            background: autoScroll ? 'var(--success-bg)' : 'var(--bg-surface)',
-            color: autoScroll ? 'var(--accent-green)' : 'var(--text-secondary)',
-            fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
+            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border)'}`,
+            background: autoScroll ? 'var(--green-dim)' : 'var(--surface)',
+            color: autoScroll ? 'var(--green)' : 'var(--text-muted)',
+            fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all var(--motion-base)',
           }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1493,7 +1493,7 @@ function LogsTab() {
             background: 'var(--log-bg)',
             fontFamily: LOG_FONT,
             fontSize: 11,
-            lineHeight: 1.5,
+            lineHeight: 'var(--lh-body)',
           }}
         >
           {lines.length === 0 ? (
@@ -1545,7 +1545,7 @@ function LogContainer({ children, maxHeight = 300 }: { children: React.ReactNode
   return (
     <div style={{
       maxHeight, overflowY: 'auto', background: LOG_COLORS.bg, borderRadius: 'var(--radius-control)', padding: '6px 0',
-      fontFamily: LOG_FONT, fontSize: 11, lineHeight: 1.5,
+      fontFamily: LOG_FONT, fontSize: 11, lineHeight: 'var(--lh-body)',
     }}>
       {children}
     </div>
@@ -1623,7 +1623,7 @@ function CopyButton({ text }: { text: string }) {
         background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px', minWidth: 24, minHeight: 24, justifyContent: 'center',
         color: copied ? 'var(--green)' : 'var(--text-dim)', fontSize: 11,
         display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
-        transition: 'color .15s',
+        transition: 'color var(--motion-base)',
       }}
     >
       {copied ? (

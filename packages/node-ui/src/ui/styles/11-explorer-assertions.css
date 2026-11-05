@@ -8,8 +8,8 @@
 .v10-memory-layer-view { max-width: 1000px; min-width: 0; }
 .v10-mlv-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 .v10-mlv-icon { font-size: 20px; }
-.v10-mlv-title { font-size: 16px; line-height: 1.25; font-weight: 600; color: var(--text-primary); margin: 0 0 2px; }
-.v10-mlv-desc { font-size: 12px; line-height: 1.4; color: var(--text-secondary); margin: 0; }
+.v10-mlv-title { font-size: 16px; line-height: var(--lh-tight); font-weight: 600; color: var(--text-primary); margin: 0 0 2px; }
+.v10-mlv-desc { font-size: 12px; line-height: var(--lh-snug); color: var(--text-secondary); margin: 0; }
 .v10-vm-search-panel {
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
@@ -91,14 +91,14 @@
 .v10-cg-query-zone-header h3 {
   margin: 2px 0 4px;
   font-size: 15px;
-  line-height: 1.3;
+  line-height: var(--lh-snug);
   color: var(--text-primary);
 }
 .v10-cg-query-zone-header p {
   margin: 0;
   max-width: 680px;
   font-size: 12px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: var(--text-secondary);
 }
 .v10-cg-query-eyebrow {
@@ -145,7 +145,7 @@
 .v10-cg-query-catalog-group-header p {
   margin: 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-cg-query-list {
@@ -181,7 +181,7 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
   font-size: 11px;
-  line-height: 1.35;
+  line-height: var(--lh-snug);
   color: var(--text-tertiary);
 }
 .v10-cg-query-error-detail {
@@ -228,7 +228,7 @@
   resize: vertical;
   padding: 10px 12px;
   font-family: var(--font-mono);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   color: var(--text-primary);

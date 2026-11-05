@@ -217,7 +217,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
               Source file not available for this document
             </span>
-            <span style={{ fontSize: 12, maxWidth: 360, lineHeight: 1.6 }}>
+            <span style={{ fontSize: 12, maxWidth: 360, lineHeight: 'var(--lh-loose)' }}>
               This document was indexed into the graph without a stored source
               file, so there is nothing to preview here. You can still explore
               its extracted entities and relationships in the graph.
@@ -243,7 +243,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
             )}
             {content !== null && !isImage && !isPdf && !(isMarkdown && viewMode === 'formatted') && (
               <pre style={{
-                fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 1.7,
+                fontFamily: 'var(--font-mono)', fontSize: 12, lineHeight: 'var(--lh-loose)',
                 color: 'var(--text-primary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                 background: 'var(--bg-surface)', borderRadius: 'var(--radius-nested)', padding: 16,
                 border: '1px solid var(--border-default)', margin: 0,

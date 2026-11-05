@@ -13,7 +13,7 @@
   max-width: 100%;
   user-select: none;
 }
-.v10-agent-chip.interactive { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.v10-agent-chip.interactive { cursor: pointer; transition: background var(--motion-base), border-color var(--motion-base); }
 .v10-agent-chip.interactive:hover {
   background: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 14%, transparent);
   border-color: color-mix(in srgb, var(--agent-color, var(--identity-fallback)) 50%, var(--border-default));
@@ -50,7 +50,7 @@
 .v10-agent-chip-body {
   display: inline-flex;
   flex-direction: column;
-  line-height: 1.15;
+  line-height: var(--lh-tight);
   min-width: 0;
   max-width: 100%;
 }
@@ -142,7 +142,7 @@
    * EmptyState primitive; recedes so the rest of the Overview
    * stays the focal area. */
   margin-top: 8px;
-  font-size: 12px; font-weight: 400; line-height: 1.5;
+  font-size: 12px; font-weight: 400; line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-activity-feed-error {
@@ -152,7 +152,7 @@
   margin-top: 8px;
   padding: 6px 8px;
   border-left: 2px solid var(--accent-amber);
-  font-size: 12px; font-weight: 400; line-height: 1.5;
+  font-size: 12px; font-weight: 400; line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-activity-feed-bucket { display: flex; flex-direction: column; gap: 4px; }
@@ -185,7 +185,7 @@
   cursor: pointer;
   color: var(--text-primary);
   font-family: var(--font-sans);
-  transition: background 0.12s;
+  transition: background var(--motion-fast);
 }
 .v10-activity-feed-row:hover { background: var(--tint-subtle); }
 .v10-activity-feed-row + .v10-activity-feed-row {
@@ -252,7 +252,7 @@
 }
 .v10-agent-profile-reputation {
   font-size: 13px; color: var(--text-secondary);
-  line-height: 1.55;
+  line-height: var(--lh-body);
   max-width: 640px;
   flex: 1 1 260px;
 }
@@ -286,7 +286,7 @@
   font-size: 10px;
   cursor: pointer;
   font-family: var(--font-sans);
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base);
 }
 .v10-agent-profile-copy:hover { border-color: var(--border-strong); color: var(--text-primary); }
 
@@ -303,7 +303,7 @@
   cursor: pointer;
   color: var(--text-secondary);
   font-family: var(--font-sans);
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base), background var(--motion-base);
 }
 .v10-agent-profile-stat:hover {
   border-color: var(--stat-color, var(--border-strong));

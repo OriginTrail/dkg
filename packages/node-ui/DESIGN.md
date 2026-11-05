@@ -203,6 +203,11 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 - a hard-coded corner size (`border-radius` / `borderRadius` in px) instead of a `--radius-*` token. `0` and `50%` (circles) are allowed.
 
 There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
+- `test/icons.test.ts`: one icon set, and the refresh icon on Refresh and Retry buttons.
+- `test/a11y-rules.test.ts`: names, keyboard access, dialog names and focus rings.
+- `test/feedback-states.test.ts`: loading copy, empty states, the disabled look and form errors.
+- `test/data-format.test.ts`: shared formats and table scrolling.
+- `test/layout-tokens.test.ts`: layers, breakpoints, motion and line height.
 
 ## Adding to the system
 
@@ -228,6 +233,31 @@ Read formats from `lib/format.ts`, so a value looks the same on every screen.
 A missing value is `—`. Chart axes and ISO dates on the subgraph timeline set their own format.
 
 Tables use `data-table` inside `ds-table-scroll`, so a wide table scrolls inside its card, and add `ds-table-pin` when the first column names the row. Figures use tabular numbers so they line up.
+
+## Layout and overlays
+
+**Layers.** Each layer has a token, and anything above 10 uses one. Numbers up to 10 only order things inside one component.
+
+| Token | Value | For |
+| --- | --- | --- |
+| `--z-raised` | 20 | Floats inside a view, such as the node panel |
+| `--z-banner` | 30 | The token prompt |
+| `--z-panel` | 40 | Side panels floating on small screens |
+| `--z-header` | 100 | The header |
+| `--z-popover` | 200 | Menus, popovers and the notification pane |
+| `--z-modal` | 1000 | Dialogs and drawers |
+| `--z-floating` | 1100 | Menus that can open over a dialog |
+| `--z-skip` | 10000 | The skip link |
+
+**Overlays.** A dialog or drawer sits on `--scrim`, uses `--radius-overlay` and `--shadow-popover`, and takes `useModalDismiss`. A menu closes on Escape and on a click outside.
+
+**Tooltips.** Use the native `title` for extra detail, such as a full address behind a shortened one. Nothing that needs reading lives only in a tooltip, because touch and keyboard users can't reach it, and a tooltip is never a control's name.
+
+**Breakpoints.** Use 600, 720, 860 and 920. The Context Graph tab bar has its own fitting steps at 1180, 1320 and 1500.
+
+**Motion.** `--motion-fast` (.12s) for hover and press, `--motion-base` (.15s) for things that appear or move, `--motion-slow` (.3s) for larger changes.
+
+**Line height.** `--lh-tight` for headings and chips, `--lh-snug` for dense rows, `--lh-body` for reading text, `--lh-loose` for long notes. A single-line control can use `1`.
 
 ## Feedback states
 

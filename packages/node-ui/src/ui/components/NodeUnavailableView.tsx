@@ -10,7 +10,7 @@ export function NodeUnavailableView() {
 
   return (
     <main className="v10-app" style={{ alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-      <section role="alert" style={{ maxWidth: 480, lineHeight: 1.6 }}>
+      <section role="alert" style={{ maxWidth: 480, lineHeight: 'var(--lh-loose)' }}>
         <h1>Node unavailable</h1>
         <p>Live node data could not be loaded. The node may be stopped, timing out or returning errors.</p>
         <p>Node status, balances, graphs and integration readiness are unavailable. Check the daemon, then reload to retry the connection.</p>

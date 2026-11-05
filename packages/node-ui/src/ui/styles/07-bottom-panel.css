@@ -8,7 +8,7 @@
   flex-shrink: 0;
   /* Height is driven by inline style (store-persisted) when expanded.
      Transition only applies when collapsing/expanding, not during drag. */
-  transition: height 0.15s ease;
+  transition: height var(--motion-base) ease;
 }
 .v10-panel-bottom.collapsed { height: var(--tab-h); }
 .v10-panel-bottom.maximised { height: 80vh !important; }
@@ -19,7 +19,7 @@
   flex-shrink: 0;
   cursor: row-resize;
   background: transparent;
-  transition: background 0.15s;
+  transition: background var(--motion-base);
 }
 .v10-resize-handle-v:hover,
 .v10-resize-handle-v.active { background: var(--border-prominent); }
@@ -64,7 +64,7 @@
   font-family: var(--font-sans);
   flex-shrink: 0;
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color var(--motion-base);
 }
 .v10-log-level-select:hover { border-color: var(--border-default); color: var(--text-primary); }
 .v10-log-output {
@@ -73,7 +73,7 @@
   padding: 4px 0;
   font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.65;
+  line-height: var(--lh-loose);
 }
 .v10-log-line {
   padding: 1px 12px;
@@ -100,7 +100,7 @@
   /* Chat copy is dense; +1 not +2 — keeps the bubble height-economical
      while tracking the body base bump (PR8). */
   font-size: 13px;
-  line-height: 1.55;
+  line-height: var(--lh-body);
   word-break: break-word;
   overflow-wrap: anywhere;
   color: var(--text-primary);

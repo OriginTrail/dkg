@@ -1,0 +1,38 @@
+// Layers, breakpoints, motion and line height come from fixed scales (see
+// DESIGN.md · Layout and overlays).
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+const UI = join(__dirname, '../src/ui');
+const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (
+  e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]
+));
+const files = walk(UI);
+const css = files.filter((f) => f.endsWith('.css'));
+const tsx = files.filter((f) => f.endsWith('.tsx'));
+const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '');
+const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) => boolean = () => true) => list.flatMap((file) => (
+  [...strip(readFileSync(file, 'utf8')).matchAll(pattern)].filter(keep).map((m) => `${relative(UI, file)}: ${m[0].slice(0, 70)}`)
+));
+
+describe('layout tokens', () => {
+  it('uses a layer token for anything above 10', () => {
+    expect(matches(css, /z-index:\s*(\d+)/g, (m) => Number(m[1]) > 10)).toEqual([]);
+    expect(matches(tsx, /zIndex:\s*(\d+)/g, (m) => Number(m[1]) > 10)).toEqual([]);
+  });
+
+  it('keeps to the breakpoint scale', () => {
+    const allowed = new Set(['600', '720', '860', '920', '1180', '1320', '1500']);
+    expect(matches(css, /@media \(max-width:\s*(\d+)px\)/g, (m) => !allowed.has(m[1]!))).toEqual([]);
+  });
+
+  it('times transitions with the motion tokens', () => {
+    expect(matches(css, /transition(?:-duration)?:[^;}]*?(?<![\w.-])\d*\.?\d+m?s\b[^;}]*/g, (m) => !/\.01ms/.test(m[0]))).toEqual([]);
+  });
+
+  it('sets line height from the scale', () => {
+    expect(matches(css, /line-height:\s*(\d*\.\d+)/g)).toEqual([]);
+    expect(matches(tsx, /lineHeight:\s*(\d*\.\d+)/g)).toEqual([]);
+  });
+});

@@ -449,7 +449,7 @@ export function PanelLeft() {
             </>
           )}
           {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 'var(--lh-body)' }}>
               No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
             </p>
           )}

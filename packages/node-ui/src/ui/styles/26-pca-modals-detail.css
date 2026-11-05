@@ -21,12 +21,12 @@
 }
 .v10-pca-create-balance { font-size: 11px; color: var(--text-secondary); margin: 6px 0 0; }
 .v10-pca-create-err { color: var(--text-danger); }
-.v10-pca-create-hint { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: 1.45; }
+.v10-pca-create-hint { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: var(--lh-body); }
 .v10-pca-create-warn {
   margin: 10px 0 0;
   padding: var(--pad-nested-sm);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: var(--text-warning);
   background: var(--warning-bg);
 }
@@ -36,9 +36,9 @@
 .v10-pca-create-review span { color: var(--text-tertiary); }
 .v10-pca-create-review strong { color: var(--text-primary); }
 .v10-pca-create-owner { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-.v10-pca-create-owner-note { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: 1.45; }
+.v10-pca-create-owner-note { font-size: 11px; color: var(--text-tertiary); margin: 6px 0 0; line-height: var(--lh-body); }
 .v10-pca-create-success-stats { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--text-secondary); margin-bottom: 10px; }
-.v10-pca-create-recon { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+.v10-pca-create-recon { font-size: 12px; color: var(--text-secondary); line-height: var(--lh-body); }
 .v10-pca-create-recon code { word-break: break-all; }
 .v10-pca-create-recon-actions { margin: 8px 0 0; padding-left: 18px; }
 .v10-pca-create-recon-actions li { margin-bottom: 4px; }
@@ -75,7 +75,7 @@
   margin-top: 4px;
   color: var(--text-secondary);
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-owner-key-readiness {
   display: flex;
@@ -96,13 +96,13 @@
 /* ----- S3 Detail (D1) ----- */
 .v10-pca-detail-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle); }
 .v10-pca-detail-section-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin: 0 0 8px; }
-.v10-pca-detail-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin: 6px 0; }
+.v10-pca-detail-hint { font-size: 11px; color: var(--text-tertiary); line-height: var(--lh-body); margin: 6px 0; }
 .v10-pca-detail-subhead { font-size: 11px; font-weight: 600; color: var(--text-secondary); margin: 12px 0 6px; }
 .v10-pca-detail-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
 .v10-pca-detail-form .v10-form-input,
 .v10-pca-detail-form .v10-form-select { max-width: 280px; }
 .v10-pca-detail-form .v10-pca-address-crux { flex: 1; min-width: 240px; }
-.v10-pca-detail-result { font-size: 11px; color: var(--text-success); margin: 8px 0 0; line-height: 1.5; }
+.v10-pca-detail-result { font-size: 11px; color: var(--text-success); margin: 8px 0 0; line-height: var(--lh-body); }
 .v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: 8px; }
 .v10-pca-detail-agentlist + .v10-pca-card-btn,
 .v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn { margin-top: 10px; }

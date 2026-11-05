@@ -752,7 +752,7 @@ describe('Graph visualization CSS', () => {
 
   it('has responsive rules for graph containers', () => {
     expect(css).toContain('@media (max-height: 700px)');
-    expect(css).toContain('@media (max-width: 700px)');
+    expect(css).toContain('@media (max-width: 720px)');
   });
 });
 
@@ -824,7 +824,7 @@ describe.skip('Memory Explorer CSS', () => {
   });
 
   it('has responsive breakpoints', () => {
-    expect(css).toContain('@media (max-width: 700px)');
+    expect(css).toContain('@media (max-width: 720px)');
   });
 
   it('has project home styles', () => {

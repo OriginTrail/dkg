@@ -14,7 +14,7 @@
 .v10-identity-wallet-status {
   margin: 10px 0 0;
   font-size: 11px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 
@@ -103,7 +103,7 @@
 .v10-identity-wallet-card label {
   margin: 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 

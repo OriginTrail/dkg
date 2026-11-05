@@ -35,7 +35,7 @@
 .v10-pca-crux-note {
   margin: 0;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: var(--lh-body);
   color: var(--text-secondary);
 }
 .v10-pca-crux-note strong { color: var(--text-primary); }
@@ -50,7 +50,7 @@
 .v10-pca-crux-help {
   margin: 0;
   font-size: 11px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-pca-crux-help abbr { cursor: help; text-decoration-style: dotted; }
@@ -103,7 +103,7 @@
 .v10-pca-verdict-message {
   margin: 0;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: var(--lh-body);
   color: var(--text-primary);
 }
 .v10-pca-verdict-glyph { margin-right: 6px; }
@@ -148,7 +148,7 @@
 .v10-pca-device-progress-note {
   margin: 4px 0 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-pca-device-progress-list {
@@ -168,7 +168,7 @@
   color: var(--text-secondary);
   min-width: 0;
 }
-.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }
+.v10-pca-device-progress-row > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; line-height: var(--lh-body); }
 .v10-pca-device-progress-row[data-state='active'] { color: var(--text-primary); }
 .v10-pca-device-progress-row[data-state='submitted'] { color: var(--text-warning); }
 .v10-pca-device-progress-row[data-state='confirmed'] { color: var(--text-success); }
@@ -179,7 +179,7 @@
   font-family: var(--font-mono);
   font-size: 10px;
   color: inherit;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-device-progress-tx {
   text-decoration: underline;
@@ -192,7 +192,7 @@
   font-size: 10px;
   min-width: 0;
   overflow-wrap: anywhere;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-device-progress-error {
   grid-column: 2 / -1;
@@ -201,7 +201,7 @@
   max-width: 100%;
   width: 100%;
   overflow-wrap: anywhere;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-pca-device-progress-row[data-state='submitted'] .v10-pca-device-progress-error {
   color: var(--text-warning);
@@ -227,7 +227,7 @@
 }
 .v10-pca-handshake-head { display: flex; flex-direction: column; gap: 2px; }
 .v10-pca-handshake-title { font-size: 12px; font-weight: 700; color: var(--text-primary); }
-.v10-pca-handshake-sub { font-size: 11px; color: var(--text-tertiary); line-height: 1.45; }
+.v10-pca-handshake-sub { font-size: 11px; color: var(--text-tertiary); line-height: var(--lh-body); }
 .v10-pca-handshake-wallets { display: flex; flex-direction: column; gap: 6px; }
 .v10-pca-handshake-copyall {
   align-self: flex-start;

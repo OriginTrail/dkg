@@ -134,7 +134,7 @@
   display: flex; align-items: center; gap: 12px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border-subtle);
-  cursor: pointer; transition: background 0.12s;
+  cursor: pointer; transition: background var(--motion-fast);
 }
 .v10-entity-card:last-child { border-bottom: none; }
 .v10-entity-card:hover { background: var(--bg-hover); }
@@ -173,7 +173,7 @@
 /* ── Item rows (shared by layer views) ── */
 .v10-item-row {
   display: flex; align-items: center; gap: 10px; padding: 8px 16px;
-  border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background 0.1s;
+  border-bottom: 1px solid var(--border-subtle); cursor: pointer; transition: background var(--motion-fast);
 }
 .v10-item-row:hover { background: var(--bg-hover); }
 .v10-item-row.selected { background: var(--bg-active); }
@@ -229,15 +229,15 @@
 .v10-gen-widget-agent-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--role); }
 .v10-gen-widget-dismiss {
   font-size: 14px; color: var(--text-tertiary); padding: 2px 4px; border-radius: var(--radius-xs);
-  transition: all 0.15s; cursor: pointer; border: none; background: none;
+  transition: all var(--motion-base); cursor: pointer; border: none; background: none;
 }
 .v10-gen-widget-dismiss:hover { color: var(--text-secondary); background: var(--bg-hover); }
 .v10-gen-widget-body { padding: 14px; }
-.v10-gen-widget-footnote { padding: 10px 14px; border-top: 1px solid var(--border-subtle); font-size: 10px; color: var(--text-tertiary); line-height: 1.5; }
-.v10-gen-widget.dissolved { opacity: 0.3; filter: blur(1px); pointer-events: none; max-height: 40px; overflow: hidden; transition: all 0.5s; }
+.v10-gen-widget-footnote { padding: 10px 14px; border-top: 1px solid var(--border-subtle); font-size: 10px; color: var(--text-tertiary); line-height: var(--lh-body); }
+.v10-gen-widget.dissolved { opacity: 0.3; filter: blur(1px); pointer-events: none; max-height: 40px; overflow: hidden; transition: all var(--motion-slow); }
 
 /* Decision card widget */
-.v10-decision-context { font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 14px; }
+.v10-decision-context { font-size: 12px; color: var(--text-secondary); line-height: var(--lh-loose); margin-bottom: 14px; }
 .v10-decision-actions { display: flex; gap: 8px; }
 .v10-decision-btn { flex: 1; }
 
@@ -290,7 +290,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  line-height: 1.35;
+  line-height: var(--lh-snug);
   color: var(--text-secondary);
 }
 .v10-graph-expand-btn { flex: 0 0 auto; width: 28px; }

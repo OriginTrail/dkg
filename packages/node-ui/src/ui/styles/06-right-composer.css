@@ -10,7 +10,7 @@
   gap: 8px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  transition: border-color 0.15s;
+  transition: border-color var(--motion-base);
 }
 .v10-local-agent-composer-shell:focus-within {
   border-color: var(--border-strong);
@@ -41,7 +41,7 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--motion-base), color var(--motion-base);
 }
 .v10-composer-attach:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -69,7 +69,7 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: opacity 0.15s, background 0.15s;
+  transition: opacity var(--motion-base), background var(--motion-base);
 }
 .v10-local-agent-inline-send:hover:not(:disabled) {
   opacity: 0.9;
@@ -236,7 +236,7 @@
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background var(--motion-base), color var(--motion-base);
 }
 .v10-attachment-chip-remove:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -253,14 +253,14 @@
 .v10-drop-overlay {
   position: absolute;
   inset: 0;
-  z-index: 50;
+  z-index: var(--z-popover);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 16px;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 80ms ease-out;
+  transition: opacity var(--motion-fast) ease-out;
   background: color-mix(in srgb, var(--bg-root) 60%, transparent);
   backdrop-filter: blur(2px);
   -webkit-backdrop-filter: blur(2px);
@@ -322,7 +322,7 @@
 .v10-local-agent-error {
   padding: var(--pad-nested);
   font-size: 11px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
 }
 .v10-local-agent-notice {
   background: var(--bg-elevated);
@@ -381,7 +381,7 @@
      chat composer is conversational. */
   font-size: 13px;
   font-family: var(--font-sans);
-  line-height: 1.5;
+  line-height: var(--lh-body);
   min-width: 0;
   resize: none;
 }

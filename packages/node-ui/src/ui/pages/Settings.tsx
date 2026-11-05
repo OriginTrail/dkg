@@ -112,14 +112,14 @@ function NetworkTelemetrySection() {
     <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Network telemetry</h2></div>
       <div className="card-body">
-        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 'var(--lh-loose)' }}>
           Local metrics are stored in SQLite and displayed in the Observability page.
         </div>
 
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' }}>
           <div>
             <div style={{ fontSize: 12, fontWeight: 600 }}>Share telemetry with the network</div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, lineHeight: 'var(--lh-body)' }}>
               When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
             </div>
           </div>
@@ -141,7 +141,7 @@ function NetworkTelemetrySection() {
 
       {showConsentModal && (
         <div style={{
-          position: 'fixed', inset: 0, zIndex: 9999,
+          position: 'fixed', inset: 0, zIndex: 'var(--z-modal)',
           background: 'var(--scrim)', display: 'flex',
           alignItems: 'center', justifyContent: 'center',
         }}>
@@ -159,24 +159,24 @@ function NetworkTelemetrySection() {
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>
               Enable Telemetry Streaming?
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 'var(--lh-loose)', marginBottom: 12 }}>
               When enabled, the following data is streamed to the OriginTrail team:
             </div>
-            <ul style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 14px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 12, color: 'var(--text)', lineHeight: 'var(--lh-loose)', margin: '0 0 14px 18px', padding: 0 }}>
               <li>Operation logs (publish, query, sync, gossip events)</li>
               <li>Performance metrics (durations, throughput, error rates)</li>
               <li>Node identity (peer ID, node name, network)</li>
             </ul>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
-              The following data is <strong style={{ color: 'var(--text-primary)' }}>NEVER</strong> shared via telemetry:
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 'var(--lh-loose)', marginBottom: 12 }}>
+              The following data is <strong style={{ color: 'var(--text)' }}>NEVER</strong> shared via telemetry:
             </div>
-            <ul style={{ fontSize: 12, color: 'var(--text-primary)', lineHeight: 1.8, margin: '0 0 16px 18px', padding: 0 }}>
+            <ul style={{ fontSize: 12, color: 'var(--text)', lineHeight: 'var(--lh-loose)', margin: '0 0 16px 18px', padding: 0 }}>
               <li>Private keys or wallet credentials</li>
               <li>Authentication tokens or API keys</li>
               <li>Private triple content or personal data</li>
               <li>File system paths or environment variables</li>
             </ul>
-            <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 20, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 20, lineHeight: 'var(--lh-body)' }}>
               You can disable streaming at any time from this page.
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
@@ -308,7 +308,7 @@ function LocalDataRetentionSection() {
             <div style={{ fontSize: 11, color: 'var(--text-warning)', fontWeight: 600, marginBottom: 4 }}>
               Reduce retention to {pendingRetention} days?
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 8 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 'var(--lh-body)', marginBottom: 8 }}>
               Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
             </div>
             <div style={{ display: 'flex', gap: 8 }}>

@@ -39,7 +39,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-menu);
-  z-index: 200;
+  z-index: var(--z-popover);
   overflow: hidden;
   padding: 4px;
 }
@@ -71,7 +71,7 @@
   color: var(--text-primary);
   border-radius: var(--radius-xs);
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-agent-tab-menu-item:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -107,7 +107,7 @@
   color: var(--text-primary);
   font-family: inherit;
   cursor: pointer;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color var(--motion-base), background var(--motion-base);
   text-align: left;
 }
 .v10-select-trigger:hover:not(:disabled) {
@@ -139,7 +139,7 @@
   flex-shrink: 0;
   font-size: 10px;
   color: var(--text-tertiary);
-  transition: transform 0.15s;
+  transition: transform var(--motion-base);
 }
 .v10-select.open .v10-select-caret {
   transform: rotate(180deg);
@@ -153,7 +153,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-menu);
-  z-index: 1000;
+  z-index: var(--z-floating);
 }
 .v10-select-menu:focus { outline: none; }
 .v10-select-menu-above {
@@ -229,7 +229,7 @@
   box-shadow: var(--shadow-menu);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 150ms ease-out, background 0.15s, color 0.15s;
+  transition: opacity var(--motion-base) ease-out, background var(--motion-base), color var(--motion-base);
   z-index: 5;
   /* Negative top margin so the pill overlays the previous message instead
      of forcing extra vertical space when invisible. */
@@ -262,7 +262,7 @@
      assistant turns full-width with no bubble. Colour/contrast (AA per
      Task #68) is unchanged; only visibility toggles. */
   opacity: 0;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--motion-fast) ease-out;
 }
 .v10-chat-msg:hover .v10-local-agent-msg-time,
 .v10-chat-msg:focus-within .v10-local-agent-msg-time {
@@ -285,7 +285,7 @@
 .v10-local-agent-warning {
   padding: var(--pad-nested);
   font-size: 11px;
-  line-height: 1.55;
+  line-height: var(--lh-body);
   border: 1px solid var(--border-default);
 }
 .v10-local-agent-warning.connecting {
@@ -301,7 +301,7 @@
 .v10-local-agent-copy {
   font-size: 12px;
   color: var(--text-secondary);
-  line-height: 1.55;
+  line-height: var(--lh-body);
 }
 .v10-local-agent-target-label {
   font-size: 11px;

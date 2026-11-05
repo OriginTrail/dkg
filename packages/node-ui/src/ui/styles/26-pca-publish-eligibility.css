@@ -12,7 +12,7 @@
 .v10-pca-alert-row[data-severity='danger'] { border-left-color: var(--text-danger); }
 .v10-pca-alert-row[data-severity='warn'] { border-left-color: var(--text-warning); }
 .v10-pca-alert-title { font-size: 12px; font-weight: 600; color: var(--text-primary); }
-.v10-pca-alert-msg { font-size: 11px; color: var(--text-secondary); line-height: 1.45; margin-top: 2px; }
+.v10-pca-alert-msg { font-size: 11px; color: var(--text-secondary); line-height: var(--lh-body); margin-top: 2px; }
 .v10-pca-alert-action {
   text-decoration: underline;
   text-decoration-color: var(--link-underline);

@@ -198,7 +198,7 @@
   margin-top: 3px;
   color: var(--text-secondary);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
 }
 .v10-po-pipeline-track {
   display: flex;
@@ -269,12 +269,12 @@
   color: var(--text-primary);
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.25;
+  line-height: var(--lh-tight);
 }
 .v10-po-pipeline-step-desc {
   color: var(--text-tertiary);
   font-size: 11px;
-  line-height: 1.3;
+  line-height: var(--lh-snug);
 }
 .v10-po-pipeline-step-count {
   flex: 0 0 auto;

@@ -44,7 +44,7 @@
   font-weight: 500;
   text-align: left;
   color: var(--text-secondary);
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-tree-dashboard:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-tree-dashboard.active { background: var(--bg-active); color: var(--text-primary); }
@@ -63,7 +63,7 @@
   padding: 4px 12px;
   gap: 8px;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
   user-select: none;
 }
 .v10-tree-section-header:hover { background: var(--bg-hover); }
@@ -114,7 +114,7 @@
   font-size: 12px; font-family: var(--font-sans);
   cursor: pointer;
   text-align: center;
-  transition: border-color 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), color var(--motion-base);
 }
 .v10-tree-show-hidden:hover {
   border-color: var(--border-strong);
@@ -127,7 +127,7 @@
   padding: 3px 12px 3px 38px;
   gap: 8px;
   cursor: pointer;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -154,7 +154,7 @@
 }
 .v10-journey-empty-card > button { margin-top: 8px; }
 .v10-jec-title { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
-.v10-jec-hint { font-size: 11px; color: var(--text-tertiary); line-height: 1.5; margin-bottom: 10px; }
+.v10-jec-hint { font-size: 11px; color: var(--text-tertiary); line-height: var(--lh-body); margin-bottom: 10px; }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 
@@ -215,7 +215,7 @@
   white-space: nowrap;
   flex-shrink: 0;
   cursor: pointer;
-  transition: color .12s, background-color .12s;
+  transition: color var(--motion-fast), background-color var(--motion-fast);
 }
 .v10-center-tab:hover { color: var(--text-secondary); background: var(--bg-surface); }
 .v10-center-tab.active { color: var(--text-primary); background: var(--bg-root); border-bottom-color: var(--text-primary); }
@@ -237,7 +237,7 @@
   opacity: 1;
   visibility: hidden;
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: opacity var(--motion-base);
 }
 .v10-center-tab:hover .v10-center-tab-close,
 .v10-center-tab.active .v10-center-tab-close,
@@ -263,7 +263,7 @@
 .v10-center-tabs-count { font-size: var(--fs-micro); font-weight: 600; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
 .v10-tab-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: var(--z-floating);
   min-width: 240px;
   max-width: 340px;
   max-height: min(70vh, 520px);

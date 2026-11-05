@@ -13,7 +13,7 @@
 .v10-pca-card-summary {
   margin: 10px 0 0;
   font-size: 12px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-secondary);
 }
 .v10-pca-overview-wallet {
@@ -83,13 +83,13 @@
   flex-wrap: wrap;
   margin: 8px 0;
   font-size: 11px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-pca-create-success {
   margin: 0;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: var(--lh-body);
   color: var(--text-secondary);
 }
 .v10-pca-handshake-copyall {
@@ -170,7 +170,7 @@
   background: var(--tint-subtle);
   color: var(--text-secondary);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: var(--lh-snug);
 }
 .v10-pca-node-picker-selected strong {
   color: var(--text-primary);

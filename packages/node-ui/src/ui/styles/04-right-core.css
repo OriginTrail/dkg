@@ -66,7 +66,7 @@
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  transition: color 0.15s;
+  transition: color var(--motion-base);
 }
 .v10-peer-group-header:hover {
   color: var(--text-primary);
@@ -76,7 +76,7 @@
 }
 .v10-peer-group-chevron {
   flex-shrink: 0;
-  transition: transform 0.15s;
+  transition: transform var(--motion-base);
 }
 .v10-peer-group-chevron.expanded {
   transform: rotate(90deg);
@@ -151,7 +151,7 @@
   font-size: 12px;
   font-weight: 500;
   white-space: nowrap;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  transition: background var(--motion-base), color var(--motion-base), border-color var(--motion-base);
 }
 .v10-agent-subtab:hover {
   background: var(--bg-hover);
@@ -177,7 +177,7 @@
 .v10-agent-card {
   padding: var(--pad-nested); margin-bottom: 4px;
   border: 1px solid var(--border-subtle); background: var(--bg-surface);
-  transition: background 0.15s;
+  transition: background var(--motion-base);
 }
 .v10-agent-card:hover { background: var(--bg-elevated); }
 .v10-agent-card.self { border-color: var(--role); border-left: 3px solid var(--role); }
@@ -226,7 +226,7 @@
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: 10px;
-  line-height: 1.4;
+  line-height: var(--lh-snug);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-peer-chip-label {
@@ -301,7 +301,7 @@
   margin-top: 4px;
   font-size: 11px;
   color: var(--text-tertiary);
-  line-height: 1.5;
+  line-height: var(--lh-body);
 }
 .v10-local-agent-chat-shell > .v10-local-agent-notice,
 .v10-local-agent-chat-shell > .v10-local-agent-error,

@@ -62,21 +62,21 @@
 .v10-wallet-note {
   margin: 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
   max-width: 520px;
 }
 .v10-wallet-error {
   margin: 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-danger);
 }
 .v10-wallet-picker {
   position: absolute;
   top: 34px;
   left: 0;
-  z-index: 35;
+  z-index: var(--z-popover);
   width: min(320px, 90vw);
   padding: var(--pad-nested-sm);
   border: 1px solid var(--border-strong);
@@ -106,7 +106,7 @@
 .v10-wallet-picker-empty {
   margin: 0;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-tertiary);
 }
 .v10-wallet-pill-wrap {
@@ -143,7 +143,7 @@
   gap: 8px;
   flex-wrap: wrap;
   font-size: 11px;
-  line-height: 1.45;
+  line-height: var(--lh-body);
   color: var(--text-warning);
 }
 .v10-wallet-pill-link {

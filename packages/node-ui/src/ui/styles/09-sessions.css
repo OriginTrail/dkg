@@ -8,7 +8,7 @@
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
   text-align: left;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-session-item:hover { background: var(--bg-hover); }
 .v10-session-preview {

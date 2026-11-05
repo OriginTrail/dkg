@@ -57,7 +57,7 @@
   font-size: 11px; color: var(--text-secondary);
   font-family: var(--font-sans);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all var(--motion-base);
 }
 .v10-subgraph-savedquery:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .v10-subgraph-savedquery.active {
@@ -156,7 +156,7 @@
   font-size: 12px; color: var(--text-secondary);
   font-family: var(--font-sans);
   text-align: left; cursor: pointer;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  transition: border-color var(--motion-base), background var(--motion-base), color var(--motion-base);
 }
 .v10-subgraph-timeline-item:hover {
   border-color: var(--border-strong);

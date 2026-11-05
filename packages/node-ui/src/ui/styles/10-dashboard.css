@@ -27,7 +27,7 @@
   padding: var(--pad-card);
   /* Same hover lift/glow as the stat cards so the lower panels feel
      part of the same surface family (round-2 feedback). */
-  transition: border-color .15s, box-shadow .15s;
+  transition: border-color var(--motion-base), box-shadow var(--motion-base);
 }
 .v10-dash-section:hover {
   border-color: var(--border-strong);
@@ -58,7 +58,7 @@
 
 /* Curator/Joined split bar in the My Context Graphs card — same
    spacing rhythm as the Size card's metric → bar → legend stack. */
-.v10-cg-rolesplit { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; transition: opacity 0.12s; }
+.v10-cg-rolesplit { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 2px; transition: opacity var(--motion-fast); }
 /* Identity refetch in flight: signal the split is not authoritative
    right now without flickering it away (the underlying data may still
    be correct after the refetch). */
@@ -81,7 +81,7 @@
   font-size: 26px;
   font-weight: 700;
   color: var(--text-primary);
-  line-height: 1.1;
+  line-height: var(--lh-tight);
   font-variant-numeric: tabular-nums;
 }
 .v10-cg-size-num .v10-cg-dim { font-size: 12px; }
@@ -103,7 +103,7 @@
   font-weight: 400;
   color: var(--text-secondary);
   font-style: italic;
-  line-height: 1.4;
+  line-height: var(--lh-snug);
   padding: 6px 0;
 }
 /* Empty placeholder ("—") for the same value slot. Same sizing as the
@@ -116,7 +116,7 @@
   font-size: 13px;
   font-weight: 400;
   color: var(--text-secondary);
-  line-height: 1.4;
+  line-height: var(--lh-snug);
   padding: 6px 0;
 }
 /* Track background + 1px gap between segments shows the track colour as
@@ -174,7 +174,7 @@
   padding: 7px 8px;
   border-bottom: 1px solid var(--border-subtle);
   background: none;
-  transition: background 0.12s;
+  transition: background var(--motion-fast);
 }
 .v10-cg-row:last-child { border-bottom: 0; }
 .v10-cg-row:hover { background: var(--bg-hover); }

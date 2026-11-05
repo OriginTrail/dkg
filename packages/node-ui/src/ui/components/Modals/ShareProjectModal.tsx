@@ -358,7 +358,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                   <div style={{ position: 'relative' }}>
                     <pre style={{
                       background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 11, lineHeight: 1.6,
+                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 11, lineHeight: 'var(--lh-loose)',
                       fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
                       overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                     }}>

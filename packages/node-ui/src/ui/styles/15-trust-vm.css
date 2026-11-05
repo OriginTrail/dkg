@@ -4,7 +4,7 @@
 @media (max-height: 700px) {
   .v10-mlv-graph-container { height: 350px; min-height: 300px; }
 }
-@media (max-width: 700px) {
+@media (max-width: 720px) {
   .v10-mlv-node-panel { width: 200px; max-height: 200px; }
 }
 
@@ -134,14 +134,14 @@
 .v10-vm-hero-badge { flex: 0 0 auto; }
 .v10-vm-hero-headline {
   font-size: 14px;
-  line-height: 1.35;
+  line-height: var(--lh-snug);
   color: var(--text-primary);
   font-weight: 650;
 }
 .v10-vm-hero-context {
   max-width: 100%;
   font-size: 12px;
-  line-height: 1.35;
+  line-height: var(--lh-snug);
   color: var(--text-tertiary);
   overflow-wrap: anywhere;
 }
@@ -217,7 +217,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  line-height: 1.3;
+  line-height: var(--lh-snug);
 }
 .v10-vm-legend-head {
   font-size: 10px;
@@ -277,7 +277,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  line-height: 1.3;
+  line-height: var(--lh-snug);
 }
 .v10-swm-legend-head {
   font-size: 10px;

@@ -15,7 +15,7 @@ html, body, #root {
      prevent the very largest surfaces (stat hero numbers, dashboard
      title) from ballooning. */
   font-size: 14px;
-  line-height: 1.5;
+  line-height: var(--lh-body);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
 }

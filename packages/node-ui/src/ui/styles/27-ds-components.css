@@ -130,7 +130,7 @@
   text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color .12s, border-color .12s, color .12s;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
 }
 .ds-btn:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -250,7 +250,7 @@
   text-transform: none;
   white-space: nowrap;
   cursor: pointer;
-  transition: color .12s, border-color .12s;
+  transition: color var(--motion-fast), border-color var(--motion-fast);
 }
 .ds-tab:hover {
   color: var(--text-secondary);
@@ -298,7 +298,7 @@
   text-transform: none;
   white-space: nowrap;
   cursor: pointer;
-  transition: color .12s, background-color .12s;
+  transition: color var(--motion-fast), background-color var(--motion-fast);
 }
 .ds-seg-item:hover { color: var(--text-primary); }
 .ds-seg-item.active, .ds-seg-item[aria-pressed="true"] {
@@ -332,7 +332,7 @@
   text-transform: none;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color .12s, border-color .12s, color .12s;
+  transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
 }
 .ds-filter.ds-sm { height: var(--h-control-sm); padding: 0 8px; font-size: var(--fs-label); }
 .ds-filter:hover {
@@ -373,7 +373,7 @@
 }
 .ds-entity-chip-name { overflow: hidden; text-overflow: ellipsis; }
 .ds-entity-chip .v10-cg-mark { width: 18px; height: 18px; border-radius: var(--radius-xs); font-size: 10px; }
-.ds-entity-chip.interactive { cursor: pointer; transition: background-color .12s, border-color .12s; }
+.ds-entity-chip.interactive { cursor: pointer; transition: background-color var(--motion-fast), border-color var(--motion-fast); }
 .ds-entity-chip.interactive:hover { background: var(--bg-hover); border-color: var(--border-strong); }
 .ds-entity-chip.interactive:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 
@@ -428,14 +428,14 @@ body.light .ds-seg-item.active {
 .ds-toggle {
   position: relative; flex-shrink: 0; width: 40px; height: var(--h-control-sm); padding: 0;
   border: 0; border-radius: var(--radius-pill); background: var(--border-control);
-  cursor: pointer; transition: background .15s;
+  cursor: pointer; transition: background var(--motion-base);
 }
 .ds-toggle[aria-checked="true"] { background: var(--accent-primary); }
 .ds-toggle[aria-busy="true"] { opacity: .6; cursor: wait; }
 .ds-toggle:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .ds-toggle-knob {
   position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%;
-  background: var(--bg-surface); transition: left .15s;
+  background: var(--bg-surface); transition: left var(--motion-base);
 }
 .ds-toggle[aria-checked="true"] .ds-toggle-knob { left: 19px; }
 
@@ -448,7 +448,7 @@ body.light .ds-seg-item.active {
 }
 
 .ds-skip-link {
-  position: fixed; top: 8px; left: 8px; z-index: 10000;
+  position: fixed; top: 8px; left: 8px; z-index: var(--z-skip);
   height: var(--h-control-md); padding: 0 14px;
   border: 1px solid var(--border-default); border-radius: var(--radius-control);
   background: var(--bg-surface); color: var(--text-primary); font-size: var(--fs-control);
