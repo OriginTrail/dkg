@@ -226,12 +226,14 @@ function buildDeduplicatedGraphPattern(
   const plan = analyzeDedupPattern(scope);
   if (!plan) return null;
   const { openEnd, close } = scope.where!;
-  const { uniqueMappings, impureFilters } = plan;
-  // Every visible mapping occurs once per graph; ASK also only needs one match.
-  // DISTINCT removes mirrors before the caller's projection without erasing its bag multiplicity.
-  const distinct = scope.operation === 'ASK' || uniqueMappings;
-  const movedFilters = distinct ? [] : impureFilters;
-  // Only the aggregate route repeats its pattern. Move volatile FILTERs after it,
+  const { uniqueMappings, filters } = plan;
+  // Only an unmodified ASK ignores multiplicity. OFFSET and aggregate
+  // modifiers must see the selected graph's complete row bag.
+  const plainAsk = scope.operation === 'ASK'
+    && scope.where!.closingTokenIndex === scope.prepared.tokens.length - 1;
+  const distinct = uniqueMappings || plainAsk;
+  const movedFilters = distinct ? [] : filters;
+  // Only the aggregate route repeats its pattern. Move every supported FILTER after it,
   // leaving no-op separators behind, so each result row is tested exactly once.
   let inner = '';
   let from = openEnd;

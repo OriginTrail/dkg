@@ -186,6 +186,43 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
       .toEqual([{ s: 'urn:s:5' }]);
   });
 
+  describe.each(['values', 'dataset'])('modifiers and FILTERs through %s graph access', (mode) => {
+    const pattern = `?s <${LINK}>${mode === 'dataset' ? '+' : ''}/<${TO}> ?o`;
+    const planned = (source: string) => {
+      const result = mode === 'values' ? wrapWithDeduplicatedGraphValues(scope(source), graphs)
+        : rewriteGraphSet(scope(source), graphs, 'deduplicated-values-union', null);
+      if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+      return materializePreparedSparql(result.value.prepared);
+    };
+    const read = async (source: string) => (await store.query(planned(source))).bindings;
+    it.each([0, 1, 2])('preserves hidden-path multiplicity for ASK OFFSET %s', async (offset) => {
+      const rewritten = planned(`ASK WHERE {
+        ${pattern} FILTER(?s = <urn:s:4>)
+      } OFFSET ${offset}`);
+      // Blazegraph rejects native ASK OFFSET syntax. Execute the ASK planner's
+      // exact pattern as SELECT there, checking the bag consumed by OFFSET.
+      const result = await store.query(endpoint ? rewritten.replace(/^ASK/, 'SELECT *') : rewritten);
+      // The first graph contributes two rows; its one-row mirror adds none.
+      if (endpoint) expect(result.bindings).toHaveLength(Math.max(0, 2 - offset));
+      else expect(result).toMatchObject({ type: 'boolean', value: offset < 2 });
+    });
+
+    it.each<[string, Record<string, string>[]]>([
+      ['REGEX(STR(?o), "t")', HOPS.filter(row => row.o === '"t"')],
+      ['COALESCE(?o = "t", false)', HOPS.filter(row => row.o === '"t"')],
+      ['!BOUND(?missing)', HOPS],
+      ['IF(?o = "t", true, 1/0)', HOPS.filter(row => row.o === '"t"')],
+      ['?o = 1/0', rows()],
+      ['?missing = "absent"', rows()],
+      ['RAND() < 2', HOPS],
+      ['RAND() < 0', rows()],
+    ])('preserves the exact repeated-row bag for FILTER(%s)', async (filter, expected) => {
+      expect(bag(await read(`SELECT ?s ?o WHERE { ${pattern} FILTER(${filter}) }`)))
+        .toEqual(bag(expected));
+    });
+
+  });
+
   it.each([
     [`ASK WHERE { ${JOIN} }`, true],
     [`ASK WHERE { ?s <${LINK}>/<${TO}> ?o }`, true],
