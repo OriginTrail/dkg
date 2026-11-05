@@ -22,10 +22,18 @@ export function bindCallerGraphsBeforeRead(
       throw new ScopedQueryViolationError('unable to bind caller GRAPH before evaluation');
     }
     const variable = scope.source.slice(tokens[target.targetTokenIndex].start, tokens[target.targetTokenIndex].end);
+    const first = tokens[opening + 1];
+    const directSubquery = first?.kind === 'word' && first.upper === 'SELECT';
     // Even an OPTIONAL barrier loses GRAPH ?g on Blazegraph's repeated
     // alternative paths. Constant targets retain it. Bind the caller's variable
     // inside each graph so its FILTERs and SELECT * retain the same bindings.
-    const branches = allowed.map(graph => `{ GRAPH ${graph} { VALUES ${variable} { ${graph} } ${branchSource(tokens[opening].end, tokens[closing].start)} } }`);
+    const branches = allowed.map(graph => {
+      const inner = branchSource(tokens[opening].end, tokens[closing].start);
+      // A direct SELECT is the group's entire grammar alternative. Preserve
+      // that boundary before adding a sibling VALUES graph pattern.
+      const pattern = directSubquery ? `{ ${inner} }` : inner;
+      return `{ GRAPH ${graph} { VALUES ${variable} { ${graph} } ${pattern} } }`;
+    });
     source += scope.source.slice(from, start) + `{ ${branches.join(' UNION ')} }`;
     from = tokens[closing].end;
   }

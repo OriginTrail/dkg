@@ -281,6 +281,20 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
     }
   });
 
+  it.each(['SELECT', String.raw`S\u0045LECT`])('preserves a direct %s subquery inside caller GRAPH on unknown engines', async (keyword) => {
+    const result = rewriteGraphSet(scope(`SELECT ?g ?s WHERE { GRAPH ?g {
+      # The direct subquery must remain a group beside the generated VALUES.
+      ${keyword} ?s WHERE { ?s <${A}>+ ?o FILTER(?o = "x") }
+    } }`), graphs, 'values-union', null);
+    if (result.kind !== 'ready') throw new Error(`Unexpected fallback: ${result.reason}`);
+    const found = (await store.query(materializePreparedSparql(result.value.prepared))).bindings;
+    expect(bag(found)).toEqual(bag([
+      { g: graphs[0], s: 'urn:s:1' }, { g: graphs[0], s: 'urn:s:2' },
+      { g: graphs[1], s: 'urn:s:1' }, { g: graphs[1], s: 'urn:s:3' },
+      { g: graphs[2], s: 'urn:s:3' },
+    ]));
+  });
+
   it.each([
     [`ASK WHERE { ${JOIN} }`, true],
     [`ASK WHERE { ?s <${LINK}>/<${TO}> ?o }`, true],
