@@ -1,3 +1,5 @@
+import { createElement, type ReactNode } from 'react';
+import { LayerGlyph } from '../../components/ds/Badge.js';
 import type { TrustLevel } from '../../hooks/useMemoryEntities.js';
 
 // ─── Shared layer configuration ─────────────────────────────
@@ -5,28 +7,28 @@ import type { TrustLevel } from '../../hooks/useMemoryEntities.js';
 // here: DOM code uses LAYER_VAR[trustLevel] (CSS variables follow the theme);
 // canvas code uses the explicit GraphPalette (../../graph-palette.ts).
 export const LAYER_CONFIG: Record<'wm' | 'swm' | 'vm', {
-  icon: string;
+  icon: ReactNode;
   title: string;
   desc: string;
   trustLabel: string;
   trustLevel: TrustLevel;
 }> = {
   wm: {
-    icon: '◇',
+    icon: createElement(LayerGlyph, { layer: 'wm' }),
     title: 'Working Memory',
     desc: 'Private agent scratchpad — ephemeral, fast local storage',
     trustLabel: 'Working',
     trustLevel: 'working',
   },
   swm: {
-    icon: '◈',
+    icon: createElement(LayerGlyph, { layer: 'swm' }),
     title: 'Shared Working Memory',
     desc: 'Team workspace — shared proposals, TTL-bounded',
     trustLabel: 'Shared',
     trustLevel: 'shared',
   },
   vm: {
-    icon: '◉',
+    icon: createElement(LayerGlyph, { layer: 'vm' }),
     title: 'Verifiable Memory',
     desc: 'Endorsed, published, on-chain knowledge',
     trustLabel: 'Verifiable',

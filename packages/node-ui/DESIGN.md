@@ -12,7 +12,7 @@ The rules behind the node UI's look and behaviour. The values live in code; this
 
 1. **Dark first.** Most operators use dark mode. Design and review in dark, then check light. Every colour token has a value for both.
 2. **One hue, one job.** A colour means one thing everywhere. If something needs to stand out and has no job of its own, use contrast and weight, not a new colour.
-3. **The shape says what it is.** Facts are pills, things you click are rectangles, things you open carry a mark (tile or avatar).
+3. **The shape says what it is.** Facts are pills, a status is an icon and text with no box, things you click are rectangles, things you open carry a mark (tile or avatar).
 4. **Use the scale.** Corners, heights and type sizes come from the tokens. A value that isn't on the scale is either a new rule (add it here and to the tokens) or a mistake.
 5. **Make the complex readable.** Show the state that matters (which layer, who wrote it, does it need me) before the details.
 
@@ -23,7 +23,7 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Job | Tokens | Rule |
 |---|---|---|
 | Surfaces | `--bg-root` → `--bg-panel` → `--bg-surface` → `--bg-elevated` → `--bg-hover` → `--bg-active` | Each step is one level closer to the user. Don't skip levels for emphasis. |
-| Borders | `--border-subtle`, `--border-default`, `--border-strong`, `--border-prominent` | Default for outlines; strong for hover and selected; prominent only where 3:1 against any surface is needed. |
+| Borders | `--border-subtle`, `--border-default`, `--border-strong`, `--border-prominent`, `--border-control` | Default for outlines; strong for hover and selected; prominent only where 3:1 against any surface is needed. |
 | Text | `--text-primary`, `--text-secondary`, `--text-tertiary` | Primary for what you read first, secondary for body text, tertiary for metadata. `--text-ghost` is decoration only, never readable text. |
 | Memory layers | `--layer-working`, `--layer-shared`, `--layer-verified`, each with `-text`, `-bg`, `-border` | Reserved for the three memory layers: slate for Working, OriginTrail cyan for Shared, OriginTrail purple for Verifiable. Nothing else uses these hues. The canvas (graph-viz) reads the same values from `layer-colors.ts`. |
 | Signals | `--text-success`, `--text-warning`, `--text-danger` (+ `--accent-green/amber/red` for non-text) | State only: done, needs attention, failed. Amber means "needs your action" (unread, pending requests). Red means an error, never a count. |
@@ -107,8 +107,8 @@ Sizes `sm` 24, `md` 32 (default), `lg` 40. `icon` makes it square; an icon-only 
 
 A badge states a fact (status, role, type, layer). It is never the click target.
 
-- `<Badge tone>`: `neutral` (default), `muted`, `success`, `warning`, `danger`, `role`, `kind` (entity types: neutral pill with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
-- `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (◇ Working, ◈ Shared, ◉ Verifiable).
+- `<Badge tone>`: `success`, `warning` and `danger` draw as a status (icon and text, no box, as in nOS). `neutral` (default), `muted`, `role`, `kind` (entity types: neutral pill with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
+- `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 11.5px text. `LayerGlyph` draws the glyph on its own.
 - `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips.
 - The notification count sits on the bell's corner, never over the glyph, and the bell brightens while anything is unread.
 

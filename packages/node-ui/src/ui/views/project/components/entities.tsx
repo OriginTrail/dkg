@@ -10,6 +10,7 @@ import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
 import { LAYER_VAR } from '../../../layer-colors.js';
+import { LayerGlyph } from '../../../components/ds/Badge.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { LayerGraphPanel } from './graph.js';
@@ -22,10 +23,10 @@ export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
 
-const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: string; label: string }> = {
-  working:  { layerKey: 'wm',  icon: '◇', label: 'Working'  },
-  shared:   { layerKey: 'swm', icon: '◈', label: 'Shared'   },
-  verified: { layerKey: 'vm',  icon: '◉', label: 'Verifiable' },
+const TRUST_BADGE_CONFIG: Record<TrustLevel, { layerKey: 'wm' | 'swm' | 'vm'; icon: ReactNode; label: string }> = {
+  working:  { layerKey: 'wm',  icon: <LayerGlyph layer="wm" />, label: 'Working'  },
+  shared:   { layerKey: 'swm', icon: <LayerGlyph layer="swm" />, label: 'Shared'   },
+  verified: { layerKey: 'vm',  icon: <LayerGlyph layer="vm" />, label: 'Verifiable' },
 };
 
 const QUERY_CATALOG_CONFIGURATION_TYPES = new Set([
@@ -52,7 +53,7 @@ export function EntityList({
 }: {
   entities: MemoryEntity[];
   layerKey: 'wm' | 'swm' | 'vm';
-  layerIcon: string;
+  layerIcon: ReactNode;
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   /** Skip the internal triple-count sort — caller already ordered `entities`. */

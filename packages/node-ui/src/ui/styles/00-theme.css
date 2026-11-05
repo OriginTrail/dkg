@@ -18,6 +18,8 @@
      surface (used by the inline-code chip, which can land on user bubbles
      whose bg is identical to a chip fill). */
   --border-prominent: #888888;
+  /* The edge of an outlined control: clears 3:1 on every surface. */
+  --border-control: #646464;
 
   /* Text — dark mode. Round-3 nudge 2026-05-20 (PR8): user feedback on
      the live state was "almost there but still could be a bit better."
@@ -64,7 +66,7 @@
      Canvas code (graph-viz) reads the same values from layer-colors.ts. */
   --layer-working: #94a3b8;
   --layer-working-text: #cbd5e1;
-  --layer-working-bg: #1a1e25;
+  --layer-working-bg: #262c35;
   --layer-working-border: #64748b;
   --layer-shared: #1aded7;
   --layer-shared-text: #1aded7;
@@ -158,6 +160,7 @@
   --border-default: #d4d4d4;
   --border-strong: #a3a3a3;
   --border-prominent: #525252;
+  --border-control: #8a8a8a;
   --text-primary: #171717;
   /* Light secondary round-3 nudge: #525252 → #444444. Same rationale
      as the dark-mode bump — single targeted step on the tier that
@@ -189,11 +192,11 @@
   --layer-working: #526173;
   --layer-working-text: #3f4c5c;
   --layer-working-bg: #e6eaef;
-  --layer-working-border: #a9b4c2;
+  --layer-working-border: #8796aa;
   --layer-shared: #0f9c96;
   --layer-shared-text: #0b6e6a;
   --layer-shared-bg: #ddf6f5;
-  --layer-shared-border: #4fb8b2;
+  --layer-shared-border: #2f9d97;
   --layer-verified: #6344df;
   --layer-verified-text: #4a2fb8;
   --layer-verified-bg: #eeebfc;
@@ -290,6 +293,7 @@
   --h-control-lg: 40px;
   --fs-micro: 10px;
   --fs-label: 11px;
+  --fs-layer: 11.5px;
   --fs-control: 12px;
   --fs-body: 13px;
   --fs-title: 15px;

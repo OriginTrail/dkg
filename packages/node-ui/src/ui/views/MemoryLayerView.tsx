@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
+import { LayerGlyph } from '../components/ds/Badge.js';
 import { useFetch } from '../hooks.js';
 import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
@@ -26,10 +27,10 @@ const OnChainProvenanceCard = lazy(() =>
 type MemoryLayer = 'wm' | 'swm' | 'vm';
 type ViewMode = 'table' | 'graph';
 
-const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: string; description: string }> = {
-  wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: '◇', description: 'Private agent drafts. Fast local storage.' },
-  swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: '◈', description: 'Shared proposals with collaborators. TTL-bounded.' },
-  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: '◉', description: 'Endorsed, published, on-chain knowledge.' },
+const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: React.ReactNode; description: string }> = {
+  wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: <LayerGlyph layer="wm" />, description: 'Private agent drafts. Fast local storage.' },
+  swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: <LayerGlyph layer="swm" />, description: 'Shared proposals with collaborators. TTL-bounded.' },
+  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: <LayerGlyph layer="vm" />, description: 'Endorsed, published, on-chain knowledge.' },
 };
 
 const TABLE_ICON = (
