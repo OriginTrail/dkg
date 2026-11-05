@@ -130,6 +130,7 @@ A leading mark says "this opens":
 ### Small screens
 
 - Under 860px the side panels float over the page: both start closed, one opens at a time, and a tap outside closes it.
+- The header keeps OriginTrail in view: the full wordmark on wide screens, the mark beside DKG under 860px. Under 600px, Connected shows as its icon and the peer count; other statuses keep their word.
 - Tables go inside `.ds-table-scroll` so they scroll within their card. Wide tables add `.ds-table-pin` to keep the first column in view.
 - A view that must stack when side panels leave it little room uses `.v10-center-content[data-narrow]`, set below 560px of content width.
 

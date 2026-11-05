@@ -313,7 +313,7 @@ describe('header node status', () => {
   });
 
   it('draws the status with the shared Badge', () => {
-    expect(header).toContain('<Badge tone={nodeState.tone}>{nodeState.word}</Badge>');
+    expect(header).toContain('<Badge tone={nodeState.tone}>');
   });
 });
 

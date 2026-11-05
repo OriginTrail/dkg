@@ -85,6 +85,7 @@
   color: var(--text-primary);
   user-select: none;
 }
+.v10-header-ot-mark { display: none; flex: none; color: var(--text-primary); line-height: 0; }
 .v10-header-logo-ot {
   display: flex;
   align-items: center;
@@ -415,12 +416,26 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
     flex: 1 1 100% !important;
     min-width: 0;
   }
+  /* The OriginTrail mark stands in for the wordmark, so the brand stays in view. */
+  .v10-header-ot-mark { display: inline-flex; }
+  .v10-header-logo-ot,
+  .v10-header-logo-version,
+  .v10-header-agent-addr { display: none; }
+  .v10-header-meta { margin-right: 8px; }
+  .v10-header-actions { flex: none; }
 }
 @media (max-width: 600px) {
-  .v10-header {
-    overflow-x: auto;
-    overflow-y: hidden;
-    scrollbar-width: none;
+  .v10-header { padding: 0 8px; }
+  .v10-header-sep,
+  .v10-header-agent-switcher,
+  .v10-header-meta-sep { display: none; }
+  /* Connected shows as its icon and the peer count; screen readers keep the words. */
+  .v10-header-compact-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
-  .v10-header::-webkit-scrollbar { display: none; }
 }
