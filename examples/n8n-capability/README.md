@@ -491,4 +491,5 @@ checks graph, asset name, content digest and sealed status before retaining it.
 See [STUDIO-MCP.md](./STUDIO-MCP.md) for the default-off native execution adapter,
 exact pins, trusted agent attribution, durable run lookup and the proposed
 #1227/#1247 gateway contract. This is separate from manual Studio's Program path;
-standing authority and live customer qualification are still pending.
+standing authority is confirmed in principle; enforcement and live customer
+qualification remain pending.

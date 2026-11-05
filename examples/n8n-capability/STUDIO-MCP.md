@@ -8,7 +8,8 @@ do not invent a Graph Computer receipt or `sourceHash`.
 
 The adapter is implemented; the gateway/authority integration is **proposed for
 agreement**, not approved by this document. Jurij owns the gateway, audit and
-node-call guard; Ziga owns trace presentation; Brana decides standing authority.
+node-call guard; Ziga owns trace presentation. Brana confirmed standing authority
+and the signed customer grant in decision 46 on 5 November 2026 (12:25 team update).
 A2's launcher and runner are unchanged.
 
 ## Development switches and trust boundary
@@ -18,7 +19,7 @@ account-bound `NOS_STUDIO_SESSION_FILE`. Unset, empty or `0` keeps it off (404).
 Other values fail startup. `NOS_STUDIO_MCP_AGENT_PREVIEW=1` additionally permits
 agent-attributed calls, on fictional development accounts only. It defaults off
 and requires the first switch. These switches are not a Commerce grant and
-must not be used as evidence that standing authority is approved.
+are not themselves a signed grant or evidence that customer enforcement is implemented.
 
 The route is service-to-service, not a browser or public model endpoint:
 
@@ -165,8 +166,21 @@ between reservation and dispatch is conservative for the same reason.
   decision-46 node guard and the existing audit record's runKey/agentVersion/
   toolDigest/approvalDecisionId linkage. No parallel audit receipt engine.
 - Ziga: agree the stable run lookup and display acceptance; this PR adds no UI.
-- Brana: standing authority and any signed run grant remain pending. An unchanged
-  workflow digest alone does not authorize a future Graph Computer grant change.
+- Brana confirmed approval of an agent version as standing authority for its
+  workflow tools, and the signed customer grant (decision 46). Implementation of
+  that grant and node-call enforcement is still required.
+- Each agent version will carry the owner's choice of reads only (default) or
+  reads and writes, shown on the approval card. Changing it requires a new
+  version. Jurij owns the contract update; resourceCeiling is the proposed home.
+  Enforce the choice on every node call, including inside Programs after the
+  Graph Computer switch; blocking programs/execute alone will not suffice.
+- This adapter remains read-only on fictional accounts/development nodes. Write
+  recovery after lost answers (decision 19) and writes outliving a tool call are
+  unresolved. Publishing is separate from writes and requires an agent spending
+  cap from Commerce. No per-run approval-click mechanism is introduced.
+- An engine-only Graph Computer switch does not require another owner approval,
+  but the switch comes back to Brana before any change to grant authority. An
+  unchanged workflow digest does not authorize a changed grant.
 - Agree a real read-only profile, body/graph enforcement and value-retention/purge
   policy before customer graph or conversation data. This PR does not complete
   all #1227 stage-A run APIs or any stage-B authority contract.
