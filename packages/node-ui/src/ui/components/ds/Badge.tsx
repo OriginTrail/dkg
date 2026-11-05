@@ -3,7 +3,8 @@
  *
  * Shapes follow nOS: a layer is a pill, a value or role is a 6px tag, and a
  * status (success, warning, danger, pending) is an icon and text with no box,
- * so a status never reads as a layer.
+ * so a status never reads as a layer. Badge owns that icon: it draws the tone's
+ * glyph unless `icon` replaces it, and `icon={null}` leaves it out.
  * It is never the click target; things you can open use a chip with a mark
  * (AgentChip, context graph chip), things you can do use a Button.
  *
@@ -22,9 +23,10 @@ export type BadgeTone =
 export interface BadgeProps extends Omit<React.HTMLAttributes<HTMLSpanElement>, 'color'> {
   tone?: BadgeTone;
   size?: 'sm' | 'md';
-  /** Leading glyph (e.g. a layer symbol). */
+  /** Leading glyph (e.g. a layer symbol). On a status tone it replaces the
+   *  default status glyph; `null` shows no glyph at all. */
   icon?: React.ReactNode;
-  /** Leading dot in the text colour (status at a glance). */
+  /** Leading dot in the text colour. Status tones show their glyph instead. */
   dot?: boolean;
   /** For tone="kind": the kind's colour, shown as a leading dot. */
   kindColor?: string;
@@ -35,6 +37,10 @@ const cx = (...c: Array<string | false | null | undefined>) => c.filter(Boolean)
 const LAYER_TONES = ['wm', 'swm', 'vm'] as const;
 type LayerTone = (typeof LAYER_TONES)[number];
 const isLayerTone = (tone: BadgeTone): tone is LayerTone => (LAYER_TONES as readonly string[]).includes(tone);
+
+const STATUS_TONES = ['success', 'warning', 'danger', 'pending'] as const;
+type StatusTone = (typeof STATUS_TONES)[number];
+const isStatusTone = (tone: BadgeTone): tone is StatusTone => (STATUS_TONES as readonly string[]).includes(tone);
 
 /** The memory-layer glyphs, the same shapes nOS draws: open circle, two circles, filled hexagon. */
 export const LayerGlyph: React.FC<{ layer: LayerTone; className?: string }> = ({ layer, className }) => (
@@ -50,6 +56,36 @@ export const LayerGlyph: React.FC<{ layer: LayerTone; className?: string }> = ({
   </svg>
 );
 
+/** The status glyphs, the same shapes nOS draws: check in a circle, warning triangle, stop octagon, clock. */
+export const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
+  <svg className="ds-status-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    {tone === 'success' ? (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m8 12.5 2.5 2.5 5-5.5" />
+      </>
+    ) : null}
+    {tone === 'warning' ? (
+      <>
+        <path d="M12 3 2.5 20h19Z" />
+        <path d="M12 10v4M12 17v.5" />
+      </>
+    ) : null}
+    {tone === 'danger' ? (
+      <>
+        <path d="M8 2h8l6 6v8l-6 6H8l-6-6V8Z" />
+        <path d="m9 9 6 6M15 9l-6 6" />
+      </>
+    ) : null}
+    {tone === 'pending' ? (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3.5 2" />
+      </>
+    ) : null}
+  </svg>
+);
+
 export const Badge: React.FC<BadgeProps> = ({ tone = 'neutral', size = 'md', icon, dot, kindColor, className, style, children, ...rest }) => (
   <span
     className={cx('ds-badge', `ds-tone-${tone}`, size === 'sm' && 'ds-sm', className)}
@@ -57,9 +93,10 @@ export const Badge: React.FC<BadgeProps> = ({ tone = 'neutral', size = 'md', ico
     {...rest}
   >
     {tone === 'kind' && kindColor ? <span className="ds-badge-kind-dot" aria-hidden="true" /> : null}
-    {dot ? <span className="ds-badge-dot" aria-hidden="true" /> : null}
+    {dot && !isStatusTone(tone) ? <span className="ds-badge-dot" aria-hidden="true" /> : null}
     {icon != null ? <span className="ds-badge-icon" aria-hidden="true">{icon}</span> : null}
     {icon == null && isLayerTone(tone) ? <LayerGlyph layer={tone} /> : null}
+    {icon === undefined && isStatusTone(tone) ? <StatusGlyph tone={tone} /> : null}
     {children}
   </span>
 );

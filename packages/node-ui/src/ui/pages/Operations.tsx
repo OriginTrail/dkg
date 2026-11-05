@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { useFetch, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
+import { Badge, type BadgeTone } from '../components/ds/Badge.js';
 import {
   fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
   fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
@@ -22,7 +23,6 @@ import {
   PHASE_LEGEND_ENTRIES,
 } from '../phase-colors.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
-import { Badge } from '../components/ds/Badge.js';
 import { HW_THRESHOLDS, hardwareChartRow, hardwareLevels, latestHardwareReading, type MetricLevel, type MetricsSnapshot } from './hardware-metrics.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
@@ -46,7 +46,7 @@ const PHASE_DESCRIPTIONS: Record<string, string> = {
 
 
 const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
-  publish:        'Publish a Knowledge Asset on-chain to a context graph',
+  publish:        'Publish a Knowledge Asset on-chain to a Context Graph',
   publishFromSWM: 'Publish a Knowledge Asset derived from Shared Working Memory',
   update:         'Update an existing Knowledge Asset on-chain',
   'ka-update':    'Incremental Knowledge Asset update (ka-update path)',
@@ -144,7 +144,7 @@ export function ObservabilitySection() {
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All Operations</button>
+        <button className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All operations</button>
         <button className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
         <button className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
         <button className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
@@ -261,7 +261,7 @@ function ReplicationTab() {
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No subscriptions</div></div>
         ) : (
           <table className="data-table">
-            <thead><tr><th>Context graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
                 const wm = c.last_reconciled_ordinal ?? 0;
@@ -292,7 +292,7 @@ function ReplicationTab() {
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
         ) : (
           <table className="data-table">
-            <thead><tr><th>Context graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context Graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
                 <tr
@@ -389,7 +389,7 @@ function HealthTab() {
       </div>
 
       <div className="card ds-card" style={{ padding: 16 }}>
-        <div className="card-title" style={{ marginBottom: 4 }}>Error Hotspots</div>
+        <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
         <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
@@ -404,7 +404,7 @@ function HealthTab() {
         ) : (
           <table className="data-table">
             <thead>
-              <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last Error</th><th>Last Occurred</th></tr>
+              <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last error</th><th>Last occurred</th></tr>
             </thead>
             <tbody>
               {hotspots.map((h: any) => {
@@ -602,19 +602,19 @@ function OperationStatsSection() {
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', fontSize: 11 }}>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
                         <div style={{ fontWeight: 700, fontSize: 16 }}>{r.total}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
                         <div style={{ fontWeight: 700, fontSize: 16, color: rateColor }}>{(r.rate * 100).toFixed(0)}%</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg Duration</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg duration</div>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>{formatDuration(r.avgMs)}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 9, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
+                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
                         <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? 'var(--red)' : 'var(--text-dim)' }}>{r.error}</div>
                       </div>
                     </div>
@@ -631,14 +631,14 @@ function OperationStatsSection() {
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
               <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations Over Time</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 10 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
                       <Bar key={t} dataKey={`${t}_count`} name={t} stackId="ops" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
                     ))}
@@ -647,14 +647,14 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg Duration by Operation Type (s)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 10 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
                       <Area key={t} type="monotone" dataKey={`${t}_avgMs`} name={t} stroke={opChartColor(t, types)} fill={opChartColor(t, types)} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
@@ -667,10 +667,10 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
-                    <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={28} />
+                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
+                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 10 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
                       <Area key={t} type="monotone" dataKey={`${t}_successPct`} name={t} stroke={opChartColor(t, types)} fill={opChartColor(t, types)} fillOpacity={0.1} strokeWidth={2} dot={false} hide={hiddenSeries.has(t)} />
                     ))}
@@ -683,10 +683,10 @@ function OperationStatsSection() {
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
                     <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                    <XAxis dataKey="time" tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} />
-                    <YAxis tick={{ fontSize: 9, fill: 'var(--text-tertiary)' }} width={32} />
+                    <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
+                    <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
-                    <Legend wrapperStyle={{ fontSize: 9 }} onClick={handleLegendClick} formatter={legendFormatter} />
+                    <Legend wrapperStyle={{ fontSize: 10 }} onClick={handleLegendClick} formatter={legendFormatter} />
                     {types.map((t: string) => (
                       <Bar key={t} dataKey={`${t}_gas`} name={t} stackId="gas" fill={opChartColor(t, types)} fillOpacity={0.75} hide={hiddenSeries.has(t)} />
                     ))}
@@ -800,8 +800,8 @@ export function HardwareTab() {
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
-                  <XAxis dataKey="time" tick={{ fontSize: 9, fill: tick }} minTickGap={24} />
-                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 9, fill: tick }} width={32} />
+                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: tick }} minTickGap={24} />
+                  <YAxis domain={c.pct ? [0, 100] : [0, 'auto']} allowDecimals={c.key !== 'peers'} tick={{ fontSize: 10, fill: tick }} width={32} />
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
                   {c.warn != null && <ReferenceLine y={c.warn} stroke={warnLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
                   {c.crit != null && <ReferenceLine y={c.crit} stroke={critLine} strokeDasharray="4 4" strokeOpacity={0.6} />}
@@ -842,7 +842,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               : PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
           return (
             <span key={`label-${p.phase}-${i}`} style={{
-              fontSize: 9, fontWeight: 600, color, letterSpacing: '.02em',
+              fontSize: 10, fontWeight: 600, color, letterSpacing: '.02em',
               display: 'inline-flex', alignItems: 'center', gap: 3,
             }}>
               <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
@@ -982,7 +982,7 @@ function OperationsTab() {
         background: 'var(--tint-faint)', border: '1px solid var(--border)',
         fontSize: 10, color: 'var(--text-muted)', alignItems: 'center',
       }}>
-        <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
         {PHASE_LEGEND_ENTRIES.map(({ phase, label, color }) => (
           <span
             key={phase}
@@ -1141,7 +1141,7 @@ function OperationsTab() {
 }
 
 /* ================================================================
-   Operation Detail — side-by-side timeline + details, logs below
+   Operation detail — side-by-side timeline + details, logs below
    ================================================================ */
 
 function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
@@ -1159,7 +1159,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'var(--text-dim)', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-dim)', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace" }}>
         <span>{formatAbsTime(opStart)}</span>
         <span>{formatDuration(opDuration)}</span>
         <span>{formatAbsTime(opEnd)}</span>
@@ -1210,7 +1210,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         })}
       </div>
 
-      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 9, color: 'var(--text-dim)' }}>
+      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 10, color: 'var(--text-dim)' }}>
         {phases.some((p: any) => p.status === 'success') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
             <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--green-mid)', display: 'inline-block' }} /> Success
@@ -1242,7 +1242,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Operation Detail</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Operation detail</span>
         <button
           onClick={onBack}
           style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 4, display: 'flex' }}
@@ -1287,12 +1287,12 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
       {phases.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
           <div className="card ds-card" style={{ padding: 16 }}>
-            <div className="card-title" style={{ marginBottom: 10 }}>Phase Timeline</div>
+            <div className="card-title" style={{ marginBottom: 10 }}>Phase timeline</div>
             <PhaseTimeline phases={phases} op={op} />
           </div>
 
           <div className="card ds-card" style={{ padding: 16 }}>
-            <div className="card-title" style={{ marginBottom: 10 }}>Phase Details</div>
+            <div className="card-title" style={{ marginBottom: 10 }}>Phase details</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
@@ -1625,11 +1625,11 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
   );
 }
 
-export function operationStatusBadgeClass(status: string): string {
-  if (status === 'success') return 'ds-tone-success';
-  if (status === 'error') return 'ds-tone-danger';
-  if (status === 'cancelled') return 'ds-tone-muted';
-  return 'ds-tone-pending';
+export function operationStatusTone(status: string): BadgeTone {
+  if (status === 'success') return 'success';
+  if (status === 'error') return 'danger';
+  if (status === 'cancelled') return 'muted';
+  return 'pending';
 }
 
 /** The word shown for an operation status: the same Done and Failed as nOS. */
@@ -1640,8 +1640,7 @@ export function operationStatusLabel(status: string): string {
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  const cls = operationStatusBadgeClass(status);
-  return <span className={`ds-badge ds-sm ${cls}`}>{operationStatusLabel(status)}</span>;
+  return <Badge size="sm" tone={operationStatusTone(status)}>{operationStatusLabel(status)}</Badge>;
 }
 
 function CopyButton({ text }: { text: string }) {

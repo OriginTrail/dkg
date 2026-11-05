@@ -103,7 +103,7 @@ describe('HealthChip', () => {
       // Glyph is decorative.
       expect(container.querySelector('.v10-pca-health-glyph')?.getAttribute('aria-hidden')).toBe('true');
       // Tone class applied.
-      expect(chip.classList.contains(HEALTH_CHIP_META[state].toneClass)).toBe(true);
+      expect(chip.classList.contains(`ds-tone-${HEALTH_CHIP_META[state].tone}`)).toBe(true);
       await unmount();
     }
   });
@@ -117,11 +117,11 @@ describe('HealthChip', () => {
   });
 
   it('renders insolvent in the DANGER tone (ds-tone-danger), distinct from warn states (§6.4/G5)', () => {
-    expect(HEALTH_CHIP_META.insolvent.toneClass).toBe('ds-tone-danger');
+    expect(HEALTH_CHIP_META.insolvent.tone).toBe('danger');
     // Expiring / cap-near stay warn-toned — insolvent must NOT collapse into them.
-    expect(HEALTH_CHIP_META.expiring.toneClass).toBe('ds-tone-warning');
-    expect(HEALTH_CHIP_META['cap-near'].toneClass).toBe('ds-tone-warning');
-    expect(HEALTH_CHIP_META.expired.toneClass).toBe('ds-tone-danger');
+    expect(HEALTH_CHIP_META.expiring.tone).toBe('warning');
+    expect(HEALTH_CHIP_META['cap-near'].tone).toBe('warning');
+    expect(HEALTH_CHIP_META.expired.tone).toBe('danger');
   });
 
   it('renders the insolvent pill with honest danger copy — "Insolvent" + ds-tone-danger (#1349)', async () => {

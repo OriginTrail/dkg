@@ -3,12 +3,12 @@ import React from 'react';
 // presentation file only consumes `PcaHealthState` for its pill (every other consumer
 // imports the derivation directly from `pca/health.js`, so no re-export here).
 import { type PcaHealthState } from '../../pca/health.js';
+import { Badge, type BadgeTone } from '../ds/Badge.js';
 
 interface HealthMeta {
   glyph: string;
   label: string;
-  /** Badge tone class from `12-observability.css`. */
-  toneClass: string;
+  tone: BadgeTone;
   /** Longer advisory shown on hover (`title`). */
   hint: string;
 }
@@ -17,19 +17,19 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
   healthy: {
     glyph: '✓',
     label: 'Healthy',
-    toneClass: 'ds-tone-success',
+    tone: 'success',
     hint: 'Active, solvent, and not expiring soon.',
   },
   expiring: {
     glyph: '⏳',
     label: 'Expiring soon',
-    toneClass: 'ds-tone-warning',
+    tone: 'warning',
     hint: 'The lock period ends soon — top-up does NOT extend it; renew to keep the discount.',
   },
   expired: {
     glyph: '✕',
     label: 'Expired',
-    toneClass: 'ds-tone-danger',
+    tone: 'danger',
     hint: 'The lock period has ended — publishes no longer get this discount. Renew to continue.',
   },
   insolvent: {
@@ -38,19 +38,19 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     // Danger tone (§6.4 / G5): insolvency is more severe than the warn-tone
     // Expiring-soon / Cap-near states — a depleted buffer means publishes pay
     // the direct cost (or fail). Distinct from those amber states.
-    toneClass: 'ds-tone-danger',
+    tone: 'danger',
     hint: 'The spendable buffer is depleted — publishes will quietly pay the direct cost. Top up.',
   },
   swept: {
     glyph: '⊘',
     label: 'Fully swept',
-    toneClass: 'ds-tone-neutral',
+    tone: 'neutral',
     hint: 'Every epoch budget has been swept to the staker reward pool.',
   },
   'cap-near': {
     glyph: '⚠',
     label: 'Cap near 100',
-    toneClass: 'ds-tone-warning',
+    tone: 'warning',
     hint: 'Approaching the 100 approved-publishing-wallet cap.',
   },
 };
@@ -71,22 +71,17 @@ export function HealthChip({
 }) {
   const meta = HEALTH_CHIP_META[state];
   const text = label ?? meta.label;
-  // Dedupe tokens — the `swept` neutral tone reuses the base `.badge` class, so
-  // a naive join would emit "badge badge".
-  const classes = [...new Set(['ds-badge', 'ds-sm', meta.toneClass, 'v10-pca-health-chip', className])]
-    .filter(Boolean)
-    .join(' ');
   return (
-    <span
-      className={classes}
+    <Badge
+      tone={meta.tone}
+      size="sm"
+      icon={<span className="v10-pca-health-glyph" aria-hidden="true">{meta.glyph}</span>}
+      className={['v10-pca-health-chip', className].filter(Boolean).join(' ')}
       data-testid="pca-health-chip"
       data-health={state}
       title={meta.hint}
     >
-      <span className="v10-pca-health-glyph" aria-hidden="true">
-        {meta.glyph}
-      </span>
       <span className="v10-pca-health-label">{text}</span>
-    </span>
+    </Badge>
   );
 }
