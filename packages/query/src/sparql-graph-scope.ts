@@ -200,17 +200,23 @@ export function wrapWithGraphUnion(
 const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
 const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
+const dedupFilterVariable = (index: number) => `?__dkgDedupFilter${index}`;
 
 interface SourceRange {
   readonly start: number;
   readonly end: number;
 }
 
+interface ProjectedGraphPattern {
+  readonly pattern: string;
+  readonly distinct?: boolean;
+}
+
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
   helperVariables: readonly string[],
-  buildReplacement: (inner: string, graphs: readonly string[]) => string,
+  buildPattern: (inner: string, graphs: readonly string[]) => ProjectedGraphPattern,
   acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
@@ -236,9 +242,12 @@ function wrapWithProjectedGraphSubselect(
 
   const innerVariables = scope.whereVariables;
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
+  const { pattern, distinct } = buildPattern(inner, graphs);
+  const variables = innerVariables.map(variable => variable.source).join(' ');
+  const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
   return ready(transitionGraphScope(
     scope,
-    `${scope.source.slice(0, openEnd)} ${buildReplacement(inner, graphs)} ${scope.source.slice(close)}`,
+    `${scope.source.slice(0, openEnd)} ${replacement} ${scope.source.slice(close)}`,
   ));
 }
 
@@ -349,8 +358,8 @@ function readDedupPattern(scope: PreparedGraphScope): {
   return hasTriple ? { uniqueMappings: visible, impureFilters } : whole;
 }
 
-/** Own the entire deduplication replacement: graph choice, FILTER placement and LIMIT ordering. */
-function buildDeduplicatedGraphSubselect(scope: PreparedGraphScope, graphs: readonly string[]): string {
+/** Own graph choice and FILTER placement inside the shared projection boundary. */
+function buildDeduplicatedGraphPattern(scope: PreparedGraphScope, graphs: readonly string[]): ProjectedGraphPattern {
   const { openEnd, close } = scope.where!;
   const { uniqueMappings, impureFilters } = readDedupPattern(scope);
   // Every visible mapping occurs once per graph; ASK also only needs one match.
@@ -368,6 +377,14 @@ function buildDeduplicatedGraphSubselect(scope: PreparedGraphScope, graphs: read
   inner += scope.source.slice(from, close);
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  // BIND evaluates on every retained row on the right of the rejoin. A raw
+  // FILTER can be pushed onto the grouped left side by either engine, sampling
+  // once for all identical mappings. Filtering these booleans after OPTIONAL
+  // also discards its unmatched fallback row and expression errors.
+  const filterBindings = movedFilters.map(({ start, end }, index) => {
+    const token = scope.prepared.tokens.find(token => token.start === start)!;
+    return `BIND(${scope.source.slice(token.end, end)} AS ${dedupFilterVariable(index)})`;
+  }).join(' ');
   const graphPattern = distinct
     ? `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`
     : [
@@ -379,12 +396,10 @@ function buildDeduplicatedGraphSubselect(scope: PreparedGraphScope, graphs: read
       `} GROUP BY ${variables} }`,
       // Every selected mapping exists in its graph. OPTIONAL is equivalent to a join
       // here, but avoids Oxigraph's much costlier plain-join plan.
-      `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} } }`,
+      `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} ${filterBindings} } }`,
     ].join(' ');
-  const trailing = movedFilters.map(({ start, end }) => scope.source.slice(start, end)).join(' ');
-  // Never cut off rows before a relocated FILTER has tested them.
-  const limit = movedFilters.length > 0 ? '' : graphSubselectLimit(scope);
-  return `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${graphPattern} }${limit} } ${trailing}`;
+  const trailing = movedFilters.map((_, index) => `FILTER(${dedupFilterVariable(index)})`).join(' ');
+  return { pattern: `${graphPattern} ${trailing}`, distinct };
 }
 
 /** Scope a graph set, reading each mapping from one graph even when several hold it. */
@@ -393,8 +408,9 @@ export function wrapWithDeduplicatedGraphValues(
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
-    input, graphUris, [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL],
-    (_inner, graphs) => buildDeduplicatedGraphSubselect(input, graphs),
+    input, graphUris, [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL,
+      ...readDedupPattern(input).impureFilters.map((_, index) => dedupFilterVariable(index))],
+    (_inner, graphs) => buildDeduplicatedGraphPattern(input, graphs),
     isDedupSafeBasicGraphPattern,
   );
 }
@@ -410,8 +426,7 @@ export function wrapWithGraphValues(
     [VIEW_GRAPH_SENTINEL],
     (inner, graphs) => {
       const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-      const variables = input.whereVariables.map(variable => variable.source).join(' ');
-      return `{ SELECT ${variables} WHERE { VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} } }${graphSubselectLimit(input)} }`;
+      return { pattern: `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }` };
     },
   );
 }
