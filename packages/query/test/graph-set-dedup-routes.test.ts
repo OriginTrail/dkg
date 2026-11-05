@@ -242,6 +242,7 @@ describe('graph-set deduplication routes', () => {
 
   it.each([
     'SELECT ?s WHERE { _:x <urn:p:value> ?s }',
+    'ASK WHERE { ?s <urn:p:link>/<urn:p:to> ?o } OFFSET 1',
     'CONSTRUCT { ?s <urn:p:seen> ?o } WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
     'DESCRIBE ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o }',
   ])('takes the aggregate route for: %s', (query) => {
@@ -272,7 +273,7 @@ describe('graph-set deduplication routes', () => {
     'FILTER(<urn:custom:function>(?s))',
     'FILTER <urn:custom:function>(?s)',
     String.raw`FILTER(R\u0041ND() < 0.5)`,
-  ])('runs an impure FILTER once per result row on the aggregate route: %s', (filter) => {
+  ])('runs a FILTER once per result row on the aggregate route: %s', (filter) => {
     const { source } = rewrite(`SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o ${filter} }`);
     expect(source).toContain('MIN(?__dkgDedupMatchGraph)');
     expect(source).toContain(' AS ?__dkgDedupFilter0)');
@@ -280,16 +281,16 @@ describe('graph-set deduplication routes', () => {
     expect(source).toContain('FILTER(true)');
   });
 
-  it('moves a prefixed extension function, and leaves pure FILTERs in both copies', () => {
+  it('moves pure and extension FILTERs through the same per-row binding', () => {
     const prefixed = rewrite('PREFIX f: <urn:custom:> SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(f:test(?s)) }').source;
     expect(prefixed).toContain('BIND((f:test(?s)) AS ?__dkgDedupFilter0)');
     const pattern = '?s <urn:p:link>/<urn:p:to> ?o FILTER(REGEX(STR(?o), "end"))';
     const pure = rewrite(`SELECT ?s WHERE { ${pattern} }`).source;
-    expect(pure.split(pattern)).toHaveLength(3);
-    expect(pure).not.toContain('FILTER(true)');
+    expect(pure).toContain('BIND((REGEX(STR(?o), "end")) AS ?__dkgDedupFilter0)');
+    expect(pure).toContain('FILTER(true)');
     const mixed = rewrite('SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(?o = "end") FILTER(RAND() < 2) }').source;
-    expect(mixed.split('FILTER(?o = "end") FILTER(true)')).toHaveLength(3);
-    expect(mixed).toContain('BIND((RAND() < 2) AS ?__dkgDedupFilter0)');
+    expect(mixed).toContain('BIND((?o = "end") AS ?__dkgDedupFilter0)');
+    expect(mixed).toContain('BIND((RAND() < 2) AS ?__dkgDedupFilter1)');
   });
 
   it.each([
@@ -363,7 +364,7 @@ describe('graph-set deduplication routes', () => {
         quad('urn:s:target', 'urn:p:link', 'urn:m:target', graphs[0]),
         quad('urn:m:target', 'urn:p:to', '"target"', graphs[0]),
       ]);
-      // COALESCE is deterministic but off the pure list, so this FILTER moves.
+      // Deterministic FILTERs use the same per-row placement as volatile ones.
       const rewritten = rewrite('SELECT ?s WHERE { ?s <urn:p:link>/<urn:p:to> ?o FILTER(COALESCE(?o = "target", false)) } LIMIT 1');
       expect(rewritten.source.match(/LIMIT 1/g)).toHaveLength(2);
       const actual = await store.query(materializePreparedSparql(rewritten.prepared));
