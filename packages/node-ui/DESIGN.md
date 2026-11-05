@@ -155,9 +155,8 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 | Group | Tokens | Use |
 |---|---|---|
 | Layer colours | `--layer-shared-bg`, `--layer-shared-border`, `--layer-shared-text`, `--layer-verified-bg`, `--layer-verified-border`, `--layer-verified-text`, `--layer-working-bg`, `--layer-working-border`, `--layer-working-text` | Fills, outlines and text for the memory layers |
-| Signal variants | `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-info`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
+| Signal variants | `--accent-amber`, `--accent-blue`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-info`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
 | Layout and scale | `--accent-vm-hover`, `--font-mono`, `--font-sans`, `--fs-layer`, `--header-h`, `--tab-h`, `--toolbar-h` | Fixed shell heights and the remaining scale steps |
-| Older names | `--accent-amber`, `--accent-blue`, `--accent-red`, `--amber`, `--amber-dim`, `--blue`, `--blue-dim`, `--border-light`, `--cyan`, `--cyan-dim`, `--green`, `--green-dark`, `--green-dim`, `--green-mid`, `--pink`, `--pink-dim`, `--purple`, `--purple-dim`, `--red`, `--red-dim`, `--surface`, `--surface-alt`, `--surface-hover`, `--text-dim`, `--text-muted` | Kept for existing CSS. Use the role tokens above in new work |
 
 ## Changing the system
 

@@ -126,7 +126,7 @@
 }
 .v10-wallet-pill[data-state='wrong-network'] {
   border-color: var(--warning-border);
-  background: var(--amber-dim);
+  background: var(--warning-bg);
 }
 .v10-wallet-pill-main {
   font-family: var(--font-mono);

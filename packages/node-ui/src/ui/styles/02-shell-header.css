@@ -22,7 +22,7 @@
   font-size: 12px;
   line-height: 1.4;
   color: var(--text-warning);
-  background: var(--amber-dim);
+  background: var(--warning-bg);
   border-bottom: 1px solid var(--warning-border);
   z-index: 30;
 }
@@ -61,7 +61,7 @@
   padding: 5px 12px;
   font-size: 11px;
   color: var(--text-warning);
-  background: var(--amber-dim);
+  background: var(--warning-bg);
   border-bottom: 1px solid var(--warning-border);
 }
 .v10-stale-banner .v10-retry-btn { margin-left: auto; }

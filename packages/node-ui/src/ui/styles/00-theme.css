@@ -111,33 +111,6 @@
   --header-h: 44px;
   --tab-h: 36px;
   --toolbar-h: 38px;
-
-  /* Legacy aliases (for existing components that use the old tokens) */
-  --bg: var(--bg-root);
-  --surface: var(--bg-surface);
-  --surface-hover: var(--bg-hover);
-  --surface-alt: var(--bg-panel);
-  --border: var(--border-default);
-  --border-light: var(--border-strong);
-  --text: var(--text-primary);
-  --text-muted: var(--text-secondary);
-  --text-dim: var(--text-tertiary);
-  --green: var(--accent-green);
-  --green-dark: #166534;
-  --green-mid: #22c55e;
-  --green-dim: rgba(34, 197, 94, 0.1);
-  --amber: var(--accent-amber);
-  --amber-dim: rgba(251, 191, 36, 0.1);
-  --red: var(--accent-red);
-  --red-dim: rgba(248, 113, 113, 0.1);
-  --blue: var(--accent-blue);
-  --blue-dim: rgba(96, 165, 250, 0.1);
-  --purple: #a78bfa;
-  --purple-dim: rgba(167, 139, 250, 0.1);
-  --cyan: #22d3ee;
-  --cyan-dim: rgba(34, 211, 238, 0.08);
-  --pink: #f472b6;
-  --pink-dim: rgba(244, 114, 182, 0.12);
 }
 
 /* ══════════════════════════════════════════
@@ -213,15 +186,6 @@
   --role-border: #8db3ea;
   --data-1: #1f6fd1; --data-2: #8a7a00; --data-3: #a3195b; --data-4: #c28a00;
   --data-5: #b5179e; --data-6: #9a5b1e; --data-7: #0284c7; --data-8: #008300;
-  --bg: var(--bg-root);
-  --surface: var(--bg-surface);
-  --surface-hover: var(--bg-hover);
-  --surface-alt: var(--bg-panel);
-  --border: var(--border-default);
-  --border-light: var(--border-strong);
-  --text: var(--text-primary);
-  --text-muted: var(--text-secondary);
-  --text-dim: var(--text-tertiary);
 }
 
 :root {

@@ -63,7 +63,7 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   system:         'Internal system maintenance operation',
 };
 
-const TOOLTIP_STYLE = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-control)', fontSize: 12, color: 'var(--text)' };
+const TOOLTIP_STYLE = { background: 'var(--bg-surface)', border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)', fontSize: 12, color: 'var(--text-primary)' };
 
 const TIME_PERIODS = [
   { value: '5m', label: '5 min', ms: 5 * 60_000 },
@@ -132,7 +132,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
         />
       )}
       {isCustom && (
-        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{value}</span>
+        <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{value}</span>
       )}
     </div>
   );
@@ -196,7 +196,7 @@ function ReplicationTab() {
     <div>
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 16 }}>
         <PeriodSelect value={period} onChange={setPeriod} />
-        <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
           Chain-anchored publishes reconciled into Verifiable Memory. Auto-refreshes every 5s.
         </span>
       </div>
@@ -206,22 +206,22 @@ function ReplicationTab() {
         <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Promotions</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>landed in VM this period</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>landed in VM this period</div>
         </div>
         <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Success rate</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{successPct}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>promote / (promote + defer)</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>promote / (promote + defer)</div>
         </div>
         <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Promotion latency</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
         </div>
         <div className="card ds-card" style={{ padding: 16 }}>
           <div className="card-title">Active fetches</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>core-first catch-up pulls</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>core-first catch-up pulls</div>
         </div>
       </div>
 
@@ -238,7 +238,7 @@ function ReplicationTab() {
         ) : (
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
               <XAxis dataKey="t" tick={{ fontSize: 11 }} />
               <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
               <Tooltip />
@@ -254,7 +254,7 @@ function ReplicationTab() {
       {/* Cursor inspector */}
       <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
           Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
         </p>
         {cursors.length === 0 ? (
@@ -287,7 +287,7 @@ function ReplicationTab() {
       {/* Per-CG activity */}
       <div className="card ds-card" style={{ padding: 16, marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
+        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
           <div className="empty-state empty-state--compact"><div className="empty-state-title">No activity in this period</div></div>
         ) : (
@@ -347,7 +347,7 @@ export function OperationsPage() {
   return (
     <div className="page-section">
       <h1 className="page-title" style={{ marginBottom: 4 }}>Observability</h1>
-      <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
+      <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
       <ObservabilitySection />
     </div>
   );
@@ -390,7 +390,7 @@ function HealthTab() {
 
       <div className="card ds-card" style={{ padding: 16 }}>
         <div className="card-title" style={{ marginBottom: 4 }}>Error hotspots</div>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 1.5 }}>
           Click a phase to see all failed operations. Click an operation to expand its logs.
         </p>
         {hotspots.length === 0 ? (
@@ -398,7 +398,7 @@ function HealthTab() {
             <div className="empty-state-icon" style={{ background: 'var(--success-bg)', borderColor: 'var(--success-border)' }}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
             </div>
-            <div className="empty-state-title" style={{ color: 'var(--green)' }}>No errors in this period</div>
+            <div className="empty-state-title" style={{ color: 'var(--accent-green)' }}>No errors in this period</div>
             <div className="empty-state-desc">All operations completed successfully. Nice work.</div>
           </div>
         ) : (
@@ -415,7 +415,7 @@ function HealthTab() {
                     onClick={() => { setExpandedPhase(p => p === rowKey ? null : rowKey); setExpandedOp(null); }}
                     style={{ cursor: 'pointer', background: expandedPhase === rowKey ? 'var(--danger-bg)' : undefined }}
                   >
-                    <td style={{ fontSize: 12, color: 'var(--text-muted)', padding: '10px 14px' }}>
+                    <td style={{ fontSize: 12, color: 'var(--text-secondary)', padding: '10px 14px' }}>
                       <span style={{ marginRight: 6, fontSize: 10 }}>{expandedPhase === rowKey ? '▼' : '▸'}</span>
                       {h.operation_name}
                     </td>
@@ -423,7 +423,7 @@ function HealthTab() {
                       {h.phase}
                     </td>
                     <td style={{ padding: '10px 14px' }}><Badge tone="danger" size="sm">{h.error_count}</Badge></td>
-                    <td style={{ fontSize: 12, color: 'var(--text-muted)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
+                    <td style={{ fontSize: 12, color: 'var(--text-secondary)', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', padding: '10px 14px' }} title={h.last_error ?? ''}>{h.last_error ?? '—'}</td>
                     <td style={{ padding: '10px 14px' }}>{h.last_occurred ? formatTime(h.last_occurred) : '—'}</td>
                   </tr>
                   {expandedPhase === rowKey && (
@@ -450,13 +450,13 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
   operations: any[]; expandedOp: string | null; onToggleOp: (id: string) => void;
 }) {
   if (operations.length === 0) {
-    return <div style={{ padding: '12px 16px', fontSize: 11, color: 'var(--text-muted)' }}>No matching failed operations</div>;
+    return <div style={{ padding: '12px 16px', fontSize: 11, color: 'var(--text-secondary)' }}>No matching failed operations</div>;
   }
 
   return (
     <div style={{ padding: '8px 0' }}>
       {operations.map((op: any) => (
-        <div key={`${op.operation_id}-${op.phase_started_at}`} style={{ borderBottom: '1px solid var(--border)' }}>
+        <div key={`${op.operation_id}-${op.phase_started_at}`} style={{ borderBottom: '1px solid var(--border-default)' }}>
           <div
             onClick={() => onToggleOp(op.operation_id)}
             style={{
@@ -464,23 +464,23 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
               background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
             }}
           >
-            <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
+            <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? '▼' : '▸'}</span>
             <span style={{ fontWeight: 600, fontSize: 12, color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
             <StatusBadge status={op.status} />
-            <span className="mono" style={{ fontSize: 10, color: 'var(--text-dim)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
-            <span style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
-            {op.duration_ms != null && <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{formatDuration(op.duration_ms)}</span>}
+            <span className="mono" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
+            <span style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>
+            {op.duration_ms != null && <span style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>}
           </div>
 
           {expandedOp === op.operation_id && (
             <div style={{ padding: '4px 20px 16px' }}>
               {op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 11, color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 11, color: 'var(--accent-red)' }}>
                   {op.phase_error}
                 </div>
               )}
               {op.error_message && op.error_message !== op.phase_error && (
-                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 11, color: 'var(--red)' }}>
+                <div style={{ padding: '6px 10px', marginBottom: 8, background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-bg-strong)', fontSize: 11, color: 'var(--accent-red)' }}>
                   {op.error_message}
                 </div>
               )}
@@ -491,7 +491,7 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
                   ))}
                 </LogContainer>
               ) : (
-                <div style={{ fontSize: 11, color: 'var(--text-dim)', padding: '4px 0' }}>No logs for this operation</div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 0' }}>No logs for this operation</div>
               )}
             </div>
           )}
@@ -573,7 +573,7 @@ function OperationStatsSection() {
 
   const legendFormatter = useCallback((value: string) => {
     const dimmed = hiddenSeries.has(value);
-    return <span style={{ color: dimmed ? 'var(--text-dim)' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
+    return <span style={{ color: dimmed ? 'var(--text-tertiary)' : undefined, textDecoration: dimmed ? 'line-through' : undefined, cursor: 'pointer' }}>{value}</span>;
   }, [hiddenSeries]);
 
   return (
@@ -581,7 +581,7 @@ function OperationStatsSection() {
       <div className="filters" style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
         <PeriodSelect value={period} onChange={setPeriod} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ fontSize: 10, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
+          <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>per</span>
           <select className="input" value={granularity} onChange={e => setGranularity(e.target.value)} style={{ width: 'auto' }}>
             {GRANULARITY_OPTIONS.map(g => <option key={g.value} value={g.value}>{g.label}</option>)}
           </select>
@@ -594,28 +594,28 @@ function OperationStatsSection() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, marginBottom: 16 }}>
               {rates.map((r: any) => {
                 const color = opTypeText(r.type);
-                const rateColor = r.rate >= 0.9 ? 'var(--green-mid)' : r.rate >= 0.7 ? 'var(--amber)' : 'var(--red)';
+                const rateColor = r.rate >= 0.9 ? 'var(--accent-green)' : r.rate >= 0.7 ? 'var(--accent-amber)' : 'var(--accent-red)';
                 return (
-                  <div key={r.type} style={{ background: 'var(--tint-subtle)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
+                  <div key={r.type} style={{ background: 'var(--tint-subtle)', borderRadius: 'var(--radius-nested)', padding: '12px 14px', border: '1px solid var(--border-default)', borderLeft: `3px solid ${opTypeRule(r.type)}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                       <span style={{ fontSize: 13, fontWeight: 700, color }}>{r.type}</span>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', fontSize: 11 }}>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
+                        <div style={{ color: 'var(--text-tertiary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Operations</div>
                         <div style={{ fontWeight: 700, fontSize: 16 }}>{r.total}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
+                        <div style={{ color: 'var(--text-tertiary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Success</div>
                         <div style={{ fontWeight: 700, fontSize: 16, color: rateColor }}>{(r.rate * 100).toFixed(0)}%</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg duration</div>
+                        <div style={{ color: 'var(--text-tertiary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Avg duration</div>
                         <div style={{ fontWeight: 600, fontSize: 13 }}>{formatDuration(r.avgMs)}</div>
                       </div>
                       <div>
-                        <div style={{ color: 'var(--text-dim)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
-                        <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? 'var(--red)' : 'var(--text-dim)' }}>{r.error}</div>
+                        <div style={{ color: 'var(--text-tertiary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: 2 }}>Errors</div>
+                        <div style={{ fontWeight: 600, fontSize: 13, color: r.error > 0 ? 'var(--accent-red)' : 'var(--text-tertiary)' }}>{r.error}</div>
                       </div>
                     </div>
                     <div style={{ height: 3, background: 'var(--tint-strong)', borderRadius: 'var(--radius-hair)', overflow: 'hidden', marginTop: 10 }}>
@@ -631,10 +631,10 @@ function OperationStatsSection() {
           {hasCharts ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
               <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Operations over time</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
                     <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
                     <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
@@ -647,10 +647,10 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Avg duration by Operation Type (s)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
                     <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
                     <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
@@ -663,10 +663,10 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Success Rate by Operation Type (%)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <AreaChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
                     <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
                     <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={28} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} />
@@ -679,10 +679,10 @@ function OperationStatsSection() {
               </div>
 
               <div className="card ds-card" style={{ padding: '12px 14px' }}>
-                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>Gas Cost by Operation Type (ETH)</div>
                 <ResponsiveContainer width="100%" height={150}>
                   <BarChart data={perTypeChartData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border-default)" />
                     <XAxis dataKey="time" tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} />
                     <YAxis tick={{ fontSize: 10, fill: 'var(--text-tertiary)' }} width={32} />
                     <Tooltip contentStyle={TOOLTIP_STYLE} cursor={{ fill: 'var(--tint-strong)' }} />
@@ -763,30 +763,30 @@ export function HardwareTab() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 12 }}>
         {statCards.map(stat => (
           <div key={stat.label} className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>{stat.label}</div>
             <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[stat.lv] : IDLE, lineHeight: 1, marginBottom: 3 }}>{stat.value}{warnIcon(stat.lv)}</div>
             {stat.pct !== null ? (
               <div style={{ height: 3, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-hair)', margin: '5px 0 3px' }}>
                 <div style={{ height: 3, width: `${Math.min(stat.pct, 100)}%`, background: LEVEL_COLOR[stat.lv], borderRadius: 'var(--radius-hair)', transition: 'width .4s ease' }} />
               </div>
             ) : <div style={{ height: 3, margin: '5px 0 3px' }} />}
-            <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{stat.sub}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{stat.sub}</div>
           </div>
         ))}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 12 }}>
         <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>Peers</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[peersLv] : IDLE, lineHeight: 1 }}>{hw ? hw.peers : '—'}{warnIcon(peersLv)}</div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
+          <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'connected' : 'waiting…'}</div>
         </div>
         <div className="card ds-card" style={{ padding: '10px 12px', opacity: loading ? 0.5 : 1, transition: 'opacity .3s' }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: 4 }}>RPC Latency</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: hw ? LEVEL_TEXT[rpcLv] : IDLE, lineHeight: 1 }}>
             {hw ? (hw.rpcMs !== null ? `${hw.rpcMs} ms` : '—') : '—'}{warnIcon(rpcLv)}
           </div>
-          <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
+          <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3 }}>{hw ? 'last measurement' : 'waiting…'}</div>
         </div>
       </div>
 
@@ -796,7 +796,7 @@ export function HardwareTab() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
           {hwCharts.map(c => (
             <div key={c.key} className="card ds-card" style={{ padding: '12px 14px' }}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '.04em' }}>{c.title}</div>
               <ResponsiveContainer width="100%" height={140}>
                 <AreaChart data={hwChartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke={grid} />
@@ -812,7 +812,7 @@ export function HardwareTab() {
           ))}
         </div>
       ) : (
-        <div style={{ fontSize: 11, color: 'var(--text-dim)', textAlign: 'center', padding: '8px 0' }}>
+        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', textAlign: 'center', padding: '8px 0' }}>
           History charts appear after a second snapshot (~30 s)
         </div>
       )}
@@ -827,8 +827,8 @@ export function HardwareTab() {
 function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
   const [hover, setHover] = useState<number | null>(null);
 
-  if (!phases?.length) return <span style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic' }}>event-based</span>;
-  if (totalMs <= 0) return <span style={{ color: 'var(--text-dim)' }}>—</span>;
+  if (!phases?.length) return <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic' }}>event-based</span>;
+  if (totalMs <= 0) return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
   const phaseTotal = phases.reduce((s: number, p: any) => s + (p.duration_ms ?? 0), 0) || totalMs;
   return (
     <div style={{ position: 'relative', minWidth: 120, maxWidth: 260 }}>
@@ -847,7 +847,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
             }}>
               <span style={{ width: 5, height: 5, borderRadius: '50%', background: color, display: 'inline-block', flexShrink: 0 }} />
               {p.phase}
-              <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>
+              <span style={{ fontWeight: 400, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>
                 {formatDuration(p.duration_ms)}
               </span>
             </span>
@@ -886,7 +886,7 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
           <div style={{
             position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)',
             marginBottom: 6, padding: '5px 10px', borderRadius: 'var(--radius-control)',
-            background: 'var(--surface)', border: '1px solid var(--border)',
+            background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
             boxShadow: 'var(--shadow-menu)',
             fontSize: 11, zIndex: 10, pointerEvents: 'none',
             maxWidth: 260,
@@ -895,22 +895,22 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
               <span style={{ fontWeight: 700, color: PHASE_COLORS[hoveredPhase] ?? PHASE_FALLBACK_COLOR }}>
                 {hoveredPhase}
               </span>
-              <span style={{ color: 'var(--text-muted)', margin: '0 6px' }}>·</span>
-              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text)' }}>
+              <span style={{ color: 'var(--text-secondary)', margin: '0 6px' }}>·</span>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-primary)' }}>
                 {formatDuration(phases[hover].duration_ms)}
               </span>
-              <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
+              <span style={{ color: 'var(--text-tertiary)', marginLeft: 6 }}>
                 ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
               </span>
               {phases[hover].status === 'error' && (
-                <span style={{ color: 'var(--red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+                <span style={{ color: 'var(--accent-red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
               )}
               {phases[hover].status === 'cancelled' && (
                 <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>CANCELLED</span>
               )}
             </div>
             {desc && (
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
+              <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 3, whiteSpace: 'normal', lineHeight: 1.4 }}>
                 {desc}
               </div>
             )}
@@ -972,17 +972,17 @@ function OperationsTab() {
           onChange={e => setOpIdFilter(e.target.value)}
           style={{ flex: '1 1 200px', minWidth: 0 }}
         />
-        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{total} total</span>
+        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{total} total</span>
       </div>
 
       {/* Phase color legend */}
       <div style={{
         display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 10,
         padding: '6px 12px', borderRadius: 'var(--radius-control)',
-        background: 'var(--tint-faint)', border: '1px solid var(--border)',
-        fontSize: 10, color: 'var(--text-muted)', alignItems: 'center',
+        background: 'var(--tint-faint)', border: '1px solid var(--border-default)',
+        fontSize: 10, color: 'var(--text-secondary)', alignItems: 'center',
       }}>
-        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-dim)', marginRight: 2 }}>Phases</span>
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--text-tertiary)', marginRight: 2 }}>Phases</span>
         {PHASE_LEGEND_ENTRIES.map(({ phase, label, color }) => (
           <span
             key={phase}
@@ -1050,7 +1050,7 @@ function OperationsTab() {
       {totalPages > 1 && (
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '10px 0', fontSize: 11, color: 'var(--text-muted)',
+          padding: '10px 0', fontSize: 11, color: 'var(--text-secondary)',
         }}>
           <span>
             Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
@@ -1061,7 +1061,7 @@ function OperationsTab() {
               onClick={() => setPage(0)}
               style={{
                 padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
-                border: '1px solid var(--border)', background: 'var(--surface)', color: page === 0 ? 'var(--text-dim)' : 'var(--text-muted)',
+                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page === 0 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
                 opacity: page === 0 ? 0.4 : 1,
               }}
             >
@@ -1072,7 +1072,7 @@ function OperationsTab() {
               onClick={() => setPage(p => Math.max(0, p - 1))}
               style={{
                 padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page === 0 ? 'default' : 'pointer',
-                border: '1px solid var(--border)', background: 'var(--surface)', color: page === 0 ? 'var(--text-dim)' : 'var(--text-muted)',
+                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page === 0 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
                 opacity: page === 0 ? 0.4 : 1,
               }}
             >
@@ -1086,7 +1086,7 @@ function OperationsTab() {
               onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
               style={{
                 padding: '4px 10px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
-                border: '1px solid var(--border)', background: 'var(--surface)', color: page >= totalPages - 1 ? 'var(--text-dim)' : 'var(--text-muted)',
+                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page >= totalPages - 1 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
                 opacity: page >= totalPages - 1 ? 0.4 : 1,
               }}
             >
@@ -1097,7 +1097,7 @@ function OperationsTab() {
               onClick={() => setPage(totalPages - 1)}
               style={{
                 padding: '4px 8px', borderRadius: 'var(--radius-xs)', fontSize: 11, fontWeight: 600, cursor: page >= totalPages - 1 ? 'default' : 'pointer',
-                border: '1px solid var(--border)', background: 'var(--surface)', color: page >= totalPages - 1 ? 'var(--text-dim)' : 'var(--text-muted)',
+                border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: page >= totalPages - 1 ? 'var(--text-tertiary)' : 'var(--text-secondary)',
                 opacity: page >= totalPages - 1 ? 0.4 : 1,
               }}
             >
@@ -1119,7 +1119,7 @@ function OperationsTab() {
           />
           <div style={{
             position: 'fixed', top: 0, right: 0, bottom: 0, width: '55%', minWidth: 480, maxWidth: 800,
-            background: 'var(--bg)', borderLeft: '1px solid var(--border)', zIndex: 901,
+            background: 'var(--bg-root)', borderLeft: '1px solid var(--border-default)', zIndex: 901,
             overflowY: 'auto', padding: '20px 24px',
             boxShadow: 'var(--shadow-drawer)',
             animation: 'slideInRight .2s ease-out',
@@ -1127,7 +1127,7 @@ function OperationsTab() {
             {detail?.operation ? (
               <OperationDetail op={detail.operation} logs={detail.logs} phases={detail.phases ?? []} explorerUrl={explorerUrl} onBack={() => setSelectedOp(null)} />
             ) : (
-              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-dim)' }}>Loading...</div>
+              <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-tertiary)' }}>Loading...</div>
             )}
           </div>
           <style>{`
@@ -1159,13 +1159,13 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-dim)', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-tertiary)', marginBottom: 4, fontFamily: "'JetBrains Mono', monospace" }}>
         <span>{formatAbsTime(opStart)}</span>
         <span>{formatDuration(opDuration)}</span>
         <span>{formatAbsTime(opEnd)}</span>
       </div>
 
-      <div style={{ position: 'relative', background: 'var(--tint-subtle)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', padding: '6px 0' }}>
+      <div style={{ position: 'relative', background: 'var(--tint-subtle)', borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', padding: '6px 0' }}>
         {phases.map((p: any, i: number) => {
           const phaseStart = p.started_at ?? opStart;
           const phaseDuration = p.duration_ms ?? 0;
@@ -1202,7 +1202,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                   }}
                 />
               </div>
-              <div style={{ width: 55, textAlign: 'right', fontSize: 10, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
+              <div style={{ width: 55, textAlign: 'right', fontSize: 10, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace", flexShrink: 0, marginLeft: 8 }}>
                 {formatDuration(phaseDuration)}
               </div>
             </div>
@@ -1210,15 +1210,15 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         })}
       </div>
 
-      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 10, color: 'var(--text-dim)' }}>
+      <div style={{ display: 'flex', gap: 12, marginTop: 6, fontSize: 10, color: 'var(--text-tertiary)' }}>
         {phases.some((p: any) => p.status === 'success') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--green-mid)', display: 'inline-block' }} /> Success
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-green)', display: 'inline-block' }} /> Success
           </span>
         )}
         {phases.some((p: any) => p.status === 'error') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--red)', display: 'inline-block' }} /> Failed
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-red)', display: 'inline-block' }} /> Failed
           </span>
         )}
         {phases.some((p: any) => p.status === 'cancelled') && (
@@ -1228,7 +1228,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--amber)', display: 'inline-block' }} /> In Progress
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-amber)', display: 'inline-block' }} /> In Progress
           </span>
         )}
       </div>
@@ -1242,10 +1242,10 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-muted)' }}>Operation detail</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Operation detail</span>
         <button
           onClick={onBack}
-          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: 4, display: 'flex' }}
+          style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, display: 'flex' }}
           title="Close"
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -1257,19 +1257,19 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
           <span style={{ fontSize: 15, fontWeight: 700 }}>{op.operation_name}</span>
           <StatusBadge status={op.status} />
-          <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{formatDuration(op.duration_ms)}</span>
-          <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
+          <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{formatDuration(op.duration_ms)}</span>
+          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
         </div>
-        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
-          <span><b style={{ color: 'var(--text-muted)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
-          {op.contextGraph_id && <span><b style={{ color: 'var(--text-muted)' }}>Context Graph</b> {op.contextGraph_id}</span>}
-          {op.triple_count != null && <span><b style={{ color: 'var(--text-muted)' }}>Triples</b> {op.triple_count}</span>}
-          {op.peer_id && <span><b style={{ color: 'var(--text-muted)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
-          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-muted)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
-          {op.trac_cost != null && <span><b style={{ color: 'var(--text-muted)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
+        <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)' }}>
+          <span><b style={{ color: 'var(--text-secondary)' }}>Started</b> {new Date(op.started_at).toLocaleString()}</span>
+          {op.contextGraph_id && <span><b style={{ color: 'var(--text-secondary)' }}>Context Graph</b> {op.contextGraph_id}</span>}
+          {op.triple_count != null && <span><b style={{ color: 'var(--text-secondary)' }}>Triples</b> {op.triple_count}</span>}
+          {op.peer_id && <span><b style={{ color: 'var(--text-secondary)' }}>Peer</b> <span className="mono">{shortId(op.peer_id)}</span></span>}
+          {op.gas_cost_eth != null && <span><b style={{ color: 'var(--text-secondary)' }}>Gas</b> {op.gas_cost_eth.toFixed(6)} ETH</span>}
+          {op.trac_cost != null && <span><b style={{ color: 'var(--text-secondary)' }}>TRAC</b> {op.trac_cost.toFixed(4)}</span>}
           {op.tx_hash && (
             <span>
-              <b style={{ color: 'var(--text-muted)' }}>TX</b>{' '}
+              <b style={{ color: 'var(--text-secondary)' }}>TX</b>{' '}
               {explorerUrl ? (
                 <a href={`${explorerUrl}/tx/${op.tx_hash}`} target="_blank" rel="noopener noreferrer" className="mono">{shortId(op.tx_hash)}</a>
               ) : <span className="mono">{shortId(op.tx_hash)}</span>}
@@ -1277,7 +1277,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
           )}
         </div>
         {op.error_message && (
-          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 12, color: 'var(--red)' }}>
+          <div style={{ marginTop: 8, padding: '8px 12px', background: 'var(--danger-bg)', borderRadius: 'var(--radius-control)', border: '1px solid var(--danger-border)', fontSize: 12, color: 'var(--accent-red)' }}>
             {op.error_message}
           </div>
         )}
@@ -1297,7 +1297,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
               {phases.map((p: any, i: number) => {
                 const color = PHASE_COLORS[p.phase] ?? PHASE_FALLBACK_COLOR;
                 const terminalColor = p.status === 'error'
-                  ? 'var(--red)'
+                  ? 'var(--accent-red)'
                   : p.status === 'cancelled'
                     ? CANCELLED_COLOR
                     : color;
@@ -1312,10 +1312,10 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
                   <div key={`${p.phase}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 10px', background: 'var(--tint-faint)', borderRadius: 'var(--radius-control)', borderLeft: `3px solid ${terminalColor}` }}>
                     <span style={{ fontWeight: 600, fontSize: 12, color, minWidth: 65 }} title={desc ?? ''}>{p.phase}</span>
                     <StatusBadge status={p.status} />
-                    <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
-                    {desc && <span style={{ fontSize: 10, color: 'var(--text-dim)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
+                    <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: "'JetBrains Mono', monospace" }}>{formatDuration(p.duration_ms)}</span>
+                    {desc && <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontStyle: 'italic', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{desc}</span>}
                     <span
-                      style={{ fontSize: 10, color: 'var(--text-dim)', marginLeft: 'auto', flexShrink: 0 }}
+                      style={{ fontSize: 10, color: 'var(--text-tertiary)', marginLeft: 'auto', flexShrink: 0 }}
                       title={p.started_at ? new Date(p.started_at).toLocaleString() : undefined}
                     >
                       {p.started_at ? formatTime(p.started_at) : ''}
@@ -1335,7 +1335,7 @@ function OperationDetail({ op, logs, phases, explorerUrl, onBack }: {
 
       {/* Logs below — full width */}
       <div className="card ds-card" style={{ padding: 0, overflow: 'hidden' }}>
-        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-default)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span className="card-title" style={{ margin: 0 }}>Logs ({logs.length})</span>
         </div>
         {logs.length === 0 ? (
@@ -1424,7 +1424,7 @@ function LogsTab() {
     return (
       <>
         {line.slice(0, idx)}
-        <mark style={{ background: 'var(--amber)', color: 'var(--bg)', borderRadius: 'var(--radius-hair)', padding: '0 1px' }}>
+        <mark style={{ background: 'var(--accent-amber)', color: 'var(--bg-root)', borderRadius: 'var(--radius-hair)', padding: '0 1px' }}>
           {line.slice(idx, idx + debouncedSearch.length)}
         </mark>
         {line.slice(idx + debouncedSearch.length)}
@@ -1466,12 +1466,12 @@ function LogsTab() {
           title="Refresh now"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: '1px solid var(--border)', background: 'var(--surface)',
-            color: 'var(--text-muted)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            borderRadius: 'var(--radius-control)', border: '1px solid var(--border-default)', background: 'var(--bg-surface)',
+            color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
             transition: 'all .15s',
           }}
-          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--green)'; e.currentTarget.style.color = 'var(--green)'; }}
-          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-muted)'; }}
+          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent-green)'; e.currentTarget.style.color = 'var(--accent-green)'; }}
+          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border-default)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
@@ -1483,9 +1483,9 @@ function LogsTab() {
           title={autoScroll ? 'Auto-scroll enabled' : 'Auto-scroll disabled'}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 5, padding: '5px 10px',
-            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border)'}`,
-            background: autoScroll ? 'var(--green-dim)' : 'var(--surface)',
-            color: autoScroll ? 'var(--green)' : 'var(--text-muted)',
+            borderRadius: 'var(--radius-control)', border: `1px solid ${autoScroll ? 'var(--success-border)' : 'var(--border-default)'}`,
+            background: autoScroll ? 'var(--success-bg)' : 'var(--bg-surface)',
+            color: autoScroll ? 'var(--accent-green)' : 'var(--text-secondary)',
             fontSize: 11, fontWeight: 600, cursor: 'pointer', transition: 'all .15s',
           }}
         >
@@ -1501,7 +1501,7 @@ function LogsTab() {
           padding: '8px 16px',
           background: 'var(--tint-faint)',
           borderBottom: '1px solid var(--border-subtle)',
-          fontSize: 11, color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          fontSize: 11, color: 'var(--text-secondary)', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
           <span>
             {lines.length} lines{debouncedSearch ? ` matching "${debouncedSearch}"` : ''}
@@ -1606,7 +1606,7 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
     const color = cls === 'error' ? LOG_COLORS.levelError : cls === 'warn' ? LOG_COLORS.levelWarn : LOG_COLORS.message;
     return (
       <div style={{ padding: '0 16px', color, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
-        <span style={{ color: 'var(--text-dim)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
+        <span style={{ color: 'var(--text-tertiary)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
         {highlight ? highlight(line) : line}
       </div>
     );
@@ -1615,10 +1615,10 @@ function StyledDaemonLine({ line, lineNum, highlight }: { line: string; lineNum:
   const opColor = opTypeText(parsed.opName);
   return (
     <div style={{ padding: '0 16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: bg }}>
-      <span style={{ color: 'var(--text-dim)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
+      <span style={{ color: 'var(--text-tertiary)', userSelect: 'none', marginRight: 8, display: 'inline-block', width: 40, textAlign: 'right' }}>{lineNum}</span>
       <span style={{ color: LOG_COLORS.timestamp }}>{parsed.ts}</span>{' '}
       <span style={{ color: opColor, fontWeight: 600 }}>{parsed.opName}</span>{' '}
-      <span style={{ color: 'var(--text-dim)' }}>{parsed.opId.slice(0, 8)}</span>{' '}
+      <span style={{ color: 'var(--text-tertiary)' }}>{parsed.opId.slice(0, 8)}</span>{' '}
       <span style={{ color: LOG_COLORS.module }}>[{parsed.module}]</span>{' '}
       <span style={{ color: LOG_COLORS.message }}>{highlight ? highlight(parsed.message) : parsed.message}</span>
     </div>
@@ -1658,7 +1658,7 @@ function CopyButton({ text }: { text: string }) {
       title="Copy to clipboard"
       style={{
         background: 'none', border: 'none', cursor: 'pointer', padding: '1px 3px',
-        color: copied ? 'var(--green)' : 'var(--text-dim)', fontSize: 11,
+        color: copied ? 'var(--accent-green)' : 'var(--text-tertiary)', fontSize: 11,
         display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
         transition: 'color .15s',
       }}

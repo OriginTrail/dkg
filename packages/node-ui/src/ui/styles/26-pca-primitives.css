@@ -82,7 +82,7 @@
 }
 .v10-pca-tier-row:last-child { border-bottom: none; }
 .v10-pca-tier-row.active {
-  background: var(--green-dim);
+  background: var(--success-bg);
   color: var(--text-primary);
   font-weight: 600;
 }
@@ -110,17 +110,17 @@
 .v10-pca-verdict-actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px; }
 
 .v10-pca-verdict-green {
-  background: var(--green-dim);
+  background: var(--success-bg);
   border-color: var(--success-border);
 }
 .v10-pca-verdict-green .v10-pca-verdict-glyph { color: var(--text-success); }
 .v10-pca-verdict-amber {
-  background: var(--amber-dim);
+  background: var(--warning-bg);
   border-color: var(--warning-border);
 }
 .v10-pca-verdict-amber .v10-pca-verdict-glyph { color: var(--text-warning); }
 .v10-pca-verdict-danger {
-  background: var(--red-dim);
+  background: var(--danger-bg);
   border-color: var(--danger-border);
 }
 .v10-pca-verdict-danger .v10-pca-verdict-glyph { color: var(--text-danger); }

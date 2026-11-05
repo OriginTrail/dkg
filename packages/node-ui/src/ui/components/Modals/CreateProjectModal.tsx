@@ -407,7 +407,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             />
             <div
               id="dkg-cg-name-help"
-              style={{ marginTop: 4, fontSize: 11, color: nameValidationError ? 'var(--red)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
+              style={{ marginTop: 4, fontSize: 11, color: nameValidationError ? 'var(--accent-red)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
             >
               {nameValidationError
                 ? nameValidationError

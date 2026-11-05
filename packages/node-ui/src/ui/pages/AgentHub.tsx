@@ -6,7 +6,7 @@ export function AgentHubPage() {
     <div className="page-section" style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 0 }}>
       <div style={{ marginBottom: 20 }}>
         <h1 className="page-title" style={{ marginBottom: 0 }}>Agent hub</h1>
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>
           Bring your own agent into the node. OpenClaw chat, network peers, and integrated-agent session history live here.
         </p>
       </div>
@@ -15,10 +15,10 @@ export function AgentHubPage() {
         style={{
           flex: 1,
           minHeight: 0,
-          border: '1px solid var(--border)',
+          border: '1px solid var(--border-default)',
           borderRadius: 'var(--radius-overlay)',
           overflow: 'hidden',
-          background: 'var(--bg)',
+          background: 'var(--bg-root)',
         }}
       >
         <PanelRight />
