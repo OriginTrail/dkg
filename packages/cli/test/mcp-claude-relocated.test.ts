@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { detectClients, selectMcpClientTargets } from '../src/mcp-client-registry.js';
@@ -57,14 +57,17 @@ describe('Claude Desktop relocated Windows user data', () => {
     expect(desktop().map((target) => target.configPath)).toEqual([config('claude_active')]);
   });
 
-  it.each(['native', 'windows-wsl'] as const)('removes registrations from every older config through real %s discovery and uninstall', async (location) => {
+  it.each((['native', 'windows-wsl'] as const).flatMap(location => [false, true].map(fractional => ({ location, fractional }))))(
+    'removes older registrations without changing the preferred profile ($location, fractional: $fractional)', async ({ location, fractional }) => {
     const classic = join(roaming, 'Claude', 'claude_desktop_config.json');
     const older = config('claude_old');
     const latest = config('claude_latest');
     const preserved = { preferences: { theme: 'dark' }, coworkUserFilesPath: 'keep', mcpServers: { other: { command: 'keep' } } };
     for (const file of [classic, older]) write(file, { ...preserved, mcpServers: { ...preserved.mcpServers, dkg: { command: 'dkg' } } });
     write(latest, preserved);
-    utimesSync(classic, 10, 10); utimesSync(older, 20, 20); utimesSync(latest, 30, 30);
+    const times = fractional ? [10, 1_700_000_000.0009, 1_700_000_000.00095] : [10, 20, 30];
+    for (const [index, file] of [classic, older, latest].entries()) utimesSync(file, times[index], times[index]);
+    const before = [classic, older, latest].map((file) => statSync(file).mtimeMs);
     if (location === 'windows-wsl') { fixture.platform = 'linux'; fixture.runtime = 'wsl'; }
     const windows = { APPDATA: roaming, LOCALAPPDATA: local, USERPROFILE: join(root, 'windows-user') };
     const resolver = (key: string) => windows[key as keyof typeof windows] ?? null;
@@ -81,6 +84,11 @@ describe('Claude Desktop relocated Windows user data', () => {
     });
     for (const file of [classic, older]) expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual(preserved);
     expect(readFileSync(latest, 'utf8')).toBe(untouched);
+    // Cleanup must not make stale profiles appear to be the active setup destination.
+    // Node's timestamp API rounds to microseconds; preserve sub-millisecond ordering.
+    [classic, older, latest].forEach((file, index) => expect(statSync(file).mtimeMs).toBeCloseTo(before[index], 2));
+    fixture.runtime = location === 'windows-wsl' ? 'wsl' : 'windows';
+    expect(detectClients({ resolveWslWindowsEnvPath: resolver }).filter((target) => target.id === 'claude-desktop').map((target) => target.configPath)).toEqual([latest]);
   });
 
   it('keeps classic installs and permits a fresh relocated profile directory', () => {

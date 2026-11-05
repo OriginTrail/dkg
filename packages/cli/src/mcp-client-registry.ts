@@ -70,8 +70,6 @@ export type ClientTarget = WithDisplayName<NativeTarget | WindowsTarget> & {
   configPath: string;
   /** Pretty path for display, with `~` substituted back in. */
   displayPath: string;
-  /** Paths checked for an application with more than one supported config location. */
-  checkedPaths?: string[];
 };
 
 /** Stable selector identity is independent of display names and detection results. */
@@ -230,7 +228,7 @@ export function detectClients({
     const selected = selection === 'all' ? paths.configPaths : paths.configPaths.slice(0, 1);
     const found = selected.filter((path) => existsSync(path) || existsSync(dirname(path)));
     for (const configPath of found) candidates.push({
-      ...target, configPath, checkedPaths: paths.checkedPaths,
+      ...target, configPath,
       displayPath: target.location === 'native' ? tildify(configPath) : configPath,
     });
     if (!found.length) reportMissing?.({ id: target.id, name: target.name, location: target.location,

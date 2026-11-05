@@ -30,6 +30,7 @@ export default defineConfig({
           'test/core-chain-cache-config.test.ts',
           'test/mcp-claude-relocated.test.ts',
           'test/mcp-uninstall-command.test.ts',
+          'test/mcp-uninstall.test.ts',
           'test/mcp-setup.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',
