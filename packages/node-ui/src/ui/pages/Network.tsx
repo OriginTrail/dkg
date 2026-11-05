@@ -33,23 +33,11 @@ export function NetworkPage() {
   const agents = agentData?.agents ?? [];
 
   return (
-    <div>
+    <div className="network-page">
       {/* This page renders standalone (outside the app shell), so without an
           explicit affordance the operator has no way back to the dashboard
           once they land here. Keep a back link at the top. */}
-      <Link
-        to="/"
-        className="page-back-link"
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          marginBottom: 12,
-          fontSize: 13,
-          color: 'var(--text-secondary)',
-          textDecoration: 'none',
-        }}
-      >
+      <Link to="/" className="network-page-back">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
         Back to dashboard
       </Link>
@@ -58,7 +46,7 @@ export function NetworkPage() {
 
       <div className="stats-grid">
         <div className="stat-card ds-card">
-          <div className="stat-label">Total Connections</div>
+          <div className="stat-label">Total connections</div>
           <div className="stat-value">{connData?.total ?? '—'}</div>
         </div>
         <div className="stat-card ds-card">
@@ -70,13 +58,13 @@ export function NetworkPage() {
           <div className="stat-value">{connData?.relayed ?? '—'}</div>
         </div>
         <div className="stat-card ds-card">
-          <div className="stat-label">Known Agents</div>
+          <div className="stat-label">Known agents</div>
           <div className="stat-value">{agents.length}</div>
         </div>
       </div>
 
       <div className="card ds-card">
-        <div className="card-title">Active Connections</div>
+        <div className="card-header"><div className="card-title">Active connections</div></div>
         {connections.length === 0 ? (
           <div className="empty-state empty-state--compact">
             <div className="empty-state-icon">
@@ -92,7 +80,7 @@ export function NetworkPage() {
                 <th>Peer</th>
                 <th>Transport</th>
                 <th>Direction</th>
-                <th>Remote Address</th>
+                <th>Remote address</th>
                 <th>Duration</th>
               </tr>
             </thead>
@@ -112,7 +100,7 @@ export function NetworkPage() {
       </div>
 
       <div className="card ds-card">
-        <div className="card-title">Discovered Agents</div>
+        <div className="card-header"><div className="card-title">Discovered agents</div></div>
         {agents.length === 0 ? (
           <div className="empty-state empty-state--compact">
             <div className="empty-state-icon">
@@ -126,7 +114,7 @@ export function NetworkPage() {
             <thead>
               <tr>
                 <th>Name</th>
-                <th>PeerId</th>
+                <th>Peer ID</th>
                 <th>Framework</th>
                 <th>Role</th>
                 <th>Connection</th>
