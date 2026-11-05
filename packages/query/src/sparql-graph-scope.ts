@@ -188,6 +188,7 @@ export function wrapWithGraphUnion(
 const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
 const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
+const DEDUP_MATCH_SENTINEL = '?__dkgDedupMatched';
 const dedupFilterVariable = (index: number) => `?__dkgDedupFilter${index}`;
 
 interface ProjectedGraphPattern {
@@ -236,7 +237,7 @@ function wrapWithProjectedGraphSubselect(
 
 /** Own graph choice and FILTER placement inside the shared projection boundary. */
 function buildDeduplicatedGraphPattern(
-  scope: PreparedGraphScope, graphs: readonly string[], selection: 'values' | 'constant',
+  scope: PreparedGraphScope, graphs: readonly string[], selection: 'values' | 'dataset',
 ): ProjectedGraphPattern {
   const { openEnd, close } = scope.where!;
   const { uniqueMappings, impureFilters } = readDedupPattern(scope);
@@ -254,11 +255,11 @@ function buildDeduplicatedGraphPattern(
   }
   inner += scope.source.slice(from, close);
   const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
-  // Blazegraph can lose a GRAPH variable while planning a repeated path, even
-  // with FROM NAMED. Constant branches retain the graph identity needed by MIN
-  // and prevent a path in one graph from joining a triple in another.
-  const graphRead = (variable: string, bindings = '') => selection === 'constant'
-    ? graphs.map(graph => `{ VALUES ${variable} { <${assertSafeIri(graph)}> } GRAPH <${assertSafeIri(graph)}> { ${inner} ${bindings} } }`).join(' UNION ')
+  // Bind the graph before evaluating a repeated path. A conditional graph
+  // read prevents Blazegraph from planning the path ahead of VALUES; the
+  // marker removes unmatched graphs. This stays constant-depth at large lists.
+  const graphRead = (variable: string, bindings = '') => selection === 'dataset'
+    ? `VALUES ${variable} { ${values} } OPTIONAL { GRAPH ${variable} { ${inner} ${bindings} } BIND(true AS ${DEDUP_MATCH_SENTINEL}) } FILTER(${DEDUP_MATCH_SENTINEL})`
     : `VALUES ${variable} { ${values} } GRAPH ${variable} { ${inner} }`;
   const variables = scope.whereVariables.map(variable => variable.source).join(' ');
   // BIND evaluates on every retained row on the right of the rejoin. A raw
@@ -277,11 +278,12 @@ function buildDeduplicatedGraphPattern(
       `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE {`,
       graphRead(DEDUP_MATCH_GRAPH_SENTINEL),
       `} GROUP BY ${variables} }`,
-      // Every selected mapping exists in its graph. Oxigraph's VALUES route
-      // benefits from OPTIONAL, but Blazegraph duplicates rows when it pushes
-      // OPTIONAL into these UNION branches. Use an ordinary join for them.
-      selection === 'constant'
-        ? `{ ${graphRead(DEDUP_GRAPH_SENTINEL, filterBindings)} }`
+      // Keep the dataset replay in its own subquery: flattening both path
+      // evaluations into one join group duplicates hidden-path mappings on
+      // Blazegraph. Project filter booleans so the shared outer boundary can
+      // discard rejected rows. Ordinary VALUES reads keep Oxigraph's fast plan.
+      selection === 'dataset'
+        ? `{ SELECT ${variables} ${DEDUP_GRAPH_SENTINEL} ${movedFilters.map((_, index) => dedupFilterVariable(index)).join(' ')} WHERE { ${graphRead(DEDUP_GRAPH_SENTINEL, filterBindings)} } }`
         : `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} ${filterBindings} } }`,
     ].join(' ');
   const trailing = movedFilters.map((_, index) => `FILTER(${dedupFilterVariable(index)})`).join(' ');
@@ -297,10 +299,11 @@ export function wrapWithDeduplicatedGraphValues(
 }
 
 function wrapWithDeduplicatedGraphSelection(
-  input: PreparedGraphScope, graphUris: readonly string[], selection: 'values' | 'constant',
+  input: PreparedGraphScope, graphUris: readonly string[], selection: 'values' | 'dataset',
 ): GraphScopeRewriteResult {
   return wrapWithProjectedGraphSubselect(
     input, graphUris, [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL,
+      ...(selection === 'dataset' ? [DEDUP_MATCH_SENTINEL] : []),
       ...readDedupPattern(input).impureFilters.map((_, index) => dedupFilterVariable(index))],
     (_inner, graphs) => buildDeduplicatedGraphPattern(input, graphs, selection),
     isDedupSafeBasicGraphPattern,
@@ -344,7 +347,7 @@ export function rewriteGraphSet(
 ): GraphScopeRewriteResult {
   return applyGraphDataset(scope, graphUris, engine, (route) => {
     const deduplicateDataset = (input: PreparedGraphScope, graphs: readonly string[]) =>
-      wrapWithDeduplicatedGraphSelection(input, graphs, 'constant');
+      wrapWithDeduplicatedGraphSelection(input, graphs, 'dataset');
     const strategies = policy === 'union-only'
       ? [wrapWithGraphUnion]
       : route === 'dataset-only'

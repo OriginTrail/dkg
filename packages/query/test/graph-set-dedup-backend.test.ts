@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BlazegraphStore, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { materializePreparedSparql, prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
-import { prepareGraphScope, wrapWithDeduplicatedGraphValues } from '../src/sparql-graph-scope.js';
+import { prepareGraphScope, rewriteGraphSet, wrapWithDeduplicatedGraphValues } from '../src/sparql-graph-scope.js';
 
 // CI's tornado-blazegraph lane runs this file on a live server; elsewhere it runs on Oxigraph, so both stores answer to the same rows.
 const endpoint = process.env.BLAZEGRAPH_TEST_URL;
@@ -240,5 +240,24 @@ describe(`graph-set deduplication on ${endpoint ? 'Blazegraph' : 'Oxigraph'}`, {
     expect(retained.length).toBeGreaterThan(count * 0.25);
     expect(retained.length).toBeLessThan(count * 0.75);
     expect(new Set(bag(retained))).toEqual(new Set([JSON.stringify({ o: 'urn:sample:end', s: 'urn:sample:shared' })]));
+  });
+
+  it('keeps repeated-path reads practical across 1,000 graphs', async () => {
+    const selected = Array.from({ length: 1000 }, (_, n) => `urn:dataset-scale:${id}:${n}`);
+    try {
+      await store.insert([
+        ...selected.map(graph => quad('urn:scale:dummy', 'urn:scale:dummy', 'urn:scale:dummy', graph)),
+        ...Array.from({ length: 3 }, (_, n) => [
+          quad('urn:scale:s', 'urn:scale:link', `urn:scale:hop:${n}`, selected[0]),
+          quad(`urn:scale:hop:${n}`, 'urn:scale:to', 'urn:scale:end', selected[0]),
+        ]).flat(),
+      ]);
+      const rewritten = rewriteGraphSet(scope('SELECT ?s ?o WHERE { ?s <urn:scale:link>+/<urn:scale:to> ?o }'), selected, 'deduplicated-values-union', null);
+      if (rewritten.kind !== 'ready') throw new Error(`Unexpected fallback: ${rewritten.reason}`);
+      const found = await store.query(rewritten.value.source);
+      expect(found.bindings).toEqual(Array.from({ length: 3 }, () => ({ s: 'urn:scale:s', o: 'urn:scale:end' })));
+    } finally {
+      await store.update(selected.map(graph => `DROP SILENT GRAPH <${graph}>`).join('; '));
+    }
   });
 });
