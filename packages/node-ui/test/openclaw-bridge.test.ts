@@ -1014,8 +1014,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
         status: 'degraded',
-        statusLabel: 'Degraded',
-        bridgeStatusLabel: 'Degraded',
+        statusLabel: 'Partial',
+        bridgeStatusLabel: 'Partial',
         chatAttachments: true,
       });
       expect(hermes?.chatReady).toBe(false);
@@ -1068,8 +1068,8 @@ describe('OpenClaw bridge behavioral tests', () => {
       const hermes = result.integrations.find((item) => item.id === 'hermes');
       expect(hermes).toMatchObject({
         status: 'degraded',
-        statusLabel: 'Degraded',
-        bridgeStatusLabel: 'Degraded',
+        statusLabel: 'Partial',
+        bridgeStatusLabel: 'Partial',
         chatReady: false,
         bridgeOnline: false,
         target: 'bridge',
@@ -1327,7 +1327,7 @@ describe('OpenClaw bridge behavioral tests', () => {
             bridgeOnline: true,
             bridgeStatusLabel: 'Connected',
             status: 'chat_ready',
-            statusLabel: 'Chat ready',
+            statusLabel: 'Ready',
             detail: 'Connected through the bridge.',
             source: 'live',
           },
@@ -1441,7 +1441,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: true,
         bridgeStatusLabel: 'Connected',
         status: 'chat_ready',
-        statusLabel: 'Chat ready',
+        statusLabel: 'Ready',
         detail: 'Connected through the bridge.',
         source: 'live',
       };
@@ -1576,7 +1576,7 @@ describe('OpenClaw bridge behavioral tests', () => {
         bridgeOnline: true,
         bridgeStatusLabel: 'Bridge live',
         status: 'chat_ready',
-        statusLabel: 'Chat ready',
+        statusLabel: 'Ready',
         detail: 'Connected through the bridge.',
         source: 'live',
       });
@@ -1618,7 +1618,7 @@ describe('OpenClaw bridge behavioral tests', () => {
           bridgeOnline: true,
           bridgeStatusLabel: 'Bridge live',
           status: 'chat_ready',
-          statusLabel: 'Chat ready',
+          statusLabel: 'Ready',
           detail: 'Connected through the bridge.',
           source: 'live',
         },

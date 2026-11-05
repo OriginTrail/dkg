@@ -120,7 +120,7 @@ async function renderChatSurface(
     chatReady: true,
     bridgeOnline: true,
     status: 'chat_ready',
-    statusLabel: 'Chat ready',
+    statusLabel: 'Ready',
     ...primeAgent,
   });
   const container = document.createElement('div');

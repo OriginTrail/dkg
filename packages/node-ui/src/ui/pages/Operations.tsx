@@ -960,10 +960,10 @@ function OperationsTab() {
         </select>
         <select className="input" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
           <option value="">All statuses</option>
-          <option value="success">success</option>
-          <option value="error">error</option>
-          <option value="cancelled">cancelled</option>
-          <option value="in_progress">in_progress</option>
+          <option value="success">{operationStatusLabel('success')}</option>
+          <option value="error">{operationStatusLabel('error')}</option>
+          <option value="cancelled">{operationStatusLabel('cancelled')}</option>
+          <option value="in_progress">{operationStatusLabel('in_progress')}</option>
         </select>
         <input
           className="input mono"
@@ -1632,9 +1632,14 @@ export function operationStatusBadgeClass(status: string): string {
   return 'ds-tone-pending';
 }
 
+/** The word shown for an operation status: the same "Failed" as nOS. */
+export function operationStatusLabel(status: string): string {
+  return status === 'error' ? 'Failed' : humanizeStatus(status);
+}
+
 export function StatusBadge({ status }: { status: string }) {
   const cls = operationStatusBadgeClass(status);
-  return <span className={`ds-badge ds-sm ${cls}`}>{humanizeStatus(status)}</span>;
+  return <span className={`ds-badge ds-sm ${cls}`}>{operationStatusLabel(status)}</span>;
 }
 
 function CopyButton({ text }: { text: string }) {

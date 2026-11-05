@@ -614,8 +614,8 @@ describe('ConnectedAgentsTab rendering', () => {
       bridgeOnline: false,
       chatReady: false,
       status: 'degraded',
-      statusLabel: 'Degraded',
-      bridgeStatusLabel: 'Degraded',
+      statusLabel: 'Partial',
+      bridgeStatusLabel: 'Partial',
     });
     const markup = renderConnectedAgentsTab({
       integrations: [degraded],

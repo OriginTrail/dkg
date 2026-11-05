@@ -2477,11 +2477,11 @@ async function mapLocalAgentIntegrationRecord(
   let detail: string;
   if (persistentChat && degraded) {
     status = 'degraded';
-    statusLabel = 'Degraded';
+    statusLabel = 'Partial';
     detail = hermesRuntimeDetail
       ?? health?.error
       ?? record.runtime?.lastError
-      ?? `${record.name} is attached to this node, but one capability is degraded.`;
+      ?? `${record.name} is attached to this node, but one capability is unavailable.`;
   } else if (persistentChat && record.runtime?.status === 'connecting') {
     status = 'connecting';
     statusLabel = 'Connecting';
@@ -2489,7 +2489,7 @@ async function mapLocalAgentIntegrationRecord(
       ?? `${record.name} is registered and still starting up.`;
   } else if (bridgeOnline) {
     status = 'chat_ready';
-    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Chat ready';
+    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Ready';
     detail = primeTurnDetached
       ? `${record.name} is still working after the browser stream disconnected. Wait for it to finish before sending another message.`
       : health?.busy
@@ -2522,7 +2522,7 @@ async function mapLocalAgentIntegrationRecord(
     : status === 'connecting'
       ? 'Connecting'
       : status === 'degraded'
-        ? 'Degraded'
+        ? 'Partial'
       : persistentChat
         ? 'Unavailable'
         : connectSupported

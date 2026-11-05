@@ -188,7 +188,7 @@ describe('PanelRight component', () => {
       configured: true,
       detected: true,
       status: 'chat_ready',
-      statusLabel: 'Chat ready',
+      statusLabel: 'Ready',
       detail: 'ready',
       source: 'live',
     }] });
@@ -314,7 +314,7 @@ describe('PanelRight component', () => {
       configured: true,
       detected: true,
       status: 'chat_ready',
-      statusLabel: 'Chat ready',
+      statusLabel: 'Ready',
       detail: 'ready',
       source: 'live',
       defaultSessionId: memorySessionId,

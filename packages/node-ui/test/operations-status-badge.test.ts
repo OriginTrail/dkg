@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   StatusBadge,
   operationStatusBadgeClass,
+  operationStatusLabel,
 } from '../src/ui/pages/Operations.js';
 
 describe('operation status badges', () => {
@@ -18,5 +19,10 @@ describe('operation status badges', () => {
     );
     expect(html).toContain('ds-tone-muted');
     expect(html).toContain('Cancelled'); // sentence case (DESIGN.md · Type)
+  });
+
+  it('says Failed for an operation that ended in error, as nOS does', () => {
+    expect(operationStatusLabel('error')).toBe('Failed');
+    expect(operationStatusLabel('in_progress')).toBe('In progress');
   });
 });
