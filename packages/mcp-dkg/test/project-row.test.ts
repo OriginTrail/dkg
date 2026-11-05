@@ -1,9 +1,34 @@
 import { describe, expect, it } from 'vitest';
 import { DkgClient } from '../src/client.js';
 import { registerReadTools } from '../src/tools.js';
+import { contextGraphDisplayName, type ProjectRow } from '../src/project-row.js';
 import { FakeServer, makeConfig } from './harness.js';
 
 const did = 'did:dkg:agent:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const hash = `0x${'a'.repeat(64)}`;
+const names: Array<{ label: string; row: ProjectRow; expected: string | null }> = [
+  { label: 'ordinary same-name graph', row: { id: 'team', name: 'team' }, expected: 'team' },
+  { label: 'explicit known name', row: { id: 'team', name: 'team', nameKnown: true }, expected: 'team' },
+  { label: 'explicit unknown name', row: { id: 'team', name: 'stale', nameKnown: false }, expected: null },
+  { label: 'missing name', row: { id: 'team' }, expected: null },
+  { label: 'blank name', row: { id: 'team', name: ' ' }, expected: null },
+  { label: 'empty name', row: { id: 'team', name: '' }, expected: null },
+  { label: 'known blank name', row: { id: 'team', name: ' ', nameKnown: true }, expected: null },
+  { label: 'legacy hash ID without provenance', row: { id: hash, name: hash }, expected: null },
+  { label: 'hash name with a different ID', row: { id: 'local', name: hash, onChain: { nameHash: hash } }, expected: hash },
+  { label: 'known flag is authoritative', row: { id: hash, name: hash, nameKnown: true, onChain: { nameHash: hash } }, expected: hash },
+  { label: 'name comparison to the ID remains case-sensitive', row: { id: hash, name: hash.toUpperCase() }, expected: hash.toUpperCase() },
+  { label: 'canonical chain hash does not mask a name', row: { id: 'local', name: hash.toUpperCase(), onChain: { nameHash: hash } }, expected: hash.toUpperCase() },
+  { label: 'noncanonical chain hash does not mask a name', row: { id: 'local', name: hash, onChain: { nameHash: hash.toUpperCase() } }, expected: hash },
+  { label: 'different chain provenance', row: { id: 'local', name: hash, onChain: { nameHash: `0x${'b'.repeat(64)}` } }, expected: hash },
+];
+
+describe('MCP Context Graph display names', () => {
+  it.each(names)('$label', ({ row, expected }) => {
+    expect(contextGraphDisplayName(row)).toBe(expected);
+  });
+});
+
 describe('context graph transport normalization', () => {
   it('normalizes malformed membership once before identity lookup and selection', async () => {
     let identityReads = 0;

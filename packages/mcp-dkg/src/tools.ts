@@ -1,4 +1,3 @@
-import { selectContextGraphName } from '@origintrail-official/dkg-core';
 /**
  * DKG MCP read-tool registrations. Every tool:
  *   - Takes a `DkgClient` + resolved `DkgConfig` so it can honour the
@@ -34,6 +33,7 @@ import {
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
 import { listContextGraphsForScope } from './tools/context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';
+import { contextGraphDisplayName } from './project-row.js';
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -102,7 +102,7 @@ export function registerReadTools(
             const star = pinned && r.id === pinned ? ' ★' : '';
             const role = r.role ? ` · ${r.role}` : '';
             const layer = r.layer ? ` · ${r.layer}` : '';
-            const name = selectContextGraphName(r, { legacyHashSource: 'id', knownNameIsAuthoritative: true, blankNameIsUnresolved: true });
+            const name = contextGraphDisplayName(r);
             return `- **${r.id}**${star} — ${name ?? '(name unresolved)'}${role}${layer}${
               r.description ? `\n    ${r.description}` : ''
             }`;

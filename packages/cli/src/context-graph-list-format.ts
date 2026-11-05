@@ -1,5 +1,3 @@
-import { selectContextGraphName } from '@origintrail-official/dkg-core';
-
 /**
  * Terminal rendering for `dkg context-graph list` and `dkg context-graph info`.
  *
@@ -44,7 +42,11 @@ const NONE = '—';
 
 /** The cleartext name, or null when the node knows the graph only by hash. */
 export function contextGraphDisplayName(row: ContextGraphListRowView): string | null {
-  return selectContextGraphName(row, { legacyHashSource: 'on-chain', knownNameIsAuthoritative: false, blankNameIsUnresolved: false });
+  if (row.nameKnown === false || row.name === undefined) return null;
+  // CLI compatibility: matching canonical chain provenance remains unresolved,
+  // even when an older daemon also marks a hash-shaped name as known.
+  if (/^0x[0-9a-f]{64}$/i.test(row.name) && row.name.toLowerCase() === row.onChain?.nameHash) return null;
+  return row.name;
 }
 
 export function contextGraphAccess(row: ContextGraphListRowView): string {

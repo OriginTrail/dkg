@@ -1,6 +1,10 @@
-import type { ContextGraphMembership, ContextGraphName } from '@origintrail-official/dkg-core';
+import type { ContextGraphMembership } from '@origintrail-official/dkg-core';
 
-export interface ProjectRow extends ContextGraphMembership, ContextGraphName {
+export interface ProjectRow extends ContextGraphMembership {
+  id: string;
+  name?: string;
+  nameKnown?: boolean;
+  onChain?: { nameHash?: string | null };
   description?: string;
   role?: string;
   layer?: string;
@@ -12,7 +16,7 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Normalize untrusted transport fields once, before membership and name policies run. */
+/** Normalize untrusted transport fields once, before membership and name selection. */
 export function normalizeProjectRows(value: unknown): ProjectRow[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((candidate): ProjectRow[] => {
@@ -31,4 +35,12 @@ export function normalizeProjectRows(value: unknown): ProjectRow[] {
     }
     return [row];
   });
+}
+
+/** MCP trusts explicit name provenance; legacy placeholders match the exact ID. */
+export function contextGraphDisplayName(row: ProjectRow): string | null {
+  if (row.nameKnown === false || row.name === undefined || !row.name.trim()) return null;
+  if (row.nameKnown === true) return row.name;
+  if (/^0x[0-9a-f]{64}$/i.test(row.name) && row.name === row.id) return null;
+  return row.name;
 }
