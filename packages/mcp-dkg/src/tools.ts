@@ -31,7 +31,7 @@ import {
   type EntitySource,
 } from './sparql.js';
 import { EXISTING_CONTEXT_GRAPH_ID_DESCRIPTION } from './tools/context-graph-description.js';
-import { filterContextGraphsForScope } from './tools/context-graph-scope.js';
+import { listContextGraphsForScope } from './tools/context-graph-scope.js';
 import { resolveWorkingMemoryAgentAddress } from './tools/working-memory-identity.js';
 
 type ToolResult = {
@@ -80,7 +80,7 @@ export function registerReadTools(
       // terminology); the follow-up sentence is the existing
       // mcp-dkg per-row payload notes.
       description:
-        "List context graphs (called 'projects' in the DKG node UI). " +
+        "List context graphs (shown as 'Context Graphs' in the DKG node UI). " +
         "Defaults to this caller's created/joined context graphs so agents " +
         'do not have to sift through noisy discovered public graphs. Pass ' +
         'scope: "all" to inspect every known graph.',
@@ -93,7 +93,7 @@ export function registerReadTools(
     },
     async ({ scope = 'mine' }): Promise<ToolResult> => {
       try {
-        const rows = filterContextGraphsForScope(await client.listProjects(), scope);
+        const rows = await listContextGraphsForScope(client, scope);
         if (!rows.length) return ok('No context graphs found on this DKG node.');
         const pinned = config.defaultProject;
         const table = rows
@@ -101,7 +101,7 @@ export function registerReadTools(
             const star = pinned && r.id === pinned ? ' ★' : '';
             const role = r.role ? ` · ${r.role}` : '';
             const layer = r.layer ? ` · ${r.layer}` : '';
-            return `- **${r.id}**${star} — ${r.name ?? '(unnamed)'}${role}${layer}${
+            return `- **${r.id}**${star} — ${r.name && r.name !== r.id ? r.name : '(name unresolved)'}${role}${layer}${
               r.description ? `\n    ${r.description}` : ''
             }`;
           })

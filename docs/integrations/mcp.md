@@ -18,6 +18,8 @@ dkg mcp setup --network testnet
 
 Setup initializes a fresh node, starts it, and offers to register DKG in detected clients. Restart the chosen client. Existing nodes keep their network. Use `dkg mcp setup --dry-run` to inspect changes first.
 
+The Context Graph listing defaults to `scope: "mine"`, matching **My Context Graphs** in the Node UI: explicit caller membership, or a matching curator identity for older list responses. Discovery and subscription alone do not establish membership. Use `scope: "all"` to inspect every known graph, including discovered and system graphs; unresolved names are labelled rather than repeated as names. Query-catalog discovery uses the same membership rule.
+
 ## Verify
 
 1. Run `dkg status` in the terminal.
