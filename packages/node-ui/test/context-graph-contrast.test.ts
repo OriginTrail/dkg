@@ -20,25 +20,6 @@ function readStylesSources(): string {
 
 const css = readStylesSources();
 
-function ruleFor(selector: string): string {
-  const match = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);
-  if (!match) throw new Error(`Missing selector ${selector}`);
-  const open = css.indexOf('{', match.index);
-  const close = css.indexOf('}', open);
-  return css.slice(open + 1, close);
-}
-
-function blockFor(selector: string): string {
-  return ruleFor(selector);
-}
-
-function customProperties(selector: string): Record<string, string> {
-  const block = blockFor(selector);
-  return Object.fromEntries(
-    [...block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)].map(([, key, value]) => [key, value.trim()]),
-  );
-}
-
 interface CssRule { selectors: string[]; body: string }
 
 /** Top-level style rules in source order, grouped selectors split apart.
@@ -64,6 +45,24 @@ function parseRules(source: string): CssRule[] {
 
 const cssRules = parseRules(css);
 
+/** Body of the first rule listing exactly this selector, alone or in a group. */
+function ruleFor(selector: string): string {
+  const rule = cssRules.find(({ selectors }) => selectors.includes(selector));
+  if (!rule) throw new Error(`Missing selector ${selector}`);
+  return rule.body;
+}
+
+/** The custom properties declared in a rule body. */
+function declarations(body: string): Record<string, string> {
+  return Object.fromEntries(
+    [...body.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)].map(([, key, value]) => [key, value.trim()]),
+  );
+}
+
+function customProperties(selector: string): Record<string, string> {
+  return declarations(ruleFor(selector));
+}
+
 /** The custom properties an element with exactly these classes ends up with:
  *  every plain class selector that matches it, grouped rules included, applied
  *  in cascade order (fewer classes first, then source order). */
@@ -73,9 +72,7 @@ function effectiveProperties(classes: string[], rules: CssRule[] = cssRules): Re
     .filter((s) => /^(?:\.[\w-]+)+$/.test(s) && s.slice(1).split('.').every((c) => own.has(c)))
     .map((s) => ({ classes: s.split('.').length - 1, body })));
   matches.sort((a, b) => a.classes - b.classes);
-  return Object.assign({}, ...matches.map(({ body }) => Object.fromEntries(
-    [...body.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)].map(([, key, value]) => [key, value.trim()]),
-  )));
+  return Object.assign({}, ...matches.map(({ body }) => declarations(body)));
 }
 
 const rootVars = customProperties(':root');
@@ -128,18 +125,9 @@ function compositedBackground(value: string, surface: string, vars: Record<strin
   return '#' + fg.map((c, i) => Math.round((c * p + bg[i] * (1 - p)) * 255).toString(16).padStart(2, '0')).join('');
 }
 
-/** The rule whose selector is exactly `selector` (at the start of a line),
- *  not a descendant rule that ends with it (the bell's `… .ds-count…`). */
-function ownRule(selector: string): string {
-  const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);
-  if (!m) throw new Error(`Missing rule ${selector}`);
-  const open = css.indexOf('{', m.index);
-  return css.slice(open + 1, css.indexOf('}', open));
-}
-
 /** Declared value of a property in a rule, without resolving var(). */
 function declared(selector: string, property: string): string {
-  const m = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`).exec(ownRule(selector));
+  const m = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`).exec(ruleFor(selector));
   if (!m) throw new Error(`Missing ${property} in ${selector}`);
   return m[1].trim();
 }
