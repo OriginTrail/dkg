@@ -52,7 +52,7 @@
   --link-underline: #6b6b6b;
   --text-on-accent: #111111;
 
-  /* Layer identity — one hue, one job (nOS ↔ node UI shared vocabulary).
+  /* Layer identity — one hue, one job. The only colours shared with nOS.
      WM slate, SWM OriginTrail cyan (--color-blue #1ADED7), VM OriginTrail
      purple (--color-primary #6344DF / --color-lavender #8B85F4). These hues
      are reserved for the three memory layers; amber, green and red are
@@ -158,7 +158,7 @@
   --link-underline: #a3a3a3;
   --text-on-accent: #111111;
   /* Layer identity, light. Same hues as dark, stepped for white
-     surfaces; identical to the nOS light set. Text roles clear 4.5:1
+     surfaces; identical to the nOS light layer colours. Text roles clear 4.5:1
      on their own bg; the non-text role clears 3:1 on --bg-surface. */
   --layer-working: #526173;
   --layer-working-text: #3f4c5c;

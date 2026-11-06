@@ -41,8 +41,8 @@ function fileIcon(name: string): React.ReactNode {
 
 export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphName }: ImportFilesModalProps) {
   const [files, setFiles] = useState<QueuedFile[]>([]);
-  const [extractKnowledge, setExtractKnowledge] = useState(true);
-  const [storeOriginals, setStoreOriginals] = useState(true);
+  const [extractKnowledge] = useState(true);
+  const [storeOriginals] = useState(true);
   const [status, setStatus] = useState<UploadStatus>('idle');
   const [currentFile, setCurrentFile] = useState(0);
   const [results, setResults] = useState<UploadResult[]>([]);

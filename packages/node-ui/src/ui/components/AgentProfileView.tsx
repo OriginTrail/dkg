@@ -18,7 +18,7 @@ import type { MemoryEntity } from '../hooks/useMemoryEntities.js';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
 import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { ActivityFeed } from './ActivityFeed.js';
-import { AgentChip } from './AgentChip.js';
+import { AgentChip, AgentTitle } from './AgentChip.js';
 import { Copy } from 'lucide-react';
 import { Breadcrumbs } from './ds/Breadcrumbs.js';
 
@@ -90,7 +90,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       <div className="v10-agent-profile-header">
         <Breadcrumbs items={[{ label: contextGraphName, onClick: onBack }, { label: 'Agent' }]} />
         <div className="v10-agent-profile-head">
-          <h1 className="v10-agent-profile-heading"><AgentChip agent={agent ?? undefined} fallbackUri={agentUri} size="lg" showOperator /></h1>
+          <AgentTitle agent={agent} fallbackUri={agentUri} />
           {agent?.reputation && (
             <div className="v10-agent-profile-reputation">
               {agent.reputation}

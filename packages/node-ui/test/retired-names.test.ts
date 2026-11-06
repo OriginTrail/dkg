@@ -45,16 +45,6 @@ const kept = new Set([...section.matchAll(/`([^`]+)`/g)].map((m) => m[1]!.replac
 // Classes added to the page by Lucide, not by this package.
 const THIRD_PARTY = /^lucide(-|$)/;
 
-// e2e selectors whose markup went before this check. Already stale on main; shrink this, never grow it.
-const STALE_E2E = new Set([
-  'v10-agent-content', 'v10-collapse-btn', 'v10-dash-project-card', 'v10-dash-project-count', 'v10-dash-project-name',
-  'v10-dash-section-link', 'v10-layer-preview', 'v10-me-entity', 'v10-me-graph-loading', 'v10-me-list-row', 'v10-op-row',
-  'v10-oracle-placeholder', 'v10-ops-detail', 'v10-ops-drawer', 'v10-ops-row', 'v10-po-card', 'v10-project-name',
-  'v10-project-overview', 'v10-project-view', 'v10-pv-header', 'v10-quick-action', 'v10-quick-action-icon', 'v10-recent-op',
-  'v10-recent-op-status', 'v10-recent-op-type', 'v10-tree-chevron', 'v10-tree-integration-dot', 'v10-tree-layer-header',
-  'v10-tree-section-badge',
-]);
-
 describe('retired names', () => {
   it('reads classes and runtime families', () => {
     expect(selectorClasses('.a:hover .b, .c > d { color: red; } @media (min-width: 1.5px) { .e { top: 0; } }')).toEqual(['a', 'b', 'c', 'e']);
@@ -80,12 +70,7 @@ describe('retired names', () => {
     const everything = new Set(`${code}\n${css.join('\n')}`.match(/[a-zA-Z_][\w-]*/g));
     const missing = walk(join(ROOT, 'e2e')).filter((f) => f.endsWith('.ts')).flatMap((file) => (
       [...read(file).replace(/^\s*\/\/.*$/gm, '').matchAll(/\.((?:v10|ds)-[\w-]*\w)(?![\w$-])/g)].map((m) => m[1]!)
-    )).filter((name) => !everything.has(name) && !isBuiltAtRuntime(name) && !STALE_E2E.has(name));
+    )).filter((name) => !everything.has(name) && !isBuiltAtRuntime(name));
     expect([...new Set(missing)]).toEqual([]);
-  });
-
-  it('no stale e2e entry has come back to life', () => {
-    const everything = new Set(`${code}\n${css.join('\n')}`.match(/[a-zA-Z_][\w-]*/g));
-    expect([...STALE_E2E].filter((name) => everything.has(name))).toEqual([]);
   });
 });

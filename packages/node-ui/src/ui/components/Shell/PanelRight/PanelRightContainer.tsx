@@ -117,8 +117,6 @@ export function PanelRight() {
 
   const localSessions = summarizeLocalAgentSessions(memorySessions, integrations);
   const {
-    sortedIntegrations,
-    connectedIntegrations,
     selectedIntegration,
     selectedConversation,
     selectedHasConversation,
