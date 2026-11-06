@@ -87,7 +87,7 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 | `Done` | carried out |
 | `Refused` | not admitted |
 | saved, stored | vaulted |
-| Say what happens | atomic, bootstrap, canonical, seeded, envelope, triage, nonce, reconciled, libp2p, rdfs |
+| Say what happens | atomic, bootstrap, canonical, seeded, envelope, triage, nonce |
 
 ## Shape and size
 
