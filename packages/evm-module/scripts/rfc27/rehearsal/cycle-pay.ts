@@ -8,6 +8,7 @@
 
 import { ethers } from 'ethers';
 
+import { PoolModel } from '../../../test/helpers/emission-model';
 import { eventsIn } from '../contracts';
 import { chainNow } from '../network';
 import { inference } from '../plans';
@@ -17,7 +18,7 @@ import { HUB, expectRevert, saveResults, send, succeeds } from './context';
 import type { CycleRun } from './cycle';
 import { approve, claimAll, requestDomain, signedGroup, walletRequest } from './operations';
 import { impersonate } from './plumbing';
-import { ExpectedReward, closedWindows, expectedReward, positions, stakerCredits } from './reads';
+import { ExpectedReward, closedWindows, expectedReward, poolsHold, positions, stakerCredits, stakerPools } from './reads';
 import { COMMITTED, LATE_COMMITTED, ROLLED_VALUE, SELLERS, TRAC, WALLET_PERIOD_VALUE, WALLET_TOP_UP } from './scenario';
 
 export async function payOut(run: CycleRun): Promise<void> {
@@ -242,7 +243,11 @@ export async function payOut(run: CycleRun): Promise<void> {
   out.operatorFeeWithdrawal = { node: feeNode, amount: feePaid, gasUsed: feeWd.gasUsed };
 
   // Window booking: the account's closed windows, booked by anyone's settle.
-  const cursor0 = (await c.pcs.getAccount(accountId)).lastSettledWindow;
+  const account0 = await c.pcs.getAccount(accountId);
+  const cursor0 = account0.lastSettledWindow;
+  // No window booked now reaches past one lock from this epoch.
+  const lastPool = E3 + account0.lockDurationEpochs + 1n;
+  const poolsBefore = await stakerPools(c, E3, lastPool);
   const settled = await send(ctx, `keeper: settle(${accountId})`, keeper, await c.pc.getAddress(), c.pc.interface.encodeFunctionData('settle', [accountId]));
   const [sched] = eventsIn(settled.receipt, c.pc, c.pc.getEvent('EmissionScheduled'));
   if (!sched) throw new Error(`settle(${accountId}) emitted no EmissionScheduled`);
@@ -271,6 +276,9 @@ export async function payOut(run: CycleRun): Promise<void> {
     `${fmt(expectedBooked)} TRAC; window 0 drew ${fmt(spent0)} (service ${fmt(cost)} + publish ${fmt(publish.discountedCost)})`,
   );
   check('no booking credits an epoch that has ended', booking.every((x) => x.start >= E3));
+  const bookedPools = new PoolModel(poolsBefore.remainder);
+  for (const credit of booking) bookedPools.add(credit);
+  check('the staker pools in storage gained what the booking credits, epoch by epoch', poolsHold(poolsBefore, await stakerPools(c, E3, lastPool), bookedPools));
   check('window 0 drew exactly the service cost and the publish, once each', spent0 === cost + publish.discountedCost);
   out.windowBooking = { fromWindow: fromW, toWindow: toW, scheduled: sched.scheduled, credits: booking };
 
