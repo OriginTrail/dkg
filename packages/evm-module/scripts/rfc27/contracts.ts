@@ -8,7 +8,7 @@ import type { BaseContract, Interface, TransactionReceipt } from 'ethers';
 
 import type {
   Chronos,
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   ConvictionStakingStorage,
   ConvictionWithdrawalStorage,
   DKGPublishingConvictionNFT,
@@ -57,7 +57,7 @@ export type PoolContracts = {
   pc: PublishingConviction;
   ss: ServiceSubscriptions;
   ssw: ServiceSubscriptionsWallet;
-  cssvc: ConvictionServiceStorage;
+  sss: ServiceSubscriptionsStorage;
   qis: QueryInferenceStorage;
   qs: QueryInferenceSettlement;
   sv10: StakingV10;
@@ -70,7 +70,7 @@ export type Contracts = BaseContracts & PoolContracts;
 
 /** The contracts the deploy adds to the Hub. */
 export const NEW_CONTRACTS: readonly string[] = [
-  'ConvictionServiceStorage',
+  'ServiceSubscriptionsStorage',
   'ServiceSubscriptions',
   'ServiceSubscriptionsWallet',
   'QueryInferenceStorage',
@@ -81,7 +81,7 @@ export const NEW_CONTRACTS: readonly string[] = [
 
 /** The version of each contract after the deploy. */
 export const EXPECTED_VERSIONS: Readonly<Record<string, string>> = {
-  ConvictionServiceStorage: '1.2.0',
+  ServiceSubscriptionsStorage: '1.2.0',
   ServiceSubscriptions: '1.2.0',
   ServiceSubscriptionsWallet: '1.0.0',
   QueryInferenceStorage: '1.0.0',
@@ -102,7 +102,7 @@ export const EXPECTED_VERSIONS: Readonly<Record<string, string>> = {
  */
 export type Artifacts = {
   Chronos: Chronos;
-  ConvictionServiceStorage: ConvictionServiceStorage;
+  ServiceSubscriptionsStorage: ServiceSubscriptionsStorage;
   ConvictionStakingStorage: ConvictionStakingStorage;
   ConvictionWithdrawalStorage: ConvictionWithdrawalStorage;
   DKGPublishingConvictionNFT: DKGPublishingConvictionNFT;
@@ -201,7 +201,7 @@ export class Stack {
       pc: await this.held('PublishingConviction'),
       ss: await this.held('ServiceSubscriptions'),
       ssw: await this.held('ServiceSubscriptionsWallet'),
-      cssvc: await this.held('ConvictionServiceStorage'),
+      sss: await this.held('ServiceSubscriptionsStorage'),
       qis: await this.held('QueryInferenceStorage'),
       qs: await this.held('QueryInferenceSettlement'),
       sv10: await this.held('StakingV10'),
@@ -226,7 +226,7 @@ const ERROR_SOURCES = [
   'QueryInferenceStorage',
   'ServiceSubscriptions',
   'ServiceSubscriptionsWallet',
-  'ConvictionServiceStorage',
+  'ServiceSubscriptionsStorage',
   'ConvictionStakingStorage',
   'ConvictionWithdrawalStorage',
   'DKGStakingConvictionNFT',

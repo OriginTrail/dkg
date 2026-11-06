@@ -22,10 +22,10 @@ contract MockSkewedServiceSpend {
         address,
         bytes32,
         uint96 value
-    ) external view returns (PublishingConviction.ServiceSpend memory d) {
-        d.cost = value;
-        d.spentFromWindow = value;
-        d.window = window;
-        d.epoch = 1;
+    ) external view returns (PublishingConviction.ServiceSpend memory spend) {
+        spend.cost = value;
+        spend.spentFromWindow = value;
+        spend.window = window;
+        spend.epoch = 1;
     }
 }

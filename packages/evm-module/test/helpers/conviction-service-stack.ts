@@ -1,5 +1,5 @@
 // The stack the Conviction Account service suites (OT-RFC-27) run on, and the
-// helpers they share: QueryInferenceStorage, ConvictionServiceStorage and
+// helpers they share: QueryInferenceStorage, ServiceSubscriptionsStorage and
 // ServiceSubscriptions registered in the Hub, on the real account stack, with
 // KnowledgeAssetsLifecycle and the context graphs for the publishing cases. Each
 // suite wraps the deploy in a fixture function of its own, so loadFixture keeps
@@ -18,7 +18,7 @@ import {
   Request,
   TRAC,
   Terms,
-  bucket,
+  budget,
   registerServiceContracts,
   requestOf,
   signTerms,
@@ -29,11 +29,11 @@ export const COMMITTED = 100_000n * TRAC + 11n;
 
 export async function deployServiceStack() {
   const stack = await deployAccountStack();
-  const { QIS, CSS, SS } = await registerServiceContracts(stack.Hub);
+  const { QIS, SSS, SS } = await registerServiceContracts(stack.Hub);
   return {
     ...stack,
     QIS,
-    CSS,
+    SSS,
     SS,
     KAL: await hre.ethers.getContract<KnowledgeAssetsLifecycle>('KnowledgeAssetsLifecycle'),
     ContextGraphs: await hre.ethers.getContract<ContextGraphs>('ContextGraphs'),
@@ -44,8 +44,8 @@ export async function deployServiceStack() {
 export type ServiceStack = Awaited<ReturnType<typeof deployServiceStack>>;
 
 /**
- * What the helpers read: the fixture, the account owner and the buyer key
- * assigned by default, the epoch length and the lock of an account.
+ * What the helpers read: the fixture, the account owner and the buyer
+ * added by default, the epoch length and the lock of an account.
  */
 export type ServiceContext = {
   f: ServiceStack;
@@ -72,45 +72,45 @@ export function serviceHelpers({ f, owner, buyer, epLen, lock }: ServiceContext)
     await f.NFT.connect(holder).topUp(accountId, amount);
   };
 
-  const termsFor = async (accountId: bigint, assignee: string, overrides: Partial<Terms> = {}): Promise<Terms> => ({
+  const termsFor = async (accountId: bigint, buyer: string, overrides: Partial<Terms> = {}): Promise<Terms> => ({
     accountId,
-    assignee,
-    maxCostPerPeriod: 1_000n * TRAC,
+    buyer,
+    maxCostPerEpoch: 1_000n * TRAC,
     expiresAt: (await latest()) + 400n * DAY,
-    nonce: await f.CSS.assignmentNonce(accountId),
+    nonce: await f.SSS.grantNonce(accountId),
     ...overrides,
   });
 
-  /** An opted-in account of `holder` with `assignee` assigned by the holder, which sends. */
+  /** An opted-in account of `holder` with `buyer` added by the holder, which sends. */
   const openAccount = async (
-    opts: { committed?: bigint; caps?: Partial<Terms>; holder?: SignerWithAddress; assignee?: SignerWithAddress } = {},
+    opts: { committed?: bigint; limits?: Partial<Terms>; holder?: SignerWithAddress; buyer?: SignerWithAddress } = {},
   ) => {
     const holder = opts.holder ?? owner;
-    const assignee = opts.assignee ?? buyer;
+    const who = opts.buyer ?? buyer;
     const { accountId, createdAt } = await createAccountFor(holder, opts.committed ?? COMMITTED);
     await f.SS.connect(holder).setServiceSpending(accountId, true);
-    const terms = await termsFor(accountId, assignee.address, opts.caps);
-    await f.SS.connect(holder).assign(terms, '0x', await signTerms(assignee, f.SS, terms));
+    const terms = await termsFor(accountId, who.address, opts.limits);
+    await f.SS.connect(holder).addBuyer(terms, '0x', await signTerms(who, f.SS, terms));
     return { accountId, createdAt, terms };
   };
 
-  const assignAs = async (terms: Terms, assignee: SignerWithAddress, sender: SignerWithAddress = owner) =>
-    f.SS.connect(sender).assign(terms, '0x', await signTerms(assignee, f.SS, terms));
+  const addBuyerAs = async (terms: Terms, buyer: SignerWithAddress, sender: SignerWithAddress = owner) =>
+    f.SS.connect(sender).addBuyer(terms, '0x', await signTerms(buyer, f.SS, terms));
 
   const fund = async (r: Request, sender: SignerWithAddress = buyer) => {
-    const [subscriptionId, cost] = await f.SS.connect(sender).fundFromConviction.staticCall(r);
-    const receipt = (await (await f.SS.connect(sender).fundFromConviction(r)).wait())!;
+    const [subscriptionId, cost] = await f.SS.connect(sender).fundFromAccount.staticCall(r);
+    const receipt = (await (await f.SS.connect(sender).fundFromAccount(r)).wait())!;
     return { subscriptionId, cost, receipt };
   };
 
-  /** The current epoch, and the next one: the two a period may be funded for. */
+  /** The current epoch, and the next one: the two a subscription may be funded for. */
   const epochNow = async () => f.Chronos.getCurrentEpoch();
   const epochNext = async () => (await epochNow()) + 1n;
 
-  /** A one-bucket inference request, for the current epoch unless `overrides.epoch` names another. */
+  /** A one-budget inference request, for the current epoch unless `overrides.epoch` names another. */
   const inference = async (accountId: bigint, value: bigint, overrides: Partial<Request> = {}) =>
     requestOf(accountId, overrides.epoch ?? (await epochNow()), {
-      buckets: [bucket(0, CLASS_INFERENCE, value)],
+      budgets: [budget(0, CLASS_INFERENCE, value)],
       ...overrides,
     });
 
@@ -134,15 +134,15 @@ export function serviceHelpers({ f, owner, buyer, epLen, lock }: ServiceContext)
   const poolSnapshot = (from: bigint, to: bigint) => poolsOver(f.ES, from, to);
 
   /** Everything a refused funding must leave as it was. */
-  const fundingState = async (accountId: bigint, assignee: string, window: bigint) => {
-    const u = await f.CSS.getUsage(accountId, assignee);
+  const fundingState = async (accountId: bigint, buyer: string, window: bigint) => {
+    const u = await f.SSS.getUsage(accountId, buyer);
     const now = await f.Chronos.getCurrentEpoch();
     return {
       windowSpent: await f.PCS.windowSpent(accountId, window),
       topUpBalance: await f.PCS.topUpBalance(accountId),
-      funded: [await f.QIS.convictionFunding(now), await f.QIS.convictionFunding(now + 1n)],
-      usage: [u.periods],
-      periods: await f.CSS.accountSubscriptionCount(accountId),
+      funded: [await f.QIS.accountFunding(now), await f.QIS.accountFunding(now + 1n)],
+      usage: [u.subscriptions],
+      subscriptions: await f.SSS.accountSubscriptionCount(accountId),
     };
   };
 
@@ -152,7 +152,7 @@ export function serviceHelpers({ f, owner, buyer, epLen, lock }: ServiceContext)
     topUp,
     termsFor,
     openAccount,
-    assignAs,
+    addBuyerAs,
     fund,
     epochNow,
     epochNext,

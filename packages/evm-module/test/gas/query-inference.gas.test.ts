@@ -6,7 +6,7 @@
 // within the per-transaction gas of the test network. A read is held to a
 // ceiling just above what it measured.
 //
-// "First" writes every slot from zero: the seller's nonce word, the bucket's
+// "First" writes every slot from zero: the seller's nonce word, the budget's
 // fill, the node's value in the epoch and the epoch's totals with its λ, so
 // each first batch opens an epoch of its own. "Again" adds a batch to those
 // slots, in the same nonce word but for the second batch of 256 items.
@@ -21,7 +21,7 @@ import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-networ
 import { expect } from 'chai';
 import hre from 'hardhat';
 
-import { Bucket, CLASS_INFERENCE, CLASS_QUERY, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from '../helpers/conviction-service';
+import { ServiceBudget, CLASS_INFERENCE, CLASS_QUERY, Domain, TRAC, budget, subscriptionIdOf, walletRequestOf } from '../helpers/conviction-service';
 import {
   ReceiptGroup,
   SettlementStack,
@@ -33,7 +33,7 @@ import {
   signedItems,
 } from '../helpers/query-inference';
 
-const UNIT_ASK = 10n ** 9n;
+const UNIT_PRICE = 10n ** 9n;
 const TX_GAS_LIMIT = 15_000_000n; // hardhat.node.config.ts, networks.hardhat.gas
 
 // Instrumented coverage runs say nothing about deployed gas.
@@ -60,8 +60,8 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
     f = await loadFixture(deployFixture);
     domain = await queryInferenceDomain(f.QIS);
     await f.Hub.forwardCall(
-      await f.CSS.getAddress(),
-      f.CSS.interface.encodeFunctionData('setMaxBucketsPerPeriod', [32n]),
+      await f.SSS.getAddress(),
+      f.SSS.interface.encodeFunctionData('setMaxBudgetsPerSubscription', [32n]),
     );
     // λ 0.5, as the development deploy sets it, so a node's gross has both terms.
     await f.Hub.forwardCall(await f.QIS.getAddress(), f.QIS.interface.encodeFunctionData('setLambdaBps', [5_000n]));
@@ -102,41 +102,41 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
     return e;
   };
 
-  /** A wallet period of the current epoch for buyer `index`, with `buckets` buckets of 1,000 TRAC. */
-  const fund = async (index: number, buckets: number): Promise<string> => {
+  /** A wallet subscription of the current epoch for buyer `index`, with `budgets` budgets of 1,000 TRAC. */
+  const fund = async (index: number, budgets: number): Promise<string> => {
     const epoch = await f.Chronos.getCurrentEpoch();
     const who = f.accounts[index];
-    const list: Bucket[] = Array.from({ length: buckets }, (_, i) =>
-      bucket(i, i % 2 === 0 ? CLASS_INFERENCE : CLASS_QUERY, 1_000n * TRAC, UNIT_ASK),
+    const list: ServiceBudget[] = Array.from({ length: budgets }, (_, i) =>
+      budget(i, i % 2 === 0 ? CLASS_INFERENCE : CLASS_QUERY, 1_000n * TRAC, UNIT_PRICE),
     );
     const value = list.reduce((a, b) => a + b.value, 0n);
     await f.Token.mint(who.address, value);
     await f.Token.connect(who).approve(await f.SSW.getAddress(), value);
-    await f.SSW.connect(who).fundFromWallet(walletRequestOf(epoch, { buckets: list, sessionKey: key.address }));
+    await f.SSW.connect(who).fundFromWallet(walletRequestOf(epoch, { budgets: list, sessionKey: key.address }));
     return subscriptionIdOf(who.address, epoch);
   };
 
-  /** `perGroup` signed items on each (period, bucket index) of `targets`, nonces counted per period. */
+  /** `perGroup` signed items on each (subscription, budget index) of `targets`, nonces counted per subscription. */
   const groupsOf = async (targets: Array<[string, number]>, perGroup: number, firstNonce = 0n) => {
     const issuedAt = await latest();
     const next = new Map<string, bigint>();
     const groups: ReceiptGroup[] = [];
-    for (const [subscriptionId, bucketIndex] of targets) {
+    for (const [subscriptionId, budgetIndex] of targets) {
       const nonce = next.get(subscriptionId) ?? firstNonce;
       const { items } = signedItems({
         domain,
         wallet: key,
         subscriptionId,
-        bucketId: (await f.CSS.getBucket(subscriptionId, bucketIndex)).bucketId,
+        serviceId: (await f.SSS.getBudget(subscriptionId, budgetIndex)).serviceId,
         seller: seller.identityId,
         firstNonce: nonce,
         count: perGroup,
         units: 1_000n,
-        ask: UNIT_ASK,
+        price: UNIT_PRICE,
         issuedAt,
       });
       next.set(subscriptionId, nonce + BigInt(perGroup));
-      groups.push({ subscriptionId, bucketIndex: BigInt(bucketIndex), minCounted: 0n, items });
+      groups.push({ subscriptionId, budgetIndex: BigInt(budgetIndex), minCounted: 0n, items });
     }
     return groups;
   };
@@ -153,7 +153,7 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
     }
   });
 
-  it('submitReceiptBatch, many groups: 128 items in 4 groups, 256 in 4, 256 in 32 over 8 periods, and 32 of one item each on one period', async () => {
+  it('submitReceiptBatch, many groups: 128 items in 4 groups, 256 in 4, 256 in 32 over 8 subscriptions, and 32 of one item each on one subscription', async () => {
     await nextEpoch();
     const p = await fund(110, 4);
     record('batch, 4 groups of 32 (128), first', await submit(await groupsOf([0, 1, 2, 3].map((i) => [p, i]), 32)), 128);
@@ -161,17 +161,17 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
     const q = await fund(111, 4);
     record('batch, 4 groups of 64 (256), first', await submit(await groupsOf([0, 1, 2, 3].map((i) => [q, i]), 64)), 256);
     await nextEpoch();
-    const periods: string[] = [];
-    for (let i = 0; i < 8; i++) periods.push(await fund(120 + i, 4));
-    const targets = periods.flatMap((pp) => [0, 1, 2, 3].map((i) => [pp, i] as [string, number]));
-    record('batch, 32 groups of 8 (256) over 8 periods, first', await submit(await groupsOf(targets, 8)), 256);
+    const subscriptions: string[] = [];
+    for (let i = 0; i < 8; i++) subscriptions.push(await fund(120 + i, 4));
+    const targets = subscriptions.flatMap((pp) => [0, 1, 2, 3].map((i) => [pp, i] as [string, number]));
+    record('batch, 32 groups of 8 (256) over 8 subscriptions, first', await submit(await groupsOf(targets, 8)), 256);
     await nextEpoch();
     const many = await fund(130, 32);
-    const buckets = Array.from({ length: 32 }, (_, i) => [many, i] as [string, number]);
-    record('batch, 32 groups of 1 on one period, first', await submit(await groupsOf(buckets, 1)), 32);
+    const budgets = Array.from({ length: 32 }, (_, i) => [many, i] as [string, number]);
+    record('batch, 32 groups of 1 on one subscription, first', await submit(await groupsOf(budgets, 1)), 32);
   });
 
-  it('submitReceiptBatch, counted in part: a group worth more than its bucket has left', async () => {
+  it('submitReceiptBatch, counted in part: a group worth more than its budget has left', async () => {
     await nextEpoch();
     const over = await fund(131, 1);
     // 1,000 TRAC funded, 2,000 TRAC of receipts.
@@ -179,21 +179,21 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
       domain,
       wallet: key,
       subscriptionId: over,
-      bucketId: (await f.CSS.getBucket(over, 0n)).bucketId,
+      serviceId: (await f.SSS.getBudget(over, 0n)).serviceId,
       seller: seller.identityId,
       count: 2,
       units: 10n ** 12n,
-      ask: UNIT_ASK,
+      price: UNIT_PRICE,
       issuedAt: await latest(),
     });
-    record('batch, 1 group of 2, counted in part, first', await submit([{ subscriptionId: over, bucketIndex: 0n, minCounted: 0n, items }]), 2);
-    expect(await f.QIS.bucketFilled(over, 0n)).to.equal(1_000n * TRAC);
-    expect(await f.QS.bucketLeft(over, 0n)).to.equal(0n);
+    record('batch, 1 group of 2, counted in part, first', await submit([{ subscriptionId: over, budgetIndex: 0n, minCounted: 0n, items }]), 2);
+    expect(await f.QIS.budgetUsed(over, 0n)).to.equal(1_000n * TRAC);
+    expect(await f.QS.budgetLeft(over, 0n)).to.equal(0n);
   });
 
   it('queryInferenceGross, the first read: a node with value and a node with none, with no rollover run behind the epoch and after a run of 100 epochs', async () => {
     const buyer = 140;
-    const PERIOD = 1_000n * TRAC;
+    const SUBSCRIPTION = 1_000n * TRAC;
     const noValue = await createNode({ ...f, operational: f.accounts[42], admin: f.accounts[43] });
     const read = async (epoch: bigint, identityId: bigint) => {
       const tx = await f.accounts[0].sendTransaction({
@@ -216,12 +216,12 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
     // and in the next epoch, where it steps back once, to the value before it.
     await landValue();
     await nextEpoch();
-    expect(await f.QS.queryInferenceGross(a, seller.identityId)).to.equal(PERIOD);
+    expect(await f.QS.queryInferenceGross(a, seller.identityId)).to.equal(SUBSCRIPTION);
     const noRun = await read(a, seller.identityId);
     held('queryInferenceGross, value, no run, at activation', noRun, 45_000n);
     await landValue();
     await nextEpoch();
-    expect(await f.QS.queryInferenceGross(a + 1n, seller.identityId)).to.equal(PERIOD);
+    expect(await f.QS.queryInferenceGross(a + 1n, seller.identityId)).to.equal(SUBSCRIPTION);
     held('queryInferenceGross, value, no run, value the epoch before', await read(a + 1n, seller.identityId), 49_000n);
     const noValueNoRun = await read(a + 1n, noValue);
     held('queryInferenceGross, no value, no run', noValueNoRun, 31_000n);
@@ -237,10 +237,10 @@ describe('@gas Receipt settlement of the query/inference pool', function () {
     await landValue();
     await nextEpoch();
 
-    // The sole seller's gross is all 101 periods' money, so the read walked the whole run.
+    // The sole seller's gross is all 101 subscriptions' money, so the read walked the whole run.
     expect(await f.QS.epochPool(end - 1n)).to.equal(0n);
-    expect(await f.QS.epochPool(end)).to.equal(101n * PERIOD);
-    expect(await f.QS.queryInferenceGross(end, seller.identityId)).to.equal(101n * PERIOD);
+    expect(await f.QS.epochPool(end)).to.equal(101n * SUBSCRIPTION);
+    expect(await f.QS.queryInferenceGross(end, seller.identityId)).to.equal(101n * SUBSCRIPTION);
     expect(await f.QS.queryInferenceGross(end, noValue)).to.equal(0n);
     const afterRun = await read(end, seller.identityId);
     held('queryInferenceGross, value, after a run of 100 epochs', afterRun, 1_016_000n);

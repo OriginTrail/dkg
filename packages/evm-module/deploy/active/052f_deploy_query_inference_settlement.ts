@@ -4,12 +4,12 @@ import { DeployFunction } from 'hardhat-deploy/types';
 /**
  * V10 — deploys `QueryInferenceSettlement`, the stateless settlement of the
  * query/inference pool (OT-RFC-27): receipt batches from Core Node sellers,
- * checked against the buyers' signed requests, which count as they land, up
- * to what the funded buckets have left.
+ * checked against the buyers' signed requests, which count as they land, up to
+ * what the funded budgets have left.
  *
  * It is registered in the Hub's contract set, so the `onlyContracts` mutators
  * of `QueryInferenceStorage` admit it. `initialize()` wires
- * `QueryInferenceStorage`, `ConvictionServiceStorage`, `Chronos`,
+ * `QueryInferenceStorage`, `ServiceSubscriptionsStorage`, `Chronos`,
  * `IdentityStorage`, `ProfileStorage`, `ShardingTableStorage`,
  * `RandomSamplingStorage`, `ConvictionStakingStorage` and `ParametersStorage`,
  * all deployed before it. On development each contract is initialized as it is
@@ -67,7 +67,7 @@ func.dependencies = [
   'ServiceSpendingBuilds',
   'Hub',
   'QueryInferenceStorage',
-  'ConvictionServiceStorage',
+  'ServiceSubscriptionsStorage',
   'Chronos',
   'IdentityStorage',
   'ProfileStorage',

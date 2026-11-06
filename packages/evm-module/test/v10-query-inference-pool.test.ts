@@ -1,6 +1,6 @@
 // The query/inference pool of an epoch (OT-RFC-27), and the gross reward each
-// node draws from it, end to end on the development deploy of the staking,
-// account and plan-period stacks (StakingV10 wired to the settlement, the
+// node spends from it, end to end on the development deploy of the staking,
+// account and plan-subscription stacks (StakingV10 wired to the settlement, the
 // activation epoch at the deployment epoch, λ 0.5). No step runs when an epoch
 // ends: its pool is a plain read of what was funded and what counted.
 //
@@ -31,9 +31,9 @@ import { expect } from 'chai';
 import hre from 'hardhat';
 
 import { QueryInferenceStorage } from '../typechain';
-import { BPS, CLASS_INFERENCE, Domain, TRAC, bucket, requestOf, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
+import { BPS, CLASS_INFERENCE, Domain, TRAC, budget, requestOf, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
 import { SCALE18, hardhatWallet, openConvictionAccount, queryInferenceDomain } from './helpers/query-inference';
-import { RewardsHelpers, Seller, UNIT_ASK, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
+import { RewardsHelpers, Seller, UNIT_PRICE, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 
 const STAKE_S_50 = 1_250_000n * TRAC; // S = sqrt(0.25) = 0.5
 const STAKE_S_65 = 2_112_500n * TRAC; // S = sqrt(0.4225) = 0.65
@@ -52,7 +52,7 @@ describe('@integration The query/inference pool of an epoch', function () {
   let domain: Domain;
   let buyer: SignerWithAddress;
   let buyer2: SignerWithAddress;
-  let assignee: SignerWithAddress;
+  let accountBuyer: SignerWithAddress;
   const key = hardhatWallet(60);
 
   beforeEach(async () => {
@@ -62,7 +62,7 @@ describe('@integration The query/inference pool of an epoch', function () {
     h = rewardsHelpers({ f, domain, firstAccount: 30, key });
     buyer = f.accounts[21];
     buyer2 = f.accounts[22];
-    assignee = f.accounts[24];
+    accountBuyer = f.accounts[24];
   });
 
   // -------------------------------------------------------------------------
@@ -81,33 +81,33 @@ describe('@integration The query/inference pool of an epoch', function () {
     return wallet + conviction;
   };
 
-  /** `by`, given a node score in the current epoch if it has none yet, lands `amount` on a period's bucket: its one receipt there. */
+  /** `by`, given a node score in the current epoch if it has none yet, lands `amount` on a subscription's budget: its one receipt there. */
   const land = async (by: Seller, p: string, amount: bigint) => {
     const epoch = await h.epochNow();
     if ((await f.RSS.getNodeEpochScore(epoch, by.identityId)) === 0n) await h.scoreEpoch(epoch, by, 100n * TRAC);
     await h.claimReceipts(by, p, amount);
   };
 
-  /** A wallet top-up of `value` to `who`'s period. */
+  /** A wallet top-up of `value` to `who`'s subscription. */
   const topUp = async (who: SignerWithAddress, p: string, value: bigint) => {
     await f.Token.mint(who.address, value);
     await f.Token.connect(who).approve(await f.SSW.getAddress(), value);
-    await f.SSW.connect(who).topUpFromWallet(p, [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], hre.ethers.ZeroHash);
+    await f.SSW.connect(who).topUpFromWallet(p, [budget(0, CLASS_INFERENCE, value, UNIT_PRICE)], hre.ethers.ZeroHash);
   };
 
-  /** A period of `epoch` for `assignee`, from an account at the 75 % tier: one bucket of `value`, at a quarter of it. */
-  const accountPeriod = async (epoch: bigint, value: bigint) => {
+  /** A subscription of `epoch` for `accountBuyer`, from an account at the 75 % tier: one budget of `value`, at a quarter of it. */
+  const accountSubscription = async (epoch: bigint, value: bigint) => {
     const { accountId } = await openConvictionAccount({
       ...f,
       owner: f.accounts[23],
-      assignee,
+      buyer: accountBuyer,
       committed: 1_000_000n * TRAC,
       limit: 1_000n * TRAC,
     });
-    await f.SS.connect(assignee).fundFromConviction(
-      requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
+    await f.SS.connect(accountBuyer).fundFromAccount(
+      requestOf(accountId, epoch, { budgets: [budget(0, CLASS_INFERENCE, value, UNIT_PRICE)], sessionKey: key.address }),
     );
-    return { accountId, p: subscriptionIdOf(assignee.address, epoch) };
+    return { accountId, p: subscriptionIdOf(accountBuyer.address, epoch) };
   };
 
   /**
@@ -129,9 +129,9 @@ describe('@integration The query/inference pool of an epoch', function () {
   };
 
   /** OT-RFC-27's formula, floored per term as the contract floors it. */
-  const formula = (pool: bigint, lambda: bigint, r: bigint, sumR: bigint, qis: bigint, sumQis: bigint) =>
-    (pool * (BPS - lambda) * r) / (BPS * sumR) +
-    (sumQis === 0n ? (pool * lambda * r) / (BPS * sumR) : (pool * lambda * qis) / (BPS * sumQis));
+  const formula = (pool: bigint, lambda: bigint, r: bigint, totalServed: bigint, qis: bigint, sumQis: bigint) =>
+    (pool * (BPS - lambda) * r) / (BPS * totalServed) +
+    (sumQis === 0n ? (pool * lambda * r) / (BPS * totalServed) : (pool * lambda * qis) / (BPS * sumQis));
 
   // -------------------------------------------------------------------------
   // An epoch with value
@@ -143,10 +143,10 @@ describe('@integration The query/inference pool of an epoch', function () {
       const e = await h.epochNow();
       await setLambda(0n); // one term, so one floor: this pool is no round number of wei
       const p = await h.walletFund(buyer, e, 10n * TRAC);
-      // Booked as ServiceSubscriptions books a period's cost; the Hub owner
+      // Booked as ServiceSubscriptions books a subscription's cost; the Hub owner
       // passes onlyContracts.
-      await f.QIS.addConvictionFunding(e, 4n * TRAC);
-      await f.QIS.addConvictionFunding(e, 3n);
+      await f.QIS.addAccountFunding(e, 4n * TRAC);
+      await f.QIS.addAccountFunding(e, 3n);
       await land(s1, p, TRAC);
       await h.toEpoch(e + 1n);
 
@@ -162,13 +162,13 @@ describe('@integration The query/inference pool of an epoch', function () {
       await setLambda(0n);
       const served = await h.walletFund(buyer, e, 100n * TRAC);
       await h.walletFund(buyer2, e, 50n * TRAC); // no receipt lands on it
-      await accountPeriod(e, 100n * TRAC); // at a cost of 25, and no receipt lands on it
+      await accountSubscription(e, 100n * TRAC); // at a cost of 25, and no receipt lands on it
       await land(a, served, TRAC);
       await land(b, served, 3n * TRAC);
       await h.toEpoch(e + 1n);
 
       expect(await funding(e)).to.deep.equal([150n * TRAC, 25n * TRAC]);
-      expect(await f.QIS.bucketFilled(served, 0n)).to.equal(4n * TRAC);
+      expect(await f.QIS.budgetUsed(served, 0n)).to.equal(4n * TRAC);
       // 4 of it counted, and all of the money is the pool, split by R.
       expect(await f.QS.epochPool(e)).to.equal(175n * TRAC);
       expect(await gross(e, a)).to.equal((175n * TRAC) / 4n);
@@ -187,7 +187,7 @@ describe('@integration The query/inference pool of an epoch', function () {
       await h.walletFund(buyer, e, 10n * TRAC);
       await h.toEpoch(e + 1n);
       await h.walletFund(buyer, e + 1n, 20n * TRAC);
-      // No period of e + 2: no money in it. The money waits for as long as no node sells.
+      // No subscription of e + 2: no money in it. The money waits for as long as no node sells.
       await h.toEpoch(e + 3n);
       for (const epoch of [e, e + 1n, e + 2n]) {
         expect(await f.QS.epochPool(epoch)).to.equal(0n);
@@ -210,12 +210,12 @@ describe('@integration The query/inference pool of an epoch', function () {
       const s1 = await h.createSeller(STAKE_S_50, 0n);
       const e = await h.epochNow();
       await setLambda(0n); // one term, so one floor: this pool is no round number of wei
-      await f.QIS.addConvictionFunding(e, 6n * TRAC); // no value in e
+      await f.QIS.addAccountFunding(e, 6n * TRAC); // no value in e
       await h.toEpoch(e + 1n);
       const p = await h.walletFund(buyer, e + 1n, 2n * TRAC);
-      await f.QIS.addConvictionFunding(e + 1n, TRAC + 1n);
+      await f.QIS.addAccountFunding(e + 1n, TRAC + 1n);
       await land(s1, p, TRAC);
-      await f.QIS.addConvictionFunding(e + 2n, 5n * TRAC); // no value in e + 2 either
+      await f.QIS.addAccountFunding(e + 2n, 5n * TRAC); // no value in e + 2 either
       await h.toEpoch(e + 3n);
 
       expect(await f.QS.epochPool(e)).to.equal(0n);
@@ -291,10 +291,10 @@ describe('@integration The query/inference pool of an epoch', function () {
         paid += pools[i];
         rolling = sells ? 0n : rolling + value * TRAC;
         expect(funded, `epoch ${epoch}`).to.equal(paid + rolling);
-        // What the nodes draw adds up to the pool, but the floors.
-        const drawn = (await gross(epoch, a)) + (await gross(epoch, b));
-        expect(drawn <= pools[i]).to.equal(true);
-        expect(pools[i] - drawn < 4n).to.equal(true);
+        // What the nodes spend adds up to the pool, but the floors.
+        const grossPaid = (await gross(epoch, a)) + (await gross(epoch, b));
+        expect(grossPaid <= pools[i]).to.equal(true);
+        expect(pools[i] - grossPaid < 4n).to.equal(true);
       }
       expect([funded, paid, rolling]).to.deep.equal([215n * TRAC, 215n * TRAC, 0n]);
     });
@@ -311,7 +311,7 @@ describe('@integration The query/inference pool of an epoch', function () {
         await h.createSeller(500_000n * TRAC, 0n),
       ];
       const start = await h.epochNow();
-      const periodsOf = new Map<bigint, string[]>();
+      const subscriptionsOf = new Map<bigint, string[]>();
       let booked = 0n;
       let buyerIndex = 100;
       let batches = 0;
@@ -323,24 +323,24 @@ describe('@integration The query/inference pool of an epoch', function () {
         for (const target of [epoch, epoch + 1n]) {
           const fundings = Number(rand(3n));
           for (let i = 0; i < fundings; i++) {
-            const value = (1n + rand(40n)) * TRAC + rand(1_000n) * UNIT_ASK;
+            const value = (1n + rand(40n)) * TRAC + rand(1_000n) * UNIT_PRICE;
             const p = await h.walletFund(f.accounts[buyerIndex++], target, value);
             booked += value;
-            periodsOf.set(target, [...(periodsOf.get(target) ?? []), p]);
+            subscriptionsOf.set(target, [...(subscriptionsOf.get(target) ?? []), p]);
           }
         }
-        for (const p of periodsOf.get(epoch) ?? []) {
+        for (const p of subscriptionsOf.get(epoch) ?? []) {
           if (rand(3n) !== 0n) continue;
-          const who = (await f.CSS.getSubscription(p)).assignee;
+          const who = (await f.SSS.getSubscription(p)).buyer;
           const value = (1n + rand(5n)) * TRAC;
           await topUp(f.accounts.find((a: SignerWithAddress) => a.address === who)!, p, value);
           booked += value;
         }
-        // Batches on this epoch's periods, some above what is left, and in some epochs none.
+        // Batches on this epoch's subscriptions, some above what is left, and in some epochs none.
         if (rand(4n) !== 0n) {
-          for (const p of periodsOf.get(epoch) ?? []) {
+          for (const p of subscriptionsOf.get(epoch) ?? []) {
             for (const s of sellers) {
-              if (rand(2n) === 0n || (await f.QS.bucketLeft(p, 0n)) === 0n) continue;
+              if (rand(2n) === 0n || (await f.QS.budgetLeft(p, 0n)) === 0n) continue;
               await land(s, p, (1n + rand(30n)) * TRAC);
               batches++;
             }
@@ -356,12 +356,12 @@ describe('@integration The query/inference pool of an epoch', function () {
           const pool = await f.QS.epochPool(e);
           funded += m;
           pools += pool;
-          rolling = (await f.QIS.getEpochTotals(e)).sumR === 0n ? rolling + m : 0n;
+          rolling = (await f.QIS.getEpochTotals(e)).totalServed === 0n ? rolling + m : 0n;
 
-          let drawn = 0n;
-          for (const s of sellers) drawn += await gross(e, s);
-          expect(drawn <= pool, `epoch ${e}`).to.equal(true);
-          expect(pool - drawn < 6n, `epoch ${e}`).to.equal(true);
+          let grossPaid = 0n;
+          for (const s of sellers) grossPaid += await gross(e, s);
+          expect(grossPaid <= pool, `epoch ${e}`).to.equal(true);
+          expect(pool - grossPaid < 6n, `epoch ${e}`).to.equal(true);
         }
         expect(funded, `epoch ${epoch}`).to.equal(pools + rolling);
         expect(funded <= booked).to.equal(true);
@@ -437,7 +437,7 @@ describe('@integration The query/inference pool of an epoch', function () {
       const now = await h.walletFund(buyer, e, 10n * TRAC);
       const ahead = await h.walletFund(buyer, e + 1n, 6n * TRAC);
       await topUp(buyer, ahead, 2n * TRAC);
-      await accountPeriod(e + 1n, 100n * TRAC); // at a cost of 25
+      await accountSubscription(e + 1n, 100n * TRAC); // at a cost of 25
       expect(await funding(e)).to.deep.equal([10n * TRAC, 0n]);
       expect(await funding(e + 1n)).to.deep.equal([8n * TRAC, 25n * TRAC]);
 
@@ -487,11 +487,11 @@ describe('@integration The query/inference pool of an epoch', function () {
       const read = async () => [await f.QS.epochPool(e), await gross(e, a), await gross(e, b)];
       // A pool of 14 at the deploy's λ of 0.5: R 4 and 2, scores 2 and 1.8.
       expect(await f.QIS.lambdaBps()).to.equal(5_000n);
-      const sumScore = (38n * TRAC) / 10n;
+      const totalWeighted = (38n * TRAC) / 10n;
       const final = [
         14n * TRAC,
-        formula(14n * TRAC, 5_000n, 4n * TRAC, 6n * TRAC, 2n * TRAC, sumScore),
-        formula(14n * TRAC, 5_000n, 2n * TRAC, 6n * TRAC, (18n * TRAC) / 10n, sumScore),
+        formula(14n * TRAC, 5_000n, 4n * TRAC, 6n * TRAC, 2n * TRAC, totalWeighted),
+        formula(14n * TRAC, 5_000n, 2n * TRAC, 6n * TRAC, (18n * TRAC) / 10n, totalWeighted),
       ];
       expect(await read()).to.deep.equal(final);
 
@@ -605,33 +605,33 @@ describe('@integration The query/inference pool of an epoch', function () {
   // -------------------------------------------------------------------------
 
   describe('an ended epoch takes no booking', () => {
-    it("through the funding paths: from the period's end, a top-up is refused, wallet or Conviction Account, and so is a new period of the past epoch", async () => {
+    it("through the funding paths: from the subscription's end, a top-up is refused, wallet or Conviction Account, and so is a new subscription of the past epoch", async () => {
       const s1 = await h.createSeller(STAKE_S_50, 0n);
       const e = await h.epochNow();
       const wallet = await h.walletFund(buyer, e, 10n * TRAC);
-      const { accountId, p: account } = await accountPeriod(e, 100n * TRAC); // at a cost of 25
+      const { accountId, p: account } = await accountSubscription(e, 100n * TRAC); // at a cost of 25
       await land(s1, wallet, TRAC);
-      const { periodEnd } = await f.CSS.getSubscription(wallet);
-      expect(periodEnd).to.equal(await epochStart(e + 1n));
-      const addition = [bucket(0, CLASS_INFERENCE, TRAC, UNIT_ASK)];
+      const { endsAt } = await f.SSS.getSubscription(wallet);
+      expect(endsAt).to.equal(await epochStart(e + 1n));
+      const addition = [budget(0, CLASS_INFERENCE, TRAC, UNIT_PRICE)];
       await f.Token.mint(buyer.address, TRAC);
       await f.Token.connect(buyer).approve(await f.SSW.getAddress(), TRAC);
 
-      await time.setNextBlockTimestamp(periodEnd);
+      await time.setNextBlockTimestamp(endsAt);
       await expect(f.SSW.connect(buyer).topUpFromWallet(wallet, addition, hre.ethers.ZeroHash))
-        .to.be.revertedWithCustomError(f.SSW, 'PeriodEnded')
-        .withArgs(wallet, periodEnd);
-      expect(await h.latest()).to.equal(periodEnd);
-      await expect(f.SS.connect(assignee).topUpFromConviction(account, addition, hre.ethers.ZeroHash))
-        .to.be.revertedWithCustomError(f.SS, 'PeriodEnded')
-        .withArgs(account, periodEnd);
+        .to.be.revertedWithCustomError(f.SSW, 'SubscriptionEnded')
+        .withArgs(wallet, endsAt);
+      expect(await h.latest()).to.equal(endsAt);
+      await expect(f.SS.connect(accountBuyer).topUpFromAccount(account, addition, hre.ethers.ZeroHash))
+        .to.be.revertedWithCustomError(f.SS, 'SubscriptionEnded')
+        .withArgs(account, endsAt);
 
       await f.Token.mint(buyer2.address, TRAC);
       await f.Token.connect(buyer2).approve(await f.SSW.getAddress(), TRAC);
-      await expect(f.SSW.connect(buyer2).fundFromWallet(walletRequestOf(e, { buckets: addition, sessionKey: key.address })))
+      await expect(f.SSW.connect(buyer2).fundFromWallet(walletRequestOf(e, { budgets: addition, sessionKey: key.address })))
         .to.be.revertedWithCustomError(f.SSW, 'InvalidFundingRequest')
         .withArgs('epoch');
-      await expect(f.SS.connect(assignee).fundFromConviction(requestOf(accountId, e, { buckets: addition, sessionKey: key.address })))
+      await expect(f.SS.connect(accountBuyer).fundFromAccount(requestOf(accountId, e, { budgets: addition, sessionKey: key.address })))
         .to.be.revertedWithCustomError(f.SS, 'InvalidFundingRequest')
         .withArgs('epoch');
 
@@ -647,13 +647,13 @@ describe('@integration The query/inference pool of an epoch', function () {
       await land(s1, p, TRAC);
       await h.toEpoch(e + 1n);
       const before = [await f.QS.epochPool(e), await gross(e, s1)];
-      const totals = { sumR: 1n, sumScore: 1n, lambdaBps: 0n };
-      const node = { r: 1n, score: 1n };
+      const totals = { totalServed: 1n, totalWeighted: 1n, lambdaBps: 0n };
+      const node = { servedValue: 1n, weightedValue: 1n };
 
       // The Hub owner passes onlyContracts.
       for (const write of [
         () => f.QIS.addWalletFunding(e, 1n),
-        () => f.QIS.addConvictionFunding(e, 1n),
+        () => f.QIS.addAccountFunding(e, 1n),
         () => f.QIS.countReceipts(p, 0n, s1.identityId, e, 1n, 1n, 1n),
         () => f.QIS.setNodeEpoch(s1.identityId, e, node),
         () => f.QIS.setEpochTotals(e, totals),
@@ -663,7 +663,7 @@ describe('@integration The query/inference pool of an epoch', function () {
       expect([await f.QS.epochPool(e), await gross(e, s1)]).to.deep.equal(before);
 
       await f.QIS.addWalletFunding(e + 1n, 1n);
-      await f.QIS.addConvictionFunding(e + 2n, 1n);
+      await f.QIS.addAccountFunding(e + 2n, 1n);
       expect(await money(e + 1n)).to.equal(1n);
       expect(await money(e + 2n)).to.equal(1n);
     });
@@ -687,7 +687,7 @@ describe('@integration The query/inference pool of an epoch', function () {
       expect(await f.QS.epochPool(e)).to.equal(10n * TRAC);
       expect(await gross(e, a)).to.equal(10n * TRAC);
 
-      await accountPeriod(e, 24n * TRAC); // at a cost of 6
+      await accountSubscription(e, 24n * TRAC); // at a cost of 6
       expect(await funding(e)).to.deep.equal([10n * TRAC, 6n * TRAC]);
       expect(await gross(e, a)).to.equal(16n * TRAC);
       await topUp(buyer, p, 4n * TRAC);
@@ -746,7 +746,7 @@ describe('@integration The query/inference pool of an epoch', function () {
         await h.toEpoch(e + 1n);
 
         const t = await f.QIS.getEpochTotals(e);
-        expect([t.sumR, t.sumScore, t.lambdaBps]).to.deep.equal([1_000n * TRAC, 700n * TRAC, lambda]);
+        expect([t.totalServed, t.totalWeighted, t.lambdaBps]).to.deep.equal([1_000n * TRAC, 700n * TRAC, lambda]);
         expect(await f.QS.epochPool(e)).to.equal(pool);
         const result = [await gross(e, a), await gross(e, b)];
         expect(result[0]).to.equal(formula(pool, lambda, 200n * TRAC, 1_000n * TRAC, 180n * TRAC, 700n * TRAC));
@@ -774,7 +774,7 @@ describe('@integration The query/inference pool of an epoch', function () {
         await land(b, p, 800n * TRAC);
         await h.toEpoch(e + 1n);
         const t = await f.QIS.getEpochTotals(e);
-        expect([t.sumR, t.sumScore]).to.deep.equal([1_000n * TRAC, 500n * TRAC]);
+        expect([t.totalServed, t.totalWeighted]).to.deep.equal([1_000n * TRAC, 500n * TRAC]);
         expect([await gross(e, a), await gross(e, b)], `λ ${lambda}`).to.deep.equal([1_000n * TRAC, 4_000n * TRAC]);
       }
     });
@@ -785,7 +785,7 @@ describe('@integration The query/inference pool of an epoch', function () {
       const stakes = [4_050_000n, 2_112_500n, 1_250_000n, 500_000n, 123_457n].map((s) => s * TRAC);
       const sellers: Seller[] = [];
       for (const stake of stakes) sellers.push(await h.createSeller(stake, 0n));
-      const amounts = [13n, 17n, 19n, 23n, 29n].map((n) => n * 1_000n * UNIT_ASK);
+      const amounts = [13n, 17n, 19n, 23n, 29n].map((n) => n * 1_000n * UNIT_PRICE);
       const pool = 1_000n * TRAC + 7n;
       const e = await h.epochNow();
       const snapshot = await takeSnapshot();
@@ -802,9 +802,9 @@ describe('@integration The query/inference pool of an epoch', function () {
         let paid = 0n;
         for (const s of sellers) {
           const n = await f.QIS.getNodeEpoch(s.identityId, e);
-          const drawn = await gross(e, s);
-          expect(drawn).to.equal(formula(pool, lambda, n.r, t.sumR, n.score, t.sumScore));
-          paid += drawn;
+          const grossPaid = await gross(e, s);
+          expect(grossPaid).to.equal(formula(pool, lambda, n.servedValue, t.totalServed, n.weightedValue, t.totalWeighted));
+          paid += grossPaid;
         }
         // Each node's two terms are floored apart, so each leaves under 1 wei,
         // and a λ of 0 or 1 has one term only.
@@ -827,7 +827,7 @@ describe('@integration The query/inference pool of an epoch', function () {
       await land(b, p, 2n * TRAC);
       await h.toEpoch(e + 1n);
       const t = await f.QIS.getEpochTotals(e);
-      expect([t.sumR, t.sumScore]).to.deep.equal([3n * TRAC, 0n]);
+      expect([t.totalServed, t.totalWeighted]).to.deep.equal([3n * TRAC, 0n]);
       expect(await gross(e, a)).to.equal(3n * TRAC);
       expect(await gross(e, b)).to.equal(6n * TRAC);
     });

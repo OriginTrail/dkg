@@ -31,8 +31,8 @@
                 "W2": "2"
             }
         },
-        "ConvictionServiceStorage": {
-            "maxBucketsPerPeriod": "16"
+        "ServiceSubscriptionsStorage": {
+            "maxBudgetsPerSubscription": "16"
         },
         "QueryInferenceStorage": {
             "maxItemsPerBatch": "256",
@@ -116,8 +116,8 @@
                 "W2": "2"
             }
         },
-        "ConvictionServiceStorage": {
-            "maxBucketsPerPeriod": "16"
+        "ServiceSubscriptionsStorage": {
+            "maxBudgetsPerSubscription": "16"
         },
         "QueryInferenceStorage": {
             "maxItemsPerBatch": "256",

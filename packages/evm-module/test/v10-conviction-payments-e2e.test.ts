@@ -1,5 +1,5 @@
 // End to end (OT-RFC-27): one epoch of the marketplace, with exact numbers, on
-// the development deploy of the account, staking and plan-period stacks, with
+// the development deploy of the account, staking and plan-subscription stacks, with
 // RandomSampling scoring the nodes. PublishingConviction 10.2.0,
 // ServiceSubscriptions 1.2.0, QueryInferenceSettlement and StakingV10 10.1.0.
 //
@@ -19,7 +19,7 @@
 //   staker               +315    +135
 //
 // The account's money joins the pool beside the wallet's, and the staker pool
-// gets only what its window did not draw.
+// gets only what its window did not spend.
 
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
@@ -27,9 +27,9 @@ import { ContractTransactionReceipt, ContractTransactionResponse } from 'ethers'
 import hre from 'hardhat';
 
 import { STAKER_SHARD_ID, eventsOf } from './helpers/account-stack';
-import { CLASS_INFERENCE, TRAC, bucket, requestOf, subscriptionIdOf } from './helpers/conviction-service';
+import { CLASS_INFERENCE, TRAC, budget, requestOf, subscriptionIdOf } from './helpers/conviction-service';
 import { hardhatWallet, openConvictionAccount, queryInferenceDomain } from './helpers/query-inference';
-import { RewardsHelpers, UNIT_ASK, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
+import { RewardsHelpers, UNIT_PRICE, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 
 // A quarter of the 5M cap: a stake factor of exactly 1/2, and a proof's score
 // over this stake leaves no remainder, so a node's only position takes all of
@@ -47,7 +47,7 @@ async function deployFixture() {
 
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
 
-describe('@integration A Conviction Account period reaches the query/inference pool, end to end', function () {
+describe('@integration A Conviction Account subscription reaches the query/inference pool, end to end', function () {
   let f: Fixture;
   let h: RewardsHelpers;
   const key = hardhatWallet(61);
@@ -77,12 +77,12 @@ describe('@integration A Conviction Account period reaches the query/inference p
     // λ applies at once to an epoch with no value yet.
     await h.forward(f.QIS, 'setLambdaBps', [0n]);
 
-    // 1. The account, opted in with Buyer 2 assigned: no discount, and 1,000 per
+    // 1. The account, opted in with Buyer 2 added: no discount, and 1,000 per
     //    window.
     const { accountId } = await openConvictionAccount({
       ...f,
       owner,
-      assignee: buyer2,
+      buyer: buyer2,
       committed: COMMITTED,
       limit: 1_000n * TRAC,
     });
@@ -92,18 +92,18 @@ describe('@integration A Conviction Account period reaches the query/inference p
     // 2. Buyer 1 pays from a wallet: the TRAC moves into the vault, and is booked
     //    in e itself.
     const vaultBeforeWallet = await h.balanceOf(vault);
-    const walletPeriod = await h.walletFund(buyer1, e, FUNDED);
+    const walletSubscription = await h.walletFund(buyer1, e, FUNDED);
     expect((await h.balanceOf(vault)) - vaultBeforeWallet).to.equal(FUNDED);
 
     // 3. Buyer 2 funds from the account: no TRAC moves, the staker pool gets
     //    nothing, and the cost, 100 at no discount, is booked in e beside it.
     const vaultBeforeAccount = await h.balanceOf(vault);
     const funded = (await (
-      await f.SS.connect(buyer2).fundFromConviction(
-        requestOf(accountId, e, { buckets: [bucket(0, CLASS_INFERENCE, FUNDED, UNIT_ASK)], sessionKey: key.address }),
+      await f.SS.connect(buyer2).fundFromAccount(
+        requestOf(accountId, e, { budgets: [budget(0, CLASS_INFERENCE, FUNDED, UNIT_PRICE)], sessionKey: key.address }),
       )
     ).wait())!;
-    const accountPeriod = subscriptionIdOf(buyer2.address, e);
+    const accountSubscription = subscriptionIdOf(buyer2.address, e);
     expect(stakerCredits(funded)).to.have.length(0);
     expect(await h.balanceOf(vault)).to.equal(vaultBeforeAccount);
     expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(FUNDED);
@@ -115,7 +115,7 @@ describe('@integration A Conviction Account period reaches the query/inference p
 
     // 5. A node has to prove before its receipts land: A twice and B once, over
     //    the same stake, is 2/3 and 1/3.
-    await expect(h.claimReceipts(A, walletPeriod, 50n * TRAC))
+    await expect(h.claimReceipts(A, walletSubscription, 50n * TRAC))
       .to.be.revertedWithCustomError(f.QS, 'NoNodeScore')
       .withArgs(A.identityId, e);
     const prove = await h.realProofs();
@@ -127,18 +127,18 @@ describe('@integration A Conviction Account period reaches the query/inference p
     expect(await f.RSS.getNodeEpochScore(e, A.identityId)).to.equal(2n * scoreB);
     expect(await f.RSS.getAllNodesEpochScore(e)).to.equal(3n * scoreB);
 
-    // 6. Receipts count as they land: A 50 on the wallet's period and 25 on the
+    // 6. Receipts count as they land: A 50 on the wallet's subscription and 25 on the
     //    account's, B 25 on the account's. Half of what was funded counts, and
     //    the pool is all of the money all the same.
-    await h.claimReceipts(A, walletPeriod, 50n * TRAC);
-    await h.claimReceipts(A, accountPeriod, 25n * TRAC);
-    await h.claimReceipts(B, accountPeriod, 25n * TRAC);
-    expect((await f.QIS.getNodeEpoch(A.identityId, e)).r).to.equal(75n * TRAC);
-    expect((await f.QIS.getNodeEpoch(B.identityId, e)).r).to.equal(25n * TRAC);
+    await h.claimReceipts(A, walletSubscription, 50n * TRAC);
+    await h.claimReceipts(A, accountSubscription, 25n * TRAC);
+    await h.claimReceipts(B, accountSubscription, 25n * TRAC);
+    expect((await f.QIS.getNodeEpoch(A.identityId, e)).servedValue).to.equal(75n * TRAC);
+    expect((await f.QIS.getNodeEpoch(B.identityId, e)).servedValue).to.equal(25n * TRAC);
     const totals = await f.QIS.getEpochTotals(e);
-    expect([totals.sumR, totals.lambdaBps]).to.deep.equal([100n * TRAC, 0n]);
-    expect(await f.QS.bucketLeft(walletPeriod, 0n)).to.equal(50n * TRAC);
-    expect(await f.QS.bucketLeft(accountPeriod, 0n)).to.equal(50n * TRAC);
+    expect([totals.totalServed, totals.lambdaBps]).to.deep.equal([100n * TRAC, 0n]);
+    expect(await f.QS.budgetLeft(walletSubscription, 0n)).to.equal(50n * TRAC);
+    expect(await f.QS.budgetLeft(accountSubscription, 0n)).to.equal(50n * TRAC);
     expect(await f.QS.epochPool(e)).to.equal(200n * TRAC);
 
     // StakingKPI already reads what the claims will pay.
@@ -188,7 +188,7 @@ describe('@integration A Conviction Account period reaches the query/inference p
     expect((await h.owed([A, B])) - owedBeforeClaims).to.equal(500n * TRAC);
 
     // 9. The account's first window, booked on its next touch, gives the staker
-    //    pool only what the period did not draw: nothing twice.
+    //    pool only what the subscription did not spend: nothing twice.
     await time.increaseTo(await f.Chronos.timestampForEpoch(e + 2n));
     const settled = (await (await f.NFT.settle(accountId)).wait())!;
     expect((await f.PCS.getAccount(accountId)).lastSettledWindow).to.equal(1n);
