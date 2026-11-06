@@ -266,7 +266,7 @@ class Sim {
   }
 
   /** A day of service: batches through the day, each from one seller, each with one to three groups. */
-  serve(e, from, to, { heat = 1, stopBuyer = null, skipBuyer = () => false } = {}) {
+  serve(e, from, to, { heat = 1, skipBuyer = () => false } = {}) {
     const start = this.startOf(e);
     const count = Math.round(44 * heat);
     for (let i = 0; i < count; i++) {
@@ -285,7 +285,6 @@ class Sim {
       }
       this.batch(seller, at, groups.slice(0, 3));
     }
-    void stopBuyer;
   }
 
   fundAll(e, opts = {}) {
@@ -390,6 +389,7 @@ const HUB = '0xc056e67da4f51377ad1b01f50f655ffdccd809f6';
 
 function freshStatus(now, source = 'repository') {
   return {
+    fixture: true,
     stale: false,
     errors: [],
     rpc: { ok: true, lastOkAt: now, block: 55_400_000, blockTime: now - 2 },
@@ -522,7 +522,7 @@ const partlyStatus = { ...freshStatus(now), stale: true, errors: ['Explorer: HTT
 partlyStatus.events = { ...partlyStatus.events, ok: false, lastOkAt: now - 700 };
 write('partly', compose({ state: live.state, pub, status: partlyStatus, now, network: network() }));
 
-const unreadStatus = { stale: true, errors: ['RPC: fetch failed (ECONNRESET)', 'Explorer: not read, the contract addresses are not known yet'], rpc: { ok: false, lastOkAt: null, block: null, blockTime: null }, events: { ok: false, lastOkAt: null, head: null, lagBlocks: null }, public: { source: 'none', at: null }, run: { ms: 4000 } };
+const unreadStatus = { fixture: true, stale: true, errors: ['RPC: fetch failed (ECONNRESET)', 'Explorer: not read, the contract addresses are not known yet'], rpc: { ok: false, lastOkAt: null, block: null, blockTime: null }, events: { ok: false, lastOkAt: null, head: null, lagBlocks: null }, public: { source: 'none', at: null }, run: { ms: 4000 } };
 write('unread', compose({ state: {}, pub: null, status: unreadStatus, now, network: network() }));
 
 const early = buildEarly(now);

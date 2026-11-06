@@ -206,8 +206,9 @@ export function compose({ state, pub, status, now, network }) {
       maxCostPerEpoch = l.a.maxCostPerEpoch;
       expiresAt = Number(l.a.expiresAt);
     }
+    // Whatever became of the grant after this subscription's epoch, it does not belong to this epoch.
     const end = s.grantEnd ?? expiresAt;
-    return { maxCostPerEpoch, expiresAt, endedAt: end < expiresAt ? end : null, grantedAt: added.at, tx: added.tx };
+    return { maxCostPerEpoch, expiresAt, endedAt: end < expiresAt && end < Number(s.endsAt) ? end : null, grantedAt: added.at, tx: added.tx };
   };
 
   // ------------------------------------------------------------------ landed groups, joined with their calldata

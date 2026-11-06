@@ -784,7 +784,6 @@ function drawEpochChart(box, rows, selected) {
 }
 
 function drawSellerChart(box, rows, selected) {
-  const sellers = D().sellers;
   const totals = rows.map((r) => r.sellers.reduce((a, x) => a + toNum(x.gross), 0));
   const max = Math.max(1, ...totals);
   const svg = epochFrame(box, rows, {
@@ -808,7 +807,6 @@ function drawSellerChart(box, rows, selected) {
       if (!present.length && r.state === 'ended') g.append(s('text', { x: f.x + f.slot / 2, y: f.base - 6, 'text-anchor': 'middle', style: 'fill:var(--muted);font-size:11px' }, 'no pool'));
     },
   });
-  void sellers;
   box.replaceChildren(svg);
 }
 
@@ -1322,6 +1320,7 @@ function renderBanner() {
   const root = document.getElementById('banner');
   const d = D();
   const items = [];
+  if (d.status?.fixture) items.push(h('div', { class: 'banner critical' }, h('strong', null, 'Generated test data. '), 'These numbers were made up to test this page, and none of them is on-chain.'));
   if (SNAPSHOT) items.push(h('div', { class: 'banner' }, `A snapshot of the chain at ${utc(d.generatedAt, 'full')}. It does not update.`));
   else {
     const f = freshness();

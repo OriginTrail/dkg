@@ -192,7 +192,7 @@ const LOG_CONTRACTS = [
 
 const KEEP = new Set(['ReceiptsLanded', 'ReceiptBatchAccepted', 'SubscriptionFunded', 'SubscriptionToppedUp', 'BuyerAdded', 'BuyerRemoved', 'BuyerLimitsUpdated', 'ServiceSpendingSet', 'RewardsClaimed']);
 
-async function readEvents(source, st, pub, rpc) {
+async function readEvents(source, st, rpc) {
   const clock = st.clock;
   // Once an epoch, and whenever the numbers disagree, everything is read again from
   // nothing, which also drops whatever a reorganized block took back.
@@ -510,7 +510,7 @@ async function main() {
   let explorerHead = null;
   if (Object.keys(st.addresses).length) {
     try {
-      const added = await readEvents(source, st, pub, rpc);
+      const added = await readEvents(source, st, rpc);
       explorerHead = await source.head();
       eventsOk = true;
       if (added) log(`events: ${added} new, ${st.logs.length} held`);

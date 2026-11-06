@@ -16,23 +16,18 @@ const dist = join(here, 'dist');
 const repoRoot = resolve(here, '../../../../../..');
 
 function loadEsbuild() {
-  const candidates = [join(repoRoot, 'package.json')];
-  for (const from of candidates) {
-    try {
-      return createRequire(from)('esbuild');
-    } catch {
-      /* not a direct dependency here */
-    }
+  try {
+    return createRequire(join(repoRoot, 'package.json'))('esbuild');
+  } catch {
+    /* not a direct dependency at the root: look in the store */
   }
   const pnpm = join(repoRoot, 'node_modules/.pnpm');
-  if (existsSync(pnpm)) {
-    const versions = readdirSync(pnpm).filter((d) => d.startsWith('esbuild@')).sort().reverse();
-    for (const v of versions) {
-      try {
-        return createRequire(join(pnpm, v, 'node_modules/esbuild/package.json'))(join(pnpm, v, 'node_modules/esbuild'));
-      } catch {
-        /* try the next */
-      }
+  const versions = existsSync(pnpm) ? readdirSync(pnpm).filter((d) => d.startsWith('esbuild@')).sort().reverse() : [];
+  for (const v of versions) {
+    try {
+      return createRequire(join(pnpm, v, 'node_modules/esbuild/package.json'))(join(pnpm, v, 'node_modules/esbuild'));
+    } catch {
+      /* try the next */
     }
   }
   throw new Error(`esbuild not found under ${pnpm}`);
