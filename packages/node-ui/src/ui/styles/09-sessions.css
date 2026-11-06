@@ -1,5 +1,5 @@
 /* Sessions list */
-.v10-sessions-list { padding: 8px 0; }
+.v10-sessions-list { padding: var(--space-8) 0; }
 .v10-session-item {
   display: flex;
   align-items: center;
@@ -18,7 +18,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-right: 8px;
+  margin-right: var(--space-8);
 }
 .v10-session-count {
   font-family: var(--font-mono);

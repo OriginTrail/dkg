@@ -10,7 +10,7 @@
   justify-content: center;
   width: 24px;
   min-height: 32px;
-  padding: 0 4px;
+  padding: 0 var(--space-4);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -41,7 +41,7 @@
   box-shadow: var(--shadow-menu);
   z-index: var(--z-popover);
   overflow: hidden;
-  padding: 4px;
+  padding: var(--space-4);
 }
 .v10-agent-tab-menu-popover.align-right {
   /* Right-anchored fallback when the left-anchored popover would
@@ -53,17 +53,17 @@
 .v10-agent-tab-menu-status {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-8);
+  padding: var(--space-8) 10px;
   font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
 }
 .v10-agent-tab-menu-item {
   display: block;
   width: 100%;
-  padding: 8px 10px;
+  padding: var(--space-8) 10px;
   background: transparent;
   border: 0;
   text-align: left;
@@ -99,9 +99,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-8);
   width: 100%;
-  padding: 0 12px;
+  padding: 0 var(--space-12);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-primary);
@@ -149,7 +149,7 @@
   overflow-y: auto;
   list-style: none;
   margin: 0;
-  padding: 4px;
+  padding: var(--space-4);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   box-shadow: var(--shadow-menu);
@@ -160,10 +160,10 @@
   margin-top: -4px;
 }
 .v10-select-menu-below {
-  margin-top: 4px;
+  margin-top: var(--space-4);
 }
 .v10-select-option {
-  padding: 8px 10px;
+  padding: var(--space-8) 10px;
   font-size: var(--fs-control);
   color: var(--text-primary);
   border-radius: var(--radius-xs);
@@ -192,7 +192,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 12px 14px;
+  padding: var(--space-12) 14px;
 }
 
 /* Floating "scroll to latest" pill — sticks to the bottom-center of the
@@ -253,7 +253,7 @@
      visible (full date + time vs. previous time-only). Pre-existing
      AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
      bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
-  margin-top: 4px;
+  margin-top: var(--space-4);
   font-size: var(--fs-micro);
   color: var(--text-secondary);
   font-family: var(--font-mono);
@@ -318,5 +318,5 @@
 .v10-local-agent-composer-row {
   display: flex;
   align-items: stretch;
-  gap: 8px;
+  gap: var(--space-8);
 }

@@ -30,6 +30,7 @@ button {
   cursor: pointer;
   outline: none;
 }
+button, input, select, textarea { line-height: var(--lh-tight); }
 button:disabled, input:disabled, textarea:disabled, select:disabled { opacity: var(--opacity-disabled); cursor: not-allowed; }
 
 input, textarea {
@@ -39,7 +40,7 @@ input, textarea {
   border: 1px solid var(--border-default);
   color: var(--text-primary);
   border-radius: var(--radius-control);
-  padding: 6px 10px;
+  padding: var(--space-6) 10px;
   outline: none;
 }
 input:focus, textarea:focus { border-color: var(--border-strong); }

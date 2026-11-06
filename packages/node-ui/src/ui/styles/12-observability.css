@@ -16,15 +16,15 @@ p { font-size: var(--fs-body); color: var(--text-secondary); line-height: var(--
    the single-column page stack, and token-driven field rows (replacing the
    previously-undefined .settings-card/.settings-grid/.prov-field-* hooks). */
 .card-body{padding:var(--pad-card)}
-.settings-stack{display:flex;flex-direction:column;gap:16px;max-width:720px}
-.settings-field-label{font-size: var(--fs-micro);font-weight:600;text-transform:uppercase;letter-spacing: var(--ls-caps);color:var(--text-tertiary);margin-bottom:3px}
+.settings-stack{display:flex;flex-direction:column;gap:var(--space-16);max-width:720px}
+.settings-field-label{font-size: var(--fs-micro);font-weight:600;text-transform:uppercase;letter-spacing: var(--ls-caps);color:var(--text-tertiary);margin-bottom:var(--space-4)}
 .settings-field-value{font-size: var(--fs-control);color:var(--text-primary);word-break:break-word}
 .settings-field-value.mono{font-family:var(--font-mono)}
 
 /* ── Observability page shared components ───────────────────────────────── */
 
-.network-tab .card { margin-bottom: 12px; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0 12px; }
+.network-tab .card { margin-bottom: var(--space-12); }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-12); margin: var(--space-16) 0 var(--space-12); }
 .network-tab .stats-grid { margin-top: 0; }
 
 /* Tab bar (legacy v9-style, used by Observability page) */
@@ -42,7 +42,7 @@ p { font-size: var(--fs-body); color: var(--text-secondary); line-height: var(--
 /* Form inputs and selects */
 .input {
   height: var(--h-control-md);
-  padding: 6px 10px;
+  padding: var(--space-6) 10px;
   font-size: var(--fs-control);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
@@ -55,9 +55,9 @@ p { font-size: var(--fs-body); color: var(--text-secondary); line-height: var(--
 .input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .input.mono { font-family: var(--font-mono); }
 select.input {
+  padding: 0 var(--space-24) 0 var(--space-12);
   appearance: none;
   -webkit-appearance: none;
-  padding-right: 24px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236b7280'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 7px center;
@@ -67,7 +67,7 @@ select.input {
 /* Filter bar */
 .tab-group > .ds-tab { flex: none; }
 .filters .input { max-width: 100%; min-width: 0; }
-.filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.filters { display: flex; gap: var(--space-8); align-items: center; flex-wrap: wrap; margin-bottom: var(--space-12); }
 
 /* Data table */
 .data-table {
@@ -75,16 +75,16 @@ select.input {
   border-collapse: collapse;
   font-size: var(--fs-control);
 }
+.data-table th:not(.ds-num) { text-align: left; }
 .data-table th {
-  padding: 8px 14px;
-  text-align: left;
+  padding: var(--space-8) 14px;
   border-bottom: 1px solid var(--border-subtle);
   white-space: nowrap;
   background: var(--bg-panel);
 }
 .data-table td {
   font-variant-numeric: tabular-nums;
-  padding: 9px 14px;
+  padding: var(--space-8) 14px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
   vertical-align: middle;
@@ -103,9 +103,9 @@ select.input {
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:var(--pad-compact);flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color var(--motion-base),box-shadow var(--motion-base)}
 .stat-card:hover{border-color:var(--border-strong);box-shadow: var(--shadow-sm)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
-.stat-label{font-size: var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing: var(--ls-caps);text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.stat-label{font-size: var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing: var(--ls-caps);text-transform:uppercase;margin-bottom:var(--space-8);display:flex;align-items:center;gap:var(--space-6)}
 .stat-value{font-size: var(--fs-display);font-weight:700;color:var(--text-primary);line-height:1}
-.stat-sub{font-size: var(--fs-body);color:var(--text-secondary);margin-top:6px}
+.stat-sub{font-size: var(--fs-body);color:var(--text-secondary);margin-top:var(--space-6)}
 
 /* ══════════════════════════════════════════
    MODAL STYLES (V10)
@@ -130,13 +130,13 @@ select.input {
   box-shadow: var(--shadow-modal);
 }
 .v10-modal-header {
-  padding: 20px 24px 16px;
+  padding: var(--space-20) var(--space-24) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-modal-title {
   font-size: var(--fs-title);
   font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
   color: var(--text-primary);
 }
 .v10-modal-subtitle {
@@ -145,14 +145,14 @@ select.input {
   line-height: var(--lh-body);
 }
 .v10-modal-body {
-  padding: 20px 24px;
+  padding: var(--space-20) var(--space-24);
 }
 .v10-modal-footer {
-  padding: 16px 24px;
+  padding: var(--space-16) var(--space-24);
   border-top: 1px solid var(--border-subtle);
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .v10-modal-btn.primary:hover { opacity: 0.85; }
 .v10-modal-btn.primary:disabled { opacity: var(--opacity-disabled); }
@@ -161,7 +161,7 @@ select.input {
   padding: var(--pad-nested);
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-16);
   font-size: var(--fs-control);
   color: var(--text-danger);
   line-height: var(--lh-body);
@@ -171,7 +171,7 @@ select.input {
   padding: var(--pad-nested);
   background: var(--warning-bg);
   border: 1px solid var(--warning-border);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-16);
   font-size: var(--fs-control);
   color: var(--text-warning);
   line-height: var(--lh-body);
@@ -181,7 +181,7 @@ select.input {
   padding: var(--pad-nested);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-16);
   font-size: var(--fs-label);
   color: var(--text-secondary);
   line-height: var(--lh-loose);
@@ -189,6 +189,6 @@ select.input {
 .v10-modal-tip-title {
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-4);
 }
 .settings-node-status { padding: 10px 14px; }

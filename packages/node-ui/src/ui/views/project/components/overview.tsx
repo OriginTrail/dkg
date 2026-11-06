@@ -521,7 +521,7 @@ export function ProjectOverviewCard({
           renders as a `title` tooltip on the Entities cell, not as
           an inline `hint:`, to keep the 4-card grid clean. */}
       <div data-section="at-a-glance" className="v10-po-stat-block">
-        <div className="v10-po-section-title">At a glance</div>
+        <h2 className="v10-po-section-title">At a glance</h2>
         <StatStrip
           className="v10-po-stat-strip"
           items={[
@@ -535,7 +535,7 @@ export function ProjectOverviewCard({
       <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge pipeline">
         <div className="v10-po-pipeline-head">
           <div>
-            <div className="v10-po-section-title">Knowledge pipeline</div>
+            <h2 className="v10-po-section-title">Knowledge pipeline</h2>
             <div className="v10-po-section-desc">Entities move from private staging to shared review; published assertion bundles become Knowledge Assets with on-chain provenance.</div>
           </div>
         </div>
@@ -583,7 +583,7 @@ export function ProjectOverviewCard({
           applied in CSS via `.is-self` / `.is-curator` — never in the
           data string. */}
       <div className="v10-po-people" data-section="participants">
-        <div className="v10-po-section-title">Participant agents</div>
+        <h2 className="v10-po-section-title">Participant agents</h2>
         {(() => {
           // Codex review bug A — `/participants` returns `allowedAgents`
           // and does NOT include the curator on a private CG. Render
@@ -778,7 +778,7 @@ export function PendingJoinRequestsSection({
     return (
       <section className="v10-po-join" data-section="join-requests">
         <header className="v10-po-join-head">
-          <span className="v10-po-section-title">Pending join requests</span>
+          <h2 className="v10-po-section-title">Pending join requests</h2>
         </header>
         <div className="v10-po-join-empty">Verifying access…</div>
       </section>
@@ -806,7 +806,7 @@ export function PendingJoinRequestsSection({
   return (
     <section className="v10-po-join" data-section="join-requests">
       <header className="v10-po-join-head">
-        <span className="v10-po-section-title">Pending join requests</span>
+        <h2 className="v10-po-section-title">Pending join requests</h2>
         <Count value={requests.length} tone={requests.length > 0 ? 'attention' : 'neutral'} />
       </header>
       {status === 'loading'

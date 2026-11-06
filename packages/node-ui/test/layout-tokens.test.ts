@@ -16,6 +16,8 @@ const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) =>
   [...strip(readFileSync(file, 'utf8')).matchAll(pattern)].filter(keep).map((m) => `${relative(UI, file)}: ${m[0].slice(0, 70)}`)
 ));
 
+const OFF_SCALE_SPACING = 208;
+const INLINE_STYLES = 513;
 const INLINE_FONT_SIZES = 0; // Canvas options take numbers and sit outside style attributes.
 
 describe('layout tokens', () => {
@@ -43,6 +45,21 @@ describe('layout tokens', () => {
   // Inline sizes in style attributes. Only ever lower this.
   it('does not add inline font sizes', () => {
     expect(matches(tsx, /style=\{\{[^}]*\bfontSize:\s*\d/g).length).toBeLessThanOrEqual(INLINE_FONT_SIZES);
+  });
+
+  // 10 and 14 stay for now, inside nested padding. Only ever lower these.
+  it('does not add spacing outside the scale', () => {
+    const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
+    const spacing = /(?:padding|margin|gap)[a-z-]*\s*:[^;}]*/g;
+    const offScale = sheets.flatMap((f) => [...strip(readFileSync(f, 'utf8')).matchAll(spacing)]
+      .flatMap((m) => [...m[0].matchAll(/(?<![\w.#-])(\d+)px\b/g)].filter((v) => v[1] !== '1' && v[1] !== '0')));
+    expect(offScale.length).toBeLessThanOrEqual(OFF_SCALE_SPACING);
+  });
+
+  it('does not add inline styles', () => {
+    const count = tsx.filter((f) => !f.includes('design-system'))
+      .reduce((n, f) => n + (readFileSync(f, 'utf8').match(/style=\{\{/g) ?? []).length, 0);
+    expect(count).toBeLessThanOrEqual(INLINE_STYLES);
   });
 
   it('sets line height from the scale', () => {

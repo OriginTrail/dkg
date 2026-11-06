@@ -197,7 +197,7 @@ function DetailBody({
         <Breadcrumbs items={[{ label: 'Publisher Conviction', onClick: () => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true }) }, { label: `PCA #${accountId}` }]} />
       </div>
       <div className="v10-pca-detail-band">
-        <span className="v10-pca-detail-id">PCA #{accountId}</span>
+        <h1 className="v10-pca-detail-id">PCA #{accountId}</h1>
         <Badge size="sm" icon={<BadgePercent size={12} />}>{pct}% discount</Badge>
         <span className="v10-pca-detail-committed">{formatPcaTrac(snapshot.committedTRACTrac)} TRAC committed</span>
         <span className="v10-pca-card-spacer" />

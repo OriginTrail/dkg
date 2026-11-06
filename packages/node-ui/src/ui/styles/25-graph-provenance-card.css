@@ -15,8 +15,8 @@
   z-index: calc(var(--z-raised) + 1);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
+  gap: var(--space-8);
+  padding: var(--space-12) 14px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-lift);
@@ -33,7 +33,7 @@
 .v10-graph-prov-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .v10-graph-prov-glyph {
   font-size: var(--fs-body);
@@ -57,7 +57,7 @@
   font-size: var(--fs-title);
   line-height: 1;
   cursor: pointer;
-  padding: 0 2px;
+  padding: 0 var(--space-2);
   transition: color var(--motion-base);
 }
 .v10-graph-prov-close:hover {
@@ -70,19 +70,19 @@
   color: var(--text-secondary);
   word-break: break-word;
   border-bottom: 1px solid var(--border-subtle);
-  padding-bottom: 6px;
+  padding-bottom: var(--space-6);
 }
 
 .v10-graph-prov-muted {
   font-size: var(--fs-label);
   color: var(--text-tertiary);
-  padding: 4px 0 2px;
+  padding: var(--space-4) 0 var(--space-2);
 }
 
 .v10-graph-prov-offchain {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
 }
 .v10-graph-prov-offchain-tag { align-self: flex-start; }
 .v10-graph-prov-offchain p {

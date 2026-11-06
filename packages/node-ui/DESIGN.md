@@ -75,6 +75,10 @@ Type sizes are whole pixels, here and in nOS. Every size is one of these tokens;
 
 `50%` is fine for things that are circles (avatars, dots). Use the `.ds-overlay`, `.ds-card` and `.ds-card-nested` classes for new surfaces.
 
+### Spacing
+
+Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens and older rules, and a test stops that number growing.
+
 ### Card padding
 
 | Token | px | Use |

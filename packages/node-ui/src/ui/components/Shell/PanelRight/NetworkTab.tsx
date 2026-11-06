@@ -184,7 +184,7 @@ export function NetworkTab(props: {
         >
           {directCount} direct / {relayedCount} relayed
         </span>
-        <button type="button" className="v10-agents-details" onClick={openConnectionDetails}>Connection details</button>
+        <button type="button" className="v10-agents-details" onClick={openConnectionDetails} aria-label="Connection details" title="Connection details in Observability">Details</button>
         <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
           <RefreshCw size={12} />Refresh
         </button>

@@ -7,7 +7,7 @@
 .v10-identity-wallet-header {
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-12);
 }
 
 .v10-identity-wallet-description,
@@ -33,7 +33,7 @@
 .v10-identity-wallet-confirm {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-8);
   flex-wrap: wrap;
 }
 
@@ -56,7 +56,7 @@
 }
 
 .v10-identity-wallet-subtitle {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-8);
   font-size: var(--fs-label);
   font-weight: 700;
   color: var(--text-secondary);
@@ -67,7 +67,7 @@
 .v10-identity-wallet-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-6);
   margin-top: 10px;
   max-width: none;
 }
@@ -79,14 +79,14 @@
 .v10-identity-wallet-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-12);
   margin-top: 14px;
 }
 
 .v10-identity-wallet-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-8);
   min-width: 0;
   padding: var(--pad-compact);
   border: 1px solid var(--border-subtle);
@@ -118,7 +118,7 @@
 }
 
 .v10-identity-wallet-confirm {
-  margin-top: 12px;
+  margin-top: var(--space-12);
 }
 
 .v10-identity-wallet-confirm > span:first-child {

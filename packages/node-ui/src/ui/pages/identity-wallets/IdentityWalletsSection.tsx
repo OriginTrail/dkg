@@ -160,7 +160,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={confirmRemoval} disabled={transactionPending}>
             Yes, remove
           </button>
-          <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={cancelRemoval} disabled={transactionPending}>
+          <button autoFocus type="button" className="v10-identity-wallet-btn ds-btn" onClick={cancelRemoval} disabled={transactionPending}>
             Cancel
           </button>
         </div>

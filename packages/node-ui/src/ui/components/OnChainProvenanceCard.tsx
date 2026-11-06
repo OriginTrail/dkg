@@ -68,7 +68,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
   return (
     <div
       className={`v10-graph-prov-card ds-card${verified ? ' verified' : ''}`}
-      role="dialog"
+      role="region"
       aria-label="On-chain provenance"
     >
       <div className="v10-graph-prov-head">

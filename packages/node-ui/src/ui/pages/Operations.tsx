@@ -253,7 +253,7 @@ function ReplicationTab() {
           <EmptyState compact inline title="No subscriptions" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th>Watermark</th><th>Chain head</th><th>Lag</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context Graph</th><th>On-chain id</th><th>Role</th><th className="ds-num">Watermark</th><th className="ds-num">Chain head</th><th className="ds-num">Lag</th><th>Last event</th></tr></thead>
             <tbody>
               {cursors.map((c) => {
                 const wm = c.last_reconciled_ordinal ?? 0;
@@ -264,9 +264,9 @@ function ReplicationTab() {
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
                     <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public Context Graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
-                    <td>{wm}</td>
-                    <td>{head ?? '—'}</td>
-                    <td>{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
+                    <td className="ds-num">{wm}</td>
+                    <td className="ds-num">{head ?? '—'}</td>
+                    <td className="ds-num">{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
                     <td>{c.last_event_ts ? formatTime(c.last_event_ts) : '—'}</td>
                   </tr>
                 );
@@ -284,7 +284,7 @@ function ReplicationTab() {
           <EmptyState compact inline title="No activity in this period" />
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
-            <thead><tr><th>Context Graph</th><th>Promotes</th><th>Fetches</th><th>Defers</th><th>Cursor moves</th><th>Watermark</th><th>Last event</th></tr></thead>
+            <thead><tr><th>Context Graph</th><th className="ds-num">Promotes</th><th className="ds-num">Fetches</th><th className="ds-num">Defers</th><th className="ds-num">Cursor moves</th><th className="ds-num">Watermark</th><th>Last event</th></tr></thead>
             <tbody>
               {perCg.map((r) => (
                 <tr
@@ -293,11 +293,11 @@ function ReplicationTab() {
                   style={{ cursor: 'pointer', background: selectedCg === r.context_graph_id ? 'var(--bg-hover)' : undefined }}
                 >
                   <td className="mono">{r.context_graph_id}</td>
-                  <td>{r.promotes}</td>
-                  <td>{r.fetches}</td>
-                  <td>{r.defers}</td>
-                  <td>{r.cursor_advances}</td>
-                  <td>{r.last_watermark ?? '—'}</td>
+                  <td className="ds-num">{r.promotes}</td>
+                  <td className="ds-num">{r.fetches}</td>
+                  <td className="ds-num">{r.defers}</td>
+                  <td className="ds-num">{r.cursor_advances}</td>
+                  <td className="ds-num">{r.last_watermark ?? '—'}</td>
                   <td>{r.last_event_ts ? formatTime(r.last_event_ts) : '—'}</td>
                 </tr>
               ))}
@@ -314,7 +314,7 @@ function ReplicationTab() {
             <EmptyState compact inline title="No events" />
           ) : (
             <div className="ds-table-scroll"><table className="data-table">
-              <thead><tr><th>Time</th><th>Action</th><th>Ordinal</th><th>Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
+              <thead><tr><th>Time</th><th>Action</th><th className="ds-num">Ordinal</th><th className="ds-num">Cursor</th><th>UAL</th><th>Detail</th></tr></thead>
               <tbody>
                 {events.map((e, i) => (
                   <tr key={i}>
@@ -389,7 +389,7 @@ function HealthTab() {
         ) : (
           <div className="ds-table-scroll"><table className="data-table">
             <thead>
-              <tr><th>Operation</th><th>Phase</th><th>Errors</th><th>Last error</th><th>Last occurred</th></tr>
+              <tr><th>Operation</th><th>Phase</th><th className="ds-num">Errors</th><th>Last error</th><th>Last occurred</th></tr>
             </thead>
             <tbody>
               {hotspots.map((h: any) => {
@@ -986,8 +986,8 @@ function OperationsTab() {
                 <th>Type</th>
                 <th>Status</th>
                 <th>Phases</th>
-                <th>Duration</th>
-                <th>Cost (ETH)</th>
+                <th className="ds-num">Duration</th>
+                <th className="ds-num">Cost (ETH)</th>
                 <th>TX</th>
                 <th>Operation ID</th>
               </tr>
@@ -1003,8 +1003,8 @@ function OperationsTab() {
                   <td><Badge size="sm" title={OP_TYPE_DESCRIPTIONS[op.operation_name] ?? ''} style={{ background: opTypeBg(op.operation_name), color: opTypeText(op.operation_name), boxShadow: 'none' }}>{op.operation_name}</Badge></td>
                   <td><StatusBadge status={op.status} /></td>
                   <td><MiniGantt phases={op.phases} totalMs={op.duration_ms} /></td>
-                  <td>{formatDuration(op.duration_ms)}</td>
-                  <td>{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
+                  <td className="ds-num">{formatDuration(op.duration_ms)}</td>
+                  <td className="ds-num">{op.gas_cost_eth != null ? op.gas_cost_eth.toFixed(6) : '—'}</td>
                   <td>
                     {op.tx_hash ? (
                       <a href={explorerUrl ? `${explorerUrl}/tx/${op.tx_hash}` : '#'} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} title={op.tx_hash} className="tx-link-icon">
