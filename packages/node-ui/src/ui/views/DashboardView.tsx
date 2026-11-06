@@ -829,7 +829,7 @@ export function DashboardView() {
           <div className="v10-ws-spend">
             <div className="v10-ws-spend-head">
               <span>Period</span>
-              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free Shared Working Memory/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to Verifiable Memory</span>
+              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free Shared Working Memory/local/testnet publishes are not counted (they don't burn TRAC).">Publishes</span>
               {/* economics totalTrac is always TRAC-denominated, independent
                   of the node wallet token symbol — label it literally. */}
               <span>TRAC</span>

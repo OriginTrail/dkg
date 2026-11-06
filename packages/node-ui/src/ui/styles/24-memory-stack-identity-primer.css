@@ -10,6 +10,8 @@
   border: 1px dashed var(--border-subtle);
 }
 .v10-memstack-table {
+  /* Wider than a phone: the page scrolls sideways, so no layer column is cut off. */
+  min-width: 720px;
   display: flex; flex-direction: column;
   gap: 10px;
 }
