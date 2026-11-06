@@ -319,3 +319,10 @@
   /* Below the shelf in the canvas stacking context. */
   z-index: 0;
 }
+
+/* ── Entities list ── */
+.v10-docs-placeholder.v10-layer-empty-fill { flex: 1; }
+
+/* ── Layer decision widgets ── */
+.v10-decision-context.v10-decision-context-gap { margin-bottom: var(--space-8); }
+.v10-decision-error { font-size: var(--fs-label); color: var(--text-danger); margin-bottom: var(--space-8); }

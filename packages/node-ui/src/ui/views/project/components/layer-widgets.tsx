@@ -174,11 +174,11 @@ function LayerActionShell({ title, footnote, context, result, warn = false, erro
 }) {
   return (
     <GenWidget title={title} footnote={footnote}>
-      <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
+      <div className="v10-decision-context v10-decision-context-gap">{context}</div>
       {result && <div data-testid="layer-action-result" style={{ fontSize: 'var(--fs-label)', color: warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}><StatusGlyph tone={warn ? 'warning' : 'success'} /> {result}</div>}
       {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
           successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
-      {error && <div data-testid="layer-action-error" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', marginBottom: 8 }}><StatusGlyph tone="danger" /> {error}</div>}
+      {error && <div data-testid="layer-action-error" className="v10-decision-error"><StatusGlyph tone="danger" /> {error}</div>}
       {extras}
       <div className="v10-decision-actions">{children}</div>
     </GenWidget>

@@ -92,3 +92,12 @@
 }
 
 /* ── Project overview graph (ProjectView) ── */
+
+/* ── Memory layer view ── */
+.v10-mlv-status.v10-mlv-status-error { color: var(--text-danger); }
+.v10-mlv-detail { font-size: var(--fs-label); margin-top: var(--space-4); }
+.v10-publish-result-gap { margin-bottom: var(--space-6); }
+
+/* ── Query results ── */
+.v10-mlv-status.v10-mlv-status-success.v10-mlv-status-success { color: var(--text-success); }
+.v10-mlv-status.v10-mlv-status-failed.v10-mlv-status-failed { color: var(--text-danger); }

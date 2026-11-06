@@ -354,12 +354,12 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       )}
 
       {loading && <Loading label="Loading…" />}
-      {error && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>Error: {error}</p>}
+      {error && <p className="v10-mlv-status v10-mlv-status-error">Error: {error}</p>}
 
       {!loading && results.length === 0 && (
         <div className="v10-mlv-empty">
           <p>No triples found in {meta.label.toLowerCase()}.</p>
-          <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
+          <p className="v10-mlv-detail">
             {layer === 'wm' && 'Import files or chat with your agent to generate working memory.'}
             {layer === 'swm' && 'Promote assertions from working memory to share with collaborators.'}
             {layer === 'vm' && 'Publish shared memory to create verified on-chain knowledge.'}
@@ -802,18 +802,18 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
                   : 'NOT published to Verifiable Memory'}
             </div>
             {partial > 0 && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+              <div className="v10-publish-result-details v10-publish-result-gap">
                 <StatusGlyph tone="warning" /> {partial} asset{partial === 1 ? '' : 's'}: {partialPublishWarning(partialError)}
               </div>
             )}
             {failures.length > 0 && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+              <div className="v10-publish-result-details v10-publish-result-gap">
                 {failures.length} asset{failures.length === 1 ? '' : 's'} could not be published — {failures[0].name}: {failures[0].error}
                 {failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}
               </div>
             )}
             {unknownNote && (
-              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+              <div className="v10-publish-result-details v10-publish-result-gap">
                 <StatusGlyph tone="warning" /> {unknownNote}
               </div>
             )}

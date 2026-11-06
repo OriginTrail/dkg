@@ -525,11 +525,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
         >
           <button
             type="button"
-            className="v10-modal-close ds-btn ds-ghost ds-icon"
+            className="v10-modal-close ds-btn ds-ghost ds-icon v10-join-close"
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
           >
             <X size={14} />
           </button>
@@ -574,11 +573,10 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
       >
         <button
           type="button"
-          className="v10-modal-close ds-btn ds-ghost ds-icon"
+          className="v10-modal-close ds-btn ds-ghost ds-icon v10-join-close"
           onClick={onClose}
           aria-label="Close join Context Graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
           <X size={14} />
         </button>
@@ -593,31 +591,19 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           {error && <div role="alert" className="v10-modal-error ds-card-nested">{error}</div>}
 
           {pending && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
-              background: 'var(--tint-subtle)', border: '1px solid var(--border-default)',
-              color: 'var(--accent-primary)',
-            }}>
+            <div className="v10-join-info">
               Join request sent. Waiting for the curator to approve — this modal will move forward automatically once they do.
             </div>
           )}
 
           {approved && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
-              background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-              color: 'var(--text-success)',
-            }}>
+            <div className="v10-join-success">
               Approved! Loading Context Graph…
             </div>
           )}
 
           {rejected && (
-            <div style={{
-              padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 16, fontSize: 'var(--fs-control)',
-              background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
-              color: 'var(--text-warning)',
-            }}>
+            <div className="v10-join-warning">
               The curator declined this join request.
             </div>
           )}
@@ -627,14 +613,13 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             <textarea
               id="dkg-cg-invite"
               name="dkg-cg-invite"
-              className="v10-form-textarea ds-input"
+              className="v10-form-textarea ds-input v10-join-input"
               placeholder={"Public: paste a Context Graph ID\n\nPrivate: paste the curator invite\nmy-context-graph-abc123\n12D3KooW..."}
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoFocus
               rows={3}
               disabled={sending || pending || approved}
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}
               aria-label="Context Graph invite code"
               autoComplete="off"
               spellCheck={false}
@@ -655,7 +640,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
               />
               <span>
                 Keep synchronized after restart
-                <span style={{ display: 'block', color: 'var(--text-tertiary)', marginTop: 2 }}>
+                <span className="v10-join-note">
                   Off by default. This node otherwise syncs the graph only when you open it.
                 </span>
               </span>

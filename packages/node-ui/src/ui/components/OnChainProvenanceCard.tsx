@@ -104,7 +104,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
       )}
 
       {verified && (
-        <div className="v10-vm-identity ds-card" style={{ margin: 0, background: 'none', border: 'none', padding: 0 }}>
+        <div className="v10-vm-identity ds-card v10-vm-identity-flat">
           {receipt.ual && (
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">UAL</span>

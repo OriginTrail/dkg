@@ -239,7 +239,7 @@ function AppShell() {
         )}
 
         <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <div className="v10-center-main">
             <PanelCenter />
           </div>
           {!bottomCollapsed && <div className="v10-resize-handle-v" ref={bottomHandle} />}

@@ -225,8 +225,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box ds-overlay"
-        style={{ maxWidth: 560 }}
+        className="v10-modal-box ds-overlay v10-share-box"
         ref={dialogRef}
         role="dialog"
         aria-modal="true"
@@ -237,10 +236,9 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
             so an absolutely-positioned button would anchor to the overlay
             viewport instead of the modal; see #959 Codex review). */}
         <div
-          className="v10-modal-header"
-          style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}
+          className="v10-modal-header v10-share-header"
         >
-          <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="v10-share-heading">
             <div id="dkg-share-modal-title" className="v10-modal-title">Share Context Graph</div>
             <div className="v10-modal-subtitle">
               Invite agents to collaborate on <strong>{contextGraphName}</strong>.
@@ -248,11 +246,10 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           </div>
           <button
             type="button"
-            className="v10-modal-close ds-btn ds-ghost ds-icon"
+            className="v10-modal-close ds-btn ds-ghost ds-icon v10-share-close"
             onClick={onClose}
             aria-label="Close share dialog"
             title="Close (Esc)"
-            style={{ flexShrink: 0, cursor: 'pointer' }}
           >
             <X size={14} />
           </button>
@@ -260,13 +257,12 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
         <div className="v10-modal-body">
           {/* Tabs */}
-          <div role="tablist" aria-label="Share options" style={{ display: 'flex', gap: 16, marginBottom: 16, borderBottom: '1px solid var(--border-default)' }}>
+          <div role="tablist" aria-label="Share options" className="v10-share-tabs">
             <button
               type="button"
               role="tab"
               aria-selected={activeTab === 'allowlist'}
-              className="ds-tab"
-              style={{ height: 'var(--h-control-md)' }}
+              className="ds-tab v10-share-tab"
               onClick={() => setActiveTab('allowlist')}
             >
               Allowlist
@@ -275,8 +271,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               type="button"
               role="tab"
               aria-selected={activeTab === 'requests'}
-              className="ds-tab"
-              style={{ height: 'var(--h-control-md)' }}
+              className="ds-tab v10-share-tab"
               onClick={() => setActiveTab('requests')}
             >
               Join requests
@@ -292,34 +287,26 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                   button revokes access for an existing participant. */}
               <div className="v10-form-group">
                 <label className="v10-form-label">Allowed agents</label>
-                <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+                <div className="v10-share-hint">
                   Only agents on this list can read and write to the Context Graph. To add someone, share the Invite code below — they'll send a signed join request you can approve in the <strong>Join requests</strong> tab.
                 </div>
 
                 {allowedAgents.length > 0 && (
-                  <div style={{ marginBottom: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <div className="v10-share-list">
                     {allowedAgents.map((addr) => {
                       const peer = networkAgents.find(
                         (a) => a.agentAddress?.toLowerCase() === addr.toLowerCase(),
                       );
                       return (
-                        <div key={addr} style={{
-                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          padding: '6px 10px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
-                          fontFamily: 'var(--font-mono)', background: 'var(--bg-surface)',
-                          border: '1px solid var(--border-default)',
-                        }}>
-                          <span style={{ color: 'var(--text-primary)' }}>
+                        <div key={addr} className="v10-share-peer">
+                          <span className="v10-share-name">
                             {peer ? (
-                              <><span style={{ fontFamily: 'var(--font-sans)', fontWeight: 500 }}>{peer.name}</span>{' '}<span style={{ color: 'var(--text-tertiary)', fontSize: 'var(--fs-micro)' }}>{truncAddr(addr)}</span></>
+                              <><span className="v10-share-role">{peer.name}</span>{' '}<span className="v10-share-you">{truncAddr(addr)}</span></>
                             ) : addr}
                           </span>
                           <button
                             onClick={() => handleRemoveAgent(addr)}
-                            style={{
-                              background: 'none', border: 'none', cursor: 'pointer',
-                              color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)', padding: '0 4px',
-                            }}
+                            className="v10-share-remove"
                             aria-label="Remove agent" title="Remove agent"
                           >
                             <X size={14} />
@@ -331,11 +318,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 )}
 
                 {allowedAgents.length === 0 && (
-                  <div style={{
-                    padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
-                    color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
-                    border: '1px dashed var(--border-default)', marginBottom: 8,
-                  }}>
+                  <div className="v10-share-empty-row">
                     No agents on allowlist — Context Graph is open to anyone who subscribes.
                   </div>
                 )}
@@ -347,30 +330,17 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               <div className="v10-form-group">
                 <label className="v10-form-label">Invite code</label>
                 {invitePayload === null ? (
-                  <div style={{
-                    padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
-                    color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
-                    border: '1px dashed var(--border-default)',
-                  }}>
+                  <div className="v10-share-empty">
                     Loading peer ID…
                   </div>
                 ) : (
-                  <div style={{ position: 'relative' }}>
-                    <pre style={{
-                      background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 'var(--fs-label)', lineHeight: 'var(--lh-loose)',
-                      fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
-                      overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                    }}>
+                  <div className="v10-share-code">
+                    <pre className="v10-share-code-text">
                       {invitePayload}
                     </pre>
                     <button
-                      className="v10-modal-btn primary ds-btn ds-primary"
+                      className="v10-modal-btn primary ds-btn ds-primary v10-share-copy"
                       onClick={() => copyToClipboard(invitePayload, 'invite')}
-                      style={{
-                        position: 'absolute', top: 6, right: 6, fontSize: 'var(--fs-micro)', padding: '4px 10px', height: 26,
-                        cursor: 'pointer',
-                      }}
                     >
                       {copied === 'invite' ? 'Copied' : 'Copy Invite'}
                     </button>
@@ -383,60 +353,41 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           {activeTab === 'requests' && (
             <div className="v10-form-group">
               <label className="v10-form-label">Pending join requests</label>
-              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginBottom: 8 }}>
+              <div className="v10-share-hint">
                 Agents who submitted a signed request to join this Context Graph. Approve to add them to the allowlist.
               </div>
 
               {pendingRequests.length === 0 && (
-                <div style={{
-                  padding: '16px 12px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', textAlign: 'center',
-                  color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
-                  border: '1px dashed var(--border-default)',
-                }}>
+                <div className="v10-share-none">
                   No pending join requests.
                 </div>
               )}
 
               {pendingRequests.map((req) => (
-                <div key={req.agentAddress} style={{
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '8px 10px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)',
-                  background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                  marginBottom: 4,
-                }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                <div key={req.agentAddress} className="v10-share-request">
+                  <div className="v10-share-request-text">
                     {req.name && (
-                      <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{req.name}</span>
+                      <span className="v10-share-request-name">{req.name}</span>
                     )}
-                    <span style={{
-                      color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)',
-                    }}>
+                    <span className="v10-share-request-id">
                       {req.agentAddress}
                     </span>
-                    <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
+                    <span className="v10-share-request-time">
                       Requested {formatDateTime(req.timestamp)}
                     </span>
                   </div>
-                  <div style={{ display: 'flex', gap: 6 }}>
+                  <div className="v10-share-request-actions">
                     <button
                       onClick={() => handleApprove(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
-                      style={{
-                        background: 'var(--success-bg-strong)', color: 'var(--text-success)',
-                        border: '1px solid var(--success-border)', cursor: 'pointer',
-                        borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', padding: '4px 10px', fontWeight: 600,
-                      }}
+                      className="v10-share-approve"
                     >
                       {processingRequest === req.agentAddress ? '…' : 'Approve'}
                     </button>
                     <button
                       onClick={() => handleReject(req.agentAddress)}
                       disabled={processingRequest === req.agentAddress}
-                      style={{
-                        background: 'var(--danger-bg)', color: 'var(--text-danger)',
-                        border: '1px solid var(--danger-border)', cursor: 'pointer',
-                        borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', padding: '4px 10px', fontWeight: 600,
-                      }}
+                      className="v10-share-deny"
                     >
                       Reject
                     </button>
@@ -445,7 +396,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               ))}
 
               {agentError && (
-                <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-danger)', marginTop: 4 }}>{agentError}</div>
+                <div className="v10-share-error">{agentError}</div>
               )}
             </div>
           )}

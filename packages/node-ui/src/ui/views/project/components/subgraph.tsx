@@ -1604,9 +1604,8 @@ export function SubGraphDetailView({
           {queryCatalogs.map(catalog => (
             <React.Fragment key={catalog.slug}>
               <span
-                className="v10-subgraph-savedqueries-label"
+                className="v10-subgraph-savedqueries-label v10-subgraph-savedqueries-count"
                 title={catalog.description || catalog.name}
-                style={{ marginLeft: 8, opacity: 0.8 }}
               >
                 {catalog.name}
               </span>

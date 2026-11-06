@@ -368,3 +368,6 @@
 .v10-center-content[data-narrow] .v10-po-primer-footer {
     flex-direction: row;
     flex-wrap: wrap; }
+
+/* ── Project view ── */
+.v10-project-note { color: var(--text-tertiary); font-size: var(--fs-control); margin-bottom: var(--space-8); }

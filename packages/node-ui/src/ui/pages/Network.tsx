@@ -65,7 +65,7 @@ export function NetworkConnections() {
                   <td className="mono">{shortId(c.peerId, 12)}</td>
                   <td><Badge tone={c.transport === 'direct' ? 'success' : 'neutral'} size="sm">{humanizeStatus(String(c.transport))}</Badge></td>
                   <td>{c.direction}</td>
-                  <td className="mono" style={{ fontSize: 'var(--fs-label)' }}>{c.remoteAddr}</td>
+                  <td className="mono v10-network-id">{c.remoteAddr}</td>
                   <td>{formatDuration(c.durationMs)}</td>
                 </tr>
               ))}
@@ -92,7 +92,7 @@ export function NetworkConnections() {
             <tbody>
               {agents.map((a: any, i: number) => (
                 <tr key={i}>
-                  <td style={{ fontWeight: 600 }}>{a.name}</td>
+                  <td className="v10-network-name">{a.name}</td>
                   <td className="mono">{shortId(a.peerId, 12)}</td>
                   <td>{a.framework ?? '—'}</td>
                   <td>{formatNodeRole(a.nodeRole)}</td>

@@ -193,3 +193,6 @@
 }
 .v10-subgraph-badge-icon { font-size: var(--fs-micro); line-height: 1; }
 .v10-subgraph-badge-label { text-transform: capitalize; }
+
+/* ── Sub-graph detail ── */
+.v10-subgraph-savedqueries-label.v10-subgraph-savedqueries-count { margin-left: var(--space-8); opacity: 0.8; }

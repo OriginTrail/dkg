@@ -25,7 +25,7 @@ import { PageHeader } from '../components/ds/PageHeader.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div style={{ marginBottom: 14 }}>
+    <div className="settings-field">
       <div className="settings-field-label">{label}</div>
       <div className={`settings-field-value${mono ? ' mono' : ''}`}>{value}</div>
     </div>
@@ -40,8 +40,8 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
   // and we never persist that choice across renders.
   const display = reveal ? rpcUrl : redactRpcUrl(rpcUrl);
   return (
-    <div style={{ marginBottom: 14 }}>
-      <div className="settings-field-label" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+    <div className="settings-field">
+      <div className="settings-field-label settings-field-label-row">
         <span>RPC</span>
         <button
           type="button"
@@ -53,7 +53,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
           {reveal ? 'Redact' : 'Reveal'}
         </button>
       </div>
-      <div className="settings-field-value mono" style={{ wordBreak: 'break-all' }}>{display}</div>
+      <div className="settings-field-value mono settings-field-value-break">{display}</div>
     </div>
   );
 }
@@ -113,14 +113,14 @@ function NetworkTelemetrySection() {
     <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Network telemetry</h2></div>
       <div className="card-body">
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginBottom: 16, lineHeight: 'var(--lh-loose)' }}>
+        <div className="settings-intro">
           Local metrics are stored in SQLite and displayed in the Observability page.
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', padding: '10px 0' }}>
+        <div className="settings-toggle-row">
           <div>
-            <div style={{ fontSize: 'var(--fs-control)', fontWeight: 600 }}>Share telemetry with the network</div>
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 2, lineHeight: 'var(--lh-body)' }}>
+            <div className="settings-toggle-title">Share telemetry with the network</div>
+            <div className="settings-toggle-desc">
               When enabled, metrics and logs are streamed to the OriginTrail network dashboard for network-wide diagnostics.
             </div>
           </div>
@@ -130,76 +130,60 @@ function NetworkTelemetrySection() {
             busy={telemetrySaving}
             aria-label="Share telemetry with the network"
             onClick={toggleTelemetry}
-            style={{ marginLeft: 16, flexShrink: 0 }}
+            className="settings-toggle-control"
           />
         </div>
         <div aria-live="polite">
           {telemetryError && (
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', marginTop: 4 }}>{telemetryError}</div>
+            <div className="settings-error">{telemetryError}</div>
           )}
         </div>
       </div>
 
       {showConsentModal && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 'var(--z-modal)',
-          background: 'var(--scrim)', display: 'flex',
-          alignItems: 'center', justifyContent: 'center',
-        }}>
+        <div className="settings-confirm-scrim">
           <div
             ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-label="Enable Telemetry Streaming?"
-            style={{
-              background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-overlay)', padding: '24px 28px', maxWidth: 440, width: '90%',
-              boxShadow: 'var(--shadow-popover)',
-            }}
+            className="settings-confirm"
           >
-            <div style={{ fontSize: 'var(--fs-title)', fontWeight: 700, marginBottom: 16 }}>
+            <div className="settings-confirm-title">
               Enable Telemetry Streaming?
             </div>
-            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', lineHeight: 'var(--lh-loose)', marginBottom: 12 }}>
+            <div className="settings-confirm-text">
               When enabled, the following data is streamed to the OriginTrail team:
             </div>
-            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text-primary)', lineHeight: 'var(--lh-loose)', margin: '0 0 14px 18px', padding: 0 }}>
+            <ul className="settings-confirm-list">
               <li>Operation logs (publish, query, sync, gossip events)</li>
               <li>Performance metrics (durations, throughput, error rates)</li>
               <li>Node identity (peer ID, node name, network)</li>
             </ul>
-            <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)', lineHeight: 'var(--lh-loose)', marginBottom: 12 }}>
-              The following data is <strong style={{ color: 'var(--text-primary)' }}>NEVER</strong> shared via telemetry:
+            <div className="settings-confirm-text">
+              The following data is <strong className="settings-confirm-strong">NEVER</strong> shared via telemetry:
             </div>
-            <ul style={{ fontSize: 'var(--fs-control)', color: 'var(--text-primary)', lineHeight: 'var(--lh-loose)', margin: '0 0 16px 18px', padding: 0 }}>
+            <ul className="settings-confirm-list-last">
               <li>Private keys or wallet credentials</li>
               <li>Authentication tokens or API keys</li>
               <li>Private triple content or personal data</li>
               <li>File system paths or environment variables</li>
             </ul>
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginBottom: 20, lineHeight: 'var(--lh-body)' }}>
+            <div className="settings-confirm-note">
               You can disable streaming at any time from this page.
             </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+            <div className="settings-confirm-actions">
               <button
                 type="button"
                 onClick={() => { setShowConsentModal(false); toggleRef.current?.focus(); }}
-                style={{
-                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', fontWeight: 600,
-                  cursor: 'pointer', border: '1px solid var(--border-default)',
-                  background: 'var(--bg-surface)', color: 'var(--text-secondary)',
-                }}
+                className="settings-confirm-cancel"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={confirmTelemetry}
-                style={{
-                  padding: '7px 18px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-control)', fontWeight: 700,
-                  cursor: 'pointer', border: '1px solid var(--success-border)',
-                  background: 'var(--success-bg)', color: 'var(--text-success)',
-                }}
+                className="settings-confirm-accept"
               >
                 Enable streaming
               </button>
@@ -269,16 +253,15 @@ function LocalDataRetentionSection() {
     <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Local data retention</h2></div>
       <div className="card-body">
-        <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
+        <label htmlFor="retention-select" className="settings-field-label settings-select-label">
           Keep local data for
         </label>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="settings-select-row">
           <select
             id="retention-select"
-            className="input"
+            className="input settings-select"
             value={pendingRetention ?? retentionDays}
             onChange={e => handleRetentionChange(Number(e.target.value))}
-            style={{ width: 160 }}
           >
             <option value={7}>7 days</option>
             <option value={30}>30 days</option>
@@ -288,11 +271,11 @@ function LocalDataRetentionSection() {
           </select>
           <span aria-live="polite">
             {retentionSaved && (
-              <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-success)', fontWeight: 600 }}>Saved</span>
+              <span className="settings-saved">Saved</span>
             )}
           </span>
           {storeBytes != null && (
-            <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>
+            <span className="mono settings-micro">
               Store: {formatBytes(storeBytes)}
             </span>
           )}
@@ -301,36 +284,27 @@ function LocalDataRetentionSection() {
           <div
             role="group"
             aria-label="Confirm retention reduction"
-            style={{
-              marginTop: 8, padding: '10px 14px', borderRadius: 'var(--radius-nested)',
-              background: 'var(--warning-bg)', border: '1px solid var(--warning-border)',
-            }}
+            className="settings-warning"
           >
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-warning)', fontWeight: 600, marginBottom: 4 }}>
+            <div className="settings-warning-title">
               Reduce retention to {pendingRetention} days?
             </div>
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', lineHeight: 'var(--lh-body)', marginBottom: 8 }}>
+            <div className="settings-warning-text">
               Operations, logs, and metrics older than {pendingRetention} days will be permanently deleted.
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="settings-warning-actions">
               <button
                 ref={confirmRef}
                 type="button"
                 onClick={confirmRetention}
-                style={{
-                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 700, cursor: 'pointer',
-                  border: '1px solid var(--warning-border)', background: 'var(--warning-bg)', color: 'var(--text-warning)',
-                }}
+                className="settings-warning-btn"
               >
                 Prune &amp; Save
               </button>
               <button
                 type="button"
                 onClick={() => setPendingRetention(null)}
-                style={{
-                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 'var(--fs-label)', fontWeight: 600, cursor: 'pointer',
-                  border: '1px solid var(--border-default)', background: 'var(--bg-surface)', color: 'var(--text-secondary)',
-                }}
+                className="settings-warning-dismiss"
               >
                 Cancel
               </button>
@@ -338,14 +312,14 @@ function LocalDataRetentionSection() {
           </div>
         )}
         {pendingRetention == null && (
-          <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
+          <div className="settings-hint">
             Operations and metric snapshots older than this are pruned automatically. Warning and error logs
             keep this window; high-volume routine logs also have a size safety cap.
           </div>
         )}
         <div aria-live="polite">
           {retentionError && (
-            <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', marginTop: 4 }}>{retentionError}</div>
+            <div className="settings-error">{retentionError}</div>
           )}
         </div>
       </div>
@@ -415,7 +389,7 @@ function GeneralSettingsTab() {
           <div className="settings-node-status ds-card-nested">
             <Badge tone={nodeState.tone}>{nodeState.word}</Badge>
             <div
-              style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 4 }}
+              className="settings-note"
               title="Peers = unique remote nodes. Direct + Relayed counts are libp2p connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
               {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${nodeStatus?.connections?.direct ?? 0} direct, ${nodeStatus?.connections?.relayed ?? 0} relayed link${(nodeStatus?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(nodeStatus?.uptimeMs ?? 0)}`}
@@ -434,17 +408,16 @@ function GeneralSettingsTab() {
           <Field label="Chain" value={chainLabel(w?.chainId)} />
           {w?.balances?.length > 0 ? (
             w.balances.map((b: any, i: number) => (
-              <div key={b.address} style={{ marginBottom: 10 }}>
+              <div key={b.address} className="settings-block">
                 <Field label={w.balances.length > 1 ? `Wallet ${i + 1}` : 'Operational wallet'} value={b.address} mono />
-                <div style={{ display: 'flex', gap: 16, marginTop: -6 }}>
+                <div className="settings-meta-row">
                   <span
-                    className="mono"
-                    style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}
+                    className="mono settings-meta"
                     title={formatEthTooltip(b.eth)}
                   >
                     {formatEth(b.eth)} ETH
                   </span>
-                  <span className="mono" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }} title={formatTracTooltip(b.trac)}>
+                  <span className="mono settings-meta" title={formatTracTooltip(b.trac)}>
                     {formatTrac(b.trac)} {formatTracSymbol(b.symbol, w?.chainId)}
                   </span>
                 </div>
@@ -457,14 +430,14 @@ function GeneralSettingsTab() {
             <RpcUrlField rpcUrl={w.rpcUrl} />
           )}
           {w?.error ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--danger-bg)', border: '1px solid var(--danger-border)' }}>
-              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-danger)', marginBottom: 2 }}><StatusGlyph tone="danger" /> Error</div>
-              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>{w.error}</div>
+            <div className="settings-danger-note">
+              <div className="settings-danger-title"><StatusGlyph tone="danger" /> Error</div>
+              <div className="settings-meta">{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--warning-bg)', border: '1px solid var(--warning-border)' }}>
-              <div style={{ fontSize: 'var(--fs-micro)', fontWeight: 700, color: 'var(--text-warning)', marginBottom: 2 }}><StatusGlyph tone="warning" /> Testnet Mode</div>
-              <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
+            <div className="settings-warn-note">
+              <div className="settings-warn-title"><StatusGlyph tone="warning" /> Testnet Mode</div>
+              <div className="settings-meta">No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
         </div>
@@ -480,10 +453,10 @@ function GeneralSettingsTab() {
       <LocalDataRetentionSection />
 
       {/* Danger Zone (full-width footer; last in the stack) */}
-      <section className="card ds-card" style={{ borderColor: 'var(--danger-border)', background: 'var(--danger-bg)' }}>
-        <div className="card-header"><h2 className="card-title" style={{ color: 'var(--text-danger)' }}>Danger zone</h2></div>
+      <section className="card ds-card settings-danger-card">
+        <div className="card-header"><h2 className="card-title settings-danger-heading">Danger zone</h2></div>
         <div className="card-body">
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="settings-danger-actions">
             <button
               onClick={handleShutdown}
               disabled={shuttingDown}
@@ -501,7 +474,7 @@ function GeneralSettingsTab() {
             </button>
             <span aria-live="polite">
               {shutdownConfirm && (
-                <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>Click again to confirm. The node process will terminate.</span>
+                <span className="settings-meta">Click again to confirm. The node process will terminate.</span>
               )}
             </span>
           </div>

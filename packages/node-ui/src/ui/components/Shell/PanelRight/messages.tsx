@@ -188,10 +188,9 @@ export function renderMessageContent(
       <span className="v10-chat-thinking" role="status" aria-live="polite">
         <ThinkingOrb
           aria-hidden="true"
-          className="v10-chat-thinking-orb"
+          className="v10-chat-thinking-orb v10-chat-thinking-orb-size"
           state="connecting"
           size={64}
-          style={{ width: 28, height: 28 }}
           theme="auto"
         />
         <span>Connecting dots...</span>

@@ -127,7 +127,7 @@ function NodeLogContent() {
           <div key={i} className="v10-log-line" style={{ color: LEVEL_COLORS[classifyLine(line)] }}>{line}</div>
         ))}
         {visible.length === 0 && (
-          <div className="v10-log-line" style={{ color: 'var(--text-tertiary)' }}>No log output</div>
+          <div className="v10-log-line v10-log-line-muted">No log output</div>
         )}
       </div>
     </div>
@@ -170,23 +170,23 @@ function TransactionsContent() {
 
   if (ops.length === 0) {
     return (
-      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
+      <div className="v10-bottom-empty">
         No publish, update, or verify activity in the last 6 hours.
       </div>
     );
   }
 
   return (
-    <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--fs-label)' }}>
+    <div className="v10-log-output v10-log-output-scroll">
+      <div className="ds-table-scroll"><table className="v10-bottom-table">
         <thead>
-          <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left' }}>
-            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Type</th>
-            <th className="ds-table-head" style={{ padding: '6px 12px' }}>ID</th>
-            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Status</th>
-            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Duration</th>
-            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Time</th>
-            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Tx hash</th>
+          <tr className="v10-bottom-head-row">
+            <th className="ds-table-head v10-bottom-th">Type</th>
+            <th className="ds-table-head v10-bottom-th">ID</th>
+            <th className="ds-table-head v10-bottom-th">Status</th>
+            <th className="ds-table-head v10-bottom-th">Duration</th>
+            <th className="ds-table-head v10-bottom-th">Time</th>
+            <th className="ds-table-head v10-bottom-th">Tx hash</th>
           </tr>
         </thead>
         <tbody>
@@ -203,23 +203,23 @@ function TransactionsContent() {
                   <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
                     {op.operation_name}
                   </td>
-                  <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                  <td className="v10-bottom-td-mono">
                     {shortId(op.operation_id)}
                   </td>
-                  <td style={{ padding: '7px 12px' }}>
+                  <td className="v10-bottom-td">
                     <span style={{
                       padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                       background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
                       color: op.status === 'success' ? 'var(--text-success)' : op.status === 'error' ? 'var(--text-danger)' : 'var(--accent-amber)',
                     }}>{op.status}</span>
                   </td>
-                  <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
+                  <td className="v10-bottom-td-muted">
                     {op.duration_ms != null ? formatDuration(op.duration_ms) : '—'}
                   </td>
-                  <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
+                  <td className="v10-bottom-td-muted">
                     {op.started_at ? formatTime(op.started_at) : '—'}
                   </td>
-                  <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-tertiary)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <td className="v10-bottom-td-id">
                     {txHash
                       ? `${txHash.slice(0, 10)}…`
                       // Only a SUCCESSFULLY-completed op with no chain phase is a
@@ -228,26 +228,23 @@ function TransactionsContent() {
                       // must NOT read as a successful local run — show "—" so the
                       // Status column stays the source of truth for those (Codex).
                       : op.status === 'success'
-                        ? <span style={{ fontFamily: 'var(--font-sans)', fontStyle: 'italic', color: 'var(--text-tertiary)' }}>local</span>
+                        ? <span className="v10-bottom-none">local</span>
                         : '—'}
                   </td>
                 </tr>
                 {isExp && (
-                  <tr style={{ background: 'var(--shade)' }}>
-                    <td colSpan={6} style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
-                        <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
-                        {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
-                        {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
-                        {op.error_message && <span style={{ color: 'var(--text-danger)' }}><b>Error:</b> {op.error_message}</span>}
+                  <tr className="v10-bottom-detail-row">
+                    <td colSpan={6} className="v10-bottom-detail-cell">
+                      <div className="v10-bottom-detail">
+                        <span><b>ID:</b> <span className="v10-bottom-mono">{op.operation_id}</span></span>
+                        {txHash && <span><b>Tx:</b> <span className="v10-bottom-mono">{txHash}</span></span>}
+                        {op.peer_id && <span><b>Peer:</b> <span className="v10-bottom-mono">{shortId(op.peer_id)}</span></span>}
+                        {op.error_message && <span className="v10-bottom-detail-error"><b>Error:</b> {op.error_message}</span>}
                       </div>
                       {(op.phases ?? []).length > 0 && (
-                        <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <div className="v10-bottom-phases">
                           {op.phases.map((p: any) => (
-                            <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
-                              background: 'var(--tint-strong)', color: 'var(--text-secondary)',
-                            }}>
+                            <span key={p.phase} className="v10-bottom-phase">
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}
                             </span>
                           ))}
@@ -340,7 +337,7 @@ export function PanelBottom() {
             {tab}
           </button>
         ))}
-        <div style={{ flex: 1 }} />
+        <div className="v10-bottom-spacer" />
         <button
           className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
           onClick={toggleBottomMaximised}

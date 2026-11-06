@@ -648,7 +648,7 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
       ))}
       {conflicts > 0 && (
         <div className="v10-swm-legend-row v10-swm-legend-conflict">
-          <span className="v10-swm-legend-swatch" style={{ background: 'var(--accent-amber)' }}>!</span>
+          <span className="v10-swm-legend-swatch v10-swm-legend-swatch-amber">!</span>
           <span className="v10-swm-legend-label">In review</span>
           <span className="v10-swm-legend-metric">{conflicts}</span>
         </div>

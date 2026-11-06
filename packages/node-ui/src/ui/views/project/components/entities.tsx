@@ -546,7 +546,7 @@ export function DocumentsList({
 
   if (docs.length === 0) {
     return (
-      <div className="v10-docs-placeholder v10-layer-empty-shell" style={{ flex: 1 }} data-cg-scroll-key={scrollKey}>
+      <div className="v10-docs-placeholder v10-layer-empty-shell v10-layer-empty-fill" data-cg-scroll-key={scrollKey}>
         <EmptyState
           compact
           title="No documents in this layer yet."

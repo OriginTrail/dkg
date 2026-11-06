@@ -731,8 +731,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         </form>
       )}
 
-      {saveMessage && <p className="v10-mlv-status" style={{ color: 'var(--text-success)' }}>{saveMessage}</p>}
-      {saveError && <p className="v10-mlv-status" style={{ color: 'var(--text-danger)' }}>{saveError}</p>}
+      {saveMessage && <p className="v10-mlv-status v10-mlv-status-success">{saveMessage}</p>}
+      {saveError && <p className="v10-mlv-status v10-mlv-status-failed">{saveError}</p>}
 
       <div className="v10-cg-query-results">
         {!executionMatchesSession && (

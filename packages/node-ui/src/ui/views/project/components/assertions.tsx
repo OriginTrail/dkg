@@ -207,8 +207,8 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
 
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
-      <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+      <div className="v10-wm-bar">
+        <span className="v10-wm-bar-label">Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
             className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
@@ -232,7 +232,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {error && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}
+          className="v10-wm-error"
         >
           <StatusGlyph tone="danger" /> {error}
         </div>
@@ -241,11 +241,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
           <span className="v10-item-icon"><FileText size={14} /></span>
           <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}>{a.name}</div>
+            <div className="v10-item-name v10-wm-item-mono">{a.name}</div>
             {a.reservedUal && (
               <div
-                className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
+                className="v10-item-ual v10-wm-item-ual"
                 title={a.reservedUal}
               >
                 {a.reservedUal}
@@ -274,7 +273,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
           </button>
         </div>
       ))}
-      <nav aria-label="Assertion pages" style={{ display: 'flex', gap: 12, padding: 16 }}>
+      <nav aria-label="Assertion pages" className="v10-wm-nav">
         <button disabled={pageIndex === 0 || busy !== null} onClick={() => setPaging({ scope, cursors, index: pageIndex - 1 })}>Previous assertions</button>
         <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
           setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });

@@ -161,26 +161,25 @@ function IntegrationsSectionBody() {
   useVisibilityPolling(loadLocal, 30_000);
 
   return (
-    <div className="v10-tree-items" style={{ display: 'block' }}>
-      <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+    <div className="v10-tree-items v10-tree-items-block">
+      <div className="v10-tree-group-label">
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
+        <div className="v10-tree-error">
           {localAgentsError}
         </div>
       )}
       {!localAgentsError && localAgents.length === 0 && (
-        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+        <div className="v10-tree-note">
           No agents detected.
         </div>
       )}
       {localAgents.map((a) => (
         <div
           key={a.id}
-          className="v10-tree-item"
+          className="v10-tree-item v10-tree-item-static"
           title={a.detail}
-          style={{ cursor: 'default' }}
         >
           <span
             aria-label={a.statusLabel}
@@ -193,7 +192,7 @@ function IntegrationsSectionBody() {
             }}
           />
           <span className="v10-tree-item-label">{a.name}</span>
-          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
+          <span className="v10-tree-item-meta">
             {a.statusLabel}
           </span>
         </div>
@@ -294,7 +293,7 @@ export function PanelLeft() {
                   : 'Create your first Context Graph to give your agent structured memory.'}
               </div>
               {stage === 1 && (
-                <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
+                <button className="v10-new-project-btn ds-btn v10-new-project-flush" onClick={() => setShowCreateModal(true)}>
                   <Plus size={14} aria-hidden="true" />Create your first Context Graph
                 </button>
               )}
@@ -330,8 +329,7 @@ export function PanelLeft() {
                 <div id={myProjectsBodyId} className="v10-peer-group-body">
                   {myProjects.length === 0 ? (
                     <div
-                      className="v10-tree-item"
-                      style={{ cursor: 'default', color: 'var(--text-tertiary)', fontStyle: 'italic' }}
+                      className="v10-tree-item v10-tree-item-empty"
                     >
                       <span className="v10-tree-item-label">{inventoryError ? 'Context Graph membership unavailable.' : inventoryLoading ? 'Loading Context Graphs…' : 'No Context Graphs in this view yet.'}</span>
                     </div>

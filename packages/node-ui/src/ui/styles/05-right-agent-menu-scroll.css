@@ -320,3 +320,10 @@
   align-items: stretch;
   gap: var(--space-8);
 }
+
+/* ── Connected agents ── */
+.v10-local-agent-attachment-list { display: flex; flex-wrap: wrap; gap: var(--space-6); margin-top: var(--space-6); }
+.v10-local-agent-attachment-pill { padding: var(--space-2) var(--space-8); border-radius: var(--radius-pill); background: var(--bg-elevated); font-size: var(--fs-label); }
+.v10-local-agent-stack { display: flex; flex-direction: column; gap: var(--space-8); width: 100%; }
+.v10-local-agent-copy.v10-local-agent-copy-flat { margin: 0; color: var(--text-tertiary); }
+.v10-local-agent-file-input { display: none; }
