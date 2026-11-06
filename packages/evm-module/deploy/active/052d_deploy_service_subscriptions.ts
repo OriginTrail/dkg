@@ -11,7 +11,7 @@ import { publishingConvictionAfterRun, versionAtLeast } from '../../utils/convic
  *     EIP-712 digest, the owner's limit updates and revocations, and
  *     `fundFromConviction` and `topUpFromConviction`, which draw from the
  *     account's allowance through `PublishingConviction.coverServiceCost` and
- *     book the cost as due in `QueryInferenceStorage`, as a wallet period's
+ *     book the cost in `QueryInferenceStorage`, as a wallet period's
  *     value is booked. No TRAC moves. `initialize()` wires
  *     `PublishingConvictionStorage`, `ConvictionServiceStorage`, `Chronos`,
  *     `ParametersStorage` and `QueryInferenceStorage`. `PublishingConviction`
@@ -19,7 +19,7 @@ import { publishingConvictionAfterRun, versionAtLeast } from '../../utils/convic
  *     so either can be re-registered without re-initializing it.
  *   - `ServiceSubscriptionsWallet`, periods funded from the buyer key's wallet:
  *     `fundFromWallet` and `topUpFromWallet` move the whole value into the vault,
- *     with no fee, and book it as due in `QueryInferenceStorage`. `initialize()`
+ *     with no fee, and book it in `QueryInferenceStorage`. `initialize()`
  *     wires the Token, `ConvictionStakingStorage` (the vault),
  *     `ConvictionServiceStorage`, `QueryInferenceStorage` and `Chronos`.
  *
