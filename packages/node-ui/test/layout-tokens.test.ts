@@ -17,7 +17,7 @@ const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) =>
 ));
 
 const OFF_SCALE_SPACING = 208;
-const INLINE_STYLES = 513;
+const INLINE_STYLES = 314;
 const INLINE_FONT_SIZES = 0; // Canvas options take numbers and sit outside style attributes.
 
 describe('layout tokens', () => {
