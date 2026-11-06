@@ -6,8 +6,8 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
 /**
  * V10 — deploys `QueryInferenceStorage`, the state store of the query/inference
  * reward pool (OT-RFC-27): the money per epoch from funded subscriptions, the
- * QIF inputs, each budget's fill and the replay bitmap, and its parameters (the
- * activation epoch, the batch bounds, the pause and λ).
+ * QIF inputs, what each budget has used and the replay bitmap, and its
+ * parameters (the activation epoch, the batch bounds, the pause and λ).
  *
  * It is registered in the Hub's contract set: its mutators are `onlyContracts`,
  * which reads the contract set. On a live network `998_initialize_contracts.ts`
