@@ -1,8 +1,8 @@
-// Shared set-up for the service plan period tests (OT-RFC-27): Hub
-// registration of QueryInferenceStorage, ConvictionServiceStorage,
+// Shared set-up for the subscription tests (OT-RFC-27): Hub
+// registration of QueryInferenceStorage, ServiceSubscriptionsStorage,
 // ServiceSubscriptions, ServiceSubscriptionsWallet and
-// QueryInferenceSettlement, the EIP-712 ServiceAssignment consent, funding
-// requests for one-epoch periods, and synthetic accounts that an older build
+// QueryInferenceSettlement, the EIP-712 BuyerGrant consent, funding
+// requests for one-epoch subscriptions, and synthetic accounts that an older build
 // created.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -11,7 +11,7 @@ import hre from 'hardhat';
 
 import {
   Chronos,
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   DKGPublishingConvictionNFT,
   Hub,
   PublishingConvictionStorage,
@@ -56,7 +56,7 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
 }
 
 /**
- * Deploy QueryInferenceStorage, ConvictionServiceStorage and
+ * Deploy QueryInferenceStorage, ServiceSubscriptionsStorage and
  * ServiceSubscriptions (and, with `wallet`, ServiceSubscriptionsWallet, which
  * needs the Token and the vault in the Hub; with `settlement`,
  * QueryInferenceSettlement, which needs the identity, profile, sharding-table,
@@ -66,28 +66,33 @@ async function registerOne<T>(hub: Hub, name: string): Promise<T> {
  * come first, because the logic contracts wire them at initialization.
  *
  * As the development deploy does, it also sets the activation epoch to the
- * current epoch, so periods can be funded at once; `activate: false` leaves it
- * unset.
+ * current epoch, so subscriptions can be funded at once; `activate: false` leaves it
+ * unset. The pool activates only once a settlement over it is registered and
+ * the Hub's StakingV10 reads it through that settlement
+ * (`QueryInferenceStorage.setActivationEpoch`), so activating registers the
+ * settlement too, last, and needs the staking stack in the Hub.
  */
 export async function registerServiceContracts(
   hub: Hub,
   opts: { activate?: boolean; wallet?: boolean; settlement?: boolean } = {},
 ): Promise<{
   QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
+  SSS: ServiceSubscriptionsStorage;
   SS: ServiceSubscriptions;
   SSW?: ServiceSubscriptionsWallet;
   QS?: QueryInferenceSettlement;
 }> {
+  const activate = opts.activate !== false;
   const QIS = await registerOne<QueryInferenceStorage>(hub, 'QueryInferenceStorage');
-  if (opts.activate !== false) await activateQueryInference(hub, QIS);
-  const CSS = await registerOne<ConvictionServiceStorage>(hub, 'ConvictionServiceStorage');
+  const SSS = await registerOne<ServiceSubscriptionsStorage>(hub, 'ServiceSubscriptionsStorage');
   const SS = await registerOne<ServiceSubscriptions>(hub, 'ServiceSubscriptions');
   const SSW = opts.wallet ? await registerOne<ServiceSubscriptionsWallet>(hub, 'ServiceSubscriptionsWallet') : undefined;
-  const QS = opts.settlement
-    ? await registerOne<QueryInferenceSettlement>(hub, 'QueryInferenceSettlement')
-    : undefined;
-  return { QIS, CSS, SS, SSW, QS };
+  const QS =
+    opts.settlement || activate
+      ? await registerOne<QueryInferenceSettlement>(hub, 'QueryInferenceSettlement')
+      : undefined;
+  if (activate) await activateQueryInference(hub, QIS);
+  return { QIS, SSS, SS, SSW, QS };
 }
 
 /** Set QueryInferenceStorage's activation epoch through Hub.forwardCall; defaults to the current epoch. */
@@ -105,11 +110,11 @@ export async function activateQueryInference(hub: Hub, qis: QueryInferenceStorag
 // EIP-712 consent
 // ---------------------------------------------------------------------------
 
-export const SERVICE_ASSIGNMENT_TYPES = {
-  ServiceAssignment: [
+export const BUYER_GRANT_TYPES = {
+  BuyerGrant: [
     { name: 'accountId', type: 'uint256' },
-    { name: 'assignee', type: 'address' },
-    { name: 'maxCostPerPeriod', type: 'uint96' },
+    { name: 'buyer', type: 'address' },
+    { name: 'maxCostPerEpoch', type: 'uint96' },
     { name: 'expiresAt', type: 'uint40' },
     { name: 'nonce', type: 'uint64' },
   ],
@@ -117,16 +122,16 @@ export const SERVICE_ASSIGNMENT_TYPES = {
 
 export type Terms = {
   accountId: bigint;
-  assignee: string;
-  maxCostPerPeriod: bigint;
+  buyer: string;
+  maxCostPerEpoch: bigint;
   expiresAt: bigint;
   nonce: bigint;
 };
 
-export type Caps = Omit<Terms, 'accountId' | 'assignee' | 'nonce'>;
+export type BuyerLimits = Omit<Terms, 'accountId' | 'buyer' | 'nonce'>;
 
-export const capsOf = (t: Terms): Caps => ({
-  maxCostPerPeriod: t.maxCostPerPeriod,
+export const limitsOf = (t: Terms): BuyerLimits => ({
+  maxCostPerEpoch: t.maxCostPerEpoch,
   expiresAt: t.expiresAt,
 });
 
@@ -134,7 +139,7 @@ export type Domain = { name: string; version: string; chainId: bigint; verifying
 
 export async function domainOf(ss: ServiceSubscriptions): Promise<Domain> {
   return {
-    name: 'DKGConvictionServices',
+    name: 'DKGServiceSubscriptions',
     version: '1',
     chainId: (await hre.ethers.provider.getNetwork()).chainId,
     verifyingContract: await ss.getAddress(),
@@ -148,7 +153,7 @@ export async function signTerms(
   terms: Terms,
   domain?: Domain,
 ): Promise<string> {
-  return signer.signTypedData(domain ?? (await domainOf(ss)), SERVICE_ASSIGNMENT_TYPES, terms);
+  return signer.signTypedData(domain ?? (await domainOf(ss)), BUYER_GRANT_TYPES, terms);
 }
 
 const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
@@ -171,34 +176,34 @@ export function compact(signature: string): string {
 // Funding requests
 // ---------------------------------------------------------------------------
 
-export type Bucket = { bucketId: string; serviceClass: bigint; value: bigint; maxAskWeiPerUnit: bigint };
+export type ServiceBudget = { serviceId: string; serviceClass: bigint; value: bigint; maxPricePerUnit: bigint };
 
 export type Request = {
   accountId: bigint;
   epoch: bigint;
   sessionKey: string;
   planDigest: string;
-  buckets: Bucket[];
+  budgets: ServiceBudget[];
 };
 
 /** A wallet funding request: an account's request without the account. */
 export type WalletRequest = Omit<Request, 'accountId'>;
 
-/** A bucket id that sorts by `rank`, so tests can order buckets explicitly. */
-export const bucketId = (rank: number): string => ethers.toBeHex(BigInt(rank) + 1n, 32);
+/** A budget id that sorts by `rank`, so tests can order budgets explicitly. */
+export const serviceId = (rank: number): string => ethers.toBeHex(BigInt(rank) + 1n, 32);
 
-export const bucket = (
+export const budget = (
   rank: number,
   serviceClass: bigint,
   value: bigint,
-  maxAskWeiPerUnit: bigint = 10n ** 12n,
-): Bucket => ({ bucketId: bucketId(rank), serviceClass, value, maxAskWeiPerUnit });
+  maxPricePerUnit: bigint = 10n ** 12n,
+): ServiceBudget => ({ serviceId: serviceId(rank), serviceClass, value, maxPricePerUnit });
 
 export const SESSION_KEY = ethers.getAddress('0x00000000000000000000000000000000005e5510');
 
 let planCounter = 0;
 
-/** A one-bucket inference request for the period of `epoch`, with a fresh plan digest. */
+/** A one-budget inference request for the subscription of `epoch`, with a fresh plan digest. */
 export function requestOf(accountId: bigint, epoch: bigint, overrides: Partial<Request> = {}): Request {
   planCounter += 1;
   return {
@@ -206,18 +211,18 @@ export function requestOf(accountId: bigint, epoch: bigint, overrides: Partial<R
     epoch,
     sessionKey: SESSION_KEY,
     planDigest: ethers.id(`plan-${planCounter}`),
-    buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC)],
+    budgets: [budget(0, CLASS_INFERENCE, 10n * TRAC)],
     ...overrides,
   };
 }
 
-/** A one-bucket inference wallet request for the period of `epoch`. */
+/** A one-budget inference wallet request for the subscription of `epoch`. */
 export function walletRequestOf(epoch: bigint, overrides: Partial<WalletRequest> = {}): WalletRequest {
   const { accountId: _accountId, ...rest } = requestOf(0n, epoch, overrides);
   return rest;
 }
 
-/** The id of the period `buyer` funds for `epoch`: keccak256(abi.encode(buyer, epoch)). */
+/** The id of the subscription `buyer` funds for `epoch`: keccak256(abi.encode(buyer, epoch)). */
 export const subscriptionIdOf = (buyer: string, epoch: bigint): string =>
   ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['address', 'uint256'], [buyer, epoch]));
 
@@ -254,7 +259,7 @@ async function nftOwnersSlot(): Promise<bigint> {
 /**
  * Write an account record the way a build older than 10.0.8 left it: created
  * at `createdAt`, with `lastSettledWindow` windows already swept under that
- * build's per-window rules and `spent` drawn (and booked) per window. The
+ * build's per-window rules and `spent` used (and booked) per window. The
  * record goes straight into PublishingConvictionStorage (the Hub owner passes
  * its `onlyContracts`), and the NFT's ERC-721 owner slot is set to `owner`, so
  * the account has an owner without the creation path.

@@ -48,6 +48,22 @@
         "internalType": "uint72",
         "name": "identityId",
         "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "NoNodeScore",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
       }
     ],
     "name": "NodeNotInShardingTable",
@@ -62,22 +78,6 @@
       }
     ],
     "name": "ProfileDoesntExist",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "closedThrough",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "QueryInferenceCloseBehind",
     "type": "error"
   },
   {
@@ -125,22 +125,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint8",
-        "name": "bits",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint256",
-        "name": "value",
-        "type": "uint256"
-      }
-    ],
-    "name": "SafeCastOverflowedUintDowncast",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "string",
         "name": "msg",
         "type": "string"
@@ -153,141 +137,6 @@
     "inputs": [],
     "name": "ZeroAddressHub",
     "type": "error"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint8",
-        "name": "bucketIndex",
-        "type": "uint8"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint72",
-        "name": "seller",
-        "type": "uint72"
-      },
-      {
-        "indexed": false,
-        "internalType": "enum QueryInferenceSettlement.Skip",
-        "name": "reason",
-        "type": "uint8"
-      }
-    ],
-    "name": "ClaimSkipped",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint8",
-        "name": "bucketIndex",
-        "type": "uint8"
-      },
-      {
-        "indexed": true,
-        "internalType": "uint72",
-        "name": "seller",
-        "type": "uint72"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "claimed",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "value",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "score",
-        "type": "uint96"
-      }
-    ],
-    "name": "ClaimsFinalized",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "walletDue",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "convictionDue",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "carryIn",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "pool",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint128",
-        "name": "sumR",
-        "type": "uint128"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint128",
-        "name": "sumScore",
-        "type": "uint128"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint16",
-        "name": "lambdaBps",
-        "type": "uint16"
-      }
-    ],
-    "name": "EpochClosed",
-    "type": "event"
   },
   {
     "anonymous": false,
@@ -319,6 +168,12 @@
       {
         "indexed": false,
         "internalType": "uint256",
+        "name": "counted",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
         "name": "stakeFactor18",
         "type": "uint256"
       }
@@ -338,7 +193,7 @@
       {
         "indexed": true,
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       },
       {
@@ -355,9 +210,15 @@
       },
       {
         "indexed": false,
-        "internalType": "uint96",
+        "internalType": "uint256",
         "name": "value",
-        "type": "uint96"
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "counted",
+        "type": "uint256"
       },
       {
         "indexed": false,
@@ -372,7 +233,7 @@
         "type": "bytes32"
       }
     ],
-    "name": "ReceiptsClaimed",
+    "name": "ReceiptsLanded",
     "type": "event"
   },
   {
@@ -407,9 +268,14 @@
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "budgetIndex",
+        "type": "uint8"
       }
     ],
-    "name": "batchDeadline",
+    "name": "budgetLeft",
     "outputs": [
       {
         "internalType": "uint256",
@@ -426,38 +292,6 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "maxSteps",
-        "type": "uint256"
-      }
-    ],
-    "name": "closeEpochs",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "closed",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "convictionServiceStorage",
-    "outputs": [
-      {
-        "internalType": "contract ConvictionServiceStorage",
         "name": "",
         "type": "address"
       }
@@ -499,86 +333,7 @@
         "type": "uint256"
       }
     ],
-    "name": "ensureClosed",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "closed",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
     "name": "epochPool",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "components": [
-          {
-            "internalType": "bytes32",
-            "name": "subscriptionId",
-            "type": "bytes32"
-          },
-          {
-            "internalType": "uint8",
-            "name": "bucketIndex",
-            "type": "uint8"
-          },
-          {
-            "internalType": "uint72",
-            "name": "seller",
-            "type": "uint72"
-          }
-        ],
-        "internalType": "struct QueryInferenceSettlement.ClaimRef[]",
-        "name": "refs",
-        "type": "tuple[]"
-      }
-    ],
-    "name": "finalizeClaims",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "finalized",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint8",
-        "name": "bucketIndex",
-        "type": "uint8"
-      }
-    ],
-    "name": "fundedCap",
     "outputs": [
       {
         "internalType": "uint256",
@@ -646,7 +401,7 @@
           },
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -661,7 +416,7 @@
           },
           {
             "internalType": "uint96",
-            "name": "acceptedAskWeiPerUnit",
+            "name": "pricePerUnit",
             "type": "uint96"
           },
           {
@@ -824,6 +579,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "serviceSubscriptionsStorage",
+    "outputs": [
+      {
+        "internalType": "contract ServiceSubscriptionsStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "bool",
@@ -892,8 +660,13 @@
           },
           {
             "internalType": "uint8",
-            "name": "bucketIndex",
+            "name": "budgetIndex",
             "type": "uint8"
+          },
+          {
+            "internalType": "uint96",
+            "name": "minCounted",
+            "type": "uint96"
           },
           {
             "components": [
@@ -904,7 +677,7 @@
               },
               {
                 "internalType": "uint96",
-                "name": "acceptedAskWeiPerUnit",
+                "name": "pricePerUnit",
                 "type": "uint96"
               },
               {

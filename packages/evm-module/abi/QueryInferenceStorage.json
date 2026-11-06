@@ -24,54 +24,17 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint8",
-        "name": "bucketIndex",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint72",
-        "name": "seller",
-        "type": "uint72"
-      }
-    ],
-    "name": "ClaimFinalized",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint256",
         "name": "epoch",
         "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "closedThrough",
+        "name": "currentEpoch",
         "type": "uint256"
       }
     ],
-    "name": "CloseOutOfOrder",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "closedThrough",
-        "type": "uint256"
-      }
-    ],
-    "name": "EpochClosed",
+    "name": "EpochEnded",
     "type": "error"
   },
   {
@@ -88,44 +51,12 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "closedThrough",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "fromEpoch",
-        "type": "uint256"
+        "internalType": "string",
+        "name": "reader",
+        "type": "string"
       }
     ],
-    "name": "LambdaScheduleAheadOfCloses",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "fromEpoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "ReceiptGraceScheduleInUse",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint8",
-        "name": "bits",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint256",
-        "name": "value",
-        "type": "uint256"
-      }
-    ],
-    "name": "SafeCastOverflowedUintDowncast",
+    "name": "PoolNotWired",
     "type": "error"
   },
   {
@@ -163,36 +94,17 @@
       {
         "indexed": false,
         "internalType": "uint16",
-        "name": "value",
+        "name": "oldValue",
         "type": "uint16"
       },
       {
         "indexed": false,
-        "internalType": "uint256",
-        "name": "fromEpoch",
-        "type": "uint256"
+        "internalType": "uint16",
+        "name": "newValue",
+        "type": "uint16"
       }
     ],
     "name": "LambdaBpsSet",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "oldValue",
-        "type": "uint8"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint8",
-        "name": "newValue",
-        "type": "uint8"
-      }
-    ],
-    "name": "MaxCloseStepsPerClaimSet",
     "type": "event"
   },
   {
@@ -247,25 +159,6 @@
     "type": "event"
   },
   {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": false,
-        "internalType": "uint32",
-        "name": "value",
-        "type": "uint32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint256",
-        "name": "fromEpoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "ReceiptGraceSecondsSet",
-    "type": "event"
-  },
-  {
     "inputs": [],
     "name": "BPS_DENOMINATOR",
     "outputs": [
@@ -273,6 +166,25 @@
         "internalType": "uint16",
         "name": "",
         "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "accountFunding",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
       }
     ],
     "stateMutability": "view",
@@ -294,32 +206,17 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint8",
-        "name": "bucketIndex",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint72",
-        "name": "seller",
-        "type": "uint72"
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
       },
       {
         "internalType": "uint96",
-        "name": "value",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint96",
-        "name": "weighted",
+        "name": "amount",
         "type": "uint96"
       }
     ],
-    "name": "addClaim",
+    "name": "addAccountFunding",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -337,25 +234,7 @@
         "type": "uint96"
       }
     ],
-    "name": "addConvictionDue",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      }
-    ],
-    "name": "addWalletDue",
+    "name": "addWalletFunding",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -397,140 +276,15 @@
       },
       {
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       }
     ],
-    "name": "bucketClaimed",
-    "outputs": [
-      {
-        "internalType": "uint128",
-        "name": "",
-        "type": "uint128"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "carry",
+    "name": "budgetUsed",
     "outputs": [
       {
         "internalType": "uint96",
         "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "pool",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint16",
-        "name": "lambda",
-        "type": "uint16"
-      },
-      {
-        "internalType": "uint96",
-        "name": "carryOut",
-        "type": "uint96"
-      }
-    ],
-    "name": "closeEpoch",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "closeState",
-    "outputs": [
-      {
-        "internalType": "uint40",
-        "name": "activation",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint256",
-        "name": "closed",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint96",
-        "name": "carried",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint8",
-        "name": "maxSteps",
-        "type": "uint8"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "closedThrough",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "convictionDue",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "dueIn",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "wallet",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint96",
-        "name": "conviction",
         "type": "uint96"
       }
     ],
@@ -546,7 +300,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       },
       {
@@ -561,18 +315,47 @@
       },
       {
         "internalType": "uint96",
-        "name": "value",
+        "name": "counted",
         "type": "uint96"
       },
       {
         "internalType": "uint96",
-        "name": "score",
+        "name": "servedValue",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "weightedValue",
         "type": "uint96"
       }
     ],
-    "name": "finalizeClaim",
+    "name": "countReceipts",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      }
+    ],
+    "name": "fundingIn",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "wallet",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "account",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -601,55 +384,24 @@
         "type": "uint256"
       }
     ],
-    "name": "getEpochClose",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "uint96",
-            "name": "pool",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint16",
-            "name": "lambdaBps",
-            "type": "uint16"
-          },
-          {
-            "internalType": "bool",
-            "name": "closed",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct QueryInferenceStorage.EpochClose",
-        "name": "",
-        "type": "tuple"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
     "name": "getEpochTotals",
     "outputs": [
       {
         "components": [
           {
-            "internalType": "uint128",
-            "name": "sumR",
-            "type": "uint128"
+            "internalType": "uint120",
+            "name": "totalServed",
+            "type": "uint120"
           },
           {
-            "internalType": "uint128",
-            "name": "sumScore",
-            "type": "uint128"
+            "internalType": "uint120",
+            "name": "totalWeighted",
+            "type": "uint120"
+          },
+          {
+            "internalType": "uint16",
+            "name": "lambdaBps",
+            "type": "uint16"
           }
         ],
         "internalType": "struct QueryInferenceStorage.EpochTotals",
@@ -679,62 +431,16 @@
         "components": [
           {
             "internalType": "uint128",
-            "name": "r",
+            "name": "servedValue",
             "type": "uint128"
           },
           {
             "internalType": "uint128",
-            "name": "score",
+            "name": "weightedValue",
             "type": "uint128"
           }
         ],
         "internalType": "struct QueryInferenceStorage.NodeEpoch",
-        "name": "",
-        "type": "tuple"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint8",
-        "name": "bucketIndex",
-        "type": "uint8"
-      },
-      {
-        "internalType": "uint72",
-        "name": "identityId",
-        "type": "uint72"
-      }
-    ],
-    "name": "getSellerClaim",
-    "outputs": [
-      {
-        "components": [
-          {
-            "internalType": "uint96",
-            "name": "claimed",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint96",
-            "name": "weighted",
-            "type": "uint96"
-          },
-          {
-            "internalType": "bool",
-            "name": "finalized",
-            "type": "bool"
-          }
-        ],
-        "internalType": "struct QueryInferenceStorage.SellerClaim",
         "name": "",
         "type": "tuple"
       }
@@ -770,38 +476,6 @@
         "internalType": "uint16",
         "name": "",
         "type": "uint16"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "lambdaBpsAt",
-    "outputs": [
-      {
-        "internalType": "uint16",
-        "name": "",
-        "type": "uint16"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "maxCloseStepsPerClaim",
-    "outputs": [
-      {
-        "internalType": "uint8",
-        "name": "",
-        "type": "uint8"
       }
     ],
     "stateMutability": "view",
@@ -847,58 +521,6 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "nextLambdaBps",
-    "outputs": [
-      {
-        "internalType": "uint16",
-        "name": "",
-        "type": "uint16"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "nextLambdaFromEpoch",
-    "outputs": [
-      {
-        "internalType": "uint40",
-        "name": "",
-        "type": "uint40"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "nextReceiptGraceFromEpoch",
-    "outputs": [
-      {
-        "internalType": "uint40",
-        "name": "",
-        "type": "uint40"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "nextReceiptGraceSeconds",
-    "outputs": [
-      {
-        "internalType": "uint32",
-        "name": "",
-        "type": "uint32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "internalType": "bytes32",
@@ -941,38 +563,6 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "receiptGraceSeconds",
-    "outputs": [
-      {
-        "internalType": "uint32",
-        "name": "",
-        "type": "uint32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "receiptGraceSecondsAt",
-    "outputs": [
-      {
-        "internalType": "uint32",
-        "name": "",
-        "type": "uint32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
     "inputs": [
       {
         "internalType": "uint40",
@@ -988,12 +578,22 @@
   {
     "inputs": [
       {
-        "internalType": "uint16",
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint8",
+        "name": "budgetIndex",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint96",
         "name": "value",
-        "type": "uint16"
+        "type": "uint96"
       }
     ],
-    "name": "setLambdaBps",
+    "name": "setBudgetUsed",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1001,12 +601,47 @@
   {
     "inputs": [
       {
-        "internalType": "uint8",
-        "name": "value",
-        "type": "uint8"
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint120",
+            "name": "totalServed",
+            "type": "uint120"
+          },
+          {
+            "internalType": "uint120",
+            "name": "totalWeighted",
+            "type": "uint120"
+          },
+          {
+            "internalType": "uint16",
+            "name": "lambdaBps",
+            "type": "uint16"
+          }
+        ],
+        "internalType": "struct QueryInferenceStorage.EpochTotals",
+        "name": "t",
+        "type": "tuple"
       }
     ],
-    "name": "setMaxCloseStepsPerClaim",
+    "name": "setEpochTotals",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint16",
+        "name": "value",
+        "type": "uint16"
+      }
+    ],
+    "name": "setLambdaBps",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1040,12 +675,34 @@
   {
     "inputs": [
       {
-        "internalType": "bool",
-        "name": "value",
-        "type": "bool"
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "uint256",
+        "name": "epoch",
+        "type": "uint256"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint128",
+            "name": "servedValue",
+            "type": "uint128"
+          },
+          {
+            "internalType": "uint128",
+            "name": "weightedValue",
+            "type": "uint128"
+          }
+        ],
+        "internalType": "struct QueryInferenceStorage.NodeEpoch",
+        "name": "n",
+        "type": "tuple"
       }
     ],
-    "name": "setPaused",
+    "name": "setNodeEpoch",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1053,12 +710,12 @@
   {
     "inputs": [
       {
-        "internalType": "uint32",
+        "internalType": "bool",
         "name": "value",
-        "type": "uint32"
+        "type": "bool"
       }
     ],
-    "name": "setReceiptGraceSeconds",
+    "name": "setPaused",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -1112,7 +769,7 @@
         "type": "uint256"
       }
     ],
-    "name": "walletDue",
+    "name": "walletFunding",
     "outputs": [
       {
         "internalType": "uint96",
