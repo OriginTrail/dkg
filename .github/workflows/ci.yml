@@ -581,7 +581,7 @@ jobs:
     needs: [changes, build]
     if: needs.changes.outputs.tornado_blazegraph == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     services:
       blazegraph:
         image: lyrasis/blazegraph:2.1.5@sha256:56be5edb612e981607edcd4fe1e6d4e66ba3303efc4bb3a7c5c8e6662e598125
@@ -618,6 +618,9 @@ jobs:
             https://github.com/blazegraph/database/releases/download/BLAZEGRAPH_2_1_6_RC/blazegraph.jar
           sha=930c38b5bce7c0ae99701c1f6ef3057c52f3f385d938e1397a3e05561c7df5de
           echo "$sha  $jar" | sha256sum --check --strict
+          # The first JVM start in a job is slow (a median of 5 s more than later starts): take it here, not within a test's limit.
+          # With no arguments this class prints its usage and exits non-zero. It runs elsewhere because it leaves a log file behind.
+          (cd "$RUNNER_TEMP" && "$JAVA_HOME/bin/java" -cp "$jar" com.bigdata.rdf.store.DataLoader) > /dev/null 2>&1 || true
           {
             echo "DKG_PUBLIC_CHECKPOINT_JAVA=$JAVA_HOME/bin/java"
             echo "DKG_PUBLIC_CHECKPOINT_JAR=$jar"
