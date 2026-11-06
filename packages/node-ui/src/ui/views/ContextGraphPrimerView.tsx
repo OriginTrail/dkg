@@ -24,6 +24,10 @@ const primerSections = [
     body: 'An assertion is a batch of facts added to the Context Graph together. Use assertions to see where information came from and what happened to it.',
   },
   {
+    title: 'Ontology',
+    body: 'An ontology describes the kinds of things in a Context Graph and how they relate, so agents use the same terms.',
+  },
+  {
     title: 'Roles',
     body: 'A curator controls access and publication policy. A participant can collaborate inside the Context Graph according to that policy.',
   },

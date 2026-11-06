@@ -1324,7 +1324,7 @@ describe('Context Graph IA and Overview', () => {
       'Working Memory',
       'Shared Working Memory',
       'Verifiable Memory',
-      'assertion/triple bundle is anchored as a Knowledge Asset',
+      'they become a Knowledge Asset',
       'included entities on-chain provenance',
     ]) {
       expect(container.textContent).toContain(text);

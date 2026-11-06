@@ -307,7 +307,7 @@ export function ConvictionOverview() {
               <div>
                 <h3 className="v10-pca-section-title">Owned by me</h3>
                 <p className="v10-pca-overview-caveat">
-                  Connect an owner wallet to discover and manage wallet-owned PCAs. Node-owned PCAs use the node&apos;s wallet.
+                  To see and manage PCAs owned by your own wallet, connect that wallet. PCAs owned by this node appear without connecting.
                 </p>
               </div>
               <div className="v10-pca-overview-cta-group">
@@ -323,7 +323,7 @@ export function ConvictionOverview() {
               <div className="v10-pca-owned-groups">
                 <AccountGroup
                   title="This node (hot wallet)"
-                  description="PCAs owned by this node’s wallet. The node signs owner actions."
+                  description="PCAs owned by this node’s wallet. It’s a hot wallet: its key is stored on the node, so the node can sign owner actions for you."
                   accounts={daemonOwned}
                   blockExplorerUrl={blockExplorerUrl}
                   onManage={onManage}

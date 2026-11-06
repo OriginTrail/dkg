@@ -320,8 +320,8 @@ export function WireWorkspacePanel({
           {variant === 'create' ? 'Wire your local workspace' : 'Wire this project locally'}
         </div>
         {variant === 'create'
-          ? 'Choose a directory for the new project and which coding tool you want it wired for. The node will add the right config files to the workspace so your agent can join the project from turn one.'
-          : 'Choose a local directory for this project and which coding tool you want it wired for. The node will add the right config files to the workspace so your agent can collaborate on this project.'}
+          ? 'Choose a folder for the new project and the coding tool you’ll use. The node adds the setup files your agent needs, so it can join the project from the first chat.'
+          : 'Choose a folder for this project and the coding tool you’ll use. The node adds the setup files your agent needs, so it can work on this project.'}
       </div>
 
       {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}

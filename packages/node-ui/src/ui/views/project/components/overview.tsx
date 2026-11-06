@@ -264,7 +264,7 @@ function overviewAccessAgentStat(
     id: 'participants',
     value: formatNumber(agents.size),
     label: 'Agents with access',
-    tooltip: 'Includes the curator plus allowlisted participants reported by the node.',
+    tooltip: 'Includes the curator and the agents approved to access this Context Graph.',
   };
 }
 

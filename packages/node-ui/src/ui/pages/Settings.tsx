@@ -418,7 +418,7 @@ function GeneralSettingsTab() {
               style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginTop: 4 }}
               title="Peers = unique remote nodes. Direct + Relayed counts are connections — a single peer can hold both a direct and a relayed link, so they sum to ≥ Peers, not exactly equal to it."
             >
-              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''} · ${nodeStatus?.connections?.direct ?? 0} direct, ${nodeStatus?.connections?.relayed ?? 0} relayed link${(nodeStatus?.connections?.relayed ?? 0) === 1 ? '' : 's'} · up ${formatUptime(nodeStatus?.uptimeMs ?? 0)}`}
+              {nodeState.tooltip ?? `${peerCount} peer${peerCount !== 1 ? 's' : ''}: ${nodeStatus?.connections?.direct ?? 0} direct, ${nodeStatus?.connections?.relayed ?? 0} relayed. Up ${formatUptime(nodeStatus?.uptimeMs ?? 0)}.`}
             </div>
           </div>
         </div>

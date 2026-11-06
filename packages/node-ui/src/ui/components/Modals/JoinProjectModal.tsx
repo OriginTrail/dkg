@@ -298,8 +298,8 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
     // in practice almost always because the joiner's
     // `network/testnet.json` is still pointing at the pre-redeploy hub.
     if (/scope mismatch/i.test(reasons)) {
-      return 'This usually means your daemon\'s network config has a stale ContextGraphsHub address — ' +
-        'pull the latest release (or `git pull && pnpm install && pnpm run build:runtime`) and try again.';
+      return 'Your node is using an out-of-date network setting. Update to the latest release and try again. ' +
+        'If you installed from source code, pull the latest code and rebuild first.';
     }
     if (/unknown CG/i.test(reasons)) {
       return 'The curator doesn\'t recognise this Context Graph id — double-check the invite, ' +

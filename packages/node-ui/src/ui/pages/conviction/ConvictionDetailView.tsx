@@ -184,7 +184,7 @@ function DetailBody({
         ? 'Owner wallet matches; switch network before signing owner actions.'
         : 'Connected owner wallet will sign top-up, approve, remove, and renewal actions.'
       : access.mode === 'daemon'
-        ? 'Connected wallet is available for wallet-owned PCAs; this account uses the node daemon for owner actions.'
+        ? 'This account is owned by the node, so the node signs its top-ups, approvals, removals and renewals. Your connected wallet isn’t needed here.'
         : `Connected as ${connectedWallet}; switch to ${snapshot.owner} to manage owner actions.`
     : access.mode === 'external'
       ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
