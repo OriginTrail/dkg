@@ -273,6 +273,7 @@
   --motion-fast: .12s;
   --motion-base: .15s;
   --motion-slow: .3s;
+  --ls-caps: 0.05em;
   --lh-tight: 1.2;
   --lh-snug: 1.35;
   --lh-body: 1.5;

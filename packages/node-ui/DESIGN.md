@@ -57,7 +57,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-label` | 11 | Badges, table headers, metadata |
 | `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
 
-Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core, Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
+Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
 
 ## Shape and size
 
@@ -242,6 +242,8 @@ Read formats from `lib/format.ts`, so a value looks the same on every screen.
 A missing value is `—`. Chart axes and ISO dates on the subgraph timeline set their own format.
 
 Tables use `data-table` inside `ds-table-scroll`, so a wide table scrolls inside its card, and add `ds-table-pin` when the first column names the row. Figures use tabular numbers so they line up.
+
+Every table header looks the same: `--fs-label`, weight 500, uppercase with `--ls-caps`, in `--text-tertiary`, so the data reads first. The shared rule in `27-ds-components.css` sets it; a table's own rule sets padding and borders only. A table that isn't a `data-table` puts `ds-table-head` on its header cells.
 
 ## Layout and overlays
 

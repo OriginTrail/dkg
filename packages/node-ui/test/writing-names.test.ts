@@ -12,9 +12,9 @@ const withoutComments = (source: string) => source
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/^\s*\/\/.*$/gm, '');
 
-/** Lower-case role names in running text: "edge node", "core-first", a raw `{role}` after "Node role:". */
+/** Wrongly cased role names in running text: "edge node", "Core Node", "core-first", a raw `{role}` after "Node role:". */
 export const lowerCaseRoles = (source: string) => [
-  ...source.matchAll(/\b(?:edge|core) nodes?\b|[>'"`\s]core-first\b|Node role: \{role\}/g),
+  ...source.matchAll(/\b(?:edge|core) nodes?\b|\b(?:Edge|Core) Nodes?\b|[>'"`\s]core-first\b|Node role: \{role\}/g),
 ].map((m) => m[0].trim());
 
 describe('Edge and Core', () => {
@@ -22,6 +22,7 @@ describe('Edge and Core', () => {
     expect(lowerCaseRoles('<p>The edge node shares</p>')).toEqual(['edge node']);
     expect(lowerCaseRoles('<div>core-first pulls</div>')).toEqual(['>core-first']);
     expect(lowerCaseRoles('<p>The Edge node</p>')).toEqual([]);
+    expect(lowerCaseRoles('<p>The Core Node</p>')).toEqual(['Core Node']);
   });
 
   it('are capitalised in UI text', () => {

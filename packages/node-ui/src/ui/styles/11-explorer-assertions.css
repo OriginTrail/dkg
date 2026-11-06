@@ -303,11 +303,6 @@
 .v10-mlv-table th {
   padding: 8px 12px;
   text-align: left;
-  font-weight: 600;
-  font-size: 10px;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
   border-bottom: 1px solid var(--border-default);
 }
 .v10-mlv-table td {

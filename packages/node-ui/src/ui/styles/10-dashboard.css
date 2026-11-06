@@ -156,10 +156,6 @@
 }
 .v10-cg-colhead {
   padding: 5px 8px;
-  font-size: var(--fs-label);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-cg-list {

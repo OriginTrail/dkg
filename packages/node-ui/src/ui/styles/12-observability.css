@@ -87,13 +87,8 @@ select.input {
 .data-table th {
   padding: 8px 14px;
   text-align: left;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
   white-space: nowrap;
-  letter-spacing: .04em;
-  text-transform: uppercase;
   background: var(--bg-panel);
 }
 .data-table td {

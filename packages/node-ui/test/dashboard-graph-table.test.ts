@@ -1,6 +1,6 @@
 // The table's columns are set in CSS, so a layout test can't see them under happy-dom.
 // These read the rules that keep the name visible and the headers at label size.
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -14,7 +14,14 @@ describe('My Context Graphs table', () => {
   });
 
   it('lets header cells take the header type, not the row type', () => {
-    expect(css).toMatch(/\.v10-cg-colhead \{[^}]*font-size: var\(--fs-label\)/);
     expect(css).toMatch(/\.v10-cg-colhead \.v10-cg-cell \{ font-size: inherit; font-weight: inherit; color: inherit; \}/);
+  });
+
+  it('shares one header style with every other table', () => {
+    const dir = join(__dirname, '../src/ui/styles');
+    const all = readdirSync(dir).map((name) => readFileSync(join(dir, name), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')).join('\n');
+    expect(all).toMatch(/\.v10-cg-colhead \{\s*font-size: var\(--fs-label\);\s*font-weight: 500;[^}]*letter-spacing: var\(--ls-caps\);\s*text-transform: uppercase;\s*color: var\(--text-tertiary\);/);
+    const ownType = [...all.matchAll(/(?:^|[\s,>])th\s*\{([^}]*)\}/g)].filter((m) => /font-size|font-weight|letter-spacing|text-transform|(?:^|\s)color:/.test(m[1]!));
+    expect(ownType.map((m) => m[0].trim())).toEqual([]);
   });
 });

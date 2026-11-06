@@ -180,13 +180,13 @@ function TransactionsContent() {
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
       <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
         <thead>
-          <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>ID</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Status</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Duration</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Time</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx hash</th>
+          <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left' }}>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Type</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>ID</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Status</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Duration</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Time</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Tx hash</th>
           </tr>
         </thead>
         <tbody>
