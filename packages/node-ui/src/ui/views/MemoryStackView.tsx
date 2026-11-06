@@ -27,6 +27,7 @@ import { LayerGlyph } from '../components/ds/Badge.js';
 import { Loading } from '../components/ds/Loading.js';
 import { RefreshCw } from 'lucide-react';
 import { formatNumber } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const LAYERS: Array<{
   key: 'working' | 'shared' | 'verified';
@@ -60,14 +61,11 @@ export function MemoryStackView() {
   );
 
   return (
-    <div className="v10-memstack">
-      <div className="v10-memstack-head">
-        <h1 className="v10-memstack-title">Memory stack</h1>
-        <p className="v10-memstack-sub">
+    <div className="ds-page v10-memstack">
+      <PageHeader title="Memory stack" description={<>
           Every layer across every Context Graph, at a glance.
           {(!inventoryLoading && !inventoryError || contextGraphs.length > 0) && <> {visible.length} visible Context Graph{visible.length === 1 ? '' : 's'} · hidden Context Graphs are skipped.</>}
-        </p>
-      </div>
+      </>} />
 
       {inventoryError && <div className="v10-stale-banner" role="alert">
         <span>{listError ? 'Context Graphs unavailable. ' : ''}{identity.error ? 'Agent identity unavailable. ' : ''}

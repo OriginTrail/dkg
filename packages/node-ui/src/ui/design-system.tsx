@@ -21,6 +21,7 @@ import { BadgePercent, ChevronRight, Copy, RefreshCw, X } from 'lucide-react';
 import { Loading } from './components/ds/Loading.js';
 import { EmptyState } from './components/ContextGraphPrimitives.js';
 import { StateMatrix } from './design-system-states.js';
+import { PageHeader } from './components/ds/PageHeader.js';
 
 type Theme = 'dark' | 'light';
 
@@ -260,6 +261,9 @@ const App: React.FC = () => {
         <Row label="Kind" note="entity types: neutral pill, the kind's colour as a dot">
           <Badge tone="kind" kindColor="var(--data-1)">Decision</Badge>
           <Badge tone="kind" kindColor="var(--data-3)">Task</Badge>
+        </Row>
+        <Row label="PageHeader" note="the top of every page, inside ds-page: one h1, a description, an optional badge">
+          <div style={{ width: '100%' }}><PageHeader title="Publisher Conviction" description="One line on what this page is for." badge={<Badge tone="role" size="sm">Node role: Core</Badge>} /></div>
         </Row>
         <Row label="Count" note="attention = needs your action (amber, never red)">
           <Count value={12} /><Count value={3} tone="attention" /><Count value={128} tone="quiet" />

@@ -50,7 +50,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | Token | Size | Use |
 |---|---|---|
 | `--fs-display` | 24 | Page totals, hero numbers |
-| `--fs-heading` | 20 | View titles |
+| `--fs-heading` | 20 | Page titles, through `PageHeader` |
 | `--fs-title` | 16 | Card and section titles |
 | `--fs-body` | 13 | Reading text |
 | `--fs-control` | 12 | Buttons, tabs, inputs, menus |
@@ -246,6 +246,8 @@ Tables use `data-table` inside `ds-table-scroll`, so a wide table scrolls inside
 Every table header looks the same: `--fs-label`, weight 500, uppercase with `--ls-caps`, in `--text-tertiary`, so the data reads first. The shared rule in `27-ds-components.css` sets it; a table's own rule sets padding and borders only. A table that isn't a `data-table` puts `ds-table-head` on its header cells.
 
 ## Layout and overlays
+
+**Pages.** A page is a `ds-page` that starts with `<PageHeader title description badge />`. The header holds the page's only `h1`, at `--fs-heading` weight 600, with a `--fs-body` description in `--text-secondary`. The content panel sets the gutter with `--page-gutter`, so a page adds no padding of its own. `--page-max` caps the width. A view that fills the panel edge to edge cancels the gutter with a negative margin of the same token.
 
 **Layers.** Each layer has a token, and anything above 10 uses one. Numbers up to 10 only order things inside one component.
 

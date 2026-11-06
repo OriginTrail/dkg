@@ -5,7 +5,7 @@
    and the cards read sparse. 1440 fills the viewport on common large
    screens while keeping readable line lengths and stopping the list row
    from over-stretching past comfort (ui-lead — capped below 1600). */
-.v10-dashboard { max-width: 1440px; min-width: 0; }
+.v10-dashboard { min-width: 0; }
 /* Subtle one-shot mount lift for dashboard cards/sections. Short
    (160ms), opacity + 4px translate only, `both` so it doesn't flash the
    pre-animation state. Fully disabled under reduced-motion. */
@@ -13,11 +13,6 @@
 .v10-anim-mount { animation: v10DashMount 160ms ease-out both; }
 @media (prefers-reduced-motion: reduce) { .v10-anim-mount { animation: none; } }
 
-.v10-dash-header { margin-bottom: 24px; }
-/* Keep hero title pinned (PR8); subtitle gets promoted from tertiary
-   muted-mono to a readable secondary line. */
-.v10-dash-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
-.v10-dash-subtitle { font-size: 13px; color: var(--text-secondary); font-family: var(--font-mono); }
 .v10-dash-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .v10-dash-stats .stat-card { min-width: 0; }
 .v10-dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }

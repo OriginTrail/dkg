@@ -21,6 +21,7 @@ import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSectio
 import { Toggle } from '../components/ds/Toggle.js';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
 import { truncateAddress } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
@@ -367,11 +368,8 @@ function chainLabel(chainId: string | null | undefined): string {
 
 export function SettingsPage() {
   return (
-    <div className="page-section">
-      <div style={{ marginBottom: 20 }}>
-        <h1 className="page-title" style={{ marginBottom: 0 }}>Settings</h1>
-        <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>Node configuration and preferences</p>
-      </div>
+    <div className="ds-page">
+      <PageHeader title="Settings" description="Node configuration and preferences" />
       <GeneralSettingsTab />
     </div>
   );

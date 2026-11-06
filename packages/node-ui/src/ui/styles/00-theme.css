@@ -273,6 +273,8 @@
   --motion-fast: .12s;
   --motion-base: .15s;
   --motion-slow: .3s;
+  --page-gutter: 24px;
+  --page-max: 1440px;
   --ls-caps: 0.05em;
   --lh-tight: 1.2;
   --lh-snug: 1.35;

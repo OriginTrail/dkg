@@ -6,6 +6,7 @@ import { Badge } from '../components/ds/Badge.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
 import { Link2, UsersRound } from 'lucide-react';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
   if (a.connectionStatus === 'self') {
@@ -44,7 +45,7 @@ export function NetworkPage() {
         Back to dashboard
       </Link>
 
-      <h1 className="page-title">Network</h1>
+      <PageHeader title="Network" />
 
       <div className="stats-grid">
         <div className="stat-card ds-card">

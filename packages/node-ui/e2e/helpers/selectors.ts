@@ -146,8 +146,8 @@ export const sel = {
 
   dashboard: {
     root: '.v10-dashboard',
-    title: '.v10-dash-title',
-    subtitle: '.v10-dash-subtitle',
+    title: '.ds-page-title',
+    subtitle: '.ds-page-desc',
     stats: '.v10-dash-stats',
     statCard: '.stat-card',
     statLabel: '.stat-label',
@@ -261,7 +261,7 @@ export const sel = {
   // rewritten page uses the shared `.card`/`.settings-*` design-system classes.
   // Opens as a closable center tab from the header gear button.
   settings: {
-    pageTitle: '.page-title',
+    pageTitle: '.ds-page-title',
     stack: '.settings-stack',
     card: '.settings-stack .card',
     cardTitle: '.settings-stack .card-title',

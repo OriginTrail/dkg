@@ -1,20 +1,9 @@
 /* PCA styles — S1 Conviction Overview shell + PcaAccountCard + Track-by-id disclosure. Split from 26-pca.css (#1354); class names + cascade order unchanged. */
 
 /* ----- S1 Conviction Overview ----- */
-.v10-pca-overview { padding: 20px 24px; max-width: 980px; }
 .v10-pca-unavailable,
-.v10-pca-detail { padding: 24px; max-width: 880px; }
-.v10-pca-overview-head { margin-bottom: 16px; }
-.v10-pca-overview-titlerow { display: flex; align-items: center; gap: 12px; }
-.v10-pca-overview-title { font-size: 18px; font-weight: 700; margin: 0; color: var(--text-primary); }
+.v10-pca-detail { max-width: 880px; }
 .v10-pca-role-chip { text-transform: capitalize; }
-.v10-pca-overview-explainer {
-  margin: 8px 0 0;
-  font-size: 12px;
-  line-height: var(--lh-loose);
-  color: var(--text-secondary);
-  max-width: 760px;
-}
 .v10-pca-overview-wallet { margin-left: auto; }
 .v10-pca-overview-caveat { font-size: 11px; color: var(--text-tertiary); line-height: var(--lh-body); margin: 12px 0 0; }
 .v10-pca-section {

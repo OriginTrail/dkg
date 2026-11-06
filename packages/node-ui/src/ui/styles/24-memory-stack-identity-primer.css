@@ -2,19 +2,6 @@
 .v10-memstack {
   display: flex; flex-direction: column;
   height: 100%; overflow: auto;
-  padding: 18px 22px 28px;
-}
-.v10-memstack-head {
-  margin-bottom: 18px;
-}
-.v10-memstack-title {
-  font-size: 20px; font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 4px 0;
-}
-.v10-memstack-sub {
-  font-size: 12px; color: var(--text-tertiary);
-  margin: 0;
 }
 .v10-memstack-empty {
   font-size: 12px; color: var(--text-tertiary);

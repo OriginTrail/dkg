@@ -23,18 +23,16 @@ p { font-size: 13px; color: var(--text-secondary); line-height: var(--lh-loose);
 
 /* ── Observability page shared components ───────────────────────────────── */
 
-/* Page layout */
-.page-section { padding: 20px 24px; max-width: 1400px; }
 /* The Network page renders outside the app shell, and html, body and #root
    don't scroll, so the page is its own scroll container. */
-.network-page { height: 100%; overflow-y: auto; padding: 20px 24px; }
+.network-page { height: 100%; overflow-y: auto; padding: var(--page-gutter); }
 .network-page-back {
   display: inline-flex; align-items: center; gap: 6px; margin-bottom: 12px; font-size: 13px;
   color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline);
 }
 .network-page .card { margin-bottom: 12px; }
 .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0 12px; }
-.page-title { font-size: 22px; font-weight: 700; color: var(--text-primary); margin: 0 0 4px; }
+.network-page .stats-grid { margin-top: 0; }
 
 /* Tab bar (legacy v9-style, used by Observability page) */
 .tab-group {

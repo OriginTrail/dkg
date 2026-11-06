@@ -22,6 +22,7 @@ import { AgentDotStack } from '../components/AgentDot.js';
 import { Count } from '../components/ds/Badge.js';
 import { Loading } from '../components/ds/Loading.js';
 import { formatNumber, truncateAddress } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 // Single user-facing description shown inside the My Context Graphs
 // card (one line, no separate footnote — round-2 feedback: the split
@@ -612,14 +613,14 @@ export function DashboardView() {
 
 
   return (
-    <div className="v10-dashboard">
-      <div className="v10-dash-header">
-        <h1 className="v10-dash-title">Dashboard</h1>
-        <p className="v10-dash-subtitle">
+    <div className="ds-page v10-dashboard">
+      <PageHeader
+        title="Dashboard"
+        description={<>
           {status?.name || 'DKG Node'} · {status?.networkName || 'network'}
           {wb?.chainId != null ? ` · ${chainInfo(wb.chainId).name}` : ''}
-        </p>
-      </div>
+        </>}
+      />
 
       {inventoryFailed ? (
         <div role="alert" className="v10-cg-empty">

@@ -30,6 +30,7 @@ import { pressable } from '../lib/pressable.js';
 import { Loading } from '../components/ds/Loading.js';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { formatDateTime } from '../lib/format.js';
+import { PageHeader } from '../components/ds/PageHeader.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -348,9 +349,8 @@ function ReplicationTab() {
 
 export function OperationsPage() {
   return (
-    <div className="page-section">
-      <h1 className="page-title" style={{ marginBottom: 4 }}>Observability</h1>
-      <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 20 }}>Track operation performance, phases, and errors</p>
+    <div className="ds-page">
+      <PageHeader title="Observability" description="Track operation performance, phases, and errors" />
       <ObservabilitySection />
     </div>
   );
