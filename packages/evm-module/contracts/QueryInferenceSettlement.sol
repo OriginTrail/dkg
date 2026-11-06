@@ -60,13 +60,15 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *   - `counted`, the lesser of the group's value and what the bucket has left,
  *     fills the bucket at face value. Batches count in the order they land, and
  *     what has landed is never reduced. A group refuses to land for less than
- *     its `minCounted`, or for nothing, so a seller keeps its receipts for a
- *     later top-up rather than spending their nonces.
+ *     its `minCounted`, so a seller that sets one keeps its receipts for a later
+ *     top-up rather than spending their nonces.
  *   - R, which is `counted` at the period's discount, floored, and
  *     QueryInferenceScore, which is R at the batch's stake factor, join the
  *     node's and the epoch's totals in the period's epoch. A Conviction Account
- *     period's cost is its value at the same discount, so a bucket's R never
- *     exceeds what was paid for it.
+ *     period's cost is its value at the same discount, floored per funding and
+ *     per top-up, so a bucket's R exceeds what was paid for it by less than 1
+ *     wei per top-up. Nothing is overpaid: a node's gross is a share of the
+ *     money.
  *
  * The pool (`epochPool`). An epoch's money is what was funded for its periods:
  * the wallet-funded value and the Conviction Account cost. If no node counted
@@ -193,7 +195,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         UnknownBucket, // the period has no bucket at the index
         OutsideEpoch, // the current epoch is not the period's
         EmptyGroup, // no items
-        BelowMinCounted, // the bucket has less left than the group's minimum, or nothing
+        BelowMinCounted, // the bucket has less left than the group's minimum
         // An item's: the faults OT-RFC-27 lists.
         BadSignature, // not signed by the session key, or for another seller, period or bucket
         InactiveAssignment, // issued once the assignment the period was funded under had ended
@@ -358,9 +360,11 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *              and valueWei <= maxValueWei;
      *           7. a non-zero result commitment.
      *         The group then counts the lesser of its value and what the bucket
-     *         has left, which must be more than 0 and at least `minCounted`.
-     *         Value above what the bucket has left does not count, and its
-     *         receipts' nonces stay used.
+     *         has left, which must be at least `minCounted`. Value above what
+     *         the bucket has left does not count, and its receipts' nonces stay
+     *         used. So a `minCounted` of 0 never refuses, whoever filled the
+     *         bucket first: a seller uses it for a batch that must land, such as
+     *         the last of an epoch.
      * @return batchDigest The hash of the batch's receipt digests, in order.
      */
     function submitReceiptBatch(ReceiptGroup[] calldata groups) external returns (bytes32 batchDigest) {
@@ -630,7 +634,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         // lower it.
         uint256 left = t.bucketValue - qis.bucketFilled(subscriptionId, group.bucketIndex);
         uint256 counted = value < left ? value : left;
-        if (counted == 0 || counted < group.minCounted) revert GroupFault(g, Fault.BelowMinCounted);
+        if (counted < group.minCounted) revert GroupFault(g, Fault.BelowMinCounted);
         uint256 r = (counted * (_BPS - t.discountBps)) / _BPS;
         qis.countReceipts(
             subscriptionId,
