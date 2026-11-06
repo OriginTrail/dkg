@@ -36,13 +36,13 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * key and epoch.
  *
  * A Conviction Account pays for a period as a wallet does (since 1.2.0). A
- * funded period moves no TRAC: `PublishingConviction.coverServiceCost` draws
+ * funded period moves no TRAC: `PublishingConviction.coverServiceCost` spends
  * the cost from the account's allowance exactly as a publish does (the
  * current billing window first, then the top-up buffer, at the account's
  * discount tier), and this contract books the whole cost in
  * `QueryInferenceStorage` under the period's epoch, as
  * `ServiceSubscriptionsWallet` books a wallet period's value: the epoch in
- * which the period's receipt value counts. The draw itself books nothing to
+ * which the period's receipt value counts. The spend itself books nothing to
  * the staker pool, so the cost is counted once, in the query/inference pool.
  *
  * Architecture (the pattern of `PublishingConviction`):
@@ -89,16 +89,16 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     in an earlier epoch would never reach a pool. Every funding needs a
  *     non-zero session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
- *     protocol treasury is wired: a service draw carries no treasury fee. So
+ *     protocol treasury is wired: a service spend carries no treasury fee. So
  *     `ParametersStorage.protocolTreasury` must stay 0 wherever this contract
  *     runs: wiring one stops every Conviction Account funding and top-up, and
  *     the opt-in, until it is unset again. Wallet periods take no fee and go
  *     on. `protocolTreasuryFee`, already set at 300 bps, takes effect only
  *     once a treasury is wired.
  *   - An account that `PublishingConviction` 10.0.8 or 10.1.0 scheduled in
- *     full cannot switch service spending on, and its draws are refused
+ *     full cannot switch service spending on, and its spends are refused
  *     (`EmissionAlreadyScheduled`): its base allowance is already the staker
- *     pool's. The refusal covers the whole account, even a draw its top-up
+ *     pool's. The refusal covers the whole account, even a spend its top-up
  *     buffer alone would pay, though the buffer was never scheduled: so the
  *     accounts 10.0.8 scheduled, testnet's among them, get no services at
  *     all, and still publish.
@@ -165,7 +165,7 @@ contract ServiceSubscriptions is
 
     /// @notice The terms both parties consent to. They are the EIP-712
     ///         `ServiceAssignment` message. The limit is in COST, TRAC wei
-    ///         drawn from the account's allowance after its discount.
+    ///         spent from the account's allowance after its discount.
     struct AssignmentTerms {
         uint256 accountId;
         address assignee;
@@ -252,7 +252,7 @@ contract ServiceSubscriptions is
     error AssignmentEndsBeforePeriod(uint256 accountId, address assignee, uint40 expiresAt, uint40 periodStart);
     error CapsUnchanged(uint256 accountId, address assignee);
     error CapExceeded(string cap, uint256 limit, uint256 attempted);
-    error DrawMismatch(uint96 expectedCost, uint96 cost, uint40 expectedWindow, uint40 window);
+    error SpendMismatch(uint96 expectedCost, uint96 cost, uint40 expectedWindow, uint40 window);
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -287,7 +287,7 @@ contract ServiceSubscriptions is
      *      account, and one that pays at use time: an account that
      *      `PublishingConviction` 10.0.8 or 10.1.0 scheduled in full
      *      (`lastSettledWindow` at the lock while it is live) reverts
-     *      `EmissionAlreadyScheduled`, as each of its draws would.
+     *      `EmissionAlreadyScheduled`, as each of its spends would.
      *      Switching off is a pause: assignments are kept, and funded periods
      *      run to their end. The opt-in records its owner and counts only
      *      while that owner holds the account: after a sale it reads as off,
@@ -423,7 +423,7 @@ contract ServiceSubscriptions is
      * @notice Replace the limit and the expiry of `assignee`'s live assignment
      *         over `accountId`. Owner only, at any time, whether service
      *         spending is on or off.
-     * @dev The limit bounds only what the owner lets the buyer key draw, and
+     * @dev The limit bounds only what the owner lets the buyer key spend, and
      *      obliges the buyer to nothing, so a change in either direction needs
      *      no consent from the assignee. The usage, `assignedAt`, the
      *      assignment's nonce and the account's nonce stay as they are. A
@@ -480,8 +480,8 @@ contract ServiceSubscriptions is
      *      nothing), the buckets, one period per buyer key and epoch, and the
      *      assignment's limit as stored at this block. A revoked assignment
      *      funds nothing, so only the expiry can be checked ahead. Then
-     *      `coverServiceCost` draws the cost (window allowance first, then the
-     *      top-up buffer); a period funded ahead draws from the window the
+     *      `coverServiceCost` spends the cost (window allowance first, then the
+     *      top-up buffer); a period funded ahead spends from the window the
      *      funding runs in. Last, the usage, the cost under the period's
      *      epoch and the period record are written. The record names
      *      the assignment by its nonce: the period accepts requests issued
@@ -494,7 +494,7 @@ contract ServiceSubscriptions is
      *      receives a record that reads as absent nor a second record under
      *      one id.
      * @return subscriptionId `subscriptionIdOf(msg.sender, r.epoch)`.
-     * @return cost The cost drawn from the allowance.
+     * @return cost The cost spent from the allowance.
      */
     function fundFromConviction(FundingRequest calldata r) external returns (bytes32 subscriptionId, uint96 cost) {
         ConvictionServiceStorage css = convictionServiceStorage;
@@ -526,8 +526,8 @@ contract ServiceSubscriptions is
         cost = _discounted(value, acct.discountBps);
         if (cost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, cost);
 
-        // 6. The draw.
-        PublishingConviction.ServiceDraw memory d = _draw(
+        // 6. The spend.
+        PublishingConviction.ServiceSpend memory d = _spend(
             r.accountId,
             assignee,
             subscriptionId,
@@ -559,8 +559,8 @@ contract ServiceSubscriptions is
                 bucketCount: uint8(r.buckets.length),
                 value: value,
                 cost: d.cost,
-                drawnFromWindow: d.drawnFromWindow,
-                drawnFromTopUp: d.drawnFromTopUp
+                spentFromWindow: d.spentFromWindow,
+                spentFromTopUp: d.spentFromTopUp
             }),
             r.buckets
         );
@@ -606,11 +606,11 @@ contract ServiceSubscriptions is
      *      requests and top-ups alike, until its own expiry
      *      (`ConvictionServiceStorage.assignmentEnd`).
      *
-     *      The draw and the cost under the period's epoch follow as for a
+     *      The spend and the cost under the period's epoch follow as for a
      *      funding, at the account's own tier; a top-up funds no new
      *      period, so the usage is unchanged, and the period keeps the
      *      assignment it was funded under.
-     * @return cost The cost drawn from the allowance.
+     * @return cost The cost spent from the allowance.
      */
     function topUpFromConviction(
         bytes32 subscriptionId,
@@ -649,8 +649,8 @@ contract ServiceSubscriptions is
         uint256 periodCost = uint256(s.cost) + cost;
         if (periodCost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, periodCost);
 
-        // 5. The draw.
-        PublishingConviction.ServiceDraw memory d = _draw(
+        // 5. The spend.
+        PublishingConviction.ServiceSpend memory d = _spend(
             s.accountId,
             assignee,
             subscriptionId,
@@ -666,8 +666,8 @@ contract ServiceSubscriptions is
             ConvictionServiceStorage.TopUpAmounts({
                 value: t.value,
                 cost: d.cost,
-                drawnFromWindow: d.drawnFromWindow,
-                drawnFromTopUp: d.drawnFromTopUp
+                spentFromWindow: d.spentFromWindow,
+                spentFromTopUp: d.spentFromTopUp
             }),
             planDigest,
             t.added,
@@ -726,7 +726,7 @@ contract ServiceSubscriptions is
      *         block time.
      * @return window The billing window of `block.timestamp`, capped at the
      *         lock (the number of windows).
-     * @return baseRemaining The window's base allowance not yet drawn, and 0
+     * @return baseRemaining The window's base allowance not yet spent, and 0
      *         once the account has expired.
      * @return topUpBuffer The top-up buffer.
      * @return expired Whether the account has expired.
@@ -826,20 +826,20 @@ contract ServiceSubscriptions is
     }
 
     /**
-     * @dev Draw `value` through `coverServiceCost`, which must return the cost
+     * @dev Spend `value` through `coverServiceCost`, which must return the cost
      *      and the window computed here, or the funding reverts
-     *      `DrawMismatch`. The caller books `d.cost`, the whole draw.
+     *      `SpendMismatch`. The caller books `d.cost`, the whole spend.
      */
-    function _draw(
+    function _spend(
         uint256 accountId,
         address assignee,
         bytes32 subscriptionId,
         uint96 value,
         uint96 cost,
         uint40 window
-    ) internal returns (PublishingConviction.ServiceDraw memory d) {
+    ) internal returns (PublishingConviction.ServiceSpend memory d) {
         d = _publishingConviction().coverServiceCost(accountId, assignee, subscriptionId, value);
-        if (d.cost != cost || d.window != window) revert DrawMismatch(cost, d.cost, window, d.window);
+        if (d.cost != cost || d.window != window) revert SpendMismatch(cost, d.cost, window, d.window);
     }
 
     /**
@@ -902,7 +902,7 @@ contract ServiceSubscriptions is
     }
 
     /// @dev The billing window of the block time, uncapped, as
-    ///      `PublishingConviction` computes it for a draw.
+    ///      `PublishingConviction` computes it for a spend.
     function _currentBillingWindow(
         PublishingConvictionStorage.Account memory acct,
         uint256 epLen

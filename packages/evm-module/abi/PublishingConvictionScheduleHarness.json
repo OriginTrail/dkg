@@ -454,13 +454,13 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromEpoch",
+        "name": "spentFromEpoch",
         "type": "uint96"
       },
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromTopUp",
+        "name": "spentFromTopUp",
         "type": "uint96"
       }
     ],
@@ -583,13 +583,13 @@
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromWindow",
+        "name": "spentFromWindow",
         "type": "uint96"
       },
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "drawnFromTopUp",
+        "name": "spentFromTopUp",
         "type": "uint96"
       }
     ],
@@ -847,12 +847,12 @@
           },
           {
             "internalType": "uint96",
-            "name": "drawnFromWindow",
+            "name": "spentFromWindow",
             "type": "uint96"
           },
           {
             "internalType": "uint96",
-            "name": "drawnFromTopUp",
+            "name": "spentFromTopUp",
             "type": "uint96"
           },
           {
@@ -871,7 +871,7 @@
             "type": "uint16"
           }
         ],
-        "internalType": "struct PublishingConviction.ServiceDraw",
+        "internalType": "struct PublishingConviction.ServiceSpend",
         "name": "d",
         "type": "tuple"
       }
