@@ -371,7 +371,7 @@ reverts.
 
 - `ParametersStorage.protocolTreasury` stays the zero address. While a
   treasury is wired, `PublishingConviction` refuses every Conviction Account
-  service draw (`ServiceFundingPausedTreasuryWired`), so Conviction Account
+  service spend (`ServiceFundingPausedTreasuryWired`), so Conviction Account
   funding of service periods would stop.
 - λ, `QueryInferenceStorage.lambdaBps` (5,000 on testnet), is taken by an epoch
   when its first value counts, and kept. A change through `setLambdaBps` applies

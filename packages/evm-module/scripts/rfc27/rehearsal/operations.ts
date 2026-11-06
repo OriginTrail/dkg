@@ -62,7 +62,7 @@ export async function publishAs(ctx: Ctx, pc: PublishingConviction, accountId: b
     await nft.getAddress(),
     nft.interface.encodeFunctionData('coverPublishingCost', [agent, baseCost, E, kaEpochs]),
   );
-  // The window and the draws as of the publish's own block.
+  // The window and the spends as of the publish's own block.
   const block = await ctx.hre.ethers.provider.getBlock(receipt.blockNumber);
   if (!block) throw new Error(`no block ${receipt.blockNumber}`);
   const a = await pcs.getAccount(accountId);
@@ -75,8 +75,8 @@ export async function publishAs(ctx: Ctx, pc: PublishingConviction, accountId: b
     discountedCost: discounted,
     windowSpentDelta: (await pcs.windowSpent(accountId, w)) - (await pcs.windowSpent(accountId, w, prior)),
     topUpDelta: (await pcs.topUpBalance(accountId)) - (await pcs.topUpBalance(accountId, prior)),
-    drawnFromEpoch: cc?.drawnFromEpoch,
-    drawnFromTopUp: cc?.drawnFromTopUp,
+    spentFromEpoch: cc?.spentFromEpoch,
+    spentFromTopUp: cc?.spentFromTopUp,
     stakerCredits: stakerCredits(receipt, ctx.base),
     gasUsed,
   };

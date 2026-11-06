@@ -118,15 +118,15 @@ export type AccountSummary = {
 /** StakingKPI's net of a node in an epoch, and the net a claim split, by `<node>:<epoch>`. */
 export type NodeEpochNet = { kpiNet: bigint; split: boolean; storedNet: bigint };
 
-/** A publish through the publishing NFT: its cost, its draws, and what it booked to the staker pool. */
+/** A publish through the publishing NFT: its cost, its spends, and what it booked to the staker pool. */
 export type PublishResult = {
   epoch: bigint;
   window: bigint;
   discountedCost: bigint;
   windowSpentDelta: bigint;
   topUpDelta: bigint;
-  drawnFromEpoch?: bigint;
-  drawnFromTopUp?: bigint;
+  spentFromEpoch?: bigint;
+  spentFromTopUp?: bigint;
   stakerCredits: Range[];
   gasUsed: bigint;
 };
