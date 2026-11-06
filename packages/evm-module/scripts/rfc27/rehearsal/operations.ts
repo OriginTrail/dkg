@@ -146,8 +146,9 @@ export const requestDomain = (c: Contracts): Promise<Domain> => queryInferenceDo
 /**
  * Requests of bucket 0 of one period, one per value, each served in full,
  * signed by the period's session key (eth_signTypedData_v4 on anvil), as the
- * items of one group of a receipt batch. Each result commitment names the
- * period, the seller and the nonce, so the sellers' items differ.
+ * items of one group of a receipt batch, which lands for at least `minCounted`,
+ * or for whatever the bucket has left without one. Each result commitment names
+ * the period, the seller and the nonce, so the sellers' items differ.
  */
 export async function signedGroup(o: {
   domain: Domain;
@@ -157,6 +158,7 @@ export async function signedGroup(o: {
   firstNonce: bigint;
   values: bigint[];
   issuedAt: bigint;
+  minCounted?: bigint;
 }): Promise<ReceiptGroup> {
   const items: ReceiptItem[] = [];
   for (let i = 0; i < o.values.length; i++) {
@@ -176,7 +178,7 @@ export async function signedGroup(o: {
     const resultCommitment = ethers.keccak256(ethers.toUtf8Bytes(`result ${o.subscriptionId} ${o.seller} ${r.nonce}`));
     items.push(itemOf(r, fullReceipt(r, { resultCommitment }), { sigR: sig.r, sigVS: sig.yParityAndS }));
   }
-  return { subscriptionId: o.subscriptionId, bucketIndex: 0n, items };
+  return { subscriptionId: o.subscriptionId, bucketIndex: 0n, minCounted: o.minCounted ?? 0n, items };
 }
 
 /** A receipt batch, submitted from the seller node's operational key. */

@@ -1,19 +1,20 @@
 // OT-RFC-27 script support: what the contracts pay, computed from views. A
 // claim's payment as StakingKPI's nets preview it, a position's share of the
-// query/inference pool, an epoch's close as storage keeps it, and the reason a
-// finalization would skip a claim.
+// query/inference pool, an epoch's money, value and pool as storage keeps them,
+// and a node's gross worked out without the contract.
 
 import { ethers } from 'ethers';
 
+import { Fault } from '../../test/helpers/query-inference';
 import type { Contracts } from './contracts';
 
 const SCALE18 = 10n ** 18n;
+const BPS = 10_000n;
 
-/** `QueryInferenceSettlement.Skip`, in declaration order. */
-export const SKIP_REASONS = ['None', 'UnknownPeriod', 'UnknownBucket', 'AlreadyFinalized', 'TooEarly', 'Void', 'NothingClaimed', 'NoScore'] as const;
-export type SkipReason = (typeof SKIP_REASONS)[number];
-
-export const skipReasonOf = (code: bigint): SkipReason => SKIP_REASONS[Number(code)] ?? 'None';
+/** A batch's refusal for group `g`, in the words of `decodeError`. */
+export const groupFault = (g: number, fault: keyof typeof Fault): string => `GroupFault(${g}, ${Fault[fault]})`;
+/** A batch's refusal for item `i` of group `g`, in the words of `decodeError`. */
+export const receiptFault = (g: number, i: number, fault: keyof typeof Fault): string => `ReceiptFault(${g}, ${i}, ${Fault[fault]})`;
 
 export type EpochReward = { epoch: bigint; scored: boolean; score: bigint; nodeScore: bigint; net: bigint; reward: bigint };
 export type ClaimPreview = { total: bigint; per: EpochReward[] };
@@ -120,67 +121,57 @@ export async function poolShareOf(c: Contracts, node: bigint, e: bigint, score: 
   return { nodeScore, publishingShare, feeBps, netWithPool: net, netWithoutPool, rewardWithPool, rewardWithoutPool, poolShare: rewardWithPool - rewardWithoutPool };
 }
 
-export type EpochCloseNumbers = {
+/** An epoch as storage keeps it, and the pool `epochPool` reads from it. */
+export type EpochNumbers = {
   epoch: bigint;
-  walletDue: bigint;
-  convictionDue: bigint;
-  carryIn: bigint;
-  pool: bigint;
+  walletFunding: bigint;
+  convictionFunding: bigint;
+  /** What was funded for the epoch's own periods. */
+  money: bigint;
   sumR: bigint;
   sumScore: bigint;
+  /** The λ the epoch took when its first value counted; 0 until then. */
   lambdaBps: bigint;
-  closed: boolean;
+  pool: bigint;
 };
 
-/** An epoch's close as storage keeps it, the carry into it chained from activation, as `EpochClosed` reports it. */
-export async function closeFromStorage(c: Contracts, e: bigint): Promise<EpochCloseNumbers> {
-  const activation = await c.qis.activationEpoch();
-  let carryIn = 0n;
-  for (let x = activation; x < e; x++) {
-    const due = await c.qis.dueIn(x);
-    carryIn = due.wallet + due.conviction + carryIn - (await c.qis.getEpochClose(x)).pool;
-  }
-  const due = await c.qis.dueIn(e);
-  const close = await c.qis.getEpochClose(e);
+export async function epochNumbers(c: Contracts, e: bigint): Promise<EpochNumbers> {
+  const funded = await c.qis.fundingIn(e);
   const totals = await c.qis.getEpochTotals(e);
   return {
     epoch: e,
-    walletDue: due.wallet,
-    convictionDue: due.conviction,
-    carryIn,
-    pool: close.pool,
+    walletFunding: funded.wallet,
+    convictionFunding: funded.conviction,
+    money: funded.wallet + funded.conviction,
     sumR: totals.sumR,
     sumScore: totals.sumScore,
-    lambdaBps: close.lambdaBps,
-    closed: close.closed,
+    lambdaBps: totals.lambdaBps,
+    pool: await c.qs.epochPool(e),
   };
 }
 
-export type ClaimRef = { subscriptionId: string; bucketIndex: bigint; seller: bigint };
-
 /**
- * Why `finalizeClaims` would skip `ref` now, from views, in the order
- * `QueryInferenceSettlement._finalize` checks: 'None' when it would finalize.
+ * The rollover rule over consecutive epochs from activation, worked out without
+ * the contract: an epoch with no value has a pool of 0, and its money waits for
+ * the next epoch with value, whose pool takes all of it. `waiting` is what is
+ * still waiting after the last epoch.
  */
-export async function predictSkip(c: Contracts, ref: ClaimRef, now: bigint): Promise<SkipReason> {
-  const s = await c.cssvc.getSubscription(ref.subscriptionId);
-  if (s.periodStart === 0n) return 'UnknownPeriod';
-  if (ref.bucketIndex >= s.bucketCount) return 'UnknownBucket';
-  const claim = await c.qis.getSellerClaim(ref.subscriptionId, ref.bucketIndex, ref.seller);
-  if (claim.finalized) return 'AlreadyFinalized';
-  const { epoch } = s;
-  const current = await c.chronos.getCurrentEpoch();
-  if (current > epoch + 1n) return 'Void';
-  if (current <= epoch || now <= s.periodEnd + (await c.qis.receiptGraceSecondsAt(epoch))) return 'TooEarly';
-  if (claim.claimed === 0n) return 'NothingClaimed';
-  if ((await c.rss.getNodeEpochScore(current, ref.seller)) === 0n) return 'NoScore';
-  return 'None';
+export function poolsFromMoney(epochs: readonly { money: bigint; sumR: bigint }[]): { pools: bigint[]; waiting: bigint } {
+  let waiting = 0n;
+  const pools = epochs.map((x) => {
+    waiting += x.money;
+    if (x.sumR === 0n) return 0n;
+    const pool = waiting;
+    waiting = 0n;
+    return pool;
+  });
+  return { pools, waiting };
 }
 
-/** What `ref` finalizes to: claimed × min(1, the bucket's funded cap / all its claims). */
-export async function finalizedValueOf(c: Contracts, ref: ClaimRef): Promise<bigint> {
-  const claim = await c.qis.getSellerClaim(ref.subscriptionId, ref.bucketIndex, ref.seller);
-  const cap = await c.qs.fundedCap(ref.subscriptionId, ref.bucketIndex);
-  const total = await c.qis.bucketClaimed(ref.subscriptionId, ref.bucketIndex);
-  return total > cap ? (claim.claimed * cap) / total : claim.claimed;
+/** A node's gross from a pool, worked out without the contract: each term floored on its own, the second by R when no node has a score. */
+export function grossOf(pool: bigint, lambdaBps: bigint, node: { r: bigint; score: bigint }, totals: { sumR: bigint; sumScore: bigint }): bigint {
+  if (node.r === 0n) return 0n;
+  const first = (pool * (BPS - lambdaBps) * node.r) / (BPS * totals.sumR);
+  const second = totals.sumScore === 0n ? (pool * lambdaBps * node.r) / (BPS * totals.sumR) : (pool * lambdaBps * node.score) / (BPS * totals.sumScore);
+  return first + second;
 }

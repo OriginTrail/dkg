@@ -10,9 +10,8 @@ export const PARAMETERS_JSON = 'deployments/parameters.json';
 
 /**
  * What parameters.json, as parsed, sets on base_sepolia_v10 for the first of
- * `keys` it holds on `contract`. A key may name the getter the deploy
- * compares, such as `latestLambdaBps`, or the parameter, such as `lambdaBps`;
- * of a list of values, the last is the one that stays set.
+ * `keys` it holds on `contract`, each the getter the deploy compares; of a list
+ * of values, the last is the one that stays set.
  */
 export function expectedParameterIn(all: ParametersConfig, contract: string, keys: string[]): { key: string; value: bigint } | undefined {
   const parameters = contractParameters(all, 'testnet', 'base_sepolia_v10', contract);

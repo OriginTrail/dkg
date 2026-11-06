@@ -7,12 +7,7 @@ and on again in an emergency.
 The figures come from the fork rehearsal,
 `scripts/rfc27-testnet-fork-rehearsal.ts`, which runs this deploy through the
 repository's own pipeline against a local anvil fork of Base Sepolia, and sends
-the Hub owner's transactions as the impersonated owner:
-
-- the deploy, the Hub owner's transactions, the upkeep calls and the emergency
-  switch at block 54,078,000;
-- the first claims at block 53,990,314, before testnet claims shortened
-  several of those histories.
+the Hub owner's transactions as the impersonated owner, at block 55,196,393.
 
 The gas of a first claim grows with every epoch (step 4).
 
@@ -44,7 +39,7 @@ transaction.
    first-claim gas at that block (step 4).
 3. Two wallets:
    - **the deployer**: a separate hot wallet with Base Sepolia ETH for about
-     27.0M gas. The network reads its key from `EVM_PRIVATE_KEY_BASE_SEPOLIA_V10`
+     25.2M gas. The network reads its key from `EVM_PRIVATE_KEY_BASE_SEPOLIA_V10`
      (`utils/network.ts`; without it, it falls back to a mnemonic) and the
      endpoint from `RPC_BASE_SEPOLIA_V10` (`https://sepolia.base.org` when
      unset);
@@ -67,19 +62,19 @@ transaction.
    Run every step, and never redeploy by `--tags` on testnet: a run by tag leaves
    out step 998, so what it deploys is recorded as deployed but never registered
    in the Hub, and a later full run does not register it either.
-3. The run deploys 10 contracts from the deployer, 26,998,505 gas in all:
+3. The run deploys 10 contracts from the deployer, 25,168,971 gas in all:
 
    | Contract | Gas |
    |---|---|
-   | `StakingV10` | 5,040,216 |
+   | `StakingV10` | 5,019,220 |
    | `PublishingConviction` | 4,285,448 |
-   | `ServiceSubscriptions` | 3,846,600 |
-   | `QueryInferenceSettlement` | 3,791,511 |
+   | `ServiceSubscriptions` | 3,837,852 |
+   | `QueryInferenceSettlement` | 2,774,458 |
    | `ConvictionServiceStorage` | 2,142,540 |
-   | `QueryInferenceStorage` | 2,073,536 |
    | `StakingV10Ledger` | 1,855,388 |
-   | `ServiceSubscriptionsWallet` | 1,845,801 |
+   | `ServiceSubscriptionsWallet` | 1,842,789 |
    | `StakingKPI` | 1,426,976 |
+   | `QueryInferenceStorage` | 1,293,811 |
    | `ConvictionWithdrawalStorage` | 690,489 |
 
 4. At the end, 998 checks whether the deployer may call
@@ -108,12 +103,12 @@ From the Hub owner's wallet, one after the other, in the same epoch:
 
 | | Transaction | Gas used | Smallest gas limit | Gas limit to set |
 |---|---|---|---|---|
-| 1 | The Hub transaction 998 printed: `Hub.setAndReinitializeContracts`, 3,972 bytes of calldata | 3,140,194 | 3,155,399 | 4,000,000 |
-| 2 | `Hub.forwardCall(QueryInferenceStorage, setActivationEpoch(currentEpoch + 1))` | 120,692 | 122,551 | 200,000 |
+| 1 | The Hub transaction 998 printed: `Hub.setAndReinitializeContracts`, 3,716 bytes of calldata | 3,088,559 | 3,104,166 | 4,000,000 |
+| 2 | `Hub.forwardCall(QueryInferenceStorage, setActivationEpoch(currentEpoch + 1))` | 98,109 | 99,679 | 200,000 |
 
 - Transaction 1 registers the 7 new contracts, points the Hub at the 3
   redeployed ones, calls `initialize()` on 30 contracts, and forwards the
-  parameters of `deployments/parameters.json` "testnet": 5 calls to
+  parameters of `deployments/parameters.json` "testnet": 3 calls to
   `QueryInferenceStorage` and 1 to `ConvictionServiceStorage`.
 - Transaction 2 sets the activation epoch: the first epoch whose rewards
   include the pool, and the first in which periods can be funded.
@@ -121,8 +116,7 @@ From the Hub owner's wallet, one after the other, in the same epoch:
     does not hold `QueryInferenceStorage` yet.
   - The storage refuses it too (`PoolNotWired`) while the Hub's
     `QueryInferenceSettlement` or `StakingV10` does not read the storage.
-  - Afterwards, `activationEpoch()` is the current epoch + 1 and
-    `closedThrough()` is the current epoch.
+  - Afterwards, `activationEpoch()` is the current epoch + 1.
 
 ### Signing on a hardware wallet
 
@@ -194,9 +188,11 @@ position per node, longest history first.
 - The first claim on a node after the upgrade walks every epoch since that
   position's last claim, and splits each epoch's operator fee for the node.
   That makes it the most expensive claim; later claims on the node cost less.
-- A claim costs about 94k gas per scored epoch in the rehearsal. StakingV10
-  10.1.0 documents about 92k per scored epoch before the pool, and about 107k
-  after.
+- A claim costs about 95k gas per scored epoch on a node no claim has split yet,
+  and about 28k on one already split, in the rehearsal. StakingV10 10.1.0
+  documents about 92k per scored epoch before the pool, and about 110k after.
+- Nothing has to run before it: a claim only reads the pool, and an epoch's
+  numbers are final when it ends.
 - Set the gas limit by hand, under Base's per-transaction cap of
   2^24 = 16,777,216: a few percent above the smallest gas limit that the
   rehearsal on `main` measures. Wallets that pad their own estimate can take a
@@ -205,76 +201,63 @@ position per node, longest history first.
   estimate against it: one that does not fit fails its check, is not sent, and
   the phase exits nonzero.
 
-The rehearsal at block 53,990,314 (epoch 659), each position's claim measured
+The rehearsal at block 55,196,393 (epoch 662), each position's claim measured
 as the first on its node, through `DKGStakingConvictionNFT.claim`, which runs
 the same claim as `claimFor`:
 
 | Node | Tokens | Scored epochs | Gas used | Smallest gas limit |
 |---|---|---|---|---|
-| 1 | 3, 5 | 133 | 12,517,944 | 12,716,878 |
-| 4 | 1 | 128 | 12,023,134 | 12,213,691 |
-| 5 | 4 | 125 | 11,745,370 | 11,931,905 |
-| 3 | 2, 6 | 117 | 11,150,542 | 11,327,166 |
-| 12 | 11 | 34 | 3,849,768 | 3,911,096 |
-| 13 | 10 | 14 | 2,114,950 | 2,148,110 |
-| 11 | 9 | 0 | 693,005 | 703,503 |
+| 3 | 2, 6 | 120 | 11,423,654 | 11,605,290 |
+| 1 | 3, 5 | 136 | 3,898,460 | 3,960,499 |
+| 12 | 11 | 34 | 3,862,557 | 3,923,904 |
+| 13 | 10 | 14 | 2,127,737 | 2,161,833 |
+| 11 | 9 | 0 | 705,790 | 717,227 |
+| 4 | 1 | 3 | 678,768 | 689,780 |
+| 5 | 4 | 3 | 678,768 | 689,780 |
 
 - For a node with two positions, the row gives the larger of the two.
-- Node 1, the longest history, had about 4.06M gas of room under the cap:
-  about 43 more scored epochs, at one epoch a day.
-- Its withdrawal, which claims first, took 12,838,278 gas, with a smallest gas
-  limit of 13,108,449.
+- Node 3, the heaviest first claim, had about 5.17M gas of room under the cap:
+  about 54 more scored epochs, at one epoch a day.
+- Claims on testnet have already split most of the epochs of nodes 1, 4 and 5,
+  so a first claim costs them less, whatever the position's history.
+- The withdrawal of token 5, the longest unclaimed history, which claims first,
+  took 4,121,684 gas, with a smallest gas limit of 4,229,476.
 
 ## 5. Upkeep
 
 Once the upgrade is live, the cron makes these calls from any funded wallet.
 All of them are permissionless.
 
-1. **`QueryInferenceSettlement.closeEpochs(maxSteps)`: new, and required at
-   least every 32 epochs.**
-   - A claim closes at most `maxCloseStepsPerClaim` epochs on its way (32 on
-     testnet). Once the close is further behind, every claim and withdrawal
-     reverts `QueryInferenceCloseBehind` until someone calls `closeEpochs`.
-   - Call it each epoch, after the epoch starts, with `maxSteps` of 32 or
-     more.
-   - Rehearsal: 94,695 gas for 1 epoch, and 1,455,412 gas for 34.
-2. `PublishingConviction.settleMany(accountIds)`, new in 10.2.0: each epoch,
+An epoch's money, its counted value and its pool are final as soon as it ends, so
+nothing has to run for the query/inference pool to pay: these calls only keep
+positions and accounts up to date.
+
+1. `PublishingConviction.settleMany(accountIds)`, new in 10.2.0: each epoch,
    over the Conviction Accounts.
    - It books every billing window that has closed. A window booked late keeps
      its curve, but the curve starts in the current epoch.
-   - Rehearsal: 235,237 gas for one account (`settle`).
-3. `QueryInferenceSettlement.finalizeClaims(refs)`, new: each epoch.
-   - In epoch e + 1, finalize the claims on the periods of epoch e, after
-     their batch deadline (the end of e plus the receipt grace, 3,600 s) and
-     before e + 1 ends. A seller's claim that is not finalized by the end of
-     e + 1 is void.
-   - The refs are the `(subscriptionId, bucketIndex, seller)` of the
-     `ReceiptsClaimed` events of e's periods.
-   - The transaction succeeds even when it finalizes nothing. A ref it cannot
-     finalize yet is skipped, with `ClaimSkipped(subscriptionId, bucketIndex,
-     seller, reason)`, and stays as it was. In particular,
-     `QueryInferenceSettlement` skips a claim with reason `NoScore` (7) while
-     the seller has no node score in the current epoch. So a run right after
-     the deadline, before the seller's first proof of e + 1, finalizes none of
-     that seller's claims.
-   - Check each ref's outcome in the receipt: `ClaimsFinalized`, or
-     `ClaimSkipped` and its reason. Retry the `NoScore` refs once the seller
-     has proved, before e + 1 ends. After that the claim is `Void`: a later
-     call skips it with that reason (5), and the seller's R for that work is
-     lost.
-   - Rehearsal: 294,488 gas for 4 claims, and 141,336 gas for a first call, in
-     e + 1 before the sellers' proofs, that skipped all 4 `NoScore`; the retry
-     after the proofs finalized them.
-4. `StakingV10.claimFor(tokenId)`: each position at least every 100 scored
-   epochs, so that no claim outgrows the 2^24 cap (step 4).
-5. `StakingV10.claimWithdrawnEpoch(tokenId)`, new in 10.1.0: for each
+   - Rehearsal: 194,964 gas for one account (`settle`).
+2. `StakingV10.claimFor(tokenId)`: each position at least every 100 scored
+   epochs, so that no claim outgrows the 2^24 cap (step 4). Many fit one
+   transaction through Multicall3 `aggregate3` with `allowFailure`, kept under
+   the cap by estimating the batch; rewards go to the positions, whoever calls.
+3. `StakingV10.claimWithdrawnEpoch(tokenId)`, new in 10.1.0: for each
    `WithdrawnEpochRecorded(tokenId, staker, epoch)` event, once that epoch has
    ended.
    - It pays the withdrawn position's share of the epoch that was in progress
      at its withdrawal, in TRAC, to the staker.
    - Before the epoch ends it reverts `WithdrawnEpochInProgress`; a second
      call reverts `NoWithdrawnEpoch`.
-   - Rehearsal: 156,546 gas.
+   - Rehearsal: 148,818 gas.
+
+Sellers land their own receipt batches. A batch counts when it lands, up to what
+the buyer's bucket has left, and the seller's node needs a score in the epoch
+first (`NoNodeScore`). A batch for a period of an epoch that has ended is refused
+(`GroupFault` with `OutsideEpoch`) and never counts, so a seller lands its last
+batch before the epoch ends. A group sets `minCounted`, so that it reverts rather
+than spend its nonces when the bucket has less left than that. With a `minCounted`
+of 0 it lands for whatever is left, even nothing, and its nonces stay spent.
+`bucketLeft` reads what the bucket has left, and a top-up adds to it.
 
 ## 6. Emergency: switching the pool off
 
@@ -288,7 +271,7 @@ nothing is stranded. The switch is the last resort, while no fix is ready.
 2. From the Hub owner's wallet, `Hub.removeContractByName("QueryInferenceSettlement")`:
    64,416 gas. Never `removeContractByAddress` (below).
 3. From the Hub owner's wallet,
-   `Hub.forwardCall(QueryInferenceStorage, setPaused(true))`: 40,978 gas.
+   `Hub.forwardCall(QueryInferenceStorage, setPaused(true))`: 40,968 gas.
 
 With the variables of step 3:
 
@@ -305,38 +288,37 @@ While it is off, as the rehearsal shows:
   through, and pay the publishing pool alone.
 - The removal alone leaves both wallet and Conviction Account funding open.
   The pause refuses both (`QueryInferencePaused`).
-- No receipt batch or finalization goes through, and no epoch closes:
-  `QueryInferenceStorage` refuses the removed settlement
-  (`UnauthorizedAccess`). `closedThrough` and the carry stay as they were.
+- No receipt batch goes through: `QueryInferenceStorage` refuses the removed
+  settlement (`UnauthorizedAccess`), and with the pause on, the pause refuses it
+  first (`QueryInferencePaused`). Every number of an ended epoch stays as it was.
 
 What the switch strands:
 
 - **Claims made while it is off lose the pool share for good.**
   - The first claim on a node splits each epoch of that node once, without the
-    pool, and every later claim on the node reuses that split, closed epochs
-    included.
+    pool, and every later claim on the node reuses that split.
   - `claimFor` is permissionless, so one claim by anyone strands the pool share
     of a whole node.
   - In the rehearsal, one claim on node 1 during the outage fixed node 1's net
     of the pool epoch without its pool gross of 2.331 TRAC. That claim itself
     paid 0.0519 TRAC less than the same claim with the switch on.
-- **Sellers lose R for work whose deadline passes during the outage.** No
-  batch can be submitted, and a seller's claim that is not finalized by the
-  end of its due epoch is void. The money is not lost: it carries forward.
+- **Sellers lose R for work whose epoch ends during the outage.** No batch can
+  be submitted, and a batch for an epoch that has ended never counts. The money
+  is not lost: an epoch with no value rolls it forward to the next with value.
 
 So keep the outage short.
 
 ### Switching on again
 
 1. Any wallet deploys a fresh `QueryInferenceSettlement`, with the Hub's
-   address as its only constructor argument: 3,791,511 gas.
+   address as its only constructor argument: 2,774,458 gas.
    - A fresh deployment registers whatever the Hub's order.
    - The removed address cannot be registered again if it was the Hub's last
      entry when it was removed (`AddressAlreadyInSet`). After any earlier
      re-registration it always is.
 2. From the Hub owner's wallet, one Hub transaction registers the fresh
    settlement, initializes it and unpauses the storage, the way 998 registers
-   contracts: 450,187 gas. Unpausing in the same transaction leaves no moment
+   contracts: 450,011 gas. Unpausing in the same transaction leaves no moment
    with funding open and no settlement registered.
 
    ```sh
@@ -347,16 +329,15 @@ So keep the outage short.
    cast send $HUB "$SIG" "${ARGS[@]}" --from $HUB_OWNER --ledger --gas-limit 600000 --rpc-url $RPC
    ```
 
-3. If more than 32 epochs passed, call `closeEpochs` before claims resume:
-   until then every claim reverts `QueryInferenceCloseBehind`.
+The fresh settlement reads the same `QueryInferenceStorage`, so every count, all
+the money and every ended epoch are kept, and nothing has to catch up. In the
+rehearsal:
 
-The fresh settlement reads the same `QueryInferenceStorage`, so the closes,
-the carry and every frozen epoch are kept. In the rehearsal:
-
-- closed through epoch 662 with a carry of 2 TRAC, before the switch, during
-  the outage and after it;
-- the next `closeEpochs` (94,688 gas) closed the epoch that ended during the
-  outage, with that carry carried in;
+- the pool epoch's pool and each seller's gross read the same before the switch,
+  during the outage and after it;
+- a batch whose epoch ended during the outage was refused (`OutsideEpoch`);
+- the next batch, on the fresh settlement, counted, and its epoch's pool took the
+  money that had rolled through the outage;
 - a claim on node 3 then split the pool epoch with node 3's pool share, while
   node 1's net of that epoch stayed without its 2.331 TRAC.
 
@@ -391,11 +372,9 @@ reverts.
   treasury is wired, `PublishingConviction` refuses every Conviction Account
   service draw (`ServiceFundingPausedTreasuryWired`), so Conviction Account
   funding of service periods would stop.
-- The receipt grace, `QueryInferenceStorage.receiptGraceSeconds` (3,600 s on
-  testnet), stays at or under half an epoch (an epoch is 86,400 s on
-  testnet). A period's batch deadline, its end plus the grace, has to fall in
-  the first half of its due epoch, so that its claims are finalized in the
-  second half. `setReceiptGraceSeconds` refuses more (`InvalidParameter`).
+- λ, `QueryInferenceStorage.lambdaBps` (5,000 on testnet), is taken by an epoch
+  when its first value counts, and kept. A change through `setLambdaBps` applies
+  to every epoch with no value yet, and moves no other.
 
 ## 8. After the deploy
 

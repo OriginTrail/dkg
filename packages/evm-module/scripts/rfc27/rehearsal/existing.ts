@@ -26,15 +26,28 @@ const ownerOf = (pos: Position[], tokenId: bigint): string => {
 const rangeText = (r: Range | undefined): string => (r ? `${fmt(r.amount)} TRAC over epochs ${r.start}..${r.end}` : 'none');
 
 /**
+ * What 10.0.8's settle of one account booked, as 10.2.0 books it in `epoch`: the
+ * same, except that a booking starting in an epoch that has ended keeps its shape,
+ * shifted to start in `epoch`. 10.0.8 could credit an ended epoch, which a claim
+ * that had already split it would never pay.
+ */
+export function bookedBy1020(credits: Range[], epoch: bigint): Range[] {
+  const start = credits.reduce((m, r) => (r.start < m ? r.start : m), epoch);
+  const shift = epoch - start;
+  return credits.map((r) => ({ start: r.start + shift, end: r.end + shift, amount: r.amount }));
+}
+
+/**
  * settleMany against what 10.0.8's settle booked, one account at a time in the
  * same order: the whole ordered ranges, since an amount in the wrong epoch changes
- * when stakers are paid, and the same accounts swept.
+ * when stakers are paid, each as 10.2.0 books it in `epoch`, and the same accounts
+ * swept.
  */
-export function checkSettleMany(report: Report, many: { credits: Range[]; swept: bigint[] }, old: PreRead['old']['settles']): void {
-  const want = old.flatMap((s) => s.stakerCredits);
+export function checkSettleMany(report: Report, many: { credits: Range[]; swept: bigint[] }, old: PreRead['old']['settles'], epoch: bigint): void {
+  const want = old.flatMap((s) => bookedBy1020(s.stakerCredits, epoch));
   const differs = [...want, ...many.credits].findIndex((_, i) => !sameRanges(want.slice(i, i + 1), many.credits.slice(i, i + 1)));
   report.check(
-    'settleMany books what 10.0.8 settle booked: the same amounts over the same epochs, in the same order',
+    'settleMany books what 10.0.8 settle booked: the same amounts over the same epochs, in the same order, a booking into an ended epoch shifted to the current one',
     sameRanges(many.credits, want),
     `${fmt(sum(many.credits.map((x) => x.amount)))} TRAC in ${many.credits.length} credits (10.0.8: ${fmt(sum(want.map((x) => x.amount)))} in ${want.length})` +
       (differs >= 0 ? `; credit ${differs}: ${rangeText(many.credits[differs])}, 10.0.8: ${rangeText(want[differs])}` : ''),
@@ -99,7 +112,7 @@ export async function phaseExisting(ctx: Ctx): Promise<void> {
   const many = await send(ctx, `settleMany(${expired.length} expired accounts)`, anyone, pcAddr, c.pc.interface.encodeFunctionData('settleMany', [expired]));
   const swept = eventsIn(many.receipt, c.pc, c.pc.getEvent('AccountFinalSwept')).map((e) => ({ id: e.accountId, topUp: e.topUpSwept }));
   const credits = stakerCredits(many.receipt, c);
-  checkSettleMany(report, { credits, swept: swept.map((x) => x.id) }, pre.old.settles);
+  checkSettleMany(report, { credits, swept: swept.map((x) => x.id) }, pre.old.settles, E);
   const before1008 = pre.accounts.filter((a) => a.createdBefore1008).map((a) => String(a.id));
   report.say(`accounts created before 10.0.8: ${before1008.join(', ') || 'none'}`);
 

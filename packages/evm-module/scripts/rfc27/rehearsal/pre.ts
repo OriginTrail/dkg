@@ -1,8 +1,10 @@
 // PHASE pre: the live contracts (PublishingConviction 10.0.8, StakingV10
 // 10.0.4, StakingKPI 10.0.2) before the upgrade, inside a snapshot that is
-// reverted: a scheduled account's publish, the settles, every position's
-// claim, and StakingKPI's nets, which the existing phase compares the upgraded
-// contracts with.
+// reverted: a scheduled account's publish, every position's claim, the settles,
+// and StakingKPI's nets, which the existing phase compares the upgraded contracts
+// with. The claims come before the expired accounts' settles: 10.0.8 can sweep a
+// late account's tail into an epoch that has ended, which 10.2.0 does not, so what
+// the claims pay would differ by that alone.
 
 import { Ctx, saveResults, send } from './context';
 import { claimAll, publishAs } from './operations';
@@ -43,6 +45,8 @@ export async function phasePre(ctx: Ctx): Promise<void> {
     const nft = await c.nft.getAddress();
     const settle = (id: bigint) => c.nft.interface.encodeFunctionData('settle', [id]);
     const settleScheduled = await send(ctx, `10.0.8 settle(${SCHEDULED_ACCOUNT})`, anyone, nft, settle(SCHEDULED_ACCOUNT));
+    const claims = await claimAll(ctx, pos, '10.0.4');
+    const netsAfterOldClaims = await storedNets(c, Object.keys(kpiBefore));
     const expired = accounts.filter((a) => !a.live).map((a) => a.id);
     const sources = await eventSources(ctx.hre);
     const settles: { id: bigint; stakerCredits: Range[]; events: string[] }[] = [];
@@ -50,8 +54,6 @@ export async function phasePre(ctx: Ctx): Promise<void> {
       const { receipt } = await send(ctx, `10.0.8 settle(${id})`, anyone, nft, settle(id));
       settles.push({ id, stakerCredits: stakerCredits(receipt, c), events: eventNamesIn(receipt, sources) });
     }
-    const claims = await claimAll(ctx, pos, '10.0.4');
-    const netsAfterOldClaims = await storedNets(c, Object.keys(kpiBefore));
     return { publish, settleScheduled: stakerCredits(settleScheduled.receipt, c), settles, claims, netsAfterOldClaims };
   });
   report.say('reverted');
