@@ -81,7 +81,7 @@ describe('prepared SPARQL graph scope', () => {
       'SELECT ?__dkgViewGraph ?s WHERE { ?s <urn:p> ?o }',
     );
     expect(wrapWithGraphValues(collisionScope, ['urn:g1', 'urn:g2']))
-      .toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+      .toMatchObject({ kind: 'ready' });
     const collisionFallback = rewriteGraphSet(
       collisionScope,
       ['urn:g1', 'urn:g2'],
@@ -90,12 +90,12 @@ describe('prepared SPARQL graph scope', () => {
     expect(collisionFallback.kind).toBe('ready');
 
     const compactCollisionScope = graphScope(
-      'SELECT ?n WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+      'SELECT ?n WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupGraph>0) }',
     );
     expect(wrapWithDeduplicatedGraphValues(
       compactCollisionScope,
       ['urn:g1', 'urn:g2'],
-    )).toMatchObject({ kind: 'unsupported', reason: 'helper-variable-collision' });
+    )).toMatchObject({ kind: 'ready' });
     const compactCollisionFallback = rewriteGraphSet(
       compactCollisionScope,
       ['urn:g1', 'urn:g2'],
@@ -103,12 +103,12 @@ describe('prepared SPARQL graph scope', () => {
     );
     expect(compactCollisionFallback.kind).toBe('ready');
     if (compactCollisionFallback.kind !== 'ready') {
-      throw new Error('expected compact helper collision to use a safe fallback');
+      throw new Error('expected a fresh private variable for the compact comparison');
     }
     expect(compactCollisionFallback.value.source)
-      .toContain('FILTER(?n<100&&?__dkgDedupRank>0)');
+      .toContain('BIND((?n<100&&?__dkgDedupGraph>0) AS');
     expect(compactCollisionFallback.value.source)
-      .not.toContain('VALUES (?__dkgDedupGraph ?__dkgDedupRank)');
+      .not.toMatch(/VALUES \?__dkgDedupGraph\s/);
 
     const graphlessDescribe = rewriteGraphSet(
       graphScope('DESCRIBE <urn:s> LIMIT 10'),
@@ -287,7 +287,7 @@ describe('graph-scope engine integration', () => {
     expect(escaped.bindings.map((binding) => binding['s']).sort())
       .toEqual(equivalent.bindings.map((binding) => binding['s']).sort());
     expect(escaped.bindings.every((binding) => Object.keys(binding).join() === 's')).toBe(true);
-    expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
+    expect(queries.some((query) => /VALUES \?__dkgDedupGraph\s/.test(query))).toBe(false);
   });
 
   it('does not alias a compact-comparison caller variable to the dedup helper', async () => {
@@ -311,14 +311,14 @@ describe('graph-scope engine integration', () => {
     ]);
 
     const result = await engine.query(
-      'SELECT ?s WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupRank>0) }',
+      'SELECT ?s WHERE { ?s <urn:p> ?n . FILTER(?n<100&&?__dkgDedupGraph>0) }',
       { contextGraphId: CG, view: 'verifiable-memory' },
     );
 
     expect(result.bindings).toEqual([]);
-    expect(queries.some((query) => query.includes('FILTER(?n<100&&?__dkgDedupRank>0)')))
+    expect(queries.some((query) => query.includes('BIND((?n<100&&?__dkgDedupGraph>0) AS')))
       .toBe(true);
-    expect(queries.some((query) => query.includes('VALUES (?__dkgDedupGraph'))).toBe(false);
+    expect(queries.some((query) => /VALUES \?__dkgDedupGraph\s/.test(query))).toBe(false);
   });
 
   it('does not alias a UCHAR-spelled caller variable to the view helper', async () => {
@@ -349,7 +349,7 @@ describe('graph-scope engine integration', () => {
     expect(escaped.bindings.map((binding) => binding['s']).sort())
       .toEqual(equivalent.bindings.map((binding) => binding['s']).sort());
     expect(escaped.bindings.every((binding) => Object.keys(binding).join() === 's')).toBe(true);
-    expect(queries.some((query) => query.includes('VALUES ?__dkgViewGraph'))).toBe(false);
+    expect(queries.some((query) => /VALUES \?__dkgViewGraph\s/.test(query))).toBe(false);
   });
 
   it('scopes a single graph when the WHERE braces use UCHAR source spans', async () => {
