@@ -14,7 +14,7 @@
   border: 0;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: var(--fs-body);
   line-height: 1;
   border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   cursor: pointer;
@@ -55,7 +55,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 4px;
@@ -67,7 +67,7 @@
   background: transparent;
   border: 0;
   text-align: left;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
   border-radius: var(--radius-xs);
   cursor: pointer;
@@ -137,7 +137,7 @@
 }
 .v10-select-caret {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   transition: transform var(--motion-base);
 }
@@ -164,7 +164,7 @@
 }
 .v10-select-option {
   padding: 8px 10px;
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-primary);
   border-radius: var(--radius-xs);
   cursor: pointer;
@@ -254,7 +254,7 @@
      AA fail surfaced by PR4: tertiary clears only 2.31-2.66:1 against
      bg-panel; secondary clears 5.58/7.17. UI-lead Task #68. */
   margin-top: 4px;
-  font-size: 10px;
+  font-size: var(--fs-micro);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   /* Hidden by default, revealed on message hover/focus — same recipe
@@ -284,7 +284,7 @@
 }
 .v10-local-agent-warning {
   padding: var(--pad-nested);
-  font-size: 11px;
+  font-size: var(--fs-label);
   line-height: var(--lh-body);
   border: 1px solid var(--border-default);
 }
@@ -299,13 +299,13 @@
   border-color: color-mix(in srgb, var(--accent-amber) 28%, var(--border-subtle));
 }
 .v10-local-agent-copy {
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   line-height: var(--lh-body);
 }
 .v10-local-agent-target-label {
-  font-size: 11px;
-  letter-spacing: 0.08em;
+  font-size: var(--fs-label);
+  letter-spacing: var(--ls-caps);
   text-transform: uppercase;
   color: var(--text-tertiary);
   flex-shrink: 0;

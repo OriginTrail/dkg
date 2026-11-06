@@ -12,7 +12,7 @@
 }
 .v10-session-item:hover { background: var(--bg-hover); }
 .v10-session-preview {
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   flex: 1;
   white-space: nowrap;
@@ -22,7 +22,7 @@
 }
 .v10-session-count {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   flex-shrink: 0;
 }

@@ -552,7 +552,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                   ))}
                 </tbody>
               </table></div>
-              <div style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
+              <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', padding: '6px 8px' }}>
                 {Math.min(entityTriples.length, 50)} of {entityTriples.length} triples shown
               </div>
             </div>
@@ -610,7 +610,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
           {/* Trust Summary */}
           <div style={{ marginTop: 16, padding: '10px 12px', borderRadius: 'var(--radius-control)', background: 'var(--bg-surface)', border: '1px solid var(--border-subtle)' }}>
             <div className="v10-ka-section-title" style={{ marginBottom: 6 }}>Entity summary</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 'var(--fs-micro)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ color: 'var(--text-tertiary)' }}>Type</span>
                 <span style={{ color: 'var(--text-primary)', fontWeight: 600, fontFamily: 'var(--font-mono)' }}>{type}</span>

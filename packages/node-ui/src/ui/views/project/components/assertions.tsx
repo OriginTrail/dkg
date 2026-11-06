@@ -208,7 +208,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
             className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
@@ -224,7 +224,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {result && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: resultWarn ? 'var(--text-warning)' : 'var(--text-success)' }}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: resultWarn ? 'var(--text-warning)' : 'var(--text-success)' }}
         >
           <StatusGlyph tone={resultWarn ? 'warning' : 'success'} /> {result}
         </div>
@@ -232,7 +232,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {error && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}
         >
           <StatusGlyph tone="danger" /> {error}
         </div>
@@ -241,11 +241,11 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
           <span className="v10-item-icon"><FileText size={14} /></span>
           <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
+            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}>{a.name}</div>
             {a.reservedUal && (
               <div
                 className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
                 title={a.reservedUal}
               >
                 {a.reservedUal}

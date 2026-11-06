@@ -170,7 +170,7 @@ function TransactionsContent() {
 
   if (ops.length === 0) {
     return (
-      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 12 }}>
+      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
         No publish, update, or verify activity in the last 6 hours.
       </div>
     );
@@ -178,7 +178,7 @@ function TransactionsContent() {
 
   return (
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--fs-label)' }}>
         <thead>
           <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left' }}>
             <th className="ds-table-head" style={{ padding: '6px 12px' }}>Type</th>
@@ -208,7 +208,7 @@ function TransactionsContent() {
                   </td>
                   <td style={{ padding: '7px 12px' }}>
                     <span style={{
-                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
+                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                       background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
                       color: op.status === 'success' ? 'var(--text-success)' : op.status === 'error' ? 'var(--text-danger)' : 'var(--accent-amber)',
                     }}>{op.status}</span>
@@ -235,7 +235,7 @@ function TransactionsContent() {
                 {isExp && (
                   <tr style={{ background: 'var(--shade)' }}>
                     <td colSpan={6} style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 11, color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
                         <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
                         {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
                         {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
@@ -245,7 +245,7 @@ function TransactionsContent() {
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {op.phases.map((p: any) => (
                             <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
+                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                               background: 'var(--tint-strong)', color: 'var(--text-secondary)',
                             }}>
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}

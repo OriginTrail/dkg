@@ -57,7 +57,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-label` | 11 | Badges, table headers, metadata |
 | `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
 
-Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
+Type sizes are whole pixels, here and in nOS. Every size is one of these tokens; weights are 400, 500, 600 and 700. Uppercase text uses `--ls-caps`, and other text has no tracking. Large numbers use `--fs-display`. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
 
 ## Shape and size
 

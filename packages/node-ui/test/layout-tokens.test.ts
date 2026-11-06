@@ -16,6 +16,8 @@ const matches = (list: string[], pattern: RegExp, keep: (m: RegExpMatchArray) =>
   [...strip(readFileSync(file, 'utf8')).matchAll(pattern)].filter(keep).map((m) => `${relative(UI, file)}: ${m[0].slice(0, 70)}`)
 ));
 
+const INLINE_FONT_SIZES = 0; // Canvas options take numbers and sit outside style attributes.
+
 describe('layout tokens', () => {
   it('uses a layer token for anything above 10', () => {
     expect(matches(css, /z-index:\s*(\d+)/g, (m) => Number(m[1]) > 10)).toEqual([]);
@@ -29,6 +31,18 @@ describe('layout tokens', () => {
 
   it('times transitions with the motion tokens', () => {
     expect(matches(css, /transition(?:-duration)?:[^;}]*?(?<![\w.-])\d*\.?\d+m?s\b[^;}]*/g, (m) => !/\.01ms/.test(m[0]))).toEqual([]);
+  });
+
+  it('sets type from the tokens', () => {
+    const sheets = css.filter((f) => !f.endsWith('00-theme.css'));
+    expect(matches(sheets, /font-size:\s*\d+px/g)).toEqual([]);
+    expect(matches(sheets, /font-weight:\s*(\d+)/g, (m) => !['400', '500', '600', '700'].includes(m[1]!))).toEqual([]);
+    expect(matches(sheets, /letter-spacing:\s*([^;}\s]+)/g, (m) => m[1] !== '0' && m[1] !== 'var(--ls-caps)')).toEqual([]);
+  });
+
+  // Inline sizes in style attributes. Only ever lower this.
+  it('does not add inline font sizes', () => {
+    expect(matches(tsx, /style=\{\{[^}]*\bfontSize:\s*\d/g).length).toBeLessThanOrEqual(INLINE_FONT_SIZES);
   });
 
   it('sets line height from the scale', () => {

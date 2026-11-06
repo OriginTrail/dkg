@@ -175,10 +175,10 @@ function LayerActionShell({ title, footnote, context, result, warn = false, erro
   return (
     <GenWidget title={title} footnote={footnote}>
       <div className="v10-decision-context" style={{ marginBottom: 10 }}>{context}</div>
-      {result && <div data-testid="layer-action-result" style={{ fontSize: 11, color: warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}><StatusGlyph tone={warn ? 'warning' : 'success'} /> {result}</div>}
+      {result && <div data-testid="layer-action-result" style={{ fontSize: 'var(--fs-label)', color: warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}><StatusGlyph tone={warn ? 'warning' : 'success'} /> {result}</div>}
       {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
           successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
-      {error && <div data-testid="layer-action-error" style={{ fontSize: 11, color: 'var(--text-danger)', marginBottom: 8 }}><StatusGlyph tone="danger" /> {error}</div>}
+      {error && <div data-testid="layer-action-error" style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', marginBottom: 8 }}><StatusGlyph tone="danger" /> {error}</div>}
       {extras}
       <div className="v10-decision-actions">{children}</div>
     </GenWidget>
@@ -368,7 +368,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
     <div
       // #1464 — success vs failure must not collide on one testid (see LayerActionShell).
       data-testid={lastAction.ok ? 'layer-action-result' : 'layer-action-error'}
-      style={{ fontSize: 11, color: !lastAction.ok ? 'var(--text-danger)' : lastAction.warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}
+      style={{ fontSize: 'var(--fs-label)', color: !lastAction.ok ? 'var(--text-danger)' : lastAction.warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}
     >
       <StatusGlyph tone={!lastAction.ok ? 'danger' : lastAction.warn ? 'warning' : 'success'} /> {lastAction.text}
     </div>

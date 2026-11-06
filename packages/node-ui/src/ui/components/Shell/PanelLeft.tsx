@@ -163,16 +163,16 @@ function IntegrationsSectionBody() {
 
   return (
     <div className="v10-tree-items" style={{ display: 'block' }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+      <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 11, color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}
       {!localAgentsError && localAgents.length === 0 && (
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
           No agents detected.
         </div>
       )}
@@ -194,7 +194,7 @@ function IntegrationsSectionBody() {
             }}
           />
           <span className="v10-tree-item-label">{a.name}</span>
-          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 4 }}>
+          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
             {a.statusLabel}
           </span>
         </div>
@@ -449,7 +449,7 @@ export function PanelLeft() {
             </>
           )}
           {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', lineHeight: 'var(--lh-body)' }}>
+            <p style={{ fontSize: 'var(--fs-control)', color: 'var(--text-tertiary)', padding: '20px 12px', lineHeight: 'var(--lh-body)' }}>
               No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
             </p>
           )}
