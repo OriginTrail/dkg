@@ -1,7 +1,9 @@
-// Shared set-up for the Conviction Account service spending tests (OT-RFC-27):
-// Hub registration of ConvictionServiceStorage and ServiceSubscriptions, the
-// EIP-712 ServiceAssignment consent, funding requests, a model of the label
-// basis, and synthetic accounts from before the schedule cut-over.
+// Shared set-up for the subscription tests (OT-RFC-27): Hub
+// registration of QueryInferenceStorage, ServiceSubscriptionsStorage,
+// ServiceSubscriptions, ServiceSubscriptionsWallet and
+// QueryInferenceSettlement, the EIP-712 BuyerGrant consent, funding
+// requests for one-epoch subscriptions, and synthetic accounts that an older build
+// created.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { ethers } from 'ethers';
@@ -9,13 +11,15 @@ import hre from 'hardhat';
 
 import {
   Chronos,
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   DKGPublishingConvictionNFT,
   Hub,
   PublishingConvictionStorage,
+  QueryInferenceSettlement,
+  QueryInferenceStorage,
   ServiceSubscriptions,
+  ServiceSubscriptionsWallet,
 } from '../../typechain';
-import { PoolModel, prorateActiveSink } from './emission-model';
 
 export const TRAC = 10n ** 18n;
 export const DAY = 86_400n;
@@ -41,60 +45,76 @@ export const ACCOUNT_STACK_TAGS = [
   'StakingV10',
 ];
 
-/**
- * Deploy ConvictionServiceStorage and ServiceSubscriptions and register both in
- * the Hub's contract set, as the development deploy helper does: the Hub
- * registration, then `initialize()` through `Hub.forwardCall`. The storage
- * comes first, because ServiceSubscriptions wires it at initialization.
- */
-export async function registerServiceContracts(hub: Hub): Promise<{
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-}> {
-  const hubAddress = await hub.getAddress();
-
-  const CSS = (await (
-    await hre.ethers.getContractFactory('ConvictionServiceStorage')
-  ).deploy(hubAddress)) as unknown as ConvictionServiceStorage;
-  await CSS.waitForDeployment();
-  await hub.setContractAddress('ConvictionServiceStorage', await CSS.getAddress());
-  await hub.forwardCall(await CSS.getAddress(), CSS.interface.encodeFunctionData('initialize'));
-
-  const SS = (await (
-    await hre.ethers.getContractFactory('ServiceSubscriptions')
-  ).deploy(hubAddress)) as unknown as ServiceSubscriptions;
-  await SS.waitForDeployment();
-  await hub.setContractAddress('ServiceSubscriptions', await SS.getAddress());
-  await hub.forwardCall(await SS.getAddress(), SS.interface.encodeFunctionData('initialize'));
-
-  return { CSS, SS };
+/** Deploy `name`, register it in the Hub's contract set and run `initialize()` through `Hub.forwardCall`. */
+async function registerOne<T>(hub: Hub, name: string): Promise<T> {
+  const contract = await (await hre.ethers.getContractFactory(name)).deploy(await hub.getAddress());
+  await contract.waitForDeployment();
+  const address = await contract.getAddress();
+  await hub.setContractAddress(name, address);
+  await hub.forwardCall(address, contract.interface.encodeFunctionData('initialize'));
+  return contract as unknown as T;
 }
 
-/** Set the schedule cut-over through Hub.forwardCall; defaults to the latest block time. */
-export async function setExactScheduleFrom(
+/**
+ * Deploy QueryInferenceStorage, ServiceSubscriptionsStorage and
+ * ServiceSubscriptions (and, with `wallet`, ServiceSubscriptionsWallet, which
+ * needs the Token and the vault in the Hub; with `settlement`,
+ * QueryInferenceSettlement, which needs the identity, profile, sharding-table,
+ * random-sampling, staking and parameters storages there) and register each in
+ * the Hub's contract set, as the development deploy does: the Hub
+ * registration, then `initialize()` through `Hub.forwardCall`. The storages
+ * come first, because the logic contracts wire them at initialization.
+ *
+ * As the development deploy does, it also sets the activation epoch to the
+ * current epoch, so subscriptions can be funded at once; `activate: false` leaves it
+ * unset. The pool activates only once a settlement over it is registered and
+ * the Hub's StakingV10 reads it through that settlement
+ * (`QueryInferenceStorage.setActivationEpoch`), so activating registers the
+ * settlement too, last, and needs the staking stack in the Hub.
+ */
+export async function registerServiceContracts(
   hub: Hub,
-  css: ConvictionServiceStorage,
-  timestamp?: bigint,
-): Promise<bigint> {
-  const ts = timestamp ?? BigInt((await hre.ethers.provider.getBlock('latest'))!.timestamp);
-  await hub.forwardCall(await css.getAddress(), css.interface.encodeFunctionData('setExactScheduleFrom', [ts]));
-  return ts;
+  opts: { activate?: boolean; wallet?: boolean; settlement?: boolean } = {},
+): Promise<{
+  QIS: QueryInferenceStorage;
+  SSS: ServiceSubscriptionsStorage;
+  SS: ServiceSubscriptions;
+  SSW?: ServiceSubscriptionsWallet;
+  QS?: QueryInferenceSettlement;
+}> {
+  const activate = opts.activate !== false;
+  const QIS = await registerOne<QueryInferenceStorage>(hub, 'QueryInferenceStorage');
+  const SSS = await registerOne<ServiceSubscriptionsStorage>(hub, 'ServiceSubscriptionsStorage');
+  const SS = await registerOne<ServiceSubscriptions>(hub, 'ServiceSubscriptions');
+  const SSW = opts.wallet ? await registerOne<ServiceSubscriptionsWallet>(hub, 'ServiceSubscriptionsWallet') : undefined;
+  const QS =
+    opts.settlement || activate
+      ? await registerOne<QueryInferenceSettlement>(hub, 'QueryInferenceSettlement')
+      : undefined;
+  if (activate) await activateQueryInference(hub, QIS);
+  return { QIS, SSS, SS, SSW, QS };
+}
+
+/** Set QueryInferenceStorage's activation epoch through Hub.forwardCall; defaults to the current epoch. */
+export async function activateQueryInference(hub: Hub, qis: QueryInferenceStorage, epoch?: bigint): Promise<bigint> {
+  const chronos = (await hre.ethers.getContractAt(
+    'Chronos',
+    await hub.getContractAddress('Chronos'),
+  )) as unknown as Chronos;
+  const e = epoch ?? (await chronos.getCurrentEpoch());
+  await hub.forwardCall(await qis.getAddress(), qis.interface.encodeFunctionData('setActivationEpoch', [e]));
+  return e;
 }
 
 // ---------------------------------------------------------------------------
 // EIP-712 consent
 // ---------------------------------------------------------------------------
 
-export const SERVICE_ASSIGNMENT_TYPES = {
-  ServiceAssignment: [
+export const BUYER_GRANT_TYPES = {
+  BuyerGrant: [
     { name: 'accountId', type: 'uint256' },
-    { name: 'assignee', type: 'address' },
-    { name: 'maxCostPerPeriod', type: 'uint96' },
-    { name: 'maxInferenceCostPerPeriod', type: 'uint96' },
-    { name: 'maxQueryCostPerPeriod', type: 'uint96' },
-    { name: 'maxCostPerWindow', type: 'uint96' },
-    { name: 'maxTotalCost', type: 'uint96' },
-    { name: 'maxPeriodSeconds', type: 'uint32' },
+    { name: 'buyer', type: 'address' },
+    { name: 'maxCostPerEpoch', type: 'uint96' },
     { name: 'expiresAt', type: 'uint40' },
     { name: 'nonce', type: 'uint64' },
   ],
@@ -102,26 +122,16 @@ export const SERVICE_ASSIGNMENT_TYPES = {
 
 export type Terms = {
   accountId: bigint;
-  assignee: string;
-  maxCostPerPeriod: bigint;
-  maxInferenceCostPerPeriod: bigint;
-  maxQueryCostPerPeriod: bigint;
-  maxCostPerWindow: bigint;
-  maxTotalCost: bigint;
-  maxPeriodSeconds: bigint;
+  buyer: string;
+  maxCostPerEpoch: bigint;
   expiresAt: bigint;
   nonce: bigint;
 };
 
-export type Caps = Omit<Terms, 'accountId' | 'assignee' | 'nonce'>;
+export type BuyerLimits = Omit<Terms, 'accountId' | 'buyer' | 'nonce'>;
 
-export const capsOf = (t: Terms): Caps => ({
-  maxCostPerPeriod: t.maxCostPerPeriod,
-  maxInferenceCostPerPeriod: t.maxInferenceCostPerPeriod,
-  maxQueryCostPerPeriod: t.maxQueryCostPerPeriod,
-  maxCostPerWindow: t.maxCostPerWindow,
-  maxTotalCost: t.maxTotalCost,
-  maxPeriodSeconds: t.maxPeriodSeconds,
+export const limitsOf = (t: Terms): BuyerLimits => ({
+  maxCostPerEpoch: t.maxCostPerEpoch,
   expiresAt: t.expiresAt,
 });
 
@@ -129,7 +139,7 @@ export type Domain = { name: string; version: string; chainId: bigint; verifying
 
 export async function domainOf(ss: ServiceSubscriptions): Promise<Domain> {
   return {
-    name: 'DKGConvictionServices',
+    name: 'DKGServiceSubscriptions',
     version: '1',
     chainId: (await hre.ethers.provider.getNetwork()).chainId,
     verifyingContract: await ss.getAddress(),
@@ -143,7 +153,7 @@ export async function signTerms(
   terms: Terms,
   domain?: Domain,
 ): Promise<string> {
-  return signer.signTypedData(domain ?? (await domainOf(ss)), SERVICE_ASSIGNMENT_TYPES, terms);
+  return signer.signTypedData(domain ?? (await domainOf(ss)), BUYER_GRANT_TYPES, terms);
 }
 
 const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
@@ -166,44 +176,55 @@ export function compact(signature: string): string {
 // Funding requests
 // ---------------------------------------------------------------------------
 
-export type Bucket = { bucketId: string; serviceClass: bigint; value: bigint; maxAskWeiPerUnit: bigint };
+export type ServiceBudget = { serviceId: string; serviceClass: bigint; value: bigint; maxPricePerUnit: bigint };
 
 export type Request = {
   accountId: bigint;
-  periodId: string;
+  epoch: bigint;
   sessionKey: string;
-  periodSeconds: bigint;
   planDigest: string;
-  buckets: Bucket[];
+  budgets: ServiceBudget[];
 };
 
-/** A bucket id that sorts by `rank`, so tests can order buckets explicitly. */
-export const bucketId = (rank: number): string => ethers.toBeHex(BigInt(rank) + 1n, 32);
+/** A wallet funding request: an account's request without the account. */
+export type WalletRequest = Omit<Request, 'accountId'>;
 
-export const bucket = (
+/** A budget id that sorts by `rank`, so tests can order budgets explicitly. */
+export const serviceId = (rank: number): string => ethers.toBeHex(BigInt(rank) + 1n, 32);
+
+export const budget = (
   rank: number,
   serviceClass: bigint,
   value: bigint,
-  maxAskWeiPerUnit: bigint = 10n ** 12n,
-): Bucket => ({ bucketId: bucketId(rank), serviceClass, value, maxAskWeiPerUnit });
+  maxPricePerUnit: bigint = 10n ** 12n,
+): ServiceBudget => ({ serviceId: serviceId(rank), serviceClass, value, maxPricePerUnit });
 
 export const SESSION_KEY = ethers.getAddress('0x00000000000000000000000000000000005e5510');
 
-let periodCounter = 0;
+let planCounter = 0;
 
-/** A one-bucket inference request with a fresh period id. */
-export function requestOf(accountId: bigint, overrides: Partial<Request> = {}): Request {
-  periodCounter += 1;
+/** A one-budget inference request for the subscription of `epoch`, with a fresh plan digest. */
+export function requestOf(accountId: bigint, epoch: bigint, overrides: Partial<Request> = {}): Request {
+  planCounter += 1;
   return {
     accountId,
-    periodId: ethers.id(`period-${periodCounter}`),
+    epoch,
     sessionKey: SESSION_KEY,
-    periodSeconds: 7n * DAY,
-    planDigest: ethers.id(`plan-${periodCounter}`),
-    buckets: [bucket(0, CLASS_INFERENCE, 10n * TRAC)],
+    planDigest: ethers.id(`plan-${planCounter}`),
+    budgets: [budget(0, CLASS_INFERENCE, 10n * TRAC)],
     ...overrides,
   };
 }
+
+/** A one-budget inference wallet request for the subscription of `epoch`. */
+export function walletRequestOf(epoch: bigint, overrides: Partial<WalletRequest> = {}): WalletRequest {
+  const { accountId: _accountId, ...rest } = requestOf(0n, epoch, overrides);
+  return rest;
+}
+
+/** The id of the subscription `buyer` funds for `epoch`: keccak256(abi.encode(buyer, epoch)). */
+export const subscriptionIdOf = (buyer: string, epoch: bigint): string =>
+  ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['address', 'uint256'], [buyer, epoch]));
 
 /** The discounted cost of a value, with the 1-wei floor, as publishing computes it. */
 export const costOf = (value: bigint, bps: bigint): bigint => {
@@ -216,70 +237,7 @@ export const costOf = (value: bigint, bps: bigint): bigint => {
 export const valueFor = (cost: bigint, bps: bigint): bigint => (cost * BPS + (BPS - bps) - 1n) / (BPS - bps);
 
 // ---------------------------------------------------------------------------
-// The label basis
-// ---------------------------------------------------------------------------
-
-/**
- * The emission per epoch of an account whose window w spreads `amounts[w]`
- * forward from its close, as the schedule written at creation or migration
- * does: prorateActiveSink over the lock, anchored at each window's close. With
- * a carry of 0 every range divides exactly, so this is S(e).
- */
-export async function emissionOfWindows(opts: {
-  chronos: Chronos;
-  amounts: bigint[];
-  createdAt: bigint;
-  lock: bigint;
-  epLen: bigint;
-}): Promise<Map<bigint, bigint>> {
-  const model = new PoolModel(0n);
-  for (let w = 0n; w < opts.lock; w++) {
-    const amount = opts.amounts[Number(w)];
-    if (amount === 0n) continue;
-    const fromTs = opts.createdAt + (w + 1n) * opts.epLen;
-    const anchor = await opts.chronos.epochAtTimestamp(fromTs);
-    const timeRemaining = (await opts.chronos.timestampForEpoch(anchor + 1n)) - fromTs;
-    for (const r of prorateActiveSink(amount, anchor, opts.lock, opts.epLen, timeRemaining)) model.add(r);
-  }
-  return model.perEpoch;
-}
-
-/**
- * The window amounts of the label basis. An account created at or after the
- * cut-over has its window budget in every window; an older one has 0 for a
- * window that closed by the cut-over and the budget less what publishing drew
- * (window spend less service spend) for any other, rounded down to a multiple
- * of the lock. The last window also carries the `committed mod lock` dust.
- */
-export function basisAmounts(opts: {
-  committed: bigint;
-  lock: bigint;
-  epLen: bigint;
-  createdAt: bigint;
-  cutOver: bigint;
-  published?: (w: bigint) => bigint;
-}): bigint[] {
-  const budget = opts.committed / opts.lock;
-  const dust = opts.committed - budget * opts.lock;
-  const exact = opts.createdAt >= opts.cutOver;
-  const out: bigint[] = [];
-  for (let w = 0n; w < opts.lock; w++) {
-    let amount = 0n;
-    if (exact) {
-      amount = budget;
-    } else if (opts.createdAt + (w + 1n) * opts.epLen > opts.cutOver) {
-      const published = opts.published ? opts.published(w) : 0n;
-      amount = budget > published ? budget - published : 0n;
-    }
-    if (w === opts.lock - 1n) amount += dust;
-    if (!exact) amount -= amount % opts.lock;
-    out.push(amount);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// Accounts from before the schedule cut-over
+// Accounts an older build created
 // ---------------------------------------------------------------------------
 
 let ownersSlot: bigint | undefined;
@@ -299,12 +257,12 @@ async function nftOwnersSlot(): Promise<bigint> {
 }
 
 /**
- * Write an account record the way an older build left it: created at
- * `createdAt`, with `lastSettledWindow` windows already swept under the old
- * per-window rules and `spent` drawn per window, but no up-front schedule. The
+ * Write an account record the way a build older than 10.0.8 left it: created
+ * at `createdAt`, with `lastSettledWindow` windows already swept under that
+ * build's per-window rules and `spent` used (and booked) per window. The
  * record goes straight into PublishingConvictionStorage (the Hub owner passes
  * its `onlyContracts`), and the NFT's ERC-721 owner slot is set to `owner`, so
- * the account has an owner without the creation path that would schedule it.
+ * the account has an owner without the creation path.
  */
 export async function writeLegacyAccount(opts: {
   pcs: PublishingConvictionStorage;

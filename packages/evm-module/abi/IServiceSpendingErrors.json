@@ -1,0 +1,29 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "EmissionAlreadyScheduled",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "treasury",
+        "type": "address"
+      }
+    ],
+    "name": "ServiceFundingPausedTreasuryWired",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroServiceValue",
+    "type": "error"
+  }
+]
