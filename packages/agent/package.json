@@ -190,7 +190,12 @@
     "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
     "./dist/rfc64/inventory-v1/schema-migrations.js": null,
     "./dist/rfc64/inventory-v1/pre-migration-copy.js": null,
-    "./dist/rfc64/inventory-v1/rollback.js": null
+    "./dist/rfc64/inventory-v1/rollback.js": null,
+    "./context-graph-list-budget-error": {
+      "types": "./dist/context-graph-list-budget-error.d.ts",
+      "import": "./dist/context-graph-list-budget-error.js",
+      "default": "./dist/context-graph-list-budget-error.js"
+    }
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
