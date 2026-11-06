@@ -36,7 +36,7 @@
   color: var(--text-primary);
 }
 .v10-pca-coverage-summary {
-  padding: 14px 0 var(--space-4);
+  padding: var(--space-16) 0 var(--space-4);
   border-top: 1px solid var(--border-subtle);
 }
 .v10-pca-overview-cta-group {
@@ -53,7 +53,7 @@
   flex-direction: column;
   gap: var(--space-6);
   max-width: 680px;
-  margin-top: 10px;
+  margin-top: var(--space-8);
 }
 .v10-pca-coverage-summary .v10-pca-wallet-list {
   display: grid;
@@ -87,21 +87,21 @@
 .v10-pca-card-owner-note { font-size: var(--fs-label); color: var(--text-tertiary); margin: var(--space-4) 0 0; line-height: var(--lh-body); }
 .v10-pca-card-explorer { color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); text-underline-offset: 3px; font-size: var(--fs-body); }
 .v10-pca-card-warn {
-  margin: 10px 0 0;
+  margin: var(--space-8) 0 0;
   padding: var(--pad-nested-sm);
   font-size: var(--fs-label);
   line-height: var(--lh-body);
   color: var(--text-warning);
   background: var(--warning-bg);
 }
-.v10-pca-card-meta { font-size: var(--fs-label); color: var(--text-secondary); margin: 10px 0 0; }
+.v10-pca-card-meta { font-size: var(--fs-label); color: var(--text-secondary); margin: var(--space-8) 0 0; }
 .v10-pca-card-meta-sep { color: var(--text-ghost); }
-.v10-pca-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-top: 14px; }
+.v10-pca-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); margin-top: var(--space-12); }
 .v10-pca-owned-groups,
 .v10-pca-account-group {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-12);
 }
 .v10-pca-account-group + .v10-pca-account-group { margin-top: var(--space-16); }
 .v10-pca-account-group-head {
@@ -130,7 +130,7 @@
   text-decoration: underline;
 }
 .v10-pca-inline-btn:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
-.v10-pca-card-error { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-control); color: var(--text-secondary); }
+.v10-pca-card-error { display: flex; flex-direction: column; gap: var(--space-8); font-size: var(--fs-control); color: var(--text-secondary); }
 .v10-pca-card-skeleton { min-height: 180px; opacity: 0.5; }
 
 /* ----- Track-by-id disclosure ----- */

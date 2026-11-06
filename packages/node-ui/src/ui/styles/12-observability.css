@@ -42,7 +42,7 @@ p { font-size: var(--fs-body); color: var(--text-secondary); line-height: var(--
 /* Form inputs and selects */
 .input {
   height: var(--h-control-md);
-  padding: var(--space-6) 10px;
+  padding: var(--space-6) var(--space-12);
   font-size: var(--fs-control);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
@@ -77,14 +77,14 @@ select.input {
 }
 .data-table th:not(.ds-num) { text-align: left; }
 .data-table th {
-  padding: var(--space-8) 14px;
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   white-space: nowrap;
   background: var(--bg-panel);
 }
 .data-table td {
   font-variant-numeric: tabular-nums;
-  padding: var(--space-8) 14px;
+  padding: var(--space-8) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-primary);
   vertical-align: middle;
@@ -191,7 +191,7 @@ select.input {
   color: var(--text-primary);
   margin-bottom: var(--space-4);
 }
-.settings-node-status { padding: 10px 14px; }
+.settings-node-status { padding: var(--pad-nested); }
 
 /* ── Observability page ─────────────────────────────────────────────────────
    Everything Operations.tsx draws. Values that come from data (the colour of

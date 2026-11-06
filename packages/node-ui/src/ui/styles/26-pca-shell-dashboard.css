@@ -4,9 +4,9 @@
 .v10-ws-pca {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   margin-top: var(--space-12);
-  padding-top: 10px;
+  padding-top: var(--space-12);
   border-top: 1px solid var(--border-subtle);
   flex-wrap: wrap;
 }

@@ -54,7 +54,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  padding: var(--space-8) 10px;
+  padding: var(--pad-nested-sm);
   font-size: var(--fs-label);
   color: var(--text-secondary);
   border-bottom: 1px solid var(--border-subtle);
@@ -63,7 +63,7 @@
 .v10-agent-tab-menu-item {
   display: block;
   width: 100%;
-  padding: var(--space-8) 10px;
+  padding: var(--pad-nested-sm);
   background: transparent;
   border: 0;
   text-align: left;
@@ -163,7 +163,7 @@
   margin-top: var(--space-4);
 }
 .v10-select-option {
-  padding: var(--space-8) 10px;
+  padding: var(--pad-nested-sm);
   font-size: var(--fs-control);
   color: var(--text-primary);
   border-radius: var(--radius-xs);
@@ -192,7 +192,7 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-12) 14px;
+  padding: var(--space-12) var(--space-16);
 }
 
 /* Floating "scroll to latest" pill — sticks to the bottom-center of the

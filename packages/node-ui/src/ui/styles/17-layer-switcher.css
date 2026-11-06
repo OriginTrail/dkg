@@ -66,7 +66,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-8);
-  padding: 0 10px;
+  padding: 0 var(--space-12);
   border: 0;
   border-radius: var(--radius-xs);
   background: transparent;
@@ -98,7 +98,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: var(--space-12);
   padding: var(--space-24);
   border: 1px solid color-mix(in srgb, var(--v10-empty-accent) 28%, var(--border-default));
   background: color-mix(in srgb, var(--v10-empty-accent) 7%, var(--bg-surface));
@@ -179,7 +179,7 @@
   --v10-stat-accent: var(--border-strong);
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
-  gap: 10px;
+  gap: var(--space-8);
   min-width: 0;
 }
 .v10-stat-strip-cell {
@@ -243,7 +243,7 @@
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-8);
   border: 0;
   border-bottom: 1px solid var(--border-subtle);
   border-radius: 0;

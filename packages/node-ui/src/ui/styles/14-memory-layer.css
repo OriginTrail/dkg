@@ -70,7 +70,7 @@
   overflow-y: auto;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
-  padding: 14px var(--space-16);
+  padding: var(--space-16) var(--space-16);
   box-shadow: var(--shadow-menu);
   z-index: var(--z-raised);
   font-size: var(--fs-control);

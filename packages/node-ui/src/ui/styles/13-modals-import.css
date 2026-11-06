@@ -9,7 +9,7 @@
   color: var(--text-danger); font-size: var(--fs-control);
 }
 .v10-file-preview-meta {
-  display: flex; flex-wrap: wrap; gap: var(--space-6); padding: 10px var(--space-24);
+  display: flex; flex-wrap: wrap; gap: var(--space-6); padding: var(--space-12) var(--space-24);
   border-bottom: 1px solid var(--border-subtle);
 }
 .v10-file-preview-meta-item {
@@ -190,7 +190,7 @@ body.light .v10-modal-box {
 .v10-import-file-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--space-8) var(--space-12);
   font-size: var(--fs-control);
   border-bottom: 1px solid var(--border-subtle);
@@ -253,7 +253,7 @@ body.light .v10-modal-box {
   margin-top: var(--space-6);
 }
 .v10-import-result {
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border-radius: var(--radius-control);
   font-size: var(--fs-control);
   line-height: var(--lh-loose);

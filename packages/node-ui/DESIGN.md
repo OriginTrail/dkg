@@ -77,7 +77,9 @@ Type sizes are whole pixels. Every size is one of these tokens; weights are 400,
 
 ### Spacing
 
-Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens and older rules, and a test stops that number growing.
+Padding, margins and gaps use `--space-2`, `--space-4`, `--space-6`, `--space-8`, `--space-12`, `--space-16`, `--space-20`, `--space-24` and `--space-32`. 10 and 14 only appear inside the nested padding tokens. A value that lands between two steps rounds up for padding and down for gaps and margins, so density stays about the same.
+
+Styles belong in a stylesheet. A `style` attribute is only for a value worked out from data at runtime, such as a bar's width, a Context Graph's colour or a panel's dragged size, and it carries only that value. A value known from a name, such as a layer's colour, is a class (`layer-tone-wm`, `layer-tone-swm`, `layer-tone-vm`).
 
 ### Card padding
 

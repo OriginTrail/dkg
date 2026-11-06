@@ -5,7 +5,7 @@
   align-items: center;
   justify-content: space-between;
   width: 100%;
-  padding: 10px 14px;
+  padding: var(--pad-nested);
   border-bottom: 1px solid var(--border-subtle);
   text-align: left;
   transition: background var(--motion-fast);

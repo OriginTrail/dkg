@@ -82,11 +82,11 @@
 .v10-agent-chip-sm .v10-agent-chip-avatar { width: 20px; height: 20px; font-size: var(--fs-micro); }
 .v10-agent-chip-sm .v10-agent-chip-glyph { width: 12px; height: 12px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
-.v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 10px 0 var(--space-2); font-size: var(--fs-control); }
+.v10-agent-chip-md { height: 28px; box-sizing: border-box; padding: 0 var(--space-12) 0 var(--space-2); font-size: var(--fs-control); }
 .v10-agent-chip-md .v10-agent-chip-avatar { width: 24px; height: 24px; font-size: var(--fs-micro); }
 .v10-agent-chip-md .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
-.v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: var(--space-4) 14px var(--space-4) var(--space-4); font-size: var(--fs-body); }
+.v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: var(--space-4) var(--space-16) var(--space-4) var(--space-4); font-size: var(--fs-body); }
 .v10-agent-chip-lg .v10-agent-chip-avatar, .v10-agent-title .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
 .v10-agent-chip-lg .v10-agent-chip-glyph, .v10-agent-title .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -2px; right: -4px; }
 
@@ -117,8 +117,8 @@
 
 /* ── Activity feed ── */
 .v10-activity-feed {
-  display: flex; flex-direction: column; gap: 14px;
-  padding: 14px var(--space-16);
+  display: flex; flex-direction: column; gap: var(--space-12);
+  padding: var(--space-16) var(--space-16);
   border-top: 1px solid var(--border-subtle);
   border-bottom: 1px solid var(--border-subtle);
   background: var(--tint-faint);
@@ -181,7 +181,7 @@
   display: grid;
   grid-template-columns: 16px auto 1fr auto auto auto;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-8);
   padding: var(--space-8) var(--space-8);
   border: none;
   background: none;
@@ -242,7 +242,7 @@
   padding: var(--space-12) 0;
 }
 .v10-agent-profile-header {
-  display: flex; flex-direction: column; gap: 14px;
+  display: flex; flex-direction: column; gap: var(--space-12);
   padding: var(--space-12) var(--space-20) var(--space-16);
   border-bottom: 1px solid var(--border-subtle);
   background: linear-gradient(
@@ -266,7 +266,7 @@
   padding-top: var(--space-4);
 }
 .v10-agent-profile-meta-row {
-  display: flex; gap: 10px; align-items: center;
+  display: flex; gap: var(--space-8); align-items: center;
   font-size: var(--fs-label);
 }
 .v10-agent-profile-meta-lbl {

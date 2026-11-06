@@ -84,8 +84,8 @@
 .v10-tree-show-hidden {
   display: block;
   width: calc(100% - 16px);
-  margin: 10px var(--space-8) var(--space-4);
-  padding: var(--space-6) 10px;
+  margin: var(--space-8) var(--space-8) var(--space-4);
+  padding: var(--space-6) var(--space-12);
   background: none;
   border: 1px dashed var(--border-subtle);
   border-radius: var(--radius-control);
@@ -103,7 +103,7 @@
 .v10-tree-item {
   display: flex;
   align-items: center;
-  padding: var(--space-4) var(--space-12) var(--space-4) 38px;
+  padding: var(--space-4) var(--space-12) var(--space-4) var(--space-32);
   gap: var(--space-8);
   cursor: pointer;
   transition: background var(--motion-fast);
@@ -125,7 +125,7 @@
 
 /* Journey empty card */
 .v10-journey-empty-card {
-  margin: var(--space-16) 10px;
+  margin: var(--space-16) var(--space-8);
   padding: var(--space-16);
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
@@ -133,7 +133,7 @@
 }
 .v10-journey-empty-card > button { margin-top: var(--space-8); }
 .v10-jec-title { font-size: var(--fs-body); font-weight: 600; color: var(--text-primary); margin-bottom: var(--space-6); }
-.v10-jec-hint { font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-body); margin-bottom: 10px; }
+.v10-jec-hint { font-size: var(--fs-label); color: var(--text-tertiary); line-height: var(--lh-body); margin-bottom: var(--space-8); }
 
 /* Tree items are toggled via React state — no CSS display:none needed */
 
@@ -229,7 +229,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-4);
-  padding: 0 10px;
+  padding: 0 var(--space-12);
   border: 0;
   border-left: 1px solid var(--border-subtle);
   background: none;
@@ -308,8 +308,8 @@
 /* Places first, then create and join side by side, above the two lists they act on. */
 .v10-sidebar-places { flex-shrink: 0; padding-top: var(--space-8); }
 .v10-tree-create-actions { flex-shrink: 0; display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-6); padding: var(--space-4) var(--space-8) var(--space-8); }
-.v10-tree-hint { margin: 0; padding: var(--space-4) var(--space-12) var(--space-8) 28px; font-size: var(--fs-control); line-height: var(--lh-body); color: var(--text-tertiary); }
-.v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: center; padding: 0 10px; }
+.v10-tree-hint { margin: 0; padding: var(--space-4) var(--space-12) var(--space-8) var(--space-32); font-size: var(--fs-control); line-height: var(--lh-body); color: var(--text-tertiary); }
+.v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: center; padding: 0 var(--space-12); }
 
 /* ── App shell ── */
 .v10-center-main { flex: 1; min-height: 0; overflow: hidden; }
