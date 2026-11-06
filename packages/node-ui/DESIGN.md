@@ -71,7 +71,7 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 - No spec notes on screen. A line that only states a rule for developers is removed.
 - A middle dot sits only between plain values of the same kind (`PDF · 8.4 MB`). A label followed by its name or detail takes a colon (`Step 2 of 4: Commitment`). When the text says something, write a sentence.
 - An error says what failed and what to do next, and includes useful details when there are any.
-- Status words are the ones the nOS brief lists: `Done`, `Failed`, `In progress`, `Partial`, `Pending`, `Ready`, `Blocked`. Words only the node UI has stay, such as `Proposed`, `Merged` and `Healthy`.
+- Where nOS and the node UI show the same state, they use the same status word: `Done`, `Failed`, `Partial`, `Pending`, `Ready`, `Blocked`. `In progress` is the one exception: nOS says `Running`, which reads wrong on a task. Words only one product has are free, such as `Proposed`, `Merged` and `Healthy`.
 - Keep a technical word only when people need it to act: SPARQL in the query editor, UAL when copying one, RPC URL in Settings.
 - A security statement says only what the system guarantees. Check it with the owner of that guarantee before it ships.
 
