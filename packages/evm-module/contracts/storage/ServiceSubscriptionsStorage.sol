@@ -468,10 +468,10 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
     ///         an id with no record (`SubscriptionNotFound`), and reverts past
     ///         the subscription's stored budgets, as `getBudget` does.
     /// @dev    The caller keeps in step the record's `value`, the sum of the
-    ///         budgets' values (`setSubscription`). Fills are kept by the
-    ///         budget's index (`QueryInferenceStorage`), so a filled budget
-    ///         keeps its `serviceId` and at least its fill. `applyTopUp`
-    ///         remains the normal path.
+    ///         budgets' values (`setSubscription`). What a budget has used is
+    ///         kept by its index (`QueryInferenceStorage`), so a budget in use
+    ///         keeps its `serviceId` and at least what it has used.
+    ///         `applyTopUp` remains the normal path.
     function setBudget(bytes32 subscriptionId, uint256 index, ServiceBudget calldata b) external onlyContracts {
         _requireRecorded(subscriptionId);
         _budgets[subscriptionId][index] = b;
@@ -493,9 +493,9 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
     /// @notice Append a recorded subscription's id to `accountId`'s list, as
     ///         `createSubscription` appends it. It refuses an id with no record
     ///         (`SubscriptionNotFound`).
-    /// @dev    The caller keeps the list in step with the records: an id belongs
-    ///         under its record's `accountId`, once, and neither is checked
-    ///         here. `createSubscription` remains the normal path.
+    /// @dev    The caller keeps the list in step with the records: an id
+    ///         belongs under its record's `accountId`, once, and neither is
+    ///         checked here. `createSubscription` remains the normal path.
     function appendAccountSubscription(uint256 accountId, bytes32 subscriptionId) external onlyContracts {
         _requireRecorded(subscriptionId);
         _accountSubscriptions[accountId].push(subscriptionId);
