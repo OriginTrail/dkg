@@ -144,10 +144,10 @@ Sizes are 12 in small controls and labels, 14 on buttons and in headers, 16 for 
 
 A badge states a fact (status, role, type, layer). It is never the click target.
 
-- `<Badge tone>`: `success`, `warning`, `danger` and `pending` draw as a status (icon and text, no box, as in nOS). Pending is a neutral clock for work under way; amber is only for something that needs attention. Badge draws the icon: pass `icon` for a chip with its own glyph, or `icon={null}` for none. Use `<Badge>`, not raw classes, or the status has no icon. `neutral` (default), `muted`, `role` and `kind` draw as a tag (6px rectangle, as in nOS) and keep their colours (`kind` is for entity types: a neutral tag with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
+- `<Badge tone>`: `success`, `warning`, `danger` and `pending` draw as a status (icon and text, no box). Pending is a neutral clock for work under way; amber is only for something that needs attention. Badge draws the icon: pass `icon` for a chip with its own glyph, or `icon={null}` for none. Use `<Badge>`, not raw classes, or the status has no icon. `neutral` (default), `muted`, `role` and `kind` draw as a tag (6px rectangle) and keep their colours (`kind` is for entity types: a neutral tag with the kind's colour as a dot). `size="sm"` in dense rows. `dot` adds a leading status dot.
 - Status words match nOS: `Done`, `In progress`, `Failed`, `Ready` (`Ready to connect` stays), `Partial`, `Pending`, `Blocked`. `Partial` is also the word for an agent with one capability down.
 - The header status says only what the node reports: `Connecting` before the first status, `Connected` with the peer count (green), `No peers` (warning), and `Unavailable` (red) after three failed status checks in a row. Settings shows the same status. `/api/status` has no sync state, so the header does not say Synced.
-- `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 12px text. `LayerGlyph` draws the glyph on its own.
+- `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS: same colours, glyphs, full border and 12px text. `LayerGlyph` draws the glyph on its own.
 - `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips. The bell's unread count is the one exception: a solid `--notify` disc.
 - The notification count sits on the bell's corner, never over the glyph, and the bell brightens while anything is unread.
 
@@ -165,7 +165,7 @@ A badge states a fact (status, role, type, layer). It is never the click target.
 A leading mark says "this opens":
 
 - **Context Graph:** `<ContextGraphChip>`, a monogram tile in the graph's data colour plus the name, in a pill.
-- **Agent:** `<AgentChip size>` (24 / 28 / 40) with a circle of initials, and `<AgentDot>` / `<AgentDotStack>` for avatars alone. Agents are drawn the same way in the graph canvas.
+- **Agent:** `<AgentChip size>` (24 / 28 / 40) with a circle of initials, and `<AgentDot>` / `<AgentDotStack>` for avatars alone. On an agent's own page, `<AgentTitle>` shows the avatar beside the page title, with no pill and no link. Agents are drawn the same way in the graph canvas.
 
 ### Small screens
 
@@ -204,7 +204,7 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 - **A rule:** change this file, the token or component, and the reference page in one PR. The design owner in `.github/CODEOWNERS` reviews it.
 - **Something new:** add it to `src/ui/components/ds/`, not to one page, and describe it here.
 - **Retiring a class or token:** remove it in the PR that replaces it, with no deprecation period. Nothing outside this package reads these names, but its e2e tests do, so change their selectors in the same PR.
-- **Layers and status words:** nOS is the source of truth for both, and nothing keeps the two repos in step automatically. A change there needs a matching PR here. The WM, SWM and VM colours are the only colours the two UIs share, so the layers are recognisable across both products. Other colours, type and spacing don't need to match nOS and shouldn't be forced to.
+- **Layers and status words:** the layer badge stays the same in nOS and here, so the layers are recognisable across both products, and status words still match. Neither product leads, and nothing keeps the two repos in step automatically, so a change in either needs a matching PR in the other. The WM, SWM and VM colours are the only colours the two UIs share. Other colours, type and spacing don't need to match nOS and shouldn't be forced to.
 
 ### Names kept for now
 
