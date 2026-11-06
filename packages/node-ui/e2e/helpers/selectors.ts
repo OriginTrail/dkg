@@ -52,9 +52,6 @@ export const sel = {
     treeItems: '.v10-tree-items',
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
-    layerHeader: '.v10-tree-layer-header',
-    publicPlaceholder: '.v10-oracle-placeholder',
-    integrationDot: '.v10-tree-integration-dot',
     // PR8 sibling-section pattern (My Context Graphs + Integrations):
     peerGroup: '.v10-peer-group',
     peerGroupHeader: '.v10-peer-group-header',
@@ -150,16 +147,7 @@ export const sel = {
     statCard: '.stat-card',
     statLabel: '.stat-label',
     statValue: '.stat-value',
-    quickAction: '.v10-quick-action',
-    quickActionIcon: '.v10-quick-action-icon',
     sectionHeader: '.v10-dash-section-header',
-    sectionLink: '.v10-dash-section-link',
-    recentOp: '.v10-recent-op',
-    recentOpType: '.v10-recent-op-type',
-    recentOpStatus: '.v10-recent-op-status',
-    projectCard: '.v10-dash-project-card',
-    projectName: '.v10-dash-project-name',
-    projectCount: '.v10-dash-project-count',
   },
 
   modal: {
@@ -183,7 +171,6 @@ export const sel = {
     advancedToggle: '.v10-form-advanced-toggle',
     advancedBody: '.v10-form-advanced-body',
     advChevron: '.v10-form-adv-chevron',
-    layerPreview: '.v10-layer-preview',
   },
 
   importModal: {

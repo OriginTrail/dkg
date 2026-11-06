@@ -77,7 +77,7 @@ test.describe('Operations View (rc.12 Observability)', () => {
     // panel may show rows OR — on a very quiet node — the empty state. Both are
     // valid; assert the All-Operations surface resolves to one of them.
     const empty = page.getByText('No operations recorded');
-    const rows = page.locator('.v10-op-row, [data-op-row], table tbody tr');
+    const rows = page.locator('table tbody tr');
     await expect
       .poll(async () =>
         (await empty.isVisible().catch(() => false)) ||
