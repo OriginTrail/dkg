@@ -1,4 +1,5 @@
 import { createEntityClient } from './entity-search/client.js';
+import { createCaClient } from './ca-client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import type {
@@ -25,12 +26,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
 import type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
-import {
-  finalizedPublishOptionsPayload,
-  type KnowledgeAssetFinalizedPublishOptions,
-} from './finalized-publish-options.js';
-import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import { finalizedPublishOptionsPayload, type KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+import { parseRegisterPcaAgentResult, type RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import {
   serializeStatusQuery,
   type StatusQueryOptions,
@@ -2465,6 +2462,9 @@ export class ApiClient {
   }
 
   readonly entities = createEntityClient((path, body, deadline) => this.post(path, body, deadline));
+  readonly ca = createCaClient({
+    get: (path) => this.get(path), post: (path, body, deadline) => this.post(path, body, deadline), del: (path) => this.del(path),
+  });
 
   private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
     return this.send<T>(path, {

@@ -80,6 +80,15 @@ export interface EVMAdapterBaseConfig {
    */
   maxFeePerGasWei?: bigint;
   /**
+   * The buyer key of Conviction Account service spending: the address that
+   * consents to assignments and funds plan periods as the assignee. It must be
+   * one of this adapter's operational wallets (a local key or an external
+   * signer's payer); otherwise the adapter cannot sign for it and its buyer-key
+   * methods refuse with `ConvictionServiceUnavailableError`. Omitted, the
+   * primary operational wallet is the buyer key.
+   */
+  convictionServiceBuyerAddress?: string;
+  /**
    * TTL (ms) for re-resolving `RandomSampling` / `RandomSamplingStorage`
    * addresses from the Hub. Defaults to 5 minutes. Values `<= 0` are
    * treated as "use default" and intentionally NOT supported as a

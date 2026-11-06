@@ -28,6 +28,7 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { boundedRpcMethodLabel } from './rpc-method-labels.js';
+import { CONVICTION_SERVICE_RPC_USAGE_CONSUMERS } from './conviction-service-rpc-usage.js';
 export { KNOWN_RPC_METHODS, boundedRpcMethodLabel } from './rpc-method-labels.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
@@ -532,11 +533,7 @@ const RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES = [
   'StakingV10',
 ] as const;
 
-const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
-  'DKGKnowledgeAssets',
-  'KnowledgeAssetsStorage',
-  'ContextGraphStorage',
-] as const;
+const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = ['DKGKnowledgeAssets', 'KnowledgeAssetsStorage', 'ContextGraphStorage'] as const;
 
 /**
  * Update deliberately when a new code-owned consumer is added.
@@ -549,12 +546,14 @@ const RPC_USAGE_SNAPSHOT_HUB_ASSET_NAMES = [
  * v3 adds `multicall3.aggregate3` and `multicall3.getCode`: one aggregate
  * request now carries background views that v2 counted one request each under
  * their own labels.
+ *
+ * v4 adds Conviction Account service spending's labels (conviction-service-rpc-usage.ts).
  */
-export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 3 as const;
+export const RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION = 4 as const;
 
 /** Complete closed vocabulary that the cumulative diagnostic may serialize. */
 export const RPC_USAGE_SNAPSHOT_CONSUMERS: readonly string[] = Object.freeze(
-  [...new Set([
+  [...new Set([...CONVICTION_SERVICE_RPC_USAGE_CONSUMERS,
     ...RPC_USAGE_SNAPSHOT_RAW_CONSUMERS,
     ...RPC_USAGE_SNAPSHOT_HUB_CONTRACT_NAMES.map(
       (name) => `Hub.getContractAddress(${name})`,

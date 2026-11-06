@@ -10,7 +10,8 @@
  * journey into a PCA-backed public graph with a curated publish policy (a core
  * node holding the Hardhat core profile's keys hosts it and acknowledges
  * storage), keep the credentials out of its output, and refuse to start as a
- * core node.
+ * core node. Its Conviction Account buyer key (`chain.caBuyerAddress`) is its
+ * second payer: the /api/ca routes answer behind the auth guard with it.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -116,6 +117,7 @@ async function spawnDaemon(
         authTokenFile: tokenFile,
         author: { authTokenFile: authorTokenFile, address: defaultAuthor.address },
       },
+      caBuyerAddress: payers[1].address,
     },
     contextGraphs: [],
   }));
@@ -174,6 +176,7 @@ describe('daemon with an external signer', () => {
   let fake: FakeSigner;
   let daemon: Daemon | undefined;
   let adminToken: string;
+  let agentToken: string;
   let snapshotId: string | undefined;
   let pcaOwner: ReturnType<typeof createEVMAdapter> | undefined;
   let accountId: bigint;
@@ -270,6 +273,7 @@ describe('daemon with an external signer', () => {
     expect(res.status, JSON.stringify(body)).toBe(200);
     expect(body).toMatchObject({ agentAddress: agentKey.address, mode: 'self-sovereign' });
     expect(typeof body.authToken).toBe('string');
+    agentToken = body.authToken as string;
     expect(body).not.toHaveProperty('privateKey');
     const signed = fake.calls('eth_signTypedData_v4').slice(before);
     expect(signed).toHaveLength(1);
@@ -282,6 +286,24 @@ describe('daemon with an external signer', () => {
     });
     expect(refused.status).toBe(400);
     expect(((await refused.json()) as { error: string }).error).toMatch(/not an author key of the external signer/);
+  });
+
+  it('serves /api/ca behind the auth guard, with the configured buyer key', async () => {
+    const contracts = await api('/api/ca/contracts');
+    expect(contracts.status).toBe(200);
+    expect(((await contracts.json()) as { domain: { chainId: number } }).domain.chainId).toBe(31337);
+    expect((await fetch(`http://127.0.0.1:${daemon!.apiPort}/api/ca/contracts`)).status).toBe(401);
+
+    // The account is owned elsewhere; the payers are its publishing agents, not its owners.
+    const status = await (await api(`/api/ca/${accountId}`)).json() as Record<string, unknown>;
+    expect(status).toMatchObject({ ownedByNode: false, buyerKey: payers[1].address, serviceSpending: { enabled: false } });
+    expect(await (await api('/api/ca/mine')).json()).toEqual({ owner: payers[0].address, buyerKey: payers[1].address, owned: [], assigned: [] });
+    // An agent token cannot drive the node's signed writes.
+    const asAgent = await api(`/api/ca/${accountId}/services`, {
+      method: 'POST', body: JSON.stringify({ enabled: true }), headers: { Authorization: `Bearer ${agentToken}` },
+    });
+    expect(asAgent.status).toBe(403);
+    expect(await allOutput(daemon!)).toContain(`Conviction Account buyer key: ${payers[1].address}`);
   });
 
   it('creates and registers a context graph with the node token, curated by the default author', async () => {

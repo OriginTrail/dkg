@@ -16,12 +16,13 @@ const READ = { method: 'GET', path: '/api/status' } as const;
 const WRITE = { method: 'POST', path: '/api/context-graph/register' } as const;
 
 describe('daemon request deadline classes', () => {
-  it('gives the graph, sub-graph, PCA and publisher-job lists the list class', () => {
+  it('gives the graph, sub-graph, PCA, publisher-job and Conviction Account lists the list class', () => {
     expect([...DAEMON_LIST_READ_ROUTES]).toEqual([
       '/api/context-graph/list',
       '/api/sub-graph/list',
       '/api/pca',
       '/api/publisher/jobs',
+      '/api/ca/mine',
     ]);
     for (const path of DAEMON_LIST_READ_ROUTES) {
       expect(classifyDaemonRequestDeadline({ method: 'GET', path })).toBe('list-read');
@@ -35,7 +36,7 @@ describe('daemon request deadline classes', () => {
     })).toBe('list-read');
     expect(classifyDaemonRequestDeadline({ method: 'GET', path: '/api/publisher/jobs?status=queued' }))
       .toBe('list-read');
-    for (const path of ['/api/pca/1', '/api/context-graph/list/', '/api/context-graph', '/api/pcas']) {
+    for (const path of ['/api/pca/1', '/api/context-graph/list/', '/api/context-graph', '/api/pcas', '/api/ca/42']) {
       expect(classifyDaemonRequestDeadline({ method: 'GET', path })).toBe('read');
     }
   });

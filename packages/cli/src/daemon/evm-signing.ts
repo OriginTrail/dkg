@@ -12,6 +12,7 @@ import {
   type RemoteSigner,
 } from '@origintrail-official/dkg-chain';
 import { isPublisherRuntimeEnabled, type DkgConfig } from '../config.js';
+import { caBuyerKeyStartupLine } from '../conviction-service-config.js';
 
 /** The wallet facts the HTTP routes need: addresses only, never keys. */
 export interface OperationalWalletAddresses {
@@ -65,6 +66,8 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
       : `  (missing from legacy wallets.json; auto-registration requires adding the profile admin key)`);
     log(`Operational wallets (${opWallets.wallets.length}):`);
     for (const w of opWallets.wallets) log(`  ${w.address}`);
+    const buyerKey = caBuyerKeyStartupLine(config.chain?.caBuyerAddress, opWallets.wallets);
+    if (buyerKey !== undefined) log(buyerKey);
     return {
       mode: 'local',
       release: () => {},
@@ -108,6 +111,8 @@ export async function resolveDaemonEvmSigning(input: ResolveDaemonEvmSigningInpu
   log(`EVM signing: external signer at ${endpoint}; the node holds no operational private key`);
   log(`Payer accounts (${signers.operational.length}):`);
   for (const signer of signers.operational) log(`  ${signer.address}`);
+  const buyerKey = caBuyerKeyStartupLine(config.chain?.caBuyerAddress, signers.operational);
+  if (buyerKey !== undefined) log(buyerKey);
   const authors = signers.authors;
   if (authors === undefined) {
     log('Author keys: none configured (publishing requires an agent with its own key)');

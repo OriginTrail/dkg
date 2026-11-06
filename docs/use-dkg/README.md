@@ -25,6 +25,7 @@ Use these routes when you want a node running, an agent connected, memory operat
 | Import, export, and verify OKF bundles | [OKF Import, Export, and Verify](okf.md) |
 | Fund testnet wallets | [Funding](funding.md) |
 | Manage Publishing Conviction Accounts | [Publishing Conviction](publishing-conviction.md) |
+| Spend a Conviction Account on services | [Conviction Account Services](conviction-accounts.md) |
 | Configure relays and peer reachability | [Relays and Peers](relays-and-peers.md) |
 | Bootstrap an edge's registry index from network relays or pinned cores | [Authority Index Snapshots](authority-index-snapshots.md) |
 | Expose the storage SPARQL endpoint | [Storage SPARQL HTTP](storage-sparql-http.md) |

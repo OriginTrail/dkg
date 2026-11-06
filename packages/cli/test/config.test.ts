@@ -1909,6 +1909,17 @@ describe('resolveChainConfig (field-level merge)', () => {
     )).toThrow(/chain\.maxFeePerGasWei must be greater than zero/);
   });
 
+  it('takes the operator\'s Conviction Account buyer key, checksummed, and refuses a malformed one', () => {
+    const buyer = '0x' + 'ab'.repeat(20);
+    const merged = resolveChainConfig({ chain: { caBuyerAddress: buyer } }, { chain: fullNetworkChain });
+    expect(merged?.caBuyerAddress).toBe('0xABaBaBaBABabABabAbAbABAbABabababaBaBABaB');
+    expect(resolveChainConfig({ chain: {} }, { chain: fullNetworkChain })).not.toHaveProperty('caBuyerAddress');
+    for (const bad of ['0x1234', null, 42]) {
+      expect(() => resolveChainConfig({ chain: { caBuyerAddress: bad } } as any, { chain: fullNetworkChain }))
+        .toThrow(/chain\.caBuyerAddress must be a 0x-prefixed 20-byte EVM address/);
+    }
+  });
+
   it('normalizes persisted (JSON/YAML) funding-floor strings and numbers to bigint', () => {
     // What operators and the network overlay can actually produce: JSON.parse /
     // yaml.load never yield bigints. Strings must survive above 2^53.

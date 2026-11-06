@@ -129,6 +129,20 @@
     ]
   },
   {
+    "name": "Conviction Account service spending",
+    "page": "docs/use-dkg/conviction-accounts.md",
+    "availability": "source only",
+    "baseline": null,
+    "owner": "DKG maintainers",
+    "reviewedOn": "2026-10-22",
+    "validation": "Not in a released package; the guide's dkg ca commands run end to end against the contracts on a local Hardhat chain (packages/cli/test/ca-command-hardhat.test.ts); verification on a public network and a released minimum remain unclaimed",
+    "sources": [
+      "docs/use-dkg/conviction-accounts.md",
+      "packages/cli/src/commands/ca.ts",
+      "packages/cli/src/daemon/routes/ca.ts"
+    ]
+  },
+  {
     "name": "Neuro-symbolic reasoning, GNNs, and marketplace direction",
     "page": "docs/how-dkg-works/roadmap-and-convergence.md",
     "availability": "proposal",

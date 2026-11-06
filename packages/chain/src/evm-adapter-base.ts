@@ -258,6 +258,11 @@ const CHAIN_INDEX_CONTRACT_KEYS: ReadonlySet<HubContractCacheKey> = new Set([
  *     non-regression (identical to pre-#1583). Excluding them also keeps this list
  *     as documentation of "which names the memo intentionally skips."
  *
+ *   - `ServiceSubscriptions` / `ConvictionServiceStorage` — Conviction Account
+ *     service spending (evm-adapter-conviction-service.ts). Cold paths only, like
+ *     `PublishingConviction`, so the memo would save nothing; resolved fresh, a
+ *     re-registration of either is followed at once.
+ *
  * NOTE on the two ACK-verify-floor contracts, `IdentityStorage` and
  * `ShardingTableStorage`, which ARE memoized (not excluded): both are on the
  * per-ACK hot path (`verifyACKIdentityDetailed` resolves both on every ACK, so a
@@ -286,6 +291,8 @@ const RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED = new Set<string>([
   'PublishingConviction',
   'ShardingTable',
   'DKGStakingConvictionNFT',
+  'ServiceSubscriptions',
+  'ConvictionServiceStorage',
 ]);
 
 /**
@@ -681,6 +688,9 @@ export class EVMChainAdapterBase {
   protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
+
+  /** `EVMAdapterBaseConfig.convictionServiceBuyerAddress`, as configured. */
+  protected readonly convictionServiceBuyerAddress?: string;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1572,6 +1582,7 @@ export class EVMChainAdapterBase {
       throw new Error(`Invalid tokenAddress: ${config.tokenAddress}`);
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
+    this.convictionServiceBuyerAddress = config.convictionServiceBuyerAddress;
     this.chainId = config.chainId ?? 'evm:31337';
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,

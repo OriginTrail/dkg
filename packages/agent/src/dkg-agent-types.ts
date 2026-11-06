@@ -1820,6 +1820,11 @@ export interface DKGAgentConfig {
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**
+     * The Conviction Account buyer key (`EVMAdapterConfig.convictionServiceBuyerAddress`):
+     * one of the operational wallets, local or external. Omitted, the primary wallet.
+     */
+    convictionServiceBuyerAddress?: string;
+    /**
      * Optional V10 allowance-sizing policy. Threaded straight through to
      * the `EVMChainAdapter`; see `ApprovalPolicy` in
      * `@origintrail-official/dkg-chain`. Omit to inherit the default

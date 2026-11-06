@@ -33,6 +33,7 @@
 * [OKF Import, Export, and Verify](use-dkg/okf.md)
 * [Funding](use-dkg/funding.md)
 * [Publishing Conviction](use-dkg/publishing-conviction.md)
+* [Conviction Account Services](use-dkg/conviction-accounts.md)
 * [Relays & Peers](use-dkg/relays-and-peers.md)
 * [Storage SPARQL HTTP](use-dkg/storage-sparql-http.md)
 * [SWM Public Snapshot Garbage Collection](use-dkg/swm-public-snapshot-gc.md)

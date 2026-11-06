@@ -151,6 +151,7 @@ export default defineConfig({
       "test/vm-reconcile-source-labels.test.ts",
       "test/profile-fix-verify.test.ts",
       "test/pca-v10-facade.test.ts",
+      "test/ca-facade.test.ts",
       "test/ensure-registered-for-publish.test.ts",
       "test/sync-verify-collapsed.test.ts",
       "test/sync-verify-rootless.test.ts",

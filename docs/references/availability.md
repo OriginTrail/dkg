@@ -24,6 +24,7 @@ Use the running node's version and discovered capabilities. A supported baseline
 | [MCP clients](../integrations/mcp.md) | released baseline | 10.0.23 | Source reviewed; client conversation pending | DKG maintainers | 2026-10-13 |
 | [Local models](../use-dkg/local-llm.md) | released baseline | 10.0.23 | Source reviewed; model execution pending | DKG maintainers | 2026-10-13 |
 | [External signer](../use-dkg/external-signer.md) | source only | Not a released baseline | Merged after the validated 10.0.23 release ([PR #3177](https://github.com/OriginTrail/dkg/pull/3177)); runtime verification and a released minimum remain unclaimed | DKG maintainers | 2026-10-14 |
+| [Conviction Account service spending](../use-dkg/conviction-accounts.md) | source only | Not a released baseline | Not in a released package; the guide's dkg ca commands run end to end against the contracts on a local Hardhat chain (packages/cli/test/ca-command-hardhat.test.ts); verification on a public network and a released minimum remain unclaimed | DKG maintainers | 2026-10-22 |
 | [Neuro-symbolic reasoning, GNNs, and marketplace direction](../how-dkg-works/roadmap-and-convergence.md) | proposal | Not a released baseline | Public architecture and RFC reviewed; integrated reasoning/GNN services not claimed as released | DKG maintainers | 2026-10-14 |
 <!-- END GENERATED: capabilities -->
 

@@ -72,6 +72,15 @@ dkg publisher jobs                       # list publisher jobs
 dkg publisher stats                      # publisher throughput stats
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
+# Conviction Account service spending (owner node: services, assign, caps, revoke; assignee node: consent, fund)
+dkg ca status <accountId>                # service-spending status, read fresh from the chain
+dkg ca services <accountId> enable       # opt the account in (disable pauses it)
+dkg ca consent <accountId> --max-period 25 --max-total 1000 --expires <ISO-8601> --out consent.json  # sign caps with the buyer key
+dkg ca assign <accountId> --consent consent.json   # assign the buyer key on its consent
+dkg ca caps <accountId> <assignee> --max-total 1500  # change caps; the usage is kept
+dkg ca fund <accountId> --plan plan.json  # fund one service period; safe to repeat with the same plan file
+dkg ca assignments <accountId>           # also: periods, labels, revoke, advance-nonce, mine, contracts; --json on each
+
 # Code & memory indexing
 dkg index [directory]                    # index a code repo into the dev-coordination CG
 dkg wallet                               # show admin and operational wallet addresses and balances
@@ -173,7 +182,7 @@ deadline by route class:
 | Class | Requests | Default |
 | --- | --- | --- |
 | Read | every `GET` not listed below | 30 s |
-| List read | `GET /api/context-graph/list`, `/api/sub-graph/list`, `/api/pca`, `/api/publisher/jobs` | 60 s, and never less than the read deadline |
+| List read | `GET /api/context-graph/list`, `/api/sub-graph/list`, `/api/pca`, `/api/publisher/jobs`, `/api/ca/mine` | 60 s, and never less than the read deadline |
 | Long | every `POST`, `PUT` and `DELETE` | 240 s, and never less than the read deadline |
 
 The CLI's `dkg verify` waits for its signature collection window plus 30 s
@@ -181,7 +190,11 @@ instead. A Knowledge Asset publish, share, file import, or a create that also
 shares or publishes, that gets no answer in time is reported as outcome
 unknown, not as failed: the daemon keeps working after the client stops
 waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
-retrying. Any other request that times out fails with a `TimeoutError`.
+retrying. So is a Conviction Account assignment or service-period funding
+(`dkg ca assign`, `dkg ca fund`): check `dkg ca assignments`, or run the same
+`dkg ca fund` again, whose plan file holds the period's id, so that it funds the
+period once at most. Any other request that times out fails with a
+`TimeoutError`.
 
 On a slow node or store, override the read and long deadlines, in
 milliseconds, with environment variables (for the MCP server, in the MCP

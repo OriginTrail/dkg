@@ -54,6 +54,7 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { MockConvictionServiceMethods, type MockConvictionAccountRecord } from './mock-adapter-conviction-service.js';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import {
   isNonexistentContextGraphStorageRevert,
@@ -207,7 +208,7 @@ function applyV10UpdateContext(
  * In-memory mock chain adapter for off-chain development.
  * Implements both V9 (UAL-based) and V8 (legacy KC) interfaces.
  */
-export class MockChainAdapter implements ChainAdapter {
+export class MockChainAdapter extends MockConvictionServiceMethods implements ChainAdapter {
   readonly chainType = 'evm' as const;
   readonly chainId: string;
   readonly signerAddress: string;
@@ -264,6 +265,7 @@ export class MockChainAdapter implements ChainAdapter {
     signerAddress = MOCK_DEFAULT_SIGNER,
     options: Readonly<MockChainAdapterOptions> = {},
   ) {
+    super();
     this.chainId = chainId;
     this.signerAddress = signerAddress;
     this.allowedPublisherAddresses = new Set([ethers.getAddress(signerAddress).toLowerCase()]);
@@ -898,19 +900,8 @@ export class MockChainAdapter implements ChainAdapter {
   // --- V10 Publishing Conviction NFT (DKGPublishingConvictionNFT) ---
   // In-memory parity: account map + agent reverse map + owner-gating.
 
-  private convictionAccounts = new Map<bigint, {
-    owner: string;
-    committedTRAC: bigint;
-    topUpBuffer: bigint;
-    lockDurationEpochs: number;
-    /** Discount tier (bps) fixed at creation, mirrors the contract. */
-    discountBps: number;
-    /** Monotonic mock epoch captured at creation (no chronos in mock). */
-    createdAtEpoch: number;
-    /** OT-RFC-51 designated node identityId this PCA funds (0n = none). */
-    primaryNode: bigint;
-    agents: Set<string>;
-  }>();
+  /** Also read by service spending (mock-adapter-conviction-service.ts). */
+  protected readonly convictionAccounts = new Map<bigint, MockConvictionAccountRecord>();
   private agentToConvictionAccount = new Map<string, bigint>();
   private nextConvictionAccountId = 1n;
   // Mock has no chronos; a monotonic (boundary-aligned) counter stands in
@@ -2311,7 +2302,7 @@ export class MockChainAdapter implements ChainAdapter {
     this.events.push({ type, blockNumber: this.nextBlock, data });
   }
 
-  private txResult(success: boolean): TxResult {
+  protected txResult(success: boolean): TxResult {
     const blockNumber = this.nextBlock;
     const txIndex = this.txIndexInBlock++;
     const hash = `0x${blockNumber.toString(16).padStart(64, '0')}${txIndex.toString(16).padStart(4, '0')}`;

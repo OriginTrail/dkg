@@ -13,6 +13,7 @@ import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
+import type { ConvictionServiceAdapter } from './conviction-service.js';
 export type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 
@@ -1516,7 +1517,7 @@ export function operationalSigningOf(
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter {
+export interface ChainAdapter extends ConvictionServiceAdapter {
   /** Complete coherent public chain evidence for explicit snapshot recovery. */
   readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
 
@@ -1858,6 +1859,8 @@ export interface ChainAdapter {
   // ----- V10 Publishing Conviction NFT write+read surface -----
   // Wraps `DKGPublishingConvictionNFT`. Optional; owner-gated writes
   // MUST surface the owner revert (→ 403), never swallow it.
+  // Conviction Account service spending (OT-RFC-27) adds the optional methods
+  // of `ConvictionServiceAdapter` (conviction-service.ts), which this extends.
 
   createPublishingConvictionAccount?(committedTRAC: bigint, primaryNode?: bigint): Promise<{ accountId: bigint } & TxResult>;
   topUpPublishingConvictionAccount?(accountId: bigint, amount: bigint): Promise<TxResult>;
