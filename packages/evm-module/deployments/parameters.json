@@ -31,14 +31,12 @@
                 "W2": "2"
             }
         },
-        "ConvictionServiceStorage": {
-            "maxBucketsPerPeriod": "16"
+        "ServiceSubscriptionsStorage": {
+            "maxBudgetsPerSubscription": "16"
         },
         "QueryInferenceStorage": {
-            "receiptGraceSeconds": "3600",
             "maxItemsPerBatch": "256",
             "maxGroupsPerBatch": "32",
-            "maxCloseStepsPerClaim": "32",
             "lambdaBps": "5000"
         }
     },
@@ -77,13 +75,7 @@
         }
     },
     "testnet": {
-        "overrides": {
-            "base_sepolia_v10": {
-                "ConvictionServiceStorage": {
-                    "exactScheduleFrom": "1783530141"
-                }
-            }
-        },
+        "overrides": {},
         "ParametersStorage": {
             "maximumStake": "10000000000000000000000000",
             "minimumStake": "50000000000000000000000",
@@ -124,14 +116,12 @@
                 "W2": "2"
             }
         },
-        "ConvictionServiceStorage": {
-            "maxBucketsPerPeriod": "16"
+        "ServiceSubscriptionsStorage": {
+            "maxBudgetsPerSubscription": "16"
         },
         "QueryInferenceStorage": {
-            "receiptGraceSeconds": "3600",
             "maxItemsPerBatch": "256",
             "maxGroupsPerBatch": "32",
-            "maxCloseStepsPerClaim": "32",
             "lambdaBps": "5000"
         }
     },
