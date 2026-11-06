@@ -63,7 +63,7 @@ h1, h2, h3, p { margin: 0; }
 .pill { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: .22rem .68rem; cursor: pointer; font-size: .92rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .pill:hover { background: var(--surface-2); }
 .pill[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); font-weight: 600; }
-.pill .tag { font-size: .78em; opacity: .75; margin-left: .3em; }
+.pill .state { font-size: .78em; opacity: .8; margin-left: .3em; }
 .nav { display: flex; gap: .9rem; font-size: .92rem; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .nav::-webkit-scrollbar { display: none; }
 .nav a { color: var(--ink-2); white-space: nowrap; }
@@ -76,7 +76,6 @@ h1, h2, h3, p { margin: 0; }
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 23rem; gap: 1.4rem; padding-bottom: 3rem; }
 .layout > main, .layout > aside { min-width: 0; }
 .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.4rem; }
-section { scroll-margin-top: 5.5rem; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1.05rem 1.2rem; }
 .head { margin-bottom: .8rem; }
 .head h2 { font-size: 1.4rem; font-weight: 650; letter-spacing: -.01em; display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
@@ -526,7 +525,7 @@ function renderBar() {
     class: 'pill',
     'aria-pressed': row.epoch === sel ? 'true' : 'false',
     onclick: () => pick(row.epoch),
-  }, row.epoch, row.state === 'current' ? h('span', { class: 'tag' }, 'now') : row.state === 'ahead' ? h('span', { class: 'tag' }, 'ahead') : row.state === 'upcoming' ? h('span', { class: 'tag' }, 'next') : null));
+  }, row.epoch, row.state === 'current' ? h('span', { class: 'state' }, 'now') : row.state === 'ahead' ? h('span', { class: 'state' }, 'ahead') : row.state === 'upcoming' ? h('span', { class: 'state' }, 'next') : null));
   const fresh = freshness();
   root.replaceChildren(
     h('div', { class: 'picker', role: 'group', 'aria-label': 'Pick an epoch' }, h('span', { class: 'picker-label' }, 'Epoch'), pills),
