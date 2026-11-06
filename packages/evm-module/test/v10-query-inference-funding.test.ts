@@ -711,7 +711,7 @@ describe('@integration Plan-subscription funding for the query/inference pool', 
         .to.be.revertedWithCustomError(f.SS, 'GrantExpired')
         .withArgs(accountId, buyer.address);
       expect(await untouched(subscriptionId, accountId)).to.deep.equal(before);
-      // One subscription per buyer and epoch, so the key is served again from
+      // One subscription per buyer and epoch, so the buyer is served again from
       // its next subscription not yet funded, which the new grant tops up.
       await expect(f.SS.connect(buyer).fundFromAccount(requestOf(accountId, epoch)))
         .to.be.revertedWithCustomError(f.SS, 'SubscriptionAlreadyFunded')
@@ -747,7 +747,7 @@ describe('@integration Plan-subscription funding for the query/inference pool', 
       expect(await f.SSS.grantEnd(accountId, buyer.address, s.grantNonce)).to.equal(expiresAt);
 
       // Until then the subscription takes requests, and so a top-up, spent and
-      // booked as any other, under the key's new grant's limit.
+      // booked as any other, under the buyer's new grant's limit.
       await time.setNextBlockTimestamp(expiresAt - 1n);
       await f.SS.connect(buyer).topUpFromAccount(subscriptionId, add, ethers.ZeroHash);
       const booked = costOf(20n * TRAC, BPS) + costOf(10n * TRAC, BPS);
