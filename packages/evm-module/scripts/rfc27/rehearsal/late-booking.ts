@@ -15,8 +15,8 @@ export type LateBooking = {
   expected: WindowRange;
   /** The model of each expected window's booking. */
   curves: Awaited<ReturnType<typeof scheduleModel>>['curves'];
-  /** Each window's budget. */
-  budget: bigint;
+  /** Each window's allowance. */
+  allowance: bigint;
   /** The epoch of the settle. */
   epoch: bigint;
   emitted: WindowRange & { scheduled: bigint };
@@ -49,9 +49,9 @@ export function checkLateBooking(report: Report, b: LateBooking): void {
   report.check('no late booking credits an epoch that has ended', credits.every((x) => x.start >= E));
   const windows = expected.toWindow - expected.fromWindow;
   report.check(
-    'the money is conserved: the closed windows\' whole budget, and nothing else',
-    sum(credits.map((x) => x.amount)) === emitted.scheduled && emitted.scheduled === b.budget * windows,
-    `${fmt(sum(credits.map((x) => x.amount)))} TRAC = ${windows} × ${fmt(b.budget)}`,
+    'the money is conserved: the closed windows\' whole allowance, and nothing else',
+    sum(credits.map((x) => x.amount)) === emitted.scheduled && emitted.scheduled === b.allowance * windows,
+    `${fmt(sum(credits.map((x) => x.amount)))} TRAC = ${windows} × ${fmt(b.allowance)}`,
   );
   report.check(
     'the staker pools in storage gained what the model books, epoch by epoch, with the remainder it carries',
@@ -87,7 +87,7 @@ export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   if (!block) throw new Error(`no block ${settled.receipt.blockNumber}`);
   const expected = closedWindows({ cursor: acct.lastSettledWindow, createdAt: created, epLen, lock, at: BigInt(block.timestamp) });
   const credits = stakerCredits(settled.receipt, c);
-  // The model of each window's booking: its budget less what it drew (and the
+  // The model of each window's booking: its allowance less what it spent (and the
   // commitment's dust on the last), spread from the epoch it closed in with
   // the time left in that epoch, shifted to start in the current one.
   const spent = new Map<bigint, bigint>();
@@ -102,6 +102,6 @@ export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   const cursorAfter = (await c.pcs.getAccount(id)).lastSettledWindow;
   const emitted = { fromWindow: sched.fromWindow, toWindow: sched.toWindow, scheduled: sched.scheduled };
   const after = await stakerPools(c, E, E + lock + 1n);
-  checkLateBooking(report, { expected, curves: model.curves, budget: B, epoch: E, emitted, cursorAfter, credits, stored: { before, after, model: pool } });
+  checkLateBooking(report, { expected, curves: model.curves, allowance: B, epoch: E, emitted, cursorAfter, credits, stored: { before, after, model: pool } });
   saveResults(ctx, 'late-booking', { epoch: E, accountId: id, fromWindow: expected.fromWindow, toWindow: expected.toWindow, emitted, cursorAfter, windows, credits, gasUsed: settled.gasUsed });
 }

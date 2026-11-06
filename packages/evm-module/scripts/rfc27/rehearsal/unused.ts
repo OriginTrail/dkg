@@ -3,7 +3,7 @@
 // in a reverted snapshot, a sale after a long quiet spell: nothing has to catch up
 // before a claim, and the pool of the epoch with the sale walks the whole run back.
 //
-// Per ended epoch from activation: money = walletFunding + convictionFunding,
+// Per ended epoch from activation: money = walletFunding + accountFunding,
 // served = ΣR counted in it, pool = what its nodes share. An epoch with no value
 // has no pool, and its money waits for the next epoch with value, whose pool takes
 // all of it. The unused share of a pool is what no counted value stands for.
@@ -31,14 +31,14 @@ export async function phaseUnused(ctx: Ctx): Promise<void> {
   const epochs: EpochNumbers[] = [];
   for (let e = activation; e <= last; e++) epochs.push(await epochNumbers(c, e));
   const { pools, waiting } = poolsFromMoney(epochs);
-  const rows = epochs.map((x) => ({ ...x, unused: x.pool === 0n ? 0n : x.pool - x.sumR }));
-  report.say(`\nunused share, epochs ${activation}..${last} (money = walletFunding + convictionFunding, served = sumR):`);
+  const rows = epochs.map((x) => ({ ...x, unused: x.pool === 0n ? 0n : x.pool - x.totalServed }));
+  report.say(`\nunused share, epochs ${activation}..${last} (money = walletFunding + accountFunding, served = totalServed):`);
   for (const r of rows) {
-    if (r.money > 0n || r.sumR > 0n) report.say(`  epoch ${r.epoch}: money ${fmt(r.money)}, served ${fmt(r.sumR)}, pool ${fmt(r.pool)}, unused ${fmt(r.unused)}`);
+    if (r.money > 0n || r.totalServed > 0n) report.say(`  epoch ${r.epoch}: money ${fmt(r.money)}, served ${fmt(r.totalServed)}, pool ${fmt(r.pool)}, unused ${fmt(r.unused)}`);
   }
-  const empty = rows.filter((r) => r.money === 0n && r.sumR === 0n).map((r) => r.epoch);
+  const empty = rows.filter((r) => r.money === 0n && r.totalServed === 0n).map((r) => r.epoch);
   report.say(`  the other ${empty.length} epochs had no money and served nothing`);
-  report.say(`  total: money ${fmt(sum(rows.map((r) => r.money)))}, served ${fmt(sum(rows.map((r) => r.sumR)))}, in pools ${fmt(sum(rows.map((r) => r.pool)))}, unused ${fmt(sum(rows.map((r) => r.unused)))}, waiting ${fmt(waiting)}`);
+  report.say(`  total: money ${fmt(sum(rows.map((r) => r.money)))}, served ${fmt(sum(rows.map((r) => r.totalServed)))}, in pools ${fmt(sum(rows.map((r) => r.pool)))}, unused ${fmt(sum(rows.map((r) => r.unused)))}, waiting ${fmt(waiting)}`);
   report.check(
     'every ended epoch reads the pool the rollover rule gives: none with no value, and otherwise its money and all that waited for it',
     rows.every((r, i) => r.pool === pools[i]),
@@ -48,9 +48,9 @@ export async function phaseUnused(ctx: Ctx): Promise<void> {
     'every coin funded is in a pool or still waiting',
     sum(rows.map((r) => r.money)) === sum(rows.map((r) => r.pool)) + waiting,
   );
-  report.check('no epoch\'s value exceeds its pool', rows.every((r) => r.sumR <= r.pool));
+  report.check('no epoch\'s value exceeds its pool', rows.every((r) => r.totalServed <= r.pool));
 
-  const lastValue = rows.reduce((at, r) => (r.sumR > 0n ? r.epoch : at), 0n);
+  const lastValue = rows.reduce((at, r) => (r.totalServed > 0n ? r.epoch : at), 0n);
   const quietSpell = await ctx.fork.inSnapshot(() => saleAfterQuietSpell(ctx, c, last, lastValue, waiting));
   saveResults(ctx, 'unused', { activation, last, rows, waiting, quietSpell }, { txs: false });
 }

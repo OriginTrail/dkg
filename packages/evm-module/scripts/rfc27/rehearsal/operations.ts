@@ -1,6 +1,6 @@
 // The operations the rehearsal's phases repeat, as the fork's actors send
 // them: claims, publishes, TRAC from the Hub owner, a Conviction Account opened
-// for services with a buyer key assigned, funding requests, and receipt batches
+// for services with a buyer added, funding requests, and receipt batches
 // of requests signed by session keys. The shapes, digests and builders are
 // test/helpers'.
 
@@ -8,12 +8,12 @@ import { ethers } from 'ethers';
 import type { Signer } from 'ethers';
 
 import type { Domain, Request, Terms, WalletRequest } from '../../../test/helpers/conviction-service';
-import { DAY, SERVICE_ASSIGNMENT_TYPES, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
+import { DAY, BUYER_GRANT_TYPES, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
 import type { ReceiptGroup, ReceiptItem, ServiceRequest } from '../../../test/helpers/query-inference';
 import { REQUEST_TYPES, fullReceipt, itemOf, queryInferenceDomain } from '../../../test/helpers/query-inference';
 import type { PublishingConviction, PublishingConvictionStorage } from '../../../typechain';
 import { Contracts, eventsIn } from '../contracts';
-import { BUCKET0, UNIT_ASK, inference } from '../plans';
+import { SERVICE0, UNIT_PRICE, inference } from '../plans';
 import { fmt } from '../report';
 import { Ctx, Sent, send } from './context';
 import { impersonate } from './plumbing';
@@ -107,48 +107,48 @@ export async function createAccount(ctx: Ctx, c: Contracts, who: string, owner: 
 
 /**
  * A new Conviction Account opened for services: created, opted in, and
- * `buyerKey` assigned over it by the owner's transaction, with the key's
+ * `buyer` added over it by the owner's transaction, with the buyer's
  * consent by an EIP-712 signature over the same terms, at the account's
- * current nonce, up to `maxCostPerPeriod` a period, until the account
+ * current nonce, up to `maxCostPerEpoch` a subscription, until the account
  * expires.
  */
 export async function openServiceAccount(
   ctx: Ctx,
   c: Contracts,
-  o: { owner: Signer; committed: bigint; buyerKey: Signer & { address: string }; maxCostPerPeriod: bigint; assignLabel: string },
+  o: { owner: Signer; committed: bigint; buyer: Signer & { address: string }; maxCostPerEpoch: bigint; addBuyerLabel: string },
 ): Promise<NewAccount & { terms: Terms }> {
   const a = await createAccount(ctx, c, 'account owner', o.owner, o.committed);
   const ss = await c.ss.getAddress();
   await send(ctx, `account owner: setServiceSpending(${a.accountId}, true)`, o.owner, ss, c.ss.interface.encodeFunctionData('setServiceSpending', [a.accountId, true]));
   const terms: Terms = {
     accountId: a.accountId,
-    assignee: o.buyerKey.address,
-    maxCostPerPeriod: o.maxCostPerPeriod,
+    buyer: o.buyer.address,
+    maxCostPerEpoch: o.maxCostPerEpoch,
     expiresAt: a.account.expiresAtTimestamp,
-    nonce: await c.cssvc.assignmentNonce(a.accountId),
+    nonce: await c.sss.grantNonce(a.accountId),
   };
-  const consent = await o.buyerKey.signTypedData(await domainOf(c.ss), SERVICE_ASSIGNMENT_TYPES, terms);
-  await send(ctx, o.assignLabel, o.owner, ss, c.ss.interface.encodeFunctionData('assign', [terms, '0x', consent]));
+  const consent = await o.buyer.signTypedData(await domainOf(c.ss), BUYER_GRANT_TYPES, terms);
+  await send(ctx, o.addBuyerLabel, o.owner, ss, c.ss.interface.encodeFunctionData('addBuyer', [terms, '0x', consent]));
   return { ...a, terms };
 }
 
-/** A wallet-funded request for the period of `epoch`: one inference bucket of `value`, under the plan named `plan`. */
+/** A wallet-funded request for the subscription of `epoch`: one inference budget of `value`, under the plan named `plan`. */
 export const walletRequest = (epoch: bigint, sessionKey: string, value: bigint, plan: string): WalletRequest =>
-  walletRequestOf(epoch, { sessionKey, planDigest: ethers.id(plan), buckets: inference(value) });
+  walletRequestOf(epoch, { sessionKey, planDigest: ethers.id(plan), budgets: inference(value) });
 
-/** A Conviction Account request for the period of `epoch`: one inference bucket of `value`, under the plan named `plan`. */
+/** A Conviction Account request for the subscription of `epoch`: one inference budget of `value`, under the plan named `plan`. */
 export const accountRequest = (accountId: bigint, epoch: bigint, sessionKey: string, value: bigint, plan: string): Request =>
-  requestOf(accountId, epoch, { sessionKey, planDigest: ethers.id(plan), buckets: inference(value) });
+  requestOf(accountId, epoch, { sessionKey, planDigest: ethers.id(plan), budgets: inference(value) });
 
 /** The signing domain of the pool's requests and receipts. */
 export const requestDomain = (c: Contracts): Promise<Domain> => queryInferenceDomain(c.qis);
 
 /**
- * Requests of bucket 0 of one period, one per value, each served in full,
- * signed by the period's session key (eth_signTypedData_v4 on anvil), as the
+ * Requests of budget 0 of one subscription, one per value, each served in full,
+ * signed by the subscription's session key (eth_signTypedData_v4 on anvil), as the
  * items of one group of a receipt batch, which lands for at least `minCounted`,
- * or for whatever the bucket has left without one. Each result commitment names
- * the period, the seller and the nonce, so the sellers' items differ.
+ * or for whatever the budget has left without one. Each result commitment names
+ * the subscription, the seller and the nonce, so the sellers' items differ.
  */
 export async function signedGroup(o: {
   domain: Domain;
@@ -162,15 +162,15 @@ export async function signedGroup(o: {
 }): Promise<ReceiptGroup> {
   const items: ReceiptItem[] = [];
   for (let i = 0; i < o.values.length; i++) {
-    const units = o.values[i] / UNIT_ASK;
+    const units = o.values[i] / UNIT_PRICE;
     const r: ServiceRequest = {
       subscriptionId: o.subscriptionId,
-      bucketId: BUCKET0,
+      serviceId: SERVICE0,
       seller: o.seller,
       nonce: o.firstNonce + BigInt(i),
-      acceptedAskWeiPerUnit: UNIT_ASK,
+      pricePerUnit: UNIT_PRICE,
       maxUnits: units,
-      maxValueWei: units * UNIT_ASK,
+      maxValueWei: units * UNIT_PRICE,
       issuedAt: o.issuedAt,
       expiry: o.issuedAt + DAY,
     };
@@ -178,7 +178,7 @@ export async function signedGroup(o: {
     const resultCommitment = ethers.keccak256(ethers.toUtf8Bytes(`result ${o.subscriptionId} ${o.seller} ${r.nonce}`));
     items.push(itemOf(r, fullReceipt(r, { resultCommitment }), { sigR: sig.r, sigVS: sig.yParityAndS }));
   }
-  return { subscriptionId: o.subscriptionId, bucketIndex: 0n, minCounted: o.minCounted ?? 0n, items };
+  return { subscriptionId: o.subscriptionId, budgetIndex: 0n, minCounted: o.minCounted ?? 0n, items };
 }
 
 /** A receipt batch, submitted from the seller node's operational key. */

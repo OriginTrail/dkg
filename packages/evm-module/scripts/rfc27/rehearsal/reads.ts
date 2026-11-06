@@ -136,7 +136,7 @@ const EVENT_SOURCES = [
   'QueryInferenceStorage',
   'ServiceSubscriptions',
   'ServiceSubscriptionsWallet',
-  'ConvictionServiceStorage',
+  'ServiceSubscriptionsStorage',
   'ConvictionStakingStorage',
   'DKGStakingConvictionNFT',
   'Token',

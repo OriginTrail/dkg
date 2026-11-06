@@ -348,7 +348,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       checkLateBooking(report, {
         expected,
         curves,
-        budget: B,
+        allowance: B,
         epoch: E,
         emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
         cursorAfter: 5n,
@@ -368,7 +368,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         checkLateBooking(report, {
           expected,
           curves,
-          budget: B,
+          allowance: B,
           epoch: E,
           emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
           cursorAfter: 5n,
@@ -394,7 +394,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       checkLateBooking(report, {
         expected,
         curves,
-        budget: B,
+        allowance: B,
         epoch: E,
         emitted: { fromWindow: 0n, toWindow: 1n, scheduled: B },
         cursorAfter: 1n,
@@ -412,7 +412,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       checkLateBooking(report, {
         expected,
         curves,
-        budget: B,
+        allowance: B,
         epoch: E,
         emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
         cursorAfter: 1n,
@@ -426,32 +426,32 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
   describe('the pool, worked out without the contract', () => {
     it('leaves an epoch with no value no pool, and its money waiting for the next epoch with value', () => {
       const rows = [
-        { money: 5n, sumR: 3n },
-        { money: 2n, sumR: 0n },
-        { money: 0n, sumR: 0n },
-        { money: 1n, sumR: 0n },
-        { money: 4n, sumR: 1n },
-        { money: 7n, sumR: 0n },
+        { money: 5n, totalServed: 3n },
+        { money: 2n, totalServed: 0n },
+        { money: 0n, totalServed: 0n },
+        { money: 1n, totalServed: 0n },
+        { money: 4n, totalServed: 1n },
+        { money: 7n, totalServed: 0n },
       ];
       expect(poolsFromMoney(rows)).to.deep.equal({ pools: [5n, 0n, 0n, 0n, 7n, 0n], waiting: 7n });
     });
 
     it('holds nothing back with value in every epoch, and everything back with value in none', () => {
-      expect(poolsFromMoney([{ money: 5n, sumR: 1n }, { money: 2n, sumR: 1n }])).to.deep.equal({ pools: [5n, 2n], waiting: 0n });
-      expect(poolsFromMoney([{ money: 5n, sumR: 0n }, { money: 2n, sumR: 0n }])).to.deep.equal({ pools: [0n, 0n], waiting: 7n });
+      expect(poolsFromMoney([{ money: 5n, totalServed: 1n }, { money: 2n, totalServed: 1n }])).to.deep.equal({ pools: [5n, 2n], waiting: 0n });
+      expect(poolsFromMoney([{ money: 5n, totalServed: 0n }, { money: 2n, totalServed: 0n }])).to.deep.equal({ pools: [0n, 0n], waiting: 7n });
       expect(poolsFromMoney([])).to.deep.equal({ pools: [], waiting: 0n });
     });
 
     it('pays a gross by the formula, each term floored on its own', () => {
       // Half the pool by R, half by score: 100 × (1/2 × 1/3) + 100 × (1/2 × 3/4), floored apart.
-      expect(grossOf(100n, 5_000n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(16n + 37n);
-      expect(grossOf(100n, 0n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(33n);
-      expect(grossOf(100n, 10_000n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(75n);
+      expect(grossOf(100n, 5_000n, { servedValue: 1n, weightedValue: 3n }, { totalServed: 3n, totalWeighted: 4n })).to.equal(16n + 37n);
+      expect(grossOf(100n, 0n, { servedValue: 1n, weightedValue: 3n }, { totalServed: 3n, totalWeighted: 4n })).to.equal(33n);
+      expect(grossOf(100n, 10_000n, { servedValue: 1n, weightedValue: 3n }, { totalServed: 3n, totalWeighted: 4n })).to.equal(75n);
     });
 
     it('gives the second term the R share when no node has a score, and a node with no value nothing', () => {
-      expect(grossOf(100n, 5_000n, { r: 1n, score: 0n }, { sumR: 2n, sumScore: 0n })).to.equal(25n + 25n);
-      expect(grossOf(100n, 5_000n, { r: 0n, score: 0n }, { sumR: 2n, sumScore: 1n })).to.equal(0n);
+      expect(grossOf(100n, 5_000n, { servedValue: 1n, weightedValue: 0n }, { totalServed: 2n, totalWeighted: 0n })).to.equal(25n + 25n);
+      expect(grossOf(100n, 5_000n, { servedValue: 0n, weightedValue: 0n }, { totalServed: 2n, totalWeighted: 1n })).to.equal(0n);
     });
 
     it('words a refusal of a batch as a decoded revert does, by the fault\'s place in the enum', () => {
@@ -551,7 +551,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(requireParameter('QueryInferenceStorage', ['lambdaBps'])).to.deep.equal({ key: 'lambdaBps', value: 5000n });
       expect(requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value).to.equal(256n);
       expect(requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value).to.equal(32n);
-      expect(requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value).to.equal(16n);
+      expect(requireParameter('ServiceSubscriptionsStorage', ['maxBudgetsPerSubscription']).value).to.equal(16n);
     });
   });
 

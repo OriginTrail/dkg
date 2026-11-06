@@ -4,7 +4,7 @@
 // The switch the Hub owner pulls if the query/inference pool misbehaves and a
 // fixed settlement cannot replace it at once: QueryInferenceSettlement removed
 // from the Hub by name, so StakingV10 and StakingKPI read no pool, and
-// QueryInferenceStorage paused, so no period is funded meanwhile. Then on
+// QueryInferenceStorage paused, so no subscription is funded meanwhile. Then on
 // again: a fresh deployment of the settlement, registered and initialized by
 // one Hub transaction, as 998 registers contracts, which also unpauses. Last,
 // what a removal by address does instead once the settlement is the Hub's last
@@ -13,8 +13,8 @@
 // deployment.
 //
 // The pool needs value to show anything, so the phase first runs two epochs
-// of it, from the activation epoch S: a wallet period of S that both sellers
-// serve, so S has a pool, and a wallet period of S + 1 that no one serves, so its
+// of it, from the activation epoch S: a wallet subscription of S that both sellers
+// serve, so S has a pool, and a wallet subscription of S + 1 that no one serves, so its
 // money rolls forward. The switch goes off in S + 2, with a batch for that epoch
 // in hand, and on again in S + 3, once that batch has missed its epoch. It runs
 // right after the hub phase, before S ends, and everything is reverted at the end,
@@ -32,15 +32,15 @@ import { accountRequest, approve, claimAll, fundTrac, openServiceAccount, reques
 import { impersonate, operationalKeys } from './plumbing';
 import { expectedReward, positions, smallestOn } from './reads';
 import type { TxEntry } from './results';
-import { CA_PERIOD_VALUE, COMMITTED, MAX_COST_PER_PERIOD, SELLERS, TRAC } from './scenario';
+import { CA_SUBSCRIPTION_VALUE, COMMITTED, MAX_COST_PER_EPOCH, SELLERS, TRAC } from './scenario';
 
 /** A placeholder entry for the Hub's contract set: an address with no code and no key. */
 const PLACEHOLDER_NAME = 'HubSetPlaceholder';
 const PLACEHOLDER = '0x000000000000000000000000000000000000dEaD';
-const SWITCH_SERVED_VALUE = 5n * TRAC; // a wallet period both sellers serve
-const SWITCH_UNSERVED_VALUE = 2n * TRAC; // a wallet period no one serves, so its money rolls forward
-const SWITCH_STRANDED_VALUE = 1n * TRAC; // a wallet period whose batch the outage stops
-const SWITCH_AFTER_VALUE = 1n * TRAC; // a wallet period served once the switch is on again
+const SWITCH_SERVED_VALUE = 5n * TRAC; // a wallet subscription both sellers serve
+const SWITCH_UNSERVED_VALUE = 2n * TRAC; // a wallet subscription no one serves, so its money rolls forward
+const SWITCH_STRANDED_VALUE = 1n * TRAC; // a wallet subscription whose batch the outage stops
+const SWITCH_AFTER_VALUE = 1n * TRAC; // a wallet subscription served once the switch is on again
 
 export async function phaseSwitch(ctx: Ctx): Promise<void> {
   const { report, stack } = ctx;
@@ -61,7 +61,7 @@ export async function phaseSwitch(ctx: Ctx): Promise<void> {
       (await h.getContractAddress('QueryInferenceSettlement')) === qsDeployedAddr &&
       !(await c.qis.paused()) &&
       moneyLeft.wallet === 0n &&
-      moneyLeft.conviction === 0n,
+      moneyLeft.account === 0n,
   );
   saveResults(ctx, 'switch', out);
 }
@@ -79,7 +79,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   const snftAddr = await c.snft.getAddress();
   const ownerAddr = await h.owner();
   const owner = await impersonate(ctx, ownerAddr);
-  const [deployer, walletBuyer, caOwner, buyerKey, caSession, , , walletSession] = await ctx.hre.ethers.getSigners();
+  const [deployer, walletBuyer, caOwner, buyer, caSession, , , walletSession] = await ctx.hre.ethers.getSigners();
 
   const [nOn, nOff] = SELLERS; // nOff is claimed while the switch is off, nOn once it is on again
   const ops = await operationalKeys(ctx);
@@ -91,7 +91,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   }
   const out: { [key: string]: unknown } = { activation: S, sellers: SELLERS, epochLength: await c.chronos.epochLength() };
 
-  // ---- epoch S: a wallet period both sellers serve; a Conviction Account to fund from later ----
+  // ---- epoch S: a wallet subscription both sellers serve; a Conviction Account to fund from later ----
   await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S)) + 120n);
   report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: funding and serving`);
   await fundTrac(ctx, owner, walletBuyer.address, 100n * TRAC, 'fork-only: Hub owner sends TRAC to the wallet buyer');
@@ -100,21 +100,21 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   const fundWallet = (epoch: bigint, value: bigint, plan: string) =>
     c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequest(epoch, walletSession.address, value, plan)]);
   await send(ctx, `wallet buyer: fundFromWallet(epoch ${S}, ${fmt(SWITCH_SERVED_VALUE)} TRAC)`, walletBuyer, sswAddr, fundWallet(S, SWITCH_SERVED_VALUE, 'switch rehearsal: served'));
-  const servedPeriod = subscriptionIdOf(walletBuyer.address, S);
+  const servedSubscription = subscriptionIdOf(walletBuyer.address, S);
 
   const { accountId } = await openServiceAccount(ctx, c, {
     owner: caOwner,
     committed: COMMITTED,
-    buyerKey,
-    maxCostPerPeriod: MAX_COST_PER_PERIOD,
-    assignLabel: 'account owner: assign the buyer key',
+    buyer,
+    maxCostPerEpoch: MAX_COST_PER_EPOCH,
+    addBuyerLabel: 'account owner: add the buyer',
   });
   const fundAccount = (epoch: bigint) =>
-    c.ss.interface.encodeFunctionData('fundFromConviction', [accountRequest(accountId, epoch, caSession.address, CA_PERIOD_VALUE, 'switch rehearsal: account')]);
+    c.ss.interface.encodeFunctionData('fundFromAccount', [accountRequest(accountId, epoch, caSession.address, CA_SUBSCRIPTION_VALUE, 'switch rehearsal: account')]);
   /** Whether each kind of funding would go through for `epoch` now. */
   const fundingOpen = async (epoch: bigint) => ({
     wallet: await succeeds(ctx, walletBuyer.address, sswAddr, fundWallet(epoch, TRAC, 'switch rehearsal: probe')),
-    account: await succeeds(ctx, buyerKey.address, ssAddr, fundAccount(epoch)),
+    account: await succeeds(ctx, buyer.address, ssAddr, fundAccount(epoch)),
   });
 
   // FORK-ONLY: both sellers score in S, as each scored in the last full epoch before the fork.
@@ -123,14 +123,14 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   const issuedAt = await chainNow(ctx.hre);
   const servedBy: Record<string, bigint[]> = { [String(nOn)]: [2n * TRAC], [String(nOff)]: [1n * TRAC] };
   for (const seller of SELLERS) {
-    const group = await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: servedPeriod, seller, firstNonce: 0n, values: servedBy[String(seller)], issuedAt });
+    const group = await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: servedSubscription, seller, firstNonce: 0n, values: servedBy[String(seller)], issuedAt });
     const opSigner = await impersonate(ctx, ops[String(seller)]);
     await submitBatch(ctx, qsDeployed, opSigner, `node ${seller} operational key: submitReceiptBatch`, [group]);
   }
 
-  // ---- epoch S + 1: a period no one serves ----
+  // ---- epoch S + 1: a subscription no one serves ----
   await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 1n)) + 120n);
-  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: a period no one serves`);
+  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: a subscription no one serves`);
   await send(
     ctx,
     `wallet buyer: fundFromWallet(epoch ${S + 1n}, ${fmt(SWITCH_UNSERVED_VALUE)} TRAC), which no one serves`,
@@ -141,7 +141,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
 
   // ---- epoch S + 2: a batch in hand, then the switch goes off ----
   await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 2n)) + 120n);
-  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: a period funded and served, whose batch has not landed, then the switch goes off`);
+  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: a subscription funded and served, whose batch has not landed, then the switch goes off`);
   await send(ctx, `wallet buyer: fundFromWallet(epoch ${S + 2n}, ${fmt(SWITCH_STRANDED_VALUE)} TRAC)`, walletBuyer, sswAddr, fundWallet(S + 2n, SWITCH_STRANDED_VALUE, 'switch rehearsal: the batch the outage stops'));
   await ctx.fork.proof(c, nOn, mirror[String(nOn)], `node ${nOn} scores in epoch ${S + 2n} what it scored in ${C - 1n}`);
   const strandedBatch = c.qs.interface.encodeFunctionData('submitReceiptBatch', [
@@ -212,7 +212,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   );
   await send(ctx, 'Hub owner: Hub.forwardCall(QueryInferenceStorage, setPaused(true))', owner, HUB, setPaused(true));
   const pausedWallet = await expectRevert(ctx, 'switch off: fundFromWallet', walletBuyer.address, sswAddr, fundWallet(S + 3n, TRAC, 'switch rehearsal: probe'));
-  const pausedAccount = await expectRevert(ctx, 'switch off: fundFromConviction', buyerKey.address, ssAddr, fundAccount(S + 3n));
+  const pausedAccount = await expectRevert(ctx, 'switch off: fundFromAccount', buyer.address, ssAddr, fundAccount(S + 3n));
   const pausedBatch = await expectRevert(ctx, `switch off: node ${nOn}'s batch, with the storage paused too`, opOn, qsDeployedAddr, strandedBatch);
   check(
     'switch off: the pause refuses both kinds of funding',
@@ -289,12 +289,12 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   const openOn = await fundingOpen(S + 4n);
   check('switch on: both kinds of funding are open again', openOn.wallet && openOn.account);
   await ctx.fork.proof(c, nOn, mirror[String(nOn)], `node ${nOn} scores in epoch ${S + 3n} what it scored in ${C - 1n}`);
-  const missed = await expectRevert(ctx, `switch on: node ${nOn}'s batch for the period of ${S + 2n}, in ${S + 3n}`, opOn, fresh, strandedBatch);
+  const missed = await expectRevert(ctx, `switch on: node ${nOn}'s batch for the subscription of ${S + 2n}, in ${S + 3n}`, opOn, fresh, strandedBatch);
   check(`switch on: a batch that missed its epoch during the outage never counts, so its work has lost its R`, missed === groupFault(0, 'OutsideEpoch'), missed);
   // The money of the epochs with no value rolls through the outage, to the next batch.
   await send(ctx, `wallet buyer: fundFromWallet(epoch ${S + 3n}, ${fmt(SWITCH_AFTER_VALUE)} TRAC)`, walletBuyer, sswAddr, fundWallet(S + 3n, SWITCH_AFTER_VALUE, 'switch rehearsal: after the outage'));
-  const afterPeriod = subscriptionIdOf(walletBuyer.address, S + 3n);
-  const afterGroup = await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: afterPeriod, seller: nOn, firstNonce: 0n, values: [SWITCH_AFTER_VALUE], issuedAt: await chainNow(ctx.hre) });
+  const afterSubscription = subscriptionIdOf(walletBuyer.address, S + 3n);
+  const afterGroup = await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: afterSubscription, seller: nOn, firstNonce: 0n, values: [SWITCH_AFTER_VALUE], issuedAt: await chainNow(ctx.hre) });
   await submitBatch(ctx, qsFresh, await impersonate(ctx, opOn), `node ${nOn} operational key: submitReceiptBatch, on the fresh settlement`, [afterGroup]);
   const poolAfter = await qsFresh.epochPool(S + 3n);
   check(

@@ -15,7 +15,7 @@ The gas of a first claim grows with every epoch (step 4).
 
 | Contract | Version | Deploy step |
 |---|---|---|
-| `ConvictionServiceStorage` | new, 1.2.0 | 052c |
+| `ServiceSubscriptionsStorage` | new, 1.2.0 | 052c |
 | `ServiceSubscriptions` | new, 1.2.0 | 052d |
 | `ServiceSubscriptionsWallet` | new, 1.0.0 | 052d |
 | `QueryInferenceStorage` | new, 1.0.0 | 052e |
@@ -70,7 +70,7 @@ transaction.
    | `PublishingConviction` | 4,285,448 |
    | `ServiceSubscriptions` | 3,837,852 |
    | `QueryInferenceSettlement` | 2,774,458 |
-   | `ConvictionServiceStorage` | 2,142,540 |
+   | `ServiceSubscriptionsStorage` | 2,142,540 |
    | `StakingV10Ledger` | 1,855,388 |
    | `ServiceSubscriptionsWallet` | 1,842,789 |
    | `StakingKPI` | 1,426,976 |
@@ -109,9 +109,9 @@ From the Hub owner's wallet, one after the other, in the same epoch:
 - Transaction 1 registers the 7 new contracts, points the Hub at the 3
   redeployed ones, calls `initialize()` on 30 contracts, and forwards the
   parameters of `deployments/parameters.json` "testnet": 3 calls to
-  `QueryInferenceStorage` and 1 to `ConvictionServiceStorage`.
+  `QueryInferenceStorage` and 1 to `ServiceSubscriptionsStorage`.
 - Transaction 2 sets the activation epoch: the first epoch whose rewards
-  include the pool, and the first in which periods can be funded.
+  include the pool, and the first in which subscriptions can be funded.
   - Before transaction 1 it reverts `InvalidTargetContract`, because the Hub
     does not hold `QueryInferenceStorage` yet.
   - The storage refuses it too (`PoolNotWired`) while the Hub's
@@ -252,13 +252,13 @@ positions and accounts up to date.
    - Rehearsal: 148,818 gas.
 
 Sellers land their own receipt batches. A batch counts when it lands, up to what
-the buyer's bucket has left, and the seller's node needs a score in the epoch
-first (`NoNodeScore`). A batch for a period of an epoch that has ended is refused
+the buyer's budget has left, and the seller's node needs a score in the epoch
+first (`NoNodeScore`). A batch for a subscription of an epoch that has ended is refused
 (`GroupFault` with `OutsideEpoch`) and never counts, so a seller lands its last
 batch before the epoch ends. A group sets `minCounted`, so that it reverts rather
-than spend its nonces when the bucket has less left than that. With a `minCounted`
+than spend its nonces when the budget has less left than that. With a `minCounted`
 of 0 it lands for whatever is left, even nothing, and its nonces stay spent.
-`bucketLeft` reads what the bucket has left, and a top-up adds to it.
+`budgetLeft` reads what the budget has left, and a top-up adds to it.
 
 ## 6. Emergency: switching the pool off
 
@@ -372,7 +372,7 @@ reverts.
 - `ParametersStorage.protocolTreasury` stays the zero address. While a
   treasury is wired, `PublishingConviction` refuses every Conviction Account
   service spend (`ServiceFundingPausedTreasuryWired`), so Conviction Account
-  funding of service periods would stop.
+  funding of service subscriptions would stop.
 - λ, `QueryInferenceStorage.lambdaBps` (5,000 on testnet), is taken by an epoch
   when its first value counts, and kept. A change through `setLambdaBps` applies
   to every epoch with no value yet, and moves no other.
