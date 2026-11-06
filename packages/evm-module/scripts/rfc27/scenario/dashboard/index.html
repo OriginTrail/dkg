@@ -64,19 +64,23 @@ h1, h2, h3, p { margin: 0; }
 .pill:hover { background: var(--surface-2); }
 .pill[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); font-weight: 600; }
 .pill .tag { font-size: .78em; opacity: .75; margin-left: .3em; }
-.nav { display: flex; gap: .9rem; font-size: .92rem; margin-left: auto; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.nav { display: flex; gap: .9rem; font-size: .92rem; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .nav::-webkit-scrollbar { display: none; }
 .nav a { color: var(--ink-2); white-space: nowrap; }
+.bar .nav { margin-left: auto; }
+.nav.top { display: none; margin: 0 0 .7rem; }
+.bar .spring { margin-left: auto; }
+.bar .nav + .spring { margin-left: 0; }
 .theme { background: none; border: 1px solid var(--border); border-radius: 8px; padding: .18rem .55rem; cursor: pointer; font-size: .86rem; color: var(--ink-2); white-space: nowrap; }
 
-.layout { display: grid; grid-template-columns: minmax(0, 1fr) 23rem; gap: 1.4rem; align-items: start; padding-bottom: 3rem; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 23rem; gap: 1.4rem; padding-bottom: 3rem; }
 .layout > main, .layout > aside { min-width: 0; }
 .stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.4rem; }
 section { scroll-margin-top: 5.5rem; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1.05rem 1.2rem; }
 .head { margin-bottom: .8rem; }
 .head h2 { font-size: 1.4rem; font-weight: 650; letter-spacing: -.01em; display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
-.head h2 .scope { font-weight: 500; color: var(--ink-2); font-size: .8em; }
+.head h2 .scope { font-weight: 500; color: var(--ink-2); font-size: .72em; letter-spacing: 0; }
 .head p { color: var(--ink-2); max-width: 75ch; margin-top: .25rem; }
 h3 { font-size: 1.02rem; font-weight: 620; }
 .cap { color: var(--ink-2); font-size: .9rem; }
@@ -121,7 +125,8 @@ h3 { font-size: 1.02rem; font-weight: 620; }
 .swatch.ghost { opacity: .4; }
 .hit { fill: transparent; cursor: pointer; outline: none; }
 .hit:focus-visible { stroke: var(--ink); stroke-width: 1.5; }
-g.slot:hover .band { fill: var(--surface-2); }
+.band { fill: transparent; }
+.band.on, g.slot:hover .band { fill: var(--surface-2); }
 
 /* tables */
 .toggle { background: none; border: 0; padding: 0; color: var(--link); cursor: pointer; font-size: .9rem; }
@@ -239,6 +244,10 @@ dl.rows .rule { grid-column: 1 / -1; border-top: 1px solid var(--grid); margin: 
 @media (max-width: 1800px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+@media (max-width: 1400px) {
+  .bar .nav { display: none; }
+  .nav.top { display: flex; }
+}
 @media (max-width: 1500px) {
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tiles { grid-template-columns: repeat(6, minmax(0, 1fr)); }
@@ -259,7 +268,6 @@ dl.rows .rule { grid-column: 1 / -1; border-top: 1px solid var(--grid); margin: 
   .grid-4, .grid-3, .grid-2 { grid-template-columns: minmax(0, 1fr); }
   .sched-row { grid-template-columns: minmax(0, 1fr); }
   .foot { grid-template-columns: minmax(0, 1fr); }
-  .nav { display: none; }
   .tile-value { font-size: 1.45rem; }
   .card { padding: .9rem 1rem; }
   .scroll-x { margin-left: -1rem; margin-right: -1rem; padding: 0 1rem; }
@@ -276,12 +284,13 @@ dl.rows .rule { grid-column: 1 / -1; border-top: 1px solid var(--grid); margin: 
 <div class="wrap">
   <header class="masthead">
     <div>
-      <h1>The marketplace, live on Base Sepolia</h1>
+      <h1 id="title">The marketplace, live on Base Sepolia</h1>
       <div class="sub">OT-RFC-27: buyers fund subscriptions, sellers land receipts, and a pool pays the sellers' stakers.</div>
     </div>
   </header>
   <div class="truth"><div><strong>Service calls here are simulated by scripts. Every transaction, proof, score and reward is real.</strong> This page reads only the chain, so it shows what the contracts recorded, not what the scripts meant to do.</div></div>
   <div id="banner"></div>
+  <nav class="nav top" id="nav-top" aria-label="Sections"></nav>
 </div>
 <div class="bar"><div class="wrap bar-in" id="bar"></div></div>
 <div class="wrap" style="padding-top:1.1rem">
@@ -500,7 +509,10 @@ function freshness() {
 
 // ------------------------------------------------------------------ the bar
 
+const navLinks = () => [['epochs', 'Epochs'], ['sellers', 'Sellers'], ['buyers', 'Buyers'], ['services', 'Services'], ['feed', 'Feed'], ['scenario', 'Schedule'], ['stakers', 'Stakers']].map(([id, label]) => h('a', { href: `#${id}` }, label));
+
 function renderBar() {
+  document.getElementById('nav-top').replaceChildren(...navLinks());
   const root = document.getElementById('bar');
   const d = D();
   if (!d?.clock) { root.replaceChildren(status(freshness().kind, freshness().text, freshness().detail)); return; }
@@ -514,7 +526,8 @@ function renderBar() {
   root.replaceChildren(
     h('div', { class: 'picker', role: 'group', 'aria-label': 'Pick an epoch' }, h('span', { class: 'picker-label' }, 'Epoch'), pills),
     h('span', { id: 'fresh-pill' }, status(fresh.kind, fresh.text, fresh.detail)),
-    h('nav', { class: 'nav' }, [['epochs', 'Epochs'], ['sellers', 'Sellers'], ['buyers', 'Buyers'], ['services', 'Services'], ['scenario', 'Schedule'], ['stakers', 'Stakers'], ['feed', 'Feed']].map(([id, label]) => h('a', { href: `#${id}` }, label))),
+    h('nav', { class: 'nav', 'aria-label': 'Sections' }, navLinks()),
+    h('span', { class: 'spring' }),
     h('button', { class: 'theme', onclick: cycleTheme, tip: 'Switch between the system theme, dark and light' }, theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'Auto'),
   );
   // Keep the chosen epoch in view inside the picker, without moving the page.
@@ -633,7 +646,7 @@ function dataLines() {
   return [
     h('div', { style: 'margin:.25rem 0 .15rem' }, status(f.kind, f.kind === 'good' ? 'Fresh' : f.kind === 'neutral' ? 'Snapshot' : 'Stale', f.detail)),
     h('div', { class: 'tile-cap' },
-      h('span', { 'data-read-age': d.status?.rpc?.lastOkAt ?? d.generatedAt }, `Read ${ago(now() - (d.status?.rpc?.lastOkAt ?? d.generatedAt))}`),
+      SNAPSHOT ? 'Read' : h('span', { 'data-read-age': d.status?.rpc?.lastOkAt ?? d.generatedAt }, `Read ${ago(now() - (d.status?.rpc?.lastOkAt ?? d.generatedAt))}`),
       d.status?.rpc?.block ? ` at block ${group(String(d.status.rpc.block))}. ` : '. ',
       lag ? `The events are ${group(String(lag))} block${lag === 1 ? '' : 's'} behind. ` : '',
       SNAPSHOT ? '' : 'A new read every 5 minutes.'),
@@ -691,18 +704,18 @@ function epochFrame(box, rows, opts) {
   const ph = H - m.t - m.b;
   const { top, ticks } = scaleFor(opts.max, compactView ? 3 : 4);
   const y = (v) => m.t + ph - (v / top) * ph;
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': opts.label });
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'group', 'aria-label': opts.label });
   ticks.forEach((t) => {
     svg.append(s('line', { x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), style: `stroke:var(--${t === 0 ? 'axis' : 'grid'});stroke-width:1` }));
     svg.append(s('text', { x: m.l - 6, y: y(t) + 4, 'text-anchor': 'end', style: `fill:var(--muted);font-size:${compactView ? 10.5 : 12}px;font-variant-numeric:tabular-nums` }, tickLabel(t)));
   });
-  const slot = pw / rows.length;
+  const slot = pw / Math.max(rows.length, compactView ? 5 : 7);
   const every = Math.ceil((compactView ? 26 : 44) / slot);
   rows.forEach((row, i) => {
     const x = m.l + slot * i;
     const g = s('g', { class: 'slot' });
     const selected = row.epoch === opts.selected;
-    g.append(s('rect', { class: 'band', x: x + 2, y: 2, width: Math.max(0, slot - 4), height: H - 4, rx: 8, style: `fill:${selected ? 'var(--surface-2)' : 'transparent'}` }));
+    g.append(s('rect', { class: `band${selected ? ' on' : ''}`, x: x + 2, y: 2, width: Math.max(0, slot - 4), height: H - 4, rx: 8 }));
     opts.draw(g, row, { x, slot, y, base: y(0), top: m.t, compactView });
     if (i % every === 0 || selected) {
       const label = s('text', { x: x + slot / 2, y: H - m.b + (compactView ? 16 : 17), 'text-anchor': 'middle', style: `fill:var(--${selected ? 'ink' : 'ink-2'});font-size:${compactView ? 11 : 13}px;font-weight:${selected ? 650 : 500};font-variant-numeric:tabular-nums` }, row.epoch);
@@ -840,7 +853,7 @@ function renderEpochs() {
       return h('tr', { class: r.epoch === sel ? 'sel' : null },
         h('td', null, r.epoch, r.state === 'current' ? h('span', { class: 'muted small' }, ' now') : r.state === 'ahead' ? h('span', { class: 'muted small' }, ' ahead') : ''),
         h('td', null, T(r.wallet)), h('td', null, T(r.account)), h('td', null, T(r.served)),
-        h('td', null, big(r.money) > 0n ? pct(r.unusedShare, 0) : '–'),
+        h('td', { tip: big(r.money) > 0n ? `${tracExact(r.unused)} TRAC of the money counted for nothing` : null }, big(r.money) > 0n ? pct(r.unusedShare, 0) : '–'),
         h('td', null, big(r.rolledIn) > 0n ? T(r.rolledIn) : '–'),
         h('td', null, r.state === 'current' && empty ? h('span', { class: 'muted' }, '0 so far') : T(r.pool)),
         h('td', null, out ? T(r.waitingAfter) : '–'),
@@ -952,7 +965,8 @@ function renderBuyers() {
         sub ? h('div', { class: 'track thin', style: 'margin-top:.15rem' }, h('i', { style: `width:${Math.min(100, (toNum(sub.cost) / Math.max(1e-9, toNum(grant.maxCostPerEpoch))) * 100)}%;background:var(--account)` })) : null),
       h('div', { style: 'margin-top:.2rem' },
         grant.revokedAt ? `Revoked ${utc(grant.revokedAt)} UTC` : `Expires ${utc(grant.expiresAt, 'day')}`,
-        b.buyersOnAccount ? ` · ${b.buyersOnAccount} buyer${b.buyersOnAccount === 1 ? '' : 's'} on the account` : '')) : b.pays === 'account' ? h('div', { class: 'note' }, 'No grant on-chain yet.') : null;
+        b.buyersOnAccount ? ` · ${b.buyersOnAccount} buyer${b.buyersOnAccount === 1 ? '' : 's'} on the account` : ''),
+      b.allowance ? h('div', { tip: 'What the account can still spend in its billing window now, from its base allowance and its top-up buffer.' }, 'Account can still spend ', T(big(b.allowance.baseRemaining) + big(b.allowance.topUpBuffer)), ' this window') : null) : b.pays === 'account' ? h('div', { class: 'note' }, 'No grant on-chain yet.') : null;
     if (!sub) {
       return h('div', { class: 'card' }, header, h('p', { class: 'cap', style: 'margin-top:.5rem' }, row.state === 'upcoming' ? 'The epoch has not started.' : 'No subscription for this epoch.'), events, grantBlock);
     }
@@ -962,7 +976,7 @@ function renderBuyers() {
         h('div', { class: 'figure' }, h('span', { class: 'lab' }, 'Funded value'), h('span', { class: 'val' }, T(sub.value))),
         h('div', { class: 'figure' }, h('span', { class: 'lab' }, 'Cost after discount'), h('span', { class: 'val' }, T(sub.cost)))),
       h('div', { class: 'budget' },
-        h('div', { class: 'row' }, h('span', { class: 'name' }, 'Budgets used'), h('span', { class: 'amt' }, h('b', null, pct(usedShare, 0)))),
+        h('div', { class: 'row' }, h('span', { class: 'name' }, 'Service budgets used'), h('span', { class: 'amt' }, h('b', null, pct(usedShare, 0)))),
         h('div', { class: 'track', style: 'margin-top:.15rem' }, h('i', { style: `width:${usedShare * 100}%;background:var(--ink-2)` }))),
       sub.budgets.map((x) => h('div', { class: 'budget' },
         h('div', { class: 'row' }, h('span', { class: 'name', tip: x.service }, serviceLabel(x.service)), h('span', { class: 'amt' }, T(x.used), ' of ', T(x.value))),
@@ -1002,7 +1016,7 @@ function renderServices() {
           stat('Receipts', group(String(x.receipts)), `${compact(x.units)} ${x.units === '1' ? unit : plural(unit)}${x.unitsComplete ? '' : ' (of those decoded)'}`),
           stat('Average price', x.avgPrice ? [price(x.avgPrice), h('span', { class: 'unit' }, 'TRAC')] : '–', `per ${unit}`)),
         h('div', { class: 'budget', style: 'margin-top:0' },
-          h('div', { class: 'row' }, h('span', { class: 'name' }, 'Its budgets, all buyers'), h('span', { class: 'amt' }, T(x.used), ' of ', T(x.budget), ' used')),
+          h('div', { class: 'row' }, h('span', { class: 'name' }, 'Service budgets, all buyers'), h('span', { class: 'amt' }, T(x.used), ' of ', T(x.budget), ' used')),
           h('div', { class: 'track', style: 'margin-top:.15rem' }, x.bySeller.map((y) => h('i', { style: `width:${(toNum(y.counted) / Math.max(1e-9, toNum(x.budget))) * 100}%;background:${sellerColor(y.id)}`, tip: `${sellerName(y.id)}: ${trac(y.counted)} TRAC` })))),
         x.bySeller.length ? h('div', { class: 'scroll-x', style: 'margin-top:.1rem' }, h('table', null,
           h('thead', null, h('tr', null, ['By seller', 'Receipts', `${unit[0].toUpperCase()}${plural(unit).slice(1)}`, 'Counted value', 'Share', 'Average price'].map((t) => h('th', null, t)))),
@@ -1133,7 +1147,8 @@ function renderFeed() {
   const rows = d.feed.filter(rule).filter((x) => !view.feedThisEpoch || epochAt(x.at) === sel);
   const list = rows.length
     ? h('ul', { class: 'feed-list' }, rows.slice(0, view.feedLimit).map(feedRow),
-      rows.length > view.feedLimit ? h('li', { class: 'more' }, h('button', { class: 'toggle', onclick: () => { view.feedLimit += 100; renderFeed(); } }, `Show more (${rows.length - view.feedLimit} left)`)) : null)
+      rows.length > view.feedLimit ? h('li', { class: 'more' }, h('button', { class: 'toggle', onclick: () => { view.feedLimit += 100; renderFeed(); } }, `Show more (${rows.length - view.feedLimit} left)`)) : null,
+      rows.length <= view.feedLimit && d.feedTotal > d.feed.length ? h('li', { class: 'more cap' }, `The newest ${d.feed.length} of ${group(String(d.feedTotal))} rows.`) : null)
     : h('div', { class: 'empty', style: 'padding:1rem' }, d.feed.length ? 'Nothing of this kind.' : `Nothing on-chain yet. From epoch ${d.clock.firstEpoch} on, every funding, batch, removal and claim appears here, newest first, with its transaction.`);
   root.replaceChildren(h('div', { class: 'card feed-card' },
     h('div', { class: 'feed-top' },
@@ -1161,6 +1176,7 @@ const STATUS_TEXT = {
   seen: ['good', 'Seen on-chain'],
   scheduled: ['neutral', 'Scheduled'],
   waiting: ['warning', 'Its time has come, not seen yet'],
+  'so-far': ['neutral', 'As scheduled, so far'],
   'not-seen': ['serious', 'Not seen on-chain'],
   'no-trace': ['neutral', 'No on-chain trace'],
   differs: ['serious', 'Differs from the schedule'],
@@ -1265,7 +1281,7 @@ function renderAbout() {
   const checks = d.checks ?? [];
   const failed = checks.filter((c) => c.ok === false);
   const pending = checks.filter((c) => c.ok === null);
-  const labels = { repository: 'the scenario\'s public file in the repository', file: 'a copy of the scenario\'s public file', 'last good copy': 'the last good copy of the scenario\'s public file', none: 'no public file yet: on-chain ids only' };
+  const labels = { repository: 'Names come from the scenario\'s public file in the repository. Nothing else comes from the scripts.', file: 'Names come from a copy of the scenario\'s public file. Nothing else comes from the scripts.', 'last good copy': 'Names come from the last good copy of the scenario\'s public file. Nothing else comes from the scripts.', none: 'The scenario\'s public file is not out yet, so whatever appears goes by its on-chain id.' };
   const contracts = Object.entries(d.contracts ?? {}).filter(([k]) => ['QueryInferenceSettlement', 'QueryInferenceStorage', 'ServiceSubscriptions', 'ServiceSubscriptionsWallet', 'ServiceSubscriptionsStorage', 'StakingKPI', 'StakingV10'].includes(k));
   root.replaceChildren(
     h('div', { class: 'head' }, h('h2', null, 'Where these numbers come from')),
@@ -1276,7 +1292,7 @@ function renderAbout() {
           h('li', null, 'Every figure comes from contract views on Base Sepolia, read together at one block, starting from the Hub ', d.network?.hub ? addrLink(d.network.hub) : null, '.'),
           h('li', null, 'The events behind the feed come from Blockscout; units and prices from each batch\'s calldata.'),
           h('li', null, 'An ended epoch\'s numbers are final, so they are read once.'),
-          h('li', null, 'Names come from ', labels[d.public?.source] ?? labels.none, '. Nothing else comes from the scripts.'))),
+          h('li', null, labels[d.public?.source] ?? labels.none))),
       h('div', null,
         h('h3', null, 'The numbers checked against each other'),
         h('div', { style: 'margin:.3rem 0' }, checks.length === 0
@@ -1407,8 +1423,10 @@ window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => { for (const j of chartJobs) j.draw(j.box); }, 120);
 });
-if (SNAPSHOT) renderAll();
-else {
+if (SNAPSHOT) {
+  document.getElementById('title').textContent = 'The marketplace on Base Sepolia';
+  renderAll();
+} else {
   load();
   setInterval(load, 60_000);
 }

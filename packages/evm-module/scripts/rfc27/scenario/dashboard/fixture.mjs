@@ -77,6 +77,7 @@ const EVENTS = [
   { epochOffset: 2, atUtc: '14:00', kind: 'remove-buyer', who: 'account-plain', note: "The account's owner removes its buyer: requests issued from then on are refused, and those served before it still land." },
   { epochOffset: 3, atUtc: '00:00', kind: 'add-buyer', who: 'account-plain', note: 'The owner adds the buyer again under a new grant, at the epoch start, and the buyer funds the epoch from it.' },
   { epochOffset: 3, atUtc: '16:00', kind: 'race', who: 'wallet-light', note: 'Two sellers serve the same budget past its limit: batches count in landing order, so whichever lands last counts only what is left.' },
+  { epochOffset: 2, atUtc: '22:30', kind: 'held-batch', who: 'beacon-03', note: 'Holds its calls past the end of the epoch and never sends them: on-chain, only the budget left unused shows it.' },
   { epochOffset: 4, atUtc: '22:30', kind: 'held-batch', who: 'beacon-04', note: 'Holds its calls past the end of the epoch, so that last batch misses: refused as OutsideEpoch, and it never counts. Expected.' },
   { epochOffset: 5, atUtc: '00:00', kind: 'funding-only', who: 'all', note: 'Every buyer funds, and no call is made. No node has served value, so the pool is 0 and the money rolls forward.' },
   { epochOffset: 6, atUtc: '00:00', kind: 'baseline', who: 'all', note: 'Calls resume with varied demand: this epoch has value, so its pool takes the money rolled forward.' },

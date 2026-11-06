@@ -23,7 +23,7 @@ import { compose, FAULTS, startOf } from './lib/compose.mjs';
 
 const env = process.env;
 const DEFAULT_HUB = '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6';
-const DEFAULT_PUBLIC_URL = 'https://raw.githubusercontent.com/OriginTrail/dkg/test/rfc27-testnet-scenario/packages/evm-module/scripts/rfc27/scenario/public.testnet.json';
+const DEFAULT_PUBLIC_URL = 'https://raw.githubusercontent.com/OriginTrail/dkg/refs/heads/test/rfc27-testnet-scenario/packages/evm-module/scripts/rfc27/scenario/public.testnet.json';
 
 const config = {
   dir: env.DASHBOARD_DIR ?? dirname(process.argv[1]),

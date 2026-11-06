@@ -72,6 +72,9 @@ export const HUB_NAMES = {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** What went wrong, with the reason a failed fetch keeps in its cause. */
+const reasonOf = (e) => (e.cause?.code || e.cause?.message ? `${e.message} (${e.cause.code ?? e.cause.message})` : e.message);
+
 export function subscriptionIdOf(buyer, epoch) {
   return keccak256(AbiCoder.defaultAbiCoder().encode(['address', 'uint256'], [buyer, epoch]));
 }
@@ -79,7 +82,7 @@ export function subscriptionIdOf(buyer, epoch) {
 // ------------------------------------------------------------------ JSON-RPC
 
 export class Rpc {
-  constructor(urls, { timeoutMs = 20_000, attempts = 3, stats = {} } = {}) {
+  constructor(urls, { timeoutMs = 20_000, attempts = 5, stats = {} } = {}) {
     this.urls = urls;
     this.timeoutMs = timeoutMs;
     this.attempts = attempts;
@@ -111,10 +114,10 @@ export class Rpc {
       } catch (e) {
         last = e;
         if (e.reverted) throw e;
-        await sleep(600 * 2 ** attempt);
+        await sleep(1000 * 2 ** attempt);
       }
     }
-    throw last;
+    throw new Error(reasonOf(last));
   }
 
   /**
@@ -289,10 +292,10 @@ export class BlockscoutSource {
         return await res.json();
       } catch (e) {
         last = e;
-        await sleep(800 * 2 ** attempt);
+        await sleep(1000 * 2 ** attempt);
       }
     }
-    throw last;
+    throw new Error(reasonOf(last));
   }
 
   /** Newest first, every page's `next_page_params` passed back as it came. */

@@ -8,7 +8,7 @@
 
 const BPS = 10_000n;
 const SCALE18 = 10n ** 18n;
-const FEED_CAP = 500;
+const FEED_CAP = 300;
 
 const big = (x) => (x === undefined || x === null || x === '' ? 0n : BigInt(x));
 const str = (x) => x.toString();
@@ -469,7 +469,14 @@ export function compose({ state, pub, status, now, network }) {
       value: str(sum(groups.map((g) => g.value))),
     };
     const subEpoch = groups.map((g) => g.subEpoch).find((x) => x !== null && x !== undefined);
-    if (subEpoch && epochOf(t.at, clock) > subEpoch) row.lateBy = t.at - startOf(subEpoch + 1, clock);
+    if (subEpoch && epochOf(t.at, clock) > subEpoch) {
+      row.lateBy = t.at - startOf(subEpoch + 1, clock);
+      // An explorer does not always keep the revert data: the times alone say this one.
+      if (!row.fault) {
+        row.fault = 'OutsideEpoch';
+        row.faultInferred = true;
+      }
+    }
     refusedRows.push(row);
     feed.push(row);
   }
@@ -590,7 +597,7 @@ export function compose({ state, pub, status, now, network }) {
         const next = epochRow(e + 1);
         out.parts.push('No served value.', { wei: row.money }, 'of money rolled forward', ...(next && big(next.rolledIn) > 0n ? [`into epoch ${e + 1}'s pool.`] : ['and is waiting.']));
       } else if (epochRunning && row) {
-        out.status = 'waiting';
+        out.status = 'so-far';
         out.parts.push('No served value so far.', { wei: row.money }, 'funded. If it stays this way, the money rolls forward.');
       } else out.status = 'scheduled';
     } else {
