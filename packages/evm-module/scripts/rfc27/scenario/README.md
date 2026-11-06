@@ -116,6 +116,9 @@ It runs each beacon's ticks at their real cadence, about six minutes an epoch. W
 `--journal <setup journal>`, on a fork of the chain after the real setup, it sends
 nothing for the setup and rehearses from what the setup left.
 
+A five-epoch run leaves about 4 GB of anvil's state under `~/.foundry/anvil/tmp`,
+which stopping anvil does not remove. Delete that run's directory when it is done.
+
 **2. Setup, once, from one machine, before any timer runs.** It takes the funder's key
 and endpoint from `EVM_PRIVATE_KEY_BASE_SEPOLIA_V10` and `RPC_BASE_SEPOLIA_V10`, and
 prints neither. Without `--send` it only lists what it would send. It has spending
