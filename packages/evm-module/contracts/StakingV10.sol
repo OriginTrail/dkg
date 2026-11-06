@@ -4,6 +4,8 @@ pragma solidity ^0.8.20;
 
 import {ShardingTable} from "./ShardingTable.sol";
 import {Ask} from "./Ask.sol";
+import {StakingV10Ledger} from "./StakingV10Ledger.sol";
+import {QueryInferenceSettlement} from "./QueryInferenceSettlement.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ProfileStorage} from "./storage/ProfileStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
@@ -13,6 +15,7 @@ import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {EpochStorage} from "./storage/EpochStorage.sol";
 import {Chronos} from "./storage/Chronos.sol";
+import {QueryInferenceStorage} from "./storage/QueryInferenceStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {INamed} from "./interfaces/INamed.sol";
@@ -57,6 +60,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *     UI/indexer consumption.
  *   - There is no separate `rewards` bucket, no `increaseRewards` /
  *     `decreaseRewards`.
+ *   - A node's reward for an epoch is its score share of the epoch's
+ *     publishing pool in `EpochStorage` plus, from the activation epoch of
+ *     the query/inference pool (OT-RFC-27, 10.1.0), its gross from that pool,
+ *     `QueryInferenceSettlement.queryInferenceGross`. The operator fee comes
+ *     off the sum, and the delegators split the rest by score.
  *
  * Withdraw model (D14 — atomic):
  *   - `withdraw()` is a single transaction. Pre-expiry is disallowed (lock
@@ -140,7 +148,43 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //           not ship to mainnet without orphaning existing position NFTs.
     //           Also carries the #1297 boost-expiry reward-boundary fix (which
     //           had landed under the unchanged 10.0.4 string).
-    string private constant _VERSION = "10.0.5";
+    //   10.0.6 — Size (24,524 bytes at 10.0.5, 52 under the EIP-170 limit):
+    //           * The bodies of the operator-fee withdrawal
+    //             (`requestOperatorFeeWithdrawal`,
+    //             `finalizeOperatorFeeWithdrawal`, `cancelOperatorFeeWithdrawal`)
+    //             and of the V8 drains (`drainV8ToCredit`,
+    //             `drainOperatorFeeToCredit`) run in the Hub-registered
+    //             `StakingV10Ledger` 1.0.0, which `initialize()` wires. Every
+    //             entry point keeps its signature and its caller gate here, and
+    //             forwards.
+    //           * `onlyConvictionNFT` and `onlyAdmin` each call one internal
+    //             check instead of inlining it.
+    //           Behaviour, the ABI, the events, the errors and the storage
+    //           reads and writes are unchanged.
+    //   10.1.0 — The query/inference pool (OT-RFC-27):
+    //           * A node's gross reward for epoch e is the publishing pool's
+    //             score share, as before, plus
+    //             `QueryInferenceSettlement.queryInferenceGross(e, node)` for
+    //             every e from the pool's activation epoch. The operator fee
+    //             and the delegator split apply to the sum, and the reward
+    //             compounds into `raw` as before; reward carries take it too.
+    //           * A claim reads only epochs that have ended, whose pool and
+    //             counts are final, so nothing has to run first and the pool
+    //             never holds a claim or a withdrawal back.
+    //           * A claim reads `QueryInferenceSettlement` from the Hub, as
+    //             the NFT gate reads its caller, and the activation epoch from
+    //             the storage that settlement uses, so a settlement replaced
+    //             in the Hub serves the next claim without a
+    //             re-initialization. Where the Hub holds no settlement, as on
+    //             a network without the pool, the rewards are those of 10.0.6.
+    //           * A withdrawal leaves the epoch in progress claimable: it
+    //             settles the position's score in that epoch and records it,
+    //             with the epoch's reward carries, in
+    //             `ConvictionWithdrawalStorage`, and once the epoch has ended
+    //             the permissionless `claimWithdrawnEpoch` pays its share of
+    //             both pools to the staker the withdrawal paid. Before, that
+    //             share counted in the node's total and stayed in the vault.
+    string private constant _VERSION = "10.1.0";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
     /// stake / redelegate / claim but the sharding table is full, so its
@@ -182,6 +226,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     IdentityStorage public identityStorage;
     IERC20 public token;
     EpochStorage public epochStorage;
+    /// @dev Runs the operator-fee withdrawal and the V8 drains (10.0.6).
+    ///      Internal, so the ABI is unchanged.
+    StakingV10Ledger internal ledger;
 
     // ========================================================================
     // Events
@@ -201,6 +248,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         wrapper burns `tokenId` on the back half.
     event Withdrawn(uint256 indexed tokenId, address indexed staker, uint96 amount);
     event RewardsClaimed(uint256 indexed tokenId, uint96 amount);
+    /// @notice The withdrawn position `tokenId` left its share of `epoch`,
+    ///         the epoch in progress at its withdrawal, to be claimed once
+    ///         that epoch has ended (10.1.0).
+    event WithdrawnEpochRecorded(uint256 indexed tokenId, address indexed staker, uint256 epoch);
+    /// @notice `amount` of TRAC, the withdrawn position's share of `epoch`,
+    ///         was paid to `staker` (10.1.0).
+    event WithdrawnEpochClaimed(uint256 indexed tokenId, address indexed staker, uint256 epoch, uint96 amount);
 
     // ========================================================================
     // Errors
@@ -219,6 +273,19 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error V8StakingStillLive();
     error NodeAlreadyInShardingTable(uint72 identityId);
     error NodeBelowMinimumStake(uint72 identityId);
+    // The operator-fee withdrawal raises these from `StakingV10Ledger` (the
+    // `TokenLib` and `StakingLib` errors of the same signatures); they are
+    // declared here so they stay in this contract's ABI.
+    error ZeroTokenAmount();
+    error AmountExceedsOperatorFeeBalance(uint96 feeBalance, uint96 amount);
+    error WithdrawalWasntInitiated();
+    error WithdrawalPeriodPending(uint256 nowTimestamp, uint256 endTimestamp);
+    /// @notice `tokenId` holds no withdrawn epoch to claim: none was
+    ///         recorded, or it has been claimed (10.1.0).
+    error NoWithdrawnEpoch(uint256 tokenId);
+    /// @notice `epoch`, the epoch `tokenId` was withdrawn in, has not ended
+    ///         yet (10.1.0).
+    error WithdrawnEpochInProgress(uint256 tokenId, uint256 epoch);
 
     // ========================================================================
     // Constructor + initialize
@@ -247,6 +314,66 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         token = IERC20(hub.getContractAddress("Token"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
+        ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
+    }
+
+    /**
+     * @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0), which
+     *         gives each node's gross from the pool, read from the Hub at each
+     *         claim, so a replaced settlement serves the next claim. 0 where
+     *         the Hub holds no settlement.
+     * @dev    Replacing the settlement in the Hub with a fixed one
+     *         (`Hub.setContractAddress`, then its `initialize()`) strands
+     *         nothing, and comes first: the new one reads the same
+     *         `QueryInferenceStorage`, so every count and all the money are
+     *         kept.
+     *
+     *         Removing it from the Hub is the emergency switch: with no
+     *         settlement, a claim pays the rewards of 10.0.6, without the
+     *         pool. It strands money, so:
+     *           1. Funding goes on. Wallet and Conviction Account subscriptions
+     *              are still funded and topped up until `QueryInferenceStorage`
+     *              is paused too; `setPaused(true)` stops both.
+     *           2. While the settlement is out, any one claim fixes the split
+     *              of each node-epoch it passes without the pool, and for good:
+     *              the pool's share stays in the vault, and registering a
+     *              settlement again does not restore it. `claimFor` is
+     *              permissionless, a withdrawal claims first, and
+     *              `claimWithdrawnEpoch` spends its record the same way. So
+     *              stop your own upkeep calls before pulling the switch, and
+     *              keep the outage short.
+     *           3. Sellers stop. `submitReceiptBatch` reverts, because
+     *              `QueryInferenceStorage` takes writes only from Hub
+     *              contracts. Work delivered but not yet batched loses its
+     *              served value if its subscription's epoch ends during the
+     *              outage. The money itself is not lost: an epoch with no
+     *              served value rolls it forward.
+     *           4. Pull the switch only with `Hub.removeContractByName`. On
+     *              the Hub's last entry, `removeContractByAddress` leaves the
+     *              name's pointer dangling in
+     *              `UnorderedNamedContractDynamicSet`, so this lookup, and
+     *              every claim and withdrawal with it, reverts until a
+     *              contract under another name is added. Switch back on with
+     *              a fresh deployment of the settlement and its
+     *              `initialize()`: removing the last entry by name leaves its
+     *              address's pointer dangling instead, and a settlement
+     *              registered again is always the last entry, so registering
+     *              the same address again can revert `AddressAlreadyInSet`.
+     */
+    function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
+        if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
+        return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
+    }
+
+    /// @notice The query/inference pool's storage, for its activation epoch:
+    ///         the one the settlement the Hub holds reads. 0 where
+    ///         the Hub holds no settlement. `QueryInferenceStorage` activates
+    ///         only once this names it, so no epoch from activation on is
+    ///         split without the pool.
+    function queryInferenceStorage() public view returns (QueryInferenceStorage) {
+        QueryInferenceSettlement settlement = queryInferenceSettlement();
+        if (address(settlement) == address(0)) return QueryInferenceStorage(address(0));
+        return settlement.queryInferenceStorage();
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -261,10 +388,11 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // Caller gate
     // ========================================================================
 
+    // 10.0.6 — each gate runs one internal check rather than its body inlined
+    // into every function it guards: the same check, in the same place, in
+    // fewer bytes.
     modifier onlyConvictionNFT() {
-        if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
-            revert StakingLib.OnlyConvictionNFT();
-        }
+        _checkConvictionNFT();
         _;
     }
 
@@ -272,6 +400,17 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         the caller's address (hashed) must hold ADMIN_KEY purpose
     ///         on `identityId` per `IdentityStorage`.
     modifier onlyAdmin(uint72 identityId) {
+        _checkAdmin(identityId);
+        _;
+    }
+
+    function _checkConvictionNFT() internal view {
+        if (msg.sender != hub.getContractAddress("DKGStakingConvictionNFT")) {
+            revert StakingLib.OnlyConvictionNFT();
+        }
+    }
+
+    function _checkAdmin(uint72 identityId) internal view {
         if (
             !identityStorage.keyHasPurpose(
                 identityId,
@@ -281,7 +420,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         ) {
             revert Permissions.OnlyProfileAdminFunction(msg.sender);
         }
-        _;
     }
 
     // ========================================================================
@@ -563,7 +701,29 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      re-stake the remainder, which gives the same economic
      *      result (tier-0 with 1x multiplier is effectively liquid
      *      stake). Q3 — rewards are auto-claimed inside this call so
-     *      the user sees a single button in the UI.
+     *      the user sees a single button in the UI. That auto-claim walks
+     *      every unclaimed epoch in this one transaction, under Base's
+     *      per-transaction cap of 2^24 gas, at the cost `claim` states
+     *      (about 92k gas per scored epoch before the query/inference pool,
+     *      about 110k after): a position claimed at least every 100 scored
+     *      epochs withdraws within it.
+     *
+     *      10.1.0 — the auto-claim covers every epoch that has ended. The
+     *      position's score in the epoch in progress counts in its node's
+     *      total for that epoch too, so it is settled here and recorded,
+     *      with that epoch's reward carries, in `ConvictionWithdrawalStorage`
+     *      before the position is deleted; once the epoch has ended,
+     *      `claimWithdrawnEpoch` pays its share of both pools to `staker`.
+     *      Nothing is recorded when there is nothing to claim.
+     *
+     *      So a withdrawal pays in two parts. This call pays the stake and
+     *      every epoch that has ended. The epoch in progress is paid later,
+     *      by `claimWithdrawnEpoch`, which anyone may call once that epoch
+     *      has ended and which pushes TRAC to `staker` in a transaction of
+     *      its own. A contract that stakes, such as a vault, must expect TRAC
+     *      it did not call for. Someone, a keeper or the staker, has to call
+     *      it: nothing claims the record by itself. No view previews the
+     *      amount.
      */
     function withdraw(
         address staker,
@@ -582,6 +742,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // happen BEFORE reading the final raw, because compounding grows
         // it. No-op when `currentEpoch <= 1` or nothing is unclaimed.
         _claim(tokenId);
+
+        // 10.1.0 — the epoch in progress, claimed once it has ended.
+        _recordWithdrawnEpoch(staker, tokenId, pos.identityId);
 
         // Re-read after auto-claim — raw may have grown via compounding.
         pos = convictionStorage.getPosition(tokenId);
@@ -621,6 +784,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // exactly. The cooldown reuses `parametersStorage.stakeWithdrawalDelay`
     // (no separate operator-fee delay parameter).
     //
+    // 10.0.6 — the admin-key gate stays here; the bodies run in
+    // `StakingV10Ledger`, which pays the finalized amount to the caller.
+    //
     // Restake-fee-as-stake is handled by the existing 2-step path
     // (`finalizeOperatorFeeWithdrawal` → `DKGStakingConvictionNFT.createConviction`)
     // — no dedicated `restakeOperatorFee` primitive exists in V10 because
@@ -646,57 +812,19 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         on `identityId`. Subsequent calls before finalize/cancel
     ///         augment the existing request (combined amount = old + new).
     function requestOperatorFeeWithdrawal(uint72 identityId, uint96 withdrawalAmount) external onlyAdmin(identityId) {
-        if (withdrawalAmount == 0) revert TokenLib.ZeroTokenAmount();
-
-        ConvictionStakingStorage cs = convictionStorage;
-
-        uint96 existingRequestAmount = cs.getOperatorFeeWithdrawalRequestAmount(identityId);
-        uint96 currentOperatorFeeBalance = cs.getOperatorFeeBalance(identityId);
-
-        // If a request already exists, the requested funds were already
-        // moved out of the balance into the queue — restore them before we
-        // re-check the cap so the totalRequestAmount comparison is honest.
-        if (existingRequestAmount > 0) {
-            currentOperatorFeeBalance += existingRequestAmount;
-        }
-
-        uint96 totalRequestAmount = existingRequestAmount + withdrawalAmount;
-        if (totalRequestAmount > currentOperatorFeeBalance) {
-            revert StakingLib.AmountExceedsOperatorFeeBalance(currentOperatorFeeBalance, totalRequestAmount);
-        }
-
-        uint256 withdrawalReleaseTimestamp = block.timestamp + parametersStorage.stakeWithdrawalDelay();
-        cs.setOperatorFeeBalance(identityId, currentOperatorFeeBalance - totalRequestAmount);
-        cs.createOperatorFeeWithdrawalRequest(identityId, totalRequestAmount, /*indexed*/ 0, withdrawalReleaseTimestamp);
+        ledger.requestOperatorFeeWithdrawal(identityId, withdrawalAmount);
     }
 
     /// @notice Complete an operator-fee withdrawal after the cooldown has
     ///         elapsed. Pays out from the CSS TRAC vault.
     function finalizeOperatorFeeWithdrawal(uint72 identityId) external onlyAdmin(identityId) {
-        ConvictionStakingStorage cs = convictionStorage;
-
-        (uint96 operatorFeeWithdrawalAmount, , uint256 withdrawalReleaseTimestamp) = cs.getOperatorFeeWithdrawalRequest(
-            identityId
-        );
-        if (operatorFeeWithdrawalAmount == 0) revert StakingLib.WithdrawalWasntInitiated();
-        if (block.timestamp < withdrawalReleaseTimestamp) {
-            revert StakingLib.WithdrawalPeriodPending(block.timestamp, withdrawalReleaseTimestamp);
-        }
-
-        cs.deleteOperatorFeeWithdrawalRequest(identityId);
-        cs.transferStake(msg.sender, operatorFeeWithdrawalAmount);
+        ledger.finalizeOperatorFeeWithdrawal(identityId, msg.sender);
     }
 
     /// @notice Cancel a pending operator-fee withdrawal and return the queued
     ///         amount to the operator-fee balance. No cooldown applies.
     function cancelOperatorFeeWithdrawal(uint72 identityId) external onlyAdmin(identityId) {
-        ConvictionStakingStorage cs = convictionStorage;
-
-        uint96 operatorFeeWithdrawalAmount = cs.getOperatorFeeWithdrawalRequestAmount(identityId);
-        if (operatorFeeWithdrawalAmount == 0) revert StakingLib.WithdrawalWasntInitiated();
-
-        cs.deleteOperatorFeeWithdrawalRequest(identityId);
-        cs.increaseOperatorFeeBalance(identityId, operatorFeeWithdrawalAmount);
+        ledger.cancelOperatorFeeWithdrawal(identityId);
     }
 
     /**
@@ -724,6 +852,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *           statistic-only lifetime counter.
      *        4. `cs.setLastClaimedEpoch(tokenId, toEpoch)` — advance cursor.
      *      No StakingStorage writes.
+     *
+     *      Gas: a claim walks every unclaimed epoch of the position in this
+     *      one transaction, and Base caps a transaction at 2^24 gas
+     *      (16,777,216). The first claim on a node in an epoch costs about
+     *      92k gas per scored epoch before the query/inference pool and about
+     *      110k once the pool is active, more for a node with value after a run
+     *      of epochs with none, so a position is to be claimed at least every 100
+     *      scored epochs.
      */
     // The first arg (the staker address) is intentionally UNNAMED: it is
     // retained only for ABI compatibility with the DEPLOYED DKGStakingConvictionNFT
@@ -744,8 +880,74 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         the per-epoch operator fee) without touching the stateful ERC-721
     ///         wrapper. `_claim` reverts `PositionNotFound` for a nonexistent or
     ///         already-withdrawn position, so no extra guard is required.
+    ///         As `claim`, it walks every unclaimed epoch in one transaction,
+    ///         under Base's per-transaction cap of 2^24 gas: about 92k gas per
+    ///         scored epoch before the query/inference pool and about 110k
+    ///         after, so a position is to be claimed at least every 100 scored
+    ///         epochs.
     function claimFor(uint256 tokenId) external {
         _claim(tokenId);
+    }
+
+    /**
+     * @notice Pay a withdrawn position's share of the epoch that was in
+     *         progress at its withdrawal, once that epoch has ended, to the
+     *         staker the withdrawal paid. Permissionless, and once per
+     *         position.
+     * @dev    10.1.0 — the withdrawal settled the position's score in that
+     *         epoch and recorded it with the epoch's reward carries
+     *         (`ConvictionWithdrawalStorage`). This runs the split `_claim`
+     *         runs for an epoch: the position's score and each carry's take
+     *         their share of their node's reward for the epoch (`_nodeEpochReward`),
+     *         the publishing pool's and the query/inference pool's, net of
+     *         the operator fee. The score is the one the position had earned
+     *         by its withdrawal: a later proof on the node in that epoch adds
+     *         to the positions still staked, not to it. With no position
+     *         left to compound into, the share is paid in TRAC from the
+     *         vault. The record is deleted before the payment.
+     *
+     *         It is the second part of a withdrawal's payment: the payment
+     *         goes to `staker`, whoever calls, so a contract that staked
+     *         receives TRAC it did not call for. Nothing calls this by
+     *         itself, so a keeper or the staker does, and no view previews
+     *         the amount (`StakingKPI` has none).
+     * @return amount The TRAC paid.
+     */
+    function claimWithdrawnEpoch(uint256 tokenId) external returns (uint96 amount) {
+        // Exists, has ended, and is deleted: `StakingV10Ledger.takeWithdrawal`.
+        (address staker, uint72 node, uint256 epoch, ConvictionStakingStorage.RewardCarry[] memory carries) = ledger
+            .takeWithdrawal(tokenId);
+
+        (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _queryInferenceFrom();
+        bytes32 delegatorKey = bytes32(tokenId);
+        uint256 reward;
+        // Each carry, but one that points at the position's own slot, which
+        // is read once, after them.
+        for (uint256 i = 0; i < carries.length; i++) {
+            reward += _carryReward(node, delegatorKey, qiFromEpoch, settlement, carries[i]);
+        }
+        uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(epoch, node, delegatorKey);
+        if (score18 > 0) reward += _nodeEpochReward(epoch, node, score18, qiFromEpoch, settlement);
+
+        if (reward > type(uint96).max) revert RewardOverflow();
+        amount = uint96(reward);
+        if (amount > 0) convictionStorage.transferStake(staker, amount);
+        emit WithdrawnEpochClaimed(tokenId, staker, epoch, amount);
+    }
+
+    /// @dev 10.1.0 — settle `tokenId`'s score in the epoch in progress on
+    ///      `identityId`, and have it recorded, with the position's reward
+    ///      carries, for `claimWithdrawnEpoch` (`StakingV10Ledger`), unless
+    ///      there is nothing to claim. The auto-claim before it has matured
+    ///      and cleared the carries of every epoch that has ended, so those
+    ///      left are of the epoch in progress; the claim reads each at its
+    ///      own epoch all the same.
+    function _recordWithdrawnEpoch(address staker, uint256 tokenId, uint72 identityId) internal {
+        uint256 epoch = chronos.getCurrentEpoch();
+        uint256 score18 = _prepareForStakeChangeV10(epoch, tokenId, identityId);
+        if (ledger.recordWithdrawal(tokenId, staker, identityId, epoch, score18)) {
+            emit WithdrawnEpochRecorded(tokenId, staker, epoch);
+        }
     }
 
     /**
@@ -836,6 +1038,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         _prepareForStakeChangeV10(currentEpoch, tokenId, pos.identityId);
 
+        // 10.1.0 — the epochs from `qiFromEpoch` on take the query/inference
+        // pool, through the settlement the Hub holds now.
+        (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _queryInferenceFrom();
+
         // Local cache.
         uint256 rawU = uint256(pos.raw);
         uint256 mult18 = uint256(pos.multiplier18);
@@ -883,7 +1089,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
-            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18);
+            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18, qiFromEpoch, settlement);
         }
 
         // v10.0.3 — integrate matured reward carries (pointers to RSS score
@@ -894,25 +1100,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 convictionStorage.getRewardCarries(tokenId);
             bool carriesMatured = false;
             for (uint256 i = 0; i < carries.length; i++) {
-                if (uint256(carries[i].epoch) > claimToEpoch) continue;
+                ConvictionStakingStorage.RewardCarry memory carry = carries[i];
+                if (uint256(carry.epoch) > claimToEpoch) continue;
                 carriesMatured = true;
                 // The main loop above already integrated the position's
-                // CURRENT (node, key) slot for every epoch in the window —
-                // skip a carry that points at it (e.g. A→B→A round-trip).
-                if (carries[i].identityId == identityId && carries[i].delegatorKey == delegatorKey) {
-                    continue;
-                }
-                uint256 carryScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
-                    uint256(carries[i].epoch),
-                    carries[i].identityId,
-                    carries[i].delegatorKey
-                );
-                if (carryScore18 == 0) continue;
-                rewardTotal += _nodeEpochReward(
-                    uint256(carries[i].epoch),
-                    carries[i].identityId,
-                    carryScore18
-                );
+                // CURRENT (node, key) slot for every epoch in the window, so
+                // a carry that points at it (e.g. A→B→A round-trip) pays 0.
+                rewardTotal += _carryReward(identityId, delegatorKey, qiFromEpoch, settlement, carry);
             }
             if (carriesMatured) {
                 convictionStorage.clearRewardCarries(tokenId, uint32(claimToEpoch));
@@ -964,105 +1158,36 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     // mutations. `drainV8ToCredit` is the drain half of the old `_convertToNFT`
     // (now per-node, mints nothing, credits CSS); `allocateFromCredit` is the
     // V10-seed half (now funded from migration credit, not a fresh transfer).
+    // 10.0.6 — the two drains run in `StakingV10Ledger`, behind the wrapper
+    // gate here.
 
     /// @notice Drain ALL of `delegator`'s V8 stake on `identityId` (active
-    ///         stakeBase + any pending withdrawal, D8) into their migration
+    ///         stakeBase + any pending withdrawal) into their migration
     ///         credit on CSS. Returns the drained `total` so the wrapper can
     ///         aggregate across nodes and revert if the grand total is zero;
     ///         a node with no V8 stake contributes 0 (no revert here).
-    /// @dev    no per-source eligibility: the full drained amount is
-    ///         credited to the delegator; the tier-6/12 lock-credit is decided
-    ///         later in `allocateFromCredit` from the chosen tier.
+    ///         Reverts `V8StakingStillLive` while the V8 `Staking` logic is
+    ///         still registered.
     function drainV8ToCredit(
         address delegator,
         uint72 identityId
     ) external onlyConvictionNFT returns (uint96 total) {
-        // Freeze-first invariant (on-chain): the V8 `Staking` logic must be
-        // unregistered before ANY drain (admin sweep OR self-migrate). A drain
-        // zeroes stakeBase without settling the reward cursor; if V8 `Staking`
-        // is still live it keeps computing rewards/sharding off StakingStorage,
-        // so draining against live state corrupts it. Gating here covers every
-        // drain path through one chokepoint; selfMigrate auto-opens at freeze.
-        if (hub.isContract("Staking")) revert V8StakingStillLive();
-        bytes32 v8Key = keccak256(abi.encodePacked(delegator));
-        StakingStorage ss = stakingStorage;
-        uint96 stakeBase = ss.getDelegatorStakeBase(identityId, v8Key);
-        uint96 pending = ss.getDelegatorWithdrawalRequestAmount(identityId, v8Key);
-        total = stakeBase + pending;
-        if (total == 0) return 0;
-
-        // V8 drain. Pending was already excluded from node/total stake at
-        // request time, so only the active base is decremented.
-        if (stakeBase > 0) {
-            ss.setDelegatorStakeBase(identityId, v8Key, 0);
-            ss.decreaseNodeStake(identityId, stakeBase);
-            ss.decreaseTotalStake(stakeBase);
-        }
-        if (pending > 0) {
-            ss.deleteDelegatorWithdrawalRequest(identityId, v8Key);
-        }
-        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
-        ss.transferStake(address(convictionStorage), total);
-
-        convictionStorage.addMigrationCredit(delegator, total);
+        return ledger.drainV8ToCredit(delegator, identityId);
     }
 
     /// @notice Drain node `identityId`'s V8 operator fee (the resting
     ///         `operatorFeeBalance` PLUS any open fee-withdrawal request) into
     ///         `operator`'s migration credit on CSS. Returns the drained
     ///         `total`; a node with no fee contributes 0 (no revert here), so
-    ///         the wrapper can sweep in bulk.
-    /// @dev    "one credit": the operator fee folds
-    ///         into the SAME `migrationCredit` bucket as delegator stake, so
-    ///         the operator recovers it exactly like a delegator — `allocate`
-    ///         at tier 0 (immediately withdrawable) or 6/12 (conviction).
-    ///
-    ///         Operator addresses are NOT recoverable on-chain — IdentityStorage
-    ///         holds key *hashes*, not addresses — so the off-chain sweep
-    ///         supplies `operator` and this function validates it currently
-    ///         holds ADMIN_KEY on the node (mirroring who V8
-    ///         `finalizeOperatorFeeWithdrawal` would have paid). A stale/wrong
-    ///         address REVERTS rather than crediting silently, so a
-    ///         mis-resolved operator can never be paid; the sweep hard-fails
-    ///         and re-resolves. The check is skipped only when there is nothing
-    ///         to drain (`total == 0`), keeping re-runs idempotent and cheap.
+    ///         the wrapper can sweep in bulk. Reverts `OnlyProfileAdminFunction`
+    ///         unless `operator` holds ADMIN_KEY on the node, when there is a
+    ///         fee to drain, and `V8StakingStillLive` while the V8 `Staking`
+    ///         logic is still registered.
     function drainOperatorFeeToCredit(
         uint72 identityId,
         address operator
     ) external onlyConvictionNFT returns (uint96 total) {
-        // Freeze-first invariant (see drainV8ToCredit) — no fee drain while V8
-        // Staking is still live and could finalize/restake the same balance.
-        if (hub.isContract("Staking")) revert V8StakingStillLive();
-        StakingStorage ss = stakingStorage;
-        uint96 feeBalance = ss.getOperatorFeeBalance(identityId);
-        uint96 feeRequest = ss.getOperatorFeeWithdrawalRequestAmount(identityId);
-        total = feeBalance + feeRequest;
-        if (total == 0) return 0;
-
-        // Credit only an address that currently controls the node.
-        if (
-            !identityStorage.keyHasPurpose(
-                identityId,
-                keccak256(abi.encodePacked(operator)),
-                IdentityLib.ADMIN_KEY
-            )
-        ) {
-            revert Permissions.OnlyProfileAdminFunction(operator);
-        }
-
-        // Zero the V8 fee slots (idempotent: a re-drain reads 0, returns 0).
-        // The open-request amount stayed in the SS vault at request time (no
-        // token moved), so deleting it here releases it for the SS->CSS move.
-        if (feeBalance > 0) {
-            ss.setOperatorFeeBalance(identityId, 0);
-        }
-        if (feeRequest > 0) {
-            ss.deleteOperatorFeeWithdrawalRequest(identityId);
-        }
-        // Move the migrated TRAC SS -> CSS so the credit stays collateralized.
-        ss.transferStake(address(convictionStorage), total);
-
-        convictionStorage.addMigrationCredit(operator, total);
+        return ledger.drainOperatorFeeToCredit(identityId, operator);
     }
 
     /// @notice Spend `amount` of `staker`'s migration credit into a fresh V10
@@ -1161,11 +1286,20 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      production (score-per-stake can only be advanced by submitProof,
      *      which also adds to node score), but defensive: there is no fee
      *      to collect and no reward.
+     *
+     *      10.1.0 — for `e >= qiFromEpoch` the node's gross from the
+     *      query/inference pool, read from `settlement`, joins the publishing
+     *      pool's share before the operator fee and the delegator split. A
+     *      node counts receipt value in an epoch only with a positive node
+     *      score in it, so a node with such a gross never takes the early
+     *      return above.
      */
     function _nodeEpochReward(
         uint256 e,
         uint72 identityId,
-        uint256 delegatorScore18
+        uint256 delegatorScore18,
+        uint256 qiFromEpoch,
+        QueryInferenceSettlement settlement
     ) internal returns (uint256 epochReward) {
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
         if (nodeScore18 == 0) return 0;
@@ -1176,6 +1310,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             if (allNodesScore18 > 0) {
                 uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
                     * nodeScore18) / allNodesScore18;
+                if (e >= qiFromEpoch) {
+                    grossNodeRewards += settlement.queryInferenceGross(e, identityId);
+                }
                 uint96 operatorFeeAmount = uint96(
                     (grossNodeRewards
                         * profileStorage.getOperatorFeePercentageByTimestampReverse(identityId, chronos.timestampForEpoch(e + 1) - 1))
@@ -1194,6 +1331,47 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         if (delegatorScore18 > 0) {
             epochReward = (delegatorScore18 * netNodeRewards) / nodeScore18;
         }
+    }
+
+    /**
+     * @dev The reward of `carry`, the position's score on the slot it points
+     *      at, a node the position left by a redelegation or its token before
+     *      a relock: that score's share of the slot node's reward for the
+     *      carry's epoch (`_nodeEpochReward`). 0 for a carry that points at
+     *      the position's own slot, (`identityId`, `delegatorKey`), which the
+     *      caller reads once itself, as an A→B→A round trip leaves one. The
+     *      claim of a position (`_claim`) and of a withdrawn one's epoch
+     *      (`claimWithdrawnEpoch`) both pay carries through it.
+     */
+    function _carryReward(
+        uint72 identityId,
+        bytes32 delegatorKey,
+        uint256 qiFromEpoch,
+        QueryInferenceSettlement settlement,
+        ConvictionStakingStorage.RewardCarry memory carry
+    ) internal returns (uint256) {
+        if (carry.identityId == identityId && carry.delegatorKey == delegatorKey) return 0;
+        uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+            uint256(carry.epoch),
+            carry.identityId,
+            carry.delegatorKey
+        );
+        if (score18 == 0) return 0;
+        return _nodeEpochReward(uint256(carry.epoch), carry.identityId, score18, qiFromEpoch, settlement);
+    }
+
+    /**
+     * @dev 10.1.0 — the first epoch whose rewards take the query/inference pool
+     *      (OT-RFC-27), its activation epoch, with the settlement the Hub holds
+     *      now, which a claim reads each epoch's gross from. With no settlement
+     *      in the Hub, or the activation epoch unset, no epoch takes the pool,
+     *      and it returns `type(uint256).max`.
+     */
+    function _queryInferenceFrom() internal view returns (uint256 qiFromEpoch, QueryInferenceSettlement settlement) {
+        settlement = queryInferenceSettlement();
+        if (address(settlement) == address(0)) return (type(uint256).max, settlement);
+        qiFromEpoch = settlement.queryInferenceStorage().activationEpoch();
+        if (qiFromEpoch == 0) qiFromEpoch = type(uint256).max;
     }
 
     /**

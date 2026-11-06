@@ -29,65 +29,12 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "assignee",
-        "type": "address"
-      }
-    ],
-    "name": "AssignmentExpired",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "assignee",
-        "type": "address"
-      }
-    ],
-    "name": "AssignmentRevoked",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "bytes32",
-        "name": "bucketId",
+        "name": "serviceId",
         "type": "bytes32"
       }
     ],
-    "name": "BucketTermsChanged",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "string",
-        "name": "cap",
-        "type": "string"
-      },
-      {
-        "internalType": "uint256",
-        "name": "limit",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "attempted",
-        "type": "uint256"
-      }
-    ],
-    "name": "CapExceeded",
+    "name": "BudgetTermsChanged",
     "type": "error"
   },
   {
@@ -99,11 +46,11 @@
       },
       {
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       }
     ],
-    "name": "CapsUnchanged",
+    "name": "BuyerLimitsUnchanged",
     "type": "error"
   },
   {
@@ -120,32 +67,86 @@
   {
     "inputs": [
       {
-        "internalType": "uint96",
-        "name": "expectedCost",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint96",
-        "name": "cost",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint40",
-        "name": "expectedWindow",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint40",
-        "name": "window",
-        "type": "uint40"
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
       }
     ],
-    "name": "DrawMismatch",
+    "name": "EmissionAlreadyScheduled",
     "type": "error"
   },
   {
-    "inputs": [],
-    "name": "ExactScheduleFromUnset",
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expiresAt",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "startsAt",
+        "type": "uint40"
+      }
+    ],
+    "name": "GrantEndsBeforeSubscription",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "GrantExpired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "GrantRevoked",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "GrantedByFormerOwner",
     "type": "error"
   },
   {
@@ -177,33 +178,12 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint64",
-        "name": "expected",
-        "type": "uint64"
-      },
-      {
-        "internalType": "uint64",
-        "name": "provided",
-        "type": "uint64"
-      }
-    ],
-    "name": "InvalidAssignmentNonce",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "string",
         "name": "reason",
         "type": "string"
       }
     ],
-    "name": "InvalidAssignmentTerms",
+    "name": "InvalidBuyerTerms",
     "type": "error"
   },
   {
@@ -232,16 +212,42 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "timeRemaining",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expected",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint64",
+        "name": "provided",
+        "type": "uint64"
+      }
+    ],
+    "name": "InvalidGrantNonce",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      },
+      {
+        "internalType": "uint256",
+        "name": "limit",
         "type": "uint256"
       },
       {
         "internalType": "uint256",
-        "name": "epochLength",
+        "name": "attempted",
         "type": "uint256"
       }
     ],
-    "name": "InvalidTimeRemaining",
+    "name": "LimitExceeded",
     "type": "error"
   },
   {
@@ -252,12 +258,12 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint96",
-        "name": "unplaced",
-        "type": "uint96"
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
       }
     ],
-    "name": "LabelCapacityExceeded",
+    "name": "NotABuyer",
     "type": "error"
   },
   {
@@ -279,22 +285,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "assignee",
-        "type": "address"
-      }
-    ],
-    "name": "NotAssigned",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "bytes32",
         "name": "subscriptionId",
         "type": "bytes32"
@@ -305,45 +295,7 @@
         "type": "address"
       }
     ],
-    "name": "NotPeriodBuyer",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "PeriodAlreadyFunded",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint40",
-        "name": "periodEnd",
-        "type": "uint40"
-      }
-    ],
-    "name": "PeriodEnded",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "PeriodNotFound",
+    "name": "NotSubscriptionBuyer",
     "type": "error"
   },
   {
@@ -424,28 +376,76 @@
   {
     "inputs": [
       {
+        "internalType": "uint96",
+        "name": "expectedCost",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expectedWindow",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "window",
+        "type": "uint40"
+      }
+    ],
+    "name": "SpendMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionAlreadyFunded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint40",
+        "name": "endsAt",
+        "type": "uint40"
+      }
+    ],
+    "name": "SubscriptionEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "string",
         "name": "msg",
         "type": "string"
       }
     ],
     "name": "UnauthorizedAccess",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "lock",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "length",
-        "type": "uint256"
-      }
-    ],
-    "name": "WindowAmountsLengthMismatch",
     "type": "error"
   },
   {
@@ -471,11 +471,6 @@
   },
   {
     "inputs": [],
-    "name": "ZeroLock",
-    "type": "error"
-  },
-  {
-    "inputs": [],
     "name": "ZeroServiceValue",
     "type": "error"
   },
@@ -494,13 +489,37 @@
         "type": "uint256"
       },
       {
+        "indexed": true,
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "termsDigest",
+        "type": "bytes32"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint96",
+        "name": "maxCostPerEpoch",
+        "type": "uint96"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint40",
+        "name": "expiresAt",
+        "type": "uint40"
+      },
+      {
         "indexed": false,
         "internalType": "uint64",
-        "name": "nextNonce",
+        "name": "nonce",
         "type": "uint64"
       }
     ],
-    "name": "AssignmentNonceAdvanced",
+    "name": "BuyerAdded",
     "type": "event"
   },
   {
@@ -515,13 +534,13 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
         "indexed": false,
         "internalType": "uint96",
-        "name": "maxCostPerPeriod",
+        "name": "maxCostPerEpoch",
         "type": "uint96"
       },
       {
@@ -531,7 +550,64 @@
         "type": "uint40"
       }
     ],
-    "name": "CapsUpdated",
+    "name": "BuyerLimitsUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      }
+    ],
+    "name": "BuyerRemoved",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint64",
+        "name": "nextNonce",
+        "type": "uint64"
+      }
+    ],
+    "name": "GrantNonceAdvanced",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "enabled",
+        "type": "bool"
+      }
+    ],
+    "name": "ServiceSpendingSet",
     "type": "event"
   },
   {
@@ -552,7 +628,7 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
@@ -576,13 +652,13 @@
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "periodStart",
+        "name": "startsAt",
         "type": "uint40"
       },
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "periodEnd",
+        "name": "endsAt",
         "type": "uint40"
       },
       {
@@ -607,7 +683,7 @@
         "components": [
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -622,17 +698,17 @@
           },
           {
             "internalType": "uint96",
-            "name": "maxAskWeiPerUnit",
+            "name": "maxPricePerUnit",
             "type": "uint96"
           }
         ],
         "indexed": false,
-        "internalType": "struct IServicePeriodFunding.BucketInput[]",
-        "name": "buckets",
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
+        "name": "budgets",
         "type": "tuple[]"
       }
     ],
-    "name": "PeriodFunded",
+    "name": "SubscriptionFunded",
     "type": "event"
   },
   {
@@ -653,7 +729,7 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
@@ -678,7 +754,7 @@
         "components": [
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -693,141 +769,17 @@
           },
           {
             "internalType": "uint96",
-            "name": "maxAskWeiPerUnit",
+            "name": "maxPricePerUnit",
             "type": "uint96"
           }
         ],
         "indexed": false,
-        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
         "name": "additions",
         "type": "tuple[]"
       }
     ],
-    "name": "PeriodToppedUp",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "assignee",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "bytes32",
-        "name": "termsDigest",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "maxCostPerPeriod",
-        "type": "uint96"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "expiresAt",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint64",
-        "name": "nonce",
-        "type": "uint64"
-      }
-    ],
-    "name": "ServiceAssigned",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "fromEpoch",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint40",
-        "name": "toEpoch",
-        "type": "uint40"
-      },
-      {
-        "indexed": false,
-        "internalType": "uint96",
-        "name": "amount",
-        "type": "uint96"
-      },
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "fromTopUp",
-        "type": "bool"
-      }
-    ],
-    "name": "ServiceEmissionLabelled",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "assignee",
-        "type": "address"
-      }
-    ],
-    "name": "ServiceRevoked",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "indexed": false,
-        "internalType": "bool",
-        "name": "enabled",
-        "type": "bool"
-      }
-    ],
-    "name": "ServiceSpendingSet",
+    "name": "SubscriptionToppedUp",
     "type": "event"
   },
   {
@@ -845,7 +797,7 @@
   },
   {
     "inputs": [],
-    "name": "SERVICE_ASSIGNMENT_TYPEHASH",
+    "name": "BUYER_GRANT_TYPEHASH",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -859,19 +811,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      }
-    ],
-    "name": "advanceAssignmentNonce",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "components": [
           {
             "internalType": "uint256",
@@ -880,12 +819,12 @@
           },
           {
             "internalType": "address",
-            "name": "assignee",
+            "name": "buyer",
             "type": "address"
           },
           {
             "internalType": "uint96",
-            "name": "maxCostPerPeriod",
+            "name": "maxCostPerEpoch",
             "type": "uint96"
           },
           {
@@ -899,7 +838,7 @@
             "type": "uint64"
           }
         ],
-        "internalType": "struct ServiceSubscriptions.AssignmentTerms",
+        "internalType": "struct ServiceSubscriptions.BuyerTerms",
         "name": "t",
         "type": "tuple"
       },
@@ -910,11 +849,11 @@
       },
       {
         "internalType": "bytes",
-        "name": "assigneeSignature",
+        "name": "buyerSignature",
         "type": "bytes"
       }
     ],
-    "name": "assign",
+    "name": "addBuyer",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -927,15 +866,9 @@
         "type": "uint256"
       }
     ],
-    "name": "baseLabelCapacity",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
+    "name": "advanceGrantNonce",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -944,19 +877,6 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "convictionServiceStorage",
-    "outputs": [
-      {
-        "internalType": "contract ConvictionServiceStorage",
         "name": "",
         "type": "address"
       }
@@ -1014,30 +934,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      }
-    ],
-    "name": "emissionSpan",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "firstEpoch",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "lastEpoch",
-        "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
         "components": [
           {
             "internalType": "uint256",
@@ -1063,7 +959,7 @@
             "components": [
               {
                 "internalType": "bytes32",
-                "name": "bucketId",
+                "name": "serviceId",
                 "type": "bytes32"
               },
               {
@@ -1078,12 +974,12 @@
               },
               {
                 "internalType": "uint96",
-                "name": "maxAskWeiPerUnit",
+                "name": "maxPricePerUnit",
                 "type": "uint96"
               }
             ],
-            "internalType": "struct IServicePeriodFunding.BucketInput[]",
-            "name": "buckets",
+            "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
+            "name": "budgets",
             "type": "tuple[]"
           }
         ],
@@ -1092,7 +988,7 @@
         "type": "tuple"
       }
     ],
-    "name": "fundFromConviction",
+    "name": "fundFromAccount",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -1119,12 +1015,12 @@
           },
           {
             "internalType": "address",
-            "name": "assignee",
+            "name": "buyer",
             "type": "address"
           },
           {
             "internalType": "uint96",
-            "name": "maxCostPerPeriod",
+            "name": "maxCostPerEpoch",
             "type": "uint96"
           },
           {
@@ -1138,12 +1034,12 @@
             "type": "uint64"
           }
         ],
-        "internalType": "struct ServiceSubscriptions.AssignmentTerms",
+        "internalType": "struct ServiceSubscriptions.BuyerTerms",
         "name": "t",
         "type": "tuple"
       }
     ],
-    "name": "hashAssignment",
+    "name": "hashGrant",
     "outputs": [
       {
         "internalType": "bytes32",
@@ -1264,13 +1160,26 @@
       },
       {
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       }
     ],
-    "name": "revoke",
+    "name": "removeBuyer",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "serviceSubscriptionsStorage",
+    "outputs": [
+      {
+        "internalType": "contract ServiceSubscriptionsStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
@@ -1281,20 +1190,31 @@
         "type": "uint256"
       },
       {
-        "internalType": "uint256",
-        "name": "epoch",
-        "type": "uint256"
-      }
-    ],
-    "name": "scheduledEmission",
-    "outputs": [
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
       {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "maxCostPerEpoch",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "expiresAt",
+            "type": "uint40"
+          }
+        ],
+        "internalType": "struct ServiceSubscriptionsStorage.BuyerLimits",
+        "name": "limits",
+        "type": "tuple"
       }
     ],
-    "stateMutability": "view",
+    "name": "setBuyerLimits",
+    "outputs": [],
+    "stateMutability": "nonpayable",
     "type": "function"
   },
   {
@@ -1345,7 +1265,7 @@
     "inputs": [
       {
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
@@ -1376,7 +1296,7 @@
         "components": [
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -1391,11 +1311,11 @@
           },
           {
             "internalType": "uint96",
-            "name": "maxAskWeiPerUnit",
+            "name": "maxPricePerUnit",
             "type": "uint96"
           }
         ],
-        "internalType": "struct IServicePeriodFunding.BucketInput[]",
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
         "name": "additions",
         "type": "tuple[]"
       },
@@ -1405,7 +1325,7 @@
         "type": "bytes32"
       }
     ],
-    "name": "topUpFromConviction",
+    "name": "topUpFromAccount",
     "outputs": [
       {
         "internalType": "uint96",
@@ -1413,41 +1333,6 @@
         "type": "uint96"
       }
     ],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "accountId",
-        "type": "uint256"
-      },
-      {
-        "internalType": "address",
-        "name": "assignee",
-        "type": "address"
-      },
-      {
-        "components": [
-          {
-            "internalType": "uint96",
-            "name": "maxCostPerPeriod",
-            "type": "uint96"
-          },
-          {
-            "internalType": "uint40",
-            "name": "expiresAt",
-            "type": "uint40"
-          }
-        ],
-        "internalType": "struct ConvictionServiceStorage.AssignmentCaps",
-        "name": "caps",
-        "type": "tuple"
-      }
-    ],
-    "name": "updateAssignmentCaps",
-    "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
   },

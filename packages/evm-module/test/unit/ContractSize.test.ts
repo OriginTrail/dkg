@@ -1,5 +1,5 @@
-// Deployed runtime size of the conviction and plan-period contracts against
-// the EIP-170 limit of 24,576 bytes.
+// Deployed runtime size of the staking, conviction, subscription and settlement
+// contracts against the EIP-170 limit of 24,576 bytes.
 //
 // Hardhat already refuses an oversized deployment in every test run except
 // coverage. This states the limit explicitly and fails with the measured size,
@@ -16,11 +16,15 @@ const isCoverage = process.argv.includes('coverage');
 
 /** Contracts whose runtime must stay deployable; each takes the Hub address. */
 const CONTRACTS = [
+  'StakingV10',
+  'StakingV10Ledger',
+  'ConvictionWithdrawalStorage',
   'PublishingConviction',
   'ServiceSubscriptions',
   'ServiceSubscriptionsWallet',
-  'ConvictionServiceStorage',
+  'ServiceSubscriptionsStorage',
   'QueryInferenceStorage',
+  'QueryInferenceSettlement',
 ];
 
 describe('@unit Contract runtime size (EIP-170)', () => {
