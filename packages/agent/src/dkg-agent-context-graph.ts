@@ -1651,6 +1651,8 @@ export class ContextGraphMethods extends DKGAgentBase {
       (a) => a.toLowerCase() === normalizedAgentAddress.toLowerCase(),
     ) ?? false;
     const membershipMeta = await this.getCgMeta(contextGraphId);
+    const alreadyListedLocally = (await this.getOwnCgMetaFacts(contextGraphId)).allowedAgents
+      .some((address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase());
     const revokedAgentAddressesToClear = membershipMeta.revokedAgents
       .filter((address) => address.toLowerCase() === normalizedAgentAddress.toLowerCase());
 
@@ -1670,11 +1672,9 @@ export class ContextGraphMethods extends DKGAgentBase {
       });
     }
 
-    // Codex review on #873 — only push the bare allowlist quad when
-    // the list is actually growing. Re-approving an existing agent
-    // with a fresh delegation overwrites the delegation node (below)
-    // but must not re-insert the DKG_ALLOWED_AGENT triple.
-    if (!alreadyAllowed) {
+    // Registered participants can lack the curator-local allowlist proof row.
+    // Repair that witness separately from authoritative roster idempotence.
+    if (!alreadyListedLocally) {
       quadsToInsert.push({
         subject: contextGraphUri,
         predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
@@ -1746,7 +1746,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         agentAddress: normalizedAgentAddress,
         delegation,
         alreadyAllowed,
-        noOp: alreadyAllowed
+        noOp: alreadyAllowed && alreadyListedLocally
           && !delegation
           && registeredParticipantMutation.agentAddresses.length === 0,
         cgMetaGraph,

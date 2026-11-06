@@ -130,6 +130,7 @@ export default defineConfig({
       "test/imported-artifact.test.ts",
       "test/publish-finalized-agent-lane.test.ts",
       "test/publish-foreign-author-resolution.test.ts",
+      "test/async-vm-publish-seal-control.test.ts",
       "test/finalize-version-after-abandoned-update.test.ts",
       "test/named-ka-vm-lifecycle.test.ts",
       "test/storage-ack-ledger-timestamp-writer.test.ts",
@@ -510,6 +511,7 @@ export default defineConfig({
       "test/context-graph-list-wire-only.test.ts",
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
+      "test/participant-join-approval-proof.test.ts",
       "test/join-approval-metadata-refetch.test.ts",
       // #3421 — a join approval whose member list is still pending, and the
       // members a curator's join admission recognises.

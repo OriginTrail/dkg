@@ -546,3 +546,4 @@ export * from './bulk-graph-transport.js';
 export { ProtocolReadLimitError } from './bounded-stream-read.js';
 
 export * from './async-admission-usage.js';
+export * from './async-admission-diagnostic-context.js';
