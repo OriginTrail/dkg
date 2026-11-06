@@ -51,11 +51,11 @@ describe('query response and continuation boundaries', () => {
   it('replaces old pagination controls while retaining the event filter and route', async () => {
     const params = new URLSearchParams({ eventID: 'urn:event:target', perPage: '1', offset: '999', nextPageToken: encodePageToken(3) });
     const original = params.toString();
-    const query = vi.fn(async (_sparql: string) => ({ bindings: [{ action: 'ADD' }, { action: 'OBSERVE' }] }));
+    const query = vi.fn(async (_sparql: string) => ({ bindings: [{ event: 'urn:event:target', action: 'ADD' }, { event: 'urn:event:next', action: 'OBSERVE' }] }));
     const result = await handleEventsQuery(params, { contextGraphId: 'boundary', basePath: '/custom/epcis/events', queryEngine: { query } });
     expect(query.mock.calls[0][0]).toContain('FILTER(?event = <urn:event:target>)');
     expect(query.mock.calls[0][0]).toContain('OFFSET 3');
-    expect(result.body.epcisBody.queryResults.resultsBody.eventList).toEqual([{ action: 'ADD' }]);
+    expect(result.body.epcisBody.queryResults.resultsBody.eventList).toEqual([{ action: 'ADD', eventID: 'urn:event:target' }]);
     expect(result.headers?.link).toMatch(/^<\/custom\/epcis\/events\?.*>; rel="next"$/);
     const url = new URL(result.headers!.link!.split('>')[0].slice(1), 'http://localhost');
     expect([...url.searchParams.keys()].sort()).toEqual(['eventID', 'nextPageToken', 'perPage']);
