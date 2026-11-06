@@ -290,7 +290,7 @@ Every view that waits on data shows one of four states, and says which.
 | --- | --- | --- |
 | Loading | `<Loading label="Loading peers…" />`, `block` to fill a view | Name what's loading and end with `…`. `EmptyState busy` when a sentence of context helps. |
 | Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Centre it when it fills a view or pane; align it left inside a card or sidebar. Say what will appear, or what to do next. One line of text is enough inside a list. |
-| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Never leave a view loading after a failure. |
+| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Retry sits outside the message, below it or beside it, never inside the sentence or box. Never leave a view loading after a failure. |
 | Disabled | `disabled` on the control | `--opacity-disabled`, the one disabled look. Say why nearby when the reason isn't obvious. |
 
 ## Accessibility

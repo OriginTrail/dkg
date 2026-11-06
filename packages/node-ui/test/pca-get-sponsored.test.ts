@@ -76,12 +76,12 @@ describe('GetSponsoredPanel', () => {
       rpcUrl: null,
     });
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, 'operational wallets');
+    await waitForText(container, 'publishing wallets');
     // The per-wallet gas line uses the native symbol.
     expect(container.querySelector('.v10-wallet-gas')?.textContent).toContain('xDAI');
     // Non-testnet → no faucet link, hand-funding copy in the native symbol.
     expect(container.querySelector('a[href*="faucet"]')).toBeNull();
-    expect(container.textContent).toContain('Fund with native xDAI');
+    expect(container.textContent).toContain('Transfer xDAI to the addresses above.');
     await unmount();
   });
 
@@ -93,7 +93,7 @@ describe('GetSponsoredPanel', () => {
       rpcUrl: null,
     });
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, 'operational wallets');
+    await waitForText(container, 'publishing wallets');
     const faucet = container.querySelector('a[href*="faucet"]') as HTMLAnchorElement | null;
     expect(faucet).toBeTruthy();
     expect(container.querySelector('.v10-wallet-gas')?.textContent).toContain('ETH');
@@ -116,7 +116,7 @@ describe('GetSponsoredPanel', () => {
       probedKey: key ? { key, registered: key.toLowerCase() === W0.toLowerCase() } : undefined,
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, "Can't find it automatically?");
+    await waitForText(container, "Have a PCA ID?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
@@ -151,7 +151,7 @@ describe('GetSponsoredPanel', () => {
         : undefined,
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, "Can't find it automatically?");
+    await waitForText(container, "Have a PCA ID?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
@@ -165,7 +165,7 @@ describe('GetSponsoredPanel', () => {
       r.getAttribute('aria-label')?.toLowerCase().startsWith(W1.toLowerCase()),
     )!;
     const status = w1Row.querySelector('.v10-wallet-status')!;
-    expect(status.getAttribute('data-tone')).toBe('neutral');
+    expect(status.getAttribute('data-tone')).toBe('warn');
     expect(status.textContent?.toLowerCase()).not.toContain('not approved');
     await unmount();
   });
@@ -184,7 +184,7 @@ describe('GetSponsoredPanel', () => {
       probedKey: key ? { key, registered: true } : undefined, // approved, but…
     }));
     const handle = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(handle.container, "Can't find it automatically?");
+    await waitForText(handle.container, "Have a PCA ID?");
     setInputValue(handle.container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(handle.container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
@@ -194,15 +194,15 @@ describe('GetSponsoredPanel', () => {
 
   it('N1 — registered on an EXPIRED sponsor PCA → warns, not Ready', async () => {
     const { container, unmount } = await runCheckOnSponsor({ expiresAtTimestamp: Math.floor(Date.now() / 1000) - 86_400 });
-    await waitForText(container, 'publishes will not get the discount');
-    expect(container.textContent).not.toContain('can publish under PCA');
+    await waitForText(container, 'has expired, so publishes pay the full fee');
+    expect(container.textContent).not.toContain('can publish with PCA');
     await unmount();
   });
 
   it('N1 — registered on a FULLY-SWEPT sponsor PCA → warns, not Ready', async () => {
     const { container, unmount } = await runCheckOnSponsor({ fullySwept: true });
-    await waitForText(container, 'publishes will not get the discount');
-    expect(container.textContent).not.toContain('can publish under PCA');
+    await waitForText(container, 'has expired, so publishes pay the full fee');
+    expect(container.textContent).not.toContain('can publish with PCA');
     await unmount();
   });
 
@@ -220,13 +220,13 @@ describe('GetSponsoredPanel', () => {
     });
     mocks.fetchPca.mockRejectedValue(new Error('rpc down')); // every per-wallet probe → null
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, "Can't find it automatically?");
+    await waitForText(container, "Have a PCA ID?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    await waitForText(container, 'the chain lookup failed');
+    await waitForText(container, 'Couldn’t check PCA #7 right now.');
     expect(container.textContent).not.toContain('Approved on PCA #7: 0 of');
     // N2 — a wholesale-failed lookup must NOT auto-track the id.
     expect(usePcaStore.getState().trackedIds).not.toContain('7');
@@ -252,15 +252,15 @@ describe('GetSponsoredPanel', () => {
       probedKey: key ? { key, registered: false, adapterSupported: false } : undefined,
     }));
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, "Can't find it automatically?");
+    await waitForText(container, "Have a PCA ID?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    await waitForText(container, 'not supported here');
+    await waitForText(container, 'This node can’t check PCA approval');
     // Capability gap → NOT the transient copy, and NO false "0 of N approved".
-    expect(container.textContent).not.toContain('the chain lookup failed');
+    expect(container.textContent).not.toContain('right now.');
     expect(container.textContent).not.toContain('Approved on PCA #7: 0 of');
     // Not tracked (no wallet approved on the wholesale-inconclusive path).
     expect(usePcaStore.getState().trackedIds).not.toContain('7');
@@ -289,14 +289,14 @@ describe('GetSponsoredPanel', () => {
       };
     });
     const { container, unmount } = await render(React.createElement(GetSponsoredPanel, { onClose: vi.fn() }));
-    await waitForText(container, "Can't find it automatically?");
+    await waitForText(container, "Have a PCA ID?");
     setInputValue(container.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement, '7');
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     const checkBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Check approval')!;
     await act(async () => { checkBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 
-    await waitForText(container, 'the chain lookup failed');
-    expect(container.textContent).not.toContain('not supported here');
+    await waitForText(container, 'Couldn’t check PCA #7 right now.');
+    expect(container.textContent).not.toContain('This node can’t check PCA approval');
     await unmount();
   });
 

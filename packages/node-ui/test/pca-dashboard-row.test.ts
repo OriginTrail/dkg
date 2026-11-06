@@ -50,27 +50,31 @@ describe('PcaDashboardRow', () => {
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('true');
-    expect(value.textContent).toBe('10% discount');
+    expect(value.textContent).toBe('10%');
     expect(value.textContent).not.toContain('pending confirmation');
+    // A covered node has nothing to join, so the CTA manages instead.
+    expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toMatch(/Manage PCA/);
     await unmount();
   });
 
-  it('uncovered → "None — publishing at the direct cost", data-covered=false', async () => {
+  it('uncovered → "None. Publishing pays the full fee", data-covered=false', async () => {
     state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('false');
-    expect(value.textContent).toBe('None — publishing at the direct cost');
+    expect(value.textContent).toBe('None. Publishing pays the full fee');
     await unmount();
   });
 
   // T2/#9 — unreadable wallets must not read as "None".
-  it('walletsInconclusive → "Couldn’t verify your wallets", not "None"', async () => {
+  it('walletsInconclusive → "Couldn’t check your wallets" with Retry, not "None" or a way in', async () => {
     state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: true };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
-    expect(value.textContent).toContain('Couldn’t verify your wallets');
-    expect(value.textContent).not.toContain('None — publishing');
+    expect(value.textContent).toContain('Couldn’t check your wallets');
+    expect(value.textContent).not.toContain('None.');
+    expect(container.querySelector('.v10-ws-pca-cta')!.textContent).toBe('Retry');
+    expect(container.querySelector('.v10-ws-pca-cta svg')).toBeTruthy();
     await unmount();
   });
 

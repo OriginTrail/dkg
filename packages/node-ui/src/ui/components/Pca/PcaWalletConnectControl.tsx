@@ -13,9 +13,9 @@ export function PcaWalletConnectControl(
       {...props}
       description={(
         <>
-          Hardware wallet recommended. If your provider uses a device, verify the amount and contract
-          on the device. Hot publishing wallets can publish without prompts; their spend is bounded by
-          the per-epoch allowance, not the committed TRAC.
+          We recommend a hardware wallet. If you use one, check the amount and contract on its screen
+          before you confirm. Publishing wallets sign automatically, without asking you. Each epoch,
+          they can spend up to that epoch’s allowance, plus any top-up balance.
         </>
       )}
     />

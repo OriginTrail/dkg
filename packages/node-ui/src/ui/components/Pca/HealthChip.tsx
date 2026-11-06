@@ -4,7 +4,6 @@ import React from 'react';
 // imports the derivation directly from `pca/health.js`, so no re-export here).
 import { type PcaHealthState } from '../../pca/health.js';
 import { Badge, type BadgeTone, StatusGlyph } from '../ds/Badge.js';
-import { Ban } from 'lucide-react';
 
 interface HealthMeta {
   glyph: React.ReactNode;
@@ -25,13 +24,13 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     glyph: <StatusGlyph tone="pending" />,
     label: 'Expiring soon',
     tone: 'warning',
-    hint: 'The lock period ends soon — top-up does NOT extend it; renew to keep the discount.',
+    hint: 'The lock period ends soon. Topping up doesn’t extend it. Renew to keep the discount.',
   },
   expired: {
     glyph: <StatusGlyph tone="danger" />,
     label: 'Expired',
     tone: 'danger',
-    hint: 'The lock period has ended — publishes no longer get this discount. Renew to continue.',
+    hint: 'The lock period has ended, so publishes no longer get this discount. Renew to continue.',
   },
   insolvent: {
     glyph: <StatusGlyph tone="warning" />,
@@ -40,19 +39,13 @@ export const HEALTH_CHIP_META: Record<PcaHealthState, HealthMeta> = {
     // Expiring-soon / Cap-near states — a depleted buffer means publishes pay
     // the direct cost (or fail). Distinct from those amber states.
     tone: 'danger',
-    hint: 'The spendable buffer is depleted — publishes will quietly pay the direct cost. Top up.',
-  },
-  swept: {
-    glyph: <Ban size={12} />,
-    label: 'Fully swept',
-    tone: 'neutral',
-    hint: 'Every epoch budget has been swept to the staker reward pool.',
+    hint: 'The spendable buffer has run out, so publishes pay the full fee, without warning. Top up.',
   },
   'cap-near': {
     glyph: <StatusGlyph tone="warning" />,
     label: 'Cap near 100',
     tone: 'warning',
-    hint: 'Approaching the 100 approved-publishing-wallet cap.',
+    hint: 'Close to the limit of 100 approved publishing wallets.',
   },
 };
 

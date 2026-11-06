@@ -147,7 +147,7 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
   it('shows the full-tab Deployment-Unavailable state on a 503', async () => {
     mocks.fetchPca.mockRejectedValue(new HttpError(503));
     const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
-    await waitForText(container, "Publisher conviction isn't available");
+    await waitForText(container, "Publisher Conviction isn't available");
     // e2e anchors: the full-tab unavailable state + its Recheck control.
     expect(container.querySelector('[data-testid="pca-view"]')).toBeTruthy();
     expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
@@ -171,7 +171,7 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
   it('Recheck re-probes and clears the 503 gate on recovery', async () => {
     mocks.fetchPca.mockRejectedValueOnce(new HttpError(503)).mockResolvedValue(snapFixture('0'));
     const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
-    await waitForText(container, "Publisher conviction isn't available");
+    await waitForText(container, "Publisher Conviction isn't available");
     expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
 
     await act(async () => {
@@ -206,7 +206,7 @@ describe('PublishingConvictionPage — deployment (503) gate', () => {
   it('a CAPABILITY 503 (FEATURE_UNAVAILABLE) DOES gate the tab', async () => {
     mocks.fetchPca.mockRejectedValue(new HttpError(503, 'x', { error: 'FEATURE_UNAVAILABLE' }));
     const { container, unmount } = await render(React.createElement(PublishingConvictionPage));
-    await waitForText(container, "Publisher conviction isn't available");
+    await waitForText(container, "Publisher Conviction isn't available");
     expect(container.querySelector('[data-testid="pca-unavailable"]')).toBeTruthy();
     await unmount();
   });
@@ -216,10 +216,8 @@ describe('ConvictionOverview — S1 discovery', () => {
   it('renders the sequential coverage, approved, and owned sections', async () => {
     // No tracked ids -> usePcaOverview resolves to [] without any fetch.
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, "This node's publishing wallet coverage");
-    expect(container.querySelector('[data-testid="pca-owned-section"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="pca-tracked-external-section"]')).toBeTruthy();
-    expect(container.querySelector('[data-testid="pca-tracked-external-section"]')?.textContent).toContain('Track PCA by ID');
+    await waitForText(container, 'Your publishing discount');
+    expect(container.querySelector('[data-testid="pca-list"]')?.textContent).toContain('Add by ID');
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
     await unmount();
   });
@@ -230,10 +228,7 @@ describe('ConvictionOverview — S1 discovery', () => {
       resolveFetch = (value) => resolve(value);
     }));
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'Track PCA by ID');
-    const tracked = container.querySelector('[data-testid="pca-tracked-external-section"]')!;
-    expect(tracked.textContent).toContain('Track PCA by ID');
-    expect(container.querySelector('[data-testid="pca-approved-section"]')?.textContent ?? '').not.toContain('Track PCA by ID');
+    await waitForText(container, 'Add by ID');
 
     await act(async () => {
       (container.querySelector('[data-testid="pca-track-toggle"]') as HTMLButtonElement)
@@ -276,10 +271,10 @@ describe('ConvictionOverview — S1 discovery', () => {
     });
 
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'Wallet-managed');
-    const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
-    expect(card?.textContent).toContain('PCA #12');
-    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
+    await waitForText(container, 'Your wallet');
+    const card = container.querySelector('[data-testid="pca-account-row"][data-owner-mode="wallet"]');
+    expect(card?.textContent).toContain('#12');
+    expect(container.querySelector('[data-testid="pca-discovered-row"]')).toBeNull();
     expect(readContract).toHaveBeenCalledWith(expect.objectContaining({
       address: CONTRACTS.nft,
       functionName: 'balanceOf',
@@ -320,15 +315,15 @@ describe('ConvictionOverview — S1 discovery', () => {
     });
 
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'read PCAs owned by the connected wallet');
+    await waitForText(container, 'read PCAs owned by your connected wallet');
     const errBanner = container.querySelector('[data-testid="pca-wallet-discovery-error"]') as HTMLElement;
     const retry = Array.from(errBanner.querySelectorAll('button')).find((b) => b.textContent === 'Retry')!;
     await act(async () => {
       retry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    await waitForText(container, 'Wallet-managed');
-    const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
-    expect(card?.textContent).toContain('PCA #12');
+    await waitForText(container, 'Your wallet');
+    const card = container.querySelector('[data-testid="pca-account-row"][data-owner-mode="wallet"]');
+    expect(card?.textContent).toContain('#12');
     expect(balanceCalls).toBeGreaterThanOrEqual(2);
     await unmount();
   });
@@ -336,7 +331,7 @@ describe('ConvictionOverview — S1 discovery', () => {
   it('edge empty state shows the warning-tone no-discount banner', async () => {
     useAgentsStore.getState().setNodeStatus({ nodeRole: 'edge', blockExplorerUrl: null });
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'No PCA discount is active for this node yet');
+    await waitForText(container, 'None yet');
     await unmount();
   });
 
@@ -369,8 +364,8 @@ describe('ConvictionOverview — S1 discovery', () => {
     });
 
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'PCA #7');
-    const card = container.querySelector('[data-state="owned"]');
+    await waitForText(container, '#7');
+    const card = container.querySelector('[data-testid="pca-account-row"][data-owner-mode="daemon"]');
     expect(card).toBeTruthy();
     // owner == wallets[0] AND that wallet probes registered → covered → no #11 warning.
     expect(container.textContent).not.toContain('discounts nothing yet');
@@ -396,9 +391,8 @@ describe('ConvictionOverview — S1 discovery', () => {
       useAgentsStore.setState({ nodeStatus: { nodeRole: 'edge', blockExplorerUrl: null } });
       await new Promise((r) => setTimeout(r, 0));
     });
-    await waitForText(container, 'PCA #7');
-    expect(container.querySelector('[data-testid="pca-approved-section"]')?.textContent).toContain('PCA #7');
-    expect(container.querySelector('[data-testid="pca-owned-section"]')).toBeTruthy();
+    await waitForText(container, '#7');
+    expect(container.querySelectorAll('[data-account="7"]')).toHaveLength(1);
     expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
     await unmount();
   });
@@ -411,10 +405,10 @@ describe('ConvictionOverview — S1 discovery', () => {
       accounts: [{ accountId: '42', relation: 'owned', discountBps: 2000, committedTRACTrac: '50000.0', expiresAtTimestamp: 9_999_999_999, agentCount: 0 }],
     });
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'PCA #42');
-    const strip = container.querySelector('[data-testid="pca-discovered-strip"]') as HTMLElement;
-    expect(strip.textContent).toContain('PCA #42');
-    expect(strip.textContent).toContain('you own this account');
+    await waitForText(container, '#42');
+    const strip = container.querySelector('[data-testid="pca-discovered-row"]') as HTMLElement;
+    expect(strip.textContent).toContain('#42');
+    expect(strip.textContent).toContain('Found on-chain');
     // 🟢/#9 — an OWNED-only account (no wallet approved) doesn't realize the discount, so
     // the strip must NOT show "20%" there (it would read as a false "you'd get this %").
     expect(strip.textContent).not.toContain('20%');
@@ -441,7 +435,7 @@ describe('ConvictionOverview — S1 discovery', () => {
       await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
     }
     expect(usePcaStore.getState().trackedIds).toContain('9'); // auto-tracked
-    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull(); // → not in the strip
+    expect(container.querySelector('[data-testid="pca-discovered-row"]')).toBeNull(); // → not in the strip
     await unmount();
   });
 
@@ -463,14 +457,14 @@ describe('ConvictionOverview — S1 discovery', () => {
       return null;
     })());
     expect(err).toBeTruthy();
-    expect(err!.textContent).toContain("Couldn't verify this node's Publisher Conviction Accounts");
+    expect(err!.textContent).toContain("Couldn't check this node's PCAs");
     // It did NOT assert the owned-empty state off the read failure.
-    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-discovered-row"]')).toBeNull();
     // Retry → the second (successful) probe surfaces the owned PCA in the strip.
     await act(async () => {
       (err!.querySelector('button') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    await waitForText(container, 'PCA #42');
+    await waitForText(container, '#42');
     expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeNull();
     await unmount();
   });
@@ -481,8 +475,8 @@ describe('ConvictionOverview — S1 discovery', () => {
     mocks.pcaAgentAccount.mockRejectedValue(new Error('agent lookup down'));
     mocks.fetchPca.mockResolvedValue(snapFixture('7'));
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, "Couldn't verify this node's Publisher Conviction Accounts");
-    expect(container.textContent).not.toContain('No PCA discount is active for this node yet');
+    await waitForText(container, "Couldn't check this node's PCAs");
+    expect(container.querySelector('[data-testid="pca-discount-value"]')?.textContent).toBe('Unknown');
     expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeTruthy();
     await unmount();
   });
@@ -492,8 +486,8 @@ describe('ConvictionOverview — S1 discovery', () => {
     mocks.fetchWalletsBalances.mockRejectedValue(new Error('wallet list down'));
     mocks.fetchPca.mockResolvedValue(snapFixture('7'));
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, "Couldn't verify this node's Publisher Conviction Accounts");
-    expect(container.textContent).not.toContain('No PCA discount is active for this node yet');
+    await waitForText(container, "Couldn't check this node's PCAs");
+    expect(container.querySelector('[data-testid="pca-discount-value"]')?.textContent).toBe('Unknown');
     expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeTruthy();
     await unmount();
   });
@@ -509,8 +503,8 @@ describe('ConvictionOverview — S1 discovery', () => {
     });
     mocks.fetchPca.mockResolvedValue(snapFixture('7'));
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, "Couldn't verify this node's Publisher Conviction Accounts");
-    expect(container.textContent).not.toContain('No PCA discount is active for this node yet');
+    await waitForText(container, "Couldn't check this node's PCAs");
+    expect(container.querySelector('[data-testid="pca-discount-value"]')?.textContent).toBe('Unknown');
     expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeTruthy();
     await unmount();
   });
@@ -522,7 +516,7 @@ describe('ConvictionOverview — S1 discovery', () => {
     await waitForText(container, 'Publisher Conviction'); // overview rendered
     await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
     expect(container.querySelector('[data-testid="pca-discovered-error"]')).toBeNull();
-    expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="pca-discovered-row"]')).toBeNull();
     await unmount();
   });
 });

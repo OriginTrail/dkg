@@ -19,7 +19,6 @@ export type PcaHealthState =
   | 'expiring'
   | 'expired'
   | 'insolvent'
-  | 'swept'
   | 'cap-near';
 
 /** Approved-wallet count at which a PCA is flagged "Cap near 100". */
@@ -31,7 +30,10 @@ export const PCA_EXPIRING_SOON_SECONDS = 7 * 24 * 60 * 60;
  * The SINGLE source of truth for deriving a PCA's `HealthChip` state from its
  * snapshot — used by S1/S3/S5 so the derivation can't drift across screens.
  * Precedence (highest first), per the lead's contract:
- *   expired → swept → insolvent → cap-near → expiring → healthy.
+ *   expired → insolvent → cap-near → expiring → healthy.
+ *
+ * `fullySwept` reads as expired: the contract only sweeps after expiry, so people
+ * never need a separate state for it.
  *
  * `insolvent` (#1349) is derived ONLY when the current-epoch `remainingAllowance`
  * (GAP-4/5 extended snapshot) is DEFINITIVELY known AND every budget source is
@@ -55,8 +57,7 @@ export function healthForSnapshot(
 ): PcaHealthState {
   const { expiresAtTimestamp, fullySwept, agentCount } = snapshot;
   const hasExpiry = typeof expiresAtTimestamp === 'number' && expiresAtTimestamp > 0;
-  if (isPcaExpired(snapshot, nowSec)) return 'expired';
-  if (fullySwept) return 'swept';
+  if (isPcaExpired(snapshot, nowSec) || fullySwept) return 'expired';
   // Insolvent ONLY when the budget is DEFINITIVELY known-empty (a present extended
   // `remainingAllowance` with nothing spendable). The primitive encapsulates the #9 boundary —
   // a coarse/fail-softed read is never definitively-empty — so there's no caller-side guard.

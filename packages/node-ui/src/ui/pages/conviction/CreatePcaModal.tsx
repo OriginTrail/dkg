@@ -563,7 +563,7 @@ export function CreatePcaModal({
         {b1.sponsorDead.length > 0 && (
           <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-b1-sponsor-dead">
             Warning: {b1.sponsorDead.length} of this node&apos;s wallet(s) are approved on another PCA that is
-            <strong> expired or swept</strong> - they are <strong>not covered</strong>, and this node
+            <strong> expired</strong> - they are <strong>not covered</strong>, and this node
             cannot free them (it does not own that account). Ask that PCA owner to remove you, then
             re-approve them here; otherwise they stay uncovered.
           </div>

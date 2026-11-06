@@ -7,11 +7,12 @@ import { classifyCoverage, type PcaCoverageResult } from '../../pca/coverage.js'
 import { PcaModalShell } from './PcaModalShell.js';
 import {
   WalletRow,
+  RetryButton,
   useCopy,
   nativeGasSymbol,
   isTestnetChain,
 } from '../../components/Pca/index.js';
-import { Check, RefreshCw } from 'lucide-react';
+import { Check } from 'lucide-react';
 import { StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
@@ -47,14 +48,30 @@ interface ProbeRow {
 function sponsorRowStatus(c: PcaCoverageResult): { text: string; tone: 'success' | 'warn' | 'danger' | 'neutral' } {
   switch (c.outcome) {
     case 'covers':
-      return { text: 'approved', tone: 'success' };
+      return { text: 'Approved', tone: 'success' };
     case 'uncovered':
-      return { text: 'approved, but that PCA is expired, swept, or out of budget - publishes will not get the discount', tone: 'warn' };
+      return { text: 'Approved, no discount', tone: 'warn' };
     case 'unregistered':
-      return { text: 'not approved - ask the PCA owner to approve it', tone: 'danger' };
+      return { text: 'Not approved: ask the PCA owner to approve it', tone: 'danger' };
     case 'inconclusive':
-      return { text: 'unknown', tone: 'neutral' };
+      return { text: 'Couldn’t check', tone: 'warn' };
   }
+}
+
+/** Why approved wallets get no discount, said once above the rows. */
+function inactiveReason(accountId: string, rows: ProbeRow[]): string | null {
+  const uncovered = rows.map((r) => r.coverage).filter((c) => c.outcome === 'uncovered');
+  if (uncovered.length === 0) return null;
+  return uncovered.some((c) => c.dead)
+    ? `PCA #${accountId} has expired, so publishes pay the full fee.`
+    : `PCA #${accountId} has no TRAC left this epoch, so publishes pay the full fee until the next epoch.`;
+}
+
+/** Summary icon: all covered is a success, none approved an error, the rest need a look. */
+function summaryTone(rows: ProbeRow[]): 'success' | 'warning' | 'danger' {
+  if (rows.every((r) => r.coverage.outcome === 'covers')) return 'success';
+  if (rows.every((r) => r.coverage.outcome === 'unregistered')) return 'danger';
+  return 'warning';
 }
 
 /**
@@ -98,6 +115,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
   const [sponsorId, setSponsorId] = useState('');
   const [checking, setChecking] = useState(false);
   const [probeError, setProbeError] = useState<string | null>(null);
+  const [probeRetryable, setProbeRetryable] = useState(false);
   const [probed, setProbed] = useState<{ accountId: string; rows: ProbeRow[] } | null>(null);
 
   const ethFor = (w: string) => balances.find((b) => b.address?.toLowerCase() === w.toLowerCase())?.eth;
@@ -108,9 +126,10 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
   const check = async () => {
     const id = sponsorId.trim();
-    if (!/^\d+$/.test(id)) { setProbeError('Enter the numeric PCA ID the owner gave you.'); return; }
+    if (!/^\d+$/.test(id)) { setProbeError('Enter the PCA ID as a number.'); return; }
     setChecking(true);
     setProbeError(null);
+    setProbeRetryable(false);
     try {
       const rows = await Promise.all(
         wallets.map((w) =>
@@ -135,9 +154,10 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
         const allAdapterGap = rows.every((r) => r.coverage.outcome === 'inconclusive' && r.coverage.adapterUnsupported);
         setProbeError(
           allAdapterGap
-            ? 'PCA approval isn’t verifiable on this chain’s adapter — not supported here. You can still publish without a discount.'
-            : `Couldn’t check approval on PCA #${id} right now — the chain lookup failed. Retry.`,
+            ? 'This node can’t check PCA approval, so we can’t confirm which wallets are covered. You can still publish. To check approval, update the node or ask the PCA owner.'
+            : `Couldn’t check PCA #${id} right now.`,
         );
+        setProbeRetryable(!allAdapterGap);
         setProbed(null);
         return;
       }
@@ -162,12 +182,12 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       testId="pca-get-sponsored"
       title="Get added to a PCA"
-      subtitle="Share this node's operational publishing wallets with the PCA owner. They approve them; this node still pays its own gas."
+      subtitle="Share this node's publishing wallets with the PCA owner, who approves them. You still pay gas."
     >
       <div className="v10-modal-body v10-pca-get-added-body">
         {/* Wallets to share */}
         <section className="v10-pca-detail-section">
-          <h3 className="v10-pca-detail-section-title">Your operational wallets (signers / msg.sender)</h3>
+          <h3 className="v10-pca-detail-section-title">This node's publishing wallets</h3>
           <div className="v10-pca-detail-agentlist">
             {/* Gate the empty state on load/error — a false "No operational
                 wallets" while the fetch is in flight (or on a transient error)
@@ -176,12 +196,12 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
             {walletsLoading && !wb ? (
               <Loading label="Loading your wallets…" />
             ) : walletsReadError && wallets.length === 0 ? (
-              <p className="v10-modal-error ds-card-nested" role="alert">
-                Couldn’t load your wallets.{' '}
-                <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshWallets()}><RefreshCw size={12} />Retry</button>
-              </p>
+              <div className="v10-pca-retry-block">
+                <p className="v10-modal-error ds-card-nested" role="alert">Couldn’t load your wallets.</p>
+                <RetryButton onClick={() => refreshWallets()} />
+              </div>
             ) : wallets.length === 0 ? (
-              <p className="v10-pca-handshake-empty">No operational wallets detected on this node.</p>
+              <p className="v10-pca-handshake-empty">This node didn't report any publishing wallets.</p>
             ) : (
               wallets.map((w) => {
                 const eth = ethFor(w);
@@ -212,34 +232,35 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               {copied ? 'Copied' : `Copy all ${wallets.length}`}
             </button>
           )}
-          <p className="v10-pca-detail-hint">
-            Share <strong>all</strong> wallets (the node rotates its signer per publish) or pin to one.
-            Share the exact address - a typo can be approved by the PCA owner but never match your real signer.
-          </p>
+          {wallets.length > 0 && (
+            <p className="v10-pca-detail-hint">
+              Share <strong>all</strong> of them, because the node can sign with a different wallet each time, or pin publishing to one.
+              Copy the exact addresses: a wrong address can still be approved, but it gives no discount.
+            </p>
+          )}
         </section>
 
         {/* Gas nudge */}
         <div className="v10-modal-warning ds-card-nested">
-          <StatusGlyph tone="warning" /> Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
-          wallet with native {gasSymbol}.
+          <StatusGlyph tone="warning" /> You pay gas. The PCA only covers the TRAC fee, so each publishing wallet needs {gasSymbol}.
           {faucet ? (
-            <>{' '}<a href={faucet} target="_blank" rel="noreferrer">Open faucet <ExternalMark /></a> (testnet only)</>
-          ) : (
-            <>{' '}Fund with native {gasSymbol} from your wallet.</>
-          )}
+            <>{' '}Get test {gasSymbol}: <a className="v10-pca-text-link" href={faucet} target="_blank" rel="noreferrer">Open faucet <ExternalMark /></a></>
+          ) : wallets.length > 0 ? (
+            <>{' '}Transfer {gasSymbol} to the addresses above.</>
+          ) : null}
         </div>
 
         {/* Approval tracker */}
         <section className="v10-pca-detail-section">
-          <h3 className="v10-pca-detail-section-title">Can&apos;t find it automatically?</h3>
+          <h3 className="v10-pca-detail-section-title">Have a PCA ID?</h3>
           {/* GAP-3 discovery — surface any sponsoring PCA we found on-chain; pre-fill the
               check (the user confirms; nothing is auto-tracked). */}
           <p className="v10-pca-detail-hint">
-            If the PCA owner gives you an account id, check it here to track whether this node&apos;s wallets are covered.
+            If the PCA owner gave you a PCA ID, enter it to see which of this node&apos;s wallets are covered.
           </p>
           {discovered && discovered.length > 0 && (
             <div className="v10-pca-discovered-check" role="status" data-testid="pca-sponsor-discovered">
-              <StatusGlyph tone="success" /> We found your wallet(s) already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
+              <StatusGlyph tone="success" /> At least one of your wallets is already approved on {discovered.map((id) => `PCA #${id}`).join(', ')}.{' '}
               <button type="button" className="v10-pca-card-btn compact ds-btn ds-sm" onClick={() => setSponsorId(discovered[0])}>
                 Check PCA #{discovered[0]}
               </button>
@@ -258,12 +279,20 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
               {checking ? 'Checking…' : 'Check approval'}
             </button>
           </div>
-          {probeError && <p className="v10-modal-error ds-card-nested" role="alert">{probeError}</p>}
+          {probeError && (
+            <div className="v10-pca-retry-block">
+              <p className="v10-modal-error ds-card-nested" role="alert">{probeError}</p>
+              {probeRetryable && <RetryButton onClick={() => void check()} />}
+            </div>
+          )}
           {probed && (
             <div className="v10-pca-approve-results" role="status" aria-live="polite">
               <p className="v10-pca-approve-summary">
-                Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets <Check size={12} />
+                <span className="v10-wallet-status" data-tone={summaryTone(probed.rows) === 'warning' ? 'warn' : summaryTone(probed.rows)}><StatusGlyph tone={summaryTone(probed.rows)} /></span> Approved on PCA #{probed.accountId}: {approvedCount} of {probed.rows.length} wallets
               </p>
+              {inactiveReason(probed.accountId, probed.rows) && (
+                <p className="v10-modal-warning ds-card-nested">{inactiveReason(probed.accountId, probed.rows)}</p>
+              )}
               {probed.rows.map((r) => {
                 const s = sponsorRowStatus(r.coverage);
                 return <WalletRow key={r.wallet} address={r.wallet} status={s.text} statusTone={s.tone} />;
@@ -274,10 +303,10 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
 
         {ready && (
           <div className="v10-pca-create-success" role="status">
-            Ready: at least 1 wallet is approved and gas-funded - this node can publish under PCA #{probed!.accountId}.{' '}
+            Ready. At least 1 wallet is approved and has gas, so this node can publish with PCA #{probed!.accountId}.{' '}
             {/* L9: no global publish target — the discount applies at any per-CG
                 publish. Guidance hint, not an inert "Go to publish →" button. */}
-            Publish from any Context Graph — the discount applies automatically to your approved wallets.
+            Publish from any Context Graph. The discount applies automatically to approved wallets.
           </div>
         )}
       </div>

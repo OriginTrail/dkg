@@ -280,10 +280,10 @@ export const sel = {
     recheckBtn: '[data-testid="pca-recheck-btn"]',
     // S7 role-adaptive landing + S1 overview
     landing: '[data-testid="pca-landing"]',
-    trackToggle: '[data-testid="pca-track-toggle"], .v10-pca-track-toggle', // S1 collapsed "track by id" disclosure (expand first)
+    trackToggle: '[data-testid="pca-track-toggle"]', // S1 collapsed "track by id" disclosure (expand first)
     trackInput: '[data-testid="pca-track-input"]',         // S1 manual accountId paste (P0 pre-discovery)
     trackSubmit: '[data-testid="pca-track-submit"]',
-    accountCard: '[data-testid="pca-account-card"]',        // S1/S3 PcaAccountCard
+    accountCard: '[data-testid="pca-account-row"]',         // S1 PCA list row
     healthChip: '[data-testid="pca-health-chip"]',          // HealthChip
     tierLadder: '[data-testid="pca-tier-ladder"]',          // DiscountTierLadder
     // S2 create
