@@ -102,19 +102,17 @@ function abbrev(n: number): string {
 }
 
 function StatCard({
-  label, value, sub, accentColor, children, icon, className,
+  label, value, sub, children, icon, className,
 }: {
   label: string;
   value?: React.ReactNode;
   sub?: React.ReactNode;
-  accentColor?: string;
   children?: React.ReactNode;
   icon?: React.ReactNode;
   className?: string;
 }) {
   return (
     <div className={`stat-card ds-card v10-anim-mount${className ? ` ${className}` : ''}`}>
-      {accentColor && <div className="accent" style={{ background: accentColor }} />}
       <div className="stat-label">{icon}{label}</div>
       {value != null && value !== '' && <div className="stat-value">{value}</div>}
       {children}

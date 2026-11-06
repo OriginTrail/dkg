@@ -102,7 +102,6 @@ select.input {
 /* Stat cards */
 .stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:var(--pad-compact);flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color var(--motion-base),box-shadow var(--motion-base)}
 .stat-card:hover{border-color:var(--border-strong);box-shadow: var(--shadow-sm)}
-.stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
 .stat-label{font-size: var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing: var(--ls-caps);text-transform:uppercase;margin-bottom:var(--space-8);display:flex;align-items:center;gap:var(--space-6)}
 .stat-value{font-size: var(--fs-display);font-weight:700;color:var(--text-primary);line-height:1}
 .stat-sub{font-size: var(--fs-body);color:var(--text-secondary);margin-top:var(--space-6)}
