@@ -83,6 +83,8 @@ export const UNFOLLOWED_LOADS = new Map([
     'the benchmark itself, re-run as its own worker process'],
   ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
     "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
+  ['packages/agent/src/snapshot-native-process.ts: command',
+    'the explicitly configured external Java executable running a locally hash-pinned Blazegraph JAR; lifecycle tests use process.execPath with inline code, not a repository entry point; the launcher and its callers already select the agent lane'],
   // Programs a child-process call runs that no reading identifies: tools, or
   // node running the file named.
   ['devnet/rfc64-gate1-public-open/agent-child.ts: options.spawn.command',

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { PublicSnapshotUnavailableError } from './public-snapshot-reader.js';
-import { PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS } from './public-snapshot-admission.js';
-import { waitForPublicSnapshotRetry } from './public-snapshot-exact-pacing.js';
+import { assertPublicSnapshotScopeAndAnchor } from './public-snapshot-scope.js';
+import { readPublicSnapshotWithAdmission } from './public-snapshot-admission-read.js';
 import type { PublicSnapshotObservation } from './public-snapshot-evidence.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 
@@ -19,21 +18,8 @@ export async function recoverPublicSnapshotToCurrent(options: {
     options.assertCurrent();
     if (Date.now() >= options.deadline) throw new Error('Snapshot catch-up exceeded the original job deadline');
   };
-  const readFresh = async (): Promise<PublicSnapshotObservation> => {
-    for (;;) {
-      active();
-      try { return await options.readFresh(); }
-      catch (error) {
-        active();
-        if (!(error instanceof PublicSnapshotUnavailableError)) throw error;
-        // The wire deliberately hides whether refusal means private, missing or
-        // busy. Wait a full serving admission window; never relax validation or
-        // extend this job. Short slices retain the ownership fence while waiting.
-        await waitForPublicSnapshotRetry(Math.min(Date.now() + PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS, options.deadline),
-          options.signal, active);
-      }
-    }
-  };
+  const readFresh = () => readPublicSnapshotWithAdmission({ read: options.readFresh,
+    signal: options.signal, deadline: options.deadline, assertCurrent: active });
   let observation = options.initial, rounds = 0;
   const bulkChunks: NonNullable<PublicSnapshotRecoveryResult['bulkChunks']> = [];
   while (true) {
@@ -44,22 +30,8 @@ export async function recoverPublicSnapshotToCurrent(options: {
     if (recovered.bulkChunks) bulkChunks.push(...recovered.bulkChunks);
     const fresh = await readFresh();
     active();
+    assertPublicSnapshotProgress(observation, fresh);
     const previous = observation.snapshot, next = fresh.snapshot;
-    // A changed contract/name binding is not an incremental inventory. Never
-    // transfer under the old subscription's authority into another namespace.
-    if (observation.mode !== fresh.mode || previous.chainId !== next.chainId
-      || previous.deploymentId !== next.deploymentId || previous.contextGraphId !== next.contextGraphId
-      || previous.onChainId !== next.onChainId || previous.nameHash !== next.nameHash
-      || previous.assetStorage !== next.assetStorage || previous.contextGraphStorage !== next.contextGraphStorage)
-      throw new Error('Snapshot catch-up scope changed');
-    if (BigInt(next.blockNumber) < BigInt(previous.blockNumber)
-      || (next.blockNumber === previous.blockNumber && next.blockHash !== previous.blockHash))
-      throw new Error('Snapshot catch-up finalized anchor regressed or changed');
-    const nextIds = new Set(next.assets.map(asset => asset.id));
-    // Catch-up can add or replace authenticated content, but cannot silently
-    // authorize old stored data after a member disappears from the inventory.
-    if (previous.assets.some(asset => !nextIds.has(asset.id)))
-      throw new Error('Snapshot catch-up inventory removed previously pinned assets');
     if (next.inventoryDigest === previous.inventoryDigest) {
       return { observation, fresh, recovered, rounds,
         bulkChunks: recovered.bulkChunks === undefined ? undefined : bulkChunks };
@@ -68,4 +40,15 @@ export async function recoverPublicSnapshotToCurrent(options: {
     // Merely having committed a UAL in an earlier round never grants coverage.
     observation = fresh;
   }
+}
+
+/** Shared by catch-up and a checkpoint's first authority read after activation/restart. */
+export function assertPublicSnapshotProgress(observation: PublicSnapshotObservation, fresh: PublicSnapshotObservation): void {
+  const previous = observation.snapshot, next = fresh.snapshot;
+  assertPublicSnapshotScopeAndAnchor(observation, fresh);
+  const nextIds = new Set(next.assets.map(asset => asset.id));
+  // Catch-up can add or replace authenticated content, but cannot silently
+  // authorize old stored data after a member disappears from the inventory.
+  if (previous.assets.some(asset => !nextIds.has(asset.id)))
+    throw new Error('Snapshot catch-up inventory removed previously pinned assets');
 }

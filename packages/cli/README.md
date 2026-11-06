@@ -64,6 +64,23 @@ the effective lane once at boot. A background query that is shed before
 execution returns HTTP 503 with `Retry-After: 1` and
 `code: "STORE_SCHEDULER_BUSY"`.
 
+## RDF file input
+
+Commands with `--file` accept N-Quads (`.nq`), N-Triples (`.nt`), Turtle (`.ttl`),
+TriG (`.trig`), JSON quad arrays (`.json`), and JSON-LD (`.jsonld`). JSON-LD
+supports inline `@context`, lists, named graphs and typed/language literals.
+Relative identifiers resolve against the input file's `file:` URL unless an
+inline `@base` overrides it. Expansion that would discard statements fails.
+
+JSON-LD named graphs can be stored in Working Memory with `dkg ka create --no-finalize`.
+A default-finalizing create rejects them before contacting the daemon: sealing, SWM
+sharing and VM publication do not yet preserve named-graph identity. Rewrite the
+document into the default graph to use those transitions.
+
+JSON-LD ingestion does not fetch remote contexts or `@import` URLs. Embed the
+required context inline before importing a file. Existing simple quad arrays
+remain supported in both `.json` and `.jsonld` files.
+
 ## Async queue settings
 
 The async share and publish queues need no changes on most nodes. The four
@@ -266,6 +283,7 @@ modes auto-renewal can't recover from:
 | `dkg stop` | Graceful daemon shutdown |
 | `dkg status` | Node health, peer count, identity |
 | `dkg logs` | Tail the daemon log |
+| `dkg debug cpu-profile [--seconds <n>]` | Record a CPU profile of the running node (node-admin token; 10 s default, 60 s max) and print where the node wrote it |
 | `dkg peers` | List connected peers and transport info |
 | `dkg peer info <peer-id>` | Inspect a peer's identity and addresses |
 | `dkg send <name> <msg>` | Encrypted direct message to a peer |
@@ -462,6 +480,7 @@ When the daemon is running, it exposes a local HTTP API (default: `http://localh
 - `GET /api/peers`, `GET /api/connections`, `GET /api/agents` — network introspection
 - `GET /api/wallets/balances`, `GET /api/chain/rpc-health` — wallet and chain health
 - `GET /api/diagnostics/backpressure` — node-admin scheduler pressure snapshot
+- `POST /api/diagnostics/cpu-profile` — node-admin CPU profile of the daemon's main thread, written to `<DKG home>/diagnostics` ([Troubleshooting](../../docs/use-dkg/troubleshooting.md#slow-or-stalled-node-record-a-cpu-profile))
 - `POST /api/knowledge-assets/{name}/swm/share-async`, `GET /api/knowledge-assets/swm/share-jobs`, `GET /api/publisher/jobs`, `GET /api/publisher/stats` — async share and publish queues (client contract: [Async Share and Publish Jobs](../../docs/build/async-jobs.md); paging: [Listing async jobs](../../docs/references/api.md#listing-async-jobs))
 - `GET /api/events` — Server-Sent Events stream for real-time notifications
 

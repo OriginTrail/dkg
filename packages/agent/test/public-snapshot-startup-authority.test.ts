@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +18,7 @@ function fixture() {
     finalityConfirmations: 1, observedAt: now, expiresAt: now + 120000, accessPolicy: 0, assets: [],
   }); };
   const a: any = {
+    withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession,
     started: true, workLifetime: new AgentWorkLifetime(),
     subscribedContextGraphs: new Map([[graph, active()]]),
     contextGraphSubscriptionDormancyById: new Map([[graph, 'authorityUnavailable']]),

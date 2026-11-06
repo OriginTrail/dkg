@@ -278,6 +278,36 @@ describe('GossipSubManager', () => {
     nodes.length = 0;
   });
 
+  it('says who a published message was sent to', async () => {
+    const node1 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    const node2 = new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'] });
+    nodes.push(node1, node2);
+    await node1.start();
+    await node2.start();
+    const gossip1 = new GossipSubManager(node1, new TypedEventBus());
+    const gossip2 = new GossipSubManager(node2, new TypedEventBus());
+    const topic = 'dkg/context-graph/recipients/publish';
+    const data = new TextEncoder().encode('profile');
+    gossip1.subscribe(topic);
+    await expect(gossip1.publish(topic, data), 'nobody to send it to').resolves.toEqual([]);
+
+    gossip2.subscribe(topic);
+    await connectNodes(node1, node2);
+    await vi.waitFor(async () => {
+      await expect(gossip1.publish(topic, data)).resolves.toEqual([node2.peerId.toString()]);
+    }, { timeout: 10_000, interval: 250 });
+  }, 20_000);
+
+  it('does not say who got a message when the pubsub implementation does not', async () => {
+    const pubsub = {
+      addEventListener: () => {},
+      publish: async () => undefined,
+    };
+    const node = { libp2p: { services: { pubsub } } } as unknown as DKGNode;
+    await expect(new GossipSubManager(node, new TypedEventBus()).publish('topic', new Uint8Array()))
+      .resolves.toBeUndefined();
+  });
+
   it('contains rejected async handlers at the gossip boundary', async () => {
     let listener!: (event: {
       detail: { topic: string; data: Uint8Array; from: string };
