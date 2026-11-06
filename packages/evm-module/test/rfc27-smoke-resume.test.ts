@@ -1762,7 +1762,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
           const tokenId = await withdrawn();
           let cron: { hash: string } = { hash: '' };
           const owner = ownerBeside(fx.f.StakingV10.interface.getFunction('claimWithdrawnEpoch').selector, async () => {
-            cron = await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId, { maxPriorityFeePerGas: 10n ** 11n, maxFeePerGas: 10n ** 12n });
+            cron = await fx.f.StakingV10.connect(fx.f.accounts[20]).claimWithdrawnEpoch(tokenId, { gasLimit: 5_000_000n, maxPriorityFeePerGas: 10n ** 11n, maxFeePerGas: 10n ** 12n });
           });
           const first = phaseWithdraw(await ctxOf('withdraw', { owner, stopAt }));
           if (stopAt) await stops(first);
