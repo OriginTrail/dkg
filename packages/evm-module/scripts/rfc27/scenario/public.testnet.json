@@ -1,0 +1,167 @@
+{
+  "network": {
+    "chainId": 84532,
+    "hub": "0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6",
+    "rpc": "https://sepolia.base.org",
+    "explorer": "https://sepolia.basescan.org",
+    "blockscout": "https://base-sepolia.blockscout.com"
+  },
+  "activationEpoch": 663,
+  "firstEpoch": 663,
+  "sellers": [
+    {
+      "name": "beacon-01",
+      "identityId": 4,
+      "address": "0x694f6eF05658913da0437ac7a63A8Dad981B4a7e"
+    },
+    {
+      "name": "beacon-02",
+      "identityId": 3,
+      "address": "0x40bb512e8Ba105e0AC0bc44be540BDFb28377230"
+    },
+    {
+      "name": "beacon-03",
+      "identityId": 1,
+      "address": "0x8891Ad8396d5FE34c9A3c778bCbb99F20fbD4954"
+    },
+    {
+      "name": "beacon-04",
+      "identityId": 5,
+      "address": "0xfd6473f3F9a6fE03984cbdb6d2370FA13c0c2441"
+    }
+  ],
+  "services": [
+    {
+      "label": "inference/model-alpha",
+      "serviceId": "0x0e47cfaf6e395fe270249d8e4a99d7a61ffe912c01b67c739be9cfd10962fc14",
+      "serviceClass": 1,
+      "unit": "token"
+    },
+    {
+      "label": "inference/model-beta",
+      "serviceId": "0x7bbebbe26e336ed4bad7858280113974c7ee8f119ff2e91910a314e564696167",
+      "serviceClass": 1,
+      "unit": "token"
+    },
+    {
+      "label": "query/knowledge",
+      "serviceId": "0x152476d43e3167091736731c0b54d5b1c9e61c71a851c17d0b7a110c4aa01668",
+      "serviceClass": 2,
+      "unit": "query"
+    }
+  ],
+  "buyers": [
+    {
+      "name": "wallet-heavy",
+      "address": "0x0EB01C5e2EC75d5F28C6A9463480621208f4E6b3",
+      "pays": "wallet",
+      "accountId": null,
+      "owner": null,
+      "discountBps": 0,
+      "home": "beacon-02"
+    },
+    {
+      "name": "wallet-light",
+      "address": "0x98B1664b1Fde66246301ba793c54bcE04A5F61e2",
+      "pays": "wallet",
+      "accountId": null,
+      "owner": null,
+      "discountBps": 0,
+      "home": "beacon-03"
+    },
+    {
+      "name": "wallet-bursty",
+      "address": "0xAFAC02057720c94556b816f8F1170578042aa1bF",
+      "pays": "wallet",
+      "accountId": null,
+      "owner": null,
+      "discountBps": 0,
+      "home": "beacon-04"
+    },
+    {
+      "name": "account-plain",
+      "address": "0x4917c4052397D4F57de62f4D4Fd441EbEa83eb8d",
+      "pays": "account",
+      "accountId": 24,
+      "owner": "0xAfacA6Eb6750ed2ae120e024388e62A55b5dc983",
+      "discountBps": 0,
+      "home": "beacon-01"
+    },
+    {
+      "name": "account-30",
+      "address": "0x9C2EBe82CCF8Fe0EaBcFB1CD37D239C2B0753fb7",
+      "pays": "account",
+      "accountId": 25,
+      "owner": "0x6Fda80c36f174d0fAAd39a9CDCdaa90C7302D562",
+      "discountBps": 3000,
+      "home": "beacon-03"
+    },
+    {
+      "name": "account-75",
+      "address": "0x8156bEb67F839239DE76e6b6f0521174FDC64524",
+      "pays": "account",
+      "accountId": 26,
+      "owner": "0xA6258bcD52428c9041DF4b44eB33E8637A352EEa",
+      "discountBps": 7500,
+      "home": "beacon-04"
+    }
+  ],
+  "events": [
+    {
+      "epochOffset": 0,
+      "atUtc": "00:00",
+      "kind": "baseline",
+      "who": "all",
+      "note": "The first epoch of the pool: every buyer funds its subscription, and the sellers land calls through the day."
+    },
+    {
+      "epochOffset": 1,
+      "atUtc": "12:00",
+      "kind": "top-up",
+      "who": "wallet-bursty",
+      "note": "Tops up every budget mid-epoch; its calls of the second half of the day use what the top-up adds."
+    },
+    {
+      "epochOffset": 1,
+      "atUtc": "16:00",
+      "kind": "remove-buyer",
+      "who": "account-30",
+      "note": "The account's owner removes its buyer: requests issued from then on are refused, and those served before it still land."
+    },
+    {
+      "epochOffset": 2,
+      "atUtc": "00:00",
+      "kind": "add-buyer",
+      "who": "account-30",
+      "note": "The owner adds the buyer again under a new grant, at the epoch start, and the buyer funds the epoch from it."
+    },
+    {
+      "epochOffset": 2,
+      "atUtc": "22:30",
+      "kind": "race",
+      "who": "wallet-heavy",
+      "note": "Two sellers serve the same budget past its limit: batches count in landing order, so whichever lands last counts only what is left."
+    },
+    {
+      "epochOffset": 2,
+      "atUtc": "22:30",
+      "kind": "held-batch",
+      "who": "beacon-03",
+      "note": "Holds its calls from 22:30 on past the end of the epoch, so that last batch misses: refused as OutsideEpoch, and it never counts. Expected."
+    },
+    {
+      "epochOffset": 3,
+      "atUtc": "00:00",
+      "kind": "funding-only",
+      "who": "all",
+      "note": "Every buyer funds, and no call is made. No node has served value, so the pool is 0 and the money rolls forward."
+    },
+    {
+      "epochOffset": 4,
+      "atUtc": "00:00",
+      "kind": "baseline",
+      "who": "all",
+      "note": "Calls resume with varied demand: this epoch has value, so its pool takes the money rolled from offset 3."
+    }
+  ]
+}
