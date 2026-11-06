@@ -659,6 +659,7 @@ jobs:
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/graph-set-dedup-backend.test.ts
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.native-bootstrap.config.ts

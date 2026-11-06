@@ -14,6 +14,8 @@ import {
 } from './sparql-rewrite-result.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { graphSubselectLimit } from './sparql-subselect-limit.js';
+import { renderDedupPattern } from './sparql-dedup-pattern-source.js';
+import { literalSuffixLength } from './sparql-literal-suffix.js';
 
 function iriValue(token: SparqlLexicalToken | undefined): string | null {
   return token?.kind === 'iri' ? token.logicalValue : null;
@@ -198,17 +200,25 @@ export function wrapWithGraphUnion(
 
 const VIEW_GRAPH_SENTINEL = '?__dkgViewGraph';
 const DEDUP_GRAPH_SENTINEL = '?__dkgDedupGraph';
-const DEDUP_RANK_SENTINEL = '?__dkgDedupRank';
-const DEDUP_PRIOR_GRAPH_SENTINEL = '?__dkgDedupPriorGraph';
-const DEDUP_PRIOR_RANK_SENTINEL = '?__dkgDedupPriorRank';
+const DEDUP_MATCH_GRAPH_SENTINEL = '?__dkgDedupMatchGraph';
+
+interface SourceRange {
+  readonly start: number;
+  readonly end: number;
+  readonly expressionStart: number;
+}
+
+interface ProjectedGraphPattern {
+  readonly pattern: string;
+  readonly distinct?: boolean;
+  readonly helperVariables: readonly string[];
+}
 
 function wrapWithProjectedGraphSubselect(
   scope: PreparedGraphScope,
   graphUris: readonly string[],
-  helperVariables: readonly string[],
-  buildGraphPattern: (inner: string, graphs: readonly string[]) => string,
+  buildPattern: (inner: string, graphs: readonly string[]) => ProjectedGraphPattern,
   acceptsScope: (scope: PreparedGraphScope) => boolean = () => true,
-  distinctMappings = false,
 ): GraphScopeRewriteResult {
   if (scope.hasGraphClause) return ready(transitionGraphScope(scope, scope.source));
   if (graphUris.length === 0) return ready(transitionGraphScope(scope, scope.source));
@@ -226,6 +236,7 @@ function wrapWithProjectedGraphSubselect(
   if (hasUnion) return unsupported('nested-union');
   if (!acceptsScope(scope)) return unsupported('strategy-rejected');
 
+  const { pattern, distinct, helperVariables } = buildPattern(inner, graphs);
   const helperNames = new Set(helperVariables.map((variable) => variable.slice(1)));
   if (scope.queryVariables.some((variable) => helperNames.has(variable.logicalName))) {
     return unsupported('helper-variable-collision');
@@ -233,10 +244,11 @@ function wrapWithProjectedGraphSubselect(
 
   const innerVariables = scope.whereVariables;
   if (innerVariables.length === 0) return unsupported('no-projected-variables');
-  const graphPattern = buildGraphPattern(inner, graphs);
+  const variables = innerVariables.map(variable => variable.source).join(' ');
+  const replacement = `{ SELECT ${distinct ? 'DISTINCT ' : ''}${variables} WHERE { ${pattern} }${graphSubselectLimit(scope)} }`;
   return ready(transitionGraphScope(
     scope,
-    `${scope.source.slice(0, openEnd)} { SELECT ${distinctMappings ? 'DISTINCT ' : ''}${innerVariables.map((variable) => variable.source).join(' ')} WHERE { ${graphPattern} }${graphSubselectLimit(scope)} } ${scope.source.slice(close)}`,
+    `${scope.source.slice(0, openEnd)} ${replacement} ${scope.source.slice(close)}`,
   ));
 }
 
@@ -253,91 +265,131 @@ function isDedupSafeBasicGraphPattern(scope: PreparedGraphScope): boolean {
     ));
 }
 
-// These FILTER expressions only test an existing mapping. Keep volatile and
-// extension functions on the old route: mirrored triples could pass them
-// differently, invalidating the DISTINCT equivalence used below.
-const DEDUP_PURE_FILTER_WORDS = new Set([
-  'STR', 'STRSTARTS', 'STRENDS', 'CONTAINS', 'STRLEN', 'LCASE', 'UCASE',
-  'BOUND', 'TRUE', 'FALSE', 'IN', 'NOT',
-]);
-
-function isSingleTripleSelect(scope: PreparedGraphScope): boolean {
-  if (scope.operation !== 'SELECT' || !scope.where) return false;
-  const tokens: SparqlLexicalToken[] = [];
-  const source = scope.prepared.tokens;
-  const end = scope.where.closingTokenIndex;
-  for (let index = scope.where.openingTokenIndex + 1; index < end; index++) {
-    const token = source[index];
-    if (token.kind !== 'word' || token.upper !== 'FILTER') {
-      tokens.push(token);
-      continue;
-    }
-    const opening = source[index + 1];
-    if (opening?.kind !== 'symbol' || opening.logicalValue !== '(') return false;
-    const closing = scope.structure.parentheses.matchingTokenIndexes[index + 1] ?? -1;
-    if (closing <= index + 1 || closing >= end) return false;
-    for (let inner = index + 2; inner < closing; inner++) {
-      const expression = source[inner];
-      if (expression.kind === 'word' && !DEDUP_PURE_FILTER_WORDS.has(expression.upper)) {
-        return false;
-      }
-      const next = source[inner + 1];
-      if ((expression.kind === 'iri' || expression.kind === 'prefixed-name')
-        && next?.kind === 'symbol' && next.logicalValue === '(') return false;
-    }
-    index = closing;
+function isVisibleTripleToken(token: SparqlLexicalToken): boolean {
+  switch (token.kind) {
+    case 'variable':
+    case 'iri':
+    case 'prefixed-name':
+    case 'number':
+      return true;
+    case 'word':
+      return token.logicalValue === 'a' || token.upper === 'TRUE' || token.upper === 'FALSE';
+    case 'symbol':
+      return token.logicalValue === '.' || token.logicalValue === ';' || token.logicalValue === ',';
+    default:
+      return false;
   }
-  const last = tokens.at(-1);
-  if (last?.kind === 'symbol' && last.logicalValue === '.') {
-    tokens.pop();
-  }
-  if (tokens.length !== 3) return false;
-  const [subject, predicate, object] = tokens;
-  return subject.kind === 'variable' && object.kind === 'variable'
-    && (predicate.kind === 'variable' || predicate.kind === 'iri'
-      || predicate.kind === 'prefixed-name'
-      || (predicate.kind === 'word' && predicate.logicalValue === 'a'));
 }
 
-/** Scope a graph set while suppressing mappings already emitted by an earlier graph. */
+/**
+ * Read a flat pattern's FILTERs and terms. When every term is visible, one graph
+ * matches a mapping at most once. A path or blank node can match the same mapping
+ * several ways, and those repeats are part of the caller's results.
+ */
+function readDedupPattern(scope: PreparedGraphScope): {
+  readonly uniqueMappings: boolean;
+  readonly filters: readonly SourceRange[];
+} {
+  const whole = { uniqueMappings: false, filters: [] };
+  if (!scope.where) return whole;
+  const tokens = scope.prepared.tokens;
+  const end = scope.where.closingTokenIndex;
+  const filters: SourceRange[] = [];
+  let visible = true;
+  let hasTriple = false;
+  for (let index = scope.where.openingTokenIndex + 1; index < end; index++) {
+    const token = tokens[index];
+    if (token.kind === 'word' && token.upper === 'FILTER') {
+      // FILTER ( ... ) or FILTER fn( ... )
+      const isOpening = (at: number) => {
+        const candidate = tokens[at];
+        return candidate?.kind === 'symbol' && candidate.logicalValue === '(';
+      };
+      const opening = isOpening(index + 1) ? index + 1 : index + 2;
+      const closing = isOpening(opening)
+        ? scope.structure.parentheses.matchingTokenIndexes[opening] ?? -1
+        : -1;
+      if (closing <= opening || closing >= end) return whole;
+      filters.push({ start: token.start, expressionStart: token.end, end: tokens[closing].end });
+      index = closing;
+      continue;
+    }
+    hasTriple = true;
+    if (token.kind === 'string') {
+      const suffix = literalSuffixLength(tokens, index + 1);
+      if (suffix < 0) visible = false;
+      else index += suffix;
+    } else if (!isVisibleTripleToken(token)) {
+      visible = false;
+    }
+  }
+  return hasTriple ? { uniqueMappings: visible, filters } : whole;
+}
+
+/** Own graph choice and FILTER placement inside the shared projection boundary. */
+function buildDeduplicatedGraphPattern(scope: PreparedGraphScope, graphs: readonly string[]): ProjectedGraphPattern {
+  const { uniqueMappings, filters } = readDedupPattern(scope);
+  // Deduplicate only mappings known to be unique within one graph. ASK uses
+  // the same row semantics, including its modifiers and volatile FILTERs.
+  const distinct = uniqueMappings;
+  const movedFilters = filters;
+  // Every retained row evaluates each moved FILTER once. Hidden blank-node
+  // variables stay private across graph selection and replay.
+  const rendered = renderDedupPattern(scope, movedFilters);
+  const inner = rendered.pattern;
+  const values = graphs.map(graph => `<${assertSafeIri(graph)}>`).join(' ');
+  const variables = scope.whereVariables.map(variable => variable.source).join(' ');
+  const usedVariables = new Set(scope.queryVariables.map(variable => variable.logicalName));
+  const filterVariables = movedFilters.map(() => {
+    let suffix = 0;
+    while (usedVariables.has(`__dkgDedupFilter${suffix}`)) suffix++;
+    const name = `__dkgDedupFilter${suffix}`;
+    usedVariables.add(name);
+    return `?${name}`;
+  });
+  // BIND evaluates on every retained row on the right of the rejoin. A raw
+  // FILTER can be pushed onto the grouped left side by either engine, sampling
+  // once for all identical mappings. Filtering these booleans after OPTIONAL
+  // also discards its unmatched fallback row and expression errors.
+  const filterBindings = movedFilters.map(({ expressionStart, end }, index) =>
+    `BIND(${scope.source.slice(expressionStart, end)} AS ${filterVariables[index]})`,
+  ).join(' ');
+  if (distinct && movedFilters.length) {
+    const candidate = `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`;
+    const trailing = filterVariables.map(variable => `FILTER(${variable})`).join(' ');
+    return {
+      pattern: `{ SELECT DISTINCT ${variables} WHERE { ${candidate} } } ${filterBindings} ${trailing}`,
+      helperVariables: [DEDUP_GRAPH_SENTINEL, ...rendered.helperVariables, ...filterVariables],
+    };
+  }
+  const graphPattern = distinct
+    ? `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`
+    : [
+      // Blazegraph cannot correlate the old FILTER NOT EXISTS rank comparison here.
+      // Pick one graph deterministically, then retain that graph's hidden-path multiplicity.
+      `{ SELECT ${variables} (MIN(${DEDUP_MATCH_GRAPH_SENTINEL}) AS ${DEDUP_GRAPH_SENTINEL}) WHERE {`,
+      `  VALUES ${DEDUP_MATCH_GRAPH_SENTINEL} { ${values} }`,
+      `  GRAPH ${DEDUP_MATCH_GRAPH_SENTINEL} { ${inner} }`,
+      `} GROUP BY ${variables} }`,
+      // Every selected mapping exists in its graph. OPTIONAL is equivalent to a join
+      // here, but avoids Oxigraph's much costlier plain-join plan.
+      `OPTIONAL { GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} ${filterBindings} } }`,
+    ].join(' ');
+  const trailing = movedFilters.map((_, index) => `FILTER(${filterVariables[index]})`).join(' ');
+  const helperVariables = distinct ? [DEDUP_GRAPH_SENTINEL, ...rendered.helperVariables]
+    : [DEDUP_GRAPH_SENTINEL, DEDUP_MATCH_GRAPH_SENTINEL, ...rendered.helperVariables, ...filterVariables];
+  return { pattern: `${graphPattern} ${trailing}`, distinct, helperVariables };
+}
+
+/** Scope a graph set, reading each mapping from one graph even when several hold it. */
 export function wrapWithDeduplicatedGraphValues(
   input: PreparedGraphScope,
   graphUris: readonly string[],
 ): GraphScopeRewriteResult {
-  // For one triple with optional pure filters, DISTINCT over every matched
-  // variable removes graph mirrors
-  // without changing multiplicity after the caller's projection or aggregation.
-  // More complex patterns retain the existing graph-rank anti-join.
-  const distinctMappings = isSingleTripleSelect(input);
   return wrapWithProjectedGraphSubselect(
-    input,
-    graphUris,
-    [
-      DEDUP_GRAPH_SENTINEL,
-      DEDUP_RANK_SENTINEL,
-      DEDUP_PRIOR_GRAPH_SENTINEL,
-      DEDUP_PRIOR_RANK_SENTINEL,
-    ],
-    (inner, graphs) => {
-      if (distinctMappings) {
-        const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-        return `VALUES ${DEDUP_GRAPH_SENTINEL} { ${values} } GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`;
-      }
-      const rows = graphs
-        .map((graph, rank) => `(<${assertSafeIri(graph)}> ${rank})`)
-        .join(' ');
-      return [
-        `VALUES (${DEDUP_GRAPH_SENTINEL} ${DEDUP_RANK_SENTINEL}) { ${rows} }`,
-        `GRAPH ${DEDUP_GRAPH_SENTINEL} { ${inner} }`,
-        'FILTER NOT EXISTS {',
-        `  VALUES (${DEDUP_PRIOR_GRAPH_SENTINEL} ${DEDUP_PRIOR_RANK_SENTINEL}) { ${rows} }`,
-        `  FILTER (${DEDUP_PRIOR_RANK_SENTINEL} < ${DEDUP_RANK_SENTINEL})`,
-        `  GRAPH ${DEDUP_PRIOR_GRAPH_SENTINEL} { ${inner} }`,
-        '}',
-      ].join(' ');
-    },
+    input, graphUris,
+    (_inner, graphs) => buildDeduplicatedGraphPattern(input, graphs),
     isDedupSafeBasicGraphPattern,
-    distinctMappings,
   );
 }
 
@@ -349,10 +401,12 @@ export function wrapWithGraphValues(
   return wrapWithProjectedGraphSubselect(
     input,
     graphUris,
-    [VIEW_GRAPH_SENTINEL],
     (inner, graphs) => {
       const values = graphs.map((graph) => `<${assertSafeIri(graph)}>`).join(' ');
-      return `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`;
+      return {
+        pattern: `VALUES ${VIEW_GRAPH_SENTINEL} { ${values} } GRAPH ${VIEW_GRAPH_SENTINEL} { ${inner} }`,
+        helperVariables: [VIEW_GRAPH_SENTINEL],
+      };
     },
   );
 }

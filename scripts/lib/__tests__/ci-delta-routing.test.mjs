@@ -527,6 +527,7 @@ test('the Blazegraph lane covers agent live suites and scoped query catalogs', (
   assert.equal(job.if, "needs.changes.outputs.tornado_blazegraph == 'true'");
   assert.ok(job.steps.some(({ run = '' }) => run.includes('dkg-agent exec vitest run --config vitest.blazegraph.config.ts')));
   assert.ok(job.steps.some(({ run = '' }) => run.includes('DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts')));
+  assert.ok(job.steps.some(({ run = '' }) => run.includes('DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/graph-set-dedup-backend.test.ts')));
   for (const filePath of [
     'packages/query/src/scoped-content-graph-catalog.ts',
     'packages/query/test/scoped-catalog-backend.test.ts',
