@@ -25,7 +25,7 @@ import { Fork } from '../scripts/rfc27/fork';
 import { Redactor, Report, fmt } from '../scripts/rfc27/report';
 import { phaseCheck } from '../scripts/rfc27/smoke/check';
 import { phaseClaim } from '../scripts/rfc27/smoke/claim';
-import { NOTHING_YET, needsOf, plannedAmounts } from '../scripts/rfc27/smoke/config';
+import { NOTHING_YET, needsOf, plannedAmounts, readEnv } from '../scripts/rfc27/smoke/config';
 import { PoolCtx, withPool } from '../scripts/rfc27/smoke/context';
 import { firstBlockAt, rewardClaims } from '../scripts/rfc27/smoke/reward-claims';
 import type { Roles } from '../scripts/rfc27/smoke/roles';
@@ -958,6 +958,18 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(await fx.f.StakingNFT.ownerOf(s.tokenId)).to.equal(ownerWallet().address);
     });
 
+    it("fails serve when a batch's stake factor isn't what the stake gave before it was sent, and serve stays not done", async () => {
+      use(await loadFixture(afterProof));
+      await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.batch-1' })));
+      editState((raw) => {
+        raw.steps['serve.batch-1'].stakeFactor18 = String(BigInt(raw.steps['serve.batch-1'].stakeFactor18) + 1n);
+      });
+      const resumed = await ctxOf('serve');
+      await phaseServe(resumed);
+      expect(failedLabels(resumed).join(' | ')).to.contain('the first batch captured the stake factor its node\'s stake gives');
+      expect(resumed.file.done('serve')).to.equal(false);
+    });
+
     it('resumed after the first batch, plans the second, which needs the top-up, rather than failing to simulate it', async () => {
       use(await loadFixture(afterProof));
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.batch-1' })));
@@ -975,6 +987,27 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(status('serve.top-up')).to.equal('simulated');
       expect(status('serve.batch-2')).to.equal('planned');
       expect(ctx?.report.status).to.not.equal('failed');
+    });
+  });
+
+  describe('a run label', () => {
+    const withRun = (run: string) => {
+      const before = process.env.RFC27_SMOKE_RUN;
+      process.env.RFC27_SMOKE_RUN = run;
+      try {
+        return readEnv().run;
+      } finally {
+        if (before === undefined) delete process.env.RFC27_SMOKE_RUN;
+        else process.env.RFC27_SMOKE_RUN = before;
+      }
+    };
+
+    it('takes letters, digits, dashes and underscores', () => {
+      expect(withRun('smoke-1_a')).to.equal('smoke-1_a');
+    });
+
+    it("refuses a dot, so a report can't take the name of another run's state", () => {
+      expect(() => withRun('smoke.check')).to.throw('RFC27_SMOKE_RUN must be');
     });
   });
 

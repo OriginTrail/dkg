@@ -17,7 +17,7 @@ import { fmt } from '../report';
 import { SmokeTx, Step, StepResult } from './tx';
 
 /** Steps that need an earlier step, and what makes them done already on chain. */
-export type StepOpts = Pick<Step, 'needs' | 'done' | 'expected'>;
+export type StepOpts = Pick<Step, 'needs' | 'done' | 'expected' | 'stakeFactor18'>;
 
 export class Marketplace {
   private qiDomain?: Domain;

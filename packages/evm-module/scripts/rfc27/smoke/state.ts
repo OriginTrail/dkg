@@ -162,6 +162,7 @@ function decodeStep(x: unknown, where: string): StepRecord {
     block: optNum(o, 'block', where),
     gasUsed: optBi(o, 'gasUsed', where),
     expected: optExpected(o, 'expected', where),
+    stakeFactor18: optBi(o, 'stakeFactor18', where),
   };
 }
 

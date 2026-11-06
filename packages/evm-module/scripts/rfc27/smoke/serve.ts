@@ -8,7 +8,7 @@
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
 import { eventsIn } from '../contracts';
-import { groupFault } from '../reads';
+import { capturedFactorHolds, expectedStakeFactor, groupFault } from '../reads';
 import { fmt, iso, sum } from '../report';
 import { planValue, requestPlan } from './config';
 import { PoolCtx, complete, doneEarlier, epochStart, now, planDigest, runState, standInProof } from './context';
@@ -49,6 +49,14 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   /** Whether the seller has spent `nonce` of the period: its receipt landed. */
   const landed = async (id: string, nonce: bigint) => ((await c.qis.nonceWord(id, s.sellerId, nonce >> 8n)) >> (nonce & 0xffn)) % 2n === 1n;
 
+  /** A batch against the factor its node's stake gave before it was sent, so a wrong factor can't vouch for the scores built on it. */
+  const checkFactor = (which: string, captured: bigint, expected: bigint | undefined) =>
+    report.check(
+      `the ${which} batch captured the stake factor its node's stake gives, worked out before it was sent`,
+      expected !== undefined && capturedFactorHolds(captured, expected),
+      `captured ${captured}, expected ${expected}`,
+    );
+
   // 1. The first batch: two account requests, up to the period's value before the top-up, and two wallet requests.
   let t = await issuedAt();
   const firstTotal = planValue(plan.caFirst) + planValue(plan.wallet);
@@ -60,7 +68,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
       await market.group(r.caSession, ca, s.sellerId, 0n, plan.caFirst.count, plan.caFirst.units, t),
       await market.group(r.walletSession, wallet, s.sellerId, 0n, plan.wallet.count, plan.wallet.units, t),
     ],
-    { done: (await landed(wallet, 0n)) ? 'the seller has landed on both periods' : undefined },
+    { stakeFactor18: await expectedStakeFactor(c, s.sellerId), done: (await landed(wallet, 0n)) ? 'the seller has landed on both periods' : undefined },
   );
   const [accepted] = eventsIn(b1.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
   if (shownBy(report, b1, accepted, 'the first batch\'s ReceiptBatchAccepted event')) {
@@ -69,6 +77,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
       accepted.seller === s.sellerId && accepted.itemCount === 4n && accepted.claimed === firstTotal && accepted.counted === firstTotal,
       `${fmt(accepted.counted)} of ${fmt(accepted.claimed)} TRAC, stake factor ${fmt(accepted.stakeFactor18)}`,
     );
+    checkFactor('first', accepted.stakeFactor18, b1.stakeFactor18);
   }
 
   // 2. The next batch, with what is left of the account bucket too little for it, is refused and spends nothing; the top-up lifts it.
@@ -106,8 +115,14 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     `${plan.caAfterTopUp.count} request: account ${fmt(afterTopUpValue)} TRAC`,
     r.seller,
     secondGroups,
-    { needs: ['serve.top-up'], done: (await landed(ca, BigInt(plan.caFirst.count))) ? 'the seller has landed the request after the top-up' : undefined },
+    {
+      needs: ['serve.top-up'],
+      stakeFactor18: await expectedStakeFactor(c, s.sellerId),
+      done: (await landed(ca, BigInt(plan.caFirst.count))) ? 'the seller has landed the request after the top-up' : undefined,
+    },
   );
+  const [acceptedSecond] = eventsIn(b2.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
+  if (shownBy(report, b2, acceptedSecond, 'the second batch\'s ReceiptBatchAccepted event')) checkFactor('second', acceptedSecond.stakeFactor18, b2.stakeFactor18);
   if (b2.receipt || b2.skipped) {
     const [caFilled, walletFilled] = [await c.qis.bucketFilled(ca, 0), await c.qis.bucketFilled(wallet, 0)];
     report.check(

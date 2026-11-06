@@ -83,7 +83,8 @@ export function readEnv(): SmokeEnv {
   const phase = PHASES.find((p) => p === (process.env.PHASE ?? 'check'));
   if (!phase) throw new Error(`set PHASE to one of ${PHASES.join(', ')}`);
   const run = process.env.RFC27_SMOKE_RUN ?? 'smoke';
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(run)) throw new Error('RFC27_SMOKE_RUN must be 1 to 64 letters, digits, dots, dashes or underscores');
+  // No dots: a run's state and its reports share a directory, and `<run>.<phase>.json` must never name another run's state.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(run)) throw new Error('RFC27_SMOKE_RUN must be 1 to 64 letters, digits, dashes or underscores');
   return {
     phase,
     send: process.env.SEND === '1',
