@@ -6,7 +6,7 @@ import { DeployFunction } from 'hardhat-deploy/types';
  * plan periods (OT-RFC-27): the opt-in switch per account, the buyer-key
  * assignments and their usage, and the funded plan periods of one epoch, from
  * an account or a wallet, with their buckets and top-ups. The money a period
- * brings is booked as due in `QueryInferenceStorage` (052e), not here.
+ * brings is booked in `QueryInferenceStorage` (052e), not here.
  *
  * It is registered in the Hub's contract set, never as an asset storage: its
  * mutators are `onlyContracts`, which reads the contract set. On a live
