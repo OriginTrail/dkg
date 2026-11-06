@@ -13,10 +13,11 @@ import { capturedFactorHolds, groupFault, grossOf, poolsFromMoney, receiptFault,
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TX_GAS_CAP, TxOverGasCap, TxReverted, TxRunner, gasLimitFor } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
-import { bookedBy1020, checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existing';
+import { StoredAccount, bookedBy1020, checkClaims, checkSettleMany, checkSettledAccounts } from '../scripts/rfc27/rehearsal/existing';
 import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
 import { claimAll } from '../scripts/rfc27/rehearsal/operations';
 import { closedWindows } from '../scripts/rfc27/rehearsal/reads';
+import { checkQuietClaim } from '../scripts/rfc27/rehearsal/unused';
 import { passedResults } from '../scripts/rfc27/rehearsal/results';
 import type { ClaimResult, Position } from '../scripts/rfc27/rehearsal/results';
 
@@ -599,6 +600,32 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       c[0] = { ...c[0], amount: c[0].amount - 1n };
       c[1] = { ...c[1], amount: c[1].amount + 1n };
       expect(settleMany(c).failed).to.equal(1);
+    });
+
+    it('fails an expired account its events call swept when storage does not', () => {
+      const settled: StoredAccount = { id: 9n, fullySwept: true, topUp: 0n, lastSettledWindow: 12n, lock: 12n };
+      const run = (accounts: StoredAccount[]) => {
+        const report = new QuietReport();
+        checkSettledAccounts(report, accounts);
+        return report;
+      };
+      expect(run([settled]).failed).to.equal(0);
+      expect(run([{ ...settled, fullySwept: false }]).failed).to.equal(1);
+      expect(run([{ ...settled, topUp: 1n }]).checks[0].detail).to.contain('account 9');
+      expect(run([{ ...settled, lastSettledWindow: 11n }]).failed).to.equal(1);
+      expect(run([]).failed).to.equal(1);
+    });
+
+    it('fails a claim after a quiet spell that went through without paying its share of the pool', () => {
+      const run = (claimed: { reward: bigint; rawDelta: bigint }, expected: bigint, poolShare: bigint) => {
+        const report = new QuietReport();
+        checkQuietClaim(report, { ...claimed, gasUsed: 1n }, expected, poolShare);
+        return report;
+      };
+      expect(run({ reward: 7n, rawDelta: 7n }, 7n, 2n).failed).to.equal(0);
+      expect(run({ reward: 5n, rawDelta: 5n }, 7n, 2n).failed).to.equal(1);
+      expect(run({ reward: 7n, rawDelta: 5n }, 7n, 2n).failed).to.equal(1);
+      expect(run({ reward: 7n, rawDelta: 7n }, 7n, 0n).failed).to.equal(1);
     });
 
     it('fails when a credit is missing or added', () => {

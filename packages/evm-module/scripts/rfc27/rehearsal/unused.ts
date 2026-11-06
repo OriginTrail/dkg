@@ -11,10 +11,10 @@
 import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
 import type { Contracts } from '../contracts';
 import { chainNow } from '../network';
-import { EpochNumbers, epochNumbers, poolsFromMoney } from '../reads';
-import { fmt, sum } from '../report';
+import { EpochNumbers, claimPreview, epochNumbers, kpiNets, poolShareOf, poolsFromMoney } from '../reads';
+import { Report, fmt, sum } from '../report';
 import { Ctx, saveResults, send, withPool } from './context';
-import { approve, fundTrac, requestDomain, signedGroup, submitBatch, walletRequest } from './operations';
+import { approve, claimAll, fundTrac, requestDomain, signedGroup, submitBatch, walletRequest } from './operations';
 import { impersonate } from './plumbing';
 import { positions } from './reads';
 import { loadPre } from './results';
@@ -53,6 +53,15 @@ export async function phaseUnused(ctx: Ctx): Promise<void> {
   const lastValue = rows.reduce((at, r) => (r.totalServed > 0n ? r.epoch : at), 0n);
   const quietSpell = await ctx.fork.inSnapshot(() => saleAfterQuietSpell(ctx, c, last, lastValue, waiting));
   saveResults(ctx, 'unused', { activation, last, rows, waiting, quietSpell }, { txs: false });
+}
+
+/** The claim after the quiet spell pays what the epochs' nets give, a share of the sale's pool in it. */
+export function checkQuietClaim(report: Report, claimed: { reward: bigint; rawDelta: bigint; gasUsed: bigint }, expected: bigint, poolShare: bigint): void {
+  report.check(
+    "after the quiet spell the claim pays what the epochs' nets give, a share of the sale's pool in it, with nothing to catch up first",
+    poolShare > 0n && claimed.reward === expected && claimed.rawDelta === expected,
+    `${fmt(claimed.reward)} TRAC of ${fmt(expected)}, ${fmt(poolShare)} of it from the pool; gas used ${claimed.gasUsed}`,
+  );
 }
 
 /**
@@ -99,8 +108,14 @@ async function saleAfterQuietSpell(ctx: Ctx, c: Contracts, lastEnded: bigint, la
   report.say(`  queryInferenceGross: ${walk} gas with value, walking ${run} epochs; ${noValue} with none, walking nothing; about ${perEpoch} per epoch walked`);
   const p = (await positions(c)).find((x) => x.node === seller);
   if (!p) throw new Error(`no position on node ${seller}`);
-  const owner = await impersonate(ctx, p.owner);
-  const claimed = await send(ctx, `token ${p.tokenId} owner: claim, after the quiet spell`, owner, await c.snft.getAddress(), c.snft.interface.encodeFunctionData('claim', [p.tokenId]));
-  check('after the quiet spell the claim goes through, with nothing to catch up first', claimed.receipt.status === 1, `gas used ${claimed.gasUsed}`);
+  // What the claim must pay, worked out before it from what no claim writes.
+  const from = p.lastClaimedEpoch + 1n;
+  const { nets } = await kpiNets(c, seller, from, sale);
+  const expected = await claimPreview(c, p.tokenId, seller, from, sale, p.raw, nets);
+  const inSale = expected.per.find((x) => x.epoch === sale);
+  if (!inSale) throw new Error(`token ${p.tokenId} has no reward in epoch ${sale}`);
+  const { poolShare } = await poolShareOf(c, seller, sale, inSale.score, inSale.net);
+  const [claimed] = await claimAll(ctx, [p], 'after the quiet spell:');
+  checkQuietClaim(report, claimed, expected.total, poolShare);
   return { sale, pool, run, gross: { walk, noValue, perEpoch }, claimGas: claimed.gasUsed };
 }
