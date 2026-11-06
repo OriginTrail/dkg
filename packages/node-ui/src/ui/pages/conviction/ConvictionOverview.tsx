@@ -15,6 +15,7 @@ import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { Badge, Count } from '../../components/ds/Badge.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -221,7 +222,7 @@ export function ConvictionOverview() {
       <header className="v10-pca-overview-head">
         <div className="v10-pca-overview-titlerow">
           <h2 className="v10-pca-overview-title">Publisher Conviction</h2>
-          {role && <span className="badge v10-pca-role-chip">Node role: {role}</span>}
+          {role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {role}</Badge>}
         </div>
         <p className="v10-pca-overview-explainer">
           {role === 'edge'
@@ -239,10 +240,10 @@ export function ConvictionOverview() {
             </p>
           </div>
           <div className="v10-pca-overview-cta-group">
-            <button type="button" className="v10-pca-card-btn primary" onClick={() => setSponsoredOpen(true)}>
+            <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" onClick={() => setSponsoredOpen(true)}>
               Get added to a PCA
             </button>
-            <button type="button" className="v10-pca-card-btn" data-testid="pca-create-btn" onClick={() => setCreateOpen(true)}>
+            <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-create-btn" onClick={() => setCreateOpen(true)}>
               + Create PCA
             </button>
           </div>
@@ -256,7 +257,7 @@ export function ConvictionOverview() {
         ) : walletsInconclusive ? (
           <p className="v10-pca-overview-caveat" role="status">
             Couldn't read this node's wallets, so coverage can't be confirmed.{' '}
-            <button type="button" className="v10-pca-card-btn" onClick={() => refresh()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refresh()}>Retry</button>
           </p>
         ) : (
           <p className="v10-pca-overview-caveat">No operational publishing wallets were reported by this node.</p>
@@ -270,7 +271,7 @@ export function ConvictionOverview() {
           <div className="v10-pca-linked-pcas" data-testid="pca-approved-section">
             <div className="v10-pca-account-group-head">
               <h3 className="v10-pca-account-group-title">PCAs linked to this node</h3>
-              <span className="v10-pca-account-group-count">{approved.length}</span>
+              <Count value={approved.length} className="v10-pca-account-group-count" />
             </div>
             <p className="v10-pca-overview-caveat">
               Account summaries for PCAs that approve at least one of this node&apos;s publishing wallets.
@@ -297,8 +298,8 @@ export function ConvictionOverview() {
 
       {loading && accounts.length === 0 ? (
         <div className="v10-pca-card-grid">
-          <div className="card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
-          <div className="card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
+          <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
+          <div className="card ds-card v10-pca-card v10-pca-card-skeleton" aria-hidden="true" />
         </div>
       ) : (
         <>
@@ -311,7 +312,7 @@ export function ConvictionOverview() {
                 </p>
               </div>
               <div className="v10-pca-overview-cta-group">
-                <button type="button" className="v10-pca-card-btn" data-testid="pca-create-owned-btn" onClick={() => setCreateOpen(true)}>
+                <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-create-owned-btn" onClick={() => setCreateOpen(true)}>
                   + Create PCA
                 </button>
               </div>
@@ -352,7 +353,7 @@ export function ConvictionOverview() {
           <section className="v10-pca-section" data-testid="pca-tracked-external-section">
             <div className="v10-pca-account-group-head">
               <h3 className="v10-pca-section-title">Tracked external accounts</h3>
-              <span className="v10-pca-account-group-count">{trackedExternal.length}</span>
+              <Count value={trackedExternal.length} className="v10-pca-account-group-count" />
             </div>
             <p className="v10-pca-overview-caveat">
               Read-only PCA records you track manually. Connect the owner wallet to manage one.
@@ -393,7 +394,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-discovered-error" role="status">
           <p className="v10-pca-overview-caveat">
             Couldn&apos;t verify this node&apos;s Publisher Conviction Accounts; approved PCA coverage may still exist.{' '}
-            <button type="button" className="v10-pca-card-btn" onClick={() => refreshDiscovered()}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={() => refreshDiscovered()}>Retry</button>
           </p>
         </section>
       )}
@@ -402,7 +403,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-wallet-bootstrap-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t load wallet contract bootstrap, so connected-wallet PCA discovery is paused.{' '}
-            <button type="button" className="v10-pca-card-btn" onClick={retryWalletBootstrap}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}>Retry</button>
           </p>
         </section>
       )}
@@ -411,7 +412,7 @@ export function ConvictionOverview() {
         <section className="v10-pca-discovered" data-testid="pca-wallet-discovery-error" role="status">
           <p className="v10-pca-overview-caveat">
             Note: Couldn&apos;t read PCAs owned by the connected wallet. Existing tracked PCAs are still shown.{' '}
-            <button type="button" className="v10-pca-card-btn" onClick={connectedWalletPcas.refresh}>Retry</button>
+            <button type="button" className="v10-pca-card-btn ds-btn" onClick={connectedWalletPcas.refresh}>Retry</button>
           </p>
         </section>
       )}
@@ -486,12 +487,12 @@ function DiscoveredStrip({
                   approved, so the account's tier isn't a discount this node realizes -
                   showing a percentage there reads as a false "you'd get this %". */}
               {(d.relation === 'agent' || d.relation === 'both') && typeof bps === 'number' && bps > 0 && (
-                <span className="badge badge-info"> {(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</span>
+                <Badge size="sm">{(bps / 100).toFixed(bps % 100 === 0 ? 0 : 1)}%</Badge>
               )}
             </span>
             <button
               type="button"
-              className="v10-pca-card-btn primary"
+              className="v10-pca-card-btn primary ds-btn ds-primary"
               data-testid="pca-discovered-track"
               onClick={() => onTrack(d.accountId)}
             >
@@ -530,7 +531,7 @@ function AccountGroup({
     <section className="v10-pca-account-group">
       <div className="v10-pca-account-group-head">
         <h3 className="v10-pca-account-group-title">{title}</h3>
-        <span className="v10-pca-account-group-count">{accounts.length}</span>
+        <Count value={accounts.length} className="v10-pca-account-group-count" />
       </div>
       <p className="v10-pca-overview-caveat">{description}</p>
       <div className="v10-pca-card-grid">
@@ -586,7 +587,7 @@ function TrackByIdDisclosure({ onTrack }: { onTrack: (id: string) => void }) {
         <div id={panelId} className="v10-pca-track-panel">
           <input
             type="text"
-            className="v10-form-input"
+            className="v10-form-input ds-input"
             data-testid="pca-track-input"
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -596,7 +597,7 @@ function TrackByIdDisclosure({ onTrack }: { onTrack: (id: string) => void }) {
               if (e.key === 'Enter') submit();
             }}
           />
-          <button type="button" className="v10-pca-card-btn primary" data-testid="pca-track-submit" onClick={submit}>
+          <button type="button" className="v10-pca-card-btn primary ds-btn ds-primary" data-testid="pca-track-submit" onClick={submit}>
             Track
           </button>
           {error && (

@@ -31,46 +31,6 @@
   border-left: 1px solid var(--border-subtle);
   background: color-mix(in srgb, var(--bg-panel) 86%, transparent);
 }
-.v10-graph-rail-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: rgba(255,255,255,0.02);
-}
-.v10-graph-rail-title {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-.v10-graph-rail-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 22px;
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-.v10-graph-rail-row.active {
-  color: var(--text-primary);
-  font-weight: 650;
-}
-.v10-graph-trust-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  flex: 0 0 auto;
-  box-shadow: 0 0 0 3px rgba(255,255,255,0.04);
-}
-.v10-graph-rail-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .v10-graph-placeholder-centered {
   display: flex;
   align-items: center;
@@ -96,7 +56,6 @@
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   background: color-mix(in srgb, var(--bg-panel) 92%, transparent);
   box-shadow: 0 14px 34px -20px rgba(0,0,0,0.8);
 }
@@ -123,7 +82,7 @@
   min-height: 22px;
   padding: 3px 7px;
   border: 1px solid var(--border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--bg-elevated);
   color: var(--text-secondary);
   font-size: 10px;
@@ -136,11 +95,6 @@
 .v10-graph-singleton-item:hover {
   border-color: var(--graph-accent);
   color: var(--text-primary);
-}
-.v10-graph-singleton-more {
-  align-self: center;
-  color: var(--text-tertiary);
-  font-size: 10px;
 }
 .v10-graph-expanded-backdrop {
   position: fixed;
@@ -158,7 +112,6 @@
   flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border-default);
-  border-radius: 10px;
   background: var(--bg-panel);
   box-shadow: 0 24px 70px -28px rgba(0,0,0,0.9);
 }
@@ -181,19 +134,7 @@
   font-size: 11px;
   color: var(--text-secondary);
 }
-.v10-graph-expanded-close {
-  width: 30px;
-  height: 28px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  cursor: pointer;
-}
-.v10-graph-expanded-close:hover {
-  border-color: var(--graph-accent);
-  color: var(--text-primary);
-}
+.v10-graph-expanded-close { width: 30px; }
 .v10-graph-expanded-body {
   flex: 1 1 auto;
   min-height: 0;
@@ -209,7 +150,7 @@
 .v10-ka-graph-shell {
   margin-top: 8px;
   min-height: clamp(380px, 55vh, 660px);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
 }
 body.light .v10-ka-graph-shell,
 body.light .v10-ka-graph-shell .v10-graph-view,
@@ -222,17 +163,6 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-docs-placeholder {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--text-tertiary); font-size: 12px;
-}
-.v10-layer-state {
-  flex: 1 1 auto;
-  min-height: 160px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  color: var(--text-tertiary);
-  font-size: 12px;
-  text-align: center;
 }
 .v10-items-list { padding: 0; }
 
@@ -270,7 +200,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 .v10-ka-prop-val { color: var(--text-secondary); word-break: break-all; }
 .v10-ka-conn {
   display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 5px 8px;
-  border-radius: 4px; cursor: pointer; border: none; background: none; color: inherit;
+  border-radius: var(--radius-xs); cursor: pointer; border: none; background: none; color: inherit;
   font-family: var(--font-sans); font-size: 11px; transition: background 0.1s;
 }
 .v10-ka-conn:hover { background: var(--bg-hover); }
@@ -295,13 +225,12 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   position: absolute; left: -21px; top: 2px; width: 10px; height: 10px;
   border-radius: 50%; border: 2px solid var(--border-strong); background: var(--bg-elevated);
 }
-.v10-ka-event-dot.created { border-color: var(--layer-working); background: rgba(100,116,139,0.15); }
-.v10-ka-event-dot.shared { border-color: var(--layer-shared); background: rgba(245,158,11,0.15); }
-.v10-ka-event-dot.verified { border-color: var(--layer-verified); background: rgba(34,197,94,0.15); }
+.v10-ka-event-dot.created { border-color: var(--layer-working); background: color-mix(in srgb, var(--layer-working) 15%, transparent); }
+.v10-ka-event-dot.shared { border-color: var(--layer-shared); background: color-mix(in srgb, var(--layer-shared) 15%, transparent); }
+.v10-ka-event-dot.verified { border-color: var(--layer-verified); background: color-mix(in srgb, var(--layer-verified) 15%, transparent); }
 .v10-ka-event-header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 2px; }
 .v10-ka-event-title { font-size: 11px; font-weight: 600; color: var(--text-primary); }
 .v10-ka-event-time { font-family: var(--font-mono); font-size: 9px; color: var(--text-tertiary); white-space: nowrap; margin-left: auto; }
-.v10-ka-event-desc { font-size: 10px; color: var(--text-tertiary); line-height: 1.5; }
 
 /* ── Sub-graph Overview (Graph Overview tab) ──
    One "wall of graphs": a responsive grid of mini RdfGraph cards, one per
@@ -334,7 +263,6 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   min-height: 320px;
   background: var(--surface-1, rgba(255,255,255,0.02));
   border: 1px solid var(--border-subtle, rgba(255,255,255,0.08));
-  border-radius: 12px;
   overflow: hidden;
   transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
 }
@@ -387,7 +315,7 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-sgov-card-open {
   appearance: none; background: transparent; color: var(--text-tertiary);
-  border: 1px solid var(--border-subtle); border-radius: 6px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-control);
   padding: 2px 6px; cursor: pointer; font-size: 12px; line-height: 1;
   transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
 }
@@ -447,18 +375,14 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
 }
 .v10-minibar-chip {
   display: inline-flex; align-items: center; gap: 4px;
-  padding: 2px 7px;
-  background: none;
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
-  font-size: 10px; font-weight: 600;
+  height: var(--h-badge-sm); padding: 0 6px;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px var(--border-default);
   color: var(--text-secondary);
-  font-family: var(--font-sans);
-  cursor: default;
-  transition: border-color 0.15s, color 0.15s, opacity 0.15s;
+  font-size: var(--fs-micro); font-weight: 600;
 }
-.v10-minibar-chip.interactive { cursor: pointer; }
-.v10-minibar-chip.interactive:hover { border-color: var(--border-strong); color: var(--text-primary); }
+/* Clickable mini-bar chips are filter chips (ds-filter ds-sm). */
+.v10-minibar-chip.interactive { box-shadow: none; border-radius: var(--radius-control); }
 .v10-minibar-chip.dim { opacity: 0.4; }
 .v10-minibar-dot {
   display: inline-block; width: 6px; height: 6px; border-radius: 50%;

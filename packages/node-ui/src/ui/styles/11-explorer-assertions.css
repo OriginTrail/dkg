@@ -1,32 +1,6 @@
 /* ══════════════════════════════════════════
    PROJECT VIEW
    ══════════════════════════════════════════ */
-.v10-project-view { max-width: 800px; min-width: 0; }
-.v10-pv-header { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 28px; }
-.v10-pv-project-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--text-primary); margin-top: 6px; flex-shrink: 0; }
-.v10-pv-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
-.v10-pv-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
-.v10-pv-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-tertiary); }
-.v10-pv-meta-sep { color: var(--text-ghost); }
-.v10-pv-meta-item { }
-.v10-pv-layers { display: flex; flex-direction: column; gap: 10px; }
-.v10-layer-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 16px 18px;
-  border-radius: 10px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  text-align: left;
-  transition: all 0.15s;
-}
-.v10-layer-card:hover { border-color: var(--border-strong); }
-.v10-layer-card-header { display: flex; align-items: center; gap: 10px; }
-.v10-layer-card-icon { font-size: 16px; }
-.v10-layer-card-label { font-size: 14px; font-weight: 600; color: var(--text-primary); flex: 1; }
-.v10-layer-card-arrow { color: var(--text-tertiary); font-size: 14px; }
-.v10-layer-card-desc { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
 
 /* ══════════════════════════════════════════
    MEMORY LAYER VIEW
@@ -38,7 +12,6 @@
 .v10-mlv-desc { font-size: 12px; line-height: 1.4; color: var(--text-secondary); margin: 0; }
 .v10-vm-search-panel {
   border: 1px solid var(--border-default);
-  border-radius: 10px;
   background: var(--bg-surface);
   padding: 12px;
   margin-bottom: 16px;
@@ -54,7 +27,7 @@
 .v10-vm-search-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 4px; }
 .v10-vm-search-toggle {
   padding: 7px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   font-size: 11px;
@@ -70,23 +43,19 @@
 }
 .v10-vm-search-select {
   min-width: 108px;
-  padding: 8px 12px;
-  border-radius: 6px;
+  padding: 0 12px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   color: var(--text-primary);
-  font-size: 12px;
 }
 .v10-vm-search-select:focus { outline: none; border-color: var(--border-strong); }
 .v10-mlv-query-bar { display: flex; gap: 8px; margin-bottom: 16px; }
 .v10-mlv-query-input {
   flex: 1;
-  padding: 8px 12px;
+  padding: 0 12px;
   font-family: var(--font-mono);
-  font-size: 12px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
   color: var(--text-primary);
 }
 .v10-mlv-query-input:focus { border-color: var(--border-strong); }
@@ -104,7 +73,6 @@
 }
 .v10-cg-query-zone {
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   background: var(--bg-panel);
   padding: 16px;
 }
@@ -169,20 +137,6 @@
   gap: 8px;
   margin-bottom: 4px;
 }
-.v10-cg-query-catalog-kind {
-  display: inline-flex;
-  align-items: center;
-  min-height: 18px;
-  padding: 2px 7px;
-  border: 1px solid color-mix(in srgb, var(--sg-color) 38%, var(--border-subtle));
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--sg-color) 12%, var(--bg-surface));
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: uppercase;
-}
 .v10-cg-query-catalog-group-header h4 {
   margin: 0;
   font-size: 13px;
@@ -208,7 +162,6 @@
   text-align: left;
   padding: 8px 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
   background: var(--bg-surface);
   color: var(--text-secondary);
 }
@@ -253,7 +206,6 @@
   padding: 10px 12px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
 }
 .v10-cg-query-parameter {
   display: flex;
@@ -276,11 +228,9 @@
   resize: vertical;
   padding: 10px 12px;
   font-family: var(--font-mono);
-  font-size: 12px;
   line-height: 1.5;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 6px;
   color: var(--text-primary);
 }
 .v10-cg-query-textarea:focus { border-color: var(--border-strong); outline: none; }
@@ -288,31 +238,6 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-.v10-mlv-run-btn {
-  padding: 8px 16px;
-  border-radius: 6px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.v10-mlv-run-btn:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.v10-mlv-save-btn {
-  padding: 8px 14px;
-  border-radius: 6px;
-  background: rgba(56, 189, 248, 0.08);
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-info);
-  transition: all 0.15s;
-}
-.v10-mlv-save-btn:hover {
-  border-color: rgba(56, 189, 248, 0.65);
-  color: var(--text-link);
 }
 .v10-cg-query-save-panel {
   display: grid;
@@ -322,7 +247,6 @@
   padding: 12px;
   margin: -4px 0 16px;
   border: 1px solid var(--border-subtle);
-  border-radius: 6px;
   background: var(--bg-panel);
 }
 .v10-cg-query-save-field {
@@ -349,7 +273,7 @@
 .v10-mlv-status { font-size: 12px; color: var(--text-tertiary); padding: 8px 0; }
 .v10-mlv-empty { padding: 32px 0; text-align: center; }
 .v10-mlv-empty p { font-size: 12px; color: var(--text-tertiary); }
-.v10-mlv-table-wrap { overflow-x: auto; border: 1px solid var(--border-default); border-radius: 8px; }
+.v10-mlv-table-wrap { overflow-x: auto; border: 1px solid var(--border-default); }
 .v10-cg-query-results {
   flex: 1 1 auto;
   min-height: 220px;
@@ -410,21 +334,12 @@
 }
 
 /* ── Assertion List (WM → SWM) ── */
-.v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); border-radius: 8px; overflow: hidden; }
+.v10-assertion-list { margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden; }
 .v10-assertion-list-loading { font-size: 12px; color: var(--text-tertiary); padding: 8px 0; }
 .v10-assertion-list-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; background: var(--bg-elevated); border-bottom: 1px solid var(--border-default); }
 .v10-assertion-list-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.v10-btn-promote-all {
-  padding: 5px 14px; border-radius: 6px; border: none;
-  /* Fallback corrected (PR8 round-4): was #7c6ef0 (purple) — `--layer-shared`
-     is amber. The fallback only kicks in if the var is undefined, which
-     shouldn't happen, but the wrong color leaks a brand inconsistency
-     in any token-stripped render. */
-  background: var(--layer-shared, #f59e0b); color: var(--text-on-accent);
-  font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity .15s;
-}
 .v10-btn-promote-all:hover { opacity: .85; }
-.v10-btn-promote-all:disabled { opacity: .5; cursor: not-allowed; }
+.v10-btn-promote-all:disabled { opacity: .5; }
 .v10-assertion-items { max-height: 220px; overflow-y: auto; }
 .v10-assertion-item {
   display: flex; align-items: center; justify-content: space-between;
@@ -437,14 +352,8 @@
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .v10-assertion-item-count { font-size: 10px; color: var(--text-tertiary); flex-shrink: 0; }
-.v10-btn-promote {
-  padding: 3px 10px; border-radius: 5px; background: transparent;
-  /* Fallback corrected (PR8 round-4): purple → amber, see promote-all. */
-  border: 1px solid var(--layer-shared, #f59e0b); color: var(--text-warning);
-  font-size: 11px; font-weight: 500; cursor: pointer; transition: all .15s; flex-shrink: 0;
-}
-.v10-btn-promote:hover { background: var(--layer-shared, #f59e0b); color: var(--text-on-accent); }
-.v10-btn-promote:disabled { opacity: .5; cursor: not-allowed; }
+.v10-btn-promote { flex-shrink: 0; }
+.v10-btn-promote:disabled { opacity: .5; }
 .v10-promote-result { padding: 8px 12px; font-size: 12px; }
 .v10-promote-result.success { color: var(--text-success); background: rgba(34,197,94,.06); }
 .v10-promote-result.error { color: var(--text-danger); background: rgba(239,68,68,.06); }
@@ -457,7 +366,7 @@
 
 /* ── Publish Panel (SWM → VM) ── */
 .v10-publish-panel {
-  margin-bottom: 16px; border: 1px solid var(--border-default); border-radius: 8px; overflow: hidden;
+  margin-bottom: 16px; border: 1px solid var(--border-default); overflow: hidden;
 }
 .v10-publish-panel-header {
   display: flex; align-items: center; justify-content: space-between;
@@ -465,11 +374,6 @@
 }
 .v10-publish-panel-header-actions { display: flex; align-items: center; gap: 8px; }
 .v10-publish-panel-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.v10-publish-panel-refresh {
-  background: none; border: none; color: var(--text-tertiary); font-size: 14px; cursor: pointer;
-  padding: 2px 6px; border-radius: 4px;
-}
-.v10-publish-panel-refresh:hover { color: var(--text-primary); background: var(--bg-hover); }
 .v10-publish-panel-empty { padding: 16px 12px; font-size: 12px; color: var(--text-tertiary); text-align: center; }
 .v10-publish-select-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -484,18 +388,11 @@
   display: flex; align-items: center; padding-right: 8px; cursor: pointer; flex-shrink: 0;
 }
 .v10-publish-entity-check input { cursor: pointer; }
-.v10-assertion-item.selected { background: rgba(245,158,11,.04); }
-.v10-btn-publish {
-  padding: 5px 14px; border-radius: 6px; border: none;
-  /* Fallback corrected (PR8 round-4): was #f59e0b (amber) — `--layer-verified`
-     is green. Same brand-leak concern as promote-all. */
-  background: var(--layer-verified, #22c55e); color: var(--text-on-accent);
-  font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity .15s; white-space: nowrap;
-}
+.v10-assertion-item.selected { background: var(--bg-active); }
 .v10-btn-publish:hover { opacity: .85; }
-.v10-btn-publish:disabled { opacity: .5; cursor: not-allowed; }
+.v10-btn-publish:disabled { opacity: .5; }
 .v10-publish-result-card {
-  margin: 0 12px 12px; padding: 12px; border-radius: 6px; font-size: 12px;
+  margin: 0 12px 12px; padding: 12px; border-radius: var(--radius-control); font-size: 12px;
 }
 .v10-publish-result-card:first-of-type { margin-top: 12px; }
 .v10-publish-result-card.success { background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.2); }

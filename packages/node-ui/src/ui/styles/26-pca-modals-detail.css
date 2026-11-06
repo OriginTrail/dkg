@@ -5,12 +5,6 @@
 .v10-pca-detail-id { font-size: 16px; font-weight: 700; color: var(--text-primary); }
 .v10-pca-detail-committed { font-size: 12px; color: var(--text-secondary); }
 .v10-pca-detail-owner { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
-.v10-pca-detail-note {
-  margin-top: 16px;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  line-height: 1.5;
-}
 .v10-pca-detail .v10-stat-strip-value {
   min-height: 42px;
 }
@@ -35,7 +29,6 @@
   line-height: 1.5;
   color: var(--text-warning);
   background: var(--amber-dim);
-  border-radius: 6px;
 }
 .v10-pca-create-tx { font-size: 11px; color: var(--text-secondary); margin: 8px 0 0; word-break: break-all; }
 .v10-pca-create-review { display: flex; flex-direction: column; gap: 6px; }
@@ -67,7 +60,6 @@
   gap: 8px;
   padding: 10px;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
   background: var(--bg-surface);
   min-width: 0;
 }
@@ -113,9 +105,7 @@
 .v10-pca-detail-result { font-size: 11px; color: var(--text-success); margin: 8px 0 0; line-height: 1.5; }
 .v10-pca-detail-agentlist { display: flex; flex-direction: column; gap: 8px; }
 .v10-pca-detail-agentlist + .v10-pca-card-btn,
-.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn {
-  margin-top: 10px;
-}
+.v10-pca-detail-subhead + .v10-pca-detail-agentlist + .v10-pca-card-btn { margin-top: 10px; }
 .v10-pca-agent-row { display: flex; }
 .v10-pca-agent-row .v10-wallet-row { flex: 1; }
 .v10-pca-agent-confirm {

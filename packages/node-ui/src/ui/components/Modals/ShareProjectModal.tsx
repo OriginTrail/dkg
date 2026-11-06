@@ -223,7 +223,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box"
+        className="v10-modal-box ds-overlay"
         style={{ maxWidth: 560 }}
         ref={dialogRef}
         role="dialog"
@@ -246,7 +246,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
           </div>
           <button
             type="button"
-            className="v10-modal-close"
+            className="v10-modal-close ds-btn ds-ghost ds-icon"
             onClick={onClose}
             aria-label="Close share dialog"
             title="Close (Esc)"
@@ -285,7 +285,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 <span style={{
                   position: 'absolute', top: 4, right: 4,
                   background: 'var(--accent-red, #ef4444)', color: 'var(--text-on-accent)',
-                  borderRadius: 999, fontSize: 9, fontWeight: 700,
+                  borderRadius: 'var(--radius-pill)', fontSize: 9, fontWeight: 700,
                   padding: '1px 5px', minWidth: 16, textAlign: 'center',
                 }}>
                   {pendingRequests.length}
@@ -315,7 +315,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       return (
                         <div key={addr} style={{
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                          padding: '6px 10px', borderRadius: 6, fontSize: 11,
+                          padding: '6px 10px', borderRadius: 'var(--radius-control)', fontSize: 11,
                           fontFamily: 'var(--font-mono)', background: 'var(--bg-surface)',
                           border: '1px solid var(--border-default)',
                         }}>
@@ -342,7 +342,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
                 {allowedAgents.length === 0 && (
                   <div style={{
-                    padding: '8px 12px', borderRadius: 6, fontSize: 11,
+                    padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 11,
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)', marginBottom: 8,
                   }}>
@@ -358,7 +358,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                 <label className="v10-form-label">Invite Code</label>
                 {invitePayload === null ? (
                   <div style={{
-                    padding: '8px 12px', borderRadius: 6, fontSize: 11,
+                    padding: '8px 12px', borderRadius: 'var(--radius-control)', fontSize: 11,
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)',
                   }}>
@@ -368,14 +368,14 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                   <div style={{ position: 'relative' }}>
                     <pre style={{
                       background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
-                      borderRadius: 6, padding: '10px 12px', fontSize: 11, lineHeight: 1.6,
+                      borderRadius: 'var(--radius-control)', padding: '10px 12px', fontSize: 11, lineHeight: 1.6,
                       fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
                       overflow: 'auto', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                     }}>
                       {invitePayload}
                     </pre>
                     <button
-                      className="v10-modal-btn primary"
+                      className="v10-modal-btn primary ds-btn ds-primary"
                       onClick={() => copyToClipboard(invitePayload, 'invite')}
                       style={{
                         position: 'absolute', top: 6, right: 6, fontSize: 10, padding: '4px 10px', height: 26,
@@ -399,7 +399,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
 
               {pendingRequests.length === 0 && (
                 <div style={{
-                  padding: '16px 12px', borderRadius: 6, fontSize: 11, textAlign: 'center',
+                  padding: '16px 12px', borderRadius: 'var(--radius-control)', fontSize: 11, textAlign: 'center',
                   color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                   border: '1px dashed var(--border-default)',
                 }}>
@@ -410,7 +410,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
               {pendingRequests.map((req) => (
                 <div key={req.agentAddress} style={{
                   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  padding: '8px 10px', borderRadius: 6, fontSize: 11,
+                  padding: '8px 10px', borderRadius: 'var(--radius-control)', fontSize: 11,
                   background: 'var(--bg-surface)', border: '1px solid var(--border-default)',
                   marginBottom: 4,
                 }}>
@@ -434,7 +434,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       style={{
                         background: 'rgba(34, 197, 94, 0.15)', color: 'var(--text-success)',
                         border: '1px solid rgba(34, 197, 94, 0.3)', cursor: 'pointer',
-                        borderRadius: 4, fontSize: 10, padding: '4px 10px', fontWeight: 600,
+                        borderRadius: 'var(--radius-xs)', fontSize: 10, padding: '4px 10px', fontWeight: 600,
                       }}
                     >
                       {processingRequest === req.agentAddress ? '…' : 'Approve'}
@@ -445,7 +445,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                       style={{
                         background: 'rgba(239, 68, 68, 0.1)', color: 'var(--text-danger)',
                         border: '1px solid rgba(239, 68, 68, 0.2)', cursor: 'pointer',
-                        borderRadius: 4, fontSize: 10, padding: '4px 10px', fontWeight: 600,
+                        borderRadius: 'var(--radius-xs)', fontSize: 10, padding: '4px 10px', fontWeight: 600,
                       }}
                     >
                       Reject
@@ -462,7 +462,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
         </div>
 
         <div className="v10-modal-footer">
-          <button className="v10-modal-btn" onClick={onClose}>Done</button>
+          <button className="v10-modal-btn ds-btn" onClick={onClose}>Done</button>
         </div>
       </div>
     </div>

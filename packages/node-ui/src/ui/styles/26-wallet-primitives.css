@@ -8,7 +8,6 @@
   min-width: 0;
   padding: 6px 8px;
   border: 1px solid var(--border-subtle);
-  border-radius: 7px;
   background: var(--bg-surface);
 }
 .v10-wallet-addr {
@@ -52,23 +51,12 @@
   justify-content: center;
   gap: 6px;
 }
-.v10-wallet-connect-btn {
-  align-self: flex-start;
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 12px;
-  border-radius: 7px;
-  cursor: pointer;
-}
-.v10-wallet-connect-btn:hover { background: var(--bg-hover); }
+.v10-wallet-connect-btn { align-self: flex-start; }
 .v10-wallet-connect-btn:focus-visible,
 .v10-wallet-provider:focus-visible,
 .v10-wallet-pill-btn:focus-visible,
 .v10-wallet-pill-link:focus-visible {
-  outline: 2px solid var(--text-link);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
 }
 .v10-wallet-note {
@@ -92,7 +80,6 @@
   width: min(320px, 90vw);
   padding: 8px;
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
   background: var(--bg-surface);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
   display: flex;
@@ -107,7 +94,6 @@
   font-size: 12px;
   font-weight: 600;
   padding: 7px 10px;
-  border-radius: 6px;
   cursor: pointer;
 }
 .v10-wallet-provider:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
@@ -115,7 +101,7 @@
 .v10-wallet-provider-icon {
   width: 16px;
   height: 16px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .v10-wallet-picker-empty {
   margin: 0;
@@ -135,7 +121,7 @@
   flex-wrap: wrap;
   padding: 5px 6px 5px 10px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-surface);
 }
 .v10-wallet-pill[data-state='wrong-network'] {
@@ -151,16 +137,6 @@
   font-size: 11px;
   color: var(--text-tertiary);
 }
-.v10-wallet-pill-btn {
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
-  font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.v10-wallet-pill-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
 .v10-wallet-pill-sub {
   display: flex;
   align-items: center;
@@ -171,6 +147,9 @@
   color: var(--text-warning);
 }
 .v10-wallet-pill-link {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   border: none;
   background: transparent;
   color: var(--text-link);

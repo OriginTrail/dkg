@@ -20,7 +20,7 @@ export function GenWidget({ title, agent, footnote, dismissed, onDismiss, childr
   children: React.ReactNode;
 }) {
   return (
-    <div className={`v10-gen-widget ${dismissed ? 'dissolved' : ''}`}>
+    <div className={`v10-gen-widget ds-card ${dismissed ? 'dissolved' : ''}`}>
       <div className="v10-gen-widget-header">
         <span className="v10-gen-widget-title">{title}</span>
         <div className="v10-gen-widget-right">
@@ -223,8 +223,6 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
   }, [contextGraphId, run]);
 
   if (count === 0) return null;
-  const color = '#f59e0b';
-
   return (
     <LayerActionShell
       title="Share complete Knowledge Assets"
@@ -235,8 +233,8 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     >
       <button
         data-testid="widget-promote-all-btn"
-        className="v10-decision-btn approve"
-        style={{ borderColor: `${color}50`, color: 'var(--text-warning)', background: `${color}15`, opacity: busy ? 0.5 : 1 }}
+        className="v10-decision-btn ds-btn ds-primary"
+        style={{ borderColor: 'var(--layer-shared-border)', color: 'var(--layer-shared-text)', background: 'var(--layer-shared-bg)', opacity: busy ? 0.5 : 1 }}
         disabled={busy}
         onClick={promote}
       >
@@ -320,7 +318,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
     >
       <button
         data-testid="widget-publish-vm-btn"
-        className="v10-decision-btn primary-cta publish-vm"
+        className="v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg"
         style={{ opacity: busy || gate.blocked ? 0.5 : 1 }}
         // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate uses
         // aria-disabled so SR/keyboard users keep focus + hear the reason (publish no-ops when

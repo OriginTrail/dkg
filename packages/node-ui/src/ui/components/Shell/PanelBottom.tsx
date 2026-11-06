@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
+import { opTypeText } from '../../op-type-colors.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -100,7 +101,7 @@ function NodeLogContent() {
           name="dkg-node-log-filter"
           type="text"
           placeholder="Filter logs..."
-          className="v10-log-filter"
+          className="v10-log-filter ds-input ds-sm"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           aria-label="Filter node log lines"
@@ -108,7 +109,7 @@ function NodeLogContent() {
         <select
           id="dkg-node-log-level"
           name="dkg-node-log-level"
-          className="v10-log-level-select"
+          className="v10-log-level-select ds-input ds-sm"
           value={level}
           onChange={e => setLevel(e.target.value as typeof level)}
           aria-label="Filter node log level"
@@ -142,14 +143,6 @@ function NodeLogContent() {
 
 const TX_OP_TYPES = new Set(['publish', 'publishFromSWM', 'update', 'ka-update', 'verify', 'reconstruct']);
 
-const TX_TYPE_COLORS: Record<string, string> = {
-  publish:        '#22c55e',
-  publishFromSWM: '#16a34a',
-  update:         '#14b8a6',
-  'ka-update':    '#0d9488',
-  verify:         '#8b5cf6',
-  reconstruct:    '#fb923c',
-};
 
 function TransactionsContent() {
   const [ops, setOps] = useState<any[]>([]);
@@ -206,7 +199,7 @@ function TransactionsContent() {
                   onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'rgba(255,255,255,.03)' : undefined }}
                 >
-                  <td style={{ padding: '7px 12px', color: TX_TYPE_COLORS[op.operation_name] ?? 'var(--text-secondary)', fontWeight: 600 }}>
+                  <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
                     {op.operation_name}
                   </td>
                   <td style={{ padding: '7px 12px', fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
@@ -214,7 +207,7 @@ function TransactionsContent() {
                   </td>
                   <td style={{ padding: '7px 12px' }}>
                     <span style={{
-                      padding: '2px 6px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
                       background: op.status === 'success' ? 'rgba(34,197,94,.15)' : op.status === 'error' ? 'rgba(239,68,68,.15)' : 'rgba(245,158,11,.15)',
                       color: op.status === 'success' ? '#22c55e' : op.status === 'error' ? '#ef4444' : '#f59e0b',
                     }}>{op.status}</span>
@@ -251,7 +244,7 @@ function TransactionsContent() {
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {op.phases.map((p: any) => (
                             <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600,
+                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
                               background: 'rgba(255,255,255,.06)', color: 'var(--text-secondary)',
                             }}>
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}
@@ -340,7 +333,7 @@ export function PanelBottom() {
         {BOTTOM_TABS.map((tab) => (
           <button
             key={tab}
-            className={`v10-bottom-tab ${tab === activeTab ? 'active' : ''}`}
+            className={`v10-bottom-tab ds-tab ${tab === activeTab ? 'active' : ''}`}
             onClick={() => { setActiveTab(tab); if (bottomCollapsed) toggleBottom(); }}
           >
             {tab}
@@ -348,14 +341,14 @@ export function PanelBottom() {
         ))}
         <div style={{ flex: 1 }} />
         <button
-          className="v10-bottom-toggle"
+          className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
           onClick={toggleBottomMaximised}
           title={bottomMaximised ? 'Restore' : 'Maximise'}
           style={{ display: bottomCollapsed ? 'none' : undefined }}
         >
           {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
         </button>
-        <button className="v10-bottom-toggle" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
+        <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
           <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
             {CHEVRON_DOWN}
           </span>

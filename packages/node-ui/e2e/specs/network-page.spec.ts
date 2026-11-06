@@ -7,10 +7,8 @@ import { test, expect } from '../fixtures/base.js';
 // /ui/network?". We use a path relative to the configured `baseURL`
 // (`http://localhost:<port>/ui/`) instead.
 //
-// Stat-card labels are MIXED case in the DOM ("Total Connections")
-// and only rendered uppercase via `text-transform: uppercase`.
-// `getByText` matches the underlying text content, so we assert on
-// the actual case.
+// Stat-card labels are sentence case ("Total connections"); the label
+// assertion below lowercases them first.
 
 test.describe('Network Debug Page (/ui/network)', () => {
   test.beforeEach(async ({ page }) => {

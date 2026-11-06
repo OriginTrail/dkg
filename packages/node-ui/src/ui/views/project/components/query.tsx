@@ -16,6 +16,7 @@ import { useFetch } from '../../../hooks.js';
 import { executeQuery, writeProfileQueryCatalog, type QueryExecutionView } from '../../../api.js';
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
+import { Badge } from '../../../components/ds/Badge.js';
 function contextGraphQueryTemplate(contextGraphId: string): string {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }
@@ -538,7 +539,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         </div>
       </div>
 
-      <section className="v10-cg-query-zone v10-cg-query-zone-catalog" aria-labelledby="query-catalogue-saved-title">
+      <section className="v10-cg-query-zone ds-card v10-cg-query-zone-catalog" aria-labelledby="query-catalogue-saved-title">
         <div className="v10-cg-query-zone-header">
           <div>
             <span className="v10-cg-query-eyebrow">Query Library</span>
@@ -574,10 +575,9 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             {renderedQueryCatalogs.map((catalog) => {
               const scope = queryCatalogueScope(catalog);
               const binding = scope === 'context' ? undefined : profile?.forSubGraph(catalog.subGraph);
-              const color = binding?.color ?? '#38bdf8';
+              const color = binding?.color ?? 'var(--text-tertiary)';
               const label = queryCatalogueGroupLabel(catalog, scope, binding?.displayName);
               const description = queryCatalogueGroupDescription(catalog);
-              const kind = queryCatalogueGroupKind(catalog, scope);
               return (
                 <div
                   key={`${catalog.subGraph}|${catalog.slug}`}
@@ -587,7 +587,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   <div className="v10-cg-query-catalog-group-header">
                     <div>
                       <div className="v10-cg-query-catalog-title-row">
-                        <span className="v10-cg-query-catalog-kind">{kind}</span>
+                        <Badge size="sm" className="v10-cg-query-catalog-kind">{queryCatalogueGroupKind(catalog, scope)}</Badge>
                         <h4>{label}</h4>
                       </div>
                       {description && <p>{description}</p>}
@@ -602,7 +602,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                         <button
                           key={key}
                           type="button"
-                          className={`v10-cg-query-chip${isActive ? ' active' : ''}`}
+                          className={`v10-cg-query-chip ds-card-nested${isActive ? ' active' : ''}`}
                           title={chipLabel}
                           aria-label={`Load query: ${chipLabel}`}
                           onClick={() => runCatalogQuery(key, q)}
@@ -631,7 +631,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         )}
       </section>
 
-      <section className="v10-cg-query-zone v10-cg-query-zone-editor" aria-labelledby="query-catalogue-editor-title">
+      <section className="v10-cg-query-zone ds-card v10-cg-query-zone-editor" aria-labelledby="query-catalogue-editor-title">
         <div className="v10-cg-query-zone-header">
           <div>
             <span className="v10-cg-query-eyebrow">Ad-hoc SPARQL</span>
@@ -642,13 +642,13 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
 
       <div className="v10-cg-query-editor">
         {selectedCatalogQuery && (selectedCatalogQuery.parameters?.length ?? 0) > 0 && (
-          <div className="v10-cg-query-parameters" aria-label="Query parameters">
+          <div className="v10-cg-query-parameters ds-card-nested" aria-label="Query parameters">
             {(selectedCatalogQuery.parameters ?? []).map(parameter => (
               <label key={parameter.name} className="v10-cg-query-parameter">
                 <span>{parameter.label ?? parameter.name}</span>
                 {parameter.type === 'boolean' ? (
                   <select
-                    className="v10-form-input"
+                    className="v10-form-input ds-input"
                     aria-label={parameter.label ?? parameter.name}
                     value={catalogParameterValues[parameter.name] ?? ''}
                     onChange={event => setSession(previous => previous.kind === 'catalog'
@@ -664,7 +664,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
                   </select>
                 ) : (
                   <input
-                    className="v10-form-input"
+                    className="v10-form-input ds-input"
                     aria-label={parameter.label ?? parameter.name}
                     type={parameter.type === 'integer' || parameter.type === 'number' ? 'number' : 'text'}
                     step={parameter.type === 'integer' ? '1' : parameter.type === 'number' ? 'any' : undefined}
@@ -686,7 +686,7 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         )}
         {parameterError && <span className="v10-cg-query-error-detail">{parameterError}</span>}
         <textarea
-          className="v10-cg-query-textarea"
+          className="v10-cg-query-textarea ds-input"
           aria-label="SPARQL editor"
           value={draftQuery}
           onChange={(e) => {
@@ -696,14 +696,14 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
           spellCheck={false}
         />
         <div className="v10-cg-query-actions">
-          <button className="v10-mlv-run-btn" type="button" onClick={runQuery}>Run</button>
-          <button className="v10-mlv-save-btn" type="button" onClick={openSaveForm}>Save</button>
-          <button className="v10-mlv-clear-btn" type="button" onClick={resetQuery}>Reset</button>
+          <button className="v10-mlv-run-btn ds-btn ds-primary" type="button" onClick={runQuery}>Run</button>
+          <button className="v10-mlv-save-btn ds-btn" type="button" onClick={openSaveForm}>Save</button>
+          <button className="v10-mlv-clear-btn ds-btn ds-ghost" type="button" onClick={resetQuery}>Reset</button>
         </div>
       </div>
 
       {saveOpen && (
-        <form className="v10-cg-query-save-panel" onSubmit={saveQuery}>
+        <form className="v10-cg-query-save-panel ds-card-nested" onSubmit={saveQuery}>
           <label className="v10-cg-query-save-field">
             <span>Name</span>
             <input
@@ -725,8 +725,8 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
             />
           </label>
           <div className="v10-cg-query-save-actions">
-            <button type="button" className="v10-mlv-clear-btn" onClick={() => setSaveOpen(false)} disabled={saving}>Cancel</button>
-            <button type="submit" className="v10-mlv-run-btn" disabled={saving}>{saving ? 'Saving...' : 'Save query'}</button>
+            <button type="button" className="v10-mlv-clear-btn ds-btn ds-ghost" onClick={() => setSaveOpen(false)} disabled={saving}>Cancel</button>
+            <button type="submit" className="v10-mlv-run-btn ds-btn ds-primary" disabled={saving}>{saving ? 'Saving...' : 'Save query'}</button>
           </div>
         </form>
       )}
@@ -773,14 +773,14 @@ export function ContextGraphQueryView({ contextGraphId }: { contextGraphId: stri
         )}
 
         {executionMatchesSession && !loading && !error && booleanResult !== undefined && (
-          <div className="v10-mlv-table-wrap" aria-label="ASK result">
+          <div className="v10-mlv-table-wrap ds-card-nested" aria-label="ASK result">
             <div className="v10-mlv-result-count">ASK result</div>
             <strong>{String(booleanResult)}</strong>
           </div>
         )}
 
         {executionMatchesSession && !loading && !error && booleanResult === undefined && rows.length > 0 && (
-          <div className="v10-mlv-table-wrap">
+          <div className="v10-mlv-table-wrap ds-card-nested">
             <div className="v10-mlv-result-count">
               {rows.length} {resultType === 'quads' ? `quad${rows.length === 1 ? '' : 's'}` : `result${rows.length === 1 ? '' : 's'}`}
             </div>

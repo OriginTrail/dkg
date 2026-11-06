@@ -10,8 +10,15 @@
  * `.v10-genui-*` classes defined in styles.css.
  */
 import React from 'react';
+import { kindColor, type EntityKind } from '../entity-kind-colors.js';
+import { Badge, LayerBadge } from '../components/ds/Badge.js';
+import { entityStatusTone } from '../lib/entity-status.js';
+import { humanizeStatus } from '../lib/formatLabels.js';
 
 type RenderProps<P> = { props: P; renderNode: (value: unknown) => React.ReactNode };
+
+/** Each card kind keeps its data-palette colour (icon tile), same as elsewhere. */
+const kindStyle = (kind: EntityKind) => ({ '--kind': kindColor(kind) }) as React.CSSProperties;
 
 /**
  * URL allow-list for anchors embedded in LLM-generated / graph-sourced GenUI.
@@ -53,7 +60,7 @@ export const EntityCardImpl: React.FC<RenderProps<{
   name: string; typeLabel?: string; subtitle?: string;
   chips?: Array<{ label: string; value: string; tone?: 'default' | 'success' | 'warn' | 'danger' | 'info' }>;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-entity-card">
+  <div className="v10-genui-card ds-card v10-genui-entity-card">
     <div className="v10-genui-card-head">
       <div className="v10-genui-card-title">{props.name}</div>
       {props.typeLabel ? <div className="v10-genui-card-type">{props.typeLabel}</div> : null}
@@ -78,7 +85,7 @@ export const EntityStatsGridImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-stats-grid">
     {props.stats.map((s, i) => (
-      <div key={i} className="v10-genui-stat" title={s.hint}>
+      <div key={i} className="v10-genui-stat ds-card-nested" title={s.hint}>
         <div className="v10-genui-stat-value">{s.value}</div>
         <div className="v10-genui-stat-label">{s.label}</div>
       </div>
@@ -93,7 +100,7 @@ export const TripleTableImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-section">
     {props.heading ? <div className="v10-genui-section-heading">{props.heading}</div> : null}
-    <div className="v10-genui-triple-table">
+    <div className="v10-genui-triple-table ds-card-nested">
       {props.rows.map((r, i) => (
         <div key={i} className="v10-genui-triple-row">
           <div className="v10-genui-triple-predicate">{shortIri(r.predicate)}</div>
@@ -117,7 +124,7 @@ export const EntityTypeListImpl: React.FC<RenderProps<{
     {props.heading ? <div className="v10-genui-section-heading">{props.heading}</div> : null}
     <div className="v10-genui-type-groups">
       {props.groups.map((g, i) => (
-        <div key={i} className="v10-genui-type-group">
+        <div key={i} className="v10-genui-type-group ds-card-nested">
           <div className="v10-genui-type-group-head">
             {g.icon ? <span className="v10-genui-type-icon">{g.icon}</span> : null}
             <span className="v10-genui-type-label">{g.typeLabel}</span>
@@ -164,9 +171,9 @@ export const PackageCardImpl: React.FC<RenderProps<{
   name: string; folder?: string; description?: string;
   fileCount?: number; classCount?: number; functionCount?: number; interfaceCount?: number;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-package-card">
+  <div className="v10-genui-card ds-card v10-genui-package-card" style={kindStyle('package')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#a855f7' }}>📦</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">▦</span>
       <div className="v10-genui-card-title">{props.name}</div>
       {props.folder ? <div className="v10-genui-card-type">packages/{props.folder}</div> : null}
     </div>
@@ -184,15 +191,15 @@ export const PackageCardImpl: React.FC<RenderProps<{
 export const FileCardImpl: React.FC<RenderProps<{
   path: string; language?: string; lineCount?: number; packageName?: string;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-file-card">
+  <div className="v10-genui-card ds-card v10-genui-file-card" style={kindStyle('file')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#3b82f6' }}>📄</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">▤</span>
       <div className="v10-genui-card-title">{basename(props.path)}</div>
       {props.language ? <div className="v10-genui-card-type">.{props.language}</div> : null}
     </div>
     <div className="v10-genui-card-subtitle">{props.path}</div>
     <div className="v10-genui-chips">
-      {props.packageName ? <span className="v10-genui-chip tone-info"><span className="v10-genui-chip-label">pkg</span><span className="v10-genui-chip-value">{props.packageName}</span></span> : null}
+      {props.packageName ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">pkg</span><span className="v10-genui-chip-value">{props.packageName}</span></span> : null}
       {typeof props.lineCount === 'number' ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">lines</span><span className="v10-genui-chip-value">{props.lineCount}</span></span> : null}
     </div>
   </div>
@@ -205,11 +212,11 @@ export const DecisionCardImpl: React.FC<RenderProps<{
   date?: string;
   context?: string; outcome?: string; consequences?: string; alternatives?: string;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-decision-card">
+  <div className="v10-genui-card ds-card v10-genui-decision-card" style={kindStyle('decision')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#ef4444' }}>◆</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">◆</span>
       <div className="v10-genui-card-title">{props.title}</div>
-      {props.status ? <div className={`v10-genui-status-chip status-${props.status}`}>{props.status}</div> : null}
+      {props.status ? <Badge size="sm" tone={entityStatusTone(props.status)} className={`v10-genui-status-chip status-${props.status}`}>{humanizeStatus(props.status)}</Badge> : null}
     </div>
     {props.date ? <div className="v10-genui-card-subtitle">Decided {props.date}</div> : null}
     {props.context ? <DecisionSection heading="Context" body={props.context} /> : null}
@@ -224,14 +231,14 @@ export const PRCardImpl: React.FC<RenderProps<{
   title: string; number?: number; state?: 'open' | 'closed' | 'merged';
   author?: string; mergedAt?: string; body?: string; url?: string;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-pr-card">
+  <div className="v10-genui-card ds-card v10-genui-pr-card" style={kindStyle('pr')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#f59e0b' }}>⇄</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">⇄</span>
       <div className="v10-genui-card-title">
         {typeof props.number === 'number' ? <span className="v10-genui-pr-num">#{props.number}</span> : null}
         {props.title}
       </div>
-      {props.state ? <div className={`v10-genui-status-chip pr-state-${props.state}`}>{props.state}</div> : null}
+      {props.state ? <Badge size="sm" tone={entityStatusTone(props.state)} className={`v10-genui-status-chip pr-state-${props.state}`}>{humanizeStatus(props.state)}</Badge> : null}
     </div>
     <div className="v10-genui-chips">
       {props.author ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">by</span><span className="v10-genui-chip-value">{props.author}</span></span> : null}
@@ -239,7 +246,7 @@ export const PRCardImpl: React.FC<RenderProps<{
       {(() => {
         const href = safeHref(props.url);
         return href
-          ? <a className="v10-genui-chip tone-info" href={href} target="_blank" rel="noopener noreferrer"><span className="v10-genui-chip-label">view</span><span className="v10-genui-chip-value">github</span></a>
+          ? <a className="v10-genui-chip" href={href} target="_blank" rel="noopener noreferrer"><span className="v10-genui-chip-label">view</span><span className="v10-genui-chip-value">github</span></a>
           : null;
       })()}
     </div>
@@ -254,12 +261,12 @@ export const TaskCardImpl: React.FC<RenderProps<{
   priority?: 'p0' | 'p1' | 'p2' | 'p3';
   assignee?: string; estimate?: number;
 }>> = ({ props }) => (
-  <div className="v10-genui-card v10-genui-task-card">
+  <div className="v10-genui-card ds-card v10-genui-task-card" style={kindStyle('task')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" style={{ color: '#06b6d4' }}>✓</span>
+      <span className="v10-genui-card-icon" aria-hidden="true">✓</span>
       <div className="v10-genui-card-title">{props.title}</div>
-      {props.status ? <div className={`v10-genui-status-chip task-status-${props.status}`}>{props.status.replace('_', ' ')}</div> : null}
-      {props.priority ? <div className={`v10-genui-priority-chip priority-${props.priority}`}>{props.priority.toUpperCase()}</div> : null}
+      {props.status ? <Badge size="sm" tone={entityStatusTone(props.status)} className={`v10-genui-status-chip task-status-${props.status}`}>{humanizeStatus(props.status)}</Badge> : null}
+      {props.priority ? <Badge size="sm" tone={props.priority === 'p0' ? 'danger' : props.priority === 'p1' ? 'warning' : 'neutral'} className={`v10-genui-priority-chip priority-${props.priority}`}>{props.priority.toUpperCase()}</Badge> : null}
     </div>
     <div className="v10-genui-chips">
       {props.assignee ? <span className="v10-genui-chip"><span className="v10-genui-chip-label">assignee</span><span className="v10-genui-chip-value">@{props.assignee}</span></span> : null}
@@ -278,17 +285,14 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
   knowledgeAsset?: { ual?: string; contentHash?: string; tracLocked?: string; tokenId?: string };
   timeline?: Array<{ label: string; at: string }>;
 }>> = ({ props }) => (
-  <div className="v10-genui-vm-panel">
+  <div className="v10-genui-vm-panel ds-card">
     <div className="v10-genui-vm-panel-head">
-      <div className="v10-genui-vm-badge">
-        <span className="v10-genui-vm-badge-dot" />
-        Verifiable Memory
-      </div>
+      <LayerBadge layer="vm" label="Verifiable Memory" className="v10-genui-vm-badge" />
       <div className="v10-genui-vm-title">On-chain provenance</div>
     </div>
     <div className="v10-genui-vm-grid">
       {props.onChain ? (
-        <div className="v10-genui-vm-block">
+        <div className="v10-genui-vm-block ds-card-nested">
           <div className="v10-genui-vm-block-heading">Anchoring</div>
           {props.onChain.txHash ? <ProvRow label="tx" value={shortHash(props.onChain.txHash)} mono /> : null}
           {props.onChain.blockNumber ? <ProvRow label="block" value={String(props.onChain.blockNumber)} mono /> : null}
@@ -296,7 +300,7 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
         </div>
       ) : null}
       {props.consensus ? (
-        <div className="v10-genui-vm-block">
+        <div className="v10-genui-vm-block ds-card-nested">
           <div className="v10-genui-vm-block-heading">Consensus {props.consensus.quorum ? <span className="v10-genui-vm-quorum">{props.consensus.quorum}</span> : null}</div>
           {(props.consensus.signers ?? []).map((s, i) => (
             <div key={i} className="v10-genui-vm-signer">
@@ -311,7 +315,7 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
         </div>
       ) : null}
       {props.knowledgeAsset ? (
-        <div className="v10-genui-vm-block">
+        <div className="v10-genui-vm-block ds-card-nested">
           <div className="v10-genui-vm-block-heading">Knowledge asset</div>
           {props.knowledgeAsset.ual ? <ProvRow label="ual" value={props.knowledgeAsset.ual} mono /> : null}
           {props.knowledgeAsset.contentHash ? <ProvRow label="hash" value={shortHash(props.knowledgeAsset.contentHash)} mono /> : null}
@@ -320,7 +324,7 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
         </div>
       ) : null}
       {props.timeline?.length ? (
-        <div className="v10-genui-vm-block">
+        <div className="v10-genui-vm-block ds-card-nested">
           <div className="v10-genui-vm-block-heading">Timeline</div>
           {props.timeline.map((t, i) => (
             <div key={i} className="v10-genui-vm-timeline-row">
@@ -337,7 +341,7 @@ export const VerifiedProvenancePanelImpl: React.FC<RenderProps<{
 
 // ── helpers ───────────────────────────────────────────────────
 const MiniStat: React.FC<{ label: string; value: string | number }> = ({ label, value }) => (
-  <div className="v10-genui-stat">
+  <div className="v10-genui-stat ds-card-nested">
     <div className="v10-genui-stat-value">{value}</div>
     <div className="v10-genui-stat-label">{label}</div>
   </div>

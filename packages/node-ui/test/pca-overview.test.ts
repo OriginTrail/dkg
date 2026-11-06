@@ -276,7 +276,7 @@ describe('ConvictionOverview — S1 discovery', () => {
     });
 
     const { container, unmount } = await render(React.createElement(ConvictionOverview));
-    await waitForText(container, 'wallet-managed');
+    await waitForText(container, 'Wallet-managed');
     const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
     expect(card?.textContent).toContain('PCA #12');
     expect(container.querySelector('[data-testid="pca-discovered-strip"]')).toBeNull();
@@ -326,7 +326,7 @@ describe('ConvictionOverview — S1 discovery', () => {
     await act(async () => {
       retry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    await waitForText(container, 'wallet-managed');
+    await waitForText(container, 'Wallet-managed');
     const card = container.querySelector('[data-testid="pca-account-card"][data-owner-mode="wallet"]');
     expect(card?.textContent).toContain('PCA #12');
     expect(balanceCalls).toBeGreaterThanOrEqual(2);

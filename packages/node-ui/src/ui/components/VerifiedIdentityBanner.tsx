@@ -20,6 +20,7 @@ import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { useFetch } from '../hooks.js';
 import { fetchStatus } from '../api.js';
 import { AgentChip } from './AgentChip.js';
+import { Badge } from './ds/Badge.js';
 
 export interface VerifiedIdentityBannerProps {
   contextGraphId: string;
@@ -65,11 +66,11 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
   };
 
   return (
-    <div className="v10-vm-identity">
+    <div className="v10-vm-identity ds-card">
       <div className="v10-vm-identity-head">
         <span className="v10-vm-identity-glyph">◉</span>
         <span className="v10-vm-identity-title">On-chain identity</span>
-        <span className="v10-vm-identity-badge">VERIFIED</span>
+        <Badge tone="vm" size="sm" icon="✓" className="v10-vm-identity-badge">Verified</Badge>
       </div>
 
       {onChainUal && (

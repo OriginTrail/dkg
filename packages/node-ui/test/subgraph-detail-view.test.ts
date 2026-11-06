@@ -6,9 +6,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProjectProfileContext, type ProjectProfile } from '../src/ui/hooks/useProjectProfile.js';
 import { SubGraphDetailView } from '../src/ui/views/project/components.js';
 import { ROOT_SLUG_SENTINEL } from '../src/ui/lib/subGraphs.js';
-import { TRUST_COLORS } from '../src/ui/views/project/helpers.js';
+import { trustColors } from '../src/ui/views/project/helpers.js';
+import { graphPalette } from '../src/ui/graph-palette.js';
+
+// Tests render in the default (dark) theme.
+const TRUST_COLORS = trustColors(graphPalette('dark'));
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+// The VM graph's receipts reload on node events; happy-dom has no EventSource.
+class StubEventSource { addEventListener() {} close() {} onerror: (() => void) | null = null; }
+vi.stubGlobal('EventSource', StubEventSource);
 
 vi.mock('@origintrail-official/dkg-graph-viz/react', async () => {
   const React = await import('react');

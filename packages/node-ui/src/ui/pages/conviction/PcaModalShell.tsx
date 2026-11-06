@@ -40,7 +40,7 @@ export function PcaModalShell({
   return (
     <div className="v10-modal-overlay" onClick={onBackdropClick} role="presentation">
       <div
-        className="v10-modal-box v10-pca-modal-box"
+        className="v10-modal-box ds-overlay v10-pca-modal-box"
         data-testid={testId}
         ref={dialogRef}
         role="dialog"
@@ -49,7 +49,7 @@ export function PcaModalShell({
       >
         <button
           type="button"
-          className="v10-modal-close"
+          className="v10-modal-close ds-btn ds-ghost ds-icon"
           onClick={handleClose}
           aria-label={dismissDisabled ? 'Close disabled while signing' : 'Close dialog'}
           title={dismissDisabled ? 'Finish or reject the wallet prompt first' : 'Close (Esc)'}

@@ -24,8 +24,6 @@ export const sel = {
     notifItemText: '.v10-notif-row-detail',
     notifItemTime: '.v10-notif-time',
     themeToggle: 'button[title*="Switch to"]',
-    observabilityBtn: 'button[title="Observability"]',
-    settingsBtn: 'button[title="Settings"]',
     rightPanelToggle: 'button[title="Toggle agent panel"]',
     actions: '.v10-header-actions',
   },
@@ -70,7 +68,9 @@ export const sel = {
     root: '.v10-panel-center',
     tabs: '.v10-center-tabs',
     tab: '.v10-center-tab',
-    tabLabel: '.v10-center-tab-label',
+    // Tab names come from each tab's `title` (the pinned Dashboard tab shows
+    // only its icon, so it has no visible `.v10-center-tab-label`).
+    activeTab: '.v10-center-tab[aria-selected="true"]',
     tabClose: '.v10-center-tab-close',
     content: '.v10-center-content',
     placeholder: '.v10-view-placeholder',

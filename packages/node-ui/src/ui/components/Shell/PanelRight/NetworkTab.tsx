@@ -3,6 +3,8 @@ import { ChevronRight } from 'lucide-react';
 import { formatDuration } from './format.js';
 import { buildPeers, shortAgentUri, shortPeerId } from './peer-model.js';
 import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
+import { Badge } from '../../ds/Badge.js';
+import { humanizeStatus } from '../../../lib/formatLabels.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -23,13 +25,13 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
       ? 'Direct + relay paths active — direct shown'
       : undefined;
   return (
-    <div className={`v10-agent-card v10-peer-card ${statusClass}`}>
+    <div className={`v10-agent-card ds-card-nested v10-peer-card ${statusClass}`}>
       <div className="v10-agent-card-header">
         <span className={`v10-agent-card-dot ${statusClass}`} />
         <span className="v10-peer-card-name">{displayName}</span>
-        <span className="v10-agent-card-badge" title={transportTitle}>
-          {transportLabel}
-        </span>
+        <Badge tone="muted" size="sm" className="v10-agent-card-badge" title={transportTitle}>
+          {humanizeStatus(String(transportLabel))}
+        </Badge>
       </div>
       <div className="v10-peer-card-meta">
         <span title={peer.peerId}>{shortPeerId(peer.peerId)}</span>
@@ -64,7 +66,7 @@ function NetworkPeerCard({ peer }: { peer: PeerInfo }) {
             <li>
               <button
                 type="button"
-                className="v10-peer-chip-more"
+                className="v10-peer-chip-more ds-btn ds-ghost ds-sm"
                 aria-expanded={expanded}
                 aria-controls={chipsId}
                 onClick={() => setExpanded((e) => !e)}
@@ -173,7 +175,7 @@ export function NetworkTab(props: {
         >
           {directCount} direct / {relayedCount} relayed
         </span>
-        <button className="v10-agents-refresh" onClick={onRefresh} title="Refresh network peers">
+        <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
           Refresh
         </button>
       </div>

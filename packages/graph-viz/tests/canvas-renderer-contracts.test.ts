@@ -71,6 +71,22 @@ describe('canvas graph rendering', () => {
     driver.call('linkCanvasObject', link, ctx, .55); expect(ctx.fillText).toHaveBeenCalledWith('knows', 20, 30); expect(paints.at(-1)?.alpha).toBeCloseTo(.5);
     driver.call('linkCanvasObject', link, ctx, 2); expect(paints.at(-1)?.alpha).toBe(1);
   });
+  it('shows link labels from a configured zoom threshold, fading in over the next half step', () => {
+    renderer.destroy();
+    conf = config({ edgeLabelMinZoom: 1.2 }); renderer = new Canvas2DRenderer(conf); renderer.init();
+    const { ctx, paints } = canvasContext();
+    const link = { _graphEdge: edge('a', 'b'), source: { x: 10, y: 20 }, target: { x: 30, y: 40 } };
+    // Visible at the default threshold (0.3), hidden below the configured one.
+    driver.call('linkCanvasObject', link, ctx, 1); driver.call('linkCanvasObject', link, ctx, 1.19); expect(ctx.fillText).not.toHaveBeenCalled();
+    driver.call('linkCanvasObject', link, ctx, 1.2); expect(ctx.fillText).toHaveBeenCalledWith('knows', 20, 30); expect(paints.at(-1)?.alpha).toBe(0);
+    driver.call('linkCanvasObject', link, ctx, 1.45); expect(paints.at(-1)?.alpha).toBeCloseTo(.5);
+    driver.call('linkCanvasObject', link, ctx, 1.7); expect(paints.at(-1)?.alpha).toBe(1);
+    // A restyle after init reaches the running renderer: no re-init.
+    conf.styleEngine.setStyle({ edgeLabelMinZoom: 0.3, defaultEdgeColor: '#abcdef' });
+    ctx.fillText.mockClear();
+    driver.call('linkCanvasObject', link, ctx, 1); expect(ctx.fillText).toHaveBeenCalledWith('knows', 20, 30);
+    expect(driver.call('linkColor', {})).toBe('#abcdef');
+  });
   it('animates node fade and risk pulse while keeping canvas alpha restored', () => {
     renderer.init(); renderer.applyAnimation({ fadeIn: true, riskPulse: true }); renderer.render(nodes(node('risk', { isHighRisk: true })), new Map());
     const { ctx } = canvasContext(); const alphas: number[] = []; const paint = vi.spyOn(conf.hexPainter, 'paint').mockImplementation(() => { alphas.push(ctx.globalAlpha); return 24; });

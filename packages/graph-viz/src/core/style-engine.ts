@@ -1,4 +1,4 @@
-import type { GraphNode, GraphEdge, StyleConfig } from './types.js';
+import type { ClassAppearance, GraphNode, GraphEdge, StyleConfig } from './types.js';
 import type { ColorPalette } from './palette.js';
 import { PALETTE_DARK } from './palette.js';
 import { PrefixManager } from './prefix-manager.js';
@@ -10,6 +10,8 @@ const NAMESPACE_COLORS: Record<string, string> = {
   'http://xmlns.com/foaf/0.1/': '#10b981',   // Emerald for FOAF
   'http://purl.org/dc/terms/': '#f59e0b',    // Amber for Dublin Core
 };
+
+const NO_APPEARANCE: ClassAppearance = Object.freeze({});
 
 /**
  * Resolves colors for nodes and edges based on configurable rules.
@@ -30,17 +32,39 @@ export class StyleEngine {
   private _palette: ColorPalette;
   private _hasExplicitDefaultNodeColor: boolean;
   private _hasExplicitDefaultEdgeColor: boolean;
+  /** classAppearance by its configured keys plus their expansions at
+   *  construction. Compact keys whose prefix arrives later (a Turtle
+   *  document's @prefix) are matched through `compact()` at lookup time. */
+  private _appearance: Map<string, ClassAppearance>;
+  private _hasCompactKeys = false;
 
   constructor(config: StyleConfig | undefined, prefixManager: PrefixManager, palette?: ColorPalette) {
     this._prefixManager = prefixManager;
     this._palette = palette ?? PALETTE_DARK;
+    this._config = undefined as unknown as Required<StyleConfig>;
+    this._hasExplicitDefaultNodeColor = false;
+    this._hasExplicitDefaultEdgeColor = false;
+    this._appearance = new Map();
+    this.setStyle(config);
+  }
+
+  /**
+   * Replace the style configuration in place (a theme switch: new class,
+   * namespace and predicate colours, appearances, defaults). Per-node colour
+   * overrides are kept unless the new config sets them; defaults not set
+   * explicitly follow the active palette. The renderer reads the live
+   * config, so a repaint is enough: no graph rebuild.
+   */
+  setStyle(config: StyleConfig | undefined): void {
     this._hasExplicitDefaultNodeColor = config?.defaultNodeColor !== undefined;
     this._hasExplicitDefaultEdgeColor = config?.defaultEdgeColor !== undefined;
     this._config = {
-      nodeColors: config?.nodeColors ?? {},
+      nodeColors: config?.nodeColors ?? this._config?.nodeColors ?? {},
       classColors: config?.classColors ?? {},
       namespaceColors: config?.namespaceColors ?? {},
       predicateColors: config?.predicateColors ?? {},
+      classAppearance: config?.classAppearance ?? {},
+      edgeLabelMinZoom: config?.edgeLabelMinZoom ?? 0.3,
       gradient: config?.gradient ?? true,
       gradientIntensity: config?.gradientIntensity ?? 0.3,
       defaultNodeColor: config?.defaultNodeColor ?? this._palette.primary,
@@ -51,6 +75,13 @@ export class StyleEngine {
       fontFamily: config?.fontFamily ?? 'system-ui, -apple-system, sans-serif',
       fontSize: config?.fontSize ?? 11,
     };
+    this._appearance = new Map();
+    this._hasCompactKeys = false;
+    for (const [type, appearance] of Object.entries(this._config.classAppearance)) {
+      this._appearance.set(type, appearance);
+      this._appearance.set(this._prefixManager.expand(type), appearance);
+      if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(type) && type.includes(':')) this._hasCompactKeys = true;
+    }
   }
 
   /** The active color palette */
@@ -107,6 +138,31 @@ export class StyleEngine {
 
     // 3. Default
     return this._config.defaultNodeColor;
+  }
+
+  /** A node's resolved appearance: each property from the first of its
+   *  types that sets it; empty when none of its types is configured. */
+  getAppearance(node: GraphNode): ClassAppearance {
+    if (this._appearance.size === 0) return NO_APPEARANCE;
+    const out: ClassAppearance = {};
+    let found = false;
+    for (const type of node.types) {
+      const a = this._appearance.get(type) ?? this._compactAppearance(type);
+      if (!a) continue;
+      found = true;
+      out.border ??= a.border;
+      out.fill ??= a.fill;
+      out.shape ??= a.shape;
+    }
+    return found ? out : NO_APPEARANCE;
+  }
+
+  /** A compact-keyed rule for a full type IRI, resolved against the prefixes
+   *  known now (so a prefix declared by loaded Turtle counts). */
+  private _compactAppearance(type: string): ClassAppearance | undefined {
+    if (!this._hasCompactKeys) return undefined;
+    const compact = this._prefixManager.compact(type);
+    return compact ? this._appearance.get(compact) : undefined;
   }
 
   /** Get the color for an edge */

@@ -8,7 +8,6 @@
   min-width: 0;
   padding: 10px 12px;
   gap: 8px;
-  border-radius: 14px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
   transition: border-color 0.15s;
@@ -37,7 +36,7 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -63,7 +62,7 @@
   height: 28px;
   min-width: 28px;
   padding: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0;
   background: var(--text-primary);
   color: var(--bg-root);
@@ -164,7 +163,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 8px 8px 8px;
-  border-radius: 12px;
+  border-radius: var(--radius-overlay);
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   max-width: 100%;
@@ -183,7 +182,7 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   background: var(--bg-active);
   color: var(--text-secondary);
   font-size: 10px;
@@ -233,7 +232,7 @@
   justify-content: center;
   width: 24px;
   height: 24px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   border: 0;
   background: transparent;
   color: var(--text-secondary);
@@ -282,7 +281,6 @@
   align-items: center;
   gap: 8px;
   padding: 24px 28px;
-  border-radius: 14px;
   background: var(--bg-elevated);
   /* Monochrome border + icon — matches the rest of the node design
      instead of competing with it as the blue accent did. Theme-aware
@@ -324,7 +322,6 @@
 .v10-local-agent-notice,
 .v10-local-agent-error {
   padding: 10px 12px;
-  border-radius: 8px;
   font-size: 11px;
   line-height: 1.5;
 }
@@ -337,27 +334,6 @@
   background: color-mix(in srgb, #ef4444 12%, var(--bg-surface));
   border: 1px solid color-mix(in srgb, #ef4444 30%, var(--border-subtle));
   color: #fca5a5;
-}
-.v10-agent-link-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 72px;
-  padding: 0 12px;
-  height: 34px;
-  border-radius: 6px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  text-decoration: none;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-.v10-agent-link-btn:hover {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border-color: var(--border-strong);
 }
 .v10-agent-empty-state {
   padding: 24px 16px;
@@ -414,22 +390,3 @@
 .v10-agent-input::placeholder {
   color: var(--text-secondary);
 }
-.v10-agent-send-btn {
-  min-width: 56px;
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 6px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-default);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
-}
-.v10-agent-send-btn.secondary {
-  background: var(--bg-elevated);
-}
-.v10-agent-send-btn:hover { background: var(--bg-elevated); color: var(--text-primary); }

@@ -114,7 +114,8 @@ export function RdfGraph({
       viz.destroy();
       vizRef.current = null;
     };
-    // Intentionally only run on mount/unmount — options changes require remount
+    // Intentionally only run on mount/unmount. `options.style` is applied
+    // reactively below; other options (renderer, labels, sizing) are mount-only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -193,6 +194,22 @@ export function RdfGraph({
     viz.applyView(viewConfig ?? { name: 'Default' });
     viz.refresh();
   }, [viewConfig]);
+
+  // Style follows the prop (a theme switch rebuilds the caller's style):
+  // restyle in place instead of remounting. Compared by value, so callers
+  // that rebuild an equal options object every render cost nothing.
+  // Per-node colours have their own effect below.
+  const styleRest = { ...options.style };
+  delete styleRest.nodeColors;
+  const styleSignature = JSON.stringify(styleRest);
+  const appliedStyleRef = useRef(styleSignature);
+  useEffect(() => {
+    const viz = vizRef.current;
+    if (!viz || styleSignature === appliedStyleRef.current) return;
+    appliedStyleRef.current = styleSignature;
+    viz.setStyle({ ...styleRest, nodeColors: viz.styleEngine.config.nodeColors });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [styleSignature]);
 
   useEffect(() => {
     const viz = vizRef.current;

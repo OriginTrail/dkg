@@ -43,16 +43,63 @@
   /* Semantic foregrounds (theme-aware) */
   --text-success: #86efac;
   --text-warning: #fbbf24;
-  --text-info: #7dd3fc;
+  /* Info is neutral (icon + text); sky blue sat next to SWM cyan. */
+  --text-info: var(--text-secondary);
   --text-danger: #fca5a5;
   --text-danger-hover: #fecaca;
-  --text-link: #60a5fa;
+  /* Links: text colour + underline. Blue is no longer a UI role. */
+  --text-link: var(--text-primary);
+  --link-underline: #6b6b6b;
   --text-on-accent: #111111;
 
-  /* Layer identity */
-  --layer-working: #64748b;
-  --layer-shared: #f59e0b;
-  --layer-verified: #22c55e;
+  /* Layer identity — one hue, one job (nOS ↔ node UI shared vocabulary).
+     WM slate, SWM OriginTrail cyan (--color-blue #1ADED7), VM OriginTrail
+     purple (--color-primary #6344DF / --color-lavender #8B85F4). These hues
+     are reserved for the three memory layers; amber, green and red are
+     signals only. Each layer has four roles:
+       --layer-X          icon, dot, bar, underline (non-text)
+       --layer-X-text     text on --layer-X-bg or on page surfaces
+       --layer-X-bg       chip / card tint
+       --layer-X-border   chip / card outline
+     Canvas code (graph-viz) reads the same values from layer-colors.ts. */
+  --layer-working: #94a3b8;
+  --layer-working-text: #cbd5e1;
+  --layer-working-bg: #1a1e25;
+  --layer-working-border: #64748b;
+  --layer-shared: #1aded7;
+  --layer-shared-text: #1aded7;
+  --layer-shared-bg: #0f2a2c;
+  --layer-shared-border: #1e7a77;
+  --layer-verified: #8b85f4;
+  --layer-verified-text: #c9b8fa;
+  --layer-verified-bg: #1f1a38;
+  --layer-verified-border: #7e6be8;
+
+  /* Actions. Primary = white on black, as origintrail.io's dark buttons.
+     --accent-vm fills exactly one kind of button: the action that commits
+     data to Verifiable Memory, so purple means VM in chips and actions. */
+  --accent-primary: #f0f0f0;
+  --text-on-primary: #111111;
+  --accent-vm: #6344df;
+  --accent-vm-hover: #7458e6;
+  --text-on-vm: #ffffff;
+
+  /* Keyboard focus — indigo, ring only. Not a link colour, not a layer. */
+  --focus-ring: #8b94ec;
+
+  /* Role & access (curator, participant; public, curated, private).
+     Facts about you and the graph, not states: blue, which links and
+     navigation no longer use. Role you hold = tinted chip, access = outline. */
+  --role: #6aa5ee;
+  --role-text: #9cc3f5;
+  --role-bg: #14233b;
+  --role-border: #2f5f9f;
+
+  /* Data palette, 8 slots, fixed order (never cycled within a chart).
+     Validated adjacent-pair separation in both themes; clear of layer and
+     signal hues. Also the context-graph identity colours. */
+  --data-1: #1a81ff; --data-2: #a69300; --data-3: #ec2890; --data-4: #c98500;
+  --data-5: #e200d0; --data-6: #ac6800; --data-7: #00a1df; --data-8: #00a309;
 
   /* Typography */
   --font-sans: 'Instrument Sans', -apple-system, sans-serif;
@@ -125,21 +172,42 @@
   --text-ghost: #d4d4d4;
   /* Light-theme danger foreground (~7.4:1 on --bg-elevated #f0f0f0) */
   --text-success: #166534;
-  --text-warning: #92400e;
-  --text-info: #1d4ed8;
+  /* Amber, between #92400e (read as brown) and #a35207 (failed AA on its
+     own tint). Clears 4.5:1 with its tint composited over every light
+     surface: 13% badge, 16% count; worst case the count on --bg-elevated
+     (4.76:1). context-graph-contrast.test.ts checks. */
+  --text-warning: #8e4706;
+  --text-info: var(--text-secondary);
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
-  --text-link: #1d4ed8;
+  --text-link: var(--text-primary);
+  --link-underline: #a3a3a3;
   --text-on-accent: #111111;
-  /* Layer accents are NOT overridden in light mode — the slate/amber/
-     green from :root carry through, matching the Context Graph and
-     project pages (which already use the unified palette in both
-     themes). The earlier PR6 desaturation to greys (#8a8a8a / #737373
-     / #404040) read as "weird variations of gray" against the white
-     dashboard card vs the colored CG pages; reverting per user
-     directive (PR8 round-4). Non-text contrast at small decoration
-     sizes is acceptable below AA's 3:1 floor — the bars/dots aren't
-     text. */
+  /* Layer identity, light. Same hues as dark, stepped for white
+     surfaces; identical to the nOS light set. Text roles clear 4.5:1
+     on their own bg; the non-text role clears 3:1 on --bg-surface. */
+  --layer-working: #526173;
+  --layer-working-text: #3f4c5c;
+  --layer-working-bg: #e6eaef;
+  --layer-working-border: #a9b4c2;
+  --layer-shared: #0f9c96;
+  --layer-shared-text: #0b6e6a;
+  --layer-shared-bg: #ddf6f5;
+  --layer-shared-border: #4fb8b2;
+  --layer-verified: #6344df;
+  --layer-verified-text: #4a2fb8;
+  --layer-verified-bg: #eeebfc;
+  --layer-verified-border: #6344df;
+  --accent-primary: #171717;
+  --text-on-primary: #ffffff;
+  --accent-vm-hover: #5236c4;
+  --focus-ring: #4553c9;
+  --role: #2f6fc4;
+  --role-text: #1d4f9a;
+  --role-bg: #e6effc;
+  --role-border: #8db3ea;
+  --data-1: #1f6fd1; --data-2: #8a7a00; --data-3: #a3195b; --data-4: #c28a00;
+  --data-5: #b5179e; --data-6: #9a5b1e; --data-7: #0284c7; --data-8: #008300;
   --bg: var(--bg-root);
   --surface: var(--bg-surface);
   --surface-hover: var(--bg-hover);
@@ -149,4 +217,30 @@
   --text: var(--text-primary);
   --text-muted: var(--text-secondary);
   --text-dim: var(--text-tertiary);
+}
+
+:root {
+  /* ── Shape and size scale (theme-independent) ──────────────────────
+     One radius per job (see DESIGN.md): controls 6, nested 8, cards 10,
+     overlays 12, pills full. Control heights 24/32/40, badges 18/22.
+     Type scale floor is 10px. */
+  --radius-xs: 4px;
+  --radius-control: 6px;
+  --radius-nested: 8px;
+  --radius-card: 10px;
+  --radius-overlay: 12px;
+  --radius-pill: 999px;
+  --shadow-popover: 0 12px 32px rgba(0, 0, 0, .45);
+  --h-badge-sm: 18px;
+  --h-badge-md: 22px;
+  --h-control-sm: 24px;
+  --h-control-md: 32px;
+  --h-control-lg: 40px;
+  --fs-micro: 10px;
+  --fs-label: 11px;
+  --fs-control: 12px;
+  --fs-body: 13px;
+  --fs-title: 15px;
+  --fs-heading: 18px;
+  --fs-display: 24px;
 }

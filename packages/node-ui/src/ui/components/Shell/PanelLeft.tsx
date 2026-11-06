@@ -14,6 +14,7 @@ import {
   type LocalAgentIntegration,
   type LocalAgentIntegrationStatus,
 } from '../../api.js';
+import { ContextGraphMark } from '../../context-graph-colors.js';
 import {
   belongsInContextOracleSidebar,
   belongsInMyProjectsSidebar,
@@ -21,6 +22,10 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
+import { DASHBOARD_ICON, placeIcon } from './nav-icons.js';
+import { NODE_PLACE_IDS, PLACES } from '../../lib/tab-target.js';
+
+const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: placeIcon(id) }));
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -51,11 +56,11 @@ function ProjectTreeItem({
         className={`v10-tree-section-header ${isActive ? 'active' : ''}`}
         onClick={onSelect}
       >
-        <span className="v10-tree-project-dot" />
+        <ContextGraphMark id={cg.id} name={cg.name} />
         <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
         <button
           type="button"
-          className="v10-tree-hide-btn"
+          className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
@@ -85,11 +90,11 @@ function OracleCatalogueItem({
   return (
     <div className="v10-tree-section">
       <div className={`v10-tree-section-header catalogue ${isBrowsing ? 'active' : ''}`}>
-        <span className="v10-tree-project-dot" />
+        <ContextGraphMark id={cg.id} name={cg.name} />
         <span className="v10-tree-section-label">{label}</span>
         <button
           type="button"
-          className="v10-tree-catalogue-btn"
+          className="v10-tree-catalogue-btn ds-btn ds-sm"
           aria-label={`Browse ${label}`}
           onClick={onBrowse}
         >
@@ -97,7 +102,7 @@ function OracleCatalogueItem({
         </button>
         <button
           type="button"
-          className="v10-tree-catalogue-btn primary"
+          className="v10-tree-catalogue-btn primary ds-btn ds-primary ds-sm"
           aria-label={`Subscribe to ${label}`}
           onClick={onSubscribe}
         >
@@ -105,7 +110,7 @@ function OracleCatalogueItem({
         </button>
         <button
           type="button"
-          className="v10-tree-hide-btn"
+          className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
           title="Hide this context graph from the sidebar (reversible)"
           onClick={onHide}
         >
@@ -241,28 +246,32 @@ export function PanelLeft() {
 
   return (
     <div className="v10-panel-left">
-      <div style={{ display: 'flex', gap: 4, padding: '8px 8px 4px' }}>
-        <button className="v10-new-project-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
-        <button className="v10-new-project-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
+      <div className="v10-tree-create-actions">
+        <button className="v10-new-project-btn ds-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
+        <button className="v10-new-project-btn ds-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
       </div>
 
       <div className="v10-tree-header">
+        <div className="ds-seg" role="group" aria-label="Sidebar view">
         <button
-          className={`v10-tree-mode-btn ${treeMode === 'explorer' ? 'active' : ''}`}
+          aria-pressed={treeMode === 'explorer'}
+          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'explorer' ? 'active' : ''}`}
           onClick={() => setTreeMode('explorer')}
         >
           Context Graphs
         </button>
         <button
-          className={`v10-tree-mode-btn ${treeMode === 'oracle' ? 'active' : ''}`}
+          aria-pressed={treeMode === 'oracle'}
+          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'oracle' ? 'active' : ''}`}
           onClick={() => setTreeMode('oracle')}
         >
           Context Oracle
         </button>
+        </div>
       </div>
 
       {inventoryError && (
-        <div className="v10-journey-empty-card" role="alert">
+        <div className="v10-journey-empty-card ds-card" role="alert">
           <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
           <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
           <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
@@ -272,17 +281,19 @@ export function PanelLeft() {
 
       {treeMode === 'explorer' && (
         <div className="v10-tree-content">
-          <div
+          <button
+            type="button"
             className={`v10-tree-dashboard ${activeTabId === 'dashboard' ? 'active' : ''}`}
+            aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
             onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
           >
-            <span>▦</span> Dashboard
-          </div>
+            <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span> Dashboard
+          </button>
 
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading && (
-            <div className="v10-journey-empty-card">
+            <div className="v10-journey-empty-card ds-card">
               <div className="v10-jec-title">No context graphs yet</div>
               <div className="v10-jec-hint">
                 {stage === 0
@@ -290,7 +301,7 @@ export function PanelLeft() {
                   : 'Create your first context graph to give your agent structured memory.'}
               </div>
               {stage === 1 && (
-                <button className="v10-new-project-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
+                <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
                   + Create First Context Graph
                 </button>
               )}
@@ -453,6 +464,27 @@ export function PanelLeft() {
           )}
         </div>
       )}
+
+      {/* Node-level places: every destination lives in the sidebar
+          (DESIGN.md · Navigation); the header keeps only status and
+          global controls. */}
+      <nav className="v10-sidebar-node" aria-label="Node">
+        <div className="v10-sidebar-group-label">Node</div>
+        {NODE_PLACES.map((place) => (
+          <button
+            key={place.id}
+            type="button"
+            className={`v10-tree-dashboard v10-sidebar-place ${activeTabId === place.id ? 'active' : ''}`}
+            aria-current={activeTabId === place.id ? 'page' : undefined}
+            data-testid={place.testId}
+            title={place.title}
+            onClick={() => openTab({ id: place.id, label: place.label, closable: true })}
+          >
+            <span className="v10-sidebar-place-icon">{place.icon}</span>
+            {place.label}
+          </button>
+        ))}
+      </nav>
 
       <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
       <JoinProjectModal

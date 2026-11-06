@@ -188,7 +188,7 @@ describe('IdentityWalletsSection', () => {
     useWalletStore.setState({ bootstrap: null });
     const { container, unmount } = await renderSection();
     await waitFor(
-      () => container.textContent?.includes('authorized admin signer') === true,
+      () => container.textContent?.includes('Authorized admin signer') === true,
       'independent identity bootstrap',
     );
     expect(mocks.fetchIdentityWalletContracts).toHaveBeenCalledOnce();
@@ -238,7 +238,7 @@ describe('IdentityWalletsSection', () => {
     await click([...container.querySelectorAll('button')].find((button) => button.textContent === 'Retry')!);
 
     await waitFor(
-      () => container.textContent?.includes('authorized admin signer') === true,
+      () => container.textContent?.includes('Authorized admin signer') === true,
       'recovered identity bootstrap',
     );
     expect(mocks.fetchIdentityWalletContracts).toHaveBeenCalledTimes(2);
@@ -248,7 +248,7 @@ describe('IdentityWalletsSection', () => {
   it('gates every write when the connected wallet is not an authorized admin', async () => {
     mocks.readIdentityWalletSummary.mockResolvedValue(summary(false));
     const { container, unmount } = await renderSection();
-    await waitFor(() => container.textContent?.includes('not an admin for this identity') === true, 'authorization result');
+    await waitFor(() => container.textContent?.includes('Not an admin for this identity') === true, 'authorization result');
     await act(async () => setInputValue(container.querySelector('#identity-admin-address')!, TARGET));
     expect((container.querySelector('[data-testid="add-admin"]') as HTMLButtonElement).disabled).toBe(true);
     expect((container.querySelector(`[data-testid="remove-operational-${OLD_OPERATIONAL}"]`) as HTMLButtonElement).disabled).toBe(true);
@@ -257,7 +257,7 @@ describe('IdentityWalletsSection', () => {
 
   it('requires confirmation and routes a known-wallet removal to removeOperational', async () => {
     const { container, unmount } = await renderSection();
-    await waitFor(() => container.textContent?.includes('authorized admin signer') === true, 'authorized state');
+    await waitFor(() => container.textContent?.includes('Authorized admin signer') === true, 'authorized state');
     await click(container.querySelector(`[data-testid="remove-operational-${OLD_OPERATIONAL}"]`)!);
     expect(container.querySelector('[role="alertdialog"]')?.textContent).toContain(OLD_OPERATIONAL);
     expect(mocks.removeOperational).not.toHaveBeenCalled();
@@ -269,7 +269,7 @@ describe('IdentityWalletsSection', () => {
 
   it('routes role-editor additions through the matching identity action', async () => {
     const { container, unmount } = await renderSection();
-    await waitFor(() => container.textContent?.includes('authorized admin signer') === true, 'authorized state');
+    await waitFor(() => container.textContent?.includes('Authorized admin signer') === true, 'authorized state');
     await act(async () => setInputValue(container.querySelector('#identity-admin-address')!, TARGET));
     await click(container.querySelector('[data-testid="add-admin"]')!);
     await waitFor(() => mocks.addAdmin.mock.calls.length === 1, 'admin add');
@@ -298,7 +298,7 @@ describe('IdentityWalletsSection', () => {
   it('keeps the broadcast hash visible when receipt confirmation is unknown', async () => {
     mocks.addAdmin.mockRejectedValue(new WalletReceiptWaitError(TX_HASH, new Error('timeout'), 'action'));
     const { container, unmount } = await renderSection();
-    await waitFor(() => container.textContent?.includes('authorized admin signer') === true, 'authorized state');
+    await waitFor(() => container.textContent?.includes('Authorized admin signer') === true, 'authorized state');
     await act(async () => setInputValue(container.querySelector('#identity-admin-address')!, TARGET));
     await click(container.querySelector('[data-testid="add-admin"]')!);
     await waitFor(() => container.textContent?.includes('confirmation is unknown') === true, 'uncertain receipt result');

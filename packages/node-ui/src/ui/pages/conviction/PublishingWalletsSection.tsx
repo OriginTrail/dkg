@@ -96,7 +96,7 @@ export function PublishingWalletsSection({
         <h3 className="v10-pca-detail-section-title">Publishing wallets — {snapshot.agentCount} / 100</h3>
         <div className="v10-pca-detail-form">
           <AddressCrux mode="single" value={probe} onChange={setProbe} label="Check a wallet" cruxNote={null} />
-          <button type="button" className="v10-pca-card-btn" onClick={runProbe}>Probe</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={runProbe}>Probe</button>
         </div>
         {probeResult && <p className="v10-pca-detail-hint" role="status">{probeResult}</p>}
 
@@ -153,14 +153,14 @@ export function PublishingWalletsSection({
             </p>
           </>
         )}
-        {removeState.error && <p className="v10-modal-error" role="alert">{removeState.error}</p>}
+        {removeState.error && <p className="v10-modal-error ds-card-nested" role="alert">{removeState.error}</p>}
         {/* D2 (#1357) — surface the deregister success (was a dead state). */}
         {removeState.result && (
           <p className="v10-pca-detail-result" role="status" data-testid="pca-remove-result">{removeState.result.message}</p>
         )}
         <button
           type="button"
-          className="v10-pca-card-btn primary"
+          className="v10-pca-card-btn primary ds-btn ds-primary"
           onClick={() => setApproveOpen(true)}
           disabled={!access.writesEnabled}
           title={ownerTitle}
@@ -212,15 +212,15 @@ function WalletProbeRow({
                     name that consequence explicitly (deregistering your own signer degrades
                     your own publishes). */}
                 <span>This is one of this node’s own signing wallets — its publishes will pay the direct cost (and revert if it holds no TRAC). Remove?</span>
-                <button type="button" className="v10-pca-card-btn" data-testid="pca-deregister-btn" aria-label={`Confirm removing ${wallet}`} onClick={onConfirmRemove} disabled={removeBusy}>
+                <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-deregister-btn" aria-label={`Confirm removing ${wallet}`} onClick={onConfirmRemove} disabled={removeBusy}>
                   {removeBusy ? 'Removing…' : 'Yes, remove'}
                 </button>
-                <button type="button" className="v10-pca-card-btn" aria-label={`Cancel removing ${wallet}`} onClick={onCancelRemove} disabled={removeBusy}>Cancel</button>
+                <button type="button" className="v10-pca-card-btn ds-btn" aria-label={`Cancel removing ${wallet}`} onClick={onCancelRemove} disabled={removeBusy}>Cancel</button>
               </span>
             ) : (
               <button
                 type="button"
-                className="v10-pca-card-btn"
+                className="v10-pca-card-btn ds-btn"
                 aria-label={`Remove ${wallet}`}
                 onClick={onAskRemove}
                 disabled={!ownerIsPrimary}

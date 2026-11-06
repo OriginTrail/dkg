@@ -425,6 +425,63 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.querySelector('.v10-modal-btn.primary')?.textContent).toBe('Subscribe');
   });
 
+  it('keeps Browse passive with the routing hook mounted, while picking a working graph still targets it', async () => {
+    const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
+    const { useShellRouting } = await import('../src/ui/hooks/useShellRouting.js');
+    const { MemoryRouter } = await import('react-router-dom');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    const { useTabsStore } = await import('../src/ui/stores/tabs.js');
+    const { useLayoutStore } = await import('../src/ui/stores/layout.js');
+    act(() => {
+      useProjectsStore.setState({ loading: false, inventoryError: null, inventoryLoaded: false, activeProjectId: null });
+      useTabsStore.setState({ tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }], activeTabId: 'dashboard' });
+      useLayoutStore.setState({ leftSectionMyProjectsOpen: true, leftSectionIntegrationsOpen: false });
+    });
+    function Routing() { useShellRouting(); return null; }
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mountedRoots.push(root);
+    mountedContainers.push(container);
+    await act(async () => {
+      root.render(React.createElement(MemoryRouter, { initialEntries: ['/'] },
+        React.createElement(PanelLeft), React.createElement(Routing)));
+    });
+    await flush();
+    await flush();
+    // The sidebar's mount-time load has settled: now the graphs this case is about.
+    act(() => {
+      useProjectsStore.setState({
+        contextGraphs: [
+          { id: 'mine', name: 'My Working Graph', accessPolicy: 'private', callerInvolved: true, subscribed: true, synced: true } as any,
+          { id: 'public-passive', name: 'Passive Public Graph', accessPolicy: 'public', callerInvolved: false, subscribed: false, synced: false } as any,
+        ],
+        activeProjectId: 'mine',
+      });
+    });
+    await flush();
+
+    // Browse a catalogue graph: its tab opens, and the chat target stays empty.
+    await act(async () => { (container.querySelectorAll('.v10-tree-mode-btn')[1] as HTMLButtonElement).click(); });
+    await flush();
+    await act(async () => { (container.querySelector('button[aria-label="Browse Passive Public Graph"]') as HTMLButtonElement).click(); });
+    await flush();
+    expect(useTabsStore.getState().activeTabId).toBe('project:public-passive');
+    expect(useProjectsStore.getState().activeProjectId).toBeNull();
+
+    // Pick a working graph in the sidebar: it becomes the target.
+    await act(async () => { (container.querySelectorAll('.v10-tree-mode-btn')[0] as HTMLButtonElement).click(); });
+    const mine = [...container.querySelectorAll<HTMLElement>('.v10-tree-section-header')].find(el => el.textContent?.includes('My Working Graph'))!;
+    await act(async () => { mine.click(); });
+    await flush();
+    expect(useProjectsStore.getState().activeProjectId).toBe('mine');
+
+    // Back to the catalogue graph's tab through history: still passive.
+    await act(async () => { useTabsStore.getState().setActiveTab('project:public-passive'); });
+    await flush();
+    expect(useProjectsStore.getState().activeProjectId).toBeNull();
+  });
+
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');

@@ -9,8 +9,8 @@ vi.mock('../src/core/rdf-graph-viz.js', () => ({ RdfGraphViz: class {
   loadNQuads = vi.fn(async () => {}); loadTurtle = vi.fn(async () => {}); loadJsonLd = vi.fn(async () => {});
   model = { clear: this.clear };
   zoomToFit = vi.fn(); centerOnNode = vi.fn();
-  applyView = vi.fn(); refresh = vi.fn(); destroy = vi.fn();
-  styleEngine = { setNodeColors: vi.fn() };
+  applyView = vi.fn(); refresh = vi.fn(); destroy = vi.fn(); setStyle = vi.fn();
+  styleEngine = { setNodeColors: vi.fn(), config: { nodeColors: { 'urn:kept': '#111111' } } };
   constructor() { state.viz = this; }
   on(name: string, callback: (value: any) => void) {
     this.handlers.set(name, callback); return () => this.handlers.delete(name);
@@ -38,6 +38,24 @@ describe('React graph updates', () => {
     expect(first).not.toHaveBeenCalled();
     expect(state.viz.loadTriples).toHaveBeenCalledOnce();
     expect(state.viz.clear).toHaveBeenCalledOnce();
+  });
+  it('restyles in place when the style changes (a theme switch), without remounting, reloading or refitting', async () => {
+    const data = [{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o' }];
+    const dark = { classColors: { 'urn:T': '#ffffff' }, defaultEdgeColor: '#333333' };
+    const render = (style: any) => root.render(React.createElement(RdfGraph, { data, format: 'triples', initialFit: true, options: { style } }));
+    await act(async () => render(dark));
+    const viz = state.viz;
+    // An equal style rebuilt by the caller on every render does nothing.
+    await act(async () => render({ ...dark, classColors: { ...dark.classColors } }));
+    expect(viz.setStyle).not.toHaveBeenCalled();
+    const light = { classColors: { 'urn:T': '#000000' }, defaultEdgeColor: '#cccccc' };
+    await act(async () => render(light));
+    expect(state.viz).toBe(viz);
+    expect(viz.destroy).not.toHaveBeenCalled();
+    expect(viz.loadTriples).toHaveBeenCalledOnce();
+    // The new dictionaries, keeping the per-node colours applied separately.
+    expect(viz.setStyle).toHaveBeenCalledOnce();
+    expect(viz.setStyle).toHaveBeenCalledWith({ ...light, nodeColors: { 'urn:kept': '#111111' } });
   });
   it('aborts an old parse and unsubscribes all events on unmount', async () => {
     await act(async () => root.render(React.createElement(RdfGraph, { data: '<urn:one> <urn:p> <urn:o> .' })));

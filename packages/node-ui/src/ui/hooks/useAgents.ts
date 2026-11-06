@@ -120,7 +120,9 @@ function stripIri(value: unknown): string {
 // Stable hash -> HSL hue. Two different agents will collide if their
 // URIs hash to neighboring hues, but that's fine for 5-10 agents on
 // screen; the name + framework badge still distinguishes them.
-function colorForUri(uri: string): string {
+// This is the agent's one colour: the chip uses it, and the SWM graph
+// tints that agent's nodes with the same value (agentHexForUri).
+function agentHue(uri: string): number {
   let h = 0;
   for (let i = 0; i < uri.length; i++) {
     h = (h * 31 + uri.charCodeAt(i)) | 0;
@@ -129,8 +131,26 @@ function colorForUri(uri: string): string {
   // Skip red-green-blue primary bands to avoid colliding with status
   // colors (red = rejected, green = verified). Rotate hue into cooler
   // or warmer mid-tones.
-  const biasedHue = (hue + 25) % 360;
-  return `hsl(${biasedHue}, 55%, 58%)`;
+  return (hue + 25) % 360;
+}
+const AGENT_S = 55;
+const AGENT_L = 58;
+
+export function agentColorForUri(uri: string): string {
+  return `hsl(${agentHue(uri)}, ${AGENT_S}%, ${AGENT_L}%)`;
+}
+
+/** Same colour as `agentColorForUri`, as #rrggbb for the graph canvas
+ *  (graph-viz derives node borders and gradients from hex only). */
+export function agentHexForUri(uri: string): string {
+  const h = agentHue(uri), s = AGENT_S / 100, l = AGENT_L / 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(c * 255).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
 }
 
 // ── Parsing ───────────────────────────────────────────────────
@@ -157,7 +177,7 @@ function parseAgents(rows: Array<Record<string, any>>): Map<string, AgentSummary
       peerId:        stripLiteral(row.peerId)     || prev?.peerId,
       avatar:        stripLiteral(row.avatar)     || prev?.avatar,
       reputation:    stripLiteral(row.reputation) || prev?.reputation,
-      color: colorForUri(uri),
+      color: agentColorForUri(uri),
     };
     // Humans get a stable "human" framework for UI uniformity.
     if (agent.kind === 'human' && !agent.framework) agent.framework = 'human';

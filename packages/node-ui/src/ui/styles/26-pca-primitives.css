@@ -9,22 +9,7 @@
    ══════════════════════════════════════════ */
 
 /* ----- Copy button (shared) ----- */
-.v10-pca-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  min-height: 24px;
-  padding: 0;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.v10-pca-copy-btn:hover { background: var(--bg-hover); color: var(--text-secondary); }
-.v10-pca-copy-btn:focus-visible { outline: 2px solid var(--text-link); outline-offset: 1px; }
+.v10-pca-copy-btn { flex-shrink: 0; }
 
 /* Visually-hidden live announcement (mirrors the markdown copy announce). */
 .v10-pca-copy-announce {
@@ -59,7 +44,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
   padding: 1px 4px;
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   background: var(--bg-elevated);
 }
 .v10-pca-crux-help {
@@ -84,7 +69,6 @@
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   overflow: hidden;
 }
 .v10-pca-tier-row {
@@ -113,7 +97,6 @@
 /* ----- EligibilityVerdictBanner ----- */
 .v10-pca-verdict-banner {
   padding: 10px 14px;
-  border-radius: 8px;
   border: 1px solid var(--border-default);
   background: var(--bg-surface);
 }
@@ -151,7 +134,6 @@
 .v10-pca-device-progress {
   padding: 10px 12px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
   background: var(--bg-surface);
   max-width: 100%;
   min-width: 0;
@@ -200,6 +182,9 @@
   line-height: 1.45;
 }
 .v10-pca-device-progress-tx {
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-underline-offset: 3px;
   grid-column: 2;
   display: block;
   color: var(--text-link);
@@ -221,34 +206,6 @@
 .v10-pca-device-progress-row[data-state='submitted'] .v10-pca-device-progress-error {
   color: var(--text-warning);
 }
-
-/* Condensed chip on the publish CTA */
-.v10-pca-verdict-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  border: 1px solid var(--border-default);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-green {
-  color: var(--text-success);
-  border-color: rgba(34, 197, 94, 0.25);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-amber {
-  color: var(--text-warning);
-  border-color: rgba(245, 158, 11, 0.3);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-danger {
-  color: var(--text-danger);
-  border-color: rgba(239, 68, 68, 0.35);
-}
-.v10-pca-verdict-chip.v10-pca-verdict-neutral {
-  color: var(--text-secondary);
-}
 /* ----- SponsorshipHandshake ----- */
 .v10-pca-handshake {
   display: grid;
@@ -264,7 +221,6 @@
   gap: 8px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
   background: var(--bg-surface);
 }
 .v10-pca-handshake-half[data-emphasis='true'] {
@@ -282,7 +238,7 @@
   color: var(--text-secondary);
   font-size: 11px;
   padding: 4px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   cursor: pointer;
 }
 .v10-pca-handshake-copyall:hover { background: var(--bg-hover); color: var(--text-primary); }

@@ -16,7 +16,7 @@ export function AgentHubPage() {
           flex: 1,
           minHeight: 0,
           border: '1px solid var(--border)',
-          borderRadius: 12,
+          borderRadius: 'var(--radius-overlay)',
           overflow: 'hidden',
           background: 'var(--bg)',
         }}

@@ -2,11 +2,78 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HexagonPainter } from '../src/core/hexagon-painter.js';
 import { PrefixManager } from '../src/core/prefix-manager.js';
+import { StyleEngine } from '../src/core/style-engine.js';
 import { canvasContext, config, edge, node } from './rendering-support.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('hexagon visual contracts', () => {
+  describe('per-type appearance reaches the canvas', () => {
+    const AGENT = 'urn:t:Agent', ANCHOR = 'urn:t:Anchor';
+    const painterWith = (classAppearance: Record<string, any>) => {
+      const pm = new PrefixManager();
+      return new HexagonPainter({ scaleWithDegree: false }, new StyleEngine({ classAppearance, gradient: true }, pm), pm);
+    };
+    // Scale 0.3: below the label threshold, so any fillText is the avatar's initials.
+    it("draws avatar types as a full circle with the label's initials, and ordinary nodes as hexagons without", () => {
+      const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
+      const { ctx } = canvasContext();
+      painter.paint(ctx, node('agent', { types: [AGENT], label: 'Claude Code' }), 10, 20, 0.3);
+      expect(ctx.arc).toHaveBeenCalledWith(10, 20, 36, 0, 2 * Math.PI);
+      expect(ctx.fillText).toHaveBeenCalledWith('CC', 10, expect.any(Number));
+      const plain = canvasContext();
+      painter.paint(plain.ctx, node('thing', { types: ['urn:t:Thing'], label: 'Thing' }), 10, 20, 0.3);
+      expect(plain.ctx.arc).not.toHaveBeenCalled();
+      expect(plain.ctx.moveTo).toHaveBeenCalled();
+      expect(plain.ctx.fillText).not.toHaveBeenCalled();
+    });
+    it('hides avatar initials once the circle is too small to read', () => {
+      const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
+      const tiny = canvasContext();
+      painter.paint(tiny.ctx, node('agent', { types: [AGENT], label: 'Claude Code' }), 0, 0, 0.1); // 36 px radius → 3.6 px on screen
+      expect(tiny.ctx.arc).toHaveBeenCalled();
+      expect(tiny.ctx.fillText).not.toHaveBeenCalled();
+    });
+    it('never paints a loaded photo over an avatar, while an ordinary node with the same photo shows it', () => {
+      const images: any[] = [];
+      vi.stubGlobal('Image', class { naturalWidth = 64; naturalHeight = 64; constructor() { images.push(this); } });
+      const painter = painterWith({ [AGENT]: { shape: 'avatar' } });
+      const URL = 'https://example.org/a.png';
+      // Positive control: an ordinary node loads the photo and, once loaded, draws it.
+      const thing = node('thing', { types: ['urn:t:Thing'], label: 'Thing', imageUrl: URL });
+      painter.paint(canvasContext().ctx, thing, 0, 0, 0.3);
+      expect(images).toHaveLength(1);
+      images[0].onload();
+      const shown = canvasContext();
+      painter.paint(shown.ctx, thing, 0, 0, 0.3);
+      expect(shown.ctx.drawImage).toHaveBeenCalledWith(images[0], expect.any(Number), expect.any(Number), expect.any(Number), expect.any(Number));
+      // The same, already-loaded photo on an agent: initials only, no image.
+      const avatar = canvasContext();
+      painter.paint(avatar.ctx, node('agent', { types: [AGENT], label: 'Ada', imageUrl: URL }), 0, 0, 0.3);
+      expect(avatar.ctx.drawImage).not.toHaveBeenCalled();
+      expect(avatar.ctx.fillText).toHaveBeenCalledWith('AD', 0, expect.any(Number));
+      expect(images).toHaveLength(1);
+    });
+    it('fills flat types with their exact colour and keeps the gradient for the rest', () => {
+      const painter = painterWith({ [ANCHOR]: { fill: 'flat' } });
+      const flat = canvasContext();
+      painter.paint(flat.ctx, node('anchor', { types: [ANCHOR] }), 0, 0, 0.3);
+      expect(flat.ctx.createRadialGradient).not.toHaveBeenCalled();
+      const shaded = canvasContext();
+      painter.paint(shaded.ctx, node('thing', { types: ['urn:t:Thing'] }), 0, 0, 0.3);
+      expect(shaded.ctx.createRadialGradient).toHaveBeenCalled();
+    });
+    it('strokes a configured outline in its colour and width, zoom-independent', () => {
+      const painter = painterWith({ [ANCHOR]: { border: { color: '#d9d0ff', width: 4 } } });
+      const { ctx, paints } = canvasContext();
+      painter.paint(ctx, node('anchor', { types: [ANCHOR] }), 0, 0, 2);
+      expect(paints.find(p => p.method === 'stroke')).toMatchObject({ stroke: '#d9d0ff', width: 2 });
+      const plain = canvasContext();
+      painter.paint(plain.ctx, node('thing', { types: ['urn:t:Thing'] }), 0, 0, 2);
+      expect(plain.paints.find(p => p.method === 'stroke')?.stroke).not.toBe('#d9d0ff');
+    });
+  });
+
   it('scales degree, image minimum and explicit/risk multipliers independently', () => {
     const { styleEngine } = config(); const painter = new HexagonPainter(undefined, styleEngine);
     painter.setMaxDegree(10);

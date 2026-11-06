@@ -233,7 +233,7 @@ export function WireWorkspacePanel({
     return (
       <div>
         <div style={{
-          padding: '12px 14px', borderRadius: 8, marginBottom: 14, fontSize: 12,
+          padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
           background: 'rgba(34, 197, 94, 0.08)', border: '1px solid rgba(34, 197, 94, 0.25)',
           color: 'var(--accent-green)',
         }}>
@@ -248,7 +248,7 @@ export function WireWorkspacePanel({
         </div>
         <pre style={{
           fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
-          padding: 10, borderRadius: 6, background: 'var(--bg-secondary)',
+          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
           border: '1px solid var(--border-primary)', margin: 0,
         }}>
           {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
@@ -257,7 +257,7 @@ export function WireWorkspacePanel({
         </pre>
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 14 }}>
-          <button className="v10-modal-btn primary" onClick={onDone}>Done</button>
+          <button className="v10-modal-btn primary ds-btn ds-primary" onClick={onDone}>Done</button>
         </div>
       </div>
     );
@@ -267,7 +267,7 @@ export function WireWorkspacePanel({
   if (planResult) {
     return (
       <div>
-        {error && <div className="v10-modal-error" style={{ marginBottom: 12 }}>{error}</div>}
+        {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
         <div style={{ marginBottom: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
           Review the install plan. Files are only written when you click Install.
@@ -275,7 +275,7 @@ export function WireWorkspacePanel({
 
         <pre style={{
           fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
-          padding: 12, borderRadius: 6, background: 'var(--bg-secondary)',
+          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
           border: '1px solid var(--border-primary)', margin: 0, whiteSpace: 'pre-wrap',
         }}>
           {planResult.markdown}
@@ -283,16 +283,16 @@ export function WireWorkspacePanel({
 
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
           <button
-            className="v10-modal-btn"
+            className="v10-modal-btn ds-btn"
             onClick={() => { setPlanResult(null); setError(null); }}
             disabled={busy}
           >
             ← Back
           </button>
           <div style={{ display: 'flex', gap: 8 }}>
-            <button className="v10-modal-btn" onClick={onDone} disabled={busy}>Skip for now</button>
+            <button className="v10-modal-btn ds-btn" onClick={onDone} disabled={busy}>Skip for now</button>
             <button
-              className="v10-modal-btn primary"
+              className="v10-modal-btn primary ds-btn ds-primary"
               onClick={handleInstall}
               disabled={busy}
             >
@@ -311,7 +311,7 @@ export function WireWorkspacePanel({
   return (
     <div>
       <div style={{
-        padding: '10px 14px', borderRadius: 8, marginBottom: 14, fontSize: 12,
+        padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
         background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)',
         color: 'var(--accent-primary, #3b82f6)',
       }}>
@@ -323,12 +323,12 @@ export function WireWorkspacePanel({
           : 'Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.'}
       </div>
 
-      {error && <div className="v10-modal-error" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           value={workspaceRoot}
           onChange={(e) => setWorkspaceRoot(e.target.value)}
@@ -346,7 +346,7 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Coding tool to wire</label>
         <select
-          className="v10-form-select"
+          className="v10-form-select ds-input"
           value={toolSelection}
           onChange={(e) => setToolSelection(e.target.value as ToolSelection)}
         >
@@ -368,7 +368,7 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Your agent identity</label>
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
           disabled
@@ -384,7 +384,7 @@ export function WireWorkspacePanel({
       <div className="v10-form-group">
         <label className="v10-form-label">Nickname for this agent</label>
         <input
-          className="v10-form-input"
+          className="v10-form-input ds-input"
           type="text"
           value={nickname}
           onChange={(e) => setNickname(e.target.value)}
@@ -400,10 +400,10 @@ export function WireWorkspacePanel({
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 14, gap: 10 }}>
         {onCancel
-          ? <button className="v10-modal-btn" onClick={onCancel} disabled={busy}>Cancel</button>
-          : <button className="v10-modal-btn" onClick={onDone} disabled={busy}>Skip for now</button>}
+          ? <button className="v10-modal-btn ds-btn" onClick={onCancel} disabled={busy}>Cancel</button>
+          : <button className="v10-modal-btn ds-btn" onClick={onDone} disabled={busy}>Skip for now</button>}
         <button
-          className="v10-modal-btn primary"
+          className="v10-modal-btn primary ds-btn ds-primary"
           onClick={handlePreview}
           // NOTE: we deliberately DO NOT gate on `!agent`. The backend
           // derives `agentUri` from the bearer token during

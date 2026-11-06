@@ -1,7 +1,6 @@
 import React from 'react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useAgentsStore } from '../../stores/agents.js';
-import { useTabsStore } from '../../stores/tabs.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
 import { NotificationsBell } from './NotificationsBell.js';
 import { formatPeerStatusTooltip } from '../../lib/formatPeerStatus.js';
@@ -53,28 +52,6 @@ const AGENT_PANEL_ICON = (
   </svg>
 );
 
-const SETTINGS_ICON = (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <circle cx="12" cy="12" r="3" />
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-  </svg>
-);
-
-const OBSERVABILITY_ICON = (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-  </svg>
-);
-
-// Publisher Conviction launcher — a "badge percent" glyph (discount +
-// commitment connotation), styled like the sibling header icons.
-const CONVICTION_ICON = (
-  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.78 4.78 4 4 0 0 1-6.74 0 4 4 0 0 1-4.78-4.78 4 4 0 0 1 0-6.75z" />
-    <line x1="15" y1="9" x2="9" y2="15" /><circle cx="9.5" cy="9.5" r=".5" /><circle cx="14.5" cy="14.5" r=".5" />
-  </svg>
-);
-
 export function Header() {
   const { theme, setTheme, leftCollapsed, toggleLeft, rightCollapsed, toggleRight } = useLayoutStore();
   const nodeStatus = useAgentsStore((s) => s.nodeStatus);
@@ -86,7 +63,6 @@ export function Header() {
   // so the dashboard fan-out drops from ~14 calls in the first
   // second to one.
   const currentAgent = useCurrentAgent().data;
-  const { openTab } = useTabsStore();
 
   const connectedPeers = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
   const directConns = nodeStatus?.connections?.direct ?? 0;
@@ -107,7 +83,7 @@ export function Header() {
       </div>
 
       <button
-        className={`v10-header-icon-btn ${!leftCollapsed ? 'active-toggle' : ''}`}
+        className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!leftCollapsed ? ' active-toggle' : ''}`}
         onClick={toggleLeft}
         title="Toggle sidebar"
       >
@@ -141,32 +117,7 @@ export function Header() {
         <NotificationsBell />
 
         <button
-          className="v10-header-icon-btn"
-          onClick={() => openTab({ id: 'operations', label: 'Observability', closable: true })}
-          title="Observability"
-        >
-          {OBSERVABILITY_ICON}
-        </button>
-
-        <button
-          className="v10-header-icon-btn"
-          data-testid="pca-launch-btn"
-          onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
-          title="Publisher Conviction - publishing discounts"
-        >
-          {CONVICTION_ICON}
-        </button>
-
-        <button
-          className="v10-header-icon-btn"
-          onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
-          title="Settings"
-        >
-          {SETTINGS_ICON}
-        </button>
-
-        <button
-          className="v10-header-icon-btn"
+          className="v10-header-icon-btn ds-btn ds-ghost ds-icon"
           onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
         >
@@ -174,7 +125,7 @@ export function Header() {
         </button>
 
         <button
-          className={`v10-header-icon-btn ${!rightCollapsed ? 'active-toggle' : ''}`}
+          className={`v10-header-icon-btn ds-btn ds-ghost ds-icon${!rightCollapsed ? ' active-toggle' : ''}`}
           onClick={toggleRight}
           title="Toggle agent panel"
         >

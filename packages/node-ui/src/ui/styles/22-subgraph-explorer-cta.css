@@ -21,21 +21,8 @@
   color: var(--text-secondary);
   max-width: 760px;
 }
-
-/* ── Subgraph Explorer Root chip (S3) ── */
-/* Quieter than named chips — it's a fallback bucket. The ⊘ glyph
-   signals "no subgraph". Sits at the end of the chip row, after
-   any named chips. */
-.v10-subgraph-chip.v10-subgraph-chip-root {
-  color: var(--text-tertiary);
-}
 .v10-subgraph-chip.v10-subgraph-chip-root .v10-subgraph-chip-icon {
   color: var(--text-tertiary);
-}
-.v10-subgraph-chip.v10-subgraph-chip-root.active {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-  background: rgba(255,255,255,0.05);
 }
 
 /* ── Cross-layer count strip + active-layer pill (S3) ── */
@@ -85,7 +72,7 @@
      (the negative margin negates the added padding so neighbours
      don't shift). */
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   padding: 4px 8px;
   margin: -4px -8px;
   transition: background 0.15s, color 0.15s, opacity 0.15s;
@@ -181,22 +168,18 @@
 .v10-ka-verify {
   margin-top: 16px;
   padding: 14px;
-  border-radius: 8px;
+  border-radius: var(--radius-nested);
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 .v10-ka-verify-promote {
-  background: linear-gradient(135deg,
-    rgba(245,158,11,0.10) 0%,
-    rgba(168,85,247,0.05) 100%);
-  border: 1px solid rgba(245,158,11,0.30);
+  background: var(--layer-shared-bg);
+  border: 1px solid var(--layer-shared-border);
 }
 .v10-ka-verify-publish {
-  background: linear-gradient(135deg,
-    rgba(34,197,94,0.10) 0%,
-    rgba(168,85,247,0.06) 100%);
-  border: 1px solid rgba(34,197,94,0.30);
+  background: var(--layer-verified-bg);
+  border: 1px solid var(--layer-verified-border);
 }
 .v10-ka-verify-head {
   display: flex; align-items: center; gap: 8px;
@@ -205,33 +188,15 @@
   font-size: 18px;
   line-height: 1;
 }
-.v10-ka-verify-promote .v10-ka-verify-arrow { color: #f59e0b; }
-.v10-ka-verify-publish .v10-ka-verify-arrow { color: #22c55e; }
+.v10-ka-verify-promote .v10-ka-verify-arrow { color: var(--layer-shared); }
+.v10-ka-verify-publish .v10-ka-verify-arrow { color: var(--layer-verified); }
 .v10-ka-verify-title {
   font-size: 13px; font-weight: 700;
   color: var(--text-primary);
   letter-spacing: 0.01em;
 }
-.v10-ka-verify-btn {
-  display: block; width: 100%;
-  padding: 8px 12px;
-  border: none; border-radius: 6px;
-  font-size: 12px; font-weight: 700;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  font-family: var(--font-sans);
-  transition: filter 0.15s, background 0.15s;
-}
-.v10-ka-verify-btn.promote {
-  background: #f59e0b;
-  color: #0a0a0a;
-}
-.v10-ka-verify-btn.publish {
-  background: #22c55e;
-  color: #0a0a0a;
-}
-.v10-ka-verify-btn:hover:not(:disabled) { filter: brightness(1.12); }
-.v10-ka-verify-btn:disabled { opacity: 0.45; cursor: default; }
+.v10-ka-verify-btn { width: 100%; }
+.v10-ka-verify-btn:disabled { opacity: 0.45; }
 .v10-ka-verify-hint {
   margin-top: 8px;
   font-size: 10px; color: var(--text-tertiary); line-height: 1.5;
@@ -239,7 +204,7 @@
 .v10-ka-verify-err {
   margin-top: 8px; padding: 6px 8px;
   background: rgba(239,68,68,0.12);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
   color: var(--text-danger); font-size: 11px;
   font-family: var(--font-mono);
 }
@@ -252,7 +217,7 @@
   display: flex; flex-direction: column; gap: 4px;
   padding: 6px 8px;
   background: rgba(245,158,11,0.12);
-  border-radius: 4px;
+  border-radius: var(--radius-xs);
 }
 .v10-ka-verify-ok-row {
   display: flex; justify-content: space-between; align-items: center;

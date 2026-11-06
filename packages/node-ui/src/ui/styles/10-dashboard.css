@@ -24,7 +24,6 @@
 .v10-dash-section {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 10px;
   padding: 16px 18px;
   /* Same hover lift/glow as the stat cards so the lower panels feel
      part of the same surface family (round-2 feedback). */
@@ -49,20 +48,6 @@
    --text-secondary so it reads as a quiet affordance, not a control. */
 .v10-dash-section-title { display: flex; align-items: center; gap: 6px; }
 .v10-dash-section-title svg { color: var(--text-secondary); flex-shrink: 0; }
-.v10-dash-section-badge {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-elevated);
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-.v10-dash-section-link {
-  font-size: 12px;
-  color: var(--text-secondary);
-  transition: color 0.15s;
-}
-.v10-dash-section-link:hover { color: var(--text-primary); }
 
 /* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
 .v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
@@ -100,7 +85,6 @@
   font-variant-numeric: tabular-nums;
 }
 .v10-cg-size-num .v10-cg-dim { font-size: 12px; }
-.v10-cg-size-empty { font-size: 20px; font-weight: 600; padding: 6px 0; }
 /* The Size card is the densest of the three stat cards; trim its
    padding so the two big numbers + bars + legend + sub don't bloat it
    past the other two (ui-lead). */
@@ -155,7 +139,7 @@
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono);
 }
-.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+.v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 50%; } /* round = data; squares are context graphs */
 
 /* My Context Graphs list — column grid shared by header + rows. */
 .v10-cg-colhead, .v10-cg-row {
@@ -214,24 +198,29 @@
    in the screenshot review. */
 .v10-cg-colhead .v10-cg-type { justify-content: center; text-align: center; }
 .v10-cg-colhead .v10-cg-agents { text-align: right; }
-/* Role badge — same small-status-badge family as `.v10-agent-card-badge`. */
+/* Role badge in the graph table — the Badge "sm" size with the role ladder. */
 .v10-cg-badge {
-  display: inline-block;
-  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  gap: 4px;
+  font-size: var(--fs-micro);
   font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 2px 7px;
-  border-radius: 999px;
+  line-height: 1;
+  white-space: nowrap;
+  height: var(--h-badge-sm);
+  padding: 0 7px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
 }
-/* Filled chip: `--accent-green` text on `--bg-elevated` fails AA in
-   light theme (~1.9:1 — accent-green is theme-invariant, bg-elevated is
-   not). Invert to a solid green chip with fixed near-black text — AA in
-   BOTH themes (~10:1, accent-green is constant) and rightly emphasises
-   the consequential "curator" role vs the quiet outlined "joined". #86 */
-.v10-cg-badge-curator { background: var(--accent-green); color: #0a0a0a; border-color: var(--accent-green); }
-.v10-cg-badge-joined { color: var(--text-secondary); }
+/* Role ladder (same as the overview pill): curator solid role blue with
+   the ◆ glyph, joined a blue tint with ✓. Text on the solid chip is the
+   surface colour, AA in both themes. */
+.v10-cg-badge-curator { background: var(--role); color: var(--bg-surface); border-color: var(--role); }
+.v10-cg-badge-curator::before { content: "◆"; }
+.v10-cg-badge-joined { background: var(--role-bg); color: var(--role-text); border-color: var(--role-border); }
+.v10-cg-badge-joined::before { content: "✓"; }
 .v10-cg-empty { color: var(--text-secondary); font-size: 12px; padding: 16px 4px; }
 
 /* Wallets and Spending sidebar card — compact, reuses existing tokens. */
@@ -315,7 +304,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.v10-ws-balcol { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
 .v10-ws-bal {
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
@@ -363,52 +351,5 @@
    (AA on the card surface), small but not micro. */
 .v10-ws-note { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
 
-/* Quick actions */
-.v10-quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
-.v10-quick-action {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border-default);
-  background: var(--bg-elevated);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.v10-quick-action:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.v10-quick-action-icon { font-size: 14px; width: 20px; text-align: center; }
-
-/* Recent ops */
-.v10-recent-ops { display: flex; flex-direction: column; gap: 0; }
-.v10-recent-op {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: 12px;
-}
-.v10-recent-op:last-child { border-bottom: none; }
-.v10-recent-op-type { font-weight: 500; color: var(--text-primary); }
-.v10-recent-op-status { font-family: var(--font-mono); font-size: 11px; }
-.v10-recent-op-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); margin-left: auto; }
-
-/* Project cards in dashboard */
-.v10-dash-projects { display: flex; flex-direction: column; gap: 6px; }
-.v10-dash-project-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  transition: all 0.15s;
-  text-align: left;
-}
-.v10-dash-project-card:hover { border-color: var(--border-default); }
-.v10-dash-project-name { font-size: 12px; font-weight: 500; color: var(--text-primary); }
-.v10-dash-project-count { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); }
+/* Collaborating agents: the agents themselves as avatars under the count. */
+.v10-stat-agents { margin: 2px 0 6px; }

@@ -39,7 +39,7 @@ function RpcUrlField({ rpcUrl }: { rpcUrl: string }) {
         <button
           type="button"
           onClick={() => setReveal((v) => !v)}
-          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 4 }}
+          style={{ background: 'none', border: '1px solid var(--border)', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 9, fontWeight: 600, padding: '1px 6px', borderRadius: 'var(--radius-xs)' }}
           aria-label={reveal ? 'Redact RPC URL' : 'Reveal RPC URL'}
           title={reveal ? 'Hide the path-token (recommended for screen-shares)' : 'Show full URL — careful, may contain a tenant secret'}
         >
@@ -112,7 +112,7 @@ function NetworkTelemetrySection() {
   }, [showConsentModal]);
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Network Telemetry</h2></div>
       <div className="card-body">
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
@@ -169,7 +169,7 @@ function NetworkTelemetrySection() {
             aria-label="Enable Telemetry Streaming?"
             style={{
               background: 'var(--surface)', border: '1px solid var(--border)',
-              borderRadius: 12, padding: '24px 28px', maxWidth: 440, width: '90%',
+              borderRadius: 'var(--radius-overlay)', padding: '24px 28px', maxWidth: 440, width: '90%',
               boxShadow: '0 8px 32px rgba(0,0,0,.3)',
             }}
           >
@@ -282,7 +282,7 @@ function LocalDataRetentionSection() {
   const storeBytes = (metrics as any)?.store_bytes ?? null;
 
   return (
-    <section className="card">
+    <section className="card ds-card">
       <div className="card-header"><h2 className="card-title">Local Data Retention</h2></div>
       <div className="card-body">
         <label htmlFor="retention-select" className="settings-field-label" style={{ display: 'block', marginBottom: 5 }}>
@@ -318,7 +318,7 @@ function LocalDataRetentionSection() {
             role="group"
             aria-label="Confirm retention reduction"
             style={{
-              marginTop: 8, padding: '10px 14px', borderRadius: 8,
+              marginTop: 8, padding: '10px 14px', borderRadius: 'var(--radius-nested)',
               background: 'rgba(251,191,36,.06)', border: '1px solid rgba(251,191,36,.2)',
             }}
           >
@@ -334,7 +334,7 @@ function LocalDataRetentionSection() {
                 type="button"
                 onClick={confirmRetention}
                 style={{
-                  padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 11, fontWeight: 700, cursor: 'pointer',
                   border: '1px solid rgba(251,191,36,.4)', background: 'rgba(251,191,36,.1)', color: 'var(--amber)',
                 }}
               >
@@ -344,7 +344,7 @@ function LocalDataRetentionSection() {
                 type="button"
                 onClick={() => setPendingRetention(null)}
                 style={{
-                  padding: '5px 14px', borderRadius: 6, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                  padding: '5px 14px', borderRadius: 'var(--radius-control)', fontSize: 11, fontWeight: 600, cursor: 'pointer',
                   border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text-muted)',
                 }}
               >
@@ -440,7 +440,7 @@ function GeneralSettingsTab() {
   return (
     <div className="settings-stack">
       {/* Node Identity */}
-      <section className="card">
+      <section className="card ds-card">
         <div className="card-header"><h2 className="card-title">Node Identity</h2></div>
         <div className="card-body">
           <Field label="Name" value={s?.name ?? '—'} />
@@ -448,7 +448,7 @@ function GeneralSettingsTab() {
           <Field label="Role" value={s?.nodeRole ?? '—'} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
-          <div style={{ padding: '10px 14px', borderRadius: 8, background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
+          <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-nested)', background: isOnline ? 'var(--green-dim)' : 'rgba(248,113,113,.05)', border: `1px solid ${isOnline ? 'rgba(74,222,128,.2)' : 'rgba(248,113,113,.2)'}` }}>
             <div className="mono" style={{ fontSize: 10, color: isOnline ? 'var(--green)' : 'var(--red)', fontWeight: 700 }}>
               {isOnline ? '● ONLINE' : '● OFFLINE'}
             </div>
@@ -468,7 +468,7 @@ function GeneralSettingsTab() {
       <IdentityWalletsSection blockExplorerUrl={s?.blockExplorerUrl ?? null} />
 
       {/* Blockchain Config */}
-      <section className="card">
+      <section className="card ds-card">
         <div className="card-header"><h2 className="card-title">Blockchain Config</h2></div>
         <div className="card-body">
           <Field label="Chain" value={chainLabel(w?.chainId)} />
@@ -497,12 +497,12 @@ function GeneralSettingsTab() {
             <RpcUrlField rpcUrl={w.rpcUrl} />
           )}
           {w?.error ? (
-            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'rgba(248,113,113,.05)', border: '1px solid rgba(248,113,113,.2)' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--red)', marginBottom: 2 }}>⚠ Error</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{w.error}</div>
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
-            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
+            <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--amber-dim)', border: '1px solid rgba(251,191,36,.2)' }}>
               <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
               <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
@@ -520,7 +520,7 @@ function GeneralSettingsTab() {
       <LocalDataRetentionSection />
 
       {/* Danger Zone (full-width footer; last in the stack) */}
-      <section className="card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
+      <section className="card ds-card" style={{ borderColor: 'rgba(248,113,113,.2)', background: 'rgba(248,113,113,.03)' }}>
         <div className="card-header"><h2 className="card-title" style={{ color: 'var(--red)' }}>Danger Zone</h2></div>
         <div className="card-body">
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -528,7 +528,7 @@ function GeneralSettingsTab() {
               onClick={handleShutdown}
               disabled={shuttingDown}
               style={{
-                padding: '8px 16px', borderRadius: 8,
+                padding: '8px 16px', borderRadius: 'var(--radius-nested)',
                 border: `1px solid ${shutdownConfirm ? 'var(--red)' : 'rgba(251,191,36,.3)'}`,
                 background: shutdownConfirm ? 'rgba(248,113,113,.15)' : 'rgba(251,191,36,.07)',
                 color: shutdownConfirm ? 'var(--red)' : 'var(--amber)',
