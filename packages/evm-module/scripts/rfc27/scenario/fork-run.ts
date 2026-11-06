@@ -51,7 +51,15 @@ class RunLog implements Log {
 const say = (s: string): void => console.log(s);
 const fmt = (wei: bigint): string => ethers.formatEther(wei);
 
-export type ForkOptions = { url: string; seed: Uint8Array; epochs: number; logFile: string; stride: number };
+export type ForkOptions = {
+  url: string;
+  seed: Uint8Array;
+  epochs: number;
+  logFile: string;
+  stride: number;
+  /** A journal of a setup already run on the chain the fork is of: the run then starts from that setup, sending nothing for it. */
+  journal?: string;
+};
 
 export async function forkRun(o: ForkOptions): Promise<boolean> {
   const provider = new RetryingProvider(o.url);
@@ -87,6 +95,7 @@ export async function forkRun(o: ForkOptions): Promise<boolean> {
   say('setup, as the funder, the owners and the buyers...');
   const journalFile = `${o.logFile}.journal.json`;
   fs.rmSync(journalFile, { force: true });
+  if (o.journal) fs.copyFileSync(o.journal, journalFile);
   const setup = await runSetup({ provider, c, seed: o.seed, funder, signerOf, log, sender, sendTransactions: true, journalFile, publicOut: [] });
   const again = await runSetup({ provider, c, seed: o.seed, funder, signerOf, log, sender, sendTransactions: true, journalFile, publicOut: [] });
   const after = { eth: await provider.getBalance(funderAddress), trac: (await c.token.balanceOf(funderAddress)) as bigint };

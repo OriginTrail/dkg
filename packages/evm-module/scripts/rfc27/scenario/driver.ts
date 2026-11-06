@@ -4,7 +4,7 @@
 //   driver.cjs setup    [--send] --out <file>[,<file>]     the funder's key and endpoint from the environment
 //   driver.cjs tick     --beacon <name> [--public <file>]  what a beacon's timer runs
 //   driver.cjs status   [--epoch <e>] --public <file>      read-only: the chain against the plan
-//   driver.cjs fork-run --rpc <url> --epochs <n> [--stride <n>] [--log <file>]
+//   driver.cjs fork-run --rpc <url> --epochs <n> [--stride <n>] [--log <file>] [--journal <setup journal>]
 
 import * as fs from 'fs';
 import * as os from 'os';
@@ -228,6 +228,7 @@ async function main(): Promise<void> {
       epochs: Number(arg('epochs') ?? 5),
       logFile: arg('log') ?? path.join(os.tmpdir(), `rfc27-scenario-fork-${Date.now()}.jsonl`),
       stride: Number(arg('stride') ?? 1),
+      journal: arg('journal'),
     });
     process.exitCode = ok ? 0 : 1;
     return undefined;

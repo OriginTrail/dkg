@@ -109,7 +109,9 @@ node $DRIVER fork-run --rpc http://127.0.0.1:8547 --epochs 5
 ```
 
 It runs each beacon's ticks at their real cadence, about six minutes an epoch. With
-`--stride <n>`, it runs only every nth of the ticks where nothing is due.
+`--stride <n>`, it runs only every nth of the ticks where nothing is due. With
+`--journal <setup journal>`, on a fork of the chain after the real setup, it sends
+nothing for the setup and rehearses from what the setup left.
 
 **2. Setup, once, from one machine, before any timer runs.** It takes the funder's key
 and endpoint from `EVM_PRIVATE_KEY_BASE_SEPOLIA_V10` and `RPC_BASE_SEPOLIA_V10`, and
