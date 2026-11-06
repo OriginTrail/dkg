@@ -17,7 +17,7 @@ import type { Signer, TransactionRequest } from 'ethers';
 import hre from 'hardhat';
 
 import type { ProfileStorage } from '../typechain';
-import { CLASS_INFERENCE, TRAC, bucket, walletRequestOf } from './helpers/conviction-service';
+import { CLASS_INFERENCE, TRAC, budget, walletRequestOf } from './helpers/conviction-service';
 import { hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
 import { deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 import { Contracts, Stack } from '../scripts/rfc27/contracts';
@@ -304,7 +304,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(moved.ok).to.equal(true);
       expect(moved.detail).to.equal(`${fmt(a.stake)} TRAC, by its own Transfer logs`);
       const trac = checkOf(resumed, 'holds the TRAC the run still spends');
-      expect(trac.label).to.contain('the commitment, the wallet period');
+      expect(trac.label).to.contain('the commitment, the wallet subscription');
       expect(trac.label).to.not.contain('the stake');
       expect(trac.detail).to.equal(`${fmt(needed - a.stake)} of ${fmt(needed - a.stake)} TRAC`);
       expect(await fx.f.Token.balanceOf(owner)).to.equal(0n);
@@ -327,13 +327,13 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(resumed, 'the stake moved into the vault').detail).to.equal(`${fmt(a.stake)} TRAC, by its own Transfer logs`);
     });
 
-    it('after the assignment is mined: the consent the replay signs is thrown away, and changes nothing', async () => {
+    it('after the grant is mined: the consent the replay signs is thrown away, and changes nothing', async () => {
       use(await loadFixture(deployFixture));
       await fundExactly();
-      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.assign-buyer' })));
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.add-buyer' })));
       const raw = rawState();
-      const before = await fx.f.CSS.getAssignment(raw.accountId, derived('test/buyer').address);
-      const nonce = await fx.f.CSS.assignmentNonce(raw.accountId);
+      const before = await fx.f.SSS.getGrant(raw.accountId, derived('test/buyer').address);
+      const nonce = await fx.f.SSS.grantNonce(raw.accountId);
       const steps = Object.keys(raw.steps).length;
       const blocks = await head();
       let resumed: PoolCtx | undefined;
@@ -343,18 +343,18 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       });
       if (!resumed) throw new Error('no context');
       passes(resumed);
-      // Each transaction sent is a step the journal did not hold: none for the replayed assignment.
+      // Each transaction sent is a step the journal did not hold: none for the replayed grant.
       const sent = Object.keys(rawState().steps).length - steps;
       expect(calls.filter((m) => m === 'eth_sendRawTransaction')).to.have.length(sent);
       expect((await head()) - blocks).to.equal(sent);
-      expect(rawState().steps['setup.assign-buyer'].hash).to.equal(raw.steps['setup.assign-buyer'].hash);
-      const after = await fx.f.CSS.getAssignment(raw.accountId, derived('test/buyer').address);
-      expect([after.nonce, after.assignedAt, after.revokedAt]).to.deep.equal([before.nonce, before.assignedAt, before.revokedAt]);
-      expect(await fx.f.CSS.assignmentNonce(raw.accountId)).to.equal(nonce);
+      expect(rawState().steps['setup.add-buyer'].hash).to.equal(raw.steps['setup.add-buyer'].hash);
+      const after = await fx.f.SSS.getGrant(raw.accountId, derived('test/buyer').address);
+      expect([after.nonce, after.grantedAt, after.revokedAt]).to.deep.equal([before.nonce, before.grantedAt, before.revokedAt]);
+      expect(await fx.f.SSS.grantNonce(raw.accountId)).to.equal(nonce);
     });
 
     it('at each later step that moves money: every check passes, and nothing is sent twice', async () => {
-      for (const stopAt of ['setup.create-account', 'setup.fund-account-period', 'setup.fund-wallet-period']) {
+      for (const stopAt of ['setup.create-account', 'setup.fund-account-subscription', 'setup.fund-wallet-subscription']) {
         use(await loadFixture(deployFixture));
         const { needed } = await fundExactly();
         await stops(phaseSetup(await ctxOf('setup', { stopAt })));
@@ -500,7 +500,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx.file.done('setup')).to.equal(true);
     });
 
-    it('a stranger\'s wallet period funded beside ours moves the vault and the epoch\'s money more, and fails nothing', async () => {
+    it('a stranger\'s wallet subscription funded beside ours moves the vault and the epoch\'s money more, and fails nothing', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
       const value = 5n * TRAC;
@@ -509,10 +509,10 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const epoch = await fx.f.Chronos.getCurrentEpoch();
       let funding: { hash: string } = { hash: '' };
       const owner = ownerBeside(fx.f.SSW.interface.getFunction('fundFromWallet').selector, async () => {
-        funding = await fx.f.SSW.connect(stranger()).fundFromWallet(walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, 10n ** 15n)], sessionKey: hardhatWallet(61).address }));
+        funding = await fx.f.SSW.connect(stranger()).fundFromWallet(walletRequestOf(epoch, { budgets: [budget(0, CLASS_INFERENCE, value, 10n ** 15n)], sessionKey: hardhatWallet(61).address }));
       });
-      await stops(phaseSetup(await ctxOf('setup', { owner, stopAt: 'setup.fund-wallet-period' })));
-      await inTheBlockOf('setup.fund-wallet-period', funding);
+      await stops(phaseSetup(await ctxOf('setup', { owner, stopAt: 'setup.fund-wallet-subscription' })));
+      await inTheBlockOf('setup.fund-wallet-subscription', funding);
       expect((await fx.f.QIS.fundingIn(epoch)).wallet).to.equal(a.walletValue + value);
 
       const resumed = await ctxOf('setup');
@@ -578,7 +578,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       for (const [stopAt, label] of [
         ['setup.stake', 'the stake moved into the vault'],
         ['setup.create-account', 'the commitment moved into the vault'],
-        ['setup.fund-wallet-period', 'moved into the vault and is booked'],
+        ['setup.fund-wallet-subscription', 'moved into the vault and is booked'],
       ]) {
         use(await loadFixture(deployFixture));
         await fundExactly();
@@ -627,10 +627,10 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       failsAndIsNotDone(ctx, 'setup', 'the stake\'s Staked event is in its transaction\'s receipt');
     });
 
-    it('fails setup, which is not done, at the account period, and at the wallet period', async () => {
+    it('fails setup, which is not done, at the account subscription, and at the wallet subscription', async () => {
       for (const [stopAt, label] of [
-        ['setup.fund-account-period', 'the account period\'s PeriodFunded event'],
-        ['setup.fund-wallet-period', 'the wallet period\'s PeriodFunded event'],
+        ['setup.fund-account-subscription', 'the account subscription\'s SubscriptionFunded event'],
+        ['setup.fund-wallet-subscription', 'the wallet subscription\'s SubscriptionFunded event'],
       ]) {
         use(await loadFixture(deployFixture));
         await fundExactly();
@@ -663,14 +663,14 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     it('fails setup, which is not done, at a wallet funding whose receipt moved another amount', async () => {
       use(await loadFixture(deployFixture));
       await fundExactly();
-      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-subscription' })));
       const stranger = fx.f.accounts[22];
       const value = 5n * TRAC;
       await fx.f.Token.mint(stranger.address, value);
       await fx.f.Token.connect(stranger).approve(await fx.f.SSW.getAddress(), value);
-      const funding = await fx.f.SSW.connect(stranger).fundFromWallet(walletRequestOf(await fx.f.Chronos.getCurrentEpoch(), { buckets: [bucket(0, CLASS_INFERENCE, value, 10n ** 15n)], sessionKey: hardhatWallet(61).address }));
+      const funding = await fx.f.SSW.connect(stranger).fundFromWallet(walletRequestOf(await fx.f.Chronos.getCurrentEpoch(), { budgets: [budget(0, CLASS_INFERENCE, value, 10n ** 15n)], sessionKey: hardhatWallet(61).address }));
       editState((raw) => {
-        raw.steps['setup.fund-wallet-period'].hash = funding.hash;
+        raw.steps['setup.fund-wallet-subscription'].hash = funding.hash;
       });
       const ctx = await ctxOf('setup');
       await phaseSetup(ctx);
@@ -680,9 +680,9 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     it('nets what a receipt moved in and out of an account, and reads none from a receipt with no Transfer in it', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
-      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-subscription' })));
       const vault = await fx.f.Vault.getAddress();
-      const receipt = await hre.ethers.provider.getTransactionReceipt(rawState().steps['setup.fund-wallet-period'].hash);
+      const receipt = await hre.ethers.provider.getTransactionReceipt(rawState().steps['setup.fund-wallet-subscription'].hash);
       if (!receipt) throw new Error('no receipt');
       const c = await (await Stack.at(hre, await fx.f.Hub.getAddress())).base();
       expect(tracMoved(receipt, c.token, vault)).to.equal(a.walletValue);
@@ -697,7 +697,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       pointedElsewhere('serve.top-up', 'setup.opt-in');
       const ctx = await ctxOf('serve');
       await phaseServe(ctx);
-      failsAndIsNotDone(ctx, 'serve', 'the top-up\'s PeriodToppedUp event');
+      failsAndIsNotDone(ctx, 'serve', 'the top-up\'s SubscriptionToppedUp event');
     });
 
     it('fails the withdrawal, which stays on its part', async () => {
@@ -720,7 +720,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const s = stateNow();
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.top-up' })));
       const record = rawState().steps['serve.top-up'];
-      const period = await fx.f.CSS.getSubscription(s.periods.ca);
+      const subscription = await fx.f.SSS.getSubscription(s.subscriptions.ca);
       const booked = await fx.f.QIS.fundingIn(s.E);
 
       const resumed = await ctxOf('serve');
@@ -729,13 +729,13 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(resumed.file.done('serve')).to.equal(true);
       expect(checkOf(resumed, 'the top-up is accepted').ok).to.equal(true);
       expect(rawState().steps['serve.top-up'].hash).to.equal(record.hash);
-      expect((await fx.f.CSS.getSubscription(s.periods.ca)).value).to.equal(period.value);
-      // The edge period, funded after the stop, is all that adds to the epoch's money.
-      expect((await fx.f.QIS.fundingIn(s.E)).conviction - booked.conviction).to.equal(s.amounts.edgeValue);
+      expect((await fx.f.SSS.getSubscription(s.subscriptions.ca)).value).to.equal(subscription.value);
+      // The edge subscription, funded after the stop, is all that adds to the epoch's money.
+      expect((await fx.f.QIS.fundingIn(s.E)).account - booked.account).to.equal(s.amounts.edgeValue);
     });
 
     it('at every other step: every check passes, the edge\'s refusal included, and nothing is sent twice', async () => {
-      for (const stopAt of ['serve.batch-1', 'serve.batch-2', 'serve.edge-assign', 'serve.edge-fund', 'serve.edge-revoke', 'serve.edge-reassign']) {
+      for (const stopAt of ['serve.batch-1', 'serve.batch-2', 'serve.edge-add-buyer', 'serve.edge-fund', 'serve.edge-revoke', 'serve.edge-add-again']) {
         use(await loadFixture(afterProof));
         await stops(phaseServe(await ctxOf('serve', { stopAt })));
         const before = rawState().steps;
@@ -749,10 +749,10 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
   });
 
   describe('a phase with a failed check', () => {
-    /** A run stopped at serve's last step, its state then saying the wallet period was worth more than it was. */
+    /** A run stopped at serve's last step, its state then saying the wallet subscription was worth more than it was. */
     const failingServe = async () => {
       use(await loadFixture(afterProof));
-      await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.edge-reassign' })));
+      await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.edge-add-again' })));
       const walletValue = rawState().amounts.walletValue;
       editState((raw) => {
         raw.amounts.walletValue = String(BigInt(walletValue) + TRAC);
@@ -844,7 +844,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(proved, 'the seller has a node score in epoch').detail).to.contain(`node ${s.sellerId}`);
     });
 
-    it('sees the next batch refused while the account bucket is too low for it, and lands it after the top-up, on nonces the refusal did not spend', async () => {
+    it('sees the next batch refused while the account budget is too low for it, and lands it after the top-up, on nonces the refusal did not spend', async () => {
       use(await loadFixture(afterProof));
       const s = stateNow();
       const ctx = await ctxOf('serve');
@@ -852,26 +852,26 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       passes(ctx);
       expect(checkOf(ctx, 'the next batch is refused until the top-up').ok).to.equal(true);
       expect(checkOf(ctx, 'the first batch counts in whole').ok).to.equal(true);
-      expect(await fx.f.QIS.bucketFilled(s.periods.ca, 0)).to.be.greaterThan(s.amounts.caValue);
+      expect(await fx.f.QIS.budgetUsed(s.subscriptions.ca, 0)).to.be.greaterThan(s.amounts.caValue);
     });
 
     it('counts each batch as it lands, and the epoch takes λ with its first value', async () => {
       use(await loadFixture(afterProof));
       const s = stateNow();
-      expect((await fx.f.QIS.getEpochTotals(s.E)).sumR).to.equal(0n);
+      expect((await fx.f.QIS.getEpochTotals(s.E)).totalServed).to.equal(0n);
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.batch-1' })));
       const totals = await fx.f.QIS.getEpochTotals(s.E);
-      expect(totals.sumR).to.be.greaterThan(0n);
+      expect(totals.totalServed).to.be.greaterThan(0n);
       expect(totals.lambdaBps).to.equal(await fx.f.QIS.lambdaBps());
-      expect((await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E)).r).to.equal(totals.sumR);
+      expect((await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E)).servedValue).to.equal(totals.totalServed);
     });
 
-    it('stops once E has ended, sending nothing: a batch lands only in its period\'s epoch', async () => {
+    it('stops once E has ended, sending nothing: a batch lands only in its subscription\'s epoch', async () => {
       use(await loadFixture(afterProof));
       const s = stateNow();
       await toEpoch(s.E + 1n);
       const blocks = await head();
-      expect(await errorOf(phaseServe(await ctxOf('serve')))).to.match(new RegExp(`^serve runs in epoch ${s.E}, the epoch of the periods, and a batch lands only there`));
+      expect(await errorOf(phaseServe(await ctxOf('serve')))).to.match(new RegExp(`^serve runs in epoch ${s.E}, the epoch of the subscriptions, and a batch lands only there`));
       expect(await head()).to.equal(blocks);
     });
 
@@ -1011,7 +1011,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
   });
 
-  describe('two runs of one owner in the same epoch, whose wallet period can only be one of theirs', () => {
+  describe('two runs of one owner in the same epoch, whose wallet subscription can only be one of theirs', () => {
     const fundOwner = async () => {
       const { needed } = await fundExactly();
       return needed;
@@ -1032,14 +1032,14 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(await fx.f.Token.balanceOf(owner)).to.equal(needed);
       expect(fs.existsSync(path.join(dir, 'b.json'))).to.equal(false);
 
-      // The first run's resume is untouched: its period is its own.
+      // The first run's resume is untouched: its subscription is its own.
       const first = await ctxOf('serve');
       await phaseServe(first);
       passes(first);
       expect(first.file.done('serve')).to.equal(true);
     });
 
-    it('lets the second run through in the next epoch, with a wallet period of its own that it can serve', async () => {
+    it('lets the second run through in the next epoch, with a wallet subscription of its own that it can serve', async () => {
       use(await loadFixture(afterSetup));
       await fundOwner();
       const E = stateNow().E;
@@ -1053,36 +1053,36 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       passes(serve);
       const held = decodeState(JSON.parse(fs.readFileSync(path.join(dir, 'b.json'), 'utf8')));
       expect(held.E).to.equal(E + 1n);
-      expect((await fx.f.CSS.getSubscription(held.periods.wallet ?? '')).sessionKey).to.equal(derived('b/wallet-session').address);
+      expect((await fx.f.SSS.getSubscription(held.subscriptions.wallet ?? '')).sessionKey).to.equal(derived('b/wallet-session').address);
     });
 
-    it('stops a run whose account period is funded in that epoch when another run took the wallet period, sending nothing', async () => {
+    it('stops a run whose account subscription is funded in that epoch when another run took the wallet subscription, sending nothing', async () => {
       use(await loadFixture(deployFixture));
       await fundExactly();
       await fundExactly();
-      await stops(phaseSetup(await ctxOf('setup', { run: 'b', stopAt: 'setup.fund-account-period' })));
+      await stops(phaseSetup(await ctxOf('setup', { run: 'b', stopAt: 'setup.fund-account-subscription' })));
       const first = await ctxOf('setup');
       await phaseSetup(first);
       passes(first);
       const blocks = await head();
-      expect(await errorOf(phaseSetup(await ctxOf('setup', { run: 'b' })))).to.match(/is another run's: .*and this run funded its account period in that epoch: start a new run$/);
+      expect(await errorOf(phaseSetup(await ctxOf('setup', { run: 'b' })))).to.match(/is another run's: .*and this run funded its account subscription in that epoch: start a new run$/);
       expect(await head()).to.equal(blocks);
     });
 
-    it('keeps a resume of the same run working, whose period is its own', async () => {
+    it('keeps a resume of the same run working, whose subscription is its own', async () => {
       use(await loadFixture(deployFixture));
       await fundExactly();
-      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period:sent' })));
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-subscription:sent' })));
       const resumed = await ctxOf('setup');
       await phaseSetup(resumed);
       passes(resumed);
       expect(resumed.file.done('setup')).to.equal(true);
     });
 
-    it('takes a period of the run\'s own key on other terms for a clash too: PHASE=check says so, and a resume stops, sending nothing', async () => {
+    it('takes a subscription of the run\'s own key on other terms for a clash too: PHASE=check says so, and a resume stops, sending nothing', async () => {
       use(await loadFixture(deployFixture));
       await fundExactly();
-      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-period' })));
+      await stops(phaseSetup(await ctxOf('setup', { stopAt: 'setup.fund-wallet-subscription' })));
       editState((raw) => {
         raw.amounts.walletValue = String(BigInt(raw.amounts.walletValue) + TRAC);
       });
@@ -1090,7 +1090,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       await phaseCheck(check);
       expect(checkOf(check, 'if it has one, is this run\'s').ok).to.equal(false);
       const blocks = await head();
-      expect(await errorOf(phaseSetup(await ctxOf('setup')))).to.match(/and this run funded its account period in that epoch: start a new run$/);
+      expect(await errorOf(phaseSetup(await ctxOf('setup')))).to.match(/and this run funded its account subscription in that epoch: start a new run$/);
       expect(await head()).to.equal(blocks);
     });
 
@@ -1148,36 +1148,36 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx.report.failed).to.equal(0);
     });
 
-    it('fails a bucket that counted other than the run landed, by its events', async () => {
+    it('fails a budget that counted other than the run landed, by its events', async () => {
       const s = await served();
       await toEpoch(s.E + 1n);
       editState((raw) => {
         raw.amounts.walletValue = String(BigInt(raw.amounts.walletValue) + TRAC);
       });
-      await failsAndGoesNoFurther(await ctxOf('claim'), 'the wallet bucket counted all the seller claimed');
+      await failsAndGoesNoFurther(await ctxOf('claim'), 'the wallet budget counted all the seller claimed');
     });
 
     it('fails a fill the batches do not show', async () => {
       const s = await served();
       const qis = await writer();
-      await qis.setBucketFilled(s.periods.wallet, 0, (await fx.f.QIS.bucketFilled(s.periods.wallet, 0)) - 1n);
+      await qis.setBudgetUsed(s.subscriptions.wallet, 0, (await fx.f.QIS.budgetUsed(s.subscriptions.wallet, 0)) - 1n);
       await toEpoch(s.E + 1n);
-      await failsAndGoesNoFurther(await ctxOf('claim'), 'the wallet bucket counted all the seller claimed');
+      await failsAndGoesNoFurther(await ctxOf('claim'), 'the wallet budget counted all the seller claimed');
     });
 
     describe('with other value in the seller\'s R and in the epoch\'s', () => {
-      /** The seller and another land on another buyer's period of E. */
+      /** The seller and another land on another buyer's subscription of E. */
       const otherValue = async () => {
         const s = await served();
-        const period = await fx.helpers.walletFund(fx.f.accounts[21], s.E, 50n * TRAC);
+        const subscription = await fx.helpers.walletFund(fx.f.accounts[21], s.E, 50n * TRAC);
         const other = await fx.helpers.createSeller(100_000n * TRAC, 0n);
         await fx.helpers.scoreEpoch(s.E, other, 10n ** 18n);
-        await fx.helpers.claimReceipts(fx.seller, period, 10n * TRAC);
-        await fx.helpers.claimReceipts(other, period, 5n * TRAC);
+        await fx.helpers.claimReceipts(fx.seller, subscription, 10n * TRAC);
+        await fx.helpers.claimReceipts(other, subscription, 5n * TRAC);
         return { s, other };
       };
 
-      it('takes what they counted: each bucket, R and ΣR hold', async () => {
+      it('takes what they counted: each budget, R and ΣR hold', async () => {
         const { s } = await otherValue();
         await toEpoch(s.E + 1n);
         const ctx = await ctxOf('claim');
@@ -1192,7 +1192,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         const { s } = await otherValue();
         const qis = await writer();
         const node = await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E);
-        await qis.setNodeEpoch(fx.seller.identityId, s.E, { r: node.r + 1n, score: node.score });
+        await qis.setNodeEpoch(fx.seller.identityId, s.E, { servedValue: node.servedValue + 1n, weightedValue: node.weightedValue });
         await toEpoch(s.E + 1n);
         const ctx = await ctxOf('claim');
         await failsAndGoesNoFurther(ctx, 'R and score in epoch');
@@ -1203,7 +1203,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         const { s } = await otherValue();
         const qis = await writer();
         const node = await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E);
-        await qis.setNodeEpoch(fx.seller.identityId, s.E, { r: node.r, score: node.score + 1n });
+        await qis.setNodeEpoch(fx.seller.identityId, s.E, { servedValue: node.servedValue, weightedValue: node.weightedValue + 1n });
         await toEpoch(s.E + 1n);
         await failsAndGoesNoFurther(await ctxOf('claim'), 'R and score in epoch');
       });
@@ -1212,7 +1212,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         const { s } = await otherValue();
         const qis = await writer();
         const totals = await fx.f.QIS.getEpochTotals(s.E);
-        await qis.setEpochTotals(s.E, { sumR: totals.sumR + 1n, sumScore: totals.sumScore, lambdaBps: totals.lambdaBps });
+        await qis.setEpochTotals(s.E, { totalServed: totals.totalServed + 1n, totalWeighted: totals.totalWeighted, lambdaBps: totals.lambdaBps });
         await toEpoch(s.E + 1n);
         const ctx = await ctxOf('claim');
         await failsAndGoesNoFurther(ctx, 'ΣR and ΣQueryInferenceScore');
@@ -1222,17 +1222,17 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       it('fails a group of ours counted at too little, though the other value lifts R past all ours were due', async () => {
         const { s } = await otherValue();
         await toEpoch(s.E + 1n);
-        // What the run planned for the bucket is more than its events show.
+        // What the run planned for the budget is more than its events show.
         editState((raw) => {
           raw.amounts.caValue = String(BigInt(raw.amounts.caValue) + 2n * TRAC);
         });
         const ctx = await ctxOf('claim');
-        await failsAndGoesNoFurther(ctx, 'the account bucket counted all the seller claimed');
+        await failsAndGoesNoFurther(ctx, 'the account budget counted all the seller claimed');
         expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
       });
     });
 
-    describe('with what is booked in E against what the periods of E were funded with', () => {
+    describe('with what is booked in E against what the subscriptions of E were funded with', () => {
       /** The wallet money booked in `epoch`, `less` short of what was funded, as a booking that fell short leaves it. */
       const bookedShort = async (epoch: bigint, less: bigint) => {
         const qis = await fx.f.QIS.getAddress();
@@ -1269,7 +1269,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         await failsAndGoesNoFurther(await ctxOf('claim'), 'what is booked in epoch');
       });
 
-      it('takes another buyer\'s period of E funded in the epoch before, and top-ups, to the wei, and leaves out periods of other epochs', async () => {
+      it('takes another buyer\'s subscription of E funded in the epoch before, and top-ups, to the wei, and leaves out subscriptions of other epochs', async () => {
         use(await loadFixture(deployFixture));
         const before = await fx.f.Chronos.getCurrentEpoch();
         await fx.helpers.walletFund(fx.f.accounts[21], before + 1n, 5n * TRAC);
@@ -1428,7 +1428,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
 
   describe('every ended epoch\'s pool, against the rollover rule', () => {
     const MONEY = 5n * TRAC;
-    /** Another buyer's period of this epoch, which ends with no value counted in it, and the clock in the next: the empty epoch. */
+    /** Another buyer's subscription of this epoch, which ends with no value counted in it, and the clock in the next: the empty epoch. */
     const anEmptyEpochWithMoney = async () => {
       use(await loadFixture(deployFixture));
       const empty = await fx.f.Chronos.getCurrentEpoch();
@@ -1456,7 +1456,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx.file.done('claim')).to.equal(true);
       const booked = await fx.f.QIS.fundingIn(s.E);
       expect(await fx.f.QS.epochPool(empty)).to.equal(0n);
-      expect(await fx.f.QS.epochPool(s.E)).to.equal(booked.wallet + booked.conviction + MONEY);
+      expect(await fx.f.QS.epochPool(s.E)).to.equal(booked.wallet + booked.account + MONEY);
       expect(checkOf(ctx, 'every ended epoch from').detail).to.equal('0.0 TRAC waiting for the next epoch with value');
     });
 

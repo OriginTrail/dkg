@@ -405,11 +405,11 @@ PHASE=setup SEND=1 $SMOKE
 The roles:
 
 - **The owner**: a hot testnet wallet. It opens a new Conviction Account
-  under PublishingConviction 10.2.0, opts it in, and assigns a buyer key. It
-  funds a wallet-paid period, and stakes a small tier-0 position on the
+  under PublishingConviction 10.2.0, opts it in, and adds a buyer. It
+  funds a wallet-paid subscription, and stakes a small tier-0 position on the
   seller's node. It also claims that position.
-- **The buyer keys and the session keys**: derived from the owner key and
-  the run label, so no key is stored. The owner sends each buyer key a little
+- **The buyers and the session keys**: derived from the owner key and
+  the run label, so no key is stored. The owner sends each buyer a little
   ETH.
 - **The seller**: one of our testnet Core Nodes, by its operational key. Its
   node also sends proofs from that key. A dedicated second operational key on
@@ -421,10 +421,10 @@ What a run needs:
 |---|---|
 | `RFC27_SMOKE_OWNER_KEY` | required, from the owner wallet |
 | `RFC27_SMOKE_SELLER_KEY` | required, an operational key of the seller node |
-| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run. The owner has one wallet period an epoch, so a second run of the same owner in the same epoch defers to the next, before it spends anything |
+| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run. The owner has one wallet subscription an epoch, so a second run of the same owner in the same epoch defers to the next, before it spends anything |
 | `RPC_BASE_SEPOLIA_V10` | `https://sepolia.base.org` |
-| The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet period and a 50 TRAC stake. A resumed run needs only what its remaining steps spend |
-| The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer key; `PHASE=check` prints it at the current fee |
+| The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet subscription and a 50 TRAC stake. A resumed run needs only what its remaining steps spend |
+| The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer; `PHASE=check` prints it at the current fee |
 | The seller key's ETH | about 0.0001: two receipt batches, about 0.6M gas |
 
 The amounts are configurable: `RFC27_SMOKE_STAKE`, `RFC27_SMOKE_CA_VALUE`,
@@ -443,15 +443,15 @@ The phases, with `SEND=1`, across one epoch boundary:
 - `serve` checks that the seller has a node score in the current epoch, which a
   batch needs (`NoNodeScore`). Until it has, `serve` waits and says so. Run it
   again after the node's next proof, before E ends: a batch lands only during its
-  period's epoch, so once E has ended `serve` stops, and the run goes no further.
+  subscription's epoch, so once E has ended `serve` stops, and the run goes no further.
   Start a new one.
-- `serve` also shows a batch refused for what its bucket has left, with its nonces
+- `serve` also shows a batch refused for what its budget has left, with its nonces
   unspent, and the same batch landing after a top-up.
 - `claim` needs nothing to run first: an epoch's numbers are final when it ends. It
-  requires each of the run's buckets to have counted all the seller claimed on it,
-  by its own `ReceiptsClaimed` events; the node's and the epoch's sums to be what
+  requires each of the run's budgets to have counted all the seller claimed on it,
+  by its own `ReceiptsLanded` events; the node's and the epoch's sums to be what
   all the groups counted in E add up to; the money booked in E to be exactly what
-  the periods of E were funded and topped up with; and every ended epoch's pool to
+  the subscriptions of E were funded and topped up with; and every ended epoch's pool to
   be what the rollover rule gives. It checks this before it sends anything, and
   reads up to two epochs of logs to do it, which can take a few minutes on a public
   endpoint.

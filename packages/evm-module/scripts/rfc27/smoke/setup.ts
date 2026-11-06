@@ -1,6 +1,6 @@
 // PHASE setup, in epoch E: a small position on the seller's node; a new
 // Conviction Account under PublishingConviction 10.2.0, opted in, the buyer
-// key assigned; a Conviction Account period and a wallet-paid period of E, each
+// key added; a Conviction Account subscription and a wallet-paid subscription of E, each
 // booked in E.
 
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
@@ -9,7 +9,7 @@ import { eventsIn } from '../contracts';
 import { FORK_ETH } from '../fork';
 import { fmt, iso } from '../report';
 import { MIN_EPOCH_LEFT, needsOf, plannedAmounts } from './config';
-import { PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt, planDigest, walletPeriodClash } from './context';
+import { PoolCtx, bindState, complete, doneEarlier, epochStart, now, opensAt, planDigest, walletSubscriptionClash } from './context';
 import { checkBalances, checkDeployment, maxFeePerGas, progressOf, verifySeller } from './check';
 import { need } from './roles';
 import { Amounts, SmokeState, setupMissing } from './state';
@@ -56,7 +56,7 @@ function newState(ctx: PoolCtx, hub: string, settlement: string, sellerId: bigin
     },
     sellerId,
     amounts: a,
-    periods: {},
+    subscriptions: {},
     costs: {},
     steps: {},
     phases: {},
@@ -73,18 +73,18 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const activation = await c.qis.activationEpoch();
   if (activation === 0n) throw new Error('the activation epoch is unset: the Hub owner sets it after the Hub transaction');
   if ((await c.chronos.getCurrentEpoch()) < activation && !(await opensAt(ctx, (await epochStart(ctx, activation)) + 120n, `funding, from the activation epoch ${activation}`))) return;
-  const fundedIn = s?.periods.ca || s?.periods.wallet || s?.steps['setup.fund-account-period'] || s?.steps['setup.fund-wallet-period'] ? s?.E : undefined;
+  const fundedIn = s?.subscriptions.ca || s?.subscriptions.wallet || s?.steps['setup.fund-account-subscription'] || s?.steps['setup.fund-wallet-subscription'] ? s?.E : undefined;
   const end = await epochStart(ctx, (await c.chronos.getCurrentEpoch()) + 1n);
   if (fundedIn === undefined && end - (await now(ctx)) < MIN_EPOCH_LEFT && !(await opensAt(ctx, end + 120n, 'setup, with a whole epoch for setup and serve'))) return;
   let current = await c.chronos.getCurrentEpoch();
-  if (fundedIn !== undefined && current !== fundedIn) throw new Error(`the periods of this run were funded in epoch ${fundedIn}, and it is ${current} now: start a new run`);
+  if (fundedIn !== undefined && current !== fundedIn) throw new Error(`the subscriptions of this run were funded in epoch ${fundedIn}, and it is ${current} now: start a new run`);
   const a = await plannedAmounts(c, s, await maxFeePerGas(ctx));
 
-  // Before anything is spent: the owner has one wallet period an epoch, and it must be this run's.
-  const clash = await walletPeriodClash(ctx, r, a.walletValue, fundedIn ?? current);
+  // Before anything is spent: the owner has one wallet subscription an epoch, and it must be this run's.
+  const clash = await walletSubscriptionClash(ctx, r, a.walletValue, fundedIn ?? current);
   if (clash) {
-    if (fundedIn !== undefined) throw new Error(`${clash}, and this run funded its account period in that epoch: start a new run`);
-    if (!(await opensAt(ctx, (await epochStart(ctx, current + 1n)) + 120n, `setup, with a wallet period of its own in the next epoch, as ${clash}`))) return;
+    if (fundedIn !== undefined) throw new Error(`${clash}, and this run funded its account subscription in that epoch: start a new run`);
+    if (!(await opensAt(ctx, (await epochStart(ctx, current + 1n)) + 120n, `setup, with a wallet subscription of its own in the next epoch, as ${clash}`))) return;
     current = await c.chronos.getCurrentEpoch();
   }
 
@@ -147,31 +147,31 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     report.check('createAccount books nothing to the staker pool (10.2.0), and the commitment moved into the vault', credits.length === 0 && moved === a.committed, `${fmt(moved)} TRAC, by its own Transfer logs`);
   }
   const accountId = s?.accountId;
-  const spending = accountId === undefined ? undefined : await c.cssvc.getServiceSpending(accountId);
+  const spending = accountId === undefined ? undefined : await c.sss.getServiceSpending(accountId);
   await market.optIn('setup.opt-in', r.owner, accountId, { needs: ['setup.create-account'], done: spending && spending.enabledAt !== 0n ? 'service spending is on' : undefined });
 
-  // 3. The buyer key, assigned with its consent by EIP-712 signature, at most the period's cost and its top-up.
+  // 3. The buyer, added with its consent by EIP-712 signature, at most the subscription's cost and its top-up.
   const cap = costOf(a.caValue, a.discountBps) + costOf(a.caTopUp, a.discountBps);
   const account = accountId !== undefined && s?.accountExpiresAt !== undefined ? { id: accountId, expiresAt: s.accountExpiresAt } : undefined;
-  const held = accountId === undefined ? undefined : await c.cssvc.getAssignment(accountId, r.buyer.address);
-  const assigned = await market.assign('setup.assign-buyer', `owner: assign the buyer key ${r.buyer.address}, at most ${fmt(cap)} TRAC a period`, r.owner, account, r.buyer, cap, {
+  const held = accountId === undefined ? undefined : await c.sss.getGrant(accountId, r.buyer.address);
+  const added = await market.addBuyer('setup.add-buyer', `owner: add the buyer ${r.buyer.address}, at most ${fmt(cap)} TRAC a subscription`, r.owner, account, r.buyer, cap, {
     needs: ['setup.opt-in'],
-    done: held && held.assignedAt !== 0n && held.revokedAt === 0n ? `assigned at nonce ${held.nonce}` : undefined,
+    done: held && held.grantedAt !== 0n && held.revokedAt === 0n ? `added at nonce ${held.nonce}` : undefined,
   });
-  const [assignedEv] = eventsIn(assigned.receipt, c.ss, c.ss.getEvent('ServiceAssigned'));
-  if (shownBy(report, assigned, assignedEv, 'the assignment\'s ServiceAssigned event') && account) {
+  const [addedEv] = eventsIn(added.receipt, c.ss, c.ss.getEvent('BuyerAdded'));
+  if (shownBy(report, added, addedEv, 'the grant\'s BuyerAdded event') && account) {
     report.check(
-      'the buyer key is assigned, with its limit and the account\'s expiry as signed',
-      assignedEv.assignee === r.buyer.address && assignedEv.maxCostPerPeriod === cap && assignedEv.expiresAt === account.expiresAt,
+      'the buyer is added, with its limit and the account\'s expiry as signed',
+      addedEv.buyer === r.buyer.address && addedEv.maxCostPerEpoch === cap && addedEv.expiresAt === account.expiresAt,
     );
   }
   if (s && accountId !== undefined) {
-    const now_ = await c.cssvc.getAssignment(accountId, r.buyer.address);
-    if (now_.assignedAt !== 0n) s.buyerNonce = now_.nonce;
+    const now_ = await c.sss.getGrant(accountId, r.buyer.address);
+    if (now_.grantedAt !== 0n) s.buyerNonce = now_.nonce;
     file.save();
   }
 
-  // 4. Gas for the derived buyer keys.
+  // 4. Gas for the derived buyers.
   for (const [k, w] of [['buyer', r.buyer], ['edge-buyer', r.edgeBuyer]] as const) {
     const bal = await ctx.hre.ethers.provider.getBalance(w.address);
     await ctx.tx.step({
@@ -186,30 +186,30 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     });
   }
 
-  // 5. The Conviction Account period of E: no TRAC moves, and its cost is booked in E.
-  const caPeriod = subscriptionIdOf(r.buyer.address, E);
-  const funded = await market.fundFromConviction('setup.fund-account-period', 'buyer key', r.buyer, accountId, E, r.caSession.address, a.caValue, planDigest(ctx, 'account plan'), {
-    needs: ['setup.assign-buyer', 'setup.eth-buyer'],
-    done: (await c.cssvc.subscriptionExists(caPeriod)) ? `period ${caPeriod} exists` : undefined,
+  // 5. The Conviction Account subscription of E: no TRAC moves, and its cost is booked in E.
+  const caSubscription = subscriptionIdOf(r.buyer.address, E);
+  const funded = await market.fundFromAccount('setup.fund-account-subscription', 'buyer', r.buyer, accountId, E, r.caSession.address, a.caValue, planDigest(ctx, 'account plan'), {
+    needs: ['setup.add-buyer', 'setup.eth-buyer'],
+    done: (await c.sss.subscriptionExists(caSubscription)) ? `subscription ${caSubscription} exists` : undefined,
   });
-  if (s && (await c.cssvc.subscriptionExists(caPeriod))) {
-    s.periods.ca = caPeriod;
-    s.costs.ca = (await c.cssvc.getSubscription(caPeriod)).cost;
+  if (s && (await c.sss.subscriptionExists(caSubscription))) {
+    s.subscriptions.ca = caSubscription;
+    s.costs.ca = (await c.sss.getSubscription(caSubscription)).cost;
     file.save();
   }
-  const [fundedEv] = eventsIn(funded.receipt, c.ss, c.ss.getEvent('PeriodFunded'));
-  if (shownBy(report, funded, fundedEv, 'the account period\'s PeriodFunded event')) {
-    report.check(`the account period's cost is its value at the account's discount: ${fmt(fundedEv.cost)} TRAC`, fundedEv.cost === costOf(a.caValue, a.discountBps) && fundedEv.subscriptionId === caPeriod);
+  const [fundedEv] = eventsIn(funded.receipt, c.ss, c.ss.getEvent('SubscriptionFunded'));
+  if (shownBy(report, funded, fundedEv, 'the account subscription\'s SubscriptionFunded event')) {
+    report.check(`the account subscription's cost is its value at the account's discount: ${fmt(fundedEv.cost)} TRAC`, fundedEv.cost === costOf(a.caValue, a.discountBps) && fundedEv.subscriptionId === caSubscription);
     const moved = eventsIn(funded.receipt, c.token, c.token.getEvent('Transfer')).length;
     const credits = eventsIn(funded.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).length;
-    report.check('the account period moves no TRAC and books nothing to the staker pool', moved === 0 && credits === 0);
-    // No event says what a transaction adds to an epoch's money, and others fund periods too: the money holds it at least.
-    const booked = (await c.qis.fundingIn(E)).conviction;
+    report.check('the account subscription moves no TRAC and books nothing to the staker pool', moved === 0 && credits === 0);
+    // No event says what a transaction adds to an epoch's money, and others fund subscriptions too: the money holds it at least.
+    const booked = (await c.qis.fundingIn(E)).account;
     report.check(`its cost is booked in epoch ${E}`, booked >= fundedEv.cost, `booked ${fmt(booked)} TRAC`);
   }
 
-  // 6. The wallet-paid period of E, paid by the owner into the vault.
-  const walletPeriod = subscriptionIdOf(r.ownerAddr, E);
+  // 6. The wallet-paid subscription of E, paid by the owner into the vault.
+  const walletSubscription = subscriptionIdOf(r.ownerAddr, E);
   const walletFunded = await market.fundFromWallet(
     'setup',
     'owner',
@@ -218,18 +218,18 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     r.walletSession.address,
     a.walletValue,
     planDigest(ctx, 'wallet plan'),
-    { done: (await c.cssvc.subscriptionExists(walletPeriod)) ? `period ${walletPeriod} exists` : undefined },
+    { done: (await c.sss.subscriptionExists(walletSubscription)) ? `subscription ${walletSubscription} exists` : undefined },
   );
-  if (s && (await c.cssvc.subscriptionExists(walletPeriod))) {
-    s.periods.wallet = walletPeriod;
+  if (s && (await c.sss.subscriptionExists(walletSubscription))) {
+    s.subscriptions.wallet = walletSubscription;
     file.save();
   }
-  const [walletEv] = eventsIn(walletFunded.receipt, c.ssw, c.ssw.getEvent('PeriodFunded'));
-  if (shownBy(report, walletFunded, walletEv, 'the wallet period\'s PeriodFunded event') && walletFunded.receipt) {
+  const [walletEv] = eventsIn(walletFunded.receipt, c.ssw, c.ssw.getEvent('SubscriptionFunded'));
+  if (shownBy(report, walletFunded, walletEv, 'the wallet subscription\'s SubscriptionFunded event') && walletFunded.receipt) {
     const moved = tracMoved(walletFunded.receipt, c.token, vault);
     const booked = (await c.qis.fundingIn(E)).wallet;
     report.check(
-      `the wallet period's ${fmt(a.walletValue)} TRAC moved into the vault and is booked in epoch ${E}`,
+      `the wallet subscription's ${fmt(a.walletValue)} TRAC moved into the vault and is booked in epoch ${E}`,
       moved === a.walletValue && booked >= a.walletValue,
       `${fmt(moved)} TRAC by its own Transfer logs; booked ${fmt(booked)} TRAC`,
     );

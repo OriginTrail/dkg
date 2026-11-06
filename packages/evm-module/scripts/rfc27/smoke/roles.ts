@@ -1,5 +1,5 @@
 // The smoke test's roles and keys. The owner and the seller sign with keys
-// from the environment, never printed; the buyer keys and the session keys are
+// from the environment, never printed; the buyers and the session keys are
 // derived from the owner key and the run label, so no key is ever stored. On
 // the local fork, an owner or a seller without a key is impersonated.
 
