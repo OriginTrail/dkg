@@ -286,15 +286,15 @@ describe('SettingsPage (cleanup) — rendering, removals, a11y', () => {
   it('Danger zone shutdown is a two-step confirm (no shutdown on first click)', async () => {
     const c = await render();
     const btn = Array.from(c.querySelectorAll('button')).find(
-      (b) => (b.textContent ?? '').trim() === 'Shutdown Node',
+      (b) => (b.textContent ?? '').trim() === 'Shut down node',
     )!;
     await act(async () => { btn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();
     expect(shutdownNodeMock).not.toHaveBeenCalled();
-    expect(c.textContent ?? '').toMatch(/Confirm Shutdown/);
+    expect(c.textContent ?? '').toMatch(/Confirm shutdown/);
     // Second click confirms.
     const confirmBtn = Array.from(c.querySelectorAll('button')).find(
-      (b) => (b.textContent ?? '').trim() === 'Confirm Shutdown',
+      (b) => (b.textContent ?? '').trim() === 'Confirm shutdown',
     )!;
     await act(async () => { confirmBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
     await flush();

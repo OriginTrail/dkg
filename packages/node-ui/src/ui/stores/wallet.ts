@@ -184,7 +184,7 @@ export const useWalletStore = create<WalletState>((set, get) => {
     async switchToExpectedChain() {
       const { provider, bootstrap } = get();
       if (!provider) throw new Error('Wallet not connected.');
-      if (!bootstrap) throw new Error('Chain not bootstrapped.');
+      if (!bootstrap) throw new Error('Chain details haven’t loaded yet.');
       await switchWalletToBootstrap(provider, bootstrap);
     },
   };

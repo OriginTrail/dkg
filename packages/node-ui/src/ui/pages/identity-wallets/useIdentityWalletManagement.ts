@@ -233,7 +233,7 @@ function useIdentityWalletMutations({
     if (!bootstrap) {
       dispatch({
         type: 'failed',
-        message: 'This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.',
+        message: 'This version of the node can’t manage identity wallets. Upgrade the node and reload the page.',
       });
       return;
     }

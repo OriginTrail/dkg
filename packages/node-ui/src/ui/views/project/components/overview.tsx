@@ -231,7 +231,7 @@ function overviewAccessAgentStat(
       id: 'participants',
       value: 'Open',
       label: 'Public access',
-      tooltip: 'Public Context Graphs do not have an authoritative allowlist count.',
+      tooltip: 'Public Context Graphs have no fixed participant list, so there’s no count.',
     };
   }
   if (participantsStatus === 'loading') {
@@ -264,7 +264,7 @@ function overviewAccessAgentStat(
     id: 'participants',
     value: formatNumber(agents.size),
     label: 'Agents with access',
-    tooltip: 'Includes the curator plus allowlisted participants reported by the node.',
+    tooltip: 'Includes the curator and the agents approved to access this Context Graph.',
   };
 }
 
@@ -434,7 +434,7 @@ export function ProjectOverviewCard({
     ? 'Live triple counts are unavailable.'
     : triplesIsPartial
       ? 'One or more layer triple counts are currently a lower bound.'
-      : 'Canonical triple total across all layers.';
+      : 'Total facts stored across all memory layers.';
   // Codex review bug D — distinguish "still fetching" from
   // "fetch failed" for the Subgraphs cell so we don't show a
   // perpetual ellipsis after a failed `/sub-graph/list` call. A

@@ -197,7 +197,7 @@ describe('formatJoinRequestError', () => {
 
     expect(msg).toContain('Curator rejected this join request');
     expect(msg).toContain('scope mismatch');
-    expect(msg).toContain('ContextGraphsHub address');
+    expect(msg).toContain('out-of-date network setting');
   });
 
   it('surfaces an unknown-CG rejection with an actionable hint', () => {

@@ -33,7 +33,7 @@ test.describe('Keyboard Shortcuts', () => {
 
   test('shortcuts are suppressed when text input is focused', async ({ page, bottomPanel }) => {
     await bottomPanel.toggle();
-    await bottomPanel.switchTab('Node Log');
+    await bottomPanel.switchTab('Node log');
     const logFilter = page.locator(sel.bottom.logFilter).first();
     await logFilter.waitFor({ state: 'visible' });
     await logFilter.focus();

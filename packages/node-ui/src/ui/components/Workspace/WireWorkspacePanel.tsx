@@ -194,7 +194,7 @@ export function WireWorkspacePanel({
     try {
       const expanded = workspaceRoot.trim();
       if (!expanded || expanded.startsWith('~')) {
-        throw new Error('Workspace path must be an absolute path (start with `/`). The daemon will create the directory if it does not exist.');
+        throw new Error('Workspace path must be an absolute path (start with `/`). The node will create the folder if it doesn’t exist.');
       }
       const result = await planProjectManifestInstall(contextGraphId, {
         workspaceRoot: expanded,
@@ -241,7 +241,7 @@ export function WireWorkspacePanel({
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
           Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
           On the first chat, your agent will see the project ontology
-          {variant === 'join' ? ', tasks, and decisions' : ' you publish via the canonical assertion-write flow'}.
+          {variant === 'join' ? ', tasks, and decisions' : ' you publish'}.
         </div>
 
         <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginBottom: 8 }}>
@@ -320,8 +320,8 @@ export function WireWorkspacePanel({
           {variant === 'create' ? 'Wire your local workspace' : 'Wire this project locally'}
         </div>
         {variant === 'create'
-          ? 'Choose a directory for the new project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can join the project from turn one.'
-          : 'Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.'}
+          ? 'Choose a folder for the new project and the coding tool you’ll use. The node adds the setup files your agent needs, so it can join the project from the first chat.'
+          : 'Choose a folder for this project and the coding tool you’ll use. The node adds the setup files your agent needs, so it can work on this project.'}
       </div>
 
       {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
@@ -338,8 +338,7 @@ export function WireWorkspacePanel({
           style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)' }}
         />
         <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-          Absolute path. Created if it doesn't exist. Daemon writes only inside this dir
-          (plus optionally <code>~/.claude/settings.json</code> if Claude Code is selected).
+          Use a full path. The folder is created if it doesn't exist. The node writes only to this folder, and to <code>~/.claude/settings.json</code> if you choose Claude Code.
           {host && <> Defaulted from your <code>$HOME</code> = <code>{host.homedir}</code>.</>}
         </div>
       </div>
@@ -394,7 +393,7 @@ export function WireWorkspacePanel({
           maxLength={80}
         />
         <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-          Free-form human label rendered as the agent's name in chips, lists, and rdfs:label triples.
+          Your agent's name in the node UI, and in the data it writes.
           Doesn't affect attribution — only changes how you appear to others.
         </div>
       </div>

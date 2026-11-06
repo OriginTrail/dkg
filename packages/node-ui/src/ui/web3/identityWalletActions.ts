@@ -143,7 +143,7 @@ const connectionPolicy: BrowserWalletConnectionPolicy = {
 function loadContext(deps: IdentityWalletActionDeps): IdentityWalletContext {
   if (!deps.bootstrap) {
     throw new IdentityWalletActionError(
-      'This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.',
+      'This version of the node can’t manage identity wallets. Upgrade the node and reload the page.',
     );
   }
   const getWalletState = deps.getWalletState ?? (() => {

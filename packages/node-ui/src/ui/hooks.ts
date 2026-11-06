@@ -63,7 +63,7 @@ export function useFetch<T>(
             return;
           }
           setError({ scope, message: hasToken
-            ? 'Authentication expired — please refresh the page.'
+            ? 'Authentication expired: refresh the page.'
             : 'API token required — enter it at the top of the page.' });
           return;
         }

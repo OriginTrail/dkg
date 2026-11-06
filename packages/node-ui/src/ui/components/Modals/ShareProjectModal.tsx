@@ -336,7 +336,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                     color: 'var(--text-tertiary)', background: 'var(--bg-surface)',
                     border: '1px dashed var(--border-default)', marginBottom: 8,
                   }}>
-                    No agents on allowlist — Context Graph is open to anyone who subscribes.
+                    No agents on this list yet: the Context Graph is open to anyone who subscribes.
                   </div>
                 )}
               </div>
@@ -372,7 +372,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                         cursor: 'pointer',
                       }}
                     >
-                      {copied === 'invite' ? 'Copied' : 'Copy Invite'}
+                      {copied === 'invite' ? 'Copied' : 'Copy invite'}
                     </button>
                   </div>
                 )}

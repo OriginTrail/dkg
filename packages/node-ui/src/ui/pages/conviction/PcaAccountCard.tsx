@@ -149,7 +149,7 @@ export function PcaAccountCard({
 
   const ownerNote =
     ownerMode === 'daemon'
-      ? 'Daemon-managed: owner actions use this node’s primary operational wallet.'
+      ? 'Managed by this node: owner actions use its primary operational wallet.'
       : ownerMode === 'wallet'
         ? 'Wallet-managed: owner actions are signed by the connected wallet.'
         : connectedAs

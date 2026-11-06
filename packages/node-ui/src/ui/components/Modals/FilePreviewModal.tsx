@@ -72,7 +72,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
           setBlobUrl(blob);
         }
       })
-      .catch((err) => setError(err.message ?? 'Failed to load file info'))
+      .catch((err) => setError(err.message ?? 'Couldn’t load file info.'))
       .finally(() => setLoading(false));
 
     return () => {

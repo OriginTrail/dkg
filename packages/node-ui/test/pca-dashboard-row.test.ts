@@ -3,7 +3,7 @@
 // N4 — PcaDashboardRow (the Dashboard "Publisher discount" row, the primary
 // discovery surface) was the lone untested PCA component. Pins: covered shows the
 // exact discount tier (data-covered=true); uncovered shows
-// "None — publishing at the direct cost"; the CTA label is role-dependent and
+// "None: publishing at the direct cost"; the CTA label is role-dependent and
 // opens the conviction tab. Deps are mocked (the row is pure presentation).
 
 import React, { act } from 'react';
@@ -55,12 +55,12 @@ describe('PcaDashboardRow', () => {
     await unmount();
   });
 
-  it('uncovered → "None — publishing at the direct cost", data-covered=false', async () => {
+  it('uncovered → "None: publishing at the direct cost", data-covered=false', async () => {
     state.overview = { covered: false, bestCoveringDiscountBps: null, walletsInconclusive: false };
     const { container, unmount } = await render(React.createElement(PcaDashboardRow));
     const value = container.querySelector('.v10-ws-pca-value')!;
     expect(value.getAttribute('data-covered')).toBe('false');
-    expect(value.textContent).toBe('None — publishing at the direct cost');
+    expect(value.textContent).toBe('None: publishing at the direct cost');
     await unmount();
   });
 

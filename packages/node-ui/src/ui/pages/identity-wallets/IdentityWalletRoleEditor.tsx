@@ -6,7 +6,7 @@ const ROLE_EDITOR_META = {
   operational: {
     title: 'Operational keys',
     label: 'Operational wallet address',
-    description: 'These wallets sign publishes. Registering an address does not copy its private key into this node; it must already be present in the node\'s operational wallet pool to participate in rotation.',
+    description: 'These wallets sign publishes. Registering an address doesn\'t add its private key to this node. To be used for signing, the wallet\'s private key must already be in the node\'s operational wallets.',
     addAction: 'add-operational',
     removeAction: 'remove-operational',
     addLabel: 'Register operational',

@@ -83,7 +83,7 @@ export function ConvictionOverview() {
         if (cancelled) return;
         setBootstrapState({
           status: 'error',
-          error: (err as Error)?.message ?? 'Could not bootstrap wallet contract reads.',
+          error: (err as Error)?.message ?? 'Couldn’t load wallet contract details.',
         });
         initWallet();
       }
@@ -306,7 +306,7 @@ export function ConvictionOverview() {
               <div>
                 <h3 className="v10-pca-section-title">Owned by me</h3>
                 <p className="v10-pca-overview-caveat">
-                  Connect an owner wallet to discover and manage wallet-owned PCAs. Node-owned PCAs use the daemon wallet.
+                  To see and manage PCAs owned by your own wallet, connect that wallet. PCAs owned by this node appear without connecting.
                 </p>
               </div>
               <div className="v10-pca-overview-cta-group">
@@ -322,7 +322,7 @@ export function ConvictionOverview() {
               <div className="v10-pca-owned-groups">
                 <AccountGroup
                   title="This node (hot wallet)"
-                  description="Daemon-owned PCAs. Owner writes use the node daemon."
+                  description="PCAs owned by this node’s wallet. It’s a hot wallet: its key is stored on the node, so the node can sign owner actions for you."
                   accounts={daemonOwned}
                   blockExplorerUrl={blockExplorerUrl}
                   onManage={onManage}
@@ -400,7 +400,7 @@ export function ConvictionOverview() {
       {bootstrapState.status === 'error' && (
         <section className="v10-pca-discovered" data-testid="pca-wallet-bootstrap-error" role="status">
           <p className="v10-pca-overview-caveat">
-            Note: Couldn&apos;t load wallet contract bootstrap, so connected-wallet PCA discovery is paused.{' '}
+            Couldn&apos;t load wallet contract details, so PCAs for your connected wallet can&apos;t be found yet.{' '}
             <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}><RefreshCw size={12} />Retry</button>
           </p>
         </section>

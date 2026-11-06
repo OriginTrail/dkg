@@ -61,7 +61,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           <p className="v10-identity-wallet-description">
             Register and rotate operational or admin keys for node identity{' '}
             {data?.hasProfile ? data.identityId : '—'}.
-            Every change is signed by the connected admin wallet; its private key never enters the node.
+            You sign every change with your connected admin wallet. Its private key stays in that wallet and never reaches the node.
           </p>
         </div>
         <div className="v10-identity-wallet-counts" aria-label="Identity wallet counts">

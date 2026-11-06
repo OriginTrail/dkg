@@ -141,11 +141,10 @@ export function EligibilityVerdictBanner({
         {/* P2-interim — the chip can't see the sized per-publish fee (deferred to
             #1351), so don't assert the direct-cost publish WILL succeed; say it
             ATTEMPTS and fails if the wallet's TRAC is below the fee. */}
-        No PCA discount on this publish — it will attempt to pay the direct cost from the signing
-        wallet’s TRAC
+        This publish won’t get a PCA discount
         {/* F9 — name the forfeited discount when it's in context (§5.5 / #5a). */}
-        {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
-        {ownerPublish ? escrowCaveat : ''}; the publish fails if that TRAC is below the fee.{reasonText}
+        {disc ? ` (you’d lose ${pcaLabel}’s ${disc} discount)` : ''}. The signing wallet will pay the full cost in TRAC
+        {ownerPublish ? `,${escrowCaveat}` : ''}. If it doesn’t have enough TRAC, the publish fails.{reasonText}
       </>
     );
   } else if (verdict === 'fallthrough-no-funds') {
@@ -153,7 +152,7 @@ export function EligibilityVerdictBanner({
       <>
         {/* Q2 — source-agnostic: DANGER now fires on no TRAC (R3) OR no gas (Q2);
             the specific cause is carried in reasonText. */}
-        This publish will FAIL — no signing wallet can cover it
+        This publish will fail: no signing wallet can cover it.
         {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>

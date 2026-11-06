@@ -9,29 +9,29 @@ test.describe('Bottom Panel', () => {
     expect(await bottomPanel.isCollapsed()).toBe(true);
   });
 
-  test('has two tabs: Node Log, Transactions', async ({ bottomPanel }) => {
+  test('has two tabs: Node log, Transactions', async ({ bottomPanel }) => {
     // The PanelBottom component ships exactly two tabs. The legacy
     // `Agent Runs` + `SPARQL` placeholders were removed once those flows
     // moved into the Operations and Memory views, and the `Gossip` tab was
-    // retired (libp2p/GossipSub traffic stays in the Node Log). The
+    // retired (libp2p/GossipSub traffic stays in the Node log). The
     // assertion is intentionally exact-match so that re-adding tabs
     // without updating the spec is caught as a regression.
     const names = (await bottomPanel.getTabNames()).map((n) => n.trim());
-    expect(names).toEqual(['Node Log', 'Transactions']);
+    expect(names).toEqual(['Node log', 'Transactions']);
   });
 
-  test('Node Log is the default active tab', async ({ bottomPanel }) => {
+  test('Node log is the default active tab', async ({ bottomPanel }) => {
     const active = await bottomPanel.getActiveTabName();
-    expect(active?.trim()).toBe('Node Log');
+    expect(active?.trim()).toBe('Node log');
   });
 
-  test('expanding shows Node Log content with filter input', async ({ bottomPanel, page }) => {
+  test('expanding shows Node log content with filter input', async ({ bottomPanel, page }) => {
     await bottomPanel.toggle();
     const filter = page.locator('input[placeholder="Filter logs..."]');
     await expect(filter).toBeVisible();
   });
 
-  test('Node Log shows at least one log line once expanded', async ({ bottomPanel, page }) => {
+  test('Node log shows at least one log line once expanded', async ({ bottomPanel, page }) => {
     await bottomPanel.toggle();
     // Against a live devnet the daemon emits dozens of lines per second,
     // but a single line is enough to prove the tail pipeline is wired.
@@ -88,7 +88,7 @@ test.describe('Bottom Panel', () => {
   });
 
   test('log filter input filters the displayed log lines (server-side q)', async ({ bottomPanel, page }) => {
-    // The Node Log filter is applied SERVER-SIDE: typing re-fetches
+    // The Node log filter is applied SERVER-SIDE: typing re-fetches
     // `/api/node-log?q=<filter>` and the daemon returns only matching lines
     // (see NodeLogContent.load). The old "BUG: filter doesn't filter" note was
     // a mock-era artifact — the stub ignored `q`. Against the real daemon the

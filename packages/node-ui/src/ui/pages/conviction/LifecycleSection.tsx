@@ -30,7 +30,7 @@ export function LifecycleSection({
         {(health === 'expiring' || health === 'expired') && (
           <p className="v10-pca-card-warn ds-card-nested">
             {formatRelativeExpiry(snapshot.expiresAtTimestamp)}. The lock period can’t be extended —
-            Renew creates a fresh replacement account seeded from this one (the old TRAC stays locked
+            Renew creates a new account based on this one (the old TRAC stays locked
             until its own expiry).
           </p>
         )}
@@ -44,7 +44,7 @@ export function LifecycleSection({
           disabled={!access.writesEnabled}
           title={ownerTitle}
         >
-          Renew — create a replacement PCA
+          Renew: create a replacement PCA
         </button>
       </section>
 

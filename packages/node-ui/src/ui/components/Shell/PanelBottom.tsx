@@ -5,7 +5,7 @@ import { formatTime, formatDuration, shortId } from '../../hooks.js';
 import { opTypeText } from '../../op-type-colors.js';
 import { pressable } from '../../lib/pressable.js';
 
-const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
+const BOTTOM_TABS = ['Node log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
 
 // ── Icons ────────────────────────────────────────────────────────────────────
@@ -75,7 +75,7 @@ function useAutoScroll(dep: unknown) {
   return scrollRef;
 }
 
-// ── Node Log ─────────────────────────────────────────────────────────────────
+// ── Node log ─────────────────────────────────────────────────────────────────
 
 function NodeLogContent() {
   const [lines, setLines] = useState<string[]>([]);
@@ -273,7 +273,7 @@ export function PanelBottom() {
     bottomMaximised, toggleBottomMaximised,
     bottomHeight, setBottomHeight,
   } = useLayoutStore();
-  const [activeTab, setActiveTab] = useState<BottomTab>('Node Log');
+  const [activeTab, setActiveTab] = useState<BottomTab>('Node log');
 
   // Vertical drag-to-resize — same pattern as horizontal handles in App.tsx.
   const handleRef = useRef<HTMLDivElement>(null);
@@ -358,7 +358,7 @@ export function PanelBottom() {
 
       {!bottomCollapsed && (
         <div className="v10-bottom-content">
-          {activeTab === 'Node Log' && <NodeLogContent />}
+          {activeTab === 'Node log' && <NodeLogContent />}
           {activeTab === 'Transactions' && <TransactionsContent />}
         </div>
       )}
