@@ -235,6 +235,7 @@ Read formats from `lib/format.ts`, so a value looks the same on every screen.
 | Date and time in full | `formatDateTime(value)` | `Nov 5, 2026, 2:03 PM`, for tooltips and detail rows |
 | Time in a dense row | `formatTime` (`hooks.ts`) | Time today, weekday this week, date after that |
 | Count | `formatNumber(value)` | The reader's own digit grouping |
+| Node role | `formatNodeRole(role)` | `Core`, `Edge` |
 | Percentage from basis points | `formatBps(bps)` | `25%`, `12.5%` |
 | File size | `formatBytes(bytes)` (`hooks.ts`) | `1.2 MB` |
 | TRAC and ETH | `formatTrac`, `formatEth` | Token amounts with their tooltip |

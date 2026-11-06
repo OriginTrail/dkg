@@ -20,7 +20,7 @@ import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
 import { Toggle } from '../components/ds/Toggle.js';
 import { useModalDismiss } from '../components/Modals/useModalDismiss.js';
-import { truncateAddress } from '../lib/format.js';
+import { formatNodeRole, truncateAddress } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 
 function Field({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
@@ -409,7 +409,7 @@ function GeneralSettingsTab() {
         <div className="card-body">
           <Field label="Name" value={s?.name ?? '—'} />
           <Field label="Peer ID" value={s?.peerId ?? '—'} mono />
-          <Field label="Role" value={s?.nodeRole ?? '—'} />
+          <Field label="Role" value={formatNodeRole(s?.nodeRole)} />
           <Field label="Network" value={s?.networkName ?? (s?.networkId ? `Network ${s.networkId}` : '—')} />
           <Field label="Store" value={s?.storeBackend ?? '—'} mono />
           <div className="settings-node-status ds-card-nested">

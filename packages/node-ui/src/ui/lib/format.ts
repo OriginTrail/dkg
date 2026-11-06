@@ -35,3 +35,10 @@ export function bpsToPercent(bps: number): string {
 export function formatBps(bps: number): string {
   return `${bpsToPercent(bps)}%`;
 }
+
+/** A node's role as people read it: Core or Edge. Anything else shows as it came. */
+export function formatNodeRole(role: string | null | undefined): string {
+  if (role === 'core') return 'Core';
+  if (role === 'edge') return 'Edge';
+  return role || '—';
+}

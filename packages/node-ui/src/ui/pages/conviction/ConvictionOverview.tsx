@@ -17,7 +17,7 @@ import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge, Count } from '../../components/ds/Badge.js';
 import { RefreshCw } from 'lucide-react';
-import { formatBps } from '../../lib/format.js';
+import { formatBps, formatNodeRole } from '../../lib/format.js';
 import { PageHeader } from '../../components/ds/PageHeader.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -224,7 +224,7 @@ export function ConvictionOverview() {
     <div className="ds-page" data-testid="pca-landing">
       <PageHeader
         title="Publisher Conviction"
-        badge={role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {role === 'core' ? 'Core' : 'Edge'}</Badge>}
+        badge={role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {formatNodeRole(role)}</Badge>}
         description={role === 'edge'
             ? "Publisher Conviction Accounts let publishers dedicate TRAC spend in advance and receive a publishing discount by tier: 0%, 10%, 20%, 30%, 40%, 50%, or 75%, based on the committed amount. Nodes can create their own PCA or get added to an existing PCA by sharing operational publishing wallets with the PCA owner. You still pay gas; the PCA covers only the TRAC publishing fee for approved wallets."
             : "A Publisher Conviction Account (PCA) lets you lock TRAC up front and approve publishing wallets to publish at a discount. The discount applies to the wallet that signs the publish (on-chain msg.sender), not a peerId, admin wallet, or author identity."}

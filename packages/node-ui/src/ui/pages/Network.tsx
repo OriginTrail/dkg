@@ -4,6 +4,7 @@ import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
 import { Badge } from '../components/ds/Badge.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { formatNodeRole } from '../lib/format.js';
 import { Link2, UsersRound } from 'lucide-react';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
@@ -117,7 +118,7 @@ export function NetworkPage() {
                   <td style={{ fontWeight: 600 }}>{a.name}</td>
                   <td className="mono">{shortId(a.peerId, 12)}</td>
                   <td>{a.framework ?? '—'}</td>
-                  <td>{a.nodeRole ?? '—'}</td>
+                  <td>{formatNodeRole(a.nodeRole)}</td>
                   <td><ConnectionBadge agent={a} /></td>
                 </tr>
               ))}
