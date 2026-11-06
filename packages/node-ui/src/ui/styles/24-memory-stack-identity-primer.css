@@ -284,6 +284,7 @@
      expanded height at all times eliminates the layout shift. */
   min-height: 44px;
 }
+.v10-project-strip-heading { min-width: 0; margin: 0; font: inherit; }
 .v10-project-strip-name {
   font-size: var(--fs-body); font-weight: 600;
   color: var(--text-primary);

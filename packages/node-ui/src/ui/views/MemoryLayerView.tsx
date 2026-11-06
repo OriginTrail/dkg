@@ -225,7 +225,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
       <div className="v10-mlv-header">
         <span className="v10-mlv-icon" style={{ color: meta.color }}>{meta.icon}</span>
         <div>
-          <h2 className="v10-mlv-title">{meta.label}</h2>
+          <h1 className="v10-mlv-title">{meta.label}</h1>
           <p className="v10-mlv-desc">{meta.description}</p>
         </div>
       </div>

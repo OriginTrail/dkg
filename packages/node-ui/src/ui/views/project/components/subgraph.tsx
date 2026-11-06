@@ -9,8 +9,7 @@ import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEnti
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
-import { trustColors, LAYER_CONFIG, entityAuthorUri, entityMeta, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
+import { trustColors, LAYER_CONFIG, entityAuthorUri, entityMeta, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';

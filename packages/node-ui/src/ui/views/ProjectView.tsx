@@ -4,7 +4,7 @@ import { useMemoryEntityDetails } from '../hooks/useMemoryEntityDetails.js';
 import { api } from '../api-wrapper.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
 import { VmReceiptsProvider, useVmReceiptsResource } from '../hooks/useVmReceipts.js';
-import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../lib/subGraphs.js';
+import { isUserFacingSubGraph } from '../lib/subGraphs.js';
 import { ImportFilesModal } from '../components/Modals/ImportFilesModal.js';
 import { ShareProjectModal } from '../components/Modals/ShareProjectModal.js';
 import {

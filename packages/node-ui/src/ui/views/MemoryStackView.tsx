@@ -13,7 +13,7 @@
  * in a dedicated lightweight "layer counts" endpoint later if the tree
  * grows past ~10 projects.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import type { ContextGraph } from '../stores/projects.js';
 import { refreshContextGraphInventory, useContextGraphInventory } from '../hooks/useContextGraphInventory.js';
 import { useTabsStore } from '../stores/tabs.js';

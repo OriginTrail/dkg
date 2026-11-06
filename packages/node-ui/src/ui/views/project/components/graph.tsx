@@ -1,13 +1,13 @@
 import { useCallback, useMemo, useState, lazy, Suspense } from 'react';
 import type { ReactNode } from 'react';
-import { useMemoryEntities, canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
+import { canonicalEntityUri, type MemoryEntity, type Triple } from '../../../hooks/useMemoryEntities.js';
 import { decodeRdfStringLiteral } from '../../../../rdf-literal.js';
 import { MEMORY_LABEL_PREDICATES } from '../../../lib/memoryLabels.js';
 import { useVerifiableMemoryAnchors } from '../../../hooks/useVerifiableMemoryAnchors.js';
 import type { VmReceipt } from '../../../hooks/useVmReceipts.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { useSwmAttributions, type AgentPaletteEntry, type SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, useLayerTriples, filterTriplesToEntities } from '../helpers.js';
+import { LAYER_CONFIG, buildLayerGraphOptions, agentNodeColors, humanizeLabel, filterTriplesToEntities } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
 import { AgentDot, AgentDotStack } from '../../../components/AgentDot.js';
 import { agentHexForUri } from '../../../hooks/useAgents.js';
