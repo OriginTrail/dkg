@@ -23,7 +23,7 @@ import { DAY, Domain, Terms, registerServiceContracts, signTerms } from './convi
 import { createProfile } from './profile-helpers';
 
 /**
- * The account and staking stacks with every plan-subscription and settlement
+ * The account and staking stacks with every subscription and settlement
  * contract registered and the activation epoch set to the current epoch, as
  * the development deploy leaves them. Each suite wraps it in a fixture of its
  * own for `loadFixture`, which keeps one snapshot per fixture function: one

@@ -344,10 +344,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *              keep the outage short.
      *           3. Sellers stop. `submitReceiptBatch` reverts, because
      *              `QueryInferenceStorage` takes writes only from Hub
-     *              contracts. Work delivered but not yet batched loses its R if
-     *              its subscription's epoch ends during the outage. The money
-     *              itself is not lost: an epoch with no counted value rolls it
-     *              forward.
+     *              contracts. Work delivered but not yet batched loses its
+     *              served value if its subscription's epoch ends during the
+     *              outage. The money itself is not lost: an epoch with no
+     *              served value rolls it forward.
      *           4. Pull the switch only with `Hub.removeContractByName`. On
      *              the Hub's last entry, `removeContractByAddress` leaves the
      *              name's pointer dangling in

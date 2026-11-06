@@ -12,7 +12,7 @@ import {ServiceSubscriptionsStorage} from "../storage/ServiceSubscriptionsStorag
  *         Conviction Account's allowance, and `ServiceSubscriptionsWallet`,
  *         which funds and tops up subscriptions from the buyer's wallet.
  *
- *         A subscription is one chain epoch. Both contracts record every
+ *         A subscription is for one chain epoch. Both contracts record every
  *         subscription in `ServiceSubscriptionsStorage`, under one id per buyer
  *         and epoch, and emit the same events, so sellers read every
  *         subscription the same way. One declaration keeps both on the same
@@ -21,8 +21,9 @@ import {ServiceSubscriptionsStorage} from "../storage/ServiceSubscriptionsStorag
 interface ISubscriptionFunding {
     /// @notice A subscription was funded: the subscription of `epoch`, from
     ///         `startsAt` to `endsAt`. `accountId` is 0 for a subscription
-    ///         funded from a wallet, whose cost is its value. Sellers verify
-    ///         their plan line against this event and the stored record.
+    ///         funded from a wallet, whose cost is its value. Sellers check
+    ///         their line of the buyer's plan (`planDigest`) against this event
+    ///         and the stored record.
     event SubscriptionFunded(
         bytes32 indexed subscriptionId,
         uint256 indexed accountId,

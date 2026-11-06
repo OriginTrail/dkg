@@ -1,6 +1,6 @@
 // Gas of a StakingV10 claim per claimed epoch, with and without the
 // query/inference pool (OT-RFC-27), on the development deploy of the staking,
-// account and plan-subscription stacks. Every case claims the same position over 1
+// account and subscription stacks. Every case claims the same position over 1
 // and over 4 epochs; in each epoch the node proves and takes the publishing
 // pool, and, with the pool active, a wallet-funded subscription brings the epoch its
 // money. The claim comes as soon as the last epoch has ended, and it is the

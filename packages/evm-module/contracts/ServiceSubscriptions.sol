@@ -29,8 +29,8 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *         to. A buyer then funds subscriptions, one transaction each, from the
  *         account's existing allowance, and tops them up while they run.
  *
- * A subscription is one chain epoch, the current one or the next, and a buyer
- * funds at most one subscription per epoch, from an account or, through
+ * A subscription is for one chain epoch, the current one or the next, and a
+ * buyer funds at most one subscription per epoch, from an account or, through
  * `ServiceSubscriptionsWallet`, from its wallet; both share one id per buyer
  * and epoch.
  *
@@ -53,21 +53,22 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     `ParametersStorage` are wired at `initialize()`. `PublishingConviction`
  *     and `DKGPublishingConvictionNFT` are resolved from the Hub on every call,
  *     so either can be re-registered.
- *   - It calls only the Hub, `PublishingConviction`, the two account
- *     storages, `QueryInferenceStorage`, `Chronos`, `ParametersStorage`, the
- *     NFT's `ownerOf` and, as a staticcall before any state write, ERC-1271
- *     wallets. It never calls the Token or the vault, and accepts no ETH.
- *     A funding needs `PublishingConviction` 10.2.0 or later, whose
- *     `coverServiceCost` books nothing to the staker pool.
+ *   - It calls only the Hub, `PublishingConviction`,
+ *     `PublishingConvictionStorage`, `ServiceSubscriptionsStorage`,
+ *     `QueryInferenceStorage`, `Chronos`, `ParametersStorage`, the NFT's
+ *     `ownerOf` and, as a staticcall before any state write, ERC-1271 wallets.
+ *     It never calls the Token or the vault, and accepts no ETH. A funding
+ *     needs `PublishingConviction` 10.2.0 or later, whose `coverServiceCost`
+ *     books nothing to the staker pool.
  *
  * Gates:
- *   - Only the current NFT owner switches service spending, revokes, updates
- *     limits or advances the grant nonce, and the owner's consent to a grant is
- *     checked against the owner at the time of `addBuyer`. The opt-in and each
- *     grant record the owner who made them and fund only while that owner holds
- *     the account: a sale of the account NFT leaves both inert, and the new
- *     owner opts in and adds its buyers afresh (`setServiceSpending` says what
- *     an inherited opt-in does).
+ *   - Only the current NFT owner switches service spending, removes buyers,
+ *     updates limits or advances the grant nonce, and the owner's consent to a
+ *     grant is checked against the owner at the time of `addBuyer`. The opt-in
+ *     and each grant record the owner who made them and fund only while that
+ *     owner holds the account: a sale of the account NFT leaves both inert, and
+ *     the new owner opts in and adds its buyers afresh (`setServiceSpending`
+ *     says what an inherited opt-in does).
  *   - A subscription keeps the grant it was funded under: it takes requests,
  *     and top-ups, only until that grant ends, at its expiry or its revocation
  *     if sooner, whatever later grant the buyer gets. So adding a buyer again
@@ -119,8 +120,8 @@ contract ServiceSubscriptions is
     //           owner's limit updates and revocation, subscription funding
     //           through `PublishingConviction.coverServiceCost`, and the
     //           labels.
-    //   1.1.0 — a subscription is one epoch, the current one or the next, one
-    //           per buyer and epoch; a grant holds one cost limit per
+    //   1.1.0 — a subscription is for one epoch, the current one or the next,
+    //           one per buyer and epoch; a grant holds one cost limit per
     //           subscription and an expiry; top-ups and upgrades within the
     //           subscription (`topUpFromAccount`); a non-zero session key; no
     //           funding or top-up while `QueryInferenceStorage` is paused; no
@@ -221,7 +222,8 @@ contract ServiceSubscriptions is
         uint40 expiresAt
     );
     /// @notice The account's grant nonce moved: the next grant must carry
-    ///         `nextNonce`, so terms signed at an older nonce no longer grant.
+    ///         `nextNonce`, so terms signed at an older nonce can no longer add
+    ///         a buyer.
     event GrantNonceAdvanced(uint256 indexed accountId, uint64 nextNonce);
 
     // ============================================================
@@ -340,7 +342,7 @@ contract ServiceSubscriptions is
     }
 
     /**
-     * @notice Add `t.buyer` as a buyer of `t.accountId`, under a grant that the
+     * @notice Add `t.buyer` as a buyer on `t.accountId`, under a grant that the
      *         current owner and the buyer consent to over the same EIP-712
      *         digest (`hashGrant(t)`).
      * @dev Anyone may submit. A party consents by sending the transaction, in
@@ -359,7 +361,7 @@ contract ServiceSubscriptions is
      *      revoking the new grant does not bring forward. The grant records the
      *      owner who consented, and funds only while that owner holds the
      *      account. It consumes the account's nonce, so the same terms never
-     *      grant twice.
+     *      add a buyer twice.
      */
     function addBuyer(
         BuyerTerms calldata t,
@@ -404,12 +406,13 @@ contract ServiceSubscriptions is
      * @dev Immediate for new subscriptions; funded subscriptions are
      *      non-refundable and run to their end. A request issued under this
      *      grant from the revocation on is refused, also after a new grant to
-     *      the same buyer, while one served before it lands until the epoch ends,
-     *      so the revocation cannot withhold a seller's receipt. It also
+     *      the same buyer, while one served before it lands until the epoch
+     *      ends, so the revocation cannot withhold a seller's receipt. It also
      *      consumes the account's nonce, so terms signed but not yet submitted
-     *      no longer grant. A new grant to the buyer afterwards serves it from
-     *      its next subscription not yet funded: the subscriptions funded under
-     *      this one take no request issued after the revocation, and no top-up.
+     *      can no longer add a buyer. A new grant to the buyer afterwards
+     *      serves it from its next subscription not yet funded: the
+     *      subscriptions funded under this one take no request issued after the
+     *      revocation, and no top-up.
      */
     function removeBuyer(uint256 accountId, address buyer) external {
         _requireOwner(accountId);
@@ -460,7 +463,8 @@ contract ServiceSubscriptions is
     }
 
     /// @notice Advance `accountId`'s grant nonce, so terms signed at the
-    ///         current nonce and not yet submitted no longer grant. Owner only.
+    ///         current nonce and not yet submitted can no longer add a buyer.
+    ///         Owner only.
     function advanceGrantNonce(uint256 accountId) external {
         _requireOwner(accountId);
         uint64 used = serviceSubscriptionsStorage.consumeGrantNonce(accountId);
@@ -479,18 +483,17 @@ contract ServiceSubscriptions is
      * @dev The cheap, read-only refusals come first: the pause and the
      *      activation, the session key, the subscription's epoch, the opt-in
      *      and the grant, both made by the account's current owner, the grant
-     *      one that must not expire before the subscription starts (a
-     *      subscription funded ahead for the next epoch would otherwise serve
-     *      nothing), the budgets, one subscription per buyer and epoch, and the
-     *      grant's limit as stored at this block. A revoked grant funds
-     *      nothing, so only the expiry can be checked ahead. Then
-     *      `coverServiceCost` spends the cost (window allowance first, then the
-     *      top-up buffer); a subscription funded ahead spends from the window
-     *      the funding runs in. Last, the usage, the cost under the
-     *      subscription's epoch and the subscription record are written. The
-     *      record names the grant by its nonce: the subscription accepts
-     *      requests issued before that grant ends, its expiry or its
-     *      revocation, whatever later grant the buyer gets.
+     *      still live when the subscription starts (a subscription funded ahead
+     *      for the next epoch would otherwise serve nothing), the budgets, one
+     *      subscription per buyer and epoch, and the grant's limit as stored at
+     *      this block. A revoked grant funds nothing, so only the expiry can be
+     *      checked ahead. Then `coverServiceCost` spends the cost (window
+     *      allowance first, then the top-up buffer); a subscription funded
+     *      ahead spends from the window the funding runs in. Last, the usage,
+     *      the cost under the subscription's epoch and the subscription record
+     *      are written. The record names the grant by its nonce: the
+     *      subscription accepts requests issued before that grant ends, its
+     *      expiry or its revocation, whatever later grant the buyer gets.
      *
      *      The subscription runs to the start of the next epoch, from the later
      *      of the block time and its epoch's start, which is never 0, and an id

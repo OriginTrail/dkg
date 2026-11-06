@@ -17,9 +17,9 @@ import {Chronos} from "./Chronos.sol";
  *         staker pool in `EpochStorage`.
  *
  * What it holds:
- *   - The money funded per epoch. A subscription is one epoch, and its money
- *     joins the pool of that epoch. `walletFunding(e)` is the value of the
- *     wallet-funded subscriptions of `e` and their top-ups, and
+ *   - The money funded per epoch. A subscription is for one epoch, and its
+ *     money joins the pool of that epoch. `walletFunding(e)` is the value of
+ *     the wallet-funded subscriptions of `e` and their top-ups, and
  *     `accountFunding(e)` the cost that the Conviction Account subscriptions of
  *     `e` and their top-ups spent from the accounts' allowances. Both are
  *     booked when the subscription is paid for: a Conviction Account pays as a
@@ -82,7 +82,7 @@ import {Chronos} from "./Chronos.sol";
  *   - every node-epoch before the replacement's activation that no claim has
  *     split yet is split without its share of this pool, which stays in the
  *     vault for good;
- *   - money funded for epochs in which no node has counted value yet, whether
+ *   - money funded for epochs in which no node has served value yet, whether
  *     they have ended or not, stays here, unpaid;
  *   - requests signed for this address do not verify against another.
  * A migration claims every position first (`StakingV10.claimFor`), swaps at an
@@ -301,10 +301,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         _nonceBitmap[subscriptionId][seller][word] |= bits;
     }
 
-    /// @notice Count a group of receipts: `counted` of face value is used of
-    ///         the budget, and `servedValue` and `weightedValue` join the
-    ///         node's and the epoch's totals in `epoch`. The first value to
-    ///         count in an epoch fixes its λ.
+    /// @notice Count a group of receipts: `counted` of face value is added to
+    ///         what the budget has used, and `servedValue` and `weightedValue`
+    ///         join the node's and the epoch's totals in `epoch`. The first
+    ///         value to count in an epoch fixes its λ.
     /// @dev    It refuses an epoch that has ended (`EpochEnded`). The sums are
     ///         checked.
     function countReceipts(

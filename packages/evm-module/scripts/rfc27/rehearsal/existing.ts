@@ -73,6 +73,18 @@ export function checkClaims(report: Report, claims: ClaimResult[], old: PreRead[
   }
 }
 
+export type StoredAccount = { id: bigint; fullySwept: boolean; topUp: bigint; lastSettledWindow: bigint; lock: bigint };
+
+/** What settleMany stored for the expired accounts, which its events can't stand in for. */
+export function checkSettledAccounts(report: Report, accounts: StoredAccount[]): void {
+  const left = accounts.filter((a) => !a.fullySwept || a.topUp !== 0n || a.lastSettledWindow < a.lock);
+  report.check(
+    'settleMany leaves every expired account settled in storage: fully swept, every window booked, no top-up left',
+    accounts.length > 0 && left.length === 0,
+    left.map((a) => `account ${a.id}: fully swept ${a.fullySwept}, top-up ${fmt(a.topUp)}, window ${a.lastSettledWindow} of ${a.lock}`).join('; '),
+  );
+}
+
 export async function phaseExisting(ctx: Ctx): Promise<void> {
   const { report } = ctx;
   const check = report.check.bind(report);
@@ -113,6 +125,14 @@ export async function phaseExisting(ctx: Ctx): Promise<void> {
   const swept = eventsIn(many.receipt, c.pc, c.pc.getEvent('AccountFinalSwept')).map((e) => ({ id: e.accountId, topUp: e.topUpSwept }));
   const credits = stakerCredits(many.receipt, c);
   checkSettleMany(report, { credits, swept: swept.map((x) => x.id) }, pre.old.settles, E);
+  const stored: StoredAccount[] = [];
+  for (const id of expired) {
+    const a = await c.pcs.getAccount(id);
+    stored.push({ id, fullySwept: a.fullySwept, topUp: await c.pcs.topUpBalance(id), lastSettledWindow: a.lastSettledWindow, lock: a.lockDurationEpochs });
+  }
+  checkSettledAccounts(report, stored);
+  const again = await send(ctx, `settleMany(${expired.length} expired accounts), again`, anyone, pcAddr, c.pc.interface.encodeFunctionData('settleMany', [expired]));
+  check('settleMany again books nothing and sweeps nothing', stakerCredits(again.receipt, c).length === 0 && eventsIn(again.receipt, c.pc, c.pc.getEvent('AccountFinalSwept')).length === 0);
   const before1008 = pre.accounts.filter((a) => a.createdBefore1008).map((a) => String(a.id));
   report.say(`accounts created before 10.0.8: ${before1008.join(', ') || 'none'}`);
 
