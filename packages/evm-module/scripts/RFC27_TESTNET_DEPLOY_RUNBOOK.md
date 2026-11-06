@@ -158,8 +158,9 @@ cast call $QIS 'activationEpoch()(uint40)' --rpc-url $RPC   # E + 1
   `--mnemonic-derivation-path "<its path>"` to each command that names the
   device. With `--from` given, cast refuses to sign when the device's account
   at that path is not the Hub owner.
-- The rehearsal sends these same commands to its fork, with `--unlocked
-  --from` the impersonated owner in place of `--ledger`.
+- The rehearsal sends the same two transactions to its fork, from the
+  impersonated owner through its own transaction runner, not with these
+  commands.
 
 **With MetaMask**, the hardware wallet connected and the Hub owner's account
 selected:

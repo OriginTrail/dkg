@@ -23,7 +23,7 @@
 import { ethers } from 'ethers';
 
 import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
-import { Contracts, eventsIn } from '../contracts';
+import { Contracts } from '../contracts';
 import { chainNow } from '../network';
 import { groupFault, poolShareOf } from '../reads';
 import { fmt } from '../report';
