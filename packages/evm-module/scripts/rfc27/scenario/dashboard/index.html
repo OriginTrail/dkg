@@ -501,8 +501,12 @@ function freshness() {
   if (SNAPSHOT) return { kind: 'neutral', text: `Snapshot of ${utc(d.generatedAt)} UTC`, detail: 'A saved copy: it does not update.' };
   const lastRead = d.status?.rpc?.lastOkAt ?? d.generatedAt;
   const age = now() - lastRead;
+  if (d.status && !d.status.rpc?.lastOkAt && !d.clock) return { kind: 'critical', text: 'No read of the chain has worked yet', detail: (d.status.errors ?? []).join(' · ') };
   if (view.fetchError) return { kind: 'critical', text: `Stale: this page can't reach its data, last read ${ago(age)}`, detail: view.fetchError };
-  if (d.status?.stale) return { kind: 'serious', text: `Stale: last good read ${ago(age)}`, detail: (d.status.errors ?? []).join(' · ') || 'The last read failed.' };
+  const errors = (d.status?.errors ?? []).join(' · ');
+  if (d.status && d.status.rpc && !d.status.rpc.ok) return { kind: 'serious', text: `Stale: the numbers are from ${ago(age)}`, detail: errors || 'The last read of the chain failed.' };
+  if (d.status?.events && !d.status.events.ok) return { kind: 'serious', text: `Partly stale: the feed is from ${ago(now() - (d.status.events.lastOkAt ?? lastRead))}`, detail: errors || 'The last read of the events failed.' };
+  if (d.status?.stale) return { kind: 'serious', text: `Stale: last good read ${ago(age)}`, detail: errors || 'The last read failed.' };
   if (age > 12 * 60) return { kind: 'serious', text: `Stale: no new read for ${ago(age)}`, detail: 'The indexer reads every five minutes, and has not written since.' };
   return { kind: 'good', text: `Fresh: read ${ago(age)}`, detail: `The indexer reads the chain every five minutes. Last read at block ${group(String(d.status?.rpc?.block ?? ''))}.` };
 }
@@ -573,7 +577,9 @@ function renderNow() {
     const optedIn = d.feed.filter((x) => x.t === 'spending' && x.enabled).length;
     root.replaceChildren(
       h('div', { class: 'card now-clock' },
-        h('div', null, h('div', { class: 'eyebrow' }, `Epoch ${first} begins in`), h('div', { class: 'big-time', 'data-countdown': startAt }, span(startAt - now()))),
+        wallEpoch() >= first
+          ? h('div', null, h('div', { class: 'eyebrow' }, `Epoch ${first}`), h('div', { class: 'big-time' }, 'Has begun'), h('div', { class: 'cap' }, 'The next read of the chain will show it.'))
+          : h('div', null, h('div', { class: 'eyebrow' }, `Epoch ${first} begins in`), h('div', { class: 'big-time', 'data-countdown': startAt }, span(startAt - now()))),
         h('div', null, h('div', { class: 'cap' }, `${utc(startAt)} UTC. Until then no subscription can be funded and no batch can land: the pool's activation epoch is ${c.activationEpoch ?? first}.`)),
         dataBlock()),
       h('div', { class: 'card now-hero' },
@@ -730,7 +736,7 @@ function epochFrame(box, rows, opts) {
 }
 
 function drawEpochChart(box, rows, selected) {
-  const stackOf = (r) => (r.state === 'ended' || r.state === 'current') && big(r.served) > 0n ? toNum(r.pool) : toNum(r.money) + toNum(r.waitingBefore);
+  const stackOf = (r) => (r.state === 'ended' || r.state === 'current') && big(r.served) > 0n ? toNum(r.pool) : toNum(r.money);
   const max = Math.max(1, ...rows.map(stackOf), ...rows.map((r) => toNum(r.served)));
   const svg = epochFrame(box, rows, {
     max, selected, label: 'Money, served value and pool per epoch',
@@ -836,6 +842,7 @@ function renderEpochs() {
   const d = D();
   const rows = d.epochs;
   const sel = selectedEpoch();
+  if (!d.clock) { root.replaceChildren(); return; }
   const nothingYet = rows.every((r) => big(r.money) === 0n && big(r.served) === 0n);
   const box = h('div', { class: 'chart' });
   const head = h('div', { class: 'head' }, h('h2', null, 'Epochs over time'),
@@ -891,18 +898,19 @@ function renderSellers() {
     h('span', { class: 'formula' }, 'QIF share = (1 − λ) × sales share + λ × weighted share'),
     h('p', null, lambda === null ? 'λ is set on-chain: an epoch fixes its own λ when its first value counts. ' : `Here λ = ${lambda}${row.lambdaBps === null ? ', what this epoch takes when its first value counts' : ', fixed when the epoch\'s first value counted'}: ${pct(1 - lambda, 0)} of the pool follows sales, and ${pct(lambda, 0)} follows sales weighted by stake. `, `The stake factor is √(stake ÷ ${maxStake} TRAC). A stake with no sales earns nothing from the pool; stake only tilts the share of a seller that serves.`));
 
-  const sellerCards = row.sellers.map((x) => {
+  const sellerCards = row.sellers.filter((x) => d.sellers.find((y) => y.id === x.id)?.listed || big(x.served) > 0n).map((x) => {
     const seller = d.sellers.find((y) => y.id === x.id);
     const color = sellerColor(x.id);
     const hasValue = big(x.served) > 0n;
     const diff = (x.qifShare - x.salesShare) * 100;
     return h('div', { class: 'card' },
       h('div', { class: 'who' }, h('i', { class: 'dot', style: `background:${color}` }), h('h3', null, seller.name), h('span', { class: 'side', tip: x.proofs ? `${x.proofs} valid proofs in this epoch` : null }, `node ${x.id}${x.proofs ? ` · ${x.proofs} proofs` : ''}`)),
+      x.batches ? h('div', { class: 'cap' }, `${x.batches} batch${x.batches === 1 ? '' : 'es'}, ${group(String(x.receipts))} receipt${x.receipts === 1 ? '' : 's'}`) : null,
       h('div', { class: 'seller-body' },
         h('div', null,
           h('dl', { class: 'rows' },
             h('dt', null, 'Served value'), h('dd', null, T(x.served)),
-            h('dt', { tip: 'What this epoch\'s batches applied: weighted value ÷ served value' }, 'Stake factor'), h('dd', null, hasValue ? h('span', { tip: `${(Number(big(x.factor18)) / 1e18).toFixed(18)}` }, factor(x.factor18)) : row.state === 'current' && seller.factor18 ? h('span', { tip: 'Its factor now, read live from the settlement. Each batch keeps the factor it landed with.' }, `${factor(seller.factor18)} now`) : '–'),
+            h('dt', { tip: `What this epoch's batches applied: weighted value ÷ served value.${seller.stake ? ` Its stake now: ${trac(seller.stake)} TRAC.` : ''}` }, 'Stake factor'), h('dd', null, hasValue ? h('span', { tip: tracExact(x.factor18) }, factor(x.factor18)) : row.state === 'current' && seller.factor18 ? h('span', { tip: 'Its factor now, read live from the settlement. Each batch keeps the factor it landed with.' }, `${factor(seller.factor18)} now`) : '–'),
             h('dt', null, 'Weighted value'), h('dd', null, T(x.weighted))),
           hasValue ? h('div', { class: 'share' },
             h('div', { class: 'share-row' }, h('span', { class: 'lab' }, 'Sales share'), h('div', { class: 'track' }, h('i', { style: `width:${x.salesShare * 100}%;background:${color};opacity:.45` })), h('span', { class: 'val' }, pct(x.salesShare))),
@@ -949,7 +957,7 @@ function renderBuyers() {
   const e = selectedEpoch();
   const row = epochRow(e);
   if (!d.clock || !row) { root.replaceChildren(); return; }
-  const cards = d.buyers.map((b) => {
+  const cards = d.buyers.filter((b) => b.listed || row.subs.some((x) => x.buyer === b.address)).map((b) => {
     const sub = row.subs.find((x) => x.buyer === b.address);
     const discount = sub ? sub.discountBps : null;
     const chipText = b.pays === 'account' ? `account${b.accountId ? ` ${b.accountId}` : ''}${discount ? ` · ${discount / 100}% discount` : ''}` : 'wallet';
@@ -978,7 +986,7 @@ function renderBuyers() {
       h('div', { class: 'budget' },
         h('div', { class: 'row' }, h('span', { class: 'name' }, 'Service budgets used'), h('span', { class: 'amt' }, h('b', null, pct(usedShare, 0)))),
         h('div', { class: 'track', style: 'margin-top:.15rem' }, h('i', { style: `width:${usedShare * 100}%;background:var(--ink-2)` }))),
-      sub.budgets.map((x) => h('div', { class: 'budget' },
+      [...sub.budgets].sort((a, b) => d.services.findIndex((y) => y.id === a.service) - d.services.findIndex((y) => y.id === b.service)).map((x) => h('div', { class: 'budget' },
         h('div', { class: 'row' }, h('span', { class: 'name', tip: x.service }, serviceLabel(x.service)), h('span', { class: 'amt' }, T(x.used), ' of ', T(x.value))),
         h('div', { class: 'track thin', style: 'margin-top:.12rem', tip: x.bySeller.length ? () => tipTable('Counted, by seller', x.bySeller.map((y) => [sellerName(y.id), trac(y.counted)])) : null },
           x.bySeller.map((y) => h('i', { style: `width:${(toNum(y.counted) / Math.max(1e-9, toNum(x.value))) * 100}%;background:${sellerColor(y.id)}` }))))),
@@ -1245,7 +1253,7 @@ function renderStakers() {
     h('div', { class: 'stack', style: 'gap:.9rem' },
       h('div', { class: 'card' },
         h('div', { class: 'stats' },
-          stat('From publishing, all epochs', [T(sumPublishing), h('span', { class: 'unit' }, 'TRAC')], 'before the operator fee'),
+          stat('From publishing, all epochs so far', [T(sumPublishing), h('span', { class: 'unit' }, 'TRAC')], 'before the operator fee'),
           stat('Added by the pool', [T(sumPool), h('span', { class: 'unit' }, 'TRAC')], addedShare === null ? '' : `on top of that: +${(addedShare * 100).toFixed(addedShare < .01 ? 2 : 1)}%`))),
       h('div', { class: 'grid-2' },
         h('div', { class: 'card' }, h('h3', null, 'From publishing'), h('div', { class: 'cap', style: 'margin-bottom:.3rem' }, 'TRAC per epoch, the sum of the sellers\' publishing shares'), left),
@@ -1314,7 +1322,7 @@ function renderBanner() {
   if (SNAPSHOT) items.push(h('div', { class: 'banner' }, `A snapshot of the chain at ${utc(d.generatedAt, 'full')}. It does not update.`));
   else {
     const f = freshness();
-    if (f.kind === 'critical' || f.kind === 'serious') items.push(h('div', { class: `banner ${f.kind === 'critical' ? 'critical' : ''}` }, h('strong', null, f.text, '. '), 'What you see is the last good data. ', f.detail));
+    if (f.kind === 'critical' || f.kind === 'serious') items.push(h('div', { class: `banner ${f.kind === 'critical' ? 'critical' : ''}` }, h('strong', null, f.text, '. '), d.clock ? 'What you see is the last good data. ' : 'The indexer tries again every five minutes. ', h('span', { class: 'small' }, f.detail)));
     if (d.params?.paused) items.push(h('div', { class: 'banner critical' }, h('strong', null, 'The pool is paused on-chain. '), 'No subscription is funded and no batch lands while it is.'));
   }
   root.replaceChildren(...items);
@@ -1336,13 +1344,20 @@ function renderAll() {
   renderFeed();
   for (const j of chartJobs) j.draw(j.box);
   hideTip();
-  if (D().clock) document.title = `Epoch ${D().clock.currentEpoch} · Marketplace on Base Sepolia`;
+  const c = D().clock;
+  if (c) document.title = `${c.currentEpoch < c.firstEpoch ? `Before epoch ${c.firstEpoch}` : `Epoch ${c.currentEpoch}`} · Marketplace on Base Sepolia`;
 }
 
 // Seconds tick by themselves; everything else waits for new data.
 function tick() {
   if (!D()?.clock) return;
   const t = now();
+  // An epoch turned over between two reads: the clock says so before the data can.
+  const wall = wallEpoch();
+  if (view.wallEpoch !== wall) {
+    view.wallEpoch = wall;
+    renderNow();
+  }
   document.querySelectorAll('[data-countdown]').forEach((el) => { el.textContent = span(Number(el.dataset.countdown) - t); });
   document.querySelectorAll('[data-ago]').forEach((el) => { el.textContent = ago(t - Number(el.dataset.ago)); });
   document.querySelectorAll('[data-read-age]').forEach((el) => { el.textContent = `Read ${ago(t - Number(el.dataset.readAge))}`; });

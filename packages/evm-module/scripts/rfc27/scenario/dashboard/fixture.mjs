@@ -7,7 +7,8 @@
 //
 // Variants: live (several days in, with an empty epoch, a partial count and a missed
 // deadline), early (hours into the first epoch), pre (before the first epoch), bare
-// (before the first epoch, with no public file yet), stale (live, with a failed read).
+// (before the first epoch, with no public file yet), stale (live, with a failed read),
+// partly (live, with the events failing), unread (the very first read failed).
 
 import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -480,7 +481,10 @@ function write(variant, data) {
   writeFileSync(join(dir, 'data.json'), JSON.stringify(data));
   copyFileSync(join(here, 'index.html'), join(dir, 'index.html'));
   console.log(`${variant}: ${JSON.stringify(data).length} bytes, ${data.epochs.length} epochs, ${data.feedTotal ?? 0} feed rows, ${data.checks.filter((c) => c.ok === false).length} failed checks`);
-  for (const c of data.checks.filter((x) => x.ok === false)) console.log(`  failed ${c.epoch} ${c.name}: ${c.detail}`);
+  for (const c of data.checks.filter((x) => x.ok === false)) {
+    console.log(`  failed ${c.epoch} ${c.name}: ${c.detail}`);
+    process.exitCode = 1;
+  }
 }
 
 const now = Math.floor(Date.now() / 1000);
@@ -493,6 +497,13 @@ const staleStatus = { ...freshStatus(now - 1260), stale: true, errors: ['RPC: re
 staleStatus.rpc = { ...staleStatus.rpc, ok: false };
 staleStatus.events = { ...staleStatus.events, ok: false };
 write('stale', compose({ state: live.state, pub, status: staleStatus, now: now - 60, network: network() }));
+
+const partlyStatus = { ...freshStatus(now), stale: true, errors: ['Explorer: HTTP 502'] };
+partlyStatus.events = { ...partlyStatus.events, ok: false, lastOkAt: now - 700 };
+write('partly', compose({ state: live.state, pub, status: partlyStatus, now, network: network() }));
+
+const unreadStatus = { stale: true, errors: ['RPC: fetch failed (ECONNRESET)', 'Explorer: not read, the contract addresses are not known yet'], rpc: { ok: false, lastOkAt: null, block: null, blockTime: null }, events: { ok: false, lastOkAt: null, head: null, lagBlocks: null }, public: { source: 'none', at: null }, run: { ms: 4000 } };
+write('unread', compose({ state: {}, pub: null, status: unreadStatus, now, network: network() }));
 
 const early = buildEarly(now);
 write('early', compose({ state: early.state, pub, status: freshStatus(now), now, network: network() }));

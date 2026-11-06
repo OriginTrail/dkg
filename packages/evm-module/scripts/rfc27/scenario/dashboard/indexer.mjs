@@ -194,8 +194,12 @@ const KEEP = new Set(['ReceiptsLanded', 'ReceiptBatchAccepted', 'SubscriptionFun
 
 async function readEvents(source, st, pub, rpc) {
   const clock = st.clock;
+  // Once an epoch, and whenever the numbers disagree, everything is read again from
+  // nothing, which also drops whatever a reorganized block took back.
   const fullScan = st.fullScanEpoch !== clock?.currentEpoch || st.needFullScan === true;
-  const seen = new Set(st.logs.map((l) => `${l.tx}:${l.idx}`));
+  const logs = fullScan ? [] : st.logs;
+  const seen = new Set(logs.map((l) => `${l.tx}:${l.idx}`));
+  const known = new Set(st.logs.map((l) => `${l.tx}:${l.idx}`));
   let added = 0;
   for (const { name, txs: wantTxs, topicEvent } of LOG_CONTRACTS) {
     for (const address of st.addresses[name] ?? []) {
@@ -211,8 +215,8 @@ async function readEvents(source, st, pub, rpc) {
         const decoded = decodeLog(iface, raw);
         if (!decoded || !KEEP.has(decoded.k)) continue;
         seen.add(key);
-        st.logs.push(decoded);
-        added++;
+        logs.push(decoded);
+        if (!known.has(key)) added++;
       }
       if (!wantTxs) continue;
       const txKey = `${address}:txs`;
@@ -231,7 +235,8 @@ async function readEvents(source, st, pub, rpc) {
       }
     }
   }
-  st.logs.sort((a, b) => a.block - b.block || a.idx - b.idx);
+  logs.sort((a, b) => a.block - b.block || a.idx - b.idx);
+  st.logs = logs;
   if (fullScan) {
     st.fullScanEpoch = clock?.currentEpoch ?? null;
     st.needFullScan = false;
@@ -251,7 +256,8 @@ async function revertOf(t, source, rpc) {
   }
   if (!hex) {
     try {
-      await rpc.call('eth_call', [{ from: t.from, to: t.to, data: t.input }, `0x${(t.block - 1).toString(16)}`]);
+      // One try: a public node may not keep a block that old.
+      await rpc.call('eth_call', [{ from: t.from, to: t.to, data: t.input }, `0x${(t.block - 1).toString(16)}`], 1);
     } catch (e) {
       if (typeof e.rpcData === 'string') hex = e.rpcData;
     }

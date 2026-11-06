@@ -407,6 +407,12 @@ export function compose({ state, pub, status, now, network }) {
 
   // ------------------------------------------------------------------ feed
 
+  // A claim belongs here if it came from the first epoch on and its position is on one of the sellers.
+  const claimCounts = (l) => {
+    const node = state.positions?.[l.a.tokenId];
+    return epochOf(l.at, clock) >= firstEpoch && (node === undefined || node === null || sellerIds.has(Number(node)));
+  };
+
   // One row per batch, which is one transaction, with the groups inside it.
   const feed = [];
   const batchRows = new Map();
@@ -435,9 +441,7 @@ export function compose({ state, pub, status, now, network }) {
     if (l.k === 'BuyerRemoved') feed.push({ ...base, t: 'buyer-removed', buyer: low(l.a.buyer), accountId: l.a.accountId });
     if (l.k === 'BuyerLimitsUpdated') feed.push({ ...base, t: 'limits', buyer: low(l.a.buyer), accountId: l.a.accountId, limit: l.a.maxCostPerEpoch, expiresAt: Number(l.a.expiresAt) });
     if (l.k === 'ServiceSpendingSet') feed.push({ ...base, t: 'spending', accountId: l.a.accountId, enabled: !!l.a.enabled });
-    if (l.k === 'RewardsClaimed') {
-      if (epochOf(l.at, clock) >= firstEpoch) feed.push({ ...base, t: 'claim', tokenId: l.a.tokenId, node: state.positions?.[l.a.tokenId] ?? null, amount: l.a.amount });
-    }
+    if (l.k === 'RewardsClaimed' && claimCounts(l)) feed.push({ ...base, t: 'claim', tokenId: l.a.tokenId, node: state.positions?.[l.a.tokenId] ?? null, amount: l.a.amount });
   }
   const refusedRows = [];
   for (const [hash, t] of Object.entries(txs)) {
@@ -485,7 +489,7 @@ export function compose({ state, pub, status, now, network }) {
   // ------------------------------------------------------------------ claims
 
   const claims = logs
-    .filter((l) => l.k === 'RewardsClaimed' && epochOf(l.at, clock) >= firstEpoch)
+    .filter((l) => l.k === 'RewardsClaimed' && claimCounts(l))
     .map((l) => ({ at: l.at, tx: l.tx, tokenId: l.a.tokenId, node: state.positions?.[l.a.tokenId] ?? null, amount: l.a.amount, epoch: epochOf(l.at, clock) }))
     .reverse();
 

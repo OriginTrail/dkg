@@ -90,9 +90,9 @@ export class Rpc {
     this.nextId = 1;
   }
 
-  async call(method, params = []) {
+  async call(method, params = [], attempts = this.attempts) {
     let last;
-    for (let attempt = 0; attempt < this.attempts; attempt++) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       const url = this.urls[attempt % this.urls.length];
       try {
         this.stats.rpcCalls = (this.stats.rpcCalls ?? 0) + 1;
