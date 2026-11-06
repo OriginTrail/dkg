@@ -2,8 +2,8 @@
 // fork-rehearsal.ts — V8→V10 migration high-fidelity pre-flight (Base mainnet fork)
 // =============================================================================
 //
-// Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the 3 new
-// migration contracts onto the REAL Hub, wires them by impersonating the Hub
+// Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the new
+// V10 staking contracts onto the REAL Hub, wires them by impersonating the Hub
 // owner. Then it exercises the admin-push flow against REAL deployed state:
 // the impersonated Hub owner ADMIN-DRAINS a REAL mainnet delegator's V8 stake
 // into that delegator's migration credit (adminMigrateToCredit), and the
@@ -108,9 +108,16 @@ async function main() {
   console.log(`  node ${SOURCE_NODE} stake = ${fmt(nodeBefore)} | total = ${fmt(totalBefore)} TRAC`);
   if (baseBefore + pendingBefore === 0n) throw new Error('Delegator has no V8 stake on the fork — wrong block/address?');
 
-  // ---- 2. deploy the 3 new contracts onto the REAL Hub ----
+  // ---- 2. deploy the new contracts onto the REAL Hub ----
   console.log('\nDeploying migration contracts onto the forked Hub:');
   const cssAddr = await deploy('ConvictionStakingStorage', funder);
+  // StakingV10Ledger wires ConvictionWithdrawalStorage at initialize(), as
+  // the hardhat deploy registers it first (054b before 054a). It has no
+  // initialize() of its own.
+  const withdrawalStorageAddr = await deploy('ConvictionWithdrawalStorage', funder);
+  // StakingV10 forwards its operator-fee withdrawal and V8 drains here, and
+  // resolves it at initialize().
+  const ledgerAddr = await deploy('StakingV10Ledger', funder);
   const stakingV10Addr = await deploy('StakingV10', funder);
   const wrapperAddr = await deploy('DKGStakingConvictionNFT', funder);
 
@@ -118,6 +125,8 @@ async function main() {
   console.log('\nRegistering in Hub (as owner):');
   for (const [n, a] of [
     ['ConvictionStakingStorage', cssAddr],
+    ['ConvictionWithdrawalStorage', withdrawalStorageAddr],
+    ['StakingV10Ledger', ledgerAddr],
     ['StakingV10', stakingV10Addr],
     ['DKGStakingConvictionNFT', wrapperAddr],
   ] as const) {
@@ -132,8 +141,11 @@ async function main() {
   const wrapper = await ethers.getContractAt('DKGStakingConvictionNFT', wrapperAddr);
   await (await (css as any).connect(owner).initialize()).wait();
   console.log('  CSS.initialize ✓ (tiers seeded)');
+  const ledger = await ethers.getContractAt('StakingV10Ledger', ledgerAddr);
+  await (await (ledger as any).connect(owner).initialize()).wait();
+  console.log('  StakingV10Ledger.initialize ✓');
   await (await (stakingV10 as any).connect(owner).initialize()).wait();
-  console.log('  StakingV10.initialize ✓ (12 deps resolved)');
+  console.log('  StakingV10.initialize ✓ (13 deps resolved)');
   await (await (wrapper as any).connect(owner).initialize()).wait();
   console.log('  wrapper.initialize ✓');
 
