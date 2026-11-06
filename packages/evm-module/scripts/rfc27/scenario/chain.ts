@@ -185,7 +185,9 @@ export type Landed = { hash: string; gasUsed: bigint; status: number; fee: bigin
 export type SendOutcome =
   | { sent: true; receipt: Landed; estimate: bigint }
   | { sent: false; why: 'reverted'; revert: Revert }
-  | { sent: false; why: 'fee' | 'error' | 'pending'; note: string };
+  | { sent: false; why: 'reverted-on-chain'; receipt: Landed }
+  /** `attempted`: the transaction may have gone out, so sending it again could repeat it. */
+  | { sent: false; why: 'fee' | 'error' | 'pending'; note: string; attempted: boolean };
 
 /** The base fee above which a send waits, unless it is the last stretch of the epoch, whose limit is higher. */
 const MAX_BASE_FEE = 250_000_000n;
@@ -227,45 +229,56 @@ async function pollReceipt(s: Sender, hash: string): Promise<Landed | undefined>
 /**
  * One transaction: simulated first, and not sent if that reverts; its gas limit
  * set by hand under Base's cap; its fee bounded. Never throws for what the chain
- * or the endpoint says: the outcome says it, and it is logged.
+ * or the endpoint says: the outcome says it, and it is logged. With
+ * `unsimulatedGasLimit` it is not simulated, and is sent with that gas limit,
+ * for a transaction that is meant to reach the chain whatever it will do there.
  */
-export async function send(s: Sender, opts: { label: string; signer: ethers.Signer; to: string; data: string; value?: bigint; lastStretch?: boolean; fields?: Fields }): Promise<SendOutcome> {
+export async function send(
+  s: Sender,
+  opts: { label: string; signer: ethers.Signer; to: string; data: string; value?: bigint; lastStretch?: boolean; fields?: Fields; unsimulatedGasLimit?: bigint },
+): Promise<SendOutcome> {
   const { label, signer, to, data } = opts;
   const value = opts.value ?? 0n;
   const fields = opts.fields ?? {};
+  let attempted = false;
   try {
     const from = await signer.getAddress();
     let estimate: bigint;
-    try {
-      estimate = await s.provider.estimateGas({ from, to, data, value });
-    } catch (e: unknown) {
-      const revert = revertOf(e);
-      if (revert) {
-        s.log.event('simulation-reverted', { label, from, why: revert.text, ...fields });
-        return { sent: false, why: 'reverted', revert };
+    if (opts.unsimulatedGasLimit !== undefined) {
+      estimate = opts.unsimulatedGasLimit;
+    } else {
+      try {
+        estimate = await s.provider.estimateGas({ from, to, data, value });
+      } catch (e: unknown) {
+        const revert = revertOf(e);
+        if (revert) {
+          s.log.event('simulation-reverted', { label, from, why: revert.text, ...fields });
+          return { sent: false, why: 'reverted', revert };
+        }
+        s.log.event('rpc-error', { label, from, error: errorMessage(e).slice(0, 300), ...fields });
+        return { sent: false, why: 'error', note: errorMessage(e), attempted };
       }
-      s.log.event('rpc-error', { label, from, error: errorMessage(e).slice(0, 300), ...fields });
-      return { sent: false, why: 'error', note: errorMessage(e) };
     }
     if (estimate >= TX_GAS_CAP) {
       s.log.event('over-gas-cap', { label, estimate: estimate.toString(), ...fields });
-      return { sent: false, why: 'error', note: 'over the gas cap' };
+      return { sent: false, why: 'error', note: 'over the gas cap', attempted };
     }
     const block = await s.provider.getBlock('latest');
     const base = block?.baseFeePerGas ?? 0n;
     const limit = opts.lastStretch ? MAX_BASE_FEE_LAST_STRETCH : MAX_BASE_FEE;
     if (base > limit) {
       s.log.event('fee-too-high', { label, baseFee: base.toString(), limit: limit.toString(), ...fields });
-      return { sent: false, why: 'fee', note: `base fee ${base}` };
+      return { sent: false, why: 'fee', note: `base fee ${base}`, attempted };
     }
     const fetched = await s.provider.getTransactionCount(from, 'pending');
     const nonce = Math.max(fetched, nextNonce.get(from) ?? 0);
+    attempted = true;
     const tx = await signer.sendTransaction({
       to,
       data,
       value,
       nonce,
-      gasLimit: gasLimitFor(estimate),
+      gasLimit: opts.unsimulatedGasLimit ?? gasLimitFor(estimate),
       maxFeePerGas: base * 2n + TIP,
       maxPriorityFeePerGas: TIP,
       type: 2,
@@ -276,7 +289,7 @@ export async function send(s: Sender, opts: { label: string; signer: ethers.Sign
     const receipt = await pollReceipt(s, tx.hash);
     if (!receipt) {
       s.log.event('tx-pending', { label, from, hash: tx.hash, ...fields });
-      return { sent: false, why: 'pending', note: tx.hash };
+      return { sent: false, why: 'pending', note: tx.hash, attempted };
     }
     s.log.event(receipt.status === 1 ? 'tx-mined' : 'tx-reverted-on-chain', {
       label,
@@ -288,10 +301,10 @@ export async function send(s: Sender, opts: { label: string; signer: ethers.Sign
       block: receipt.block,
       ...fields,
     });
-    if (receipt.status !== 1) return { sent: false, why: 'error', note: `reverted on chain: ${tx.hash}` };
+    if (receipt.status !== 1) return { sent: false, why: 'reverted-on-chain', receipt };
     return { sent: true, receipt, estimate };
   } catch (e: unknown) {
     s.log.event('send-error', { label, error: errorMessage(e).slice(0, 300), ...fields });
-    return { sent: false, why: 'error', note: errorMessage(e) };
+    return { sent: false, why: 'error', note: errorMessage(e), attempted };
   }
 }

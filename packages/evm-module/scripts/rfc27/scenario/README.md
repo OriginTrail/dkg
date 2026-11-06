@@ -51,7 +51,7 @@ data; the plan and the ticks read it.
 |---|---|
 | 0 | Baseline. |
 | 1 | `wallet-bursty` tops up at about 12:00 UTC. The owner of `account-30` removes its buyer at about 16:00 UTC: a request issued from then on is refused, and one served before it still lands. |
-| 2 | The owner adds the buyer back at the epoch's start. **The race**: from 22:30 UTC, two sellers serve `wallet-heavy`'s model-beta budget past its limit, so batches count in landing order and the later lander counts only what is left. **The held batch**: `beacon-03` holds its calls from 22:30 UTC past the epoch's end, so they miss. Its refusal, `GroupFault` with `OutsideEpoch`, is logged as expected. |
+| 2 | The owner adds the buyer back at the epoch's start. **The race**: from 22:30 UTC, two sellers serve `wallet-heavy`'s model-beta budget past its limit, so batches count in landing order and the later lander counts only what is left. **The held batch**: `beacon-03` holds its calls from 22:30 UTC past the epoch's end, then sends that batch once, early in offset 3, so the chain records a failed transaction. Its refusal, `GroupFault` with `OutsideEpoch`, is read back and logged as expected, and those calls never count. |
 | 3 | Only funding, and no calls. No node has served value, so the pool is 0 and the money rolls forward. |
 | 4 and on | Baseline with varied demand. Offset 4's pool takes offset 3's money. |
 
@@ -76,9 +76,12 @@ data; the plan and the ticks read it.
   twice.
 - **Every transaction is simulated first.** A revert is decoded and logged, and the
   tick goes on. A faulty item is left out of its batch, which is simulated again.
-  `NoNodeScore` is normal early in an epoch: the next tick tries again.
+  `NoNodeScore` is normal early in an epoch: the next tick tries again. The one
+  exception is the held batch, sent unsimulated with a fixed gas limit, as its failure
+  is meant to reach the chain.
 - **What a tick keeps** in `~/.rfc27-scenario/state.json` is only whether to retry at
-  the next tick, and that the held batch was tried. Losing it costs one extra look.
+  the next tick, and that the held batch was sent. Losing it costs one extra look, and
+  at worst a second failed send of that batch.
 - **Logs** are JSON lines in `~/.rfc27-scenario/logs/tick.jsonl`, at most 5 MB each,
   with three older files kept.
 

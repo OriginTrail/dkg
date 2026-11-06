@@ -39,17 +39,18 @@ const END_MARGIN_SECONDS = 30;
 const MAX_BATCHES_PER_TICK = 3;
 /** Faulty items dropped from one batch, past which the batch waits for the next tick. */
 const MAX_FAULT_DROPS = 8;
-/** For how long into the next epoch the held batch is tried, for its expected refusal. */
-const HELD_RETRY_SECONDS = 6 * 3_600;
+/** The gas limit of the held batch, which goes out unsimulated: its first group is refused before any item is read, well under this. */
+export const HELD_BATCH_GAS_LIMIT = 500_000n;
 /** Below this, a key's balance is logged as low. */
 const LOW_ETH = 50_000_000_000_000n;
 
-/** What a tick keeps between runs. Losing it costs nothing but one extra landing. */
+/** What a tick keeps between runs. Losing it costs one extra landing at most, and at worst a second failed send of the held batch. */
 export interface TickState {
   retryLanding(epoch: number): boolean;
   setRetryLanding(epoch: number, on: boolean): void;
   heldDone(epoch: number): boolean;
   markHeldDone(epoch: number): void;
+  unmarkHeldDone(epoch: number): void;
 }
 
 export type LandedGroup = { subscriptionId: string; budgetIndex: number; seller: number; itemCount: number; value: bigint; counted: bigint; stakeFactor18: bigint };
@@ -73,7 +74,7 @@ export type TickDeps = {
   onDropped?: (seller: SellerName, epoch: number, why: string, count: number) => void;
 };
 
-type Times = { now: number; epoch: number; offset: number; start: number; secondsIn: number; secondsLeft: number };
+export type Times = { now: number; epoch: number; offset: number; start: number; secondsIn: number; secondsLeft: number };
 
 let qiDomainCache: Domain | undefined;
 let ssDomainCache: Domain | undefined;
@@ -427,11 +428,18 @@ async function land(d: TickDeps, seller: SellerName, sellerId: number, t: Times,
   d.state.setRetryLanding(t.epoch, failed);
 }
 
-/** The batch held past the epoch's end, tried once its epoch has ended: only simulated, as it is expected to be refused, and logged as expected. */
-async function heldBatch(d: TickDeps, seller: SellerName, sellerId: number, t: Times): Promise<void> {
+/**
+ * The batch held past the epoch's end, sent once that epoch has ended, so that the
+ * chain records a failed transaction: it goes out unsimulated, with a fixed gas
+ * limit, once the node has a score in the new epoch, as NoNodeScore would otherwise
+ * come first. It is marked before it goes out, so a crash loses the send rather than
+ * repeating it. The chain keeps no reason, so it is read by calling the same batch at
+ * that block, and logged as expected.
+ */
+export async function heldBatch(d: TickDeps, seller: SellerName, sellerId: number, t: Times): Promise<void> {
   const previous = t.epoch - 1;
   if (previous < FIRST_EPOCH || eventOf(previous - FIRST_EPOCH, 'held-batch')?.who !== seller) return;
-  if (d.state.heldDone(previous) || t.secondsIn > HELD_RETRY_SECONDS) return;
+  if (d.state.heldDone(previous)) return;
   const plan = planEpoch(d.seed, previous);
   const held = plan.calls.filter((c) => c.seller === seller && c.held);
   const ready = await readyCalls(d, plan, held, sellerId, seller, false);
@@ -440,26 +448,36 @@ async function heldBatch(d: TickDeps, seller: SellerName, sellerId: number, t: T
     d.state.markHeldDone(previous);
     return;
   }
+  if (((await d.c.rss.getNodeEpochScore(t.epoch, sellerId)) as bigint) === 0n) {
+    d.log.event('held-batch-waits', { seller, epoch: previous, note: 'it goes out once the node has proved in this epoch' });
+    return;
+  }
   const domain = await qiDomain(d);
   const groups = groupsOf(d, domain, previous, sellerId, ready);
   const value = ready.reduce((a, r) => a + r.call.value, 0n);
-  try {
-    await d.provider.estimateGas({ from: await d.seller.getAddress(), to: await d.c.qs.getAddress(), data: d.c.qs.interface.encodeFunctionData('submitReceiptBatch', [groups]) });
-    d.log.event('held-batch-unexpected', { seller, epoch: previous, note: 'the simulation of the held batch did not revert' });
-    d.state.markHeldDone(previous);
-  } catch (e: unknown) {
-    const revert = revertOf(e);
-    if (revert?.name === 'NoNodeScore') {
-      d.log.event('held-batch-waits', { seller, epoch: previous, why: revert.text, note: 'its refusal is read after the node has proved in this epoch' });
-      return;
+  const from = await d.seller.getAddress();
+  const to = await d.c.qs.getAddress();
+  const data = d.c.qs.interface.encodeFunctionData('submitReceiptBatch', [groups]);
+  const fields: Fields = { seller, epoch: previous, items: ready.length, valueWei: value.toString() };
+
+  d.state.markHeldDone(previous);
+  const outcome = await send(d.sender, { label: `${seller}: send the held batch, past its epoch`, signer: d.seller, to, data, unsimulatedGasLimit: HELD_BATCH_GAS_LIMIT, fields: { ...fields, event: 'held-batch' } });
+  if (outcome.sent) {
+    d.log.event('held-batch-unexpected', { ...fields, hash: outcome.receipt.hash, note: 'the held batch landed' });
+  } else if (outcome.why === 'reverted-on-chain') {
+    let revert: Revert | undefined;
+    try {
+      await d.provider.call({ from, to, data, blockTag: outcome.receipt.block });
+    } catch (e: unknown) {
+      revert = revertOf(e);
     }
-    if (revert) {
-      const expected = revert.name === 'GroupFault' && revert.args[1] === Fault.OutsideEpoch;
-      d.log.event('held-batch-missed', { seller, epoch: previous, expected, why: revert.text, items: ready.length, valueWei: value.toString() });
-      d.state.markHeldDone(previous);
-    } else {
-      d.log.event('rpc-error', { seller, epoch: previous, error: errorMessage(e).slice(0, 300) });
-    }
+    const expected = revert?.name === 'GroupFault' && revert.args[1] === Fault.OutsideEpoch;
+    d.log.event('held-batch-missed', { ...fields, expected, why: revert?.text ?? 'the reason could not be read', hash: outcome.receipt.hash, gasUsed: outcome.receipt.gasUsed.toString(), feeWei: outcome.receipt.fee.toString(), block: outcome.receipt.block });
+  } else if (outcome.why !== 'reverted' && !outcome.attempted) {
+    // Nothing went out, so the next tick sends it.
+    d.state.unmarkHeldDone(previous);
+  } else {
+    d.log.event('held-batch-unknown', { ...fields, note: 'it may have gone out, so it is not sent again' });
   }
 }
 

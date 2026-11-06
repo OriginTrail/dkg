@@ -112,6 +112,10 @@ class FileState implements TickState {
     this.data.held.push(e);
     this.save();
   };
+  unmarkHeldDone = (e: number): void => {
+    this.data.held = this.data.held.filter((x) => x !== e);
+    this.save();
+  };
 }
 
 /** A beacon's tick. It never fails the timer: whatever goes wrong is logged, and the next tick goes on. */

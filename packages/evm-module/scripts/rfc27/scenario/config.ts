@@ -221,7 +221,7 @@ export const EVENTS: readonly ScriptedEvent[] = [
     sellers: ['beacon-01', 'beacon-02'],
     note: 'Two sellers serve the same budget past its limit: batches count in landing order, so whichever lands last counts only what is left.',
   },
-  { epochOffset: 2, atUtc: '22:30', kind: 'held-batch', who: 'beacon-03', note: 'Holds its calls from 22:30 on past the end of the epoch, so that last batch misses: refused as OutsideEpoch, and it never counts. Expected.' },
+  { epochOffset: 2, atUtc: '22:30', kind: 'held-batch', who: 'beacon-03', note: 'Holds its calls from 22:30 on past the end of the epoch, then sends that last batch once, early in the next epoch: the chain records a failed transaction, refused as OutsideEpoch, and those calls never count. Expected.' },
   { epochOffset: 3, atUtc: '00:00', kind: 'funding-only', who: 'all', note: 'Every buyer funds, and no call is made. No node has served value, so the pool is 0 and the money rolls forward.' },
   { epochOffset: 4, atUtc: '00:00', kind: 'baseline', who: 'all', note: 'Calls resume with varied demand: this epoch has value, so its pool takes the money rolled from offset 3.' },
 ];

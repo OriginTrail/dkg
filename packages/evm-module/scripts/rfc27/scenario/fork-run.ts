@@ -32,6 +32,7 @@ class MemoryState implements TickState {
   setRetryLanding = (e: number, on: boolean): void => void this.retry.set(e, on);
   heldDone = (e: number): boolean => this.held.has(e);
   markHeldDone = (e: number): void => void this.held.add(e);
+  unmarkHeldDone = (e: number): void => void this.held.delete(e);
 }
 
 type Seen = { kind: string; fields: Fields };
@@ -262,7 +263,8 @@ export async function forkRun(o: ForkOptions): Promise<boolean> {
       check(n.totalServed === 0n && n.pool === 0n && n.money > 0n, 'offset 3: no value, so the pool is 0 and the money waits', `money ${fmt(n.money)}`);
       const missed = seen.filter((x) => x.kind === 'held-batch-missed');
       check(missed.length === 1 && missed[0].fields.expected === true, 'offset 3: the held batch of offset 2 is refused as OutsideEpoch', JSON.stringify(missed.map((x) => x.fields)));
-      for (const x of missed) say(`    held batch: ${x.fields.seller}, ${x.fields.items} items of ${fmt(BigInt(String(x.fields.valueWei)))} TRAC, refused: ${x.fields.why}`);
+      check(seen.filter((x) => x.kind === 'tx-sent' && x.fields.event === 'held-batch').length === 1, 'offset 3: the held batch goes out once, and fails on the chain');
+      for (const x of missed) say(`    held batch: ${x.fields.seller}, ${x.fields.items} items of ${fmt(BigInt(String(x.fields.valueWei)))} TRAC, failed on the chain, gas ${x.fields.gasUsed}: ${x.fields.why}`);
     }
     if (offset === 4) {
       const prev = await readEpoch(c, epoch - 1);
@@ -272,7 +274,7 @@ export async function forkRun(o: ForkOptions): Promise<boolean> {
   }
   check(crashed, 'the run stopped right after a send once, and went on');
 
-  const worst = log.seen.filter((x) => ['tick-error', 'duty-error', 'tx-reverted-on-chain', 'over-gas-cap', 'send-error'].includes(x.kind));
+  const worst = log.seen.filter((x) => ['tick-error', 'duty-error', 'tx-reverted-on-chain', 'over-gas-cap', 'send-error'].includes(x.kind) && x.fields.event !== 'held-batch');
   check(worst.filter((x) => x.kind !== 'send-error').length === 0, 'no tick failed', JSON.stringify(worst.slice(0, 5).map((x) => [x.kind, x.fields.error ?? x.fields.label])));
   const unexpected = log.seen.filter((x) => x.kind === 'simulation-reverted' && !String(x.fields.why).startsWith('NoNodeScore'));
   check(unexpected.length === 0, 'no simulation reverted but for NoNodeScore', JSON.stringify(unexpected.slice(0, 5).map((x) => [x.fields.label, x.fields.why])));
@@ -293,8 +295,13 @@ function isScripted(seed: Uint8Array, epoch: number, seller: SellerName, seconds
 }
 
 async function recordCrashed(provider: ethers.JsonRpcProvider, qs: ethers.Contract, ledger: Ledger, seller: SellerName, epoch: number, hash: string, tally: { batches: number; items: number; gas: bigint }): Promise<void> {
-  const r = (await provider.send('eth_getTransactionReceipt', [hash])) as { logs: RawLog[]; gasUsed: string } | null;
-  if (!r) return;
+  // anvil may not have mined it yet, right after the send.
+  let r: { logs: RawLog[]; gasUsed: string } | null = null;
+  for (let i = 0; i < 100 && !r; i++) {
+    r = (await provider.send('eth_getTransactionReceipt', [hash])) as { logs: RawLog[]; gasUsed: string } | null;
+    if (!r) await new Promise((res) => setTimeout(res, 100));
+  }
+  if (!r) throw new Error(`no receipt for the batch stopped right after its send: ${hash}`);
   const groups: LandedGroup[] = [];
   for (const l of r.logs) {
     if (l.address.toLowerCase() !== String(qs.target).toLowerCase()) continue;

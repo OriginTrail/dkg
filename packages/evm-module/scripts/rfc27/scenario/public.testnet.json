@@ -147,7 +147,7 @@
       "atUtc": "22:30",
       "kind": "held-batch",
       "who": "beacon-03",
-      "note": "Holds its calls from 22:30 on past the end of the epoch, so that last batch misses: refused as OutsideEpoch, and it never counts. Expected."
+      "note": "Holds its calls from 22:30 on past the end of the epoch, then sends that last batch once, early in the next epoch: the chain records a failed transaction, refused as OutsideEpoch, and those calls never count. Expected."
     },
     {
       "epochOffset": 3,
