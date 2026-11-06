@@ -223,7 +223,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       expect(await f.QS.budgetLeft(p, 0n)).to.equal(15n * TRAC - served.valueWei);
       expect((await f.QIS.getNodeEpoch(s1.identityId, epoch)).servedValue).to.equal((served.valueWei * (10_000n - s.discountBps)) / 10_000n);
 
-      // From its expiry on, neither: the key's new grant reopens nothing.
+      // From its expiry on, neither: the buyer's new grant reopens nothing.
       await time.setNextBlockTimestamp(expiresAt);
       await refusedAs(p, h.itemFor(await h.requestFor(p, 0, s1, { nonce: 1n, issuedAt: expiresAt })), Fault.InactiveGrant);
       await expect(f.SS.connect(buyer2).topUpFromAccount(p, [budget(0, CLASS_INFERENCE, TRAC, CAP)], ethers.ZeroHash))

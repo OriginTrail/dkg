@@ -136,7 +136,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
       await NFT.connect(kal).coverPublishingCost(agent.address, baseCost, kaStartEpoch ?? (await epochNow()), kaEpochs)
     ).wait())!;
 
-  /** Opt the account in and grant `buyer` under a limit no test reaches. */
+  /** Opt the account in and add `buyer` under a limit no test reaches. */
   const openForServices = async (accountId: bigint) => {
     await SS.connect(owner).setServiceSpending(accountId, true);
     const terms: Terms = {

@@ -348,14 +348,14 @@ describe('@unit ServiceSubscriptionsStorage', () => {
       await SSS.connect(logic).recordUsage(accountId, a);
       expect((await SSS.getUsage(accountId, a)).subscriptions).to.equal(1n);
 
-      // Re-adding the same key: new terms, the list unchanged, usage from zero.
+      // Re-adding the same buyer: new terms, the list unchanged, usage from zero.
       const renewed = buyerTerms({ grantedAt: 5_000n, maxCostPerEpoch: 2_000n * TRAC, nonce: 1n });
       await SSS.connect(logic).setGrant(accountId, a, renewed);
       expect(plain(await SSS.getGrant(accountId, a))).to.deep.equal(renewed);
       expect(await SSS.buyerCount(accountId)).to.equal(1n);
       expect(plain(await SSS.getUsage(accountId, a))).to.deep.equal({ subscriptions: 0n });
 
-      // A second key is appended after the first; another account's list is separate.
+      // A second buyer is appended after the first; another account's list is separate.
       await SSS.connect(logic).setGrant(accountId, b, buyerTerms({ nonce: 2n }));
       expect(await SSS.buyerCount(accountId)).to.equal(2n);
       expect(await SSS.buyerAt(accountId, 1n)).to.equal(b);
@@ -689,7 +689,7 @@ describe('@unit ServiceSubscriptionsStorage', () => {
       expect(await SSS.replacedGrantEnd(accountId + 1n, a, 0n)).to.equal(0n);
     });
 
-    it('listBuyer lists a key once, in order, as setGrant lists it, and isBuyerListed reads the listing', async () => {
+    it('listBuyer lists a buyer once, in order, as setGrant lists it, and isBuyerListed reads the listing', async () => {
       await SSS.connect(logic).listBuyer(accountId, a);
       await SSS.connect(logic).listBuyer(accountId, a);
       await SSS.connect(logic).setGrant(accountId, b, buyerTerms());
