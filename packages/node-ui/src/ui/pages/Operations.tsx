@@ -1,17 +1,35 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
-  ResponsiveContainer, LineChart, Line, BarChart, Bar, AreaChart, Area,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine,
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ReferenceLine,
 } from 'recharts';
 import { useFetch, formatBytes, formatTime, formatDuration, shortId } from '../hooks.js';
 import { opTypeText, opTypeBg, opTypeRule, opChartColor } from '../op-type-colors.js';
 import { Badge, type BadgeTone, StatusGlyph } from '../components/ds/Badge.js';
 import {
-  fetchOperationsWithPhases, fetchOperation, fetchNodeLog,
-  fetchOperationStats, fetchStatus, fetchErrorHotspots, fetchFailedOperations,
-  fetchSuccessRates, fetchPerTypeStats, fetchMetricsHistory,
-  fetchReplicationSummary, fetchReplicationPerCg, fetchReplicationTimeline,
-  fetchReplicationCursors, fetchReplicationEvents,
+  fetchOperationsWithPhases,
+  fetchOperation,
+  fetchNodeLog,
+  fetchStatus,
+  fetchErrorHotspots,
+  fetchFailedOperations,
+  fetchSuccessRates,
+  fetchPerTypeStats,
+  fetchMetricsHistory,
+  fetchReplicationSummary,
+  fetchReplicationPerCg,
+  fetchReplicationTimeline,
+  fetchReplicationCursors,
+  fetchReplicationEvents,
   type ReplicationPerCgRow,
 } from '../api.js';
 // P-1 review: shared phase palette — single source of truth for
@@ -33,7 +51,7 @@ import { formatDateTime } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 import { StatTile } from '../components/ds/StatTile.js';
 import { NetworkConnections } from './Network.js';
-import { useObservabilityStore } from '../stores/observability.js';
+import { useObservabilityStore, writeTabToAddress } from '../stores/observability.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -150,6 +168,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 
 export function ObservabilitySection() {
   const { tab, setTab } = useObservabilityStore();
+  useEffect(() => writeTabToAddress(tab), [tab]);
 
   return (
     <div>

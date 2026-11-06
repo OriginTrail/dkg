@@ -59,8 +59,7 @@ function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.
 // the document has no source file — the entity uri, which does not start with
 // `urn:dkg:file:` and drives the "source not available" empty state.
 function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
-  const { tabs, activeTabId, closeTab } = useTabsStore();
-  const setActiveTab = useTabsStore(s => s.setActiveTab);
+  const { tabs, activeTabId } = useTabsStore();
   const [content, setContent] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [contentType, setContentType] = useState<string>('');

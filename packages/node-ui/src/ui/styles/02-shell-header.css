@@ -361,6 +361,11 @@ button.v10-notif-row:hover { background: var(--bg-hover); }
   cursor: col-resize;
   transition: background var(--motion-base), width var(--motion-fast);
 }
+/* The line stays 1px; the target around it is 9px, because a 1px target is hard to catch. */
+.v10-resize-handle-h, .v10-resize-handle-v { position: relative; z-index: 1; }
+.v10-resize-handle-h::after, .v10-resize-handle-v::after { content: ''; position: absolute; }
+.v10-resize-handle-h::after { inset: 0 -4px; }
+.v10-resize-handle-v::after { inset: -4px 0; }
 .v10-resize-handle-h:hover,
 .v10-resize-handle-h.active { background: var(--border-prominent); width: 3px; }
 /* Vertical twin for the bottom panel (drag the top edge up/down). */

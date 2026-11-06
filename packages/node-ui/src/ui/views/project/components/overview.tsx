@@ -1,11 +1,9 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { api } from '../../../api-wrapper.js';
 import { listJoinRequests, approveJoinRequest, rejectJoinRequest, type PendingJoinRequest } from '../../../api.js';
 import { useMemoryEntities } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfile } from '../../../hooks/useProjectProfile.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
 import { canonicalAgentDid, normalizeAccessPolicy } from '../../../lib/contextGraphSidebar.js';
-import { layerNoun, useLayerTriples, useCanonicalTriples, type LayerView } from '../helpers.js';
+import { layerNoun, useCanonicalTriples, type LayerView } from '../helpers.js';
 import { StatStrip } from '../../../components/ContextGraphPrimitives.js';
 import { useNodeEvents } from '../../../hooks/useNodeEvents.js';
 import { AgentDot } from '../../../components/AgentDot.js';
@@ -180,15 +178,17 @@ export function ProjectHeaderStrip({
   return (
     <div className="v10-project-strip" style={{ '--sg-color': activeSubGraph ? activeSubGraph.color ?? 'var(--text-tertiary)' : cgColor } as React.CSSProperties}>
       <ContextGraphMark id={cg.id} name={name} size="md" />
-      <button
-        type="button"
-        className="v10-project-strip-name"
-        onClick={activeSubGraph ? onClearSubGraph : undefined}
-        disabled={!activeSubGraph}
-        title={activeSubGraph ? 'Back to Context Graph overview' : cg.id}
-      >
-        {name}
-      </button>
+      <h1 className="v10-project-strip-heading">
+        <button
+          type="button"
+          className="v10-project-strip-name"
+          onClick={activeSubGraph ? onClearSubGraph : undefined}
+          disabled={!activeSubGraph}
+          title={activeSubGraph ? 'Back to Context Graph overview' : cg.id}
+        >
+          {name}
+        </button>
+      </h1>
       {activeSubGraph ? (
         <>
           <span className="v10-project-strip-sep">›</span>

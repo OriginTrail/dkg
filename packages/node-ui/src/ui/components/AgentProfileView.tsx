@@ -90,7 +90,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
       <div className="v10-agent-profile-header">
         <Breadcrumbs items={[{ label: contextGraphName, onClick: onBack }, { label: 'Agent' }]} />
         <div className="v10-agent-profile-head">
-          <AgentChip agent={agent ?? undefined} fallbackUri={agentUri} size="lg" showOperator />
+          <h1 className="v10-agent-profile-heading"><AgentChip agent={agent ?? undefined} fallbackUri={agentUri} size="lg" showOperator /></h1>
           {agent?.reputation && (
             <div className="v10-agent-profile-reputation">
               {agent.reputation}

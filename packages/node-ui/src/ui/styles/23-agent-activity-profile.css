@@ -246,6 +246,7 @@
     transparent 100%
   );
 }
+.v10-agent-profile-heading { min-width: 0; margin: 0; font: inherit; }
 .v10-agent-profile-head {
   display: flex; align-items: center; gap: var(--space-16);
   flex-wrap: wrap;

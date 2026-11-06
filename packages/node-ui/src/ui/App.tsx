@@ -268,7 +268,7 @@ function NetworkRoute() {
     openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
   }, [openTab]);
 
-  return <Navigate to={PLACES.operations.path} replace />;
+  return <Navigate to={`${PLACES.operations.path}?tab=network`} replace />;
 }
 
 /** Old address: Agent hub is the right panel. AppShell opens it once it has mounted. */
