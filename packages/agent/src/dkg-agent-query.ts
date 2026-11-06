@@ -1,3 +1,4 @@
+import { scalarRegistrationAdmissionFor } from './internal/scalar-registration-admission.js';
 import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import type { AgentQueryOptions } from './agent-query-options.js';
 import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
@@ -17,10 +18,7 @@ import { isAdmittedContextGraphSubscription } from './context-graph-subscription
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { canReadUnscopedQuery } from './unscoped-query-admission.js';
-import {
-  prepareUnscopedContextGraphReadChecks,
-  type ContextGraphReadCheck,
-} from './prepare-unscoped-context-graph-read-checks.js';
+import { prepareUnscopedContextGraphReadChecks, type ContextGraphReadCheck } from './prepare-unscoped-context-graph-read-checks.js';
 import { executePublicQuery, publicQueryBudget } from './public-query-execution.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -743,6 +741,7 @@ export class QueryMethods extends DKGAgentBase {
     opts: { callerAgentAddress?: string; signal: AbortSignal },
   ): Promise<ContextGraphReadCheck> {
     return prepareUnscopedContextGraphReadChecks({
+      scalarRegistrationAdmission: scalarRegistrationAdmissionFor(this),
       createReadAuthorityInput: (id, signal) => (
         QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
           this,

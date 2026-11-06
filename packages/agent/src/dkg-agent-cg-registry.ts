@@ -671,11 +671,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async readLocalContextGraphRegistrationStatus(
     this: DKGAgent,
     contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<'registered' | 'unregistered' | 'pending' | null> {
     return new LocalContextGraphRegistrationStatusStore({
       store: this.store,
       markProjectionDirty: (id) => this.contextGraphMetaProjection.markDirty(id),
-    }).read(contextGraphId);
+    }).read(contextGraphId, options);
   }
 
   /**
@@ -686,17 +687,22 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async isLocalFirstUnregisteredContextGraph(
     this: DKGAgent,
     contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     return this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
       && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
-      && await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered';
+      && await this.readLocalContextGraphRegistrationStatus(contextGraphId, options) === 'unregistered';
   }
 
   /**
    * Check whether a context graph has been registered on-chain.
    */
-  async isContextGraphRegistered(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    return await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'registered';
+  async isContextGraphRegistered(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<boolean> {
+    return await this.readLocalContextGraphRegistrationStatus(contextGraphId, options) === 'registered';
   }
 
   /**
@@ -1030,7 +1036,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     }
     // A durable local-first graph deliberately has no chain target. RFC-64
     // authenticates that lane from its local owner metadata instead.
-    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
+    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId, { signal: options.signal })) return null;
 
     const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
       [contextGraphId],
@@ -1150,7 +1156,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       && this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
     ) {
       try {
-        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
+        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId, { signal: options.signal })) {
           return { kind: 'unregistered', unregisteredEvidence: 'local-create' };
         }
       } catch (err) {
@@ -1404,7 +1410,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         //
         // It is not one caller-driven read, though: unscoped-query admission
         // fans this boundary out once per candidate graph, up to
-        // `SCALAR_REGISTRATION_PREPARATION_CONCURRENCY` (32) scalar
+        // `SCALAR_REGISTRATION_PREPARATION_CONCURRENCY` scalar
         // preparations at a time. The foreground lane's own permit is what
         // bounds that fan-out to a single probe against an exhausted pool;
         // the siblings are then refused at the re-evaluated admission gate.
@@ -1890,7 +1896,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // remotely discovered graphs continue through authoritative resolution.
     if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
       try {
-        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
+        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId, { signal })) {
           return {};
         }
       } catch {
@@ -1972,7 +1978,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // An unregistered locally-created CG has neither, so the gate
     // still fails closed for it.
     if (accessPolicy === undefined || publishPolicy === undefined) {
-      const registeredViaStatus = await this.isContextGraphRegistered(contextGraphId).catch(() => false);
+      const registeredViaStatus = await this.isContextGraphRegistered(contextGraphId, { signal }).catch(() => false);
       let registeredViaOnChainId = false;
       if (!registeredViaStatus) {
         if (onChainId === undefined) {
