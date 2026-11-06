@@ -6,8 +6,8 @@
 // a Hub-registered stand-in for KnowledgeAssetsLifecycle:
 //   - a publish books its whole discounted draw over the Knowledge Asset's
 //     epochs, with the spread of a wallet publish, and nothing else;
-//   - a plan period's cost is due in QueryInferenceStorage in the epoch after
-//     the period, funded now or ahead, with nothing in the staker pool;
+//   - a plan period's cost is booked in QueryInferenceStorage under the
+//     period's epoch, funded now or ahead, with nothing in the staker pool;
 //   - an account that 10.0.8 or 10.1.0 scheduled publishes exactly as before
 //     (a budget gate, its top-up overflow forward over the lock) and is
 //     refused services;
@@ -202,7 +202,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Services
   // -------------------------------------------------------------------------
 
-  it("a plan period's cost is due in the epoch after the period, funded now or ahead, and nothing reaches the staker pool", async () => {
+  it("a plan period's cost is booked under the period's epoch, funded now or ahead, and nothing reaches the staker pool", async () => {
     const { accountId } = await createAccount();
     await openForServices(accountId);
     const e0 = await epochNow();
@@ -215,19 +215,21 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
     for (const receipt of [now, ahead]) expect(await credits(receipt)).to.have.length(0);
     expect(await poolSnapshot(e0, e0 + 2n * lock + 2n)).to.deep.equal(before);
-    expect(await QIS.convictionDue(e0)).to.equal(0n);
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(nowCost);
-    expect(await QIS.convictionDue(e0 + 2n)).to.equal(aheadCost);
-    expect(await QIS.dueIn(e0 + 1n)).to.deep.equal([0n, nowCost]);
+    expect(await QIS.convictionFunding(e0 - 1n)).to.equal(0n);
+    expect(await QIS.convictionFunding(e0)).to.equal(nowCost);
+    expect(await QIS.convictionFunding(e0 + 1n)).to.equal(aheadCost);
+    expect(await QIS.convictionFunding(e0 + 2n)).to.equal(0n);
+    expect(await QIS.fundingIn(e0)).to.deep.equal([0n, nowCost]);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(nowCost + aheadCost);
 
-    // A top-up of the current period is due with it.
+    // A top-up of the current period is booked with it.
     await SS.connect(buyer).topUpFromConviction(
       subscriptionIdOf(buyer.address, e0),
       [bucket(0, CLASS_INFERENCE, 10n * TRAC)],
       hre.ethers.id('plan-2'),
     );
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(nowCost + costOf(10n * TRAC, BPS));
+    expect(await QIS.convictionFunding(e0)).to.equal(nowCost + costOf(10n * TRAC, BPS));
+    expect(await QIS.convictionFunding(e0 + 1n)).to.equal(aheadCost);
   });
 
   // -------------------------------------------------------------------------
@@ -295,11 +297,11 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const e0 = await epochNow();
 
     const published = await publish(1_000n * TRAC, lock); // 800 TRAC booked at once
-    const funded = await fund(accountId, 500n * TRAC); // 400 TRAC due after the period
+    const funded = await fund(accountId, 500n * TRAC); // 400 TRAC under the period's epoch
     expect(sumOf(await credits(published))).to.equal(800n * TRAC);
     expect(await credits(funded)).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(1_200n * TRAC);
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(400n * TRAC);
+    expect(await QIS.convictionFunding(e0)).to.equal(400n * TRAC);
 
     // Window 0 closes; the next touch books what is left of it.
     await time.increaseTo(createdAt + epLen);
@@ -338,7 +340,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect(await PCS.topUpBalance(accountId)).to.equal(100n * TRAC);
   });
 
-  it('top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service draw has both due', async () => {
+  it("top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service draw books both under the period's epoch", async () => {
     const B = COMMITTED / lock;
     // The publishing path.
     const { accountId: publishingId } = await createAccount();
@@ -363,11 +365,11 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const [drawn] = await eventsOf(funded, PC, 'ServiceCostCovered');
     expect([drawn.cost, drawn.drawnFromWindow, drawn.drawnFromTopUp]).to.deep.equal([cost, B, cost - B]);
     expect(await credits(funded)).to.have.length(0);
-    expect(await QIS.convictionDue((await epochNow()) + 1n)).to.equal(cost);
+    expect(await QIS.convictionFunding(await epochNow())).to.equal(cost);
     expect(await PCS.topUpBalance(serviceId)).to.equal(2_000n * TRAC - (cost - B));
   });
 
-  it('the 1-wei floor holds on both paths: a 1-wei publish books 1 wei in the KA last epoch, and a value the discount rounds to 0 is due as 1 wei', async () => {
+  it('the 1-wei floor holds on both paths: a 1-wei publish books 1 wei in the KA last epoch, and a value the discount rounds to 0 is booked as 1 wei', async () => {
     // The 75 % tier: 3 wei is 0.75 wei after the discount.
     const { accountId } = await createAccount(1_000_000n * TRAC);
     await openForServices(accountId);
@@ -380,7 +382,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const funded = await fund(accountId, 3n);
     expect((await eventsOf(funded, PC, 'ServiceCostCovered'))[0].cost).to.equal(1n);
     expect(await credits(funded)).to.have.length(0);
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(1n);
+    expect(await QIS.convictionFunding(e0)).to.equal(1n);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(2n);
   });
 

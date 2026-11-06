@@ -47,15 +47,16 @@ export const Fault = {
   None: 0n,
   UnknownPeriod: 1n,
   UnknownBucket: 2n,
-  PastDeadline: 3n,
+  OutsideEpoch: 3n,
   EmptyGroup: 4n,
-  BadSignature: 5n,
-  InactiveAssignment: 6n,
-  DuplicateNonce: 7n,
-  OutsideTime: 8n,
-  AskOutOfRange: 9n,
-  BadArithmetic: 10n,
-  ZeroResultCommitment: 11n,
+  BelowMinCounted: 5n,
+  BadSignature: 6n,
+  InactiveAssignment: 7n,
+  DuplicateNonce: 8n,
+  OutsideTime: 9n,
+  AskOutOfRange: 10n,
+  BadArithmetic: 11n,
+  ZeroResultCommitment: 12n,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -120,7 +121,7 @@ export type ReceiptItem = {
   sigVS: string;
 };
 
-export type ReceiptGroup = { subscriptionId: string; bucketIndex: bigint; items: ReceiptItem[] };
+export type ReceiptGroup = { subscriptionId: string; bucketIndex: bigint; minCounted: bigint; items: ReceiptItem[] };
 
 /** The signing domain of requests and receipts: the verifying contract is QueryInferenceStorage. */
 export async function queryInferenceDomain(qis: QueryInferenceStorage): Promise<Domain> {

@@ -1,421 +1,321 @@
-// The epoch close of the query/inference pool (OT-RFC-27), and the gross
-// reward each node draws from it, end to end on the real account and staking
-// stacks with wallet-funded periods, and Conviction Account cost booked as due
-// beside them.
+// The query/inference pool of an epoch (OT-RFC-27), and the gross reward each
+// node draws from it, end to end on the development deploy of the staking,
+// account and plan-period stacks (StakingV10 wired to the settlement, the
+// activation epoch at the deployment epoch, λ 0.5). No step runs when an epoch
+// ends: its pool is a plain read of what was funded and what counted.
 //
 // Groups:
-//   - frozen inputs: the pool, λ, ΣR and ΣQueryInferenceScore of a closed
-//     epoch, which no later change moves, and a further change of λ, which
-//     waits for closeEpochs to close the epochs before the last one;
-//   - the epoch's money: what is due in it from wallets and from Conviction
-//     Accounts, both reported by EpochClosed, plus the carry;
-//   - rollover: epochs with no finalized value, empty ones included, carry
-//     their whole money to the next epoch with finalized value;
-//   - order: epochs close one at a time, after they end, at most maxSteps per
-//     call; ensureClosed is bounded by maxCloseStepsPerClaim and reverts
-//     QueryInferenceCloseBehind while behind, which closeEpochs clears;
-//   - conservation over a seeded run of fundings, top-ups, batches,
-//     finalizations and void claims: the money due in closed epochs equals
-//     their pools plus the carry;
-//   - queryInferenceGross: OT-RFC-27's formula at λ 0, 0.5 and 1, its sum
-//     over the nodes, short of the pool by under 2 wei per node at every λ,
-//     the R share when ΣQueryInferenceScore is 0, and 0 for an open epoch, an
-//     empty pool or a node with no value;
-//   - the preview: previewEpochClose and previewQueryInferenceGross read an
-//     ended epoch's pool, λ and gross before its close exactly as the close
-//     then freezes them, replaying the rollover of the epochs before it, for
-//     wallet value and Conviction Account cost alike, account cost alone
-//     included.
+//   - an epoch with value: its pool is its money, wallet value and Conviction
+//     Account cost alike, with the shares nobody used;
+//   - an epoch with no value: its pool is 0 and its money rolls, along an
+//     unbroken run, to the next epoch with value, so each epoch's money reaches
+//     exactly one pool, also over a seeded run;
+//   - the activation epoch, where the run stops;
+//   - money funded ahead, which joins the epoch it is funded for;
+//   - nothing changes after an epoch's end: its reads, and the claims of
+//     StakingV10, from the first second of the next epoch on;
+//   - an ended epoch takes no booking, through the funding paths or directly;
+//   - the epoch in progress, which reads as if it ended now;
+//   - queryInferenceGross: OT-RFC-27's formula at λ 0, 0.5 and 1, at equal and
+//     unequal stake factors, its sum over the nodes, short of the pool by under
+//     2 wei per node, the R share when ΣQueryInferenceScore is 0, and 0 for a
+//     node with no value, which walks no run.
+//
+// How batches count is in v10-query-inference-counting.test.ts, and the pool
+// paid through the operator fee and to delegators by score in
+// v10-query-inference-rewards.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import { QueryInferenceStorage } from '../typechain';
-import { eventsOf } from './helpers/account-stack';
-import { CLASS_INFERENCE, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
-import {
-  SCALE18,
-  SettlementStack,
-  createNode,
-  deploySettlementStack,
-  hardhatWallet,
-  queryInferenceDomain,
-  scoreNode,
-  signedItems,
-} from './helpers/query-inference';
+import { BPS, CLASS_INFERENCE, Domain, TRAC, bucket, requestOf, subscriptionIdOf, walletRequestOf } from './helpers/conviction-service';
+import { SCALE18, hardhatWallet, openConvictionAccount, queryInferenceDomain } from './helpers/query-inference';
+import { RewardsHelpers, Seller, UNIT_ASK, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 
-const UNIT_ASK = 10n ** 15n;
-const BPS = 10_000n;
-
-type Seller = { identityId: bigint; operational: SignerWithAddress };
+const STAKE_S_50 = 1_250_000n * TRAC; // S = sqrt(0.25) = 0.5
+const STAKE_S_65 = 2_112_500n * TRAC; // S = sqrt(0.4225) = 0.65
+const STAKE_S_90 = 4_050_000n * TRAC; // S = sqrt(0.81) = 0.9
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
-async function deployFixture(): Promise<SettlementStack> {
-  return deploySettlementStack();
+async function deployFixture() {
+  return deployRewardsStack();
 }
 
-describe('@integration The epoch close of the query/inference pool', function () {
-  let f: SettlementStack;
-  let QIS: QueryInferenceStorage;
+type Fixture = Awaited<ReturnType<typeof deployFixture>>;
+
+describe('@integration The query/inference pool of an epoch', function () {
+  let f: Fixture;
+  let h: RewardsHelpers;
   let domain: Domain;
-  let nextAccount: number;
+  let buyer: SignerWithAddress;
+  let buyer2: SignerWithAddress;
+  let assignee: SignerWithAddress;
   const key = hardhatWallet(60);
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
     f = await loadFixture(deployFixture);
-    QIS = f.QIS;
-    domain = await queryInferenceDomain(QIS);
-    nextAccount = 40;
+    domain = await queryInferenceDomain(f.QIS);
+    h = rewardsHelpers({ f, domain, firstAccount: 30, key });
+    buyer = f.accounts[21];
+    buyer2 = f.accounts[22];
+    assignee = f.accounts[24];
   });
 
   // -------------------------------------------------------------------------
   // Helpers
   // -------------------------------------------------------------------------
 
-  const latest = async () => BigInt(await time.latest());
-  const epochNow = async () => f.Chronos.getCurrentEpoch();
   const epochStart = async (e: bigint) => f.Chronos.timestampForEpoch(e);
-  const toEpoch = async (e: bigint) => time.increaseTo(await epochStart(e));
-  const forward = async (contract: BaseContract, fn: string, args: unknown[] = []) =>
-    f.Hub.forwardCall(await contract.getAddress(), contract.interface.encodeFunctionData(fn, args));
-
-  const seller = async (stake: bigint): Promise<Seller> => {
-    const operational = f.accounts[nextAccount++];
-    const admin = f.accounts[nextAccount++];
-    return { identityId: await createNode({ ...f, operational, admin, stake }), operational };
+  const setLambda = async (value: bigint) => h.forward(f.QIS, 'setLambdaBps', [value]);
+  const gross = async (e: bigint, s: Seller) => f.QS.queryInferenceGross(e, s.identityId);
+  const funding = async (e: bigint) => {
+    const [wallet, conviction] = await f.QIS.fundingIn(e);
+    return [wallet, conviction];
+  };
+  const money = async (e: bigint) => {
+    const [wallet, conviction] = await funding(e);
+    return wallet + conviction;
   };
 
-  /** A wallet period of `epoch` for buyer `who`, one bucket of `value`. */
-  const walletFund = async (who: SignerWithAddress, epoch: bigint, value: bigint): Promise<string> => {
+  /** `by`, given a node score in the current epoch if it has none yet, lands `amount` on a period's bucket: its one receipt there. */
+  const land = async (by: Seller, p: string, amount: bigint) => {
+    const epoch = await h.epochNow();
+    if ((await f.RSS.getNodeEpochScore(epoch, by.identityId)) === 0n) await h.scoreEpoch(epoch, by, 100n * TRAC);
+    await h.claimReceipts(by, p, amount);
+  };
+
+  /** A wallet top-up of `value` to `who`'s period. */
+  const topUp = async (who: SignerWithAddress, p: string, value: bigint) => {
     await f.Token.mint(who.address, value);
     await f.Token.connect(who).approve(await f.SSW.getAddress(), value);
-    await f.SSW.connect(who).fundFromWallet(
-      walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
+    await f.SSW.connect(who).topUpFromWallet(p, [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], hre.ethers.ZeroHash);
+  };
+
+  /** A period of `epoch` for `assignee`, from an account at the 75 % tier: one bucket of `value`, at a quarter of it. */
+  const accountPeriod = async (epoch: bigint, value: bigint) => {
+    const { accountId } = await openConvictionAccount({
+      ...f,
+      owner: f.accounts[23],
+      assignee,
+      committed: 1_000_000n * TRAC,
+      limit: 1_000n * TRAC,
+    });
+    await f.SS.connect(assignee).fundFromConviction(
+      requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
     );
-    return subscriptionIdOf(who.address, epoch);
+    return { accountId, p: subscriptionIdOf(assignee.address, epoch) };
   };
 
-  const claim = async (by: Seller, subscriptionId: string, amount: bigint, firstNonce = 0n) => {
-    const { items } = signedItems({
-      domain,
-      wallet: key,
-      subscriptionId,
-      bucketId: (await f.CSS.getBucket(subscriptionId, 0n)).bucketId,
-      seller: by.identityId,
-      firstNonce,
-      count: 1,
-      units: amount / UNIT_ASK,
-      ask: UNIT_ASK,
-      issuedAt: await latest(),
-    });
-    await f.QS.connect(by.operational).submitReceiptBatch([{ subscriptionId, bucketIndex: 0n, items }]);
+  /**
+   * A replacement storage with no activation epoch, which the settlement and
+   * the funding contracts read from now on, and under whose domain requests are
+   * signed from now on.
+   */
+  const replaceStorage = async () => {
+    const fresh = (await (
+      await hre.ethers.getContractFactory('QueryInferenceStorage')
+    ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceStorage;
+    await fresh.waitForDeployment();
+    await f.Hub.setContractAddress('QueryInferenceStorage', await fresh.getAddress());
+    await h.forward(fresh, 'initialize');
+    for (const c of [f.QS, f.SSW, f.SS]) await h.forward(c, 'initialize');
+    domain = await queryInferenceDomain(fresh);
+    h = rewardsHelpers({ f, domain, firstAccount: 50, key });
+    return fresh;
   };
 
-  /** Move into the finalization window of `epoch`'s periods, score `sellers` there, and finalize their claims on `periods`. */
-  const finalizeIn = async (epoch: bigint, periods: string[], sellers: Seller[]) => {
-    const deadline = (await epochStart(epoch + 1n)) + (await QIS.receiptGraceSecondsAt(epoch));
-    if ((await latest()) <= deadline) await time.increaseTo(deadline + 1n);
-    for (const s of sellers) await scoreNode(f.RSS, epoch + 1n, s.identityId);
-    await f.QS.finalizeClaims(
-      periods.flatMap((p) => sellers.map((s) => ({ subscriptionId: p, bucketIndex: 0n, seller: s.identityId }))),
-    );
-  };
-
-  const closeAll = async () => (await (await f.QS.closeEpochs(255n)).wait())!;
-
-  const closedEvents = (receipt: ContractTransactionReceipt) =>
-    eventsOf(receipt, f.QS, 'EpochClosed').map((e) => [
-      e.epoch,
-      e.walletDue,
-      e.convictionDue,
-      e.carryIn,
-      e.pool,
-      e.sumR,
-      e.sumScore,
-      e.lambdaBps,
-    ]);
-
-  const record = async (e: bigint) => {
-    const c = await QIS.getEpochClose(e);
-    return [c.pool, c.lambdaBps, c.closed];
-  };
+  /** OT-RFC-27's formula, floored per term as the contract floors it. */
+  const formula = (pool: bigint, lambda: bigint, r: bigint, sumR: bigint, qis: bigint, sumQis: bigint) =>
+    (pool * (BPS - lambda) * r) / (BPS * sumR) +
+    (sumQis === 0n ? (pool * lambda * r) / (BPS * sumR) : (pool * lambda * qis) / (BPS * sumQis));
 
   // -------------------------------------------------------------------------
-  // Frozen inputs
+  // An epoch with value
   // -------------------------------------------------------------------------
 
-  describe('frozen inputs', () => {
-    it('freezes the pool, λ and the totals; later changes to λ, bookings and credits leave them', async () => {
-      const s1 = await seller(1_250_000n * TRAC); // S = 0.5
-      const s2 = await seller(4_050_000n * TRAC); // S = 0.9
-      const e = await epochNow();
-      expect(await QIS.activationEpoch()).to.equal(e);
-      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
-      const p = await walletFund(f.accounts[21], e, 10n * TRAC);
-      await claim(s1, p, 4n * TRAC);
-      await claim(s2, p, 2n * TRAC);
-      await finalizeIn(e, [p], [s1, s2]);
-      const score = 2n * TRAC + (18n * TRAC) / 10n;
-      expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([6n * TRAC, score]);
-
-      // Only ended epochs close: during e + 1, a close reaches e.
-      expect(await f.QS.closeEpochs.staticCall(10n)).to.equal(e);
-      await toEpoch(e + 2n);
-      const receipt = await closeAll();
-      expect(closedEvents(receipt)).to.deep.equal([
-        [e, 0n, 0n, 0n, 0n, 0n, 0n, 0n],
-        [e + 1n, 10n * TRAC, 0n, 0n, 10n * TRAC, 6n * TRAC, score, 5_000n],
-      ]);
-      expect(await record(e)).to.deep.equal([0n, 0n, true]);
-      expect(await record(e + 1n)).to.deep.equal([10n * TRAC, 5_000n, true]);
-      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 1n, 0n]);
-      expect(await f.QS.epochPool(e + 1n)).to.equal(10n * TRAC);
-      const gross = [await f.QS.queryInferenceGross(e + 1n, s1.identityId), await f.QS.queryInferenceGross(e + 1n, s2.identityId)];
-
-      // λ moves for later epochs only; the closed epoch takes no booking and no credit.
-      await forward(QIS, 'setLambdaBps', [10_000n]);
-      expect(await record(e + 1n)).to.deep.equal([10n * TRAC, 5_000n, true]);
-      await expect(QIS.addWalletDue(e + 1n, 1n)).to.be.revertedWithCustomError(QIS, 'EpochClosed');
-      await expect(QIS.finalizeClaim(p, 0n, s1.identityId, e + 1n, 1n, 1n)).to.be.revertedWithCustomError(
-        QIS,
-        'EpochClosed',
-      );
-      expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([6n * TRAC, score]);
-      expect([await f.QS.queryInferenceGross(e + 1n, s1.identityId), await f.QS.queryInferenceGross(e + 1n, s2.identityId)]).to.deep.equal(gross);
-    });
-
-    it('λ changes again and again as closeEpochs closes the epochs before the last change: refused while one is open, and no closed epoch moves', async () => {
-      const e = await epochNow();
-      expect(await QIS.closedThrough()).to.equal(e - 1n);
-      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
-
-      // In force, with e still open: folding it in would hand e the new λ.
-      await toEpoch(e + 1n);
-      await expect(forward(QIS, 'setLambdaBps', [2_000n]))
-        .to.be.revertedWithCustomError(QIS, 'LambdaScheduleAheadOfCloses')
-        .withArgs(e - 1n, e + 1n);
-
-      // Anyone closes e through the settlement, and the change goes on.
-      await f.QS.connect(f.accounts[25]).closeEpochs(10n);
-      expect(await QIS.closedThrough()).to.equal(e);
-      await expect(forward(QIS, 'setLambdaBps', [2_000n])).to.emit(QIS, 'LambdaBpsSet').withArgs(2_000n, e + 2n);
-      expect(await record(e)).to.deep.equal([0n, 0n, true]);
-      expect(await QIS.lambdaBpsAt(e + 1n)).to.equal(5_000n);
-      expect(await QIS.lambdaBpsAt(e + 2n)).to.equal(2_000n);
-
-      // The same in the next epoch: a third change waits for e + 1 to close, at its own λ.
-      await toEpoch(e + 2n);
-      await expect(forward(QIS, 'setLambdaBps', [7_000n]))
-        .to.be.revertedWithCustomError(QIS, 'LambdaScheduleAheadOfCloses')
-        .withArgs(e, e + 2n);
-      await f.QS.connect(f.accounts[25]).closeEpochs(10n);
-      await expect(forward(QIS, 'setLambdaBps', [7_000n])).to.emit(QIS, 'LambdaBpsSet').withArgs(7_000n, e + 3n);
-
-      // Each epoch closes at the λ scheduled for it; the changes after its close leave it.
-      await toEpoch(e + 4n);
-      await closeAll();
-      expect(await record(e)).to.deep.equal([0n, 0n, true]);
-      expect(await record(e + 1n)).to.deep.equal([0n, 5_000n, true]);
-      expect(await record(e + 2n)).to.deep.equal([0n, 2_000n, true]);
-      expect(await record(e + 3n)).to.deep.equal([0n, 7_000n, true]);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // The epoch's money
-  // -------------------------------------------------------------------------
-
-  describe("the epoch's money", () => {
-    it('Conviction Account cost due in an epoch joins its pool beside the wallet value, and both are reported', async () => {
-      const s1 = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      const p = await walletFund(f.accounts[21], e, 10n * TRAC);
+  describe('an epoch with value', () => {
+    it('its pool is its money, wallet value and Conviction Account cost alike, and the only node with value takes it all', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await setLambda(0n); // one term, so one floor: this pool is no round number of wei
+      const p = await h.walletFund(buyer, e, 10n * TRAC);
       // Booked as ServiceSubscriptions books a period's cost; the Hub owner
       // passes onlyContracts.
-      await QIS.addConvictionDue(e + 1n, 4n * TRAC);
-      await QIS.addConvictionDue(e + 1n, 3n);
-      await claim(s1, p, TRAC);
-      await finalizeIn(e, [p], [s1]);
-      await toEpoch(e + 2n);
+      await f.QIS.addConvictionFunding(e, 4n * TRAC);
+      await f.QIS.addConvictionFunding(e, 3n);
+      await land(s1, p, TRAC);
+      await h.toEpoch(e + 1n);
 
-      const receipt = await closeAll();
-      expect(closedEvents(receipt).map(([epoch, wallet, conviction, carryIn, pool]) => [epoch, wallet, conviction, carryIn, pool])).to.deep.equal([
-        [e, 0n, 0n, 0n, 0n],
-        [e + 1n, 10n * TRAC, 4n * TRAC + 3n, 0n, 14n * TRAC + 3n],
-      ]);
-      expect(await f.QS.epochPool(e + 1n)).to.equal(14n * TRAC + 3n);
-      expect(await f.QS.queryInferenceGross(e + 1n, s1.identityId)).to.equal(14n * TRAC + 3n);
+      expect(await funding(e)).to.deep.equal([10n * TRAC, 4n * TRAC + 3n]);
+      expect(await f.QS.epochPool(e)).to.equal(14n * TRAC + 3n);
+      expect(await gross(e, s1)).to.equal(14n * TRAC + 3n);
     });
 
-    it('Conviction Account cost alone rolls over like wallet value, and is paid with the next finalized value', async () => {
-      const s1 = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      await QIS.addConvictionDue(e + 1n, 6n * TRAC); // no value finalized in e + 1
-      await toEpoch(e + 1n);
-      const p = await walletFund(f.accounts[21], e + 1n, 2n * TRAC);
-      await QIS.addConvictionDue(e + 2n, TRAC);
-      await claim(s1, p, TRAC);
-      await finalizeIn(e + 1n, [p], [s1]);
-      await toEpoch(e + 3n);
+    it("a share nobody used stays in the pool, a shared margin: a wallet's and an account's money with no receipt go to the nodes that served another buyer", async () => {
+      const a = await h.createSeller(STAKE_S_50, 0n);
+      const b = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await setLambda(0n);
+      const served = await h.walletFund(buyer, e, 100n * TRAC);
+      await h.walletFund(buyer2, e, 50n * TRAC); // no receipt lands on it
+      await accountPeriod(e, 100n * TRAC); // at a cost of 25, and no receipt lands on it
+      await land(a, served, TRAC);
+      await land(b, served, 3n * TRAC);
+      await h.toEpoch(e + 1n);
 
-      const receipt = await closeAll();
-      expect(closedEvents(receipt).map(([epoch, wallet, conviction, carryIn, pool]) => [epoch, wallet, conviction, carryIn, pool])).to.deep.equal([
-        [e, 0n, 0n, 0n, 0n],
-        [e + 1n, 0n, 6n * TRAC, 0n, 0n],
-        [e + 2n, 2n * TRAC, TRAC, 6n * TRAC, 9n * TRAC],
-      ]);
-      expect(await QIS.carry()).to.equal(0n);
-      expect(await f.QS.queryInferenceGross(e + 2n, s1.identityId)).to.equal(9n * TRAC);
+      expect(await funding(e)).to.deep.equal([150n * TRAC, 25n * TRAC]);
+      expect(await f.QIS.bucketFilled(served, 0n)).to.equal(4n * TRAC);
+      // 4 of it counted, and all of the money is the pool, split by R.
+      expect(await f.QS.epochPool(e)).to.equal(175n * TRAC);
+      expect(await gross(e, a)).to.equal((175n * TRAC) / 4n);
+      expect(await gross(e, b)).to.equal((525n * TRAC) / 4n);
     });
   });
 
   // -------------------------------------------------------------------------
-  // Rollover
+  // An epoch with no value, and the rollover
   // -------------------------------------------------------------------------
 
-  describe('rollover', () => {
-    it('epochs with no finalized value, empty ones included, carry their money to the next epoch that has some', async () => {
-      const s1 = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      await walletFund(f.accounts[21], e, 10n * TRAC); // due e + 1, never claimed
-      await toEpoch(e + 1n);
-      const p1 = await walletFund(f.accounts[21], e + 1n, 20n * TRAC); // due e + 2
-      await claim(s1, p1, TRAC); // claimed, but left void
-      // No period of e + 2: nothing is due in e + 3.
-      await toEpoch(e + 3n);
-      const p3 = await walletFund(f.accounts[21], e + 3n, 5n * TRAC); // due e + 4
-      await claim(s1, p3, TRAC);
-      await finalizeIn(e + 3n, [p3], [s1]);
-      await toEpoch(e + 5n);
-
-      const receipt = await closeAll();
-      expect(closedEvents(receipt).map(([epoch, due, , carryIn, pool]) => [epoch, due, carryIn, pool])).to.deep.equal([
-        [e, 0n, 0n, 0n],
-        [e + 1n, 10n * TRAC, 0n, 0n],
-        [e + 2n, 20n * TRAC, 10n * TRAC, 0n],
-        [e + 3n, 0n, 30n * TRAC, 0n],
-        [e + 4n, 5n * TRAC, 30n * TRAC, 35n * TRAC],
-      ]);
-      for (const epoch of [e, e + 1n, e + 2n, e + 3n]) expect(await f.QS.epochPool(epoch)).to.equal(0n);
-      expect(await f.QS.epochPool(e + 4n)).to.equal(35n * TRAC);
-      expect(await QIS.carry()).to.equal(0n);
-      // The only node with value takes the whole pool, carry included.
-      expect(await f.QS.queryInferenceGross(e + 4n, s1.identityId)).to.equal(35n * TRAC);
-    });
-
-    it('a carry waits in closed epochs until value is finalized again', async () => {
-      const e = await epochNow();
-      await walletFund(f.accounts[21], e, 7n * TRAC);
-      await toEpoch(e + 4n);
-      await closeAll();
-      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 3n, 7n * TRAC]);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // Order and bounds
-  // -------------------------------------------------------------------------
-
-  describe('order and bounds', () => {
-    it('epochs close in order, one per step, only once they have ended', async () => {
-      const e = await epochNow();
-      expect(await QIS.closedThrough()).to.equal(e - 1n);
-      let receipt = await closeAll();
-      expect(closedEvents(receipt)).to.have.length(0);
-
-      await toEpoch(e + 3n);
-      receipt = (await (await f.QS.closeEpochs(0n)).wait())!;
-      expect(closedEvents(receipt)).to.have.length(0);
-      for (const expected of [e, e + 1n]) {
-        expect(await f.QS.closeEpochs.staticCall(1n)).to.equal(expected);
-        receipt = (await (await f.QS.closeEpochs(1n)).wait())!;
-        expect(closedEvents(receipt).map(([epoch]) => epoch)).to.deep.equal([expected]);
+  describe('an epoch with no value', () => {
+    it('its pool is 0 and its money rolls: three epochs with no value, one of them with no money either, then one with value pays the sum', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await h.walletFund(buyer, e, 10n * TRAC);
+      await h.toEpoch(e + 1n);
+      await h.walletFund(buyer, e + 1n, 20n * TRAC);
+      // No period of e + 2: no money in it. The money waits for as long as no node sells.
+      await h.toEpoch(e + 3n);
+      for (const epoch of [e, e + 1n, e + 2n]) {
+        expect(await f.QS.epochPool(epoch)).to.equal(0n);
+        expect(await gross(epoch, s1)).to.equal(0n);
       }
-      receipt = await closeAll();
-      expect(closedEvents(receipt).map(([epoch]) => epoch)).to.deep.equal([e + 2n]);
-      // The current epoch has not ended.
-      receipt = await closeAll();
-      expect(closedEvents(receipt)).to.have.length(0);
-      expect(await QIS.closedThrough()).to.equal(e + 2n);
-      expect((await QIS.getEpochClose(e + 3n)).closed).to.equal(false);
+
+      const p = await h.walletFund(buyer, e + 3n, 5n * TRAC);
+      await land(s1, p, TRAC);
+      await h.toEpoch(e + 4n);
+
+      for (const epoch of [e, e + 1n, e + 2n]) expect(await f.QS.epochPool(epoch)).to.equal(0n);
+      expect(await f.QS.epochPool(e + 3n)).to.equal(35n * TRAC);
+      // The only node with value takes the whole pool, the run included.
+      expect(await gross(e + 3n, s1)).to.equal(35n * TRAC);
+      // Nothing is left for the epoch after it.
+      expect(await f.QS.epochPool(e + 4n)).to.equal(0n);
     });
 
-    it('ensureClosed closes up to its epoch within maxCloseStepsPerClaim, reverts while behind, and closeEpochs clears it', async () => {
-      await forward(QIS, 'setMaxCloseStepsPerClaim', [2n]);
-      const e = await epochNow();
-      await toEpoch(e + 5n);
+    it('Conviction Account cost alone rolls like wallet value, and is paid with the next value', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await setLambda(0n); // one term, so one floor: this pool is no round number of wei
+      await f.QIS.addConvictionFunding(e, 6n * TRAC); // no value in e
+      await h.toEpoch(e + 1n);
+      const p = await h.walletFund(buyer, e + 1n, 2n * TRAC);
+      await f.QIS.addConvictionFunding(e + 1n, TRAC + 1n);
+      await land(s1, p, TRAC);
+      await f.QIS.addConvictionFunding(e + 2n, 5n * TRAC); // no value in e + 2 either
+      await h.toEpoch(e + 3n);
 
-      await expect(f.QS.ensureClosed(e + 4n))
-        .to.be.revertedWithCustomError(f.QS, 'QueryInferenceCloseBehind')
-        .withArgs(e + 1n, e + 4n);
-      expect(await QIS.closedThrough()).to.equal(e - 1n);
-
-      // Within the bound, it closes only what it needs.
-      expect(await f.QS.ensureClosed.staticCall(e + 1n)).to.equal(e + 1n);
-      await f.QS.ensureClosed(e + 1n);
-      expect(await QIS.closedThrough()).to.equal(e + 1n);
-      await f.QS.ensureClosed(e); // already closed: nothing to do
-
-      await f.QS.closeEpochs(10n);
-      expect(await QIS.closedThrough()).to.equal(e + 4n);
-      await f.QS.ensureClosed(e + 4n);
-
-      // An epoch that has not ended cannot be closed.
-      await expect(f.QS.ensureClosed(e + 5n))
-        .to.be.revertedWithCustomError(f.QS, 'QueryInferenceCloseBehind')
-        .withArgs(e + 4n, e + 5n);
-      // An epoch before activation never closes, and needs no close.
-      expect(await f.QS.ensureClosed.staticCall(e - 1n)).to.equal(e + 4n);
-      expect(await f.QS.ensureClosed.staticCall(0n)).to.equal(e + 4n);
+      expect(await f.QS.epochPool(e)).to.equal(0n);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(9n * TRAC + 1n);
+      expect(await gross(e + 1n, s1)).to.equal(9n * TRAC + 1n);
+      // That of e + 2 waits on.
+      expect(await f.QS.epochPool(e + 2n)).to.equal(0n);
+      expect(await funding(e + 2n)).to.deep.equal([0n, 5n * TRAC]);
     });
 
-    it('with activation unset, nothing closes and ensureClosed returns at once', async () => {
-      const fresh = (await (
-        await hre.ethers.getContractFactory('QueryInferenceStorage')
-      ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceStorage;
-      await fresh.waitForDeployment();
-      await f.Hub.setContractAddress('QueryInferenceStorage', await fresh.getAddress());
-      await forward(fresh, 'initialize');
-      await forward(f.QS, 'initialize');
-      await toEpoch((await epochNow()) + 3n);
-      expect(await f.QS.closeEpochs.staticCall(10n)).to.equal(0n);
-      expect(await f.QS.ensureClosed.staticCall(2n)).to.equal(0n);
-      const receipt = await closeAll();
-      expect(closedEvents(receipt)).to.have.length(0);
+    it('an epoch with value breaks the run: the money before it is not counted twice', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await h.walletFund(buyer, e, 10n * TRAC); // no value: it rolls into e + 1
+      await h.toEpoch(e + 1n);
+      const paid = await h.walletFund(buyer, e + 1n, 20n * TRAC);
+      await land(s1, paid, TRAC);
+      await h.toEpoch(e + 2n);
+      await h.walletFund(buyer, e + 2n, 7n * TRAC); // no value: it rolls into e + 3
+      await h.toEpoch(e + 3n);
+      const again = await h.walletFund(buyer, e + 3n, 3n * TRAC);
+      await land(s1, again, TRAC);
+      await h.toEpoch(e + 4n);
+
+      expect(await f.QS.epochPool(e + 1n)).to.equal(30n * TRAC);
+      expect(await f.QS.epochPool(e + 2n)).to.equal(0n);
+      expect(await f.QS.epochPool(e + 3n)).to.equal(10n * TRAC);
+      expect(await gross(e + 1n, s1)).to.equal(30n * TRAC);
+      expect(await gross(e + 3n, s1)).to.equal(10n * TRAC);
     });
 
-    it('closes run while paused, so rewards are never stranded', async () => {
-      const e = await epochNow();
-      await walletFund(f.accounts[21], e, 3n * TRAC);
-      await forward(QIS, 'setPaused', [true]);
-      await toEpoch(e + 3n);
-      await closeAll();
-      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 2n, 3n * TRAC]);
+    it('the money of each epoch reaches exactly one pool, over eight epochs, by summing', async () => {
+      const a = await h.createSeller(STAKE_S_50, 0n);
+      const b = await h.createSeller(STAKE_S_90, 0n);
+      const e = await h.epochNow();
+      // Each epoch's money in TRAC, and whether a node counts value in it: a
+      // run with an epoch of no money in it, two epochs with value in a row,
+      // and a run that the last epoch pays.
+      const plan: Array<[bigint, boolean]> = [
+        [10n, false],
+        [20n, true],
+        [30n, false],
+        [0n, false],
+        [40n, true],
+        [50n, true],
+        [60n, false],
+        [5n, true],
+      ];
+      for (const [i, [value, sells]] of plan.entries()) {
+        const epoch = e + BigInt(i);
+        if (i > 0) await h.toEpoch(epoch);
+        if (value === 0n) continue;
+        const p = await h.walletFund(buyer, epoch, value * TRAC);
+        if (sells) {
+          await land(a, p, TRAC);
+          await land(b, p, 2n * TRAC);
+        }
+      }
+      await h.toEpoch(e + BigInt(plan.length));
+
+      const pools: bigint[] = [];
+      for (let i = 0n; i < BigInt(plan.length); i++) pools.push(await f.QS.epochPool(e + i));
+      expect(pools).to.deep.equal([0n, 30n, 0n, 0n, 70n, 50n, 0n, 65n].map((n) => n * TRAC));
+
+      // At every epoch, its money so far is its pools so far and the run still rolling.
+      let funded = 0n;
+      let paid = 0n;
+      let rolling = 0n;
+      for (const [i, [value, sells]] of plan.entries()) {
+        const epoch = e + BigInt(i);
+        expect(await funding(epoch)).to.deep.equal([value * TRAC, 0n]);
+        funded += value * TRAC;
+        paid += pools[i];
+        rolling = sells ? 0n : rolling + value * TRAC;
+        expect(funded, `epoch ${epoch}`).to.equal(paid + rolling);
+        // What the nodes draw adds up to the pool, but the floors.
+        const drawn = (await gross(epoch, a)) + (await gross(epoch, b));
+        expect(drawn <= pools[i]).to.equal(true);
+        expect(pools[i] - drawn < 4n).to.equal(true);
+      }
+      expect([funded, paid, rolling]).to.deep.equal([215n * TRAC, 215n * TRAC, 0n]);
     });
-  });
 
-  // -------------------------------------------------------------------------
-  // Conservation
-  // -------------------------------------------------------------------------
-
-  describe('conservation', () => {
-    it('over a seeded run, the money due in closed epochs equals their pools plus the carry, at every close', async () => {
+    it('over a seeded run, the money of the ended epochs is their pools and the run still rolling, at the end of every epoch', async () => {
       let seed = 0x2f6e2b1n;
       const rand = (n: bigint) => {
         seed = (seed * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
         return (seed >> 33n) % n;
       };
-      const sellers = [await seller(1_250_000n * TRAC), await seller(4_050_000n * TRAC), await seller(500_000n * TRAC)];
-      const start = await epochNow();
+      const sellers = [
+        await h.createSeller(STAKE_S_50, 0n),
+        await h.createSeller(STAKE_S_90, 0n),
+        await h.createSeller(500_000n * TRAC, 0n),
+      ];
+      const start = await h.epochNow();
       const periodsOf = new Map<bigint, string[]>();
-      let paid = 0n;
+      let booked = 0n;
       let buyerIndex = 100;
-      let claims = 0;
-      let carried = 0;
+      let batches = 0;
+      let rolled = 0;
       let paidOut = 0;
 
       for (let epoch = start; epoch < start + 8n; epoch++) {
@@ -424,64 +324,401 @@ describe('@integration The epoch close of the query/inference pool', function ()
           const fundings = Number(rand(3n));
           for (let i = 0; i < fundings; i++) {
             const value = (1n + rand(40n)) * TRAC + rand(1_000n) * UNIT_ASK;
-            const p = await walletFund(f.accounts[buyerIndex++], target, value);
-            paid += value;
+            const p = await h.walletFund(f.accounts[buyerIndex++], target, value);
+            booked += value;
             periodsOf.set(target, [...(periodsOf.get(target) ?? []), p]);
           }
         }
         for (const p of periodsOf.get(epoch) ?? []) {
           if (rand(3n) !== 0n) continue;
-          const buyer = (await f.CSS.getSubscription(p)).assignee;
+          const who = (await f.CSS.getSubscription(p)).assignee;
           const value = (1n + rand(5n)) * TRAC;
-          const who = f.accounts.find((a) => a.address === buyer)!;
-          await f.Token.mint(who.address, value);
-          await f.Token.connect(who).approve(await f.SSW.getAddress(), value);
-          await f.SSW.connect(who).topUpFromWallet(p, [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], hre.ethers.ZeroHash);
-          paid += value;
+          await topUp(f.accounts.find((a: SignerWithAddress) => a.address === who)!, p, value);
+          booked += value;
         }
-        // Claims on this epoch's periods, some above their funded value.
-        for (const p of periodsOf.get(epoch) ?? []) {
-          for (const [i, s] of sellers.entries()) {
-            if (rand(2n) === 0n) continue;
-            await claim(s, p, (1n + rand(30n)) * TRAC, BigInt(i) * 1_000n);
-            claims++;
+        // Batches on this epoch's periods, some above what is left, and in some epochs none.
+        if (rand(4n) !== 0n) {
+          for (const p of periodsOf.get(epoch) ?? []) {
+            for (const s of sellers) {
+              if (rand(2n) === 0n || (await f.QS.bucketLeft(p, 0n)) === 0n) continue;
+              await land(s, p, (1n + rand(30n)) * TRAC);
+              batches++;
+            }
           }
         }
-        // Into the next epoch: finalize most of this epoch's claims, leave the rest void.
-        if (rand(4n) !== 0n) {
-          const periods = periodsOf.get(epoch) ?? [];
-          const scored = sellers.filter(() => rand(4n) !== 0n);
-          await finalizeIn(epoch, periods, scored);
-        } else {
-          await toEpoch(epoch + 1n);
-        }
+        await h.toEpoch(epoch + 1n);
 
-        // The preview of every ended epoch still open is what its close freezes.
-        const previewed: Array<[bigint, bigint, bigint]> = [];
-        for (let e = (await QIS.closedThrough()) + 1n; e < (await epochNow()); e++) {
-          const [pool, lambdaBps] = await f.QS.previewEpochClose(e);
-          previewed.push([e, pool, lambdaBps]);
-        }
-        await closeAll();
-        for (const [e, pool, lambdaBps] of previewed) {
-          const c = await QIS.getEpochClose(e);
-          expect([c.pool, c.lambdaBps], `preview of epoch ${e}`).to.deep.equal([pool, lambdaBps]);
-        }
-        const closed = await QIS.closedThrough();
-        let due = 0n;
+        let funded = 0n;
         let pools = 0n;
-        for (let e = start; e <= closed; e++) {
-          const [wallet, conviction] = await QIS.dueIn(e);
-          due += wallet + conviction;
-          pools += await f.QS.epochPool(e);
+        let rolling = 0n;
+        for (let e = start; e <= epoch; e++) {
+          const m = await money(e);
+          const pool = await f.QS.epochPool(e);
+          funded += m;
+          pools += pool;
+          rolling = (await f.QIS.getEpochTotals(e)).sumR === 0n ? rolling + m : 0n;
+
+          let drawn = 0n;
+          for (const s of sellers) drawn += await gross(e, s);
+          expect(drawn <= pool, `epoch ${e}`).to.equal(true);
+          expect(pool - drawn < 6n, `epoch ${e}`).to.equal(true);
         }
-        expect(due, `epoch ${closed}`).to.equal(pools + (await QIS.carry()));
-        expect(due <= paid).to.equal(true);
-        if ((await QIS.carry()) > 0n) carried++;
-        if ((await f.QS.epochPool(closed)) > 0n) paidOut++;
+        expect(funded, `epoch ${epoch}`).to.equal(pools + rolling);
+        expect(funded <= booked).to.equal(true);
+        if (rolling > 0n) rolled++;
+        if ((await f.QS.epochPool(epoch)) > 0n) paidOut++;
       }
-      // The run covers claims, epochs that paid out and epochs that rolled over.
-      expect([claims > 10, carried > 0, paidOut > 1]).to.deep.equal([true, true, true]);
+      // The run covers batches, epochs that paid out and epochs that rolled over.
+      expect([batches > 10, rolled > 0, paidOut > 1]).to.deep.equal([true, true, true]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The activation epoch
+  // -------------------------------------------------------------------------
+
+  describe('the activation epoch', () => {
+    it('the run stops at it: the money of the activation epoch rolls, and money booked before it reaches no pool', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      // A replacement storage, into which a migration books the money of an
+      // earlier epoch; the Hub owner passes onlyContracts.
+      const fresh = await replaceStorage();
+      await fresh.addWalletFunding(e, 7n * TRAC);
+      await h.forward(fresh, 'setActivationEpoch', [e + 1n]);
+
+      await h.toEpoch(e + 1n);
+      await h.walletFund(buyer, e + 1n, 11n * TRAC); // no value, at the activation epoch
+      await h.toEpoch(e + 2n);
+      const p = await h.walletFund(buyer, e + 2n, 13n * TRAC);
+      await land(s1, p, TRAC);
+      await h.toEpoch(e + 3n);
+
+      expect(await fresh.walletFunding(e)).to.equal(7n * TRAC);
+      expect(await f.QS.epochPool(e + 2n)).to.equal(24n * TRAC);
+      expect(await gross(e + 2n, s1)).to.equal(24n * TRAC);
+      expect(await f.QS.epochPool(e)).to.equal(0n);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(0n);
+    });
+
+    it('an epoch with value at the activation epoch itself has a run of none', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      expect(await f.QIS.activationEpoch()).to.equal(e);
+      const p = await h.walletFund(buyer, e, 3n * TRAC);
+      await land(s1, p, TRAC);
+      expect(await f.QS.epochPool(e)).to.equal(3n * TRAC);
+    });
+
+    it('the pool reads 0 before the activation epoch and with activation unset', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      const p = await h.walletFund(buyer, e, 4n * TRAC);
+      await land(s1, p, TRAC);
+      await h.toEpoch(e + 1n);
+      expect(await f.QS.epochPool(e - 1n)).to.equal(0n);
+      expect(await gross(e - 1n, s1)).to.equal(0n);
+      expect(await gross(e, s1)).to.equal(4n * TRAC);
+
+      await replaceStorage();
+      expect(await f.QS.epochPool(e)).to.equal(0n);
+      expect(await gross(e, s1)).to.equal(0n);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Money funded ahead
+  // -------------------------------------------------------------------------
+
+  describe('money funded ahead', () => {
+    it('funded for the next epoch during this one, with its top-up, joins the next epoch only', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      const now = await h.walletFund(buyer, e, 10n * TRAC);
+      const ahead = await h.walletFund(buyer, e + 1n, 6n * TRAC);
+      await topUp(buyer, ahead, 2n * TRAC);
+      await accountPeriod(e + 1n, 100n * TRAC); // at a cost of 25
+      expect(await funding(e)).to.deep.equal([10n * TRAC, 0n]);
+      expect(await funding(e + 1n)).to.deep.equal([8n * TRAC, 25n * TRAC]);
+
+      await land(s1, now, TRAC);
+      expect(await f.QS.epochPool(e)).to.equal(10n * TRAC);
+
+      await h.toEpoch(e + 1n);
+      expect(await f.QS.epochPool(e)).to.equal(10n * TRAC);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(0n); // no value yet
+      await land(s1, ahead, TRAC);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(33n * TRAC);
+
+      await h.toEpoch(e + 2n);
+      expect(await gross(e, s1)).to.equal(10n * TRAC);
+      expect(await gross(e + 1n, s1)).to.equal(33n * TRAC);
+    });
+
+    it('funded ahead with no value in this epoch, it joins the same pool as the money that rolls from here, once each', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await h.walletFund(buyer, e, 10n * TRAC);
+      const ahead = await h.walletFund(buyer, e + 1n, 6n * TRAC);
+      await h.toEpoch(e + 1n);
+      await land(s1, ahead, TRAC);
+      await h.toEpoch(e + 2n);
+      expect(await f.QS.epochPool(e)).to.equal(0n);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(16n * TRAC);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Nothing changes after the epoch's end
+  // -------------------------------------------------------------------------
+
+  describe("nothing changes after the epoch's end", () => {
+    it('the pool and the gross read the same at the first second of the next epoch, later, after later funding and value, and whatever λ does', async () => {
+      const a = await h.createSeller(STAKE_S_50, 0n);
+      const b = await h.createSeller(STAKE_S_90, 0n);
+      const first = await h.epochNow();
+      await h.walletFund(buyer, first, 4n * TRAC); // rolls into e
+      const e = first + 1n;
+      await h.toEpoch(e);
+      const p = await h.walletFund(buyer, e, 10n * TRAC);
+      await land(a, p, 4n * TRAC);
+      await land(b, p, 2n * TRAC);
+
+      const read = async () => [await f.QS.epochPool(e), await gross(e, a), await gross(e, b)];
+      // A pool of 14 at the deploy's λ of 0.5: R 4 and 2, scores 2 and 1.8.
+      expect(await f.QIS.lambdaBps()).to.equal(5_000n);
+      const sumScore = (38n * TRAC) / 10n;
+      const final = [
+        14n * TRAC,
+        formula(14n * TRAC, 5_000n, 4n * TRAC, 6n * TRAC, 2n * TRAC, sumScore),
+        formula(14n * TRAC, 5_000n, 2n * TRAC, 6n * TRAC, (18n * TRAC) / 10n, sumScore),
+      ];
+      expect(await read()).to.deep.equal(final);
+
+      await h.toEpoch(e + 1n);
+      expect(await h.latest()).to.equal(await epochStart(e + 1n));
+      expect(await read()).to.deep.equal(final);
+
+      // The next epoch's money and value, and money funded further ahead.
+      const later = await h.walletFund(buyer, e + 1n, 6n * TRAC);
+      await land(a, later, TRAC);
+      await h.walletFund(buyer, e + 2n, 5n * TRAC);
+      await topUp(buyer, later, TRAC);
+      expect(await read()).to.deep.equal(final);
+
+      await setLambda(10_000n);
+      await h.toEpoch(e + 3n);
+      await setLambda(0n);
+      expect(await read()).to.deep.equal(final);
+      expect((await f.QIS.getEpochTotals(e)).lambdaBps).to.equal(5_000n);
+      // The later epochs have their own pools.
+      expect(await f.QS.epochPool(e + 1n)).to.equal(7n * TRAC);
+      expect(await f.QS.epochPool(e + 2n)).to.equal(0n);
+    });
+
+    it('a claim in the first second of the next epoch pays the epoch through StakingV10, and compounds into the position', async () => {
+      const e = await h.epochNow();
+      const n1 = await h.createSeller(STAKE_S_50, 1_000n); // 10% fee
+      const d1 = f.accounts[10];
+      const t1 = await h.delegate(d1, n1.identityId, 250_000n * TRAC);
+      // 100 TRAC of money, 30 counted, and a publishing pool of 40.
+      await h.valueIn(e, [[n1, 30n * TRAC, 100n * TRAC]], 40n * TRAC);
+      const score = await h.positionScore(t1, n1, e);
+      const scoreOperator = await h.positionScore(n1.tokenId, n1, e);
+      const rawOperator = (await f.Vault.getPosition(n1.tokenId)).raw;
+
+      const boundary = await epochStart(e + 1n);
+      await time.setNextBlockTimestamp(boundary);
+      const paid = await h.claim(d1, t1);
+      expect(await h.latest()).to.equal(boundary);
+
+      const s = await h.split(n1, e);
+      expect([s.queryInference, s.publishing, s.gross, s.fee, s.net]).to.deep.equal([
+        100n * TRAC,
+        40n * TRAC,
+        140n * TRAC,
+        14n * TRAC,
+        126n * TRAC,
+      ]);
+      // A sixth of the node's score, and of its net.
+      expect(paid).to.equal((score * s.net) / s.nodeScore);
+      expect(paid).to.be.closeTo(21n * TRAC, 10n ** 9n);
+      const position = await f.Vault.getPosition(t1);
+      expect(position.raw).to.equal(250_000n * TRAC + paid);
+      expect(position.lastClaimedEpoch).to.equal(e);
+      expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(s.net);
+      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s.fee);
+
+      // The claim has nothing more to pay, and the node's other position takes its share at its own claim.
+      expect(await h.claim(d1, t1)).to.equal(0n);
+      const paidOperator = await h.claim(n1.operational, n1.tokenId);
+      expect(paidOperator).to.equal((scoreOperator * s.net) / s.nodeScore);
+      expect((await f.Vault.getPosition(n1.tokenId)).raw).to.equal(rawOperator + paidOperator);
+      expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(s.fee);
+    });
+
+    it("claims before and after two changes of λ pay at the epoch's λ, so an epoch's nodes are paid at most its pool", async () => {
+      const cap = await f.Params.maximumStake();
+      const a = await h.createSeller(cap, 0n); // S = 1
+      const b = await h.createSeller(cap / 100n, 0n); // S = 0.1
+      const slack = async () => (await h.balanceOf(await h.vault())) - (await h.owed([a, b]));
+      const before = await slack();
+      const e = await h.epochNow();
+      expect(await f.QIS.lambdaBps()).to.equal(5_000n);
+      const pool = 1_000n * TRAC;
+      const p = await h.walletFund(buyer, e, pool);
+      await land(a, p, 200n * TRAC);
+      await land(b, p, 800n * TRAC);
+      // R 200 and 800, scores 200 and 80; each node's only position takes its gross.
+      const expected = [100n * TRAC + (500n * TRAC * 200n) / 280n, 400n * TRAC + (500n * TRAC * 80n) / 280n];
+
+      await h.toEpoch(e + 1n);
+      expect(await h.claim(b.operational, b.tokenId)).to.equal(expected[1]);
+      await setLambda(0n);
+      await h.toEpoch(e + 2n);
+      await setLambda(10_000n);
+      expect(await gross(e, a)).to.equal(expected[0]);
+      expect(await h.claim(a.operational, a.tokenId)).to.equal(expected[0]);
+      expect(await gross(e, b)).to.equal(expected[1]);
+
+      const paid = expected[0] + expected[1];
+      expect(paid <= pool).to.equal(true);
+      expect(pool - paid < 4n).to.equal(true);
+      expect((await slack()) - before).to.equal(pool - paid);
+    });
+
+    it('reads and claims go on while paused', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      const p = await h.walletFund(buyer, e, 3n * TRAC);
+      await land(s1, p, TRAC);
+      await h.forward(f.QIS, 'setPaused', [true]);
+      await h.toEpoch(e + 1n);
+      expect(await f.QS.epochPool(e)).to.equal(3n * TRAC);
+      expect(await gross(e, s1)).to.equal(3n * TRAC);
+      expect(await h.claim(s1.operational, s1.tokenId)).to.equal(3n * TRAC);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // An ended epoch takes no booking
+  // -------------------------------------------------------------------------
+
+  describe('an ended epoch takes no booking', () => {
+    it("through the funding paths: from the period's end, a top-up is refused, wallet or Conviction Account, and so is a new period of the past epoch", async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      const wallet = await h.walletFund(buyer, e, 10n * TRAC);
+      const { accountId, p: account } = await accountPeriod(e, 100n * TRAC); // at a cost of 25
+      await land(s1, wallet, TRAC);
+      const { periodEnd } = await f.CSS.getSubscription(wallet);
+      expect(periodEnd).to.equal(await epochStart(e + 1n));
+      const addition = [bucket(0, CLASS_INFERENCE, TRAC, UNIT_ASK)];
+      await f.Token.mint(buyer.address, TRAC);
+      await f.Token.connect(buyer).approve(await f.SSW.getAddress(), TRAC);
+
+      await time.setNextBlockTimestamp(periodEnd);
+      await expect(f.SSW.connect(buyer).topUpFromWallet(wallet, addition, hre.ethers.ZeroHash))
+        .to.be.revertedWithCustomError(f.SSW, 'PeriodEnded')
+        .withArgs(wallet, periodEnd);
+      expect(await h.latest()).to.equal(periodEnd);
+      await expect(f.SS.connect(assignee).topUpFromConviction(account, addition, hre.ethers.ZeroHash))
+        .to.be.revertedWithCustomError(f.SS, 'PeriodEnded')
+        .withArgs(account, periodEnd);
+
+      await f.Token.mint(buyer2.address, TRAC);
+      await f.Token.connect(buyer2).approve(await f.SSW.getAddress(), TRAC);
+      await expect(f.SSW.connect(buyer2).fundFromWallet(walletRequestOf(e, { buckets: addition, sessionKey: key.address })))
+        .to.be.revertedWithCustomError(f.SSW, 'InvalidFundingRequest')
+        .withArgs('epoch');
+      await expect(f.SS.connect(assignee).fundFromConviction(requestOf(accountId, e, { buckets: addition, sessionKey: key.address })))
+        .to.be.revertedWithCustomError(f.SS, 'InvalidFundingRequest')
+        .withArgs('epoch');
+
+      expect(await funding(e)).to.deep.equal([10n * TRAC, 25n * TRAC]);
+      expect(await f.QS.epochPool(e)).to.equal(35n * TRAC);
+      expect(await gross(e, s1)).to.equal(35n * TRAC);
+    });
+
+    it("directly: the storage refuses every write to an ended epoch's money and QIF inputs, and takes them for the current epoch and later", async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      const p = await h.walletFund(buyer, e, 4n * TRAC);
+      await land(s1, p, TRAC);
+      await h.toEpoch(e + 1n);
+      const before = [await f.QS.epochPool(e), await gross(e, s1)];
+      const totals = { sumR: 1n, sumScore: 1n, lambdaBps: 0n };
+      const node = { r: 1n, score: 1n };
+
+      // The Hub owner passes onlyContracts.
+      for (const write of [
+        () => f.QIS.addWalletFunding(e, 1n),
+        () => f.QIS.addConvictionFunding(e, 1n),
+        () => f.QIS.countReceipts(p, 0n, s1.identityId, e, 1n, 1n, 1n),
+        () => f.QIS.setNodeEpoch(s1.identityId, e, node),
+        () => f.QIS.setEpochTotals(e, totals),
+      ]) {
+        await expect(write()).to.be.revertedWithCustomError(f.QIS, 'EpochEnded').withArgs(e, e + 1n);
+      }
+      expect([await f.QS.epochPool(e), await gross(e, s1)]).to.deep.equal(before);
+
+      await f.QIS.addWalletFunding(e + 1n, 1n);
+      await f.QIS.addConvictionFunding(e + 2n, 1n);
+      expect(await money(e + 1n)).to.equal(1n);
+      expect(await money(e + 2n)).to.equal(1n);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // The epoch in progress
+  // -------------------------------------------------------------------------
+
+  describe('the epoch in progress', () => {
+    it('reads as if it ended now: no value reads 0, and money and value move it until the end, which it then keeps', async () => {
+      const a = await h.createSeller(STAKE_S_50, 0n);
+      const b = await h.createSeller(STAKE_S_90, 0n);
+      const e = await h.epochNow();
+      expect(await f.QIS.lambdaBps()).to.equal(5_000n);
+      const p = await h.walletFund(buyer, e, 10n * TRAC);
+      expect(await f.QS.epochPool(e)).to.equal(0n);
+      expect(await gross(e, a)).to.equal(0n);
+
+      await land(a, p, 2n * TRAC);
+      expect(await f.QS.epochPool(e)).to.equal(10n * TRAC);
+      expect(await gross(e, a)).to.equal(10n * TRAC);
+
+      await accountPeriod(e, 24n * TRAC); // at a cost of 6
+      expect(await funding(e)).to.deep.equal([10n * TRAC, 6n * TRAC]);
+      expect(await gross(e, a)).to.equal(16n * TRAC);
+      await topUp(buyer, p, 4n * TRAC);
+      expect(await f.QS.epochPool(e)).to.equal(20n * TRAC);
+      expect(await gross(e, a)).to.equal(20n * TRAC);
+
+      // R 2 and 6, scores 1 and 5.4, a pool of 20 at λ 0.5: 2.5 + 1.5625, and 7.5 + 8.4375.
+      await land(b, p, 6n * TRAC);
+      const last = [(40_625n * TRAC) / 10_000n, (159_375n * TRAC) / 10_000n];
+      expect([await gross(e, a), await gross(e, b)]).to.deep.equal(last);
+      expect(last[0] + last[1]).to.equal(20n * TRAC);
+
+      await h.toEpoch(e + 1n);
+      expect(await f.QS.epochPool(e)).to.equal(20n * TRAC);
+      expect([await gross(e, a), await gross(e, b)]).to.deep.equal(last);
+    });
+
+    it('reads the run behind it, and an epoch still ahead reads 0 whatever is funded for it', async () => {
+      const s1 = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await h.walletFund(buyer, e, 7n * TRAC);
+      await h.toEpoch(e + 1n);
+      const p = await h.walletFund(buyer, e + 1n, 3n * TRAC);
+      await h.walletFund(buyer, e + 2n, 9n * TRAC);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(0n);
+
+      await land(s1, p, TRAC);
+      expect(await f.QS.epochPool(e + 1n)).to.equal(10n * TRAC);
+      expect(await gross(e + 1n, s1)).to.equal(10n * TRAC);
+      expect(await f.QS.epochPool(e + 2n)).to.equal(0n);
+      expect(await gross(e + 2n, s1)).to.equal(0n);
     });
   });
 
@@ -490,39 +727,33 @@ describe('@integration The epoch close of the query/inference pool', function ()
   // -------------------------------------------------------------------------
 
   describe('queryInferenceGross', () => {
-    /** OT-RFC-27's formula, floored per term as the contract floors it. */
-    const formula = (pool: bigint, lambda: bigint, r: bigint, sumR: bigint, qis: bigint, sumQis: bigint) =>
-      (pool * (BPS - lambda) * r) / (BPS * sumR) +
-      (sumQis === 0n ? (pool * lambda * r) / (BPS * sumR) : (pool * lambda * qis) / (BPS * sumQis));
-
-    it("a 20 % share of a 5,000 TRAC pool is 1,000 TRAC at λ 0, as in OT-RFC-27's example, and the blend at 0.5 and 1", async () => {
+    it("a 20 % share of a 5,000 TRAC pool is 1,000 TRAC at λ 0, as in OT-RFC-27's example, and the blend at 0.5 and 1, at unequal stake factors", async () => {
       // A: R 200 at S 0.9 (QIS 180); B: R 800 at S 0.65 (QIS 520). ΣR 1,000, ΣQIS 700.
-      const a = await seller(4_050_000n * TRAC);
-      const b = await seller(2_112_500n * TRAC);
+      const a = await h.createSeller(STAKE_S_90, 0n);
+      const b = await h.createSeller(STAKE_S_65, 0n);
+      expect(await f.QS.stakeFactor(a.identityId)).to.equal((9n * SCALE18) / 10n);
       expect(await f.QS.stakeFactor(b.identityId)).to.equal((65n * SCALE18) / 100n);
-      const e = await epochNow();
+      const e = await h.epochNow();
+      const pool = 5_000n * TRAC;
       const snapshot = await takeSnapshot();
       const results: Record<string, bigint[]> = {};
       for (const lambda of [0n, 5_000n, 10_000n]) {
         await snapshot.restore();
-        await forward(QIS, 'setLambdaBps', [lambda]);
-        const p = await walletFund(f.accounts[21], e, 5_000n * TRAC);
-        await claim(a, p, 200n * TRAC);
-        await claim(b, p, 800n * TRAC);
-        await finalizeIn(e, [p], [a, b]);
-        expect(await f.QS.queryInferenceGross(e + 1n, a.identityId)).to.equal(0n); // still open
-        await toEpoch(e + 2n);
-        await closeAll();
-        expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([1_000n * TRAC, 700n * TRAC]);
-        const gross = [
-          await f.QS.queryInferenceGross(e + 1n, a.identityId),
-          await f.QS.queryInferenceGross(e + 1n, b.identityId),
-        ];
-        expect(gross[0]).to.equal(formula(5_000n * TRAC, lambda, 200n * TRAC, 1_000n * TRAC, 180n * TRAC, 700n * TRAC));
-        expect(gross[1]).to.equal(formula(5_000n * TRAC, lambda, 800n * TRAC, 1_000n * TRAC, 520n * TRAC, 700n * TRAC));
-        expect(gross[0] + gross[1] <= 5_000n * TRAC).to.equal(true);
-        expect(5_000n * TRAC - gross[0] - gross[1] <= 4n).to.equal(true);
-        results[String(lambda)] = gross;
+        await setLambda(lambda);
+        const p = await h.walletFund(buyer, e, pool);
+        await land(a, p, 200n * TRAC);
+        await land(b, p, 800n * TRAC);
+        await h.toEpoch(e + 1n);
+
+        const t = await f.QIS.getEpochTotals(e);
+        expect([t.sumR, t.sumScore, t.lambdaBps]).to.deep.equal([1_000n * TRAC, 700n * TRAC, lambda]);
+        expect(await f.QS.epochPool(e)).to.equal(pool);
+        const result = [await gross(e, a), await gross(e, b)];
+        expect(result[0]).to.equal(formula(pool, lambda, 200n * TRAC, 1_000n * TRAC, 180n * TRAC, 700n * TRAC));
+        expect(result[1]).to.equal(formula(pool, lambda, 800n * TRAC, 1_000n * TRAC, 520n * TRAC, 700n * TRAC));
+        expect(result[0] + result[1] <= pool).to.equal(true);
+        expect(pool - result[0] - result[1] <= 4n).to.equal(true);
+        results[String(lambda)] = result;
       }
       expect(results['0']).to.deep.equal([1_000n * TRAC, 4_000n * TRAC]);
       // 0.5 × 5,000 × 0.2 + 0.5 × 5,000 × 180 / 700
@@ -530,35 +761,50 @@ describe('@integration The epoch close of the query/inference pool', function ()
       expect(results['10000'][0]).to.equal((5_000n * TRAC * 180n) / 700n);
     });
 
-    it('sums over the nodes to the pool less under 2 wei per node, at every λ, and the close carries none of it', async () => {
-      // Five nodes at five stake factors, claims that divide no total evenly,
+    it('at equal stake factors both terms give the same share: 1,000 and 4,000 of 5,000 at λ 0, 0.5 and 1', async () => {
+      const a = await h.createSeller(STAKE_S_50, 0n);
+      const b = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      const snapshot = await takeSnapshot();
+      for (const lambda of [0n, 5_000n, 10_000n]) {
+        await snapshot.restore();
+        await setLambda(lambda);
+        const p = await h.walletFund(buyer, e, 5_000n * TRAC);
+        await land(a, p, 200n * TRAC);
+        await land(b, p, 800n * TRAC);
+        await h.toEpoch(e + 1n);
+        const t = await f.QIS.getEpochTotals(e);
+        expect([t.sumR, t.sumScore]).to.deep.equal([1_000n * TRAC, 500n * TRAC]);
+        expect([await gross(e, a), await gross(e, b)], `λ ${lambda}`).to.deep.equal([1_000n * TRAC, 4_000n * TRAC]);
+      }
+    });
+
+    it('sums over the nodes to the pool less under 2 wei per node, at every λ', async () => {
+      // Five nodes at five stake factors, receipts that divide no total evenly,
       // and a pool that is no round number of wei.
       const stakes = [4_050_000n, 2_112_500n, 1_250_000n, 500_000n, 123_457n].map((s) => s * TRAC);
       const sellers: Seller[] = [];
-      for (const stake of stakes) sellers.push(await seller(stake));
+      for (const stake of stakes) sellers.push(await h.createSeller(stake, 0n));
       const amounts = [13n, 17n, 19n, 23n, 29n].map((n) => n * 1_000n * UNIT_ASK);
       const pool = 1_000n * TRAC + 7n;
-      const e = await epochNow();
+      const e = await h.epochNow();
       const snapshot = await takeSnapshot();
       let dusty = 0;
       for (const lambda of [0n, 1n, 3_333n, 5_000n, 9_999n, 10_000n]) {
         await snapshot.restore();
-        await forward(QIS, 'setLambdaBps', [lambda]);
-        const p = await walletFund(f.accounts[21], e, pool);
-        for (const [i, s] of sellers.entries()) await claim(s, p, amounts[i]);
-        await finalizeIn(e, [p], sellers);
-        await toEpoch(e + 2n);
-        await closeAll();
-        expect(await f.QS.epochPool(e + 1n)).to.equal(pool);
-        expect(await QIS.carry()).to.equal(0n);
+        await setLambda(lambda);
+        const p = await h.walletFund(buyer, e, pool);
+        for (const [i, s] of sellers.entries()) await land(s, p, amounts[i]);
+        await h.toEpoch(e + 1n);
+        expect(await f.QS.epochPool(e)).to.equal(pool);
 
-        const t = await QIS.getEpochTotals(e + 1n);
+        const t = await f.QIS.getEpochTotals(e);
         let paid = 0n;
         for (const s of sellers) {
-          const n = await QIS.getNodeEpoch(s.identityId, e + 1n);
-          const gross = await f.QS.queryInferenceGross(e + 1n, s.identityId);
-          expect(gross).to.equal(formula(pool, lambda, n.r, t.sumR, n.score, t.sumScore));
-          paid += gross;
+          const n = await f.QIS.getNodeEpoch(s.identityId, e);
+          const drawn = await gross(e, s);
+          expect(drawn).to.equal(formula(pool, lambda, n.r, t.sumR, n.score, t.sumScore));
+          paid += drawn;
         }
         // Each node's two terms are floored apart, so each leaves under 1 wei,
         // and a λ of 0 or 1 has one term only.
@@ -571,225 +817,43 @@ describe('@integration The epoch close of the query/inference pool', function ()
     });
 
     it('takes the R share for the stake-weighted term when ΣQIS is 0', async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const b = await seller(1_250_000n * TRAC);
+      const a = await h.createSeller(STAKE_S_50, 0n);
+      const b = await h.createSeller(STAKE_S_50, 0n);
       for (const s of [a, b]) await f.RSS.setNodeChallengeStakeSnapshot(s.identityId, 0n);
-      const e = await epochNow();
-      await forward(QIS, 'setLambdaBps', [5_000n]);
-      const p = await walletFund(f.accounts[21], e, 9n * TRAC);
-      await claim(a, p, TRAC);
-      await claim(b, p, 2n * TRAC);
-      await finalizeIn(e, [p], [a, b]);
-      await toEpoch(e + 2n);
-      await closeAll();
-      expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([3n * TRAC, 0n]);
-      expect(await f.QS.queryInferenceGross(e + 1n, a.identityId)).to.equal(3n * TRAC);
-      expect(await f.QS.queryInferenceGross(e + 1n, b.identityId)).to.equal(6n * TRAC);
+      const e = await h.epochNow();
+      await setLambda(5_000n);
+      const p = await h.walletFund(buyer, e, 9n * TRAC);
+      await land(a, p, TRAC);
+      await land(b, p, 2n * TRAC);
+      await h.toEpoch(e + 1n);
+      const t = await f.QIS.getEpochTotals(e);
+      expect([t.sumR, t.sumScore]).to.deep.equal([3n * TRAC, 0n]);
+      expect(await gross(e, a)).to.equal(3n * TRAC);
+      expect(await gross(e, b)).to.equal(6n * TRAC);
     });
 
-    it('is 0 for an open epoch, an empty pool, and a node with no value', async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const idle = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      const p = await walletFund(f.accounts[21], e, 4n * TRAC);
-      await claim(a, p, TRAC);
-      await finalizeIn(e, [p], [a]);
-      expect(await f.QS.queryInferenceGross(e + 1n, a.identityId)).to.equal(0n);
-      expect(await f.QS.epochPool(e + 1n)).to.equal(0n);
-      await toEpoch(e + 2n);
-      await closeAll();
-      expect(await f.QS.queryInferenceGross(e + 1n, a.identityId)).to.equal(4n * TRAC);
-      expect(await f.QS.queryInferenceGross(e + 1n, idle.identityId)).to.equal(0n);
-      // Epoch e had no value and no money: its pool is 0.
-      expect(await f.QS.epochPool(e)).to.equal(0n);
-      expect(await f.QS.queryInferenceGross(e, a.identityId)).to.equal(0n);
-    });
-  });
-
-  // -------------------------------------------------------------------------
-  // The preview of an open epoch's close
-  // -------------------------------------------------------------------------
-
-  describe('previewEpochClose and previewQueryInferenceGross', () => {
-    const preview = async (e: bigint) => {
-      const [pool, lambdaBps] = await f.QS.previewEpochClose(e);
-      return [pool, lambdaBps];
-    };
-
-    it("reads every ended epoch's pool, λ and gross before the close as the close then freezes them, rollover replayed", async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const b = await seller(4_050_000n * TRAC);
-      const e = await epochNow();
-      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
-      await walletFund(f.accounts[21], e, 10n * TRAC); // due e + 1, never claimed
-      await toEpoch(e + 1n);
-      const p1 = await walletFund(f.accounts[21], e + 1n, 20n * TRAC); // due e + 2
-      await claim(a, p1, TRAC); // claimed, but left void
-      await toEpoch(e + 3n);
-      const p3 = await walletFund(f.accounts[21], e + 3n, 5n * TRAC); // due e + 4
-      await claim(a, p3, TRAC);
-      await claim(b, p3, 3n * TRAC);
-      await finalizeIn(e + 3n, [p3], [a, b]);
-      await toEpoch(e + 5n);
-
-      // Nothing has closed: every epoch from activation is replayed.
-      expect(await QIS.closedThrough()).to.equal(e - 1n);
-      const epochs = [e, e + 1n, e + 2n, e + 3n, e + 4n];
-      const before = [];
-      for (const epoch of epochs) before.push(await preview(epoch));
-      const grossBefore = [
-        await f.QS.previewQueryInferenceGross(e + 4n, a.identityId),
-        await f.QS.previewQueryInferenceGross(e + 4n, b.identityId),
-      ];
-      expect(before).to.deep.equal([
-        [0n, 0n],
-        [0n, 5_000n],
-        [0n, 5_000n],
-        [0n, 5_000n],
-        [35n * TRAC, 5_000n],
-      ]);
-      expect(grossBefore[0] + grossBefore[1] > 34n * TRAC).to.equal(true);
-      // The frozen view reads nothing yet.
-      expect(await f.QS.queryInferenceGross(e + 4n, a.identityId)).to.equal(0n);
-
-      // Close part of the way: the rest replays from the carry the closes left.
-      await f.QS.closeEpochs(2n);
-      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 1n, 10n * TRAC]);
-      for (const [i, epoch] of epochs.entries()) expect(await preview(epoch), `epoch ${epoch}`).to.deep.equal(before[i]);
-
-      await closeAll();
-      for (const [i, epoch] of epochs.entries()) {
-        const c = await QIS.getEpochClose(epoch);
-        expect([c.pool, c.lambdaBps], `epoch ${epoch}`).to.deep.equal(before[i]);
-        expect(await preview(epoch), `epoch ${epoch}`).to.deep.equal(before[i]);
+    it('a node with no value in the epoch reads 0, without walking the run behind it, where a node with value walks it', async () => {
+      const seller = await h.createSeller(STAKE_S_50, 0n);
+      const idle = await h.createSeller(STAKE_S_50, 0n);
+      const e = await h.epochNow();
+      await h.walletFund(buyer, e, TRAC);
+      // An epoch with a run of 30 before it, and the one after it with none.
+      const withRun = e + 30n;
+      const withoutRun = withRun + 1n;
+      for (const epoch of [withRun, withoutRun]) {
+        await h.toEpoch(epoch);
+        await land(seller, await h.walletFund(buyer, epoch, TRAC), TRAC);
       }
-      expect([
-        await f.QS.queryInferenceGross(e + 4n, a.identityId),
-        await f.QS.queryInferenceGross(e + 4n, b.identityId),
-      ]).to.deep.equal(grossBefore);
-      expect([
-        await f.QS.previewQueryInferenceGross(e + 4n, a.identityId),
-        await f.QS.previewQueryInferenceGross(e + 4n, b.identityId),
-      ]).to.deep.equal(grossBefore);
-    });
+      await h.toEpoch(withoutRun + 1n);
 
-    it('previews an epoch that has not ended as if it ended now', async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      const p = await walletFund(f.accounts[21], e, 6n * TRAC); // due e + 1
-      // In e, nothing is finalized in e + 1 yet: its money would carry.
-      expect(await preview(e + 1n)).to.deep.equal([0n, await QIS.lambdaBpsAt(e + 1n)]);
-      await claim(a, p, 2n * TRAC);
-      await finalizeIn(e, [p], [a]); // now in e + 1
-      expect(await f.Chronos.getCurrentEpoch()).to.equal(e + 1n);
-      expect((await preview(e + 1n))[0]).to.equal(6n * TRAC);
-      expect(await f.QS.previewQueryInferenceGross(e + 1n, a.identityId)).to.equal(6n * TRAC);
-    });
+      expect(await gross(withRun, seller)).to.equal(2n * TRAC);
+      expect(await gross(withoutRun, seller)).to.equal(TRAC);
+      expect(await gross(withRun, idle)).to.equal(0n);
+      expect(await gross(withoutRun, idle)).to.equal(0n);
 
-    it("counts the Conviction Account cost due beside the wallet value, as the close does", async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const b = await seller(4_050_000n * TRAC);
-      const e = await epochNow();
-      await forward(QIS, 'setLambdaBps', [5_000n]); // from e + 1
-      const p = await walletFund(f.accounts[21], e, 10n * TRAC);
-      // Booked as ServiceSubscriptions books a period's cost; the Hub owner
-      // passes onlyContracts.
-      await QIS.addConvictionDue(e + 1n, 4n * TRAC);
-      await QIS.addConvictionDue(e + 1n, 3n);
-      await claim(a, p, TRAC);
-      await claim(b, p, 2n * TRAC);
-      await finalizeIn(e, [p], [a, b]);
-      // While e + 1 runs, its preview already counts both parts.
-      expect(await preview(e + 1n)).to.deep.equal([14n * TRAC + 3n, 5_000n]);
-      await toEpoch(e + 2n);
-
-      const before = await preview(e + 1n);
-      const grossBefore = [
-        await f.QS.previewQueryInferenceGross(e + 1n, a.identityId),
-        await f.QS.previewQueryInferenceGross(e + 1n, b.identityId),
-      ];
-      const receipt = await closeAll();
-      const [, walletDue, convictionDue, carryIn, pool, , , lambdaBps] = closedEvents(receipt).find(
-        ([epoch]) => epoch === e + 1n,
-      )!;
-      expect([walletDue, convictionDue, carryIn]).to.deep.equal([10n * TRAC, 4n * TRAC + 3n, 0n]);
-      expect([pool, lambdaBps]).to.deep.equal(before);
-      expect(await record(e + 1n)).to.deep.equal([...before, true]);
-      expect([
-        await f.QS.queryInferenceGross(e + 1n, a.identityId),
-        await f.QS.queryInferenceGross(e + 1n, b.identityId),
-      ]).to.deep.equal(grossBefore);
-      expect(grossBefore[0] + grossBefore[1]).to.be.closeTo(14n * TRAC + 3n, 2n);
-    });
-
-    it('replays a rollover of Conviction Account cost alone into the next epoch with value, before and across a partial close', async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      await QIS.addConvictionDue(e + 1n, 6n * TRAC); // no value is finalized in e + 1
-      await toEpoch(e + 1n);
-      const p = await walletFund(f.accounts[21], e + 1n, 2n * TRAC); // due e + 2
-      await QIS.addConvictionDue(e + 2n, TRAC + 1n);
-      await claim(a, p, TRAC);
-      await finalizeIn(e + 1n, [p], [a]);
-      await QIS.addConvictionDue(e + 3n, 5n * TRAC); // no value is finalized in e + 3 either
-      await toEpoch(e + 4n);
-
-      const epochs = [e, e + 1n, e + 2n, e + 3n];
-      const before = [];
-      for (const epoch of epochs) before.push(await preview(epoch));
-      // The account money of e + 1 alone carries into e + 2, which pays it
-      // with its own; that of e + 3 carries on.
-      expect(before.map(([pool]) => pool)).to.deep.equal([0n, 0n, 9n * TRAC + 1n, 0n]);
-      const grossBefore = await f.QS.previewQueryInferenceGross(e + 2n, a.identityId);
-      expect(grossBefore).to.equal(9n * TRAC + 1n);
-
-      await f.QS.closeEpochs(2n);
-      expect([await QIS.closedThrough(), await QIS.carry()]).to.deep.equal([e + 1n, 6n * TRAC]);
-      for (const [i, epoch] of epochs.entries()) expect(await preview(epoch), `epoch ${epoch}`).to.deep.equal(before[i]);
-
-      const receipt = await closeAll();
-      expect(
-        closedEvents(receipt).map(([epoch, walletDue, convictionDue, carryIn, pool]) => [
-          epoch,
-          walletDue,
-          convictionDue,
-          carryIn,
-          pool,
-        ]),
-      ).to.deep.equal([
-        [e + 2n, 2n * TRAC, TRAC + 1n, 6n * TRAC, 9n * TRAC + 1n],
-        [e + 3n, 0n, 5n * TRAC, 0n, 0n],
-      ]);
-      for (const [i, epoch] of epochs.entries()) {
-        expect(await record(epoch), `epoch ${epoch}`).to.deep.equal([...before[i], true]);
-      }
-      expect(await QIS.carry()).to.equal(5n * TRAC);
-      expect(await f.QS.queryInferenceGross(e + 2n, a.identityId)).to.equal(grossBefore);
-    });
-
-    it('is (0, 0) before activation and with activation unset, and 0 gross for a node with no value', async () => {
-      const a = await seller(1_250_000n * TRAC);
-      const idle = await seller(1_250_000n * TRAC);
-      const e = await epochNow();
-      const p = await walletFund(f.accounts[21], e, 4n * TRAC);
-      await claim(a, p, TRAC);
-      await finalizeIn(e, [p], [a]);
-      await toEpoch(e + 2n);
-      expect(await preview(e - 1n)).to.deep.equal([0n, 0n]);
-      expect(await preview(0n)).to.deep.equal([0n, 0n]);
-      expect(await f.QS.previewQueryInferenceGross(e + 1n, a.identityId)).to.equal(4n * TRAC);
-      expect(await f.QS.previewQueryInferenceGross(e + 1n, idle.identityId)).to.equal(0n);
-      expect(await f.QS.previewQueryInferenceGross(e, a.identityId)).to.equal(0n);
-
-      const fresh = (await (
-        await hre.ethers.getContractFactory('QueryInferenceStorage')
-      ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceStorage;
-      await fresh.waitForDeployment();
-      await f.Hub.setContractAddress('QueryInferenceStorage', await fresh.getAddress());
-      await forward(fresh, 'initialize');
-      await forward(f.QS, 'initialize');
-      expect(await preview(e + 1n)).to.deep.equal([0n, 0n]);
-      expect(await f.QS.previewQueryInferenceGross(e + 1n, a.identityId)).to.equal(0n);
+      const gasOf = async (epoch: bigint, s: Seller) => f.QS.queryInferenceGross.estimateGas(epoch, s.identityId);
+      expect(await gasOf(withRun, idle)).to.be.closeTo(await gasOf(withoutRun, idle), 100n);
+      expect((await gasOf(withRun, seller)) - (await gasOf(withoutRun, seller))).to.be.greaterThan(30n * 5_000n);
     });
   });
 });

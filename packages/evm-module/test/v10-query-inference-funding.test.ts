@@ -8,13 +8,12 @@
 //   - the period: one epoch, the current one (from now to the boundary) or the
 //     next (from its start), no other; one per buyer key and epoch, shared by
 //     wallet and Conviction Account periods;
-//   - the money due: in the epoch after the period, for fundings and top-ups
-//     alike, whatever the receipt grace, which stays below one epoch, from a
-//     wallet and from a Conviction Account, each in its own ledger;
+//   - the money: under the period's own epoch, for fundings and top-ups alike,
+//     from a wallet and from a Conviction Account, each in its own ledger;
 //   - wallet top-ups and upgrades: caps unchanged, new buckets appended, the
-//     value into the vault and due after the period;
+//     value into the vault and booked under the period's epoch;
 //   - Conviction Account top-ups and upgrades: the draw at the account's tier
-//     and its cost due after the period, the period limit counting the
+//     and its cost under the period's epoch, the period limit counting the
 //     period's earlier cost, and the usage without another period; a top-up
 //     only while the assignment the period was funded under is live, so a new
 //     assignment of the key after a revocation or an expiry reopens nothing,
@@ -178,11 +177,11 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       buckets: tuples(await f.CSS.getBuckets(subscriptionId)),
       storedBuckets: await f.CSS.storedBucketCount(subscriptionId),
       walletPeriods: await f.CSS.accountSubscriptionCount(0n),
-      due: [await f.QIS.walletDue(epoch), await f.QIS.walletDue(epoch + 1n), await f.QIS.walletDue(epoch + 2n)],
+      funded: [await f.QIS.walletFunding(epoch), await f.QIS.walletFunding(epoch + 1n), await f.QIS.walletFunding(epoch + 2n)],
       balances: [await Falsy.balanceOf(buyer.address), await Falsy.balanceOf(await f.Vault.getAddress())],
     });
 
-    it('a funding is refused TokenTransferFailed, with no record, bucket, list entry, money due or balance left of it', async () => {
+    it('a funding is refused TokenTransferFailed, with no record, bucket, list entry, money booked or balance left of it', async () => {
       const r = walletRequestOf(epoch, {
         buckets: [bucket(0, CLASS_INFERENCE, 7n * TRAC), bucket(1, CLASS_QUERY, 3n * TRAC)],
       });
@@ -200,11 +199,11 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       const after = await stateOf(subscriptionId);
       expect(after.exists).to.equal(true);
       expect(after.walletPeriods).to.equal(before.walletPeriods + 1n);
-      expect(after.due[1]).to.equal(10n * TRAC);
+      expect(after.funded).to.deep.equal([10n * TRAC, 0n, 0n]);
       expect(after.balances).to.deep.equal([before.balances[0] - 10n * TRAC, before.balances[1] + 10n * TRAC]);
     });
 
-    it('a top-up of a funded period is refused TokenTransferFailed, with its record, buckets, list entry, money due and balances as they were', async () => {
+    it('a top-up of a funded period is refused TokenTransferFailed, with its record, buckets, list entry, money booked and balances as they were', async () => {
       const subscriptionId = subscriptionIdOf(buyer.address, epoch);
       await f.SSW.connect(buyer).fundFromWallet(walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, 7n * TRAC)] }));
       const before = await stateOf(subscriptionId);
@@ -226,7 +225,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await f.SSW.connect(buyer).topUpFromWallet(subscriptionId, additions, newDigest);
       const after = await stateOf(subscriptionId);
       expect(after.storedBuckets).to.equal(before.storedBuckets + 1n);
-      expect(after.due[1]).to.equal(10n * TRAC);
+      expect(after.funded).to.deep.equal([10n * TRAC, 0n, 0n]);
       expect(after.balances).to.deep.equal([before.balances[0] - 3n * TRAC, before.balances[1] + 3n * TRAC]);
     });
   });
@@ -236,7 +235,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
   // -------------------------------------------------------------------------
 
   describe('wallet funding', () => {
-    it('moves the whole value into the vault, books it due after the period, records it under account 0 and emits PeriodFunded', async () => {
+    it("moves the whole value into the vault, books it under the period's epoch, records it under account 0 and emits PeriodFunded", async () => {
       const epoch = await h.epochNow();
       const r = walletRequestOf(epoch, {
         buckets: [bucket(0, CLASS_INFERENCE, 7n * TRAC + 3n), bucket(1, CLASS_QUERY, 3n * TRAC + 1n)],
@@ -255,8 +254,8 @@ describe('@integration Plan-period funding for the query/inference pool', functi
 
       expect(await f.Token.balanceOf(buyer.address)).to.equal(buyerBefore - value);
       expect(await vaultBalance()).to.equal(vaultBefore + value);
-      expect(await f.QIS.walletDue(epoch + 1n)).to.equal(value);
-      expect(await f.QIS.walletDue(epoch)).to.equal(0n);
+      expect(await f.QIS.walletFunding(epoch)).to.equal(value);
+      expect(await f.QIS.walletFunding(epoch + 1n)).to.equal(0n);
 
       expect(plain(await f.CSS.getSubscription(subscriptionId))).to.deep.equal({
         accountId: 0n,
@@ -315,7 +314,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await walletFund(r);
       expect(await vaultBalance()).to.equal(vaultBefore + 50n * TRAC);
       expect(await f.Token.balanceOf(treasury.address)).to.equal(treasuryBefore);
-      expect(await f.QIS.walletDue(r.epoch + 1n)).to.equal(50n * TRAC);
+      expect(await f.QIS.walletFunding(r.epoch)).to.equal(50n * TRAC);
     });
 
     it('a short allowance or balance reverts in the Token, with no partial effect', async () => {
@@ -323,7 +322,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await f.Token.connect(buyer).approve(await f.SSW.getAddress(), valueOf(r) - 1n);
       await expect(f.SSW.connect(buyer).fundFromWallet(r)).to.be.revertedWithCustomError(f.Token, 'ERC20InsufficientAllowance');
       expect(await f.CSS.subscriptionExists(subscriptionIdOf(buyer.address, r.epoch))).to.equal(false);
-      expect(await f.QIS.walletDue(r.epoch + 1n)).to.equal(0n);
+      expect(await f.QIS.walletFunding(r.epoch)).to.equal(0n);
     });
 
     it('applies the bucket rules: none, too many, unsorted, duplicate, zero value, unknown class, zero ask, a sum beyond uint96', async () => {
@@ -365,7 +364,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       expect([s.periodStart, s.periodEnd]).to.deep.equal([ts, await h.epochStart(epoch + 1n)]);
     });
 
-    it('a period funded ahead for the next epoch starts at that epoch, and its money is due the epoch after', async () => {
+    it('a period funded ahead for the next epoch starts at that epoch, and its money is booked under that epoch', async () => {
       const next = (await h.epochNow()) + 1n;
       const r = walletRequestOf(next);
       const { subscriptionId } = await walletFund(r);
@@ -375,14 +374,18 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         await h.epochStart(next + 1n),
         next - 1n,
       ]);
-      expect(await f.QIS.walletDue(next + 1n)).to.equal(valueOf(r));
-      expect(await f.QIS.walletDue(next)).to.equal(0n);
+      expect(await f.QIS.walletFunding(next)).to.equal(valueOf(r));
+      expect(await f.QIS.walletFunding(next - 1n)).to.equal(0n);
+      expect(await f.QIS.walletFunding(next + 1n)).to.equal(0n);
 
       // The same for a Conviction Account period.
       const accountId = await h.openAccount({ assignee: buyer2 });
       const ca = await h.caFund(accountId, next, 10n * TRAC, buyer2);
       const record = await f.CSS.getSubscription(ca.subscriptionId);
       expect([record.periodStart, record.periodEnd]).to.deep.equal([await h.epochStart(next), await h.epochStart(next + 1n)]);
+      expect(await f.QIS.convictionFunding(next)).to.equal(record.cost);
+      expect(await f.QIS.convictionFunding(next - 1n)).to.equal(0n);
+      expect(await f.QIS.convictionFunding(next + 1n)).to.equal(0n);
     });
 
     it('any other epoch is refused, for a wallet period and an account period alike', async () => {
@@ -436,45 +439,24 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         .to.be.revertedWithCustomError(f.SSW, 'InvalidFundingRequest')
         .withArgs('epoch');
       await walletFund(walletRequestOf(now + 2n));
-      expect(await f.QIS.walletDue(now + 3n)).to.equal(10n * TRAC);
+      expect(await f.QIS.walletFunding(now + 2n)).to.equal(10n * TRAC);
+      expect(await f.QIS.walletFunding(now + 3n)).to.equal(0n);
     });
   });
 
   // -------------------------------------------------------------------------
-  // The money due
+  // The money
   // -------------------------------------------------------------------------
 
-  describe('the money due', () => {
-    it('is booked to the epoch after the period, never the funding epoch, summing per epoch over buyers and top-ups', async () => {
+  describe('the money', () => {
+    it("is booked under the period's own epoch, in no other, summing per epoch over buyers and top-ups", async () => {
       const now = await h.epochNow();
       const a = await walletFund(walletRequestOf(now, { buckets: [bucket(0, CLASS_INFERENCE, 4n * TRAC)] }));
       await walletFund(walletRequestOf(now, { buckets: [bucket(0, CLASS_QUERY, 6n * TRAC)] }), buyer2);
       await walletTopUp(a.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)]);
-      expect(await f.QIS.walletDue(now)).to.equal(0n);
-      expect(await f.QIS.walletDue(now + 1n)).to.equal(11n * TRAC);
-      expect(await f.QIS.walletDue(now + 2n)).to.equal(0n);
-    });
-
-    it('the receipt grace stays at most half an epoch, so the batch deadline always falls in the due epoch; a change to it moves no booking', async () => {
-      for (const bad of [0n, epLen / 2n + 1n, epLen]) {
-        await expect(forward(f.QIS, 'setReceiptGraceSeconds', [bad]))
-          .to.be.revertedWithCustomError(f.QIS, 'InvalidParameter')
-          .withArgs('receiptGraceSeconds');
-      }
-      // A change applies to the next epoch's periods: fund one, under the longest grace.
-      await forward(f.QIS, 'setReceiptGraceSeconds', [epLen / 2n]);
-      const next = (await h.epochNow()) + 1n;
-      const { subscriptionId } = await walletFund(walletRequestOf(next));
-      const s = await f.CSS.getSubscription(subscriptionId);
-      expect(await f.QIS.receiptGraceSecondsAt(next)).to.equal(epLen / 2n);
-      const deadline = s.periodEnd + (await f.QIS.receiptGraceSecondsAt(next));
-      expect(await f.Chronos.epochAtTimestamp(deadline)).to.equal(next + 1n);
-      expect(await f.QIS.walletDue(next + 1n)).to.equal(10n * TRAC);
-
-      // A later change to the grace leaves the booking, and later bookings, in the same epoch.
-      await forward(f.QIS, 'setReceiptGraceSeconds', [60n]);
-      await walletTopUp(subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)]);
-      expect(await f.QIS.walletDue(next + 1n)).to.equal(11n * TRAC);
+      expect(await f.QIS.walletFunding(now - 1n)).to.equal(0n);
+      expect(await f.QIS.walletFunding(now)).to.equal(11n * TRAC);
+      expect(await f.QIS.walletFunding(now + 1n)).to.equal(0n);
     });
   });
 
@@ -504,7 +486,8 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       const receipt = await walletTopUp(subscriptionId, additions, buyer, planDigest);
 
       expect(await vaultBalance()).to.equal(vaultBefore + 6n * TRAC);
-      expect(await f.QIS.walletDue(epoch + 1n)).to.equal(16n * TRAC);
+      expect(await f.QIS.walletFunding(epoch)).to.equal(16n * TRAC);
+      expect(await f.QIS.walletFunding(epoch + 1n)).to.equal(0n);
       expect(tuples(await f.CSS.getBuckets(subscriptionId))).to.deep.equal(
         tuples([
           { ...first(), value: 7n * TRAC },
@@ -539,7 +522,8 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       const next = await walletFund(walletRequestOf(epoch + 1n));
       await walletTopUp(next.subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)]);
       expect((await f.CSS.getSubscription(next.subscriptionId)).value).to.equal(11n * TRAC);
-      expect(await f.QIS.walletDue(epoch + 2n)).to.equal(11n * TRAC);
+      expect(await f.QIS.walletFunding(epoch + 1n)).to.equal(11n * TRAC);
+      expect(await f.QIS.walletFunding(epoch)).to.equal(10n * TRAC);
     });
 
     it('caps never change within a period: a stored bucket must repeat its class and price cap', async () => {
@@ -602,7 +586,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         .to.be.revertedWithCustomError(f.SSW, 'PeriodEnded')
         .withArgs(subscriptionId, s.periodEnd);
       expect(plain(await f.CSS.getSubscription(subscriptionId))).to.deep.equal(plain(s));
-      expect(await f.QIS.walletDue(epoch + 1n)).to.equal(10n * TRAC);
+      expect(await f.QIS.walletFunding(epoch)).to.equal(10n * TRAC);
     });
   });
 
@@ -621,7 +605,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       ({ subscriptionId } = await h.caFund(accountId, epoch, 20n * TRAC));
     });
 
-    it('draws at the account tier, books the cost due after the period, adds to the record and counts no new period', async () => {
+    it("draws at the account tier, books the cost under the period's epoch, adds to the record and counts no new period", async () => {
       const additions = [bucket(0, CLASS_INFERENCE, 10n * TRAC), bucket(3, CLASS_QUERY, 5n * TRAC)];
       const cost = costOf(15n * TRAC, BPS);
       const vaultBefore = await vaultBalance();
@@ -644,14 +628,14 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         tuples([bucket(0, CLASS_INFERENCE, 30n * TRAC), bucket(3, CLASS_QUERY, 5n * TRAC)]),
       );
       expect((await f.CSS.getUsage(accountId, buyer.address)).periods).to.equal(1n);
-      // The funding's cost and the top-up's are both due after the period, in
-      // the Conviction Account ledger. No TRAC moves, and nothing is booked to
-      // the wallet ledger.
-      expect(await f.QIS.convictionDue(epoch + 1n)).to.equal(fundedCost + cost);
-      expect(await f.QIS.convictionDue(epoch)).to.equal(0n);
-      expect(await f.QIS.convictionDue(epoch + 2n)).to.equal(0n);
+      // The funding's cost and the top-up's are both under the period's epoch,
+      // in the Conviction Account ledger. No TRAC moves, and nothing is booked
+      // to the wallet ledger.
+      expect(await f.QIS.convictionFunding(epoch)).to.equal(fundedCost + cost);
+      expect(await f.QIS.convictionFunding(epoch - 1n)).to.equal(0n);
+      expect(await f.QIS.convictionFunding(epoch + 1n)).to.equal(0n);
       expect(await vaultBalance()).to.equal(vaultBefore);
-      expect(await f.QIS.walletDue(epoch + 1n)).to.equal(0n);
+      expect(await f.QIS.walletFunding(epoch)).to.equal(0n);
 
       const [ev] = await eventsOf(receipt, f.SS, 'PeriodToppedUp');
       expect([ev.subscriptionId, ev.accountId, ev.assignee, ev.value, ev.cost, ev.planDigest]).to.deep.equal([
@@ -700,11 +684,11 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         .withArgs(subscriptionId, s.periodEnd);
     });
 
-    /** What a refused top-up must leave as it was: the record, its buckets, the cost due and the allowance. */
+    /** What a refused top-up must leave as it was: the record, its buckets, the cost booked and the allowance. */
     const untouched = async (id: string, account: bigint) => [
       plain(await f.CSS.getSubscription(id)),
       tuples(await f.CSS.getBuckets(id)),
-      await f.QIS.convictionDue(epoch + 1n),
+      await f.QIS.convictionFunding(epoch),
       await f.SS.currentWindowAllowance(account),
     ];
 
@@ -767,7 +751,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await time.setNextBlockTimestamp(expiresAt - 1n);
       await f.SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash);
       const booked = costOf(20n * TRAC, BPS) + costOf(10n * TRAC, BPS);
-      expect(await f.QIS.convictionDue(epoch + 1n)).to.equal(booked);
+      expect(await f.QIS.convictionFunding(epoch)).to.equal(booked);
       expect((await f.CSS.getSubscription(subscriptionId)).cost).to.equal(booked);
 
       // From its expiry on, the period takes no request, and no top-up.
@@ -844,10 +828,10 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await time.increaseTo(await h.epochStart(now + 1n));
       const { subscriptionId } = await walletFund(walletRequestOf(now + 1n));
       await walletTopUp(subscriptionId, [bucket(0, CLASS_INFERENCE, TRAC)]);
-      expect(await f.QIS.walletDue(now + 2n)).to.equal(11n * TRAC);
+      expect(await f.QIS.walletFunding(now + 1n)).to.equal(11n * TRAC);
     });
 
-    it('Conviction Account funding and top-ups are refused until the activation epoch too, so no cost is due in an epoch that never closes', async () => {
+    it('Conviction Account funding and top-ups are refused until the activation epoch too, so no cost is booked in an epoch before it, which no pool reaches', async () => {
       const accountId = await h.openAccount();
       const now = await h.epochNow();
       // A period funded while active, to try a top-up against later.
@@ -873,7 +857,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await h.assign(accountId, buyer2, 1_000n * TRAC);
       await h.caFund(accountId, now + 1n, 10n * TRAC, buyer2);
       await f.SS.connect(buyer).topUpFromConviction(active.subscriptionId, add, ethers.ZeroHash);
-      expect(await f.QIS.convictionDue(now + 2n)).to.equal(costOf(10n * TRAC, BPS) + costOf(TRAC, BPS));
+      expect(await f.QIS.convictionFunding(now + 1n)).to.equal(costOf(10n * TRAC, BPS) + costOf(TRAC, BPS));
     });
   });
 
