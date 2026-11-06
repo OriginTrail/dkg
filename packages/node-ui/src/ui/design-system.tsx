@@ -14,7 +14,7 @@ import { Badge, Count, LayerBadge, type BadgeTone, LayerGlyph, StatusGlyph } fro
 import { Button, type ButtonVariant } from './components/ds/Button.js';
 import { Toggle } from './components/ds/Toggle.js';
 import { ContextGraphChip } from './components/ds/ContextGraphChip.js';
-import { AgentChip } from './components/AgentChip.js';
+import { AgentChip, AgentTitle } from './components/AgentChip.js';
 import { AgentDot, AgentDotStack } from './components/AgentDot.js';
 import { agentColorForUri, type AgentSummary } from './hooks/useAgents.js';
 import { BadgePercent, ChevronRight, Copy, RefreshCw, X } from 'lucide-react';
@@ -301,10 +301,11 @@ const App: React.FC = () => {
           <ContextGraphChip id="cg:climate-science" name="Climate science" onOpen={() => undefined} />
           <ContextGraphChip id="cg:supply-chain-eu" name="EU supply chain" />
         </Row>
-        <Row label="Agent" note="<AgentChip size>: 24 / 28 / 40">
+        <Row label="Agent" note="<AgentChip size>: 24 / 28 / 40. <AgentTitle> on an agent's own page">
           <AgentChip agent={SAMPLE_AGENT} size="sm" onOpenAgent={() => undefined} />
           <AgentChip agent={SAMPLE_AGENT} size="md" onOpenAgent={() => undefined} />
           <AgentChip agent={SAMPLE_AGENT} size="lg" onOpenAgent={() => undefined} />
+          <AgentTitle agent={SAMPLE_AGENT} fallbackUri={SAMPLE_AGENT.uri} />
         </Row>
         <Row label="Agent avatars" note="<AgentDot>, <AgentDotStack>">
           <AgentDot uri="did:dkg:agent:0x7a3f" label="Claude Code" size={20} />

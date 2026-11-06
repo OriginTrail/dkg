@@ -105,11 +105,6 @@ function shortLabel(uri: string): string {
   return uri;
 }
 
-function shortPredicate(uri: string): string {
-  const s = shortLabel(uri);
-  return s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
-}
-
 export function uriTail(uri: string): string {
   const hash = uri.lastIndexOf('#');
   const slash = uri.lastIndexOf('/');

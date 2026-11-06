@@ -55,7 +55,6 @@ export function ConvictionOverview() {
   const setPcaScope = usePcaStore((s) => s.setScope);
   const setWalletBootstrap = useWalletStore((s) => s.setBootstrap);
   const initWallet = useWalletStore((s) => s.initWallet);
-  const walletBootstrap = useWalletStore((s) => s.bootstrap);
   const connectedWallet = useWalletStore((s) => s.address);
   const wrongNetwork = useWalletStore((s) => isWrongNetwork(s));
   const switchToExpectedChain = useWalletStore((s) => s.switchToExpectedChain);

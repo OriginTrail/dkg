@@ -40,9 +40,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
   const starters = listStarters();
   const [starterSlug, setStarterSlug] = useState<string>(starters[0]?.slug ?? 'coding-project');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [quorum, setQuorum] = useState('off');
-  const [swmTtl, setSwmTtl] = useState('7d');
-  const [swmCap, setSwmCap] = useState('100k');
+  const [quorum] = useState('off');
+  const [swmTtl] = useState('7d');
+  const [swmCap] = useState('100k');
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState<string | null>(null);

@@ -39,13 +39,13 @@
 .ds-badge.ds-tone-wm  { --badge-fg: var(--layer-working-text);  --badge-bg: var(--layer-working-bg);  --badge-ring: var(--layer-working-border); }
 .ds-badge.ds-tone-swm { --badge-fg: var(--layer-shared-text);   --badge-bg: var(--layer-shared-bg);   --badge-ring: var(--layer-shared-border); }
 .ds-badge.ds-tone-vm  { --badge-fg: var(--layer-verified-text); --badge-bg: var(--layer-verified-bg); --badge-ring: var(--layer-verified-border); }
-/* Layers match nOS, the source of truth: a full border, 12px text, nOS's own glyphs. */
+/* Layers look the same as in nOS: a full border, 12px text and the same glyphs. */
 .ds-badge.ds-tone-wm, .ds-badge.ds-tone-swm, .ds-badge.ds-tone-vm { gap: var(--space-4); padding: 0 var(--space-8); border-radius: var(--radius-pill); font-weight: 600; font-size: var(--fs-layer); }
 .ds-badge.ds-sm.ds-tone-wm, .ds-badge.ds-sm.ds-tone-swm, .ds-badge.ds-sm.ds-tone-vm { padding: 0 var(--space-8); font-size: var(--fs-micro); }
 .ds-layer-glyph { width: 12px; height: 12px; flex-shrink: 0; }
 .ds-badge.ds-sm .ds-layer-glyph { width: 10px; height: 10px; }
 
-/* Statuses match nOS too: an icon and text with no box, so a status never reads as a layer.
+/* A status is an icon and text with no box, so it never reads as a layer.
    Badge draws the icon (StatusGlyph, or the chip's own); here it only gets its size. */
 .ds-badge.ds-tone-success { --badge-fg: var(--text-success); }
 .ds-badge.ds-tone-warning { --badge-fg: var(--text-warning); }
