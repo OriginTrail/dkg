@@ -11,9 +11,12 @@ import { waitFor } from './devnet.mjs';
 import { heldAt, watched } from './observation.mjs';
 import { traceAdmissions } from '../qa/admission-trace.mjs';
 import {
-  admissionsBySlot, attemptVerdict, besideTransfer, busySlotCovered, generalSlotIdleFor, heldTransfer, nextLargeSize, transferChain, transferSettled,
+  admissionsBySlot, attemptVerdict, besideTransfer, busySlotCovered, generalSlotIdleFor, heldTransfer, nextLargeSize, ownerLargeSize, transferChain, transferSettled,
 } from '../qa/busy-slot.mjs';
 import { describe } from '../qa/member-sharing.mjs';
+
+const seconds = ms => Math.round(ms / 1000);
+const sizeText = size => `${size.assets} assets of ${size.triples} triples`;
 
 /**
  * The large graph, written by `author` (the feeder, or the owner): `assets`
@@ -29,18 +32,55 @@ export async function fillBigGraph(io, author, graph, { assets, triples, stamp }
       object: `"row ${t} of asset ${i} ${'x'.repeat(80)}"`, graph: '',
     }));
     const outcome = await io.createAndShare(author, { contextGraphId: graph.id, name: `i3251-${graph.key}-${stamp.toLowerCase()}-${i}`, quads },
-      { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 500 });
+      { createTimeoutMs: 300_000, jobTimeoutMs: 300_000, pollMs: 500, label: `case 6: asset ${i} of the ${graph.key} graph` });
     if (outcome.error) throw new Error(`asset ${i} of the ${graph.key} graph: ${outcome.error}`);
   }
+}
+
+/**
+ * The large graph of case 6's attempt `attempt`, kept away from the Cores and
+ * filled with `size` ({ assets, triples per asset }). The first is the
+ * owner's. A later one is written by a feeder that holds nothing yet, started
+ * for it (member 2 dials it through node 2), or put in place of the one that
+ * wrote the attempt before (once `audit` saw it out of the public graph): the
+ * owner, whose writes case 6 waits for, holds no more than before, and no node
+ * holds the large graphs of several attempts. Without a feeder the owner
+ * writes it, no larger than it can take (ownerLargeSize).
+ *
+ * A freshly started feeder has died within seconds, with nothing in its log,
+ * and that says nothing about the writes. So a feeder that fails while it
+ * writes the graph is given up and the owner writes the graph instead. It
+ * needs no audit: no write is made while a large graph is written, so it has
+ * carried none. Throws when the owner fails too. `ctx` is { edges, graphs, io,
+ * say, stamp, audit (when) }. Returns the graph, with the `size` it carries.
+ */
+export async function writeLargeGraph(ctx, attempt, size) {
+  const { edges, say, audit } = ctx;
+  const author = await edges.prepareLargeGraphAuthor(attempt, () => audit(`before attempt ${attempt} of case 6`));
+  if (author === edges.owner) return createLargeGraph(ctx, author, attempt, attempt > 1 ? ownerLargeSize(size) : size);
+  say(`feeder ${author.label} up, holding nothing yet, and dialed by member2`);
+  try {
+    return await createLargeGraph(ctx, author, attempt, size);
+  } catch (error) {
+    await edges.giveUpFeeder(error);
+    return createLargeGraph(ctx, edges.owner, attempt, ownerLargeSize(size));
+  }
+}
+
+/** The graph of writeLargeGraph, on `author`, carrying `size`. */
+async function createLargeGraph({ graphs, io, say, stamp }, author, attempt, size) {
+  const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false }, { by: author });
+  await graphs.keepCoresOut(graph);
+  const started = Date.now();
+  await fillBigGraph(io, author, graph, { ...size, stamp });
+  say(`large graph ${graph.key} written: ${sizeText(size)} in ${seconds(Date.now() - started)} s`);
+  return { ...graph, size };
 }
 
 /** The admissions member 2's trace holds now (null when it wrote none). */
 function readTrace(file) {
   try { return traceAdmissions(readFileSync(file, 'utf8')); } catch { return null; }
 }
-
-const seconds = ms => Math.round(ms / 1000);
-const sizeText = size => `${size.assets} assets of ${size.triples} triples`;
 
 /**
  * Case 6. The node's own evidence must show the transfer in the slot: its
@@ -61,10 +101,12 @@ const sizeText = size => `${size.assets} assets of ${size.triples} triples`;
  * it up before the writes could start, another attempt follows, up to
  * `attempts` in all: member 2 subscribes to a new large graph (`largeGraph`),
  * sized from the rate its trace measured for the last transfer to hold the
- * slot past the window the last writes needed, within what one node holds
- * well (nextLargeSize), and the three writes are made again. Only the last
- * attempt is judged as the case: its writes as usual, and a write of it
- * received after the slot was free, or a transfer never admitted to the
+ * slot for as long as a write can take to arrive, its bound, or the window the
+ * last writes needed if that was longer, within what one node holds well
+ * (nextLargeSize), and the three writes are made again. A subscribe that keeps
+ * being refused ends only its attempt, and another follows in the same way.
+ * Only the last attempt is judged as the case: its writes as usual, and a write
+ * of it received after the slot was free, or a transfer never admitted to the
  * general slot, as not exercised. A write never received fails the case at
  * once, whatever the slot did; so does a node that writes no trace or runs
  * another sync policy, and a trace that shows another admission in the one
@@ -76,20 +118,31 @@ const sizeText = size => `${size.assets} assets of ${size.triples} triples`;
  * admitMs (how long the transfer has to take the general slot, 60 s), idleMs
  * (how long the general slot must have been free before the subscribe, 1.5 s),
  * sizing (options of nextLargeSize) }; `pub` is a graph and `big` a large
- * graph, with its `size` ({ assets, triples per asset }).
+ * graph, with its `size` ({ assets, triples per asset }). Returns a function
+ * that says, once the transfer of the attempt judged is over, how long it held
+ * the slot in all: the margin that attempt had. Returns undefined instead when
+ * no writes were judged.
  */
 export async function busyMember(ctx, pub, big) {
-  const { report, attempts = 1, largeGraph, graphs, edges } = ctx;
+  const { report, attempts = 1, largeGraph, graphs, edges, boundMs } = ctx;
   for (let attempt = 1; ; attempt += 1) {
     const outcome = await busyAttempt(ctx, pub, big, { attempt, attempts });
-    if (!outcome.again) return undefined;
-    // Without a window to size it for (the transfer was over before the writes), the next graph is twice as large.
-    const size = nextLargeSize(big.size, outcome.measured, { ...(outcome.measured.neededMs === null ? { minGrowth: 2 } : {}), ...ctx.sizing });
+    if (!outcome.again) return outcome.heldInAll;
+    // The next transfer must hold the slot for as long as a write can take to arrive, not only as long as the last
+    // writes took. With no window measured (the transfer was over before the writes), the next graph is at least
+    // twice as large.
+    const { heldMs, neededMs } = outcome.measured;
+    const size = nextLargeSize(big.size, { heldMs, neededMs: Math.max(neededMs ?? 0, boundMs) }, { ...(neededMs === null ? { minGrowth: 2 } : {}), ...ctx.sizing });
     const sizing = size.expectedHoldMs === null ? 'no rate was measured' : `sized to hold the slot about ${seconds(size.expectedHoldMs)} s at the rate measured`;
     report.note(`case 6, attempt ${attempt} of ${attempts}: ${outcome.why}; attempt ${attempt + 1} transfers a large graph of ${sizeText(size)}, ${sizing}`);
     try {
-      // Member 2 stops following the last large graph: its periodic pulls of it would hold a reserved slot.
-      await graphs.unsubscribe(edges.member2, big);
+      // Member 2 stops following the last large graph: its periodic pulls of it would hold a reserved slot. A subscribe
+      // that kept being refused may still have taken effect, with its answer lost, so it leaves that graph too; a
+      // refusal to leave then says nothing, as it may never have joined.
+      await graphs.unsubscribe(edges.member2, big).catch(error => {
+        if (outcome.subscribed !== false) throw error;
+        report.note(`case 6, attempt ${attempt} of ${attempts}: member2 could not leave the large graph it may not have joined: ${error?.message ?? error}`);
+      });
       big = await largeGraph(attempt + 1, size);
     } catch (error) {
       outcome.judge();
@@ -100,9 +153,11 @@ export async function busyMember(ctx, pub, big) {
 
 /**
  * One attempt of case 6 (see busyMember). Reports the attempt and returns
- * { again: false } when it is judged as the case; returns { again: true, why,
- * measured: { heldMs, neededMs }, judge } when another attempt is to follow:
- * `judge` reports it as the case after all (when the next one cannot start).
+ * { again: false, heldInAll (see busyMember) } when it is judged as the case;
+ * returns { again: true, why, measured: { heldMs, neededMs }, judge } when
+ * another attempt is to follow: `judge` reports it as the case after all (when
+ * the next one cannot start), and `subscribed: false` says no subscribe to this
+ * attempt's graph was ever confirmed.
  */
 async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
   const { devnet, edges, io, report, precondition, boundMs, sub, admitMs = 60_000, idleMs = 1_500 } = ctx;
@@ -126,7 +181,25 @@ async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
   // temporary-edges.mjs): the pull from the node that holds the large graph
   // is the transfer, and the other peers' empty pulls of it continue it.
   await waitFor(() => ({ ok: generalSlotIdleFor(readTrace(member2.trace), Date.now()) >= idleMs }), 60_000, 250);
-  await ctx.graphs.subscribe(member2, big);
+  // A subscribe can be refused for a moment, until the node has the graph's
+  // authority (as keepCoresOut knows). One that keeps being refused ends this
+  // attempt and not the run: the cases after this one still have to run.
+  const joined = await waitFor(async () => {
+    try {
+      await ctx.graphs.subscribe(member2, big);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, why: error?.message ?? String(error) };
+    }
+  }, admitMs, 1_000);
+  if (!joined.ok) {
+    const why = `member2 could not subscribe to the large graph (${sizeText(big.size)}) within ${seconds(admitMs)} s: ${joined.why}`;
+    if (last) {
+      report.fail(6, `not exercised: ${why}${attempts > 1 ? ` in the last of ${attempts} attempts` : ''}`);
+      return { again: false };
+    }
+    return { again: true, why, subscribed: false, measured: { heldMs: null, neededMs: null }, judge: () => report.fail(6, `not exercised: ${why}`) };
+  }
   const admitted = await waitFor(() => {
     const held = heldTransfer(readTrace(member2.trace), isTransfer, { now: Date.now() });
     return { ok: Boolean(held.transfer), ...held };
@@ -189,7 +262,14 @@ async function busyAttempt(ctx, pub, big, { attempt, attempts }) {
   if (verdict.exercised || verdict.missing.length > 0 || contradicted || last) {
     judge();
     report.note(noteText);
-    return { again: false };
+    const heldInAll = () => {
+      const whole = transferChain(admitted.transfer, readTrace(member2.trace), { isTransfer });
+      const end = whole.at(-1);
+      if (!end) return `case 6${of}: the trace no longer shows member2's transfer of the large graph`;
+      const past = Math.max(0, seconds(end.heldUntil - until));
+      return `case 6${of}: member2's transfer of the large graph held its general sync slot ${seconds(end.heldUntil - whole[0].startedAt)} s in all${end.releasedAt === null ? ' so far' : ''}, ${past} s past the last receipt check`;
+    };
+    return { again: false, heldInAll };
   }
   report.note(noteText);
   const neededMs = Math.max(...verdict.late.map(i => receipts[i])) - start;

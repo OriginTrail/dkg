@@ -98,7 +98,8 @@ export function createGraphs(devnet, edges, { stamp, sub, say }) {
   /** Whether a node follows a graph, by its own listing: { state: 'following' | 'not-following' | …, reason }. */
   async function following(node, graph) {
     const answer = await api(node, 'GET', '/api/context-graph/list');
-    return subscriptionState(answer.status, answer.text, graph.id);
+    const seen = subscriptionState(answer.status, answer.text, graph.id);
+    return seen.state === 'unknown' && answer.status !== 200 && answer.status !== 0 ? { ...seen, reason: brief(answer) } : seen;
   }
 
   /** A node stops following a graph; what it holds of it stays. */
