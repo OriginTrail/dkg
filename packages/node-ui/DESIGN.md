@@ -166,7 +166,7 @@ A leading mark says "this opens":
 
 ### Inputs
 
-`.ds-input` for text fields, selects and text areas: 6px corners, 32px tall (`.ds-sm` 24px) to match the buttons beside them, 12px text, one focus ring. The chat composer is a card, not an input.
+`.ds-input` for text fields, selects and text areas: 6px corners, 32px tall (`.ds-sm` 24px) to match the buttons beside them, 12px text, one focus ring. A field with `aria-invalid` gets a `--accent-red` border, and the message beside it says what's wrong. A combobox stays neutral until something is picked, because unfinished isn't wrong. The chat composer is a card, not an input.
 
 ## Navigation and tabs
 
@@ -275,7 +275,7 @@ Every view that waits on data shows one of four states, and says which.
 | --- | --- | --- |
 | Loading | `<Loading label="Loading peers…" />`, `block` to fill a view | Name what's loading and end with `…`. `EmptyState busy` when a sentence of context helps. |
 | Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Say what will appear, or what to do next. One line of text is enough inside a list. |
-| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form | Say what failed and offer a way forward. Never leave a view loading after a failure. |
+| Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Never leave a view loading after a failure. |
 | Disabled | `disabled` on the control | `--opacity-disabled`, the one disabled look. Say why nearby when the reason isn't obvious. |
 
 ## Accessibility

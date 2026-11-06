@@ -23,6 +23,12 @@ describe('feedback states', () => {
     expect(matches(tsx, /className="empty-state/g)).toEqual([]);
   });
 
+  it('gives fields the same disabled look as buttons, and a red border when invalid', () => {
+    const read = (name: string) => readFileSync(join(__dirname, '../src/ui/styles', name), 'utf8');
+    expect(read('01-base.css')).toMatch(/button:disabled, input:disabled, textarea:disabled, select:disabled \{ opacity: var\(--opacity-disabled\)/);
+    expect(read('27-ds-components.css')).toMatch(/\.ds-input\[aria-invalid="true"\]:not\(\[role="combobox"\]\) \{ border-color: var\(--accent-red\)/);
+  });
+
   it('shows every disabled control the same way', () => {
     const css = files.filter((f) => f.endsWith('.css'));
     const found = css.flatMap((file) => [...readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]*:disabled[^{}]*)\{([^{}]*)\}/g)]

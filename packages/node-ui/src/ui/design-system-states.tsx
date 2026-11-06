@@ -105,7 +105,6 @@ const ROWS: MatrixRow[] = [
   },
   {
     name: 'Input',
-    note: 'Gap: disabled and error look like default',
     states: FIELD,
     render: ({ className, disabled, error, label }) => (
       <input className={['ds-input', className].filter(Boolean).join(' ')} defaultValue="Climate" disabled={disabled} aria-invalid={error || undefined} aria-label={label} />
@@ -113,7 +112,6 @@ const ROWS: MatrixRow[] = [
   },
   {
     name: 'Select',
-    note: 'Gap: no error look; .ds-input alone leaves it unthemed',
     states: FIELD,
     render: ({ className, disabled, error, label }) => (
       <select className={['ds-input', className].filter(Boolean).join(' ')} disabled={disabled} aria-invalid={error || undefined} aria-label={label}><option>Newest first</option></select>

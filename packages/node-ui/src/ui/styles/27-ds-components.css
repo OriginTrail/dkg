@@ -414,6 +414,17 @@ body.light .ds-seg-item.active {
   padding-bottom: 0;
   font-size: var(--fs-label);
 }
+/* Text fields get these from 01-base. :where keeps it below any screen's own select rule. */
+:where(select.ds-input) {
+  padding: 0 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  cursor: pointer;
+}
+/* A combobox is unfinished until something is picked, not wrong, so it stays neutral. */
+.ds-input[aria-invalid="true"]:not([role="combobox"]) { border-color: var(--accent-red); }
 .ds-input:focus-visible,
 :where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select):focus-visible {
   outline: 2px solid var(--focus-ring);
