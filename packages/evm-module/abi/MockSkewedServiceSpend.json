@@ -58,7 +58,7 @@
           }
         ],
         "internalType": "struct PublishingConviction.ServiceSpend",
-        "name": "d",
+        "name": "spend",
         "type": "tuple"
       }
     ],

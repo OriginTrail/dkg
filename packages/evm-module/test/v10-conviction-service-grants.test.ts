@@ -1,19 +1,19 @@
 // Conviction Account service spending (OT-RFC-27) end to end: the owner's opt-in
-// and the assignment of buyer keys, on ServiceSubscriptions and
-// ConvictionServiceStorage registered in the Hub, on the real account stack.
+// and the grant of buyers, on ServiceSubscriptions and
+// ServiceSubscriptionsStorage registered in the Hub, on the real account stack.
 //
 // Groups:
 //   - opt-in: owner only, an account that 10.0.8 or 10.1.0 scheduled, an
 //     expired account, a wired treasury, a repeated switch, and an account a
 //     build older than 10.0.8 created;
-//   - assign: consent by sending or by signature (EOA and ERC-1271), the nonce,
+//   - grant: consent by sending or by signature (EOA and ERC-1271), the nonce,
 //     replay, the domain, every invalid term, a transferred NFT, high-s and
 //     compact signatures, and the separation from publishing agents;
-//   - a sale of the account NFT: the former owner's opt-in and assignments
+//   - a sale of the account NFT: the former owner's opt-in and grants
 //     fund and top up nothing, also once the new owner opts in, and the new
-//     owner assigns afresh;
+//     owner grants afresh;
 //   - revoke, and advancing the nonce;
-//   - caps update: owner only, live assignments only, a valid and changed limit
+//   - limits update: owner only, live grants only, a valid and changed limit
 //     and expiry, usage and nonces kept, applied from the next funding in both
 //     directions, a paused account, and terms signed before an update.
 //
@@ -30,12 +30,12 @@ import { MockERC1271Wallet } from '../typechain';
 import { blockTime, eventsOf } from './helpers/account-stack';
 import {
   CLASS_INFERENCE,
-  Caps,
+  BuyerLimits,
   DAY,
   TRAC,
   Terms,
-  bucket,
-  capsOf,
+  budget,
+  limitsOf,
   compact,
   costOf,
   domainOf,
@@ -49,8 +49,8 @@ import { DEFAULT_CHAIN_ID } from './helpers/v10-ka-helpers';
 
 // No discount, so a cost equals its value; the window allowance is 1,000 TRAC.
 const SMALL = 12_000n * TRAC + 5n;
-// A limit that no test of the draw itself reaches.
-const WIDE: Partial<Terms> = { maxCostPerPeriod: 50_000n * TRAC };
+// A limit that no test of the spend itself reaches.
+const WIDE: Partial<Terms> = { maxCostPerEpoch: 50_000n * TRAC };
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {
@@ -98,7 +98,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expect(f.SS.connect(owner).setServiceSpending(scheduled.accountId, true))
         .to.be.revertedWithCustomError(f.SS, 'EmissionAlreadyScheduled')
         .withArgs(scheduled.accountId);
-      expect((await f.CSS.getServiceSpending(scheduled.accountId)).enabledAt).to.equal(0n);
+      expect((await f.SSS.getServiceSpending(scheduled.accountId)).enabledAt).to.equal(0n);
 
       const { accountId } = await h.createAccountFor();
       expect((await f.PCS.getAccount(accountId)).lastSettledWindow).to.equal(0n);
@@ -125,28 +125,28 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           .withArgs(424242n);
       });
 
-      it('switching on records the block time; switching off records 0, keeps the assignments and pauses funding', async () => {
+      it('switching on records the block time; switching off records 0, keeps the grants and pauses funding', async () => {
         const { accountId } = await h.createAccountFor();
         const on = await f.SS.connect(owner).setServiceSpending(accountId, true);
         await expect(on).to.emit(f.SS, 'ServiceSpendingSet').withArgs(accountId, true);
-        expect(h.plain(await f.CSS.getServiceSpending(accountId))).to.deep.equal({
+        expect(h.plain(await f.SSS.getServiceSpending(accountId))).to.deep.equal({
           enabledAt: await blockTime((await on.wait())!),
           owner: owner.address,
         });
         const terms = await h.termsFor(accountId, buyer.address);
-        await h.assignAs(terms, buyer);
+        await h.addBuyerAs(terms, buyer);
 
         await expect(f.SS.connect(owner).setServiceSpending(accountId, false))
           .to.emit(f.SS, 'ServiceSpendingSet')
           .withArgs(accountId, false);
-        expect(h.plain(await f.CSS.getServiceSpending(accountId))).to.deep.equal({ enabledAt: 0n, owner: ethers.ZeroAddress });
-        expect(await f.CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
-        await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, TRAC)))
+        expect(h.plain(await f.SSS.getServiceSpending(accountId))).to.deep.equal({ enabledAt: 0n, owner: ethers.ZeroAddress });
+        expect(await f.SSS.isGrantActive(accountId, buyer.address)).to.equal(true);
+        await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, TRAC)))
           .to.be.revertedWithCustomError(f.SS, 'ServiceSpendingDisabled')
           .withArgs(accountId);
 
         const again = await f.SS.connect(owner).setServiceSpending(accountId, true);
-        expect((await f.CSS.getServiceSpending(accountId)).enabledAt).to.equal(await blockTime((await again.wait())!));
+        expect((await f.SSS.getServiceSpending(accountId)).enabledAt).to.equal(await blockTime((await again.wait())!));
         await h.fund(await h.inference(accountId, TRAC));
       });
 
@@ -229,22 +229,22 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await h.creditedRanges(optIn)).to.have.length(0);
       expect((await f.PCS.getAccount(synthId)).lastSettledWindow).to.equal(0n);
 
-      // Its first funding books window 0, which has closed, and draws window 1.
-      await h.assignAs(await h.termsFor(synthId, buyer.address, WIDE), buyer);
+      // Its first funding books window 0, which has closed, and spends window 1.
+      await h.addBuyerAs(await h.termsFor(synthId, buyer.address, WIDE), buyer);
       const { cost, receipt } = await h.fund(await h.inference(synthId, 10n * TRAC));
       const B = committed / lock;
       await expect(receipt).to.emit(f.PC, 'EmissionScheduled').withArgs(synthId, 0n, 1n, B - spent0, 0n);
       expect((await f.PCS.getAccount(synthId)).lastSettledWindow).to.equal(1n);
       expect(await f.PCS.windowSpent(synthId, 1n)).to.equal(cost);
-      expect(await f.QIS.convictionFunding(await h.epochNow())).to.equal(cost);
+      expect(await f.QIS.accountFunding(await h.epochNow())).to.equal(cost);
     });
   });
 
   // -------------------------------------------------------------------------
-  // Assign
+  // addBuyer
   // -------------------------------------------------------------------------
 
-  describe('assign', () => {
+  describe('addBuyer', () => {
     let accountId: bigint;
 
     beforeEach(async () => {
@@ -252,50 +252,50 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await f.SS.connect(owner).setServiceSpending(accountId, true);
     });
 
-    const expectAssigned = async (tx: ContractTransactionResponse, t: Terms, nonce: bigint) => {
-      const digest = await f.SS.hashAssignment(t);
+    const expectBuyerAdded = async (tx: ContractTransactionResponse, t: Terms, nonce: bigint) => {
+      const digest = await f.SS.hashGrant(t);
       await expect(tx)
-        .to.emit(f.SS, 'ServiceAssigned')
-        .withArgs(t.accountId, t.assignee, digest, t.maxCostPerPeriod, t.expiresAt, nonce);
-      await expect(tx).to.emit(f.SS, 'AssignmentNonceAdvanced').withArgs(t.accountId, nonce + 1n);
-      const a = await f.CSS.getAssignment(t.accountId, t.assignee);
-      expect([a.maxCostPerPeriod, a.expiresAt]).to.deep.equal(Object.values(capsOf(t)));
-      expect(a.assignedAt).to.equal(await blockTime((await tx.wait())!));
+        .to.emit(f.SS, 'BuyerAdded')
+        .withArgs(t.accountId, t.buyer, digest, t.maxCostPerEpoch, t.expiresAt, nonce);
+      await expect(tx).to.emit(f.SS, 'GrantNonceAdvanced').withArgs(t.accountId, nonce + 1n);
+      const a = await f.SSS.getGrant(t.accountId, t.buyer);
+      expect([a.maxCostPerEpoch, a.expiresAt]).to.deep.equal(Object.values(limitsOf(t)));
+      expect(a.grantedAt).to.equal(await blockTime((await tx.wait())!));
       expect(a.revokedAt).to.equal(0n);
       expect(a.nonce).to.equal(nonce);
       expect(a.owner).to.equal(await f.NFT.ownerOf(t.accountId));
-      expect(await f.CSS.assignmentNonce(t.accountId)).to.equal(nonce + 1n);
-      expect(await f.CSS.isAssignmentActive(t.accountId, t.assignee)).to.equal(true);
+      expect(await f.SSS.grantNonce(t.accountId)).to.equal(nonce + 1n);
+      expect(await f.SSS.isGrantActive(t.accountId, t.buyer)).to.equal(true);
     };
 
-    it("the owner sends, with the assignee's EOA signature", async () => {
+    it("the owner sends, with the buyer's EOA signature", async () => {
       const t = await h.termsFor(accountId, buyer.address);
-      await expectAssigned(await f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t)), t, 0n);
-      expect(await f.CSS.assigneeCount(accountId)).to.equal(1n);
-      expect(await f.CSS.assigneeAt(accountId, 0n)).to.equal(buyer.address);
-      expect((await f.CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
+      await expectBuyerAdded(await f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t)), t, 0n);
+      expect(await f.SSS.buyerCount(accountId)).to.equal(1n);
+      expect(await f.SSS.buyerAt(accountId, 0n)).to.equal(buyer.address);
+      expect((await f.SSS.getUsage(accountId, buyer.address)).subscriptions).to.equal(0n);
     });
 
-    it("the assignee sends, with the owner's signature", async () => {
+    it("the buyer sends, with the owner's signature", async () => {
       const t = await h.termsFor(accountId, buyer.address);
-      await expectAssigned(await f.SS.connect(buyer).assign(t, await signTerms(owner, f.SS, t), '0x'), t, 0n);
+      await expectBuyerAdded(await f.SS.connect(buyer).addBuyer(t, await signTerms(owner, f.SS, t), '0x'), t, 0n);
     });
 
     it('a third party submits both signatures', async () => {
       const t = await h.termsFor(accountId, buyer.address);
-      await expectAssigned(
-        await f.SS.connect(relayer).assign(t, await signTerms(owner, f.SS, t), await signTerms(buyer, f.SS, t)),
+      await expectBuyerAdded(
+        await f.SS.connect(relayer).addBuyer(t, await signTerms(owner, f.SS, t), await signTerms(buyer, f.SS, t)),
         t,
         0n,
       );
     });
 
-    it('both parties may be ERC-1271 wallets, and a wallet assignee funds as itself', async () => {
+    it('both parties may be ERC-1271 wallets, and a wallet buyer funds as itself', async () => {
       const ownerKey = f.accounts[26];
-      const buyerKey = f.accounts[27];
+      const buyer = f.accounts[27];
       const Wallet = await hre.ethers.getContractFactory('MockERC1271Wallet');
       const ownerWallet = (await Wallet.deploy(ownerKey.address)) as unknown as MockERC1271Wallet;
-      const buyerWallet = (await Wallet.deploy(buyerKey.address)) as unknown as MockERC1271Wallet;
+      const buyerWallet = (await Wallet.deploy(buyer.address)) as unknown as MockERC1271Wallet;
       const ownerWalletAddress = await ownerWallet.getAddress();
       const buyerWalletAddress = await buyerWallet.getAddress();
       await f.NFT.connect(owner).transferFrom(owner.address, ownerWalletAddress, accountId);
@@ -304,19 +304,19 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
       const t = await h.termsFor(accountId, buyerWalletAddress);
       const ownerSig = await signTerms(ownerKey, f.SS, t);
-      const buyerSig = await signTerms(buyerKey, f.SS, t);
+      const buyerSig = await signTerms(buyer, f.SS, t);
 
       // The wallet's answer decides: a refusal, or another key's signature, is a bad signature.
       await ownerWallet.setForceFailure(true);
-      await expect(f.SS.connect(relayer).assign(t, ownerSig, buyerSig))
+      await expect(f.SS.connect(relayer).addBuyer(t, ownerSig, buyerSig))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(ownerWalletAddress);
       await ownerWallet.setForceFailure(false);
-      await expect(f.SS.connect(relayer).assign(t, ownerSig, await signTerms(stranger, f.SS, t)))
+      await expect(f.SS.connect(relayer).addBuyer(t, ownerSig, await signTerms(stranger, f.SS, t)))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(buyerWalletAddress);
 
-      await expectAssigned(await f.SS.connect(relayer).assign(t, ownerSig, buyerSig), t, 0n);
+      await expectBuyerAdded(await f.SS.connect(relayer).addBuyer(t, ownerSig, buyerSig), t, 0n);
 
       const wallet = await h.impersonate(buyerWalletAddress);
       const { cost } = await h.fund(await h.inference(accountId, 10n * TRAC), wallet);
@@ -326,28 +326,28 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     it('an address with code that does not answer ERC-1271 cannot consent by signature', async () => {
       const contractParty = await f.PCS.getAddress();
       const t = await h.termsFor(accountId, contractParty);
-      await expect(f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t)))
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t)))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(contractParty);
     });
 
-    it('self-assignment: an owner that sends consents in both roles, and funds as its own buyer key', async () => {
+    it('self-grant: an owner that sends consents in both roles, and funds as its own buyer', async () => {
       const t = await h.termsFor(accountId, owner.address);
       const sig = await signTerms(owner, f.SS, t);
-      await expect(f.SS.connect(owner).assign(t, sig, '0x'))
+      await expect(f.SS.connect(owner).addBuyer(t, sig, '0x'))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(owner.address);
-      await expect(f.SS.connect(owner).assign(t, '0x', sig))
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', sig))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(owner.address);
-      await expectAssigned(await f.SS.connect(owner).assign(t, '0x', '0x'), t, 0n);
+      await expectBuyerAdded(await f.SS.connect(owner).addBuyer(t, '0x', '0x'), t, 0n);
       await h.fund(await h.inference(accountId, TRAC), owner);
     });
 
-    it('a wrong nonce reverts InvalidAssignmentNonce', async () => {
+    it('a wrong nonce reverts InvalidGrantNonce', async () => {
       const t = await h.termsFor(accountId, buyer.address, { nonce: 1n });
-      await expect(f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t)))
-        .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentNonce')
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t)))
+        .to.be.revertedWithCustomError(f.SS, 'InvalidGrantNonce')
         .withArgs(accountId, 0n, 1n);
     });
 
@@ -355,10 +355,10 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const t = await h.termsFor(accountId, buyer.address);
       const ownerSig = await signTerms(owner, f.SS, t);
       const buyerSig = await signTerms(buyer, f.SS, t);
-      await f.SS.connect(relayer).assign(t, ownerSig, buyerSig);
+      await f.SS.connect(relayer).addBuyer(t, ownerSig, buyerSig);
       for (const sender of [relayer, owner]) {
-        await expect(f.SS.connect(sender).assign(t, sender === owner ? '0x' : ownerSig, buyerSig))
-          .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentNonce')
+        await expect(f.SS.connect(sender).addBuyer(t, sender === owner ? '0x' : ownerSig, buyerSig))
+          .to.be.revertedWithCustomError(f.SS, 'InvalidGrantNonce')
           .withArgs(accountId, 1n, 0n);
       }
     });
@@ -372,10 +372,10 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         { ...domain, name: 'KnowledgeAssetsLifecycle' },
         { ...domain, version: '2' },
       ]) {
-        await expect(f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t, other)))
+        await expect(f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t, other)))
           .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
           .withArgs(buyer.address);
-        await expect(f.SS.connect(buyer).assign(t, await signTerms(owner, f.SS, t, other), '0x'))
+        await expect(f.SS.connect(buyer).addBuyer(t, await signTerms(owner, f.SS, t, other), '0x'))
           .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
           .withArgs(owner.address);
       }
@@ -384,70 +384,70 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
     it('refuses expired terms and every invalid term, and admits the bounds', async () => {
       const now = await h.latest();
       const cases: Array<[Partial<Terms>, string]> = [
-        [{ assignee: ethers.ZeroAddress }, 'assignee'],
-        [{ maxCostPerPeriod: 0n }, 'maxCostPerPeriod'],
+        [{ buyer: ethers.ZeroAddress }, 'buyer'],
+        [{ maxCostPerEpoch: 0n }, 'maxCostPerEpoch'],
         [{ expiresAt: now }, 'expiresAt'],
         [{ expiresAt: 0n }, 'expiresAt'],
       ];
       for (const [overrides, reason] of cases) {
         const t = await h.termsFor(accountId, buyer.address, overrides);
-        await expect(f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t)), reason)
-          .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentTerms')
+        await expect(f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t)), reason)
+          .to.be.revertedWithCustomError(f.SS, 'InvalidBuyerTerms')
           .withArgs(reason);
       }
       // A limit of 1 wei, and an expiry just after the block time.
-      const t = await h.termsFor(accountId, buyer.address, { maxCostPerPeriod: 1n, expiresAt: (await h.latest()) + 100n });
-      await expectAssigned(await f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t)), t, 0n);
+      const t = await h.termsFor(accountId, buyer.address, { maxCostPerEpoch: 1n, expiresAt: (await h.latest()) + 100n });
+      await expectBuyerAdded(await f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t)), t, 0n);
     });
 
     it('an account that has not opted in, or has switched off, reverts ServiceSpendingDisabled', async () => {
       const other = await h.createAccountFor();
       const t = await h.termsFor(other.accountId, buyer.address);
-      await expect(f.SS.connect(owner).assign(t, '0x', await signTerms(buyer, f.SS, t)))
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t)))
         .to.be.revertedWithCustomError(f.SS, 'ServiceSpendingDisabled')
         .withArgs(other.accountId);
       await f.SS.connect(owner).setServiceSpending(accountId, false);
       const u = await h.termsFor(accountId, buyer.address);
-      await expect(f.SS.connect(owner).assign(u, '0x', await signTerms(buyer, f.SS, u)))
+      await expect(f.SS.connect(owner).addBuyer(u, '0x', await signTerms(buyer, f.SS, u)))
         .to.be.revertedWithCustomError(f.SS, 'ServiceSpendingDisabled')
         .withArgs(accountId);
     });
 
-    it("after an NFT transfer the previous owner's signature fails, and its opt-in and assignments fund nothing", async () => {
-      await h.assignAs(await h.termsFor(accountId, buyer.address), buyer);
+    it("after an NFT transfer the previous owner's signature fails, and its opt-in and grants fund nothing", async () => {
+      await h.addBuyerAs(await h.termsFor(accountId, buyer.address), buyer);
       await f.NFT.connect(owner).transferFrom(owner.address, newOwner.address, accountId);
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, TRAC)))
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(f.SS, 'ServiceSpendingDisabled')
         .withArgs(accountId);
 
       await f.SS.connect(newOwner).setServiceSpending(accountId, true);
       const t = await h.termsFor(accountId, buyer2.address);
-      await expect(f.SS.connect(buyer2).assign(t, await signTerms(owner, f.SS, t), '0x'))
+      await expect(f.SS.connect(buyer2).addBuyer(t, await signTerms(owner, f.SS, t), '0x'))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(newOwner.address);
 
-      // The stored assignment is still there, but its consent was the former owner's.
-      expect(await f.CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, TRAC)))
-        .to.be.revertedWithCustomError(f.SS, 'AssignedByFormerOwner')
+      // The stored grant is still there, but its consent was the former owner's.
+      expect(await f.SSS.isGrantActive(accountId, buyer.address)).to.equal(true);
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, TRAC)))
+        .to.be.revertedWithCustomError(f.SS, 'GrantedByFormerOwner')
         .withArgs(accountId, buyer.address);
 
       for (const call of [
-        f.SS.connect(owner).revoke(accountId, buyer.address),
+        f.SS.connect(owner).removeBuyer(accountId, buyer.address),
         f.SS.connect(owner).setServiceSpending(accountId, false),
-        f.SS.connect(owner).advanceAssignmentNonce(accountId),
+        f.SS.connect(owner).advanceGrantNonce(accountId),
       ]) {
         await expect(call).to.be.revertedWithCustomError(f.SS, 'NotAccountOwner').withArgs(accountId, owner.address);
       }
-      await expectAssigned(await f.SS.connect(buyer2).assign(t, await signTerms(newOwner, f.SS, t), '0x'), t, 1n);
+      await expectBuyerAdded(await f.SS.connect(buyer2).addBuyer(t, await signTerms(newOwner, f.SS, t), '0x'), t, 1n);
       await h.fund(await h.inference(accountId, TRAC), buyer2);
-      await f.SS.connect(newOwner).revoke(accountId, buyer.address);
+      await f.SS.connect(newOwner).removeBuyer(accountId, buyer.address);
     });
 
     it('rejects a high-s signature and malformed ones, and accepts the low-s twin in its 64-byte compact form', async () => {
       const t = await h.termsFor(accountId, buyer.address);
       const sig = await signTerms(buyer, f.SS, t);
-      const digest = await f.SS.hashAssignment(t);
+      const digest = await f.SS.hashGrant(t);
       const malleated = highS(sig);
       // The malleated twin recovers to the same key with solady, which checks
       // no s (shown through a wallet that recovers with it), so only the s
@@ -461,21 +461,21 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         ethers.dataSlice(sig, 0, 63),
         ethers.concat([ethers.dataSlice(sig, 0, 64), '0x1d']),
       ]) {
-        await expect(f.SS.connect(owner).assign(t, '0x', bad))
+        await expect(f.SS.connect(owner).addBuyer(t, '0x', bad))
           .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
           .withArgs(buyer.address);
       }
-      await expectAssigned(await f.SS.connect(owner).assign(t, '0x', compact(sig)), t, 0n);
+      await expectBuyerAdded(await f.SS.connect(owner).addBuyer(t, '0x', compact(sig)), t, 0n);
     });
 
     it('a party that sends the transaction must not also sign', async () => {
       const t = await h.termsFor(accountId, buyer.address);
       const ownerSig = await signTerms(owner, f.SS, t);
       const buyerSig = await signTerms(buyer, f.SS, t);
-      await expect(f.SS.connect(owner).assign(t, ownerSig, buyerSig))
+      await expect(f.SS.connect(owner).addBuyer(t, ownerSig, buyerSig))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(owner.address);
-      await expect(f.SS.connect(buyer).assign(t, ownerSig, buyerSig))
+      await expect(f.SS.connect(buyer).addBuyer(t, ownerSig, buyerSig))
         .to.be.revertedWithCustomError(f.SS, 'InvalidConsentSignature')
         .withArgs(buyer.address);
     });
@@ -484,37 +484,37 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const t = await h.termsFor(accountId, buyer.address);
       const ownerSig = await signTerms(owner, f.SS, t);
       const buyerSig = await signTerms(buyer, f.SS, t);
-      await expect(f.SS.connect(relayer).assign(t, '0x', buyerSig))
+      await expect(f.SS.connect(relayer).addBuyer(t, '0x', buyerSig))
         .to.be.revertedWithCustomError(f.SS, 'ConsentMissing')
         .withArgs(owner.address);
-      await expect(f.SS.connect(relayer).assign(t, ownerSig, '0x'))
+      await expect(f.SS.connect(relayer).addBuyer(t, ownerSig, '0x'))
         .to.be.revertedWithCustomError(f.SS, 'ConsentMissing')
         .withArgs(buyer.address);
-      await expect(f.SS.connect(owner).assign(t, '0x', '0x'))
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', '0x'))
         .to.be.revertedWithCustomError(f.SS, 'ConsentMissing')
         .withArgs(buyer.address);
     });
 
-    it('a publishing agent registration grants no service spending, and an assignment grants no publishing', async () => {
+    it('a publishing agent registration grants no service spending, and a grant grants no publishing', async () => {
       await f.NFT.connect(owner).registerAgent(accountId, buyer2.address);
-      await expect(f.SS.connect(buyer2).fundFromConviction(await h.inference(accountId, TRAC)))
-        .to.be.revertedWithCustomError(f.SS, 'NotAssigned')
+      await expect(f.SS.connect(buyer2).fundFromAccount(await h.inference(accountId, TRAC)))
+        .to.be.revertedWithCustomError(f.SS, 'NotABuyer')
         .withArgs(accountId, buyer2.address);
-      await h.assignAs(await h.termsFor(accountId, buyer.address), buyer);
+      await h.addBuyerAs(await h.termsFor(accountId, buyer.address), buyer);
       expect(await f.PCS.agentToAccountId(buyer.address)).to.equal(0n);
       expect(await f.NFT.isAgent(accountId, buyer.address)).to.equal(false);
     });
 
-    it('a new assignment of the same assignee replaces its terms and counts its usage from zero', async () => {
-      await h.assignAs(await h.termsFor(accountId, buyer.address), buyer);
+    it('a new grant to the same buyer replaces its terms and counts its usage from zero', async () => {
+      await h.addBuyerAs(await h.termsFor(accountId, buyer.address), buyer);
       await h.fund(await h.inference(accountId, 10n * TRAC));
       await h.fund(await h.inference(accountId, 10n * TRAC, { epoch: await h.epochNext() }));
-      expect((await f.CSS.getUsage(accountId, buyer.address)).periods).to.equal(2n);
+      expect((await f.SSS.getUsage(accountId, buyer.address)).subscriptions).to.equal(2n);
 
-      const t = await h.termsFor(accountId, buyer.address, { maxCostPerPeriod: 5n * TRAC });
-      await expectAssigned(await h.assignAs(t, buyer), t, 1n);
-      expect((await f.CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
-      expect(await f.CSS.assigneeCount(accountId)).to.equal(1n);
+      const t = await h.termsFor(accountId, buyer.address, { maxCostPerEpoch: 5n * TRAC });
+      await expectBuyerAdded(await h.addBuyerAs(t, buyer), t, 1n);
+      expect((await f.SSS.getUsage(accountId, buyer.address)).subscriptions).to.equal(0n);
+      expect(await f.SSS.buyerCount(accountId)).to.equal(1n);
     });
   });
 
@@ -532,39 +532,39 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await f.NFT.connect(owner).transferFrom(owner.address, newOwner.address, accountId);
     });
 
-    it("leaves the former owner's buyer key unable to fund or top up from the new owner's allowance", async () => {
+    it("leaves the former owner's buyer unable to fund or top up from the new owner's allowance", async () => {
       const { window } = await f.SS.currentWindowAllowance(accountId);
       const spent = await f.PCS.windowSpent(accountId, window);
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, 900n * TRAC, { epoch: await h.epochNext() })))
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, 900n * TRAC, { epoch: await h.epochNext() })))
         .to.be.revertedWithCustomError(f.SS, 'ServiceSpendingDisabled')
         .withArgs(accountId);
-      await expect(f.SS.connect(buyer).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, 900n * TRAC)], ethers.ZeroHash))
+      await expect(f.SS.connect(buyer).topUpFromAccount(p, [budget(0, CLASS_INFERENCE, 900n * TRAC)], ethers.ZeroHash))
         .to.be.revertedWithCustomError(f.SS, 'ServiceSpendingDisabled')
         .withArgs(accountId);
       expect(await f.PCS.windowSpent(accountId, window)).to.equal(spent);
     });
 
-    it('switching spending on again does not revive the assignments the former owner made', async () => {
+    it('switching spending on again does not revive the grants the former owner made', async () => {
       await expect(f.SS.connect(newOwner).setServiceSpending(accountId, true))
         .to.emit(f.SS, 'ServiceSpendingSet')
         .withArgs(accountId, true);
-      expect((await f.CSS.getServiceSpending(accountId)).owner).to.equal(newOwner.address);
+      expect((await f.SSS.getServiceSpending(accountId)).owner).to.equal(newOwner.address);
       const refused = async () => {
-        await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, 900n * TRAC, { epoch: await h.epochNext() })))
-          .to.be.revertedWithCustomError(f.SS, 'AssignedByFormerOwner')
+        await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, 900n * TRAC, { epoch: await h.epochNext() })))
+          .to.be.revertedWithCustomError(f.SS, 'GrantedByFormerOwner')
           .withArgs(accountId, buyer.address);
-        await expect(f.SS.connect(buyer).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
-          .to.be.revertedWithCustomError(f.SS, 'AssignedByFormerOwner')
+        await expect(f.SS.connect(buyer).topUpFromAccount(p, [budget(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash))
+          .to.be.revertedWithCustomError(f.SS, 'GrantedByFormerOwner')
           .withArgs(accountId, buyer.address);
       };
       await refused();
       await expect(
-        f.SS.connect(newOwner).updateAssignmentCaps(accountId, buyer.address, {
-          maxCostPerPeriod: 2_000n * TRAC,
+        f.SS.connect(newOwner).setBuyerLimits(accountId, buyer.address, {
+          maxCostPerEpoch: 2_000n * TRAC,
           expiresAt: (await h.latest()) + 500n * DAY,
         }),
       )
-        .to.be.revertedWithCustomError(f.SS, 'AssignedByFormerOwner')
+        .to.be.revertedWithCustomError(f.SS, 'GrantedByFormerOwner')
         .withArgs(accountId, buyer.address);
 
       // Off and on again: still nothing.
@@ -573,14 +573,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await refused();
     });
 
-    it('the new owner opts in and assigns afresh, and its buyer key funds and tops up', async () => {
+    it('the new owner opts in and grants afresh, and its buyer funds and tops up', async () => {
       await f.SS.connect(newOwner).setServiceSpending(accountId, true);
       const t = await h.termsFor(accountId, buyer.address);
-      await f.SS.connect(newOwner).assign(t, '0x', await signTerms(buyer, f.SS, t));
-      expect((await f.CSS.getAssignment(accountId, buyer.address)).owner).to.equal(newOwner.address);
+      await f.SS.connect(newOwner).addBuyer(t, '0x', await signTerms(buyer, f.SS, t));
+      expect((await f.SSS.getGrant(accountId, buyer.address)).owner).to.equal(newOwner.address);
       const { subscriptionId: q } = await h.fund(await h.inference(accountId, TRAC, { epoch: await h.epochNext() }));
-      await f.SS.connect(buyer).topUpFromConviction(q, [bucket(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
-      expect((await f.CSS.getSubscription(q)).value).to.equal(2n * TRAC);
+      await f.SS.connect(buyer).topUpFromAccount(q, [budget(0, CLASS_INFERENCE, TRAC)], ethers.ZeroHash);
+      expect((await f.SSS.getSubscription(q)).value).to.equal(2n * TRAC);
     });
   });
 
@@ -588,7 +588,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
   // Revoke
   // -------------------------------------------------------------------------
 
-  describe('revoke', () => {
+  describe('removeBuyer', () => {
     let accountId: bigint;
 
     beforeEach(async () => {
@@ -597,222 +597,222 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
     it('is owner only', async () => {
       for (const caller of [buyer, stranger]) {
-        await expect(f.SS.connect(caller).revoke(accountId, buyer.address))
+        await expect(f.SS.connect(caller).removeBuyer(accountId, buyer.address))
           .to.be.revertedWithCustomError(f.SS, 'NotAccountOwner')
           .withArgs(accountId, caller.address);
       }
     });
 
-    it('is immediate for new periods, records the time and advances the nonce', async () => {
+    it('is immediate for new subscriptions, records the time and advances the nonce', async () => {
       await h.fund(await h.inference(accountId, TRAC));
-      const tx = await f.SS.connect(owner).revoke(accountId, buyer.address);
-      await expect(tx).to.emit(f.SS, 'ServiceRevoked').withArgs(accountId, buyer.address);
-      await expect(tx).to.emit(f.SS, 'AssignmentNonceAdvanced').withArgs(accountId, 2n);
-      expect((await f.CSS.getAssignment(accountId, buyer.address)).revokedAt).to.equal(
+      const tx = await f.SS.connect(owner).removeBuyer(accountId, buyer.address);
+      await expect(tx).to.emit(f.SS, 'BuyerRemoved').withArgs(accountId, buyer.address);
+      await expect(tx).to.emit(f.SS, 'GrantNonceAdvanced').withArgs(accountId, 2n);
+      expect((await f.SSS.getGrant(accountId, buyer.address)).revokedAt).to.equal(
         await blockTime((await tx.wait())!),
       );
-      expect(await f.CSS.isAssignmentActive(accountId, buyer.address)).to.equal(false);
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, TRAC, { epoch: await h.epochNext() })))
-        .to.be.revertedWithCustomError(f.SS, 'AssignmentRevoked')
+      expect(await f.SSS.isGrantActive(accountId, buyer.address)).to.equal(false);
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, TRAC, { epoch: await h.epochNext() })))
+        .to.be.revertedWithCustomError(f.SS, 'GrantRevoked')
         .withArgs(accountId, buyer.address);
-      await expect(f.SS.connect(owner).revoke(accountId, buyer.address))
-        .to.be.revertedWithCustomError(f.SS, 'AssignmentRevoked')
+      await expect(f.SS.connect(owner).removeBuyer(accountId, buyer.address))
+        .to.be.revertedWithCustomError(f.SS, 'GrantRevoked')
         .withArgs(accountId, buyer.address);
-      await expect(f.SS.connect(owner).revoke(accountId, stranger.address))
-        .to.be.revertedWithCustomError(f.SS, 'NotAssigned')
+      await expect(f.SS.connect(owner).removeBuyer(accountId, stranger.address))
+        .to.be.revertedWithCustomError(f.SS, 'NotABuyer')
         .withArgs(accountId, stranger.address);
     });
 
-    it('terms signed but not yet submitted no longer assign', async () => {
+    it('terms signed but not yet submitted no longer grant', async () => {
       const t = await h.termsFor(accountId, buyer2.address);
       const sig = await signTerms(buyer2, f.SS, t);
-      await f.SS.connect(owner).revoke(accountId, buyer.address);
-      await expect(f.SS.connect(owner).assign(t, '0x', sig))
-        .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentNonce')
+      await f.SS.connect(owner).removeBuyer(accountId, buyer.address);
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', sig))
+        .to.be.revertedWithCustomError(f.SS, 'InvalidGrantNonce')
         .withArgs(accountId, 2n, 1n);
     });
 
-    it('a funded period keeps its record and its buckets', async () => {
+    it('a funded subscription keeps its record and its budgets', async () => {
       const { subscriptionId } = await h.fund(await h.inference(accountId, 10n * TRAC));
-      const record = h.plain(await f.CSS.getSubscription(subscriptionId));
-      const buckets = (await f.CSS.getBuckets(subscriptionId)).map(h.plain);
-      await f.SS.connect(owner).revoke(accountId, buyer.address);
-      expect(h.plain(await f.CSS.getSubscription(subscriptionId))).to.deep.equal(record);
-      expect((await f.CSS.getBuckets(subscriptionId)).map(h.plain)).to.deep.equal(buckets);
-      expect(await f.CSS.subscriptionExists(subscriptionId)).to.equal(true);
+      const record = h.plain(await f.SSS.getSubscription(subscriptionId));
+      const budgets = (await f.SSS.getBudgets(subscriptionId)).map(h.plain);
+      await f.SS.connect(owner).removeBuyer(accountId, buyer.address);
+      expect(h.plain(await f.SSS.getSubscription(subscriptionId))).to.deep.equal(record);
+      expect((await f.SSS.getBudgets(subscriptionId)).map(h.plain)).to.deep.equal(budgets);
+      expect(await f.SSS.subscriptionExists(subscriptionId)).to.equal(true);
     });
 
-    it('works while service spending is off, and only a new assign renews the assignee', async () => {
+    it('works while service spending is off, and only a new grant renews the buyer', async () => {
       await f.SS.connect(owner).setServiceSpending(accountId, false);
-      await f.SS.connect(owner).revoke(accountId, buyer.address);
+      await f.SS.connect(owner).removeBuyer(accountId, buyer.address);
       await f.SS.connect(owner).setServiceSpending(accountId, true);
       const t = await h.termsFor(accountId, buyer.address);
-      await h.assignAs(t, buyer);
-      const a = await f.CSS.getAssignment(accountId, buyer.address);
+      await h.addBuyerAs(t, buyer);
+      const a = await f.SSS.getGrant(accountId, buyer.address);
       expect(a.revokedAt).to.equal(0n);
       expect(a.nonce).to.equal(2n);
       await h.fund(await h.inference(accountId, TRAC));
     });
 
-    it('advanceAssignmentNonce is owner only, keeps the assignments, and terms signed at the old nonce then fail', async () => {
+    it('advanceGrantNonce is owner only, keeps the grants, and terms signed at the old nonce then fail', async () => {
       const t = await h.termsFor(accountId, buyer2.address);
       const sig = await signTerms(buyer2, f.SS, t);
       for (const caller of [buyer, stranger]) {
-        await expect(f.SS.connect(caller).advanceAssignmentNonce(accountId))
+        await expect(f.SS.connect(caller).advanceGrantNonce(accountId))
           .to.be.revertedWithCustomError(f.SS, 'NotAccountOwner')
           .withArgs(accountId, caller.address);
       }
-      await expect(f.SS.connect(owner).advanceAssignmentNonce(accountId))
-        .to.emit(f.SS, 'AssignmentNonceAdvanced')
+      await expect(f.SS.connect(owner).advanceGrantNonce(accountId))
+        .to.emit(f.SS, 'GrantNonceAdvanced')
         .withArgs(accountId, 2n);
-      await expect(f.SS.connect(owner).assign(t, '0x', sig))
-        .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentNonce')
+      await expect(f.SS.connect(owner).addBuyer(t, '0x', sig))
+        .to.be.revertedWithCustomError(f.SS, 'InvalidGrantNonce')
         .withArgs(accountId, 2n, 1n);
-      expect(await f.CSS.isAssignmentActive(accountId, buyer.address)).to.equal(true);
+      expect(await f.SSS.isGrantActive(accountId, buyer.address)).to.equal(true);
     });
   });
 
   // -------------------------------------------------------------------------
-  // Caps update
+  // BuyerLimits update
   // -------------------------------------------------------------------------
 
-  describe('caps update', () => {
+  describe('limits update', () => {
     let accountId: bigint;
     let terms: Terms;
-    const CAPS: Partial<Terms> = { maxCostPerPeriod: 50n * TRAC };
+    const LIMITS: Partial<Terms> = { maxCostPerEpoch: 50n * TRAC };
 
     beforeEach(async () => {
-      ({ accountId, terms } = await h.openAccount({ committed: SMALL, caps: CAPS }));
+      ({ accountId, terms } = await h.openAccount({ committed: SMALL, limits: LIMITS }));
     });
 
-    const capsWith = (overrides: Partial<Caps> = {}): Caps => ({ ...capsOf(terms), ...overrides });
-    const update = (caps: Caps, sender: SignerWithAddress = owner, assignee: string = buyer.address) =>
-      f.SS.connect(sender).updateAssignmentCaps(accountId, assignee, caps);
-    const capsTuple = async () => {
-      const a = await f.CSS.getAssignment(accountId, buyer.address);
-      return [a.maxCostPerPeriod, a.expiresAt];
+    const limitsWith = (overrides: Partial<BuyerLimits> = {}): BuyerLimits => ({ ...limitsOf(terms), ...overrides });
+    const update = (limits: BuyerLimits, sender: SignerWithAddress = owner, who: string = buyer.address) =>
+      f.SS.connect(sender).setBuyerLimits(accountId, who, limits);
+    const limitsTuple = async () => {
+      const a = await f.SSS.getGrant(accountId, buyer.address);
+      return [a.maxCostPerEpoch, a.expiresAt];
     };
 
-    it('is owner only: the assignee and anyone else revert NotAccountOwner', async () => {
+    it('is owner only: the buyer and anyone else revert NotAccountOwner', async () => {
       for (const caller of [buyer, stranger, relayer]) {
-        await expect(update(capsWith({ maxCostPerPeriod: 45n * TRAC }), caller))
+        await expect(update(limitsWith({ maxCostPerEpoch: 45n * TRAC }), caller))
           .to.be.revertedWithCustomError(f.SS, 'NotAccountOwner')
           .withArgs(accountId, caller.address);
       }
     });
 
-    it('needs a live assignment: NotAssigned and AssignmentRevoked', async () => {
-      await expect(update(capsWith(), owner, stranger.address))
-        .to.be.revertedWithCustomError(f.SS, 'NotAssigned')
+    it('needs a live grant: NotABuyer and GrantRevoked', async () => {
+      await expect(update(limitsWith(), owner, stranger.address))
+        .to.be.revertedWithCustomError(f.SS, 'NotABuyer')
         .withArgs(accountId, stranger.address);
-      await f.SS.connect(owner).revoke(accountId, buyer.address);
-      await expect(update(capsWith({ maxCostPerPeriod: 45n * TRAC })))
-        .to.be.revertedWithCustomError(f.SS, 'AssignmentRevoked')
+      await f.SS.connect(owner).removeBuyer(accountId, buyer.address);
+      await expect(update(limitsWith({ maxCostPerEpoch: 45n * TRAC })))
+        .to.be.revertedWithCustomError(f.SS, 'GrantRevoked')
         .withArgs(accountId, buyer.address);
     });
 
-    it('an expired assignment reverts AssignmentExpired, so a later expiry never revives it', async () => {
+    it('an expired grant reverts GrantExpired, so a later expiry never revives it', async () => {
       await time.increaseTo(terms.expiresAt);
-      await expect(update(capsWith({ expiresAt: terms.expiresAt + 30n * DAY })))
-        .to.be.revertedWithCustomError(f.SS, 'AssignmentExpired')
+      await expect(update(limitsWith({ expiresAt: terms.expiresAt + 30n * DAY })))
+        .to.be.revertedWithCustomError(f.SS, 'GrantExpired')
         .withArgs(accountId, buyer.address);
     });
 
-    it('validates the caps by the rules of assign, and reverts CapsUnchanged for the caps it holds', async () => {
+    it('validates the limits by the rules of grant, and reverts BuyerLimitsUnchanged for the limits it holds', async () => {
       const now = await h.latest();
-      const cases: Array<[Partial<Caps>, string]> = [
-        [{ maxCostPerPeriod: 0n }, 'maxCostPerPeriod'],
+      const cases: Array<[Partial<BuyerLimits>, string]> = [
+        [{ maxCostPerEpoch: 0n }, 'maxCostPerEpoch'],
         [{ expiresAt: now }, 'expiresAt'],
       ];
       for (const [overrides, reason] of cases) {
-        await expect(update(capsWith(overrides)), reason)
-          .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentTerms')
+        await expect(update(limitsWith(overrides)), reason)
+          .to.be.revertedWithCustomError(f.SS, 'InvalidBuyerTerms')
           .withArgs(reason);
       }
-      await expect(update(capsWith()))
-        .to.be.revertedWithCustomError(f.SS, 'CapsUnchanged')
+      await expect(update(limitsWith()))
+        .to.be.revertedWithCustomError(f.SS, 'BuyerLimitsUnchanged')
         .withArgs(accountId, buyer.address);
       // Either limit is a change, the expiry included.
-      await update(capsWith({ expiresAt: terms.expiresAt + 1n }));
-      await update(capsWith({ maxCostPerPeriod: 49n * TRAC, expiresAt: terms.expiresAt + 1n }));
+      await update(limitsWith({ expiresAt: terms.expiresAt + 1n }));
+      await update(limitsWith({ maxCostPerEpoch: 49n * TRAC, expiresAt: terms.expiresAt + 1n }));
     });
 
-    it('keeps the usage, assignedAt, the assignment nonce and the account nonce', async () => {
+    it('keeps the usage, grantedAt, the grant nonce and the account nonce', async () => {
       await h.fund(await h.inference(accountId, 30n * TRAC));
       await h.fund(await h.inference(accountId, 20n * TRAC, { epoch: await h.epochNext() }));
       await time.increase(epLen);
       await h.fund(await h.inference(accountId, 10n * TRAC, { epoch: await h.epochNext() }));
-      const before = await f.CSS.getAssignment(accountId, buyer.address);
-      const usage = h.plain(await f.CSS.getUsage(accountId, buyer.address));
-      expect(usage).to.deep.equal({ periods: 3n });
-      const nonce = await f.CSS.assignmentNonce(accountId);
+      const before = await f.SSS.getGrant(accountId, buyer.address);
+      const usage = h.plain(await f.SSS.getUsage(accountId, buyer.address));
+      expect(usage).to.deep.equal({ subscriptions: 3n });
+      const nonce = await f.SSS.grantNonce(accountId);
 
-      const caps = capsWith({ maxCostPerPeriod: 40n * TRAC });
-      await update(caps);
+      const limits = limitsWith({ maxCostPerEpoch: 40n * TRAC });
+      await update(limits);
 
-      expect(h.plain(await f.CSS.getUsage(accountId, buyer.address))).to.deep.equal(usage);
-      const after = await f.CSS.getAssignment(accountId, buyer.address);
-      expect([after.assignedAt, after.revokedAt, after.nonce]).to.deep.equal([before.assignedAt, 0n, before.nonce]);
-      expect(await f.CSS.assignmentNonce(accountId)).to.equal(nonce);
-      expect(await capsTuple()).to.deep.equal(Object.values(caps));
-      expect(await f.CSS.assigneeCount(accountId)).to.equal(1n);
+      expect(h.plain(await f.SSS.getUsage(accountId, buyer.address))).to.deep.equal(usage);
+      const after = await f.SSS.getGrant(accountId, buyer.address);
+      expect([after.grantedAt, after.revokedAt, after.nonce]).to.deep.equal([before.grantedAt, 0n, before.nonce]);
+      expect(await f.SSS.grantNonce(accountId)).to.equal(nonce);
+      expect(await limitsTuple()).to.deep.equal(Object.values(limits));
+      expect(await f.SSS.buyerCount(accountId)).to.equal(1n);
     });
 
     it('applies from the next funding: a raised cap admits what the old cap refused, a lowered cap refuses what it admitted', async () => {
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, 60n * TRAC)))
-        .to.be.revertedWithCustomError(f.SS, 'CapExceeded')
-        .withArgs('maxCostPerPeriod', 50n * TRAC, 60n * TRAC);
-      await update(capsWith({ maxCostPerPeriod: 80n * TRAC }));
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, 60n * TRAC)))
+        .to.be.revertedWithCustomError(f.SS, 'LimitExceeded')
+        .withArgs('maxCostPerEpoch', 50n * TRAC, 60n * TRAC);
+      await update(limitsWith({ maxCostPerEpoch: 80n * TRAC }));
       await h.fund(await h.inference(accountId, 60n * TRAC));
 
-      await update(capsWith({ maxCostPerPeriod: 40n * TRAC }));
+      await update(limitsWith({ maxCostPerEpoch: 40n * TRAC }));
       const next = await h.epochNext();
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, 45n * TRAC, { epoch: next })))
-        .to.be.revertedWithCustomError(f.SS, 'CapExceeded')
-        .withArgs('maxCostPerPeriod', 40n * TRAC, 45n * TRAC);
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, 45n * TRAC, { epoch: next })))
+        .to.be.revertedWithCustomError(f.SS, 'LimitExceeded')
+        .withArgs('maxCostPerEpoch', 40n * TRAC, 45n * TRAC);
       await h.fund(await h.inference(accountId, 40n * TRAC, { epoch: next }));
     });
 
-    it('works while service spending is off, and the new caps hold once it is back on', async () => {
+    it('works while service spending is off, and the new limits hold once it is back on', async () => {
       await f.SS.connect(owner).setServiceSpending(accountId, false);
-      await update(capsWith({ maxCostPerPeriod: 20n * TRAC }));
+      await update(limitsWith({ maxCostPerEpoch: 20n * TRAC }));
       await f.SS.connect(owner).setServiceSpending(accountId, true);
-      await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(accountId, 25n * TRAC)))
-        .to.be.revertedWithCustomError(f.SS, 'CapExceeded')
-        .withArgs('maxCostPerPeriod', 20n * TRAC, 25n * TRAC);
+      await expect(f.SS.connect(buyer).fundFromAccount(await h.inference(accountId, 25n * TRAC)))
+        .to.be.revertedWithCustomError(f.SS, 'LimitExceeded')
+        .withArgs('maxCostPerEpoch', 20n * TRAC, 25n * TRAC);
       await h.fund(await h.inference(accountId, 20n * TRAC));
     });
 
-    it('a funded period keeps its record', async () => {
+    it('a funded subscription keeps its record', async () => {
       const { subscriptionId } = await h.fund(await h.inference(accountId, 40n * TRAC));
-      const record = h.plain(await f.CSS.getSubscription(subscriptionId));
-      await update(capsWith({ maxCostPerPeriod: 10n * TRAC }));
-      expect(h.plain(await f.CSS.getSubscription(subscriptionId))).to.deep.equal(record);
+      const record = h.plain(await f.SSS.getSubscription(subscriptionId));
+      await update(limitsWith({ maxCostPerEpoch: 10n * TRAC }));
+      expect(h.plain(await f.SSS.getSubscription(subscriptionId))).to.deep.equal(record);
     });
 
-    it('CapsUpdated carries the new caps', async () => {
-      const caps = capsWith({ maxCostPerPeriod: 30n * TRAC, expiresAt: terms.expiresAt - DAY });
-      await expect(update(caps))
-        .to.emit(f.SS, 'CapsUpdated')
-        .withArgs(accountId, buyer.address, ...Object.values(caps));
+    it('BuyerLimitsUpdated carries the new limits', async () => {
+      const limits = limitsWith({ maxCostPerEpoch: 30n * TRAC, expiresAt: terms.expiresAt - DAY });
+      await expect(update(limits))
+        .to.emit(f.SS, 'BuyerLimitsUpdated')
+        .withArgs(accountId, buyer.address, ...Object.values(limits));
     });
 
-    it('terms signed before an update still assign and reset the usage; after advanceAssignmentNonce they fail', async () => {
-      const t = await h.termsFor(accountId, buyer.address, { maxCostPerPeriod: 70n * TRAC });
+    it('terms signed before an update still grant and reset the usage; after advanceGrantNonce they fail', async () => {
+      const t = await h.termsFor(accountId, buyer.address, { maxCostPerEpoch: 70n * TRAC });
       const sig = await signTerms(buyer, f.SS, t);
       await h.fund(await h.inference(accountId, 30n * TRAC));
-      await update(capsWith({ maxCostPerPeriod: 45n * TRAC }));
-      expect(await f.CSS.assignmentNonce(accountId)).to.equal(t.nonce);
-      await f.SS.connect(owner).assign(t, '0x', sig);
-      expect((await f.CSS.getAssignment(accountId, buyer.address)).maxCostPerPeriod).to.equal(70n * TRAC);
-      expect((await f.CSS.getUsage(accountId, buyer.address)).periods).to.equal(0n);
+      await update(limitsWith({ maxCostPerEpoch: 45n * TRAC }));
+      expect(await f.SSS.grantNonce(accountId)).to.equal(t.nonce);
+      await f.SS.connect(owner).addBuyer(t, '0x', sig);
+      expect((await f.SSS.getGrant(accountId, buyer.address)).maxCostPerEpoch).to.equal(70n * TRAC);
+      expect((await f.SSS.getUsage(accountId, buyer.address)).subscriptions).to.equal(0n);
 
-      const next = await h.termsFor(accountId, buyer.address, { maxCostPerPeriod: 80n * TRAC });
+      const next = await h.termsFor(accountId, buyer.address, { maxCostPerEpoch: 80n * TRAC });
       const nextSig = await signTerms(buyer, f.SS, next);
-      await update(capsWith({ maxCostPerPeriod: 35n * TRAC, expiresAt: next.expiresAt }));
-      await f.SS.connect(owner).advanceAssignmentNonce(accountId);
-      await expect(f.SS.connect(owner).assign(next, '0x', nextSig))
-        .to.be.revertedWithCustomError(f.SS, 'InvalidAssignmentNonce')
+      await update(limitsWith({ maxCostPerEpoch: 35n * TRAC, expiresAt: next.expiresAt }));
+      await f.SS.connect(owner).advanceGrantNonce(accountId);
+      await expect(f.SS.connect(owner).addBuyer(next, '0x', nextSig))
+        .to.be.revertedWithCustomError(f.SS, 'InvalidGrantNonce')
         .withArgs(accountId, next.nonce + 1n, next.nonce);
     });
   });

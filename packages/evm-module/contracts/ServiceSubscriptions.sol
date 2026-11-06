@@ -6,16 +6,16 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
-import {IConvictionServiceErrors} from "./interfaces/IConvictionServiceErrors.sol";
-import {IServicePeriodFunding} from "./interfaces/IServicePeriodFunding.sol";
+import {IServiceSpendingErrors} from "./interfaces/IServiceSpendingErrors.sol";
+import {ISubscriptionFunding} from "./interfaces/ISubscriptionFunding.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Chronos} from "./storage/Chronos.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {PublishingConvictionStorage} from "./storage/PublishingConvictionStorage.sol";
-import {ConvictionServiceStorage} from "./storage/ConvictionServiceStorage.sol";
+import {ServiceSubscriptionsStorage} from "./storage/ServiceSubscriptionsStorage.sol";
 import {QueryInferenceStorage} from "./storage/QueryInferenceStorage.sol";
 import {PublishingConviction} from "./PublishingConviction.sol";
-import {ServicePeriodLib} from "./libraries/ServicePeriodLib.sol";
+import {SubscriptionLib} from "./libraries/SubscriptionLib.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
@@ -24,35 +24,35 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
 /**
  * @title ServiceSubscriptions
  * @notice Conviction Account service spending (OT-RFC-27, "NeuroSymbolic
- *         Marketplace"): the owner of a Conviction Account opts it in and
- *         assigns bounded plan-funding authority to a buyer key, with that
- *         key's signed consent; the buyer key then funds service plan
- *         periods, one transaction each, from the account's existing
- *         allowance, and tops them up within the period.
+ *         Marketplace"): the owner of a Conviction Account opts it in and adds
+ *         buyers, each under a grant that the owner and the buyer both consent
+ *         to. A buyer then funds subscriptions, one transaction each, from the
+ *         account's existing allowance, and tops them up while they run.
  *
- * A plan period is one chain epoch, the current one or the next, and a buyer
- * key funds at most one period per epoch, from an account or, through
+ * A subscription is one chain epoch, the current one or the next, and a buyer
+ * funds at most one subscription per epoch, from an account or, through
  * `ServiceSubscriptionsWallet`, from its wallet; both share one id per buyer
- * key and epoch.
+ * and epoch.
  *
- * A Conviction Account pays for a period as a wallet does (since 1.2.0). A
- * funded period moves no TRAC: `PublishingConviction.coverServiceCost` spends
- * the cost from the account's allowance exactly as a publish does (the
+ * A Conviction Account pays for a subscription as a wallet does (since 1.2.0).
+ * A funded subscription moves no TRAC: `PublishingConviction.coverServiceCost`
+ * spends the cost from the account's allowance exactly as a publish does (the
  * current billing window first, then the top-up buffer, at the account's
  * discount tier), and this contract books the whole cost in
- * `QueryInferenceStorage` under the period's epoch, as
- * `ServiceSubscriptionsWallet` books a wallet period's value: the epoch in
- * which the period's receipt value counts. The spend itself books nothing to
- * the staker pool, so the cost is counted once, in the query/inference pool.
+ * `QueryInferenceStorage` under the subscription's epoch, as
+ * `ServiceSubscriptionsWallet` books a wallet subscription's value: the epoch
+ * in which the subscription's receipt value counts. The spend itself books
+ * nothing to the staker pool, so the cost is counted once, in the
+ * query/inference pool.
  *
  * Architecture (the pattern of `PublishingConviction`):
  *   - Stateless logic. Every byte of service-spending state lives in
- *     `ConvictionServiceStorage` and `QueryInferenceStorage`; this contract
+ *     `ServiceSubscriptionsStorage` and `QueryInferenceStorage`; this contract
  *     holds only Hub-resolved references. `PublishingConvictionStorage`,
- *     `ConvictionServiceStorage`, `QueryInferenceStorage`, `Chronos` and
+ *     `ServiceSubscriptionsStorage`, `QueryInferenceStorage`, `Chronos` and
  *     `ParametersStorage` are wired at `initialize()`. `PublishingConviction`
- *     and `DKGPublishingConvictionNFT` are resolved from the Hub on every
- *     call, so either can be re-registered.
+ *     and `DKGPublishingConvictionNFT` are resolved from the Hub on every call,
+ *     so either can be re-registered.
  *   - It calls only the Hub, `PublishingConviction`, the two account
  *     storages, `QueryInferenceStorage`, `Chronos`, `ParametersStorage`, the
  *     NFT's `ownerOf` and, as a staticcall before any state write, ERC-1271
@@ -62,27 +62,27 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *
  * Gates:
  *   - Only the current NFT owner switches service spending, revokes, updates
- *     caps or advances the assignment nonce, and the owner's consent to an
- *     assignment is checked against the owner at the time of `assign`. The
- *     opt-in and each assignment record the owner who made them and fund
- *     only while that owner holds the account: a sale of the account NFT
- *     leaves both inert, and the new owner opts in and assigns afresh
- *     (`setServiceSpending` says what an inherited opt-in does).
- *   - A period keeps the assignment it was funded under: it takes requests,
- *     and top-ups, only until that assignment ends, at its expiry or its
- *     revocation if sooner, whatever later assignment the buyer key gets.
- *     So assigning a key again after a revocation or an expiry serves it
- *     only from its next period not yet funded, and an assignment replaced
- *     while still live keeps its periods open until its own expiry.
- *   - An assignment needs the consent of both the owner and the assignee over
- *     one EIP-712 digest that carries the account's current nonce. A party
- *     consents by sending the transaction, or by a signature: ERC-1271 for an
- *     address with code, ECDSA with a low `s` for an EOA.
- *   - Only the assignee funds and tops up, as `msg.sender`, within the
- *     assignment's one limit, the most a period may cost, its top-ups
- *     included, as stored at that block. Both service classes are allowed. A
- *     publishing agent registration never grants service spending, and an
- *     assignment never grants publishing.
+ *     limits or advances the grant nonce, and the owner's consent to a grant is
+ *     checked against the owner at the time of `addBuyer`. The opt-in and each
+ *     grant record the owner who made them and fund only while that owner holds
+ *     the account: a sale of the account NFT leaves both inert, and the new
+ *     owner opts in and adds its buyers afresh (`setServiceSpending` says what
+ *     an inherited opt-in does).
+ *   - A subscription keeps the grant it was funded under: it takes requests,
+ *     and top-ups, only until that grant ends, at its expiry or its revocation
+ *     if sooner, whatever later grant the buyer gets. So adding a buyer again
+ *     after a revocation or an expiry serves it only from its next subscription
+ *     not yet funded, and a grant replaced while still live keeps its
+ *     subscriptions open until its own expiry.
+ *   - A grant needs the consent of both the owner and the buyer over one
+ *     EIP-712 digest that carries the account's current nonce. A party consents
+ *     by sending the transaction, or by a signature: ERC-1271 for an address
+ *     with code, ECDSA with a low `s` for an EOA.
+ *   - Only the buyer funds and tops up, as `msg.sender`, within the grant's one
+ *     limit, the most a subscription may cost, its top-ups included, as stored
+ *     at that block. Both service classes are allowed. A publishing agent
+ *     registration never allows service spending, and a grant never allows
+ *     publishing.
  *   - Every funding and top-up is refused while `QueryInferenceStorage` is
  *     paused, before its activation epoch and while that is unset, as wallet
  *     fundings are: the pool counts money from activation on, so a cost booked
@@ -92,8 +92,8 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     protocol treasury is wired: a service spend carries no treasury fee. So
  *     `ParametersStorage.protocolTreasury` must stay 0 wherever this contract
  *     runs: wiring one stops every Conviction Account funding and top-up, and
- *     the opt-in, until it is unset again. Wallet periods take no fee and go
- *     on. `protocolTreasuryFee`, already set at 300 bps, takes effect only
+ *     the opt-in, until it is unset again. Wallet subscriptions take no fee and
+ *     go on. `protocolTreasuryFee`, already set at 300 bps, takes effect only
  *     once a treasury is wired.
  *   - An account that `PublishingConviction` 10.0.8 or 10.1.0 scheduled in
  *     full cannot switch service spending on, and its spends are refused
@@ -109,25 +109,26 @@ contract ServiceSubscriptions is
     ContractStatus,
     IInitializable,
     IPublishingConvictionErrors,
-    IConvictionServiceErrors,
-    IServicePeriodFunding
+    IServiceSpendingErrors,
+    ISubscriptionFunding
 {
     string private constant _NAME = "ServiceSubscriptions";
     // Version history:
     //   1.0.0 — Conviction Account service spending (OT-RFC-27): the owner's
-    //           opt-in, two-party consent to an assignment with cost caps, the
-    //           owner's cap updates and revocation, period funding through
-    //           `PublishingConviction.coverServiceCost`, and the labels.
-    //   1.1.0 — a period is one epoch, the current one or the next, one per
-    //           buyer key and epoch; an assignment holds one cost limit per
-    //           period and an expiry; top-ups and upgrades within the period
-    //           (`topUpFromConviction`); a non-zero session key; no funding
-    //           or top-up while `QueryInferenceStorage` is paused; no funding
-    //           or top-up of a period whose assignment expires before the
-    //           period starts.
+    //           opt-in, two-party consent to a grant with cost limits, the
+    //           owner's limit updates and revocation, subscription funding
+    //           through `PublishingConviction.coverServiceCost`, and the
+    //           labels.
+    //   1.1.0 — a subscription is one epoch, the current one or the next, one
+    //           per buyer and epoch; a grant holds one cost limit per
+    //           subscription and an expiry; top-ups and upgrades within the
+    //           subscription (`topUpFromAccount`); a non-zero session key; no
+    //           funding or top-up while `QueryInferenceStorage` is paused; no
+    //           funding or top-up of a subscription whose grant expires before
+    //           the subscription starts.
     //   1.2.0 — a Conviction Account pays as a wallet does: each funding and
-    //           top-up books its cost under the period's epoch
-    //           (`QueryInferenceStorage.addConvictionFunding`), and both are
+    //           top-up books its cost under the subscription's epoch
+    //           (`QueryInferenceStorage.addAccountFunding`), and both are
     //           refused before the activation epoch. The labels are gone
     //           (`_labelBase`, `_labelTopUp`, their basis and cursor, the
     //           `ServiceEmissionLabelled` event, `LabelCapacityExceeded`, and
@@ -135,12 +136,12 @@ contract ServiceSubscriptions is
     //           `baseLabelCapacity`), and with them the schedule cut-over the
     //           opt-in needed (`ExactScheduleFromUnset`). The opt-in refuses an
     //           account scheduled in full (`EmissionAlreadyScheduled`). A
-    //           funded period records the nonce of its assignment, whose end
-    //           a later assignment of the buyer key does not move, and takes a
-    //           top-up only while that assignment is live. The opt-in
-    //           and each assignment record the owner who made them, and fund
-    //           or top up nothing once another owner holds the account
-    //           (`ServiceSpendingDisabled`, `AssignedByFormerOwner`).
+    //           funded subscription records the nonce of its grant, whose end a
+    //           later grant to the buyer does not move, and takes a top-up only
+    //           while that grant is live. The opt-in and each grant record the
+    //           owner who made them, and fund or top up nothing once another
+    //           owner holds the account (`ServiceSpendingDisabled`,
+    //           `GrantedByFormerOwner`).
     string private constant _VERSION = "1.2.0";
 
     uint256 public constant BPS_DENOMINATOR = 10_000;
@@ -148,10 +149,10 @@ contract ServiceSubscriptions is
     // EIP-712, built by hand as KnowledgeAssetsLifecycle builds its domain.
     bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant _EIP712_NAME_HASH = keccak256(bytes("DKGConvictionServices"));
+    bytes32 private constant _EIP712_NAME_HASH = keccak256(bytes("DKGServiceSubscriptions"));
     bytes32 private constant _EIP712_VERSION_HASH = keccak256(bytes("1"));
-    bytes32 public constant SERVICE_ASSIGNMENT_TYPEHASH =
-        keccak256("ServiceAssignment(uint256 accountId,address assignee,uint96 maxCostPerPeriod,uint40 expiresAt,uint64 nonce)");
+    bytes32 public constant BUYER_GRANT_TYPEHASH =
+        keccak256("BuyerGrant(uint256 accountId,address buyer,uint96 maxCostPerEpoch,uint40 expiresAt,uint64 nonce)");
     /// @dev `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
     bytes4 private constant _ERC1271_MAGIC_VALUE = 0x1626ba7e;
     /// @dev floor(secp256k1n / 2). An EOA signature with a larger `s` is the
@@ -164,23 +165,24 @@ contract ServiceSubscriptions is
     // ============================================================
 
     /// @notice The terms both parties consent to. They are the EIP-712
-    ///         `ServiceAssignment` message. The limit is in COST, TRAC wei
-    ///         spent from the account's allowance after its discount.
-    struct AssignmentTerms {
+    ///         `BuyerGrant` message. The limit is in COST, TRAC wei spent from
+    ///         the account's allowance after its discount.
+    struct BuyerTerms {
         uint256 accountId;
-        address assignee;
-        uint96 maxCostPerPeriod; // the most one period may cost, its top-ups included
+        address buyer;
+        uint96 maxCostPerEpoch; // the most one subscription may cost, its top-ups included
         uint40 expiresAt;
-        uint64 nonce; // the account's current assignment nonce
+        uint64 nonce; // the account's current grant nonce
     }
 
-    /// @notice A buyer key's request to fund one plan period from an account.
+    /// @notice A buyer's request to fund one subscription from an account.
     struct FundingRequest {
         uint256 accountId;
-        uint256 epoch; // the period's epoch: the current one or the next
+        uint256 epoch; // the subscription's epoch: the current one or the next
         address sessionKey; // the buyer's request-signing key; never zero
         bytes32 planDigest; // the buyer's commitment to its plan, opaque here
-        ConvictionServiceStorage.Bucket[] buckets; // 1 to maxBucketsPerPeriod, strictly increasing bucketId
+        // 1 to maxBudgetsPerSubscription, in strictly increasing serviceId.
+        ServiceSubscriptionsStorage.ServiceBudget[] budgets;
     }
 
     // ============================================================
@@ -188,7 +190,7 @@ contract ServiceSubscriptions is
     // ============================================================
 
     PublishingConvictionStorage public publishingConvictionStorage;
-    ConvictionServiceStorage public convictionServiceStorage;
+    ServiceSubscriptionsStorage public serviceSubscriptionsStorage;
     Chronos public chronos;
     ParametersStorage public parametersStorage;
     QueryInferenceStorage public queryInferenceStorage;
@@ -198,30 +200,29 @@ contract ServiceSubscriptions is
     // ============================================================
 
     event ServiceSpendingSet(uint256 indexed accountId, bool enabled);
-    /// @notice A new assignment, with the terms both parties consented to.
+    /// @notice A new grant, with the terms both parties consented to.
     ///         `termsDigest` is the EIP-712 digest they consented over, and
     ///         `nonce` the account nonce it consumed.
-    event ServiceAssigned(
+    event BuyerAdded(
         uint256 indexed accountId,
-        address indexed assignee,
+        address indexed buyer,
         bytes32 termsDigest,
-        uint96 maxCostPerPeriod,
+        uint96 maxCostPerEpoch,
         uint40 expiresAt,
         uint64 nonce
     );
-    event ServiceRevoked(uint256 indexed accountId, address indexed assignee);
-    /// @notice The owner replaced an assignment's limit and expiry. Its usage
-    ///         and nonce are unchanged.
-    event CapsUpdated(
+    event BuyerRemoved(uint256 indexed accountId, address indexed buyer);
+    /// @notice The owner replaced a grant's limit and expiry. Its usage and
+    ///         nonce are unchanged.
+    event BuyerLimitsUpdated(
         uint256 indexed accountId,
-        address indexed assignee,
-        uint96 maxCostPerPeriod,
+        address indexed buyer,
+        uint96 maxCostPerEpoch,
         uint40 expiresAt
     );
-    /// @notice The account's assignment nonce moved: the next assignment must
-    ///         carry `nextNonce`, so terms signed at an older nonce no longer
-    ///         assign.
-    event AssignmentNonceAdvanced(uint256 indexed accountId, uint64 nextNonce);
+    /// @notice The account's grant nonce moved: the next grant must carry
+    ///         `nextNonce`, so terms signed at an older nonce no longer grant.
+    event GrantNonceAdvanced(uint256 indexed accountId, uint64 nextNonce);
 
     // ============================================================
     //                          Errors
@@ -230,28 +231,29 @@ contract ServiceSubscriptions is
     error NotAccountOwner(uint256 accountId, address caller);
     error ServiceSpendingDisabled(uint256 accountId);
     error ServiceSpendingUnchanged(uint256 accountId, bool enabled);
-    error InvalidAssignmentTerms(string reason);
-    error InvalidAssignmentNonce(uint256 accountId, uint64 expected, uint64 provided);
+    error InvalidBuyerTerms(string reason);
+    error InvalidGrantNonce(uint256 accountId, uint64 expected, uint64 provided);
     error ConsentMissing(address party);
     error InvalidConsentSignature(address party);
-    error NotAssigned(uint256 accountId, address assignee);
-    /// @notice The owner who consented to the assignment no longer holds the
-    ///         account: it funds nothing, and the current owner assigns afresh.
-    error AssignedByFormerOwner(uint256 accountId, address assignee);
-    error AssignmentRevoked(uint256 accountId, address assignee);
-    /// @notice The assignment has expired. A top-up also reverts with it once
-    ///         the assignment the period was funded under has ended, by its
-    ///         expiry or its revocation, whatever later assignment the buyer
-    ///         key holds: the period takes no request issued after that end.
-    error AssignmentExpired(uint256 accountId, address assignee);
-    /// @notice The assignment expires at or before the start of the period,
+    error NotABuyer(uint256 accountId, address buyer);
+    /// @notice The owner who consented to the grant no longer holds the
+    ///         account: it funds nothing, and the current owner adds the buyer
+    ///         afresh.
+    error GrantedByFormerOwner(uint256 accountId, address buyer);
+    error GrantRevoked(uint256 accountId, address buyer);
+    /// @notice The grant has expired. A top-up also reverts with it once the
+    ///         grant the subscription was funded under has ended, by its expiry
+    ///         or its revocation, whatever later grant the buyer holds: the
+    ///         subscription takes no request issued after that end.
+    error GrantExpired(uint256 accountId, address buyer);
+    /// @notice The grant expires at or before the start of the subscription,
     ///         which it could then never serve: no request issued in the
-    ///         period would be from a live assignment, and a period is
-    ///         non-refundable. A top-up checks the assignment the period was
+    ///         subscription would be from a live grant, and a subscription is
+    ///         non-refundable. A top-up checks the grant the subscription was
     ///         funded under too.
-    error AssignmentEndsBeforePeriod(uint256 accountId, address assignee, uint40 expiresAt, uint40 periodStart);
-    error CapsUnchanged(uint256 accountId, address assignee);
-    error CapExceeded(string cap, uint256 limit, uint256 attempted);
+    error GrantEndsBeforeSubscription(uint256 accountId, address buyer, uint40 expiresAt, uint40 startsAt);
+    error BuyerLimitsUnchanged(uint256 accountId, address buyer);
+    error LimitExceeded(string name, uint256 limit, uint256 attempted);
     error SpendMismatch(uint96 expectedCost, uint96 cost, uint40 expectedWindow, uint40 window);
 
     // solhint-disable-next-line no-empty-blocks
@@ -263,7 +265,9 @@ contract ServiceSubscriptions is
         publishingConvictionStorage = PublishingConvictionStorage(
             hub.getContractAddress("PublishingConvictionStorage")
         );
-        convictionServiceStorage = ConvictionServiceStorage(hub.getContractAddress("ConvictionServiceStorage"));
+        serviceSubscriptionsStorage = ServiceSubscriptionsStorage(
+            hub.getContractAddress("ServiceSubscriptionsStorage")
+        );
         chronos = Chronos(hub.getContractAddress("Chronos"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
         queryInferenceStorage = QueryInferenceStorage(hub.getContractAddress("QueryInferenceStorage"));
@@ -283,29 +287,29 @@ contract ServiceSubscriptions is
 
     /**
      * @notice Switch service spending on or off for `accountId`. Owner only.
-     * @dev Switching on needs no protocol treasury wired, an unexpired
-     *      account, and one that pays at use time: an account that
+     * @dev Switching on needs no protocol treasury wired, an unexpired account,
+     *      and one that pays at use time: an account that
      *      `PublishingConviction` 10.0.8 or 10.1.0 scheduled in full
      *      (`lastSettledWindow` at the lock while it is live) reverts
-     *      `EmissionAlreadyScheduled`, as each of its spends would.
-     *      Switching off is a pause: assignments are kept, and funded periods
-     *      run to their end. The opt-in records its owner and counts only
-     *      while that owner holds the account: after a sale it reads as off,
-     *      the new owner switches it on afresh, and the former owner's
-     *      assignments stay inert whatever the new owner switches.
+     *      `EmissionAlreadyScheduled`, as each of its spends would. Switching
+     *      off is a pause: grants are kept, and funded subscriptions run to
+     *      their end. The opt-in records its owner and counts only while that
+     *      owner holds the account: after a sale it reads as off, the new owner
+     *      switches it on afresh, and the former owner's grants stay inert
+     *      whatever the new owner switches.
      *
      *      An inherited opt-in, one an earlier owner made, reads as off, so a
      *      new owner cannot switch it off as such: `false` reverts
      *      `ServiceSpendingUnchanged`. Switching it on and then off clears it.
-     *      An assignment recorded for an owner applies again if the account
-     *      returns to that owner, unless an owner in between revoked it, as
-     *      long as that owner's opt-in was not overwritten in between; if it
-     *      was, the assignment applies again once that owner opts in again.
+     *      A grant recorded for an owner applies again if the account returns
+     *      to that owner, unless an owner in between revoked it, as long as
+     *      that owner's opt-in was not overwritten in between; if it was, the
+     *      grant applies again once that owner opts in again.
      */
     function setServiceSpending(uint256 accountId, bool enabled) external {
         _requireOwner(accountId);
-        ConvictionServiceStorage css = convictionServiceStorage;
-        ConvictionServiceStorage.ServiceSpending memory current = css.getServiceSpending(accountId);
+        ServiceSubscriptionsStorage subs = serviceSubscriptionsStorage;
+        ServiceSubscriptionsStorage.ServiceSpending memory current = subs.getServiceSpending(accountId);
         bool isOn = current.enabledAt != 0 && current.owner == msg.sender;
 
         if (enabled) {
@@ -317,70 +321,73 @@ contract ServiceSubscriptions is
             if (acct.lastSettledWindow >= acct.lockDurationEpochs) revert EmissionAlreadyScheduled(accountId);
             if (isOn) revert ServiceSpendingUnchanged(accountId, true);
 
-            css.setServiceSpending(
+            subs.setServiceSpending(
                 accountId,
-                ConvictionServiceStorage.ServiceSpending({
+                ServiceSubscriptionsStorage.ServiceSpending({
                     enabledAt: SafeCast.toUint40(block.timestamp),
                     owner: msg.sender
                 })
             );
         } else {
             if (!isOn) revert ServiceSpendingUnchanged(accountId, false);
-            css.setServiceSpending(accountId, ConvictionServiceStorage.ServiceSpending({enabledAt: 0, owner: address(0)}));
+            subs.setServiceSpending(
+                accountId,
+                ServiceSubscriptionsStorage.ServiceSpending({enabledAt: 0, owner: address(0)})
+            );
         }
 
         emit ServiceSpendingSet(accountId, enabled);
     }
 
     /**
-     * @notice Assign bounded plan-funding authority over `t.accountId` to
-     *         `t.assignee`, with the consent of the current owner and of the
-     *         assignee over the same EIP-712 digest (`hashAssignment(t)`).
+     * @notice Add `t.buyer` as a buyer of `t.accountId`, under a grant that the
+     *         current owner and the buyer consent to over the same EIP-712
+     *         digest (`hashGrant(t)`).
      * @dev Anyone may submit. A party consents by sending the transaction, in
      *      which case its signature argument must be empty, or by a signature
-     *      over the digest. The assignment replaces any earlier one of the
-     *      same assignee and starts its usage from zero. The periods funded
-     *      under the earlier one keep its end, its expiry or its revocation if
-     *      sooner, so a new assignment never admits a request issued once the
-     *      earlier one had ended; the periods funded under this one follow it.
-     *      So assigning a key again after a revocation or an expiry restores
-     *      its service only from its next period not yet funded: a period
-     *      already funded keeps its ended assignment and takes no request
-     *      issued after that end, and no top-up, and the key funds no second
-     *      period for that epoch. Replacing a live assignment leaves the
-     *      periods funded under it open until its own expiry, which revoking
-     *      the new assignment does not bring forward.
-     *      The assignment records the owner who consented, and funds only
-     *      while that owner holds the account. It consumes the account's
-     *      nonce, so the same terms never assign twice.
+     *      over the digest. The grant replaces any earlier one of the same
+     *      buyer and starts its usage from zero. The subscriptions funded under
+     *      the earlier one keep its end, its expiry or its revocation if
+     *      sooner, so a new grant never admits a request issued once the
+     *      earlier one had ended; the subscriptions funded under this one
+     *      follow it. So adding a buyer again after a revocation or an expiry
+     *      restores its service only from its next subscription not yet funded:
+     *      a subscription already funded keeps its ended grant and takes no
+     *      request issued after that end, and no top-up, and the buyer funds no
+     *      second subscription for that epoch. Replacing a live grant leaves
+     *      the subscriptions funded under it open until its own expiry, which
+     *      revoking the new grant does not bring forward. The grant records the
+     *      owner who consented, and funds only while that owner holds the
+     *      account. It consumes the account's nonce, so the same terms never
+     *      grant twice.
      */
-    function assign(
-        AssignmentTerms calldata t,
+    function addBuyer(
+        BuyerTerms calldata t,
         bytes calldata ownerSignature,
-        bytes calldata assigneeSignature
+        bytes calldata buyerSignature
     ) external {
-        ConvictionServiceStorage css = convictionServiceStorage;
-        address accountOwner = _requireSpendingOn(css, t.accountId);
+        ServiceSubscriptionsStorage subs = serviceSubscriptionsStorage;
+        address accountOwner = _requireSpendingOn(subs, t.accountId);
 
-        if (t.assignee == address(0)) revert InvalidAssignmentTerms("assignee");
-        _validateCaps(
-            ConvictionServiceStorage.AssignmentCaps({maxCostPerPeriod: t.maxCostPerPeriod, expiresAt: t.expiresAt})
+        if (t.buyer == address(0)) revert InvalidBuyerTerms("buyer");
+        _validateLimits(
+            ServiceSubscriptionsStorage.BuyerLimits({maxCostPerEpoch: t.maxCostPerEpoch, expiresAt: t.expiresAt})
         );
 
-        uint64 expected = css.assignmentNonce(t.accountId);
-        if (t.nonce != expected) revert InvalidAssignmentNonce(t.accountId, expected, t.nonce);
+        uint64 expected = subs.grantNonce(t.accountId);
+        if (t.nonce != expected) revert InvalidGrantNonce(t.accountId, expected, t.nonce);
 
-        bytes32 digest = hashAssignment(t);
+        bytes32 digest = hashGrant(t);
         _requireConsent(accountOwner, digest, ownerSignature);
-        _requireConsent(t.assignee, digest, assigneeSignature);
+        _requireConsent(t.buyer, digest, buyerSignature);
 
-        uint64 used = css.consumeAssignmentNonce(t.accountId);
-        css.setAssignment(
+        uint64 used = subs.consumeGrantNonce(t.accountId);
+        subs.setGrant(
             t.accountId,
-            t.assignee,
-            ConvictionServiceStorage.Assignment({
-                maxCostPerPeriod: t.maxCostPerPeriod,
-                assignedAt: SafeCast.toUint40(block.timestamp),
+            t.buyer,
+            ServiceSubscriptionsStorage.BuyerGrant({
+                maxCostPerEpoch: t.maxCostPerEpoch,
+                grantedAt: SafeCast.toUint40(block.timestamp),
                 expiresAt: t.expiresAt,
                 revokedAt: 0,
                 nonce: used,
@@ -388,79 +395,76 @@ contract ServiceSubscriptions is
             })
         );
 
-        emit ServiceAssigned(t.accountId, t.assignee, digest, t.maxCostPerPeriod, t.expiresAt, used);
-        emit AssignmentNonceAdvanced(t.accountId, used + 1);
+        emit BuyerAdded(t.accountId, t.buyer, digest, t.maxCostPerEpoch, t.expiresAt, used);
+        emit GrantNonceAdvanced(t.accountId, used + 1);
     }
 
     /**
-     * @notice Revoke `assignee`'s assignment over `accountId`. Owner only.
-     * @dev Immediate for new periods; funded periods are non-refundable and
-     *      run to their end. A request issued under this assignment from the
-     *      revocation on is refused, also after a new assignment of the same
-     *      key, while one served before it lands until the epoch ends, so
-     *      the revocation cannot withhold a seller's receipt. It also consumes
-     *      the account's nonce, so terms
-     *      signed but not yet submitted no longer assign. A new assignment of
-     *      the key afterwards serves it from its next period not yet funded:
-     *      the periods funded under this one take no request issued after the
-     *      revocation, and no top-up.
+     * @notice Revoke `buyer`'s grant over `accountId`. Owner only.
+     * @dev Immediate for new subscriptions; funded subscriptions are
+     *      non-refundable and run to their end. A request issued under this
+     *      grant from the revocation on is refused, also after a new grant to
+     *      the same buyer, while one served before it lands until the epoch ends,
+     *      so the revocation cannot withhold a seller's receipt. It also
+     *      consumes the account's nonce, so terms signed but not yet submitted
+     *      no longer grant. A new grant to the buyer afterwards serves it from
+     *      its next subscription not yet funded: the subscriptions funded under
+     *      this one take no request issued after the revocation, and no top-up.
      */
-    function revoke(uint256 accountId, address assignee) external {
+    function removeBuyer(uint256 accountId, address buyer) external {
         _requireOwner(accountId);
-        ConvictionServiceStorage css = convictionServiceStorage;
-        ConvictionServiceStorage.Assignment memory a = css.getAssignment(accountId, assignee);
-        if (a.assignedAt == 0) revert NotAssigned(accountId, assignee);
-        if (a.revokedAt != 0) revert AssignmentRevoked(accountId, assignee);
+        ServiceSubscriptionsStorage subs = serviceSubscriptionsStorage;
+        ServiceSubscriptionsStorage.BuyerGrant memory grant = subs.getGrant(accountId, buyer);
+        if (grant.grantedAt == 0) revert NotABuyer(accountId, buyer);
+        if (grant.revokedAt != 0) revert GrantRevoked(accountId, buyer);
 
-        css.setAssignmentRevokedAt(accountId, assignee, SafeCast.toUint40(block.timestamp));
-        uint64 used = css.consumeAssignmentNonce(accountId);
+        subs.setGrantRevokedAt(accountId, buyer, SafeCast.toUint40(block.timestamp));
+        uint64 used = subs.consumeGrantNonce(accountId);
 
-        emit ServiceRevoked(accountId, assignee);
-        emit AssignmentNonceAdvanced(accountId, used + 1);
+        emit BuyerRemoved(accountId, buyer);
+        emit GrantNonceAdvanced(accountId, used + 1);
     }
 
     /**
-     * @notice Replace the limit and the expiry of `assignee`'s live assignment
-     *         over `accountId`. Owner only, at any time, whether service
-     *         spending is on or off.
-     * @dev The limit bounds only what the owner lets the buyer key spend, and
+     * @notice Replace the limit and the expiry of `buyer`'s live grant over
+     *         `accountId`. Owner only, at any time, whether service spending is
+     *         on or off.
+     * @dev The limit bounds only what the owner lets the buyer spend, and
      *      obliges the buyer to nothing, so a change in either direction needs
-     *      no consent from the assignee. The usage, `assignedAt`, the
-     *      assignment's nonce and the account's nonce stay as they are. A
-     *      limit below a period's cost so far is allowed, and refuses every
-     *      top-up of that period. An earlier `expiresAt` refuses, from then
-     *      on, the requests of the periods funded under this assignment, as a
-     *      revocation does. An expired
-     *      assignment is renewed only by a new `assign`, so a later
-     *      `expiresAt` here never revives one. Terms
+     *      no consent from the buyer. The usage, `grantedAt`, the grant's nonce
+     *      and the account's nonce stay as they are. A limit below a
+     *      subscription's cost so far is allowed, and refuses every top-up of
+     *      that subscription. An earlier `expiresAt` refuses, from then on, the
+     *      requests of the subscriptions funded under this grant, as a
+     *      revocation does. An expired grant is renewed only by a new
+     *      `addBuyer`, so a later `expiresAt` here never revives one. Terms
      *      signed at the current nonce stay valid; an owner who tightens the
-     *      limit and wants to rule them out also calls
-     *      `advanceAssignmentNonce`.
+     *      limit and wants to rule them out also calls `advanceGrantNonce`.
      */
-    function updateAssignmentCaps(
+    function setBuyerLimits(
         uint256 accountId,
-        address assignee,
-        ConvictionServiceStorage.AssignmentCaps calldata caps
+        address buyer,
+        ServiceSubscriptionsStorage.BuyerLimits calldata limits
     ) external {
         _requireOwner(accountId);
-        ConvictionServiceStorage css = convictionServiceStorage;
-        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, accountId, assignee, msg.sender);
-        _validateCaps(caps);
-        if (caps.maxCostPerPeriod == a.maxCostPerPeriod && caps.expiresAt == a.expiresAt) {
-            revert CapsUnchanged(accountId, assignee);
+        ServiceSubscriptionsStorage subs = serviceSubscriptionsStorage;
+        ServiceSubscriptionsStorage.BuyerGrant memory grant = _liveGrant(subs, accountId, buyer, msg.sender);
+        _validateLimits(limits);
+        if (limits.maxCostPerEpoch == grant.maxCostPerEpoch && limits.expiresAt == grant.expiresAt) {
+            revert BuyerLimitsUnchanged(accountId, buyer);
         }
 
-        css.setAssignmentCaps(accountId, assignee, caps);
+        subs.setBuyerLimits(accountId, buyer, limits);
 
-        emit CapsUpdated(accountId, assignee, caps.maxCostPerPeriod, caps.expiresAt);
+        emit BuyerLimitsUpdated(accountId, buyer, limits.maxCostPerEpoch, limits.expiresAt);
     }
 
-    /// @notice Advance `accountId`'s assignment nonce, so terms signed at the
-    ///         current nonce and not yet submitted no longer assign. Owner only.
-    function advanceAssignmentNonce(uint256 accountId) external {
+    /// @notice Advance `accountId`'s grant nonce, so terms signed at the
+    ///         current nonce and not yet submitted no longer grant. Owner only.
+    function advanceGrantNonce(uint256 accountId) external {
         _requireOwner(accountId);
-        uint64 used = convictionServiceStorage.consumeAssignmentNonce(accountId);
-        emit AssignmentNonceAdvanced(accountId, used + 1);
+        uint64 used = serviceSubscriptionsStorage.consumeGrantNonce(accountId);
+        emit GrantNonceAdvanced(accountId, used + 1);
     }
 
     // ============================================================
@@ -468,206 +472,208 @@ contract ServiceSubscriptions is
     // ============================================================
 
     /**
-     * @notice Fund the plan period of `r.epoch` from `r.accountId`'s
-     *         allowance, as the assignee (`msg.sender`). Atomic: every refusal
+     * @notice Fund the subscription of `r.epoch` from `r.accountId`'s
+     *         allowance, as the buyer (`msg.sender`). Atomic: every refusal
      *         reverts the whole transaction, so nothing is ever funded
      *         partially.
      * @dev The cheap, read-only refusals come first: the pause and the
-     *      activation, the session key, the period's epoch, the opt-in and the
-     *      assignment, both made by the account's current owner, the
-     *      assignment one that must not expire before the period starts (a
-     *      period funded ahead for the next epoch would otherwise serve
-     *      nothing), the buckets, one period per buyer key and epoch, and the
-     *      assignment's limit as stored at this block. A revoked assignment
-     *      funds nothing, so only the expiry can be checked ahead. Then
+     *      activation, the session key, the subscription's epoch, the opt-in
+     *      and the grant, both made by the account's current owner, the grant
+     *      one that must not expire before the subscription starts (a
+     *      subscription funded ahead for the next epoch would otherwise serve
+     *      nothing), the budgets, one subscription per buyer and epoch, and the
+     *      grant's limit as stored at this block. A revoked grant funds
+     *      nothing, so only the expiry can be checked ahead. Then
      *      `coverServiceCost` spends the cost (window allowance first, then the
-     *      top-up buffer); a period funded ahead spends from the window the
-     *      funding runs in. Last, the usage, the cost under the period's
-     *      epoch and the period record are written. The record names
-     *      the assignment by its nonce: the period accepts requests issued
-     *      before that assignment ends, its expiry or its revocation,
-     *      whatever later assignment the buyer key gets.
+     *      top-up buffer); a subscription funded ahead spends from the window
+     *      the funding runs in. Last, the usage, the cost under the
+     *      subscription's epoch and the subscription record are written. The
+     *      record names the grant by its nonce: the subscription accepts
+     *      requests issued before that grant ends, its expiry or its
+     *      revocation, whatever later grant the buyer gets.
      *
-     *      The period runs to the start of the next epoch, from the later of
-     *      the block time and its epoch's start, which is never 0, and an id
+     *      The subscription runs to the start of the next epoch, from the later
+     *      of the block time and its epoch's start, which is never 0, and an id
      *      that already holds a record is refused, so the storage never
-     *      receives a record that reads as absent nor a second record under
-     *      one id.
+     *      receives a record that reads as absent nor a second record under one
+     *      id.
      * @return subscriptionId `subscriptionIdOf(msg.sender, r.epoch)`.
      * @return cost The cost spent from the allowance.
      */
-    function fundFromConviction(FundingRequest calldata r) external returns (bytes32 subscriptionId, uint96 cost) {
-        ConvictionServiceStorage css = convictionServiceStorage;
+    function fundFromAccount(FundingRequest calldata r) external returns (bytes32 subscriptionId, uint96 cost) {
+        ServiceSubscriptionsStorage subs = serviceSubscriptionsStorage;
         QueryInferenceStorage qis = queryInferenceStorage;
-        address assignee = msg.sender;
+        address buyer = msg.sender;
 
-        // 1. Funding is live, a session key, and the period of the current
-        //    epoch or the next one.
-        uint256 currentEpoch = ServicePeriodLib.requireLive(qis, chronos);
+        // 1. Funding is live, a session key, and the subscription of the
+        //    current epoch or the next one.
+        uint256 currentEpoch = SubscriptionLib.requireLive(qis, chronos);
         if (r.sessionKey == address(0)) revert ZeroSessionKey();
-        (uint40 periodStart, uint40 periodEnd) = ServicePeriodLib.periodOf(chronos, r.epoch, currentEpoch);
+        (uint40 startsAt, uint40 endsAt) = SubscriptionLib.timesOf(chronos, r.epoch, currentEpoch);
 
-        // 2. The opt-in and a live assignment, both made by the account's
-        //    current owner, the assignment still live when the period starts.
-        address accountOwner = _requireSpendingOn(css, r.accountId);
-        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, r.accountId, assignee, accountOwner);
-        _requireLiveAtStart(r.accountId, assignee, a, periodStart);
+        // 2. The opt-in and a live grant, both made by the account's current
+        //    owner, the grant still live when the subscription starts.
+        address accountOwner = _requireSpendingOn(subs, r.accountId);
+        ServiceSubscriptionsStorage.BuyerGrant memory grant = _liveGrant(subs, r.accountId, buyer, accountOwner);
+        _requireLiveAtStart(r.accountId, buyer, grant, startsAt);
 
-        // 3. The buckets and their value.
-        uint96 value = ServicePeriodLib.fundingValue(r.buckets, css.maxBucketsPerPeriod());
+        // 3. The budgets and their value.
+        uint96 value = SubscriptionLib.fundingValue(r.budgets, subs.maxBudgetsPerSubscription());
 
-        // 4. One period per buyer key and epoch.
-        subscriptionId = ServicePeriodLib.subscriptionIdOf(assignee, r.epoch);
-        if (css.subscriptionExists(subscriptionId)) revert PeriodAlreadyFunded(subscriptionId);
+        // 4. One subscription per buyer and epoch.
+        subscriptionId = SubscriptionLib.subscriptionIdOf(buyer, r.epoch);
+        if (subs.subscriptionExists(subscriptionId)) revert SubscriptionAlreadyFunded(subscriptionId);
 
         // 5. The cost at the account's tier, within the limit stored at this
         //    block.
         PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(r.accountId);
         cost = _discounted(value, acct.discountBps);
-        if (cost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, cost);
+        if (cost > grant.maxCostPerEpoch) revert LimitExceeded("maxCostPerEpoch", grant.maxCostPerEpoch, cost);
 
         // 6. The spend.
-        PublishingConviction.ServiceSpend memory d = _spend(
+        PublishingConviction.ServiceSpend memory spend = _spend(
             r.accountId,
-            assignee,
+            buyer,
             subscriptionId,
             value,
             cost,
             _currentBillingWindow(acct, chronos.epochLength())
         );
 
-        // 7. The usage, and the cost under the period's epoch, as a wallet
-        //    funding books its value.
-        css.recordUsage(r.accountId, assignee);
-        qis.addConvictionFunding(r.epoch, d.cost);
+        // 7. The usage, and the cost under the subscription's epoch, as a
+        //    wallet funding books its value.
+        subs.recordUsage(r.accountId, buyer);
+        qis.addAccountFunding(r.epoch, spend.cost);
 
-        // 8. The record, which names the assignment it is funded under.
-        css.createSubscription(
+        // 8. The record, which names the grant it is funded under.
+        subs.createSubscription(
             subscriptionId,
-            ConvictionServiceStorage.Subscription({
+            ServiceSubscriptionsStorage.Subscription({
                 accountId: r.accountId,
-                assignee: assignee,
-                assignmentNonce: a.nonce,
+                buyer: buyer,
+                grantNonce: grant.nonce,
                 sessionKey: r.sessionKey,
                 epoch: SafeCast.toUint40(r.epoch),
                 planDigest: r.planDigest,
-                periodStart: periodStart,
-                periodEnd: periodEnd,
-                fundedEpoch: d.epoch,
-                fundedWindow: d.window,
-                discountBps: d.discountBps,
-                bucketCount: uint8(r.buckets.length),
+                startsAt: startsAt,
+                endsAt: endsAt,
+                fundedEpoch: spend.epoch,
+                fundedWindow: spend.window,
+                discountBps: spend.discountBps,
+                budgetCount: uint8(r.budgets.length),
                 value: value,
-                cost: d.cost,
-                spentFromWindow: d.spentFromWindow,
-                spentFromTopUp: d.spentFromTopUp
+                cost: spend.cost,
+                spentFromWindow: spend.spentFromWindow,
+                spentFromTopUp: spend.spentFromTopUp
             }),
-            r.buckets
+            r.budgets
         );
 
         // 9.
-        emit PeriodFunded(
+        emit SubscriptionFunded(
             subscriptionId,
             r.accountId,
-            assignee,
+            buyer,
             r.epoch,
             r.sessionKey,
             r.planDigest,
-            periodStart,
-            periodEnd,
+            startsAt,
+            endsAt,
             value,
-            d.cost,
-            d.discountBps,
-            r.buckets
+            spend.cost,
+            spend.discountBps,
+            r.budgets
         );
     }
 
     /**
-     * @notice Top up or upgrade a period funded from a Conviction Account, as
-     *         the buyer key that funded it: add value to its buckets, or add
-     *         buckets. Atomic, as a funding is.
+     * @notice Top up or upgrade a subscription funded from a Conviction
+     *         Account, as the buyer that funded it: add value to its budgets,
+     *         or add budgets. Atomic, as a funding is.
      * @dev Refused while paused or before the activation epoch, and unless the
-     *      period was funded from an account by `msg.sender` and has not
-     *      ended. An addition to a stored bucket repeats its class and price
-     *      cap, which never change within a period; a new bucket is appended
-     *      under the funding rules. The opt-in, a live assignment of the buyer
-     *      key that does not expire before the period starts, and its limit
-     *      are checked as for a funding, the limit against the period's cost
-     *      with this top-up added.
+     *      subscription was funded from an account by `msg.sender` and has not
+     *      ended. An addition to a stored budget repeats its class and price
+     *      cap, which never change within a subscription; a new budget is
+     *      appended under the funding rules. The opt-in, a live grant to the
+     *      buyer that does not expire before the subscription starts, and its
+     *      limit are checked as for a funding, the limit against the
+     *      subscription's cost with this top-up added.
      *
-     *      The assignment the period was funded under must be live too, and
-     *      must not end before the period starts: it decides which of the
-     *      period's requests count, so once it has ended no request issued
-     *      after the top-up could use what the top-up buys. A later assignment
-     *      of the buyer key does not reopen the period. After a revocation or
-     *      an expiry, the key is served again only from its next period not
-     *      yet funded, and refused here with `AssignmentExpired`. An
-     *      assignment replaced while still live keeps its period open, to
-     *      requests and top-ups alike, until its own expiry
-     *      (`ConvictionServiceStorage.assignmentEnd`).
+     *      The grant the subscription was funded under must be live too, and
+     *      must not end before the subscription starts: it decides which of the
+     *      subscription's requests count, so once it has ended no request
+     *      issued after the top-up could use what the top-up buys. A later
+     *      grant to the buyer does not reopen the subscription. After a
+     *      revocation or an expiry, the buyer is served again only from its
+     *      next subscription not yet funded, and refused here with
+     *      `GrantExpired`. A grant replaced while still live keeps its
+     *      subscription open, to requests and top-ups alike, until its own
+     *      expiry (`ServiceSubscriptionsStorage.grantEnd`).
      *
-     *      The spend and the cost under the period's epoch follow as for a
-     *      funding, at the account's own tier; a top-up funds no new
-     *      period, so the usage is unchanged, and the period keeps the
-     *      assignment it was funded under.
+     *      The spend and the cost under the subscription's epoch follow as for
+     *      a funding, at the account's own tier; a top-up funds no new
+     *      subscription, so the usage is unchanged, and the subscription keeps
+     *      the grant it was funded under.
      * @return cost The cost spent from the allowance.
      */
-    function topUpFromConviction(
+    function topUpFromAccount(
         bytes32 subscriptionId,
-        ConvictionServiceStorage.Bucket[] calldata additions,
+        ServiceSubscriptionsStorage.ServiceBudget[] calldata additions,
         bytes32 planDigest
     ) external returns (uint96 cost) {
-        ConvictionServiceStorage css = convictionServiceStorage;
+        ServiceSubscriptionsStorage subs = serviceSubscriptionsStorage;
         QueryInferenceStorage qis = queryInferenceStorage;
-        address assignee = msg.sender;
+        address buyer = msg.sender;
 
-        // 1. Funding is live, and the period is open to this top-up.
-        ServicePeriodLib.requireLive(qis, chronos);
-        ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
-        ServicePeriodLib.requireTopUpOpen(subscriptionId, s, assignee, true);
+        // 1. Funding is live, and the subscription is open to this top-up.
+        SubscriptionLib.requireLive(qis, chronos);
+        ServiceSubscriptionsStorage.Subscription memory s = subs.getSubscription(subscriptionId);
+        SubscriptionLib.requireTopUpOpen(subscriptionId, s, buyer, true);
 
-        // 2. The opt-in and a live assignment, both made by the account's
-        //    current owner, the assignment still live when the period starts,
-        //    and the assignment the period was funded under live too.
-        address accountOwner = _requireSpendingOn(css, s.accountId);
-        ConvictionServiceStorage.Assignment memory a = _liveAssignment(css, s.accountId, assignee, accountOwner);
-        _requireLiveAtStart(s.accountId, assignee, a, s.periodStart);
-        _requireFundedUnderLive(css, s.accountId, assignee, s.assignmentNonce, s.periodStart);
+        // 2. The opt-in and a live grant, both made by the account's current
+        //    owner, the grant still live when the subscription starts, and the
+        //    grant the subscription was funded under live too.
+        address accountOwner = _requireSpendingOn(subs, s.accountId);
+        ServiceSubscriptionsStorage.BuyerGrant memory grant = _liveGrant(subs, s.accountId, buyer, accountOwner);
+        _requireLiveAtStart(s.accountId, buyer, grant, s.startsAt);
+        _requireFundedUnderLive(subs, s.accountId, buyer, s.grantNonce, s.startsAt);
 
-        // 3. The additions, merged into the stored buckets.
-        ServicePeriodLib.TopUp memory t = ServicePeriodLib.mergeTopUp(
-            css.getBuckets(subscriptionId),
+        // 3. The additions, merged into the stored budgets.
+        SubscriptionLib.TopUp memory t = SubscriptionLib.mergeTopUp(
+            subs.getBudgets(subscriptionId),
             additions,
-            css.maxBucketsPerPeriod(),
+            subs.maxBudgetsPerSubscription(),
             s.value
         );
 
-        // 4. The cost at the account's tier, and the period's cost with it
-        //    within the limit stored at this block.
+        // 4. The cost at the account's tier, and the subscription's cost with
+        //    it within the limit stored at this block.
         PublishingConvictionStorage.Account memory acct = publishingConvictionStorage.getAccount(s.accountId);
         cost = _discounted(t.value, acct.discountBps);
-        uint256 periodCost = uint256(s.cost) + cost;
-        if (periodCost > a.maxCostPerPeriod) revert CapExceeded("maxCostPerPeriod", a.maxCostPerPeriod, periodCost);
+        uint256 subscriptionCost = uint256(s.cost) + cost;
+        if (subscriptionCost > grant.maxCostPerEpoch) {
+            revert LimitExceeded("maxCostPerEpoch", grant.maxCostPerEpoch, subscriptionCost);
+        }
 
         // 5. The spend.
-        PublishingConviction.ServiceSpend memory d = _spend(
+        PublishingConviction.ServiceSpend memory spend = _spend(
             s.accountId,
-            assignee,
+            buyer,
             subscriptionId,
             t.value,
             cost,
             _currentBillingWindow(acct, chronos.epochLength())
         );
 
-        // 6. The cost under the period's epoch, and the record.
-        qis.addConvictionFunding(s.epoch, d.cost);
-        css.applyTopUp(
+        // 6. The cost under the subscription's epoch, and the record.
+        qis.addAccountFunding(s.epoch, spend.cost);
+        subs.applyTopUp(
             subscriptionId,
-            ConvictionServiceStorage.TopUpAmounts({
+            ServiceSubscriptionsStorage.TopUpAmounts({
                 value: t.value,
-                cost: d.cost,
-                spentFromWindow: d.spentFromWindow,
-                spentFromTopUp: d.spentFromTopUp
+                cost: spend.cost,
+                spentFromWindow: spend.spentFromWindow,
+                spentFromTopUp: spend.spentFromTopUp
             }),
             planDigest,
             t.added,
@@ -675,14 +681,14 @@ contract ServiceSubscriptions is
         );
 
         // 7.
-        emit PeriodToppedUp(subscriptionId, s.accountId, assignee, t.value, d.cost, planDigest, additions);
+        emit SubscriptionToppedUp(subscriptionId, s.accountId, buyer, t.value, spend.cost, planDigest, additions);
     }
 
     // ============================================================
     //                           Views
     // ============================================================
 
-    /// @notice The EIP-712 domain separator: name `DKGConvictionServices`,
+    /// @notice The EIP-712 domain separator: name `DKGServiceSubscriptions`,
     ///         version `1`, this chain and this contract.
     function domainSeparator() public view returns (bytes32) {
         return
@@ -697,23 +703,23 @@ contract ServiceSubscriptions is
             );
     }
 
-    /// @notice The EIP-712 digest of `ServiceAssignment` terms, which the
-    ///         owner and the assignee consent to.
-    function hashAssignment(AssignmentTerms calldata t) public view returns (bytes32 digest) {
+    /// @notice The EIP-712 digest of `BuyerGrant` terms, which the owner and
+    ///         the buyer consent to.
+    function hashGrant(BuyerTerms calldata t) public view returns (bytes32 digest) {
         bytes32 structHash = keccak256(
-            abi.encode(SERVICE_ASSIGNMENT_TYPEHASH, t.accountId, t.assignee, t.maxCostPerPeriod, t.expiresAt, t.nonce)
+            abi.encode(BUYER_GRANT_TYPEHASH, t.accountId, t.buyer, t.maxCostPerEpoch, t.expiresAt, t.nonce)
         );
         digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator(), structHash));
     }
 
-    /// @notice The id of the period `assignee` funds for `epoch`:
-    ///         `keccak256(abi.encode(assignee, epoch))`, one per buyer key and
-    ///         epoch, for a period funded from an account or from a wallet.
-    function subscriptionIdOf(address assignee, uint256 epoch) public pure returns (bytes32) {
-        return ServicePeriodLib.subscriptionIdOf(assignee, epoch);
+    /// @notice The id of the subscription `buyer` funds for `epoch`:
+    ///         `keccak256(abi.encode(buyer, epoch))`, one per buyer and epoch,
+    ///         for a subscription funded from an account or from a wallet.
+    function subscriptionIdOf(address buyer, uint256 epoch) public pure returns (bytes32) {
+        return SubscriptionLib.subscriptionIdOf(buyer, epoch);
     }
 
-    /// @notice The cost of a bucket value at the account's discount tier:
+    /// @notice The cost of a budget value at the account's discount tier:
     ///         `value × (10000 − discountBps) / 10000`, at least 1 wei for a
     ///         non-zero value, as publishing computes it.
     function previewCost(uint256 accountId, uint96 value) public view returns (uint96 cost, uint16 discountBps) {
@@ -756,9 +762,9 @@ contract ServiceSubscriptions is
     // ============================================================
 
     /// @dev A limit above 0, and an expiry after the block time.
-    function _validateCaps(ConvictionServiceStorage.AssignmentCaps memory c) internal view {
-        if (c.maxCostPerPeriod == 0) revert InvalidAssignmentTerms("maxCostPerPeriod");
-        if (c.expiresAt <= block.timestamp) revert InvalidAssignmentTerms("expiresAt");
+    function _validateLimits(ServiceSubscriptionsStorage.BuyerLimits memory limits) internal view {
+        if (limits.maxCostPerEpoch == 0) revert InvalidBuyerTerms("maxCostPerEpoch");
+        if (limits.expiresAt <= block.timestamp) revert InvalidBuyerTerms("expiresAt");
     }
 
     /// @dev Service spending is on for `accountId`, switched on by its current
@@ -766,80 +772,79 @@ contract ServiceSubscriptions is
     ///      off; an account that was never switched on is refused before its
     ///      owner is read.
     function _requireSpendingOn(
-        ConvictionServiceStorage css,
+        ServiceSubscriptionsStorage subs,
         uint256 accountId
     ) internal view returns (address accountOwner) {
-        ConvictionServiceStorage.ServiceSpending memory s = css.getServiceSpending(accountId);
+        ServiceSubscriptionsStorage.ServiceSpending memory s = subs.getServiceSpending(accountId);
         if (s.enabledAt != 0) accountOwner = _nft().ownerOf(accountId);
         if (s.enabledAt == 0 || s.owner != accountOwner) revert ServiceSpendingDisabled(accountId);
     }
 
-    /// @dev A live assignment exists, `accountOwner`, the account's current
-    ///      owner, consented to it, and it is neither revoked nor expired.
-    function _liveAssignment(
-        ConvictionServiceStorage css,
+    /// @dev A live grant exists, `accountOwner`, the account's current owner,
+    ///      consented to it, and it is neither revoked nor expired.
+    function _liveGrant(
+        ServiceSubscriptionsStorage subs,
         uint256 accountId,
-        address assignee,
+        address buyer,
         address accountOwner
-    ) internal view returns (ConvictionServiceStorage.Assignment memory a) {
-        a = css.getAssignment(accountId, assignee);
-        if (a.assignedAt == 0) revert NotAssigned(accountId, assignee);
-        if (a.owner != accountOwner) revert AssignedByFormerOwner(accountId, assignee);
-        if (a.revokedAt != 0) revert AssignmentRevoked(accountId, assignee);
-        if (block.timestamp >= uint256(a.expiresAt)) revert AssignmentExpired(accountId, assignee);
+    ) internal view returns (ServiceSubscriptionsStorage.BuyerGrant memory grant) {
+        grant = subs.getGrant(accountId, buyer);
+        if (grant.grantedAt == 0) revert NotABuyer(accountId, buyer);
+        if (grant.owner != accountOwner) revert GrantedByFormerOwner(accountId, buyer);
+        if (grant.revokedAt != 0) revert GrantRevoked(accountId, buyer);
+        if (block.timestamp >= uint256(grant.expiresAt)) revert GrantExpired(accountId, buyer);
     }
 
-    /// @dev The assignment does not expire at or before the period's start. A
-    ///      live assignment has not expired at the block time, so this only
-    ///      ever refuses a period that starts later: one funded ahead for the
+    /// @dev The grant does not expire at or before the subscription's start. A
+    ///      live grant has not expired at the block time, so this only ever
+    ///      refuses a subscription that starts later: one funded ahead for the
     ///      next epoch, or topped up before it starts.
     function _requireLiveAtStart(
         uint256 accountId,
-        address assignee,
-        ConvictionServiceStorage.Assignment memory a,
-        uint40 periodStart
+        address buyer,
+        ServiceSubscriptionsStorage.BuyerGrant memory grant,
+        uint40 startsAt
     ) internal pure {
-        if (a.expiresAt <= periodStart) {
-            revert AssignmentEndsBeforePeriod(accountId, assignee, a.expiresAt, periodStart);
+        if (grant.expiresAt <= startsAt) {
+            revert GrantEndsBeforeSubscription(accountId, buyer, grant.expiresAt, startsAt);
         }
     }
 
-    /// @dev The assignment of `assignee` that consumed `nonce`, the one a
-    ///      period was funded under, has not ended and does not end at or
-    ///      before the period's start, as `_liveAssignment` and
-    ///      `_requireLiveAtStart` check the current one: its end is when its
-    ///      period stops taking requests. For the current assignment that
-    ///      holds already; for one a later assignment replaced, it is the end
-    ///      it had then, its expiry or its revocation if sooner. A revocation
-    ///      is never after the block time, so the second check meets only an
-    ///      expiry.
+    /// @dev The grant to `buyer` that consumed `nonce`, the one a subscription
+    ///      was funded under, has not ended and does not end at or before the
+    ///      subscription's start, as `_liveGrant` and `_requireLiveAtStart`
+    ///      check the current one: its end is when its subscription stops
+    ///      taking requests. For the current grant that holds already; for one
+    ///      a later grant replaced, it is the end it had then, its expiry or
+    ///      its revocation if sooner. A revocation is never after the block
+    ///      time, so the second check meets only an expiry.
     function _requireFundedUnderLive(
-        ConvictionServiceStorage css,
+        ServiceSubscriptionsStorage subs,
         uint256 accountId,
-        address assignee,
+        address buyer,
         uint64 nonce,
-        uint40 periodStart
+        uint40 startsAt
     ) internal view {
-        uint40 end = css.assignmentEnd(accountId, assignee, nonce);
-        if (block.timestamp >= end) revert AssignmentExpired(accountId, assignee);
-        if (end <= periodStart) revert AssignmentEndsBeforePeriod(accountId, assignee, end, periodStart);
+        uint40 end = subs.grantEnd(accountId, buyer, nonce);
+        if (block.timestamp >= end) revert GrantExpired(accountId, buyer);
+        if (end <= startsAt) revert GrantEndsBeforeSubscription(accountId, buyer, end, startsAt);
     }
 
     /**
      * @dev Spend `value` through `coverServiceCost`, which must return the cost
      *      and the window computed here, or the funding reverts
-     *      `SpendMismatch`. The caller books `d.cost`, the whole spend.
+     *      `SpendMismatch`. The caller books `spend.cost`, the whole spend.
      */
     function _spend(
         uint256 accountId,
-        address assignee,
+        address buyer,
         bytes32 subscriptionId,
         uint96 value,
         uint96 cost,
         uint40 window
-    ) internal returns (PublishingConviction.ServiceSpend memory d) {
-        d = _publishingConviction().coverServiceCost(accountId, assignee, subscriptionId, value);
-        if (d.cost != cost || d.window != window) revert SpendMismatch(cost, d.cost, window, d.window);
+    ) internal returns (PublishingConviction.ServiceSpend memory spend) {
+        spend = _publishingConviction().coverServiceCost(accountId, buyer, subscriptionId, value);
+        if (spend.cost != cost || spend.window != window) revert SpendMismatch(cost, spend.cost, window, spend.window);
     }
 
     /**

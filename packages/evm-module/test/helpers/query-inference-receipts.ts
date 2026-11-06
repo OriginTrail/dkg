@@ -1,6 +1,6 @@
 // The stack the query/inference receipt suites (OT-RFC-27) run on, and the
 // helpers they share: QueryInferenceSettlement on the real account and
-// staking stacks, with wallet and Conviction Account periods, Core Node
+// staking stacks, with wallet and Conviction Account subscriptions, Core Node
 // sellers and session keys that sign requests. Each suite wraps the deploy in
 // a fixture function of its own, so loadFixture keeps a snapshot per suite,
 // and its beforeEach builds the helpers from that fixture.
@@ -26,8 +26,8 @@ import {
 } from './query-inference';
 
 export const SELLER_STAKE = 500_000n * TRAC; // a tenth of the 5M cap: S = sqrt(0.1)
-export const ASK = 10n ** 9n;
-export const CAP = 10n ** 12n; // the buckets' price cap
+export const PRICE = 10n ** 9n;
+export const CAP = 10n ** 12n; // the budgets' price cap
 
 export const deployReceiptsStack = deploySettlementStack;
 
@@ -78,23 +78,23 @@ export function receiptsHelpers({ f, domain, key }: ReceiptsContext) {
   const acceptAt = async (timestamp: bigint, by: Seller, groups: ReceiptGroup[]) =>
     (await (await submitAt(timestamp, by, groups)).wait())!;
 
-  /** One request for `by` on a period's bucket, with `overrides`, and its full receipt. */
+  /** One request for `by` on a subscription's budget, with `overrides`, and its full receipt. */
   const requestFor = async (
     subscriptionId: string,
-    bucketIndex: number,
+    budgetIndex: number,
     by: Seller,
     overrides: Partial<ServiceRequest> = {},
   ): Promise<ServiceRequest> => {
-    const b = await f.CSS.getBucket(subscriptionId, bucketIndex);
+    const b = await f.SSS.getBudget(subscriptionId, budgetIndex);
     const issuedAt = overrides.issuedAt ?? (await latest());
     return {
       subscriptionId,
-      bucketId: b.bucketId,
+      serviceId: b.serviceId,
       seller: by.identityId,
       nonce: 100n,
-      acceptedAskWeiPerUnit: ASK,
+      pricePerUnit: PRICE,
       maxUnits: 1_000n,
-      maxValueWei: 1_000n * ASK,
+      maxValueWei: 1_000n * PRICE,
       issuedAt,
       expiry: issuedAt + DAY,
       ...overrides,

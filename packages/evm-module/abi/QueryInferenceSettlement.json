@@ -162,7 +162,7 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "claimed",
+        "name": "value",
         "type": "uint256"
       },
       {
@@ -193,7 +193,7 @@
       {
         "indexed": true,
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       },
       {
@@ -211,7 +211,7 @@
       {
         "indexed": false,
         "internalType": "uint256",
-        "name": "claimed",
+        "name": "value",
         "type": "uint256"
       },
       {
@@ -233,7 +233,7 @@
         "type": "bytes32"
       }
     ],
-    "name": "ReceiptsClaimed",
+    "name": "ReceiptsLanded",
     "type": "event"
   },
   {
@@ -271,11 +271,11 @@
       },
       {
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       }
     ],
-    "name": "bucketLeft",
+    "name": "budgetLeft",
     "outputs": [
       {
         "internalType": "uint256",
@@ -292,19 +292,6 @@
     "outputs": [
       {
         "internalType": "contract Chronos",
-        "name": "",
-        "type": "address"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "convictionServiceStorage",
-    "outputs": [
-      {
-        "internalType": "contract ConvictionServiceStorage",
         "name": "",
         "type": "address"
       }
@@ -414,7 +401,7 @@
           },
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -429,7 +416,7 @@
           },
           {
             "internalType": "uint96",
-            "name": "acceptedAskWeiPerUnit",
+            "name": "pricePerUnit",
             "type": "uint96"
           },
           {
@@ -592,6 +579,19 @@
     "type": "function"
   },
   {
+    "inputs": [],
+    "name": "serviceSubscriptionsStorage",
+    "outputs": [
+      {
+        "internalType": "contract ServiceSubscriptionsStorage",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [
       {
         "internalType": "bool",
@@ -660,7 +660,7 @@
           },
           {
             "internalType": "uint8",
-            "name": "bucketIndex",
+            "name": "budgetIndex",
             "type": "uint8"
           },
           {
@@ -677,7 +677,7 @@
               },
               {
                 "internalType": "uint96",
-                "name": "acceptedAskWeiPerUnit",
+                "name": "pricePerUnit",
                 "type": "uint96"
               },
               {

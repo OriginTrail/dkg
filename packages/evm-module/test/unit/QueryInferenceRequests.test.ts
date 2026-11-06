@@ -52,11 +52,11 @@ describe('@unit QueryInferenceSettlement formats', () => {
   });
 
   const request = (overrides: Partial<ServiceRequest> = {}): ServiceRequest => ({
-    subscriptionId: ethers.id('period'),
-    bucketId: ethers.toBeHex(1n, 32),
+    subscriptionId: ethers.id('subscription'),
+    serviceId: ethers.toBeHex(1n, 32),
     seller: 7n,
     nonce: 3n,
-    acceptedAskWeiPerUnit: 10n ** 12n,
+    pricePerUnit: 10n ** 12n,
     maxUnits: 2_000n,
     maxValueWei: 2n * 10n ** 15n,
     issuedAt: 1_790_000_000n,
@@ -82,7 +82,7 @@ describe('@unit QueryInferenceSettlement formats', () => {
     const requestType = ethers.TypedDataEncoder.from(REQUEST_TYPES).encodeType('ServiceRequest');
     const receiptType = ethers.TypedDataEncoder.from(RECEIPT_TYPES).encodeType('QueryInferenceReceipt');
     expect(requestType).to.equal(
-      'ServiceRequest(bytes32 subscriptionId,bytes32 bucketId,uint72 seller,uint64 nonce,uint96 acceptedAskWeiPerUnit,uint64 maxUnits,uint96 maxValueWei,uint40 issuedAt,uint40 expiry)',
+      'ServiceRequest(bytes32 subscriptionId,bytes32 serviceId,uint72 seller,uint64 nonce,uint96 pricePerUnit,uint64 maxUnits,uint96 maxValueWei,uint40 issuedAt,uint40 expiry)',
     );
     expect(receiptType).to.equal(
       'QueryInferenceReceipt(bytes32 requestDigest,bytes32 resultCommitment,uint64 units,uint96 valueWei,uint40 completedAt)',
@@ -98,10 +98,10 @@ describe('@unit QueryInferenceSettlement formats', () => {
       request({ seller: 1n, nonce: 0n, issuedAt: 0n, expiry: 0n }),
       request({
         subscriptionId: ethers.toBeHex(ethers.MaxUint256, 32),
-        bucketId: ethers.ZeroHash,
+        serviceId: ethers.ZeroHash,
         seller: MAX(72n),
         nonce: MAX(64n),
-        acceptedAskWeiPerUnit: MAX(96n),
+        pricePerUnit: MAX(96n),
         maxUnits: MAX(64n),
         maxValueWei: MAX(96n),
         issuedAt: MAX(40n),
@@ -115,10 +115,10 @@ describe('@unit QueryInferenceSettlement formats', () => {
     const base = await QS.hashRequest(request());
     for (const [field, value] of Object.entries({
       subscriptionId: ethers.id('other'),
-      bucketId: ethers.toBeHex(2n, 32),
+      serviceId: ethers.toBeHex(2n, 32),
       seller: 8n,
       nonce: 4n,
-      acceptedAskWeiPerUnit: 10n ** 12n + 1n,
+      pricePerUnit: 10n ** 12n + 1n,
       maxUnits: 2_001n,
       maxValueWei: 2n * 10n ** 15n + 1n,
       issuedAt: 1_790_000_001n,
@@ -145,7 +145,7 @@ describe('@unit QueryInferenceSettlement formats', () => {
     const widths = {
       seller: MAX(72n),
       nonce: MAX(64n),
-      acceptedAskWeiPerUnit: MAX(96n),
+      pricePerUnit: MAX(96n),
       maxUnits: MAX(64n),
       maxValueWei: MAX(96n),
       issuedAt: MAX(40n),
@@ -153,10 +153,10 @@ describe('@unit QueryInferenceSettlement formats', () => {
     };
     const zero: ServiceRequest = {
       subscriptionId: ethers.ZeroHash,
-      bucketId: ethers.ZeroHash,
+      serviceId: ethers.ZeroHash,
       seller: 0n,
       nonce: 0n,
-      acceptedAskWeiPerUnit: 0n,
+      pricePerUnit: 0n,
       maxUnits: 0n,
       maxValueWei: 0n,
       issuedAt: 0n,
@@ -175,10 +175,10 @@ describe('@unit QueryInferenceSettlement formats', () => {
       return {
         r: {
           subscriptionId: ethers.toBeHex(word(0), 32),
-          bucketId: ethers.toBeHex(word(1), 32),
+          serviceId: ethers.toBeHex(word(1), 32),
           seller: fit(2, 72n),
           nonce: fit(3, 64n),
-          acceptedAskWeiPerUnit: fit(4, 96n),
+          pricePerUnit: fit(4, 96n),
           maxUnits: fit(5, 64n),
           maxValueWei: fit(6, 96n),
           issuedAt: fit(7, 40n),
@@ -193,7 +193,7 @@ describe('@unit QueryInferenceSettlement formats', () => {
       };
     };
 
-    const allWide: ServiceRequest = { ...zero, subscriptionId: ones, bucketId: ones, ...widths };
+    const allWide: ServiceRequest = { ...zero, subscriptionId: ones, serviceId: ones, ...widths };
     const allWideReceipt: Receipt = { resultCommitment: ones, units: MAX(64n), valueWei: MAX(96n), completedAt: MAX(40n) };
     const pairs = (): Array<{ r: ServiceRequest; receipt: Receipt }> => [
       { r: request(), receipt: receipt() },
@@ -201,7 +201,7 @@ describe('@unit QueryInferenceSettlement formats', () => {
       { r: allWide, receipt: allWideReceipt },
       // One field wide and the rest empty, and one empty and the rest wide, so
       // a field that spills into, or is read from, its neighbour shows.
-      ...oneAtATime(zero, { subscriptionId: ones, bucketId: ones, ...widths }).map((r) => ({ r, receipt: noReceipt })),
+      ...oneAtATime(zero, { subscriptionId: ones, serviceId: ones, ...widths }).map((r) => ({ r, receipt: noReceipt })),
       ...oneAtATime(allWide, { ...zero }).map((r) => ({ r, receipt: allWideReceipt })),
       ...oneAtATime<Receipt>(noReceipt, { resultCommitment: ones, units: MAX(64n), valueWei: MAX(96n), completedAt: MAX(40n) }).map(
         (rec) => ({ r: request(), receipt: rec }),
@@ -219,7 +219,7 @@ describe('@unit QueryInferenceSettlement formats', () => {
         const item = itemOf(r, rec, unsigned);
         const requestDigest = await QS.hashRequest(r);
         expect(
-          await Harness.batchRequestDigest(separator, r.subscriptionId, r.bucketId, r.seller, item),
+          await Harness.batchRequestDigest(separator, r.subscriptionId, r.serviceId, r.seller, item),
           label,
         ).to.equal(requestDigest);
         expect(await Harness.batchReceiptDigest(separator, requestDigest, item), label).to.equal(
@@ -238,11 +238,11 @@ describe('@unit QueryInferenceSettlement formats', () => {
         sigR: ones,
         sigVS: ones,
       });
-      expect(await Harness.batchRequestDigest(separator, r.subscriptionId, r.bucketId, r.seller, other)).to.equal(requestDigest);
+      expect(await Harness.batchRequestDigest(separator, r.subscriptionId, r.serviceId, r.seller, other)).to.equal(requestDigest);
       expect(await Harness.batchReceiptDigest(separator, ethers.id('other'), item)).to.not.equal(
         await Harness.batchReceiptDigest(separator, requestDigest, item),
       );
-      expect(await Harness.batchRequestDigest(ethers.id('other'), r.subscriptionId, r.bucketId, r.seller, item)).to.not.equal(
+      expect(await Harness.batchRequestDigest(ethers.id('other'), r.subscriptionId, r.serviceId, r.seller, item)).to.not.equal(
         requestDigest,
       );
     });

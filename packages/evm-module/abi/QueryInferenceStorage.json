@@ -172,6 +172,25 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "accountFunding",
+    "outputs": [
+      {
+        "internalType": "uint96",
+        "name": "",
+        "type": "uint96"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "activationEpoch",
     "outputs": [
@@ -197,7 +216,7 @@
         "type": "uint96"
       }
     ],
-    "name": "addConvictionFunding",
+    "name": "addAccountFunding",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -257,30 +276,11 @@
       },
       {
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       }
     ],
-    "name": "bucketFilled",
-    "outputs": [
-      {
-        "internalType": "uint96",
-        "name": "",
-        "type": "uint96"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
-      }
-    ],
-    "name": "convictionFunding",
+    "name": "budgetUsed",
     "outputs": [
       {
         "internalType": "uint96",
@@ -300,7 +300,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       },
       {
@@ -320,12 +320,12 @@
       },
       {
         "internalType": "uint96",
-        "name": "r",
+        "name": "servedValue",
         "type": "uint96"
       },
       {
         "internalType": "uint96",
-        "name": "score",
+        "name": "weightedValue",
         "type": "uint96"
       }
     ],
@@ -351,7 +351,7 @@
       },
       {
         "internalType": "uint96",
-        "name": "conviction",
+        "name": "account",
         "type": "uint96"
       }
     ],
@@ -390,12 +390,12 @@
         "components": [
           {
             "internalType": "uint120",
-            "name": "sumR",
+            "name": "totalServed",
             "type": "uint120"
           },
           {
             "internalType": "uint120",
-            "name": "sumScore",
+            "name": "totalWeighted",
             "type": "uint120"
           },
           {
@@ -431,12 +431,12 @@
         "components": [
           {
             "internalType": "uint128",
-            "name": "r",
+            "name": "servedValue",
             "type": "uint128"
           },
           {
             "internalType": "uint128",
-            "name": "score",
+            "name": "weightedValue",
             "type": "uint128"
           }
         ],
@@ -584,7 +584,7 @@
       },
       {
         "internalType": "uint8",
-        "name": "bucketIndex",
+        "name": "budgetIndex",
         "type": "uint8"
       },
       {
@@ -593,7 +593,7 @@
         "type": "uint96"
       }
     ],
-    "name": "setBucketFilled",
+    "name": "setBudgetUsed",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -609,12 +609,12 @@
         "components": [
           {
             "internalType": "uint120",
-            "name": "sumR",
+            "name": "totalServed",
             "type": "uint120"
           },
           {
             "internalType": "uint120",
-            "name": "sumScore",
+            "name": "totalWeighted",
             "type": "uint120"
           },
           {
@@ -688,12 +688,12 @@
         "components": [
           {
             "internalType": "uint128",
-            "name": "r",
+            "name": "servedValue",
             "type": "uint128"
           },
           {
             "internalType": "uint128",
-            "name": "score",
+            "name": "weightedValue",
             "type": "uint128"
           }
         ],

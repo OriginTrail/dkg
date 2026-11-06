@@ -1,12 +1,12 @@
-// Unit tests for the deploy steps of service plan periods (OT-RFC-27) and for
+// Unit tests for the deploy steps of subscriptions (OT-RFC-27) and for
 // the Hub transaction step they end in:
 //   - deploy/active/000_check_service_spending_builds.ts, which refuses, ahead
 //     of every deployment of a run of every step or by any single tag, to keep a
 //     PublishingConviction 10.1.x, which would count an account funding twice, or
 //     a StakingV10 below 10.1.0, which would split every epoch without the pool,
 //     so such a refused run strands nothing;
-//   - deploy/active/052c_deploy_conviction_service_storage.ts, which deploys
-//     ConvictionServiceStorage and sets its parameters everywhere but on
+//   - deploy/active/052c_deploy_service_subscriptions_storage.ts, which deploys
+//     ServiceSubscriptionsStorage and sets its parameters everywhere but on
 //     mainnet;
 //   - deploy/active/052d_deploy_service_subscriptions.ts, which deploys
 //     ServiceSubscriptions and ServiceSubscriptionsWallet;
@@ -33,7 +33,7 @@ import { ethers, Interface } from 'ethers';
 import { DeployFunction } from 'hardhat-deploy/types';
 
 import checkBuilds from '../deploy/active/000_check_service_spending_builds';
-import deployStorage from '../deploy/active/052c_deploy_conviction_service_storage';
+import deployStorage from '../deploy/active/052c_deploy_service_subscriptions_storage';
 import deployServiceSubscriptions from '../deploy/active/052d_deploy_service_subscriptions';
 import deployQueryInferenceStorage from '../deploy/active/052e_deploy_query_inference_storage';
 import deployQueryInferenceSettlement from '../deploy/active/052f_deploy_query_inference_settlement';
@@ -46,7 +46,7 @@ const abiOf = (name: string) =>
 
 const HUB = '0x1000000000000000000000000000000000000001';
 const PUBLISHING_CONVICTION = '0x1000000000000000000000000000000000000003';
-const CSS = '0x1000000000000000000000000000000000000004';
+const SSS = '0x1000000000000000000000000000000000000004';
 const SS = '0x1000000000000000000000000000000000000005';
 const QIS = '0x1000000000000000000000000000000000000007';
 const CHRONOS = '0x1000000000000000000000000000000000000008';
@@ -361,7 +361,7 @@ describe("@unit deploy/000 — the builds service spending needs, checked ahead 
         expect(retried.sent).to.have.members([
           'Ask',
           'QueryInferenceStorage',
-          'ConvictionServiceStorage',
+          'ServiceSubscriptionsStorage',
           'QueryInferenceSettlement',
           'PublishingConviction',
           'ServiceSubscriptions',
@@ -375,7 +375,7 @@ describe("@unit deploy/000 — the builds service spending needs, checked ahead 
   }
 });
 
-describe('@unit deploy/052c — ConvictionServiceStorage', () => {
+describe('@unit deploy/052c — ServiceSubscriptionsStorage', () => {
   it('on a mainnet network, deploys nothing and sets no parameters', async () => {
     for (const network of ['base_mainnet', 'gnosis_mainnet']) {
       const { hre, deployed, updates } = storageHre({ network, environment: 'mainnet' });
@@ -395,8 +395,8 @@ describe('@unit deploy/052c — ConvictionServiceStorage', () => {
     ]) {
       const { hre, deployed, updates } = storageHre(where);
       const lines = await captured(() => deployStorage(hre as never));
-      expect(deployed).to.deep.equal(['ConvictionServiceStorage']);
-      expect(updates).to.deep.equal(['ConvictionServiceStorage']);
+      expect(deployed).to.deep.equal(['ServiceSubscriptionsStorage']);
+      expect(updates).to.deep.equal(['ServiceSubscriptionsStorage']);
       expect(lines).to.have.length(0);
     }
   });
@@ -407,7 +407,7 @@ describe('@unit deploy/052c — ConvictionServiceStorage', () => {
       fs.readFileSync(path.join(__dirname, '..', 'deployments', 'parameters.json'), 'utf-8'),
     ) as Record<string, unknown>;
     expect(JSON.stringify(parameters)).to.not.match(/exactScheduleFrom/);
-    expect(new Interface(abiOf('ConvictionServiceStorage')).getFunction('exactScheduleFrom')).to.equal(null);
+    expect(new Interface(abiOf('ServiceSubscriptionsStorage')).getFunction('exactScheduleFrom')).to.equal(null);
   });
 });
 
@@ -652,7 +652,7 @@ describe('@unit deploy/052f — QueryInferenceSettlement', () => {
   it('runs after every storage it wires', () => {
     expect(deployQueryInferenceSettlement.dependencies).to.include.members([
       'QueryInferenceStorage',
-      'ConvictionServiceStorage',
+      'ServiceSubscriptionsStorage',
       'Chronos',
       'IdentityStorage',
       'ProfileStorage',
@@ -666,18 +666,18 @@ describe('@unit deploy/052f — QueryInferenceSettlement', () => {
 
 describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub owner', () => {
   const hubInterface = new Interface(abiOf('Hub'));
-  const cssInterface = new Interface(abiOf('ConvictionServiceStorage'));
+  const cssInterface = new Interface(abiOf('ServiceSubscriptionsStorage'));
   const lists = () => ({
     newContracts: [
-      { name: 'ConvictionServiceStorage', addr: CSS },
+      { name: 'ServiceSubscriptionsStorage', addr: SSS },
       { name: 'ServiceSubscriptions', addr: SS },
     ],
     newAssetStorageContracts: [],
-    contractsForReinitialization: [CSS, SS],
+    contractsForReinitialization: [SSS, SS],
     setParametersEncodedData: [
       {
-        contractName: 'ConvictionServiceStorage',
-        encodedData: [cssInterface.encodeFunctionData('setMaxBucketsPerPeriod', [12n])],
+        contractName: 'ServiceSubscriptionsStorage',
+        encodedData: [cssInterface.encodeFunctionData('setMaxBudgetsPerSubscription', [12n])],
       },
     ],
   });
@@ -719,7 +719,7 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
         contractDeployments: {
           contracts: {
             Hub: { evmAddress: HUB },
-            ConvictionServiceStorage: { evmAddress: CSS },
+            ServiceSubscriptionsStorage: { evmAddress: SSS },
             ServiceSubscriptions: { evmAddress: SS },
           },
         },
@@ -752,9 +752,9 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
       const out = lines.join('\n');
       expect(out).to.match(/cannot call Hub\.setAndReinitializeContracts/);
       expect(out).to.contain(`to:    ${HUB}`);
-      expect(out).to.contain('ConvictionServiceStorage -> ' + CSS);
-      expect(out).to.contain(`1. ${CSS} (ConvictionServiceStorage)`);
-      expect(out).to.contain('ConvictionServiceStorage.setMaxBucketsPerPeriod(12)');
+      expect(out).to.contain('ServiceSubscriptionsStorage -> ' + SSS);
+      expect(out).to.contain(`1. ${SSS} (ServiceSubscriptionsStorage)`);
+      expect(out).to.contain('ServiceSubscriptionsStorage.setMaxBudgetsPerSubscription(12)');
       expect(out).to.match(/Send it before any further deploy run on this network/);
 
       const json = lines.find((x) => x.includes('Hub owner transaction (JSON): '))!;
@@ -768,7 +768,7 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
       );
       expect(decoded[1]).to.have.length(0);
       expect([...decoded[2]]).to.deep.equal(l.contractsForReinitialization);
-      expect(decoded[3][0][0]).to.equal('ConvictionServiceStorage');
+      expect(decoded[3][0][0]).to.equal('ServiceSubscriptionsStorage');
       expect([...decoded[3][0][1]]).to.deep.equal(l.setParametersEncodedData[0].encodedData);
     }
   });
