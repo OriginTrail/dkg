@@ -963,19 +963,21 @@ function renderBuyers() {
     const discount = sub ? sub.discountBps : b.discountBps;
     const chipText = b.pays === 'account' ? `account${b.accountId ? ` ${b.accountId}` : ''}${discount ? ` · ${discount / 100}% discount` : ''}` : 'wallet';
     const header = h('div', { class: 'who' }, h('h3', null, b.name), h('span', { class: 'chip', tip: b.pays === 'account' ? 'Pays from a Conviction Account\'s allowance, at its discount tier, under a grant from the account\'s owner.' : 'Pays from its wallet, at no discount.' }, chipText), b.listed ? null : h('span', { class: 'chip', tip: 'This buyer is not in the scenario\'s public file.' }, 'unlisted'));
-    const grant = b.grant;
+    // The grant this epoch's subscription was funded under; without one, the grant as it stands now.
+    const grant = sub?.grant ?? b.grant;
+    const endedAt = sub?.grant ? sub.grant.endedAt : b.grant?.revokedAt || null;
     const events = (row.buyerEvents ?? []).filter((x) => x.buyer === b.address).map((x) => h('div', { class: 'note' },
       x.t === 'removed'
         ? [status('serious', `Removed ${utc(x.at)} UTC`, 'The account\'s owner ended this grant. Requests issued before it still land until the epoch ends.'), ' ', txLink(x.tx)]
         : [status('good', `Added ${utc(x.at)} UTC`, 'The account\'s owner and the buyer both consented to a new grant.'), ' ', txLink(x.tx)]));
     const grantBlock = grant ? h('div', { class: 'note' },
       h('div', { class: 'budget', style: 'margin-top:0' },
-        h('div', { class: 'row' }, h('span', { class: 'name', tip: 'The most one subscription may cost, top-ups included, as the grant stands now.' }, 'Grant limit'), h('span', { class: 'amt' }, sub ? [T(sub.cost), ' of '] : null, T(grant.maxCostPerEpoch))),
+        h('div', { class: 'row' }, h('span', { class: 'name', tip: sub?.grant ? 'The most one subscription may cost, top-ups included, under the grant this subscription was funded under.' : 'The most one subscription may cost, top-ups included, as the grant stands now.' }, sub ? 'Grant limit' : 'Grant limit now'), h('span', { class: 'amt' }, sub ? [T(sub.cost), ' of '] : null, T(grant.maxCostPerEpoch))),
         sub ? h('div', { class: 'track thin', style: 'margin-top:.15rem' }, h('i', { style: `width:${Math.min(100, (toNum(sub.cost) / Math.max(1e-9, toNum(grant.maxCostPerEpoch))) * 100)}%;background:var(--account)` })) : null),
       h('div', { style: 'margin-top:.2rem' },
-        grant.revokedAt ? `Revoked ${utc(grant.revokedAt)} UTC` : `Expires ${utc(grant.expiresAt, 'day')}`,
-        b.buyersOnAccount ? ` · ${b.buyersOnAccount} buyer${b.buyersOnAccount === 1 ? '' : 's'} on the account` : ''),
-      b.allowance ? h('div', { tip: 'What the account can still spend in its billing window now, from its base allowance and its top-up buffer.' }, 'Account can still spend ', T(big(b.allowance.baseRemaining) + big(b.allowance.topUpBuffer)), ' this window') : null) : b.pays === 'account' ? h('div', { class: 'note' }, 'No grant on-chain yet.') : null;
+        endedAt ? `Ended ${utc(endedAt)} UTC` : `Expires ${utc(grant.expiresAt, 'day')}`,
+        row.state === 'current' && b.buyersOnAccount ? ` · ${b.buyersOnAccount} buyer${b.buyersOnAccount === 1 ? '' : 's'} on the account` : ''),
+      row.state === 'current' && b.allowance ? h('div', { tip: 'What the account can still spend in its billing window now, from its base allowance and its top-up buffer.' }, 'Account can still spend ', T(big(b.allowance.baseRemaining) + big(b.allowance.topUpBuffer)), ' this window') : null) : b.pays === 'account' ? h('div', { class: 'note' }, 'No grant on-chain yet.') : null;
     if (!sub) {
       return h('div', { class: 'card' }, header, h('p', { class: 'cap', style: 'margin-top:.5rem' }, row.state === 'upcoming' ? 'The epoch has not started.' : 'No subscription for this epoch.'), events, grantBlock);
     }

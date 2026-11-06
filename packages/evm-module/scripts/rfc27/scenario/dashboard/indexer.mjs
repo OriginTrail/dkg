@@ -397,6 +397,13 @@ async function readEpochs(rpc, st, pub, pin) {
       });
     }
   }
+  // When the grant a subscription was funded under ends: a later grant to the buyer does not move it.
+  for (const rec of [...Object.values(live), ...Object.values(final)]) {
+    for (const s of Object.values(rec.subs)) {
+      if (!s || s.accountId === '0' || s.grantEnd !== undefined) continue;
+      budgetCalls.push({ c: SSS, fn: 'grantEnd', args: [s.accountId, s.buyer, s.grantNonce], put: (r) => { s.grantEnd = r === null ? null : Number(r); } });
+    }
+  }
   await runCalls(rpc, budgetCalls, pin);
   const usedCalls = [];
   for (const rec of [...Object.values(live), ...Object.values(final)]) {

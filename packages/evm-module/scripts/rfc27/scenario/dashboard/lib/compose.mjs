@@ -141,7 +141,7 @@ export function compose({ state, pub, status, now, network }) {
   const buyers = [...buyerAddrs].map((addr) => {
     const p = idx.buyerByAddr.get(addr);
     const accountEvent = [...logs].reverse().find((l) => low(l.a?.buyer) === addr && l.a?.accountId && l.a.accountId !== '0');
-    const accountId = p?.accountId ?? accountEvent?.a?.accountId ?? null;
+    const accountId = accountEvent?.a?.accountId ?? p?.accountId ?? null;
     const live = liveBuyers[addr] ?? {};
     const removed = [...logs].reverse().find((l) => l.k === 'BuyerRemoved' && low(l.a.buyer) === addr);
     return {
@@ -190,6 +190,25 @@ export function compose({ state, pub, status, now, network }) {
   };
   services.sort((a, b) => serviceOrder(a.id) - serviceOrder(b.id));
   const serviceLabel = (id) => services.find((s) => s.id === low(id))?.label ?? shortHex(id);
+
+  // The terms of the grant a subscription was funded under, as they stood in its
+  // epoch: a later grant to the same buyer has its own nonce, and changes nothing here.
+  const grantLogs = logs.filter((l) => l.k === 'BuyerAdded' || l.k === 'BuyerLimitsUpdated');
+  const grantOf = (s) => {
+    const same = (l) => String(l.a.accountId) === String(s.accountId) && low(l.a.buyer) === low(s.buyer);
+    const added = grantLogs.find((l) => l.k === 'BuyerAdded' && same(l) && String(l.a.nonce) === String(s.grantNonce));
+    if (!added) return null;
+    const next = grantLogs.find((l) => l.k === 'BuyerAdded' && same(l) && l.block > added.block);
+    let maxCostPerEpoch = added.a.maxCostPerEpoch;
+    let expiresAt = Number(added.a.expiresAt);
+    for (const l of grantLogs) {
+      if (l.k !== 'BuyerLimitsUpdated' || !same(l) || l.block < added.block || (next && l.block > next.block) || l.at >= Number(s.endsAt)) continue;
+      maxCostPerEpoch = l.a.maxCostPerEpoch;
+      expiresAt = Number(l.a.expiresAt);
+    }
+    const end = s.grantEnd ?? expiresAt;
+    return { maxCostPerEpoch, expiresAt, endedAt: end < expiresAt ? end : null, grantedAt: added.at, tx: added.tx };
+  };
 
   // ------------------------------------------------------------------ landed groups, joined with their calldata
 
@@ -326,6 +345,7 @@ export function compose({ state, pub, status, now, network }) {
           fundedEpoch: Number(s.fundedEpoch),
           fundedAt: fundedLog?.at ?? null,
           fundedTx: fundedLog?.tx ?? null,
+          grant: String(s.accountId) !== '0' ? grantOf(s) : null,
           budgets,
           topUps,
         };
@@ -562,13 +582,15 @@ export function compose({ state, pub, status, now, network }) {
         }
       } else pending('No removal on-chain.');
     } else if (kind === 'race') {
-      const partials = landed.filter((g) => g.epoch === e && g.counted < g.value && (!buyerAddr || g.buyer === buyerAddr));
+      const anyPartial = landed.filter((g) => g.epoch === e && g.counted < g.value && (!buyerAddr || g.buyer === buyerAddr));
+      const raceTime = anyPartial.filter((g) => g.l.at >= scheduledAt);
+      const partials = raceTime.length ? raceTime : anyPartial;
       const refused = refusedRows.filter((r) => r.fault === 'BelowMinCounted' && epochOf(r.at, clock) === e);
       if (partials.length || refused.length) {
         out.status = 'seen';
         for (const g of partials.slice(0, 4)) {
-          const others = new Set(landed.filter((x) => x.sub === g.sub && x.budget === g.budget).map((x) => x.seller));
-          out.parts.push(`${sellerName(g.seller)} counted`, { wei: str(g.counted) }, 'of', { wei: str(g.value) }, `on ${g.buyer ? buyerName(g.buyer) : 'a buyer'}'s ${g.service ? serviceLabel(g.service) : 'service'} budget${others.size > 1 ? `, against ${others.size - 1} other seller${others.size > 2 ? 's' : ''}` : ''}`, { tx: g.l.tx });
+          const rivals = new Set(landed.filter((x) => x.sub === g.sub && x.budget === g.budget && x.l.at >= scheduledAt && x.seller !== g.seller).map((x) => x.seller));
+          out.parts.push(`${sellerName(g.seller)} counted`, { wei: str(g.counted) }, 'of', { wei: str(g.value) }, `on ${g.buyer ? buyerName(g.buyer) : 'a buyer'}'s ${g.service ? serviceLabel(g.service) : 'service'} budget${rivals.size ? `, with ${[...rivals].map(sellerName).join(' and ')} landing on it too` : ''}`, { tx: g.l.tx });
         }
         if (refused.length) out.parts.push(`${refused.length} batch${refused.length === 1 ? ' was' : 'es were'} refused: the budget had less left than the batch's minimum`, { tx: refused[0].tx });
       } else pending('No partial count on-chain.');

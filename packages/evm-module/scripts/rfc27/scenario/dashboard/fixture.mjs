@@ -106,6 +106,23 @@ class Sim {
     this.logIndex = 0;
     this.nonce = 1;
     this.rand = random(27);
+    this.grantNonce = new Map();
+  }
+
+  /** The account buyers' first grants: the owner opts the account in and adds the buyer, before the first epoch. */
+  setup() {
+    const at = this.startOf(FIRST) - 3 * 3600;
+    for (const b of BUYERS) {
+      if (!b.accountId) continue;
+      this.log('ServiceSpendingSet', at, this.tx(), { accountId: b.accountId, enabled: true });
+      this.addBuyer(b, at + 60);
+    }
+  }
+
+  addBuyer(b, at) {
+    const nonce = (this.grantNonce.get(b.address) ?? 0) + 1;
+    this.grantNonce.set(b.address, nonce);
+    this.log('BuyerAdded', at, this.tx(), { accountId: b.accountId, buyer: b.address, maxCostPerEpoch: tok(b.discountBps === 7500 ? 300 : 500).toString(), expiresAt: String(this.clock.startTime + (FIRST + 29) * DAY), nonce: String(nonce) });
   }
 
   startOf(e) {
@@ -144,7 +161,7 @@ class Sim {
     const cost = (value * (BPS - BigInt(buyer.discountBps))) / BPS;
     const id = hex(BigInt(e) * 0x10000n + BigInt(BUYERS.indexOf(buyer) + 1) * 0x123456789n);
     const tx = this.tx();
-    const sub = { id, buyer, epoch: e, value, cost, budgets, startsAt: Math.max(at, this.startOf(e)), endsAt: this.startOf(e + 1), fundedEpoch: Math.min(e, Math.floor((at - this.clock.startTime) / DAY) + 1) };
+    const sub = { id, buyer, epoch: e, value, cost, budgets, startsAt: Math.max(at, this.startOf(e)), endsAt: this.startOf(e + 1), fundedEpoch: Math.min(e, Math.floor((at - this.clock.startTime) / DAY) + 1), grantNonce: this.grantNonce.get(buyer.address) ?? 0 };
     const r = this.rec(e);
     r.subs.set(buyer.address, sub);
     if (buyer.accountId) r.account += cost;
@@ -318,7 +335,8 @@ class Sim {
               id: s.id,
               accountId: b.accountId ?? '0',
               buyer: b.address,
-              grantNonce: '0',
+              grantNonce: String(s.grantNonce),
+              grantEnd: b.accountId ? (this.logs.find((l) => l.k === 'BuyerRemoved' && l.a.buyer === b.address && l.at >= s.startsAt && l.at < s.endsAt)?.at ?? clock.startTime + (FIRST + 29) * DAY) : undefined,
               epoch: e,
               startsAt: s.startsAt,
               endsAt: s.endsAt,
@@ -394,6 +412,7 @@ function buildLive(now) {
   const dayEnd = DAY - 300;
 
   // 663: an ordinary day. Not everything is used.
+  sim.setup();
   sim.fundAll(FIRST);
   sim.serve(FIRST, 1800, dayEnd, { heat: 0.8 });
 
@@ -414,7 +433,7 @@ function buildLive(now) {
   sim.serve(FIRST + 2, 14 * 3600, dayEnd, { heat: 0.5, skipBuyer: (b) => b.name === 'account-plain' });
 
   // 666: the buyer gets a new grant and funds again; two sellers race for the end of wallet-light's budget: one counts in full, the other in part, a third refuses to land for less than its minimum.
-  sim.log('BuyerAdded', sim.startOf(FIRST + 3) + 8, sim.tx(), { accountId: by('account-plain').accountId, buyer: by('account-plain').address, maxCostPerEpoch: tok(500).toString(), expiresAt: String(sim.startOf(FIRST + 33)), nonce: '2' });
+  sim.addBuyer(by('account-plain'), sim.startOf(FIRST + 3) + 8);
   sim.fundAll(FIRST + 3);
   sim.serve(FIRST + 3, 1800, 16 * 3600, { heat: 0.6, skipBuyer: (b) => b.name === 'wallet-light' });
   const light = sim.rec(FIRST + 3).subs.get(by('wallet-light').address);
@@ -458,17 +477,18 @@ function buildLive(now) {
 function buildEarly(now) {
   const sim = new Sim({ now, currentEpoch: FIRST });
   // Hours into the first epoch, with only some of the buyers funded.
-  sim.startOf(FIRST);
+  sim.setup();
   sim.fundAll(FIRST, { skip: (b) => b.name === 'wallet-bursty' });
   sim.serve(FIRST, 1800, DAY, { heat: 0.8 });
   return { sim, state: sim.state({ hub: HUB }) };
 }
 
-function buildPre(now) {
+function buildPre(now, withSetup) {
   const start = now + 4 * 3600 + 7 * 60;
   const midnight = start - (start % DAY);
   const sim = new Sim({ now, currentEpoch: FIRST - 1 });
   sim.clock.startTime = midnight - (FIRST - 1) * DAY;
+  if (withSetup) sim.setup();
   const state = sim.state({ hub: HUB });
   state.live = { [FIRST]: { epoch: FIRST, wallet: '0', account: '0', served: '0', weighted: '0', lambdaBps: 0, pool: '0', publishingPool: tok(139_351).toString(), allNodesScore: '0', sellers: {}, subs: {} } };
   state.buyersLive = {};
@@ -508,6 +528,7 @@ write('unread', compose({ state: {}, pub: null, status: unreadStatus, now, netwo
 const early = buildEarly(now);
 write('early', compose({ state: early.state, pub, status: freshStatus(now), now, network: network() }));
 
-const pre = buildPre(now);
+const pre = buildPre(now, true);
 write('pre', compose({ state: pre.state, pub, status: freshStatus(now), now, network: network() }));
-write('bare', compose({ state: pre.state, pub: null, status: freshStatus(now, 'none'), now, network: network() }));
+const bare = buildPre(now, false);
+write('bare', compose({ state: bare.state, pub: null, status: freshStatus(now, 'none'), now, network: network() }));
