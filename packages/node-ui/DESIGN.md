@@ -57,7 +57,7 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-label` | 11 | Badges, table headers, metadata |
 | `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
 
-Type sizes are whole pixels, here and in nOS. Every size is one of these tokens; weights are 400, 500, 600 and 700. Uppercase text uses `--ls-caps`, and other text has no tracking. Large numbers use `--fs-display`. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
+Type sizes are whole pixels. Every size is one of these tokens; weights are 400, 500, 600 and 700. Uppercase text uses `--ls-caps`, and other text has no tracking. Large numbers use `--fs-display`. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Edge, Core (only the role: Core node, Edge node), Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is for small section kickers and for card and chart titles.
 
 ## Shape and size
 
@@ -204,7 +204,7 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 - **A rule:** change this file, the token or component, and the reference page in one PR. The design owner in `.github/CODEOWNERS` reviews it.
 - **Something new:** add it to `src/ui/components/ds/`, not to one page, and describe it here.
 - **Retiring a class or token:** remove it in the PR that replaces it, with no deprecation period. Nothing outside this package reads these names, but its e2e tests do, so change their selectors in the same PR.
-- **Layers and status words:** nOS is the source of truth, and nothing keeps the two repos in step automatically. A change there needs a matching PR here.
+- **Layers and status words:** nOS is the source of truth for both, and nothing keeps the two repos in step automatically. A change there needs a matching PR here. The WM, SWM and VM colours are the only colours the two UIs share, so the layers are recognisable across both products. Other colours, type and spacing don't need to match nOS and shouldn't be forced to.
 
 ### Names kept for now
 
