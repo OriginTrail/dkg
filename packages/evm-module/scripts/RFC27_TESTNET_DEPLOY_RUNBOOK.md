@@ -383,3 +383,103 @@ reverts.
   deploy wrote: the 10 new addresses and versions, with `deployed: true`.
 - The rehearsal never writes that file. It works on a scratch copy under
   `cache/rfc27-fork/`.
+
+## 9. After the deploy: the smoke test
+
+`scripts/rfc27-testnet-smoke.ts` runs one marketplace cycle on the live
+contracts, with real signers and real time, and plays every role. It makes no
+Hub owner call. Its header lists every setting; its phases live in
+`scripts/rfc27/smoke/`.
+
+```sh
+cd packages/evm-module
+export RFC27_SMOKE_OWNER_KEY=...    # never printed or stored
+export RFC27_SMOKE_SELLER_KEY=...
+export RFC27_SMOKE_RUN=smoke-1
+SMOKE="npx hardhat run scripts/rfc27-testnet-smoke.ts --network base_sepolia_v10 --config hardhat.node.config.ts"
+PHASE=check $SMOKE                  # read-only; prints the plan
+PHASE=setup $SMOKE                  # a dry run, as every phase is without SEND=1
+PHASE=setup SEND=1 $SMOKE
+```
+
+The roles:
+
+- **The owner**: a hot testnet wallet. It opens a new Conviction Account
+  under PublishingConviction 10.2.0, opts it in, and adds a buyer. It
+  funds a wallet-paid subscription, and stakes a small tier-0 position on the
+  seller's node. It also claims that position.
+- **The buyers and the session keys**: derived from the owner key and
+  the run label, so no key is stored. The owner sends each buyer a little
+  ETH.
+- **The seller**: one of our testnet Core Nodes, by its operational key. Its
+  node also sends proofs from that key. A dedicated second operational key on
+  the same identity avoids nonce clashes with them.
+
+What a run needs:
+
+| Variable or balance | Default |
+|---|---|
+| `RFC27_SMOKE_OWNER_KEY` | required, from the owner wallet |
+| `RFC27_SMOKE_SELLER_KEY` | required, an operational key of the seller node |
+| `RFC27_SMOKE_RUN` | `smoke`; a new label for each run. The owner has one wallet subscription an epoch, so a second run of the same owner in the same epoch defers to the next, before it spends anything |
+| `RPC_BASE_SEPOLIA_V10` | `https://sepolia.base.org` |
+| The owner's TRAC | 124: a 72 TRAC account, a 2 TRAC wallet subscription and a 50 TRAC stake. A resumed run needs only what its remaining steps spend |
+| The owner's ETH | about 0.001 at a 0.005 gwei base fee, 0.0002 of it for each buyer; `PHASE=check` prints it at the current fee |
+| The seller key's ETH | about 0.0001: two receipt batches, about 0.6M gas |
+
+The amounts are configurable: `RFC27_SMOKE_STAKE`, `RFC27_SMOKE_CA_VALUE`,
+`RFC27_SMOKE_CA_TOPUP`, `RFC27_SMOKE_EDGE_VALUE`, `RFC27_SMOKE_WALLET_VALUE`,
+`RFC27_SMOKE_COMMITTED` and `RFC27_SMOKE_KEY_ETH`.
+
+The phases, with `SEND=1`, across one epoch boundary:
+
+| Phase | When |
+|---|---|
+| `setup`, then `serve` | epoch E, with at least an hour of it left; `serve` once the seller has proved in E |
+| `claim` | from the start of E+1, with nothing run first |
+| `withdraw`, optional | in the middle of an epoch, then again once it has ended: another day |
+
+- A phase run too early stops, deferred, and prints when it opens.
+- `serve` checks that the seller has a node score in the current epoch, which a
+  batch needs (`NoNodeScore`). Until it has, `serve` waits and says so. Run it
+  again after the node's next proof, before E ends: a batch lands only during its
+  subscription's epoch, so once E has ended `serve` stops, and the run goes no further.
+  Start a new one.
+- `serve` also shows a batch refused for what its budget has left, with its nonces
+  unspent, and the same batch landing after a top-up.
+- `claim` needs nothing to run first: an epoch's numbers are final when it ends. It
+  requires each of the run's budgets to have counted all the seller claimed on it,
+  by its own `ReceiptsLanded` events; the node's and the epoch's sums to be what
+  all the groups counted in E add up to; the money booked in E to be exactly what
+  the subscriptions of E were funded and topped up with; and every ended epoch's pool to
+  be what the rollover rule gives. It checks this before it sends anything, and
+  reads up to two epochs of logs to do it, which can take a few minutes on a public
+  endpoint.
+- These sums read the logs of the contracts registered now. An endpoint that
+  serves incomplete logs fails a correct run: run the phase again. A settlement
+  or service contract replaced during the run fails it too: start a new one.
+- `withdraw` waits until the position holds score in the epoch: without it, a
+  withdrawal burns the position and records nothing to claim.
+- A phase stopped at any point is run again as it was: it sends nothing the
+  journal holds, and its checks read what each transaction did from its own
+  receipt, so other transactions in its block, or since, have no part in them.
+- A phase with a failed check is not done. It exits nonzero, the phases after it
+  refuse to start, and running it again sends nothing it sent already, until its
+  checks pass.
+- Every transaction's gas estimate must fit under 2^24, or its check fails.
+- Each phase prints every check as PASS or FAIL, and writes
+  `cache/rfc27-smoke/<run>.<phase>.json`. The run resumes from
+  `cache/rfc27-smoke/<run>.json`.
+
+The upkeep cron may run `claimFor` or `claimWithdrawnEpoch` first. The phase then
+checks what the cron did, from the chain, and does not fail because another caller
+went first.
+
+The smoke test also runs on the fork, before the deploy reaches testnet, with
+`--config scripts/rfc27-testnet-fork.config.ts`. Its header lists the fork-only
+switches: `FORK_WARP=1` moves the clock, and `FORK_PROOFS=1` stands in for
+the seller's proofs, both with `SEND=1` only; `FORK_STOP_AFTER=<step>` stops a
+run as a crash would.
+
+`test/rfc27-smoke-resume.test.ts` runs the phases, interrupted and resumed, on
+the development deploy on the in-process chain, with no fork.
