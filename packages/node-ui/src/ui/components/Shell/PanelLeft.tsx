@@ -1,5 +1,5 @@
 import React, { useCallback, useId, useState } from 'react';
-import { ChevronRight, Eye, X, RefreshCw } from 'lucide-react';
+import { ChevronRight, Eye, X, RefreshCw, LogIn, Plus } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
@@ -248,8 +248,8 @@ export function PanelLeft() {
   return (
     <div className="v10-panel-left">
       <div className="v10-tree-create-actions">
-        <button className="v10-new-project-btn ds-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
-        <button className="v10-new-project-btn ds-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
+        <button className="v10-new-project-btn ds-btn" onClick={() => setShowCreateModal(true)}><Plus size={14} aria-hidden="true" />New Context Graph</button>
+        <button className="v10-new-project-btn ds-btn" onClick={() => openJoinModal()}><LogIn size={14} aria-hidden="true" />Join Context Graph</button>
       </div>
 
       <div className="v10-tree-header">
@@ -303,7 +303,7 @@ export function PanelLeft() {
               </div>
               {stage === 1 && (
                 <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
-                  + Create First Context Graph
+                  <Plus size={14} aria-hidden="true" />Create First Context Graph
                 </button>
               )}
             </div>
@@ -449,7 +449,7 @@ export function PanelLeft() {
             </>
           )}
           {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 'var(--lh-body)' }}>
+            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', lineHeight: 'var(--lh-body)' }}>
               No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
             </p>
           )}

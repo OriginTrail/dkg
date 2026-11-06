@@ -12,7 +12,7 @@ import { Renderer } from '@openuidev/react-lang';
 import { genuiLibrary, getGenuiLibraryPrompt } from './registry.js';
 import { streamGenUI } from './streamGenUI.js';
 import { useTabsStore } from '../stores/tabs.js';
-import { Settings } from 'lucide-react';
+import { Settings, ArrowRight } from 'lucide-react';
 
 export interface GenUIEntityPanelProps {
   contextGraphId: string;
@@ -126,7 +126,7 @@ const GenUIErrorBlock: React.FC<{ error: string }> = ({ error }) => {
         className="v10-genui-error-cta-btn ds-btn ds-sm"
         onClick={() => openTab({ id: 'settings', label: 'Settings', closable: true })}
       >
-        Open Settings →
+        Open Settings<ArrowRight size={14} aria-hidden="true" />
       </button>
     </div>
   );

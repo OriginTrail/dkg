@@ -16,7 +16,7 @@ import { GetSponsoredPanel } from './GetSponsoredPanel.js';
 import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { Badge, Count } from '../../components/ds/Badge.js';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, Plus } from 'lucide-react';
 import { formatBps, formatNodeRole } from '../../lib/format.js';
 import { PageHeader } from '../../components/ds/PageHeader.js';
 
@@ -243,7 +243,7 @@ export function ConvictionOverview() {
               Get added to a PCA
             </button>
             <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-create-btn" onClick={() => setCreateOpen(true)}>
-              + Create PCA
+              <Plus size={14} aria-hidden="true" />Create PCA
             </button>
           </div>
         </div>
@@ -312,7 +312,7 @@ export function ConvictionOverview() {
               </div>
               <div className="v10-pca-overview-cta-group">
                 <button type="button" className="v10-pca-card-btn ds-btn" data-testid="pca-create-owned-btn" onClick={() => setCreateOpen(true)}>
-                  + Create PCA
+                  <Plus size={14} aria-hidden="true" />Create PCA
                 </button>
               </div>
             </div>

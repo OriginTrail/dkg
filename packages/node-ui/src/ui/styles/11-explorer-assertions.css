@@ -366,7 +366,7 @@
 }
 .v10-publish-panel-header-actions { display: flex; align-items: center; gap: 8px; }
 .v10-publish-panel-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.v10-publish-panel-empty { padding: 16px 12px; font-size: 12px; color: var(--text-tertiary); text-align: center; }
+.v10-publish-panel-empty { padding: 16px 12px; font-size: 12px; color: var(--text-tertiary); }
 .v10-publish-select-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 8px 12px; border-bottom: 1px solid var(--border-subtle);

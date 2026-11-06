@@ -431,6 +431,8 @@ body.light .ds-seg-item.active {
   outline-offset: 0;
 }
 
+.ds-external-mark { vertical-align: -1px; }
+
 /* Page: the content panel sets the gutter, so a page adds no padding of its own. */
 .ds-page { max-width: var(--page-max); }
 .ds-page-narrow { max-width: var(--page-max-narrow); }

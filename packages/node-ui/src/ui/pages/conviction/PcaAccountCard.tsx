@@ -12,6 +12,7 @@ import { ownerModeWritesEnabled, type PcaOwnerMode } from '../../pca/ownerAccess
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { BadgePercent, Wallet, RefreshCw } from 'lucide-react';
 import { formatBps } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 /** The owner-mode union — re-exported from the owner-access model (no longer re-declared
  *  here) so existing importers keep a stable name. */
@@ -138,7 +139,7 @@ export function PcaAccountCard({
               rel="noreferrer"
               aria-label={`View owner ${snapshot.owner} on the block explorer`}
             >
-              ↗
+              <ExternalMark />
             </a>
           ) : undefined
         }

@@ -35,8 +35,10 @@
   margin-bottom: 12px;
 }
 .v10-dash-section-header h2 {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--fs-control);
+  font-weight: 700;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
   color: var(--text-primary);
 }
 /* Icon + title cluster on the left of a section header. Icon inherits

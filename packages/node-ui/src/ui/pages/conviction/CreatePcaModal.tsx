@@ -35,6 +35,7 @@ import {
 import { PcaModalShell } from './PcaModalShell.js';
 import { StatusGlyph } from '../../components/ds/Badge.js';
 import { formatBps } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 type Phase = 'form' | 'creating' | 'success' | 'reconcile';
 
@@ -344,7 +345,7 @@ export function CreatePcaModal({
               <p>
                 Broadcast tx{' '}
                 {txUrl ? (
-                  <a href={txUrl} target="_blank" rel="noreferrer">{pendingTxHash} ↗</a>
+                  <a href={txUrl} target="_blank" rel="noreferrer">{pendingTxHash} <ExternalMark /></a>
                 ) : (
                   <code>{pendingTxHash}</code>
                 )}
@@ -371,7 +372,7 @@ export function CreatePcaModal({
         </div>
         <div className="v10-modal-footer">
           {txUrl && (
-            <a className="v10-modal-btn ds-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer ↗</a>
+            <a className="v10-modal-btn ds-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer <ExternalMark /></a>
           )}
           <button
             type="button"
@@ -431,7 +432,7 @@ export function CreatePcaModal({
             {result.txHash && (
               <p className="v10-pca-create-tx">
                 Tx{' '}
-                {txUrl ? <a href={txUrl} target="_blank" rel="noreferrer">{result.txHash} ↗</a> : <code>{result.txHash}</code>}
+                {txUrl ? <a href={txUrl} target="_blank" rel="noreferrer">{result.txHash} <ExternalMark /></a> : <code>{result.txHash}</code>}
               </p>
             )}
             <div className="v10-pca-create-warn ds-card-nested" role="alert">

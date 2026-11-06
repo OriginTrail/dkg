@@ -423,9 +423,9 @@ function CgRow({
         aria-label={`${typeLabel} Context Graph`}
       >
         {policy === 'private'
-          ? <Lock size={13} aria-hidden="true" />
+          ? <Lock size={14} aria-hidden="true" />
           : policy === 'public'
-            ? <Globe size={13} aria-hidden="true" />
+            ? <Globe size={14} aria-hidden="true" />
             : <span className="v10-cg-dim">—</span>}
       </span>
       <span className="v10-cg-cell v10-cg-size">
@@ -462,7 +462,7 @@ function CgRow({
       </span>
       <span className="v10-cg-cell v10-cg-role">
         <span className={`v10-cg-badge v10-cg-badge-${isCurator ? 'curator' : 'joined'}`}>
-          {isCurator ? <Diamond size={10} fill="currentColor" /> : <Check size={10} />}
+          {isCurator ? <Diamond size={12} fill="currentColor" /> : <Check size={12} />}
           {isCurator ? 'Curator' : 'Joined'}
         </span>
       </span>
@@ -634,7 +634,7 @@ export function DashboardView() {
         <StatCard
           label="My Context Graphs"
           className="v10-stat-tight"
-          icon={<Share2 size={13} aria-hidden />}
+          icon={<Share2 size={14} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
           sub={CG_DEFINITION}
         >
@@ -648,7 +648,7 @@ export function DashboardView() {
         </StatCard>
         <StatCard
           label="Context Graph size"
-          icon={<TrendingUp size={13} aria-hidden />}
+          icon={<TrendingUp size={14} aria-hidden />}
           className="v10-stat-tight"
         >
           {!agg.hasCgs ? (
@@ -690,7 +690,7 @@ export function DashboardView() {
         </StatCard>
         <StatCard
           label="Collaborating agents"
-          icon={<UsersRound size={13} aria-hidden />}
+          icon={<UsersRound size={14} aria-hidden />}
           value={!agg.hasCgs
             ? <span className="v10-stat-empty">—</span>
             : agg.agentsLoading
@@ -717,7 +717,7 @@ export function DashboardView() {
         <div className="v10-dash-section ds-card v10-dash-section-wide v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
-              <Share2 size={13} aria-hidden />
+              <Share2 size={14} aria-hidden />
               <h2>My Context Graphs</h2>
             </div>
             <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
@@ -765,7 +765,7 @@ export function DashboardView() {
         <div className="v10-dash-section ds-card v10-anim-mount">
           <div className="v10-dash-section-header">
             <div className="v10-dash-section-title">
-              <Wallet size={13} aria-hidden />
+              <Wallet size={14} aria-hidden />
               <h2>Wallets and Spending</h2>
             </div>
           </div>

@@ -14,7 +14,7 @@ const files = walk(UI);
 // Arrows, technical symbols, shapes, dingbats and emoji.
 const GLYPH = /[×←-⇿⌀-⏿■-➿⤀-⥿⬀-⯿\u{1f300}-\u{1faff}]/gu;
 // Typography rather than icons: text arrows inside a sentence or link.
-const ALLOWED = new Set(['→', '←', '↗']);
+const ALLOWED = new Set(['→', '←']);
 
 const stripComments = (source: string) => source
   .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -22,6 +22,13 @@ const stripComments = (source: string) => source
   .replace(/\s\/\/ .*$/gm, '');
 
 describe('icons', () => {
+  it('keeps icons to the size scale', () => {
+    const found = files
+      .filter((file) => file.endsWith('.tsx'))
+      .flatMap((file) => [...readFileSync(file, 'utf8').matchAll(/\bsize=\{(10|11|13|15)\}/g)].map((m) => `${relative(UI, file)}: ${m[1]}`));
+    expect(found).toEqual([]);
+  });
+
   it('uses no emoji or symbol characters as icons in the UI code', () => {
     const found = files
       .filter((file) => /\.tsx?$/.test(file))

@@ -686,7 +686,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">
-        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}><Anchor size={10} /></span>
+        <span className="v10-vm-legend-swatch" style={{ background: palette.anchor.fill, color: 'var(--text-on-identity)', boxShadow: `0 0 0 2px ${palette.anchor.ring}` }}><Anchor size={12} /></span>
         <span className="v10-vm-legend-label">On-chain anchor</span>
       </div>
       <div className="v10-vm-legend-row">

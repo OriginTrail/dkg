@@ -92,7 +92,7 @@ export class LeftPanelPage {
   }
 
   async clickNewProject() {
-    const btn = this.newProjectBtn.filter({ hasText: '+ New Context Graph' });
+    const btn = this.newProjectBtn.filter({ hasText: 'New Context Graph' });
     await btn.waitFor({ state: 'visible', timeout: 10_000 });
     await btn.click();
     // The modal mounts via a layout-store update. If the click lands while the

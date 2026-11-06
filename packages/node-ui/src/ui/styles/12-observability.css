@@ -9,7 +9,7 @@ p { font-size: 13px; color: var(--text-secondary); line-height: var(--lh-loose);
 /* Cards */
 .card{background:var(--bg-surface);border:1px solid var(--border-default);overflow:hidden;transition:border-color var(--motion-base)}
 .card-header{padding:var(--pad-card);border-bottom:1px solid var(--border-default);display:flex;align-items:center;justify-content:space-between}
-.card-title{font-size:12px;font-weight:700;color:var(--text-primary);letter-spacing:.04em;text-transform:uppercase}
+.card-title{font-size:var(--fs-control);font-weight:700;color:var(--text-primary);letter-spacing:var(--ls-caps);text-transform:uppercase}
 
 /* ── Settings page (cleanup): the page migrates the keep-cards onto the
    canonical .card idiom above. These add the body padding the idiom omits,

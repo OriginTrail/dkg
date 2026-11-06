@@ -91,7 +91,7 @@ export function WalletPill({
           onClick={disconnect}
           title="Disconnect this wallet before switching to another wallet"
         >
-          <Power size={13} aria-hidden="true" />
+          <Power size={14} aria-hidden="true" />
           <span>Disconnect</span>
         </button>
       </div>

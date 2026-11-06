@@ -14,6 +14,7 @@ import {
 import { Check, RefreshCw } from 'lucide-react';
 import { StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 // Testnet faucets for the native gas token (testnet-only CTA — §6.2). Only
 // chains we have a known faucet for render a button; others show the copy alone.
@@ -222,7 +223,7 @@ export function GetSponsoredPanel({ onClose }: { onClose: () => void }) {
           <StatusGlyph tone="warning" /> Gas is always on you. The PCA covers the TRAC publishing fee — never your gas. Fund each
           wallet with native {gasSymbol}.
           {faucet ? (
-            <>{' '}<a href={faucet} target="_blank" rel="noreferrer">Open faucet ↗</a> (testnet only)</>
+            <>{' '}<a href={faucet} target="_blank" rel="noreferrer">Open faucet <ExternalMark /></a> (testnet only)</>
           ) : (
             <>{' '}Fund with native {gasSymbol} from your wallet.</>
           )}

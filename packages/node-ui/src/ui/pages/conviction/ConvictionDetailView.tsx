@@ -29,6 +29,7 @@ import { Badge } from '../../components/ds/Badge.js';
 import { BadgePercent, RefreshCw } from 'lucide-react';
 import { Loading } from '../../components/ds/Loading.js';
 import { bpsToPercent } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -261,7 +262,7 @@ function DetailBody({
         <span className="v10-pca-card-owner-lbl">Owner</span>
         <WalletRow
           address={snapshot.owner}
-          trailing={explorer ? <a className="v10-pca-card-explorer" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer">↗</a> : undefined}
+          trailing={explorer ? <a className="v10-pca-card-explorer" href={`${explorer}/address/${snapshot.owner}`} target="_blank" rel="noreferrer" aria-label="View owner on explorer"><ExternalMark /></a> : undefined}
         />
       </div>
 

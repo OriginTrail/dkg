@@ -9,6 +9,7 @@ import {
 import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
 import { Loading } from '../../components/ds/Loading.js';
 import { RefreshCw } from 'lucide-react';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -178,7 +179,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           {completed.confirmed
             ? <><StatusGlyph tone="success" /> {`${IDENTITY_WALLET_ACTION_META[completed.action].label}: ${completed.address}. `}</>
             : `Transaction broadcast for ${completed.address}, but confirmation is unknown. Check it before retrying. `}
-          {resultUrl && <a href={resultUrl} target="_blank" rel="noreferrer">View transaction ↗</a>}
+          {resultUrl && <a href={resultUrl} target="_blank" rel="noreferrer">View transaction <ExternalMark /></a>}
           {completed.confirmed && IDENTITY_WALLET_ACTION_META[completed.action].role === 'operational' && (
             <span> Restart the node before relying on the updated operational signer rotation.</span>
           )}

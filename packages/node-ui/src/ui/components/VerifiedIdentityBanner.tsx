@@ -23,6 +23,7 @@ import { AgentChip } from './AgentChip.js';
 import { Badge, LayerGlyph } from './ds/Badge.js';
 import { Check, Copy } from 'lucide-react';
 import { formatDateTime } from '../lib/format.js';
+import { ExternalMark } from './ds/ExternalMark.js';
 
 export interface VerifiedIdentityBannerProps {
   contextGraphId: string;
@@ -72,7 +73,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
       <div className="v10-vm-identity-head">
         <span className="v10-vm-identity-glyph"><LayerGlyph layer="vm" /></span>
         <span className="v10-vm-identity-title">On-chain identity</span>
-        <Badge tone="vm" size="sm" icon={<Check size={10} />} className="v10-vm-identity-badge">Verified</Badge>
+        <Badge tone="vm" size="sm" icon={<Check size={12} />} className="v10-vm-identity-badge">Verified</Badge>
       </div>
 
       {onChainUal && (
@@ -101,7 +102,7 @@ export const VerifiedIdentityBanner: React.FC<VerifiedIdentityBannerProps> = ({
               rel="noopener noreferrer"
               title={receipt.txHash}
             >
-              {truncateId(receipt.txHash, 10, 8)} ↗
+              {truncateId(receipt.txHash, 10, 8)} <ExternalMark />
             </a>
           ) : (
             <span className="v10-vm-identity-val mono" title={receipt.txHash}>

@@ -1,4 +1,5 @@
 import React from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useAgentsStore } from '../../stores/agents.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
@@ -37,7 +38,7 @@ export function PcaDashboardRow() {
         className="v10-ws-pca-cta ds-btn ds-sm"
         onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
       >
-        {role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'} -&gt;
+        {role === 'edge' ? 'Get added to a PCA' : 'Set up PCA'}<ArrowRight size={14} aria-hidden="true" />
       </button>
     </div>
   );

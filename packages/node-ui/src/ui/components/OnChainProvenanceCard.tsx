@@ -21,6 +21,7 @@ import { truncateId } from '../hooks/useVerifiedEntityIdentity.js';
 import { Badge, LayerGlyph } from './ds/Badge.js';
 import { Check, CircleDashed, Copy, X } from 'lucide-react';
 import { formatNumber, formatDateTime } from '../lib/format.js';
+import { ExternalMark } from './ds/ExternalMark.js';
 
 export interface OnChainProvenanceCardProps {
   contextGraphId: string;
@@ -73,7 +74,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
       <div className="v10-graph-prov-head">
         <span className="v10-graph-prov-glyph">{verified ? <LayerGlyph layer="vm" /> : <CircleDashed size={12} />}</span>
         <span className="v10-graph-prov-title">On-chain provenance</span>
-        {verified && <Badge tone="vm" size="sm" icon={<Check size={10} />} className="v10-graph-prov-badge">Verified</Badge>}
+        {verified && <Badge tone="vm" size="sm" icon={<Check size={12} />} className="v10-graph-prov-badge">Verified</Badge>}
         <button
           type="button"
           className="v10-graph-prov-close"
@@ -123,7 +124,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
                   rel="noopener noreferrer"
                   title={receipt.txHash}
                 >
-                  {truncateId(receipt.txHash, 10, 8)} ↗
+                  {truncateId(receipt.txHash, 10, 8)} <ExternalMark />
                 </a>
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.txHash}>{truncateId(receipt.txHash, 10, 8)}</span>
@@ -158,7 +159,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
                   rel="noopener noreferrer"
                   title={receipt.author}
                 >
-                  {truncateId(receipt.author, 6, 4)} ↗
+                  {truncateId(receipt.author, 6, 4)} <ExternalMark />
                 </a>
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.author}>{truncateId(receipt.author, 6, 4)}</span>

@@ -671,7 +671,7 @@ export function ProjectOverviewCard({
                     aria-label={ariaLabelParts.join(' ')}
                   >
                     <AgentDot uri={canonical} label={display} size={16} title={full} />
-                    {isCurator && <Diamond className="v10-po-participant-role" size={11} fill="currentColor" />}
+                    {isCurator && <Diamond className="v10-po-participant-role" size={12} fill="currentColor" />}
                     <span className="v10-po-participant-name">{shortAddress}</span>
                     {isSelf && <span className="v10-po-participant-tag">you</span>}
                     {isCurator && <span className="v10-po-participant-tag">curator</span>}

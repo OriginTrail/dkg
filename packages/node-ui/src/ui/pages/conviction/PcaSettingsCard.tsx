@@ -1,4 +1,5 @@
 import React from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
@@ -49,7 +50,7 @@ export function PcaSettingsCard() {
           className="v10-pca-card-btn ds-btn"
           onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
         >
-          Manage publisher conviction -&gt;
+          Manage publisher conviction<ArrowRight size={14} aria-hidden="true" />
         </button>
       </div>
     </section>

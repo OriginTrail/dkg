@@ -130,6 +130,8 @@ Sizes: 14 in controls and rows, 12 in small buttons and badges, 10 inside the sm
 
 No emoji or Unicode symbols as icons: they change from one platform to the next and can't take a size or colour. `test/icons.test.ts` enforces this. Text arrows in a sentence or link (`→`, `←`, `↗`) are typography and stay. Subgraph marks are the exception: they are text from the project profile, so their defaults (`⊚`, `⊘`, `•`) stay text.
 
+Sizes are 12 in small controls and labels, 14 on buttons and in headers, 16 for standalone icons. A control's plus or arrow is an icon, not a typed character. A link that leaves the app ends in `<ExternalMark />`. Arrows inside a sentence stay as text.
+
 ### Toggle
 
 `<Toggle checked busy aria-label>`: an on/off setting that takes effect straight away. On is the primary action colour, not green: it isn't a success. Use a checkbox when the choice is applied by a later button press. Checkboxes and radios use `accent-color: var(--text-primary)`.
@@ -280,7 +282,7 @@ Every view that waits on data shows one of four states, and says which.
 | State | Use | Rule |
 | --- | --- | --- |
 | Loading | `<Loading label="Loading peers…" />`, `block` to fill a view | Name what's loading and end with `…`. `EmptyState busy` when a sentence of context helps. |
-| Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Say what will appear, or what to do next. One line of text is enough inside a list. |
+| Empty | `<EmptyState title description actions />`, `compact inline` inside a card | Centre it when it fills a view or pane; align it left inside a card or sidebar. Say what will appear, or what to do next. One line of text is enough inside a list. |
 | Error | `EmptyState tone="danger"` for a view, `role="alert"` on `v10-modal-error` inside a form, `aria-invalid` on a field | Say what failed and offer a way forward. Never leave a view loading after a failure. |
 | Disabled | `disabled` on the control | `--opacity-disabled`, the one disabled look. Say why nearby when the reason isn't obvious. |
 

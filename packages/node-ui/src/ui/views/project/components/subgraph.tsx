@@ -17,7 +17,7 @@ import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js'
 import { EntityList, DocumentsList } from './entities.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { subGraphMiniGraphOptions } from './subgraph-mini-graph.js';
-import { Check, Play } from 'lucide-react';
+import { Check, Play, ArrowUpRight } from 'lucide-react';
 import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
@@ -718,8 +718,8 @@ export function SubGraphMiniCard({
             <div className="v10-sgov-card-desc" title={card.description}>{card.description}</div>
           )}
         </div>
-        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`}>
-          ↗
+        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`} aria-label={`Focus on ${card.displayName}`}>
+          <ArrowUpRight size={12} aria-hidden="true" />
         </button>
       </div>
       <div className="v10-sgov-card-stats">
@@ -798,7 +798,7 @@ export function SubGraphMiniCard({
             {/* Two-branch wording locked by ux-lead in the #2 amendment.
                 `entityCount > 0` AND mini-graph empty means the
                 sub-graph has content but no WM-shaped data this card
-                can render — pair the literal with the existing ↗ open
+                can render — pair the literal with the existing arrow open
                 button so the next action is obvious. */}
             {card.entityCount > 0 ? 'Promoted — open to view' : 'No data yet'}
           </div>
@@ -1626,7 +1626,7 @@ export function SubGraphDetailView({
                     disabled={queryLoading && !isActive}
                   >
                     <span className="v10-subgraph-savedquery-glyph">
-                      {requiresParameters ? '↗' : queryLoading && isActive ? '…' : isActive ? <Check size={12} /> : <Play size={12} />}
+                      {requiresParameters ? <ArrowUpRight size={12} aria-hidden="true" /> : queryLoading && isActive ? '…' : isActive ? <Check size={12} /> : <Play size={12} />}
                     </span>
                     {q.name}
                   </button>
