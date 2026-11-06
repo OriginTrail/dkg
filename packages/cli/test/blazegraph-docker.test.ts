@@ -70,6 +70,10 @@ function runDevnetBlazegraphSmoke(metadata: string, namespaceStatus = '201'): {
     resolve(REPO_ROOT, 'packages/cli/blazegraph-image-metadata.cjs'),
     join(parserDir, 'blazegraph-image-metadata.cjs'),
   );
+  const storageDir = join(root, 'packages', 'storage');
+  mkdirSync(storageDir, { recursive: true });
+  copyFileSync(resolve(REPO_ROOT, 'packages/storage/blazegraph-namespace-contract.cjs'),
+    join(storageDir, 'blazegraph-namespace-contract.cjs'));
   writeFileSync(join(root, 'blazegraph-image.json'), metadata);
   try {
     const result = spawnSync('bash', [
@@ -118,12 +122,18 @@ function mockDocker(script: MockDockerScript): { runner: DockerRunner; calls: st
           return matcher.respond(args);
         }
       }
+      // A volume that a test does not name does not exist.
+      if (args[0] === 'volume' && args[1] === 'inspect') return dockerVolumeMissing(args[2]!);
       // Default: pretend success so tests that don't care about a
       // particular subcommand stay short.
       return { stdout: '', stderr: '', exitCode: 0 };
     },
   };
   return { runner, calls };
+}
+
+function dockerVolumeMissing(volume: string): DockerCommandResult {
+  return { stdout: '[]', stderr: `Error response from daemon: get ${volume}: no such volume`, exitCode: 1 };
 }
 
 function dockerVersionOk(): DockerCommandResult {
@@ -447,6 +457,36 @@ describe('provisionBlazegraphDocker', () => {
     expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
   });
 
+  it('reattaches the migrated journal volume when a stopped container cannot start', async () => {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => { const result = dockerInspectStopped(); const rows = JSON.parse(result.stdout); rows[0].Mounts[0].Name = 'dkg-blazegraph-mynode-hardened-data'; return { ...result, stdout: JSON.stringify(rows) }; } },
+        { when: (a) => a[0] === 'start', respond: () => ({ stdout: '', stderr: 'config drift', exitCode: 1 }) },
+        { when: (a) => a[0] === 'rm', respond: () => ({ stdout: '', stderr: '', exitCode: 0 }) },
+        { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch((url) => {
+      if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 200 });
+      if (url.endsWith('/bigdata/namespace')) return new Response('unexpected', { status: 500 });
+      return new Response(null, { status: 200 });
+    });
+    const result = await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    });
+    expect(result.reused).toBe(false);
+    expect(result.namespaceCreated).toBe(false);
+    expect(calls.some((c) => c[0] === 'rm')).toBe(true);
+    expect(calls.find((c) => c[0] === 'run')).toContain(`type=volume,source=dkg-blazegraph-mynode-hardened-data,target=${BLAZEGRAPH_DATA_PATH}`);
+    expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
+  });
+
   it('does not delete a stopped legacy container when `docker start` fails', async () => {
     const { runner, calls } = mockDocker({
       matchers: [
@@ -470,6 +510,23 @@ describe('provisionBlazegraphDocker', () => {
     expect(calls.some((call) => call[0] === 'rm')).toBe(false);
     expect(calls.some((call) => call[0] === 'run')).toBe(false);
     expect(logs.some((message) => message.includes('will not recreate it automatically'))).toBe(true);
+  });
+
+  it.each(['missing-state', 'nonboolean-state', 'multiple-containers'])('does not recreate from invalid %s journal evidence', async shape => {
+    const owned = JSON.parse(dockerInspectStopped().stdout)[0] as Record<string, unknown>;
+    const values = shape === 'multiple-containers' ? [owned, { State: { Running: true } }]
+      : [{ ...owned, State: shape === 'missing-state' ? {} : { Running: 'false' } }];
+    const { runner, calls } = mockDocker({ matchers: [
+      { when: args => args[0] === '--version', respond: dockerVersionOk },
+      { when: args => args[0] === 'inspect', respond: () => ({ stdout: JSON.stringify(values), stderr: '', exitCode: 0 }) },
+      { when: args => args[0] === 'start', respond: () => ({ stdout: '', stderr: 'cannot start', exitCode: 1 }) },
+    ] });
+    const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+    await expect(provisionBlazegraphDocker({ namespace: 'mynode', docker: runner, fetch: fn,
+      isPortFree: async () => true, log: () => {},
+    })).rejects.toThrow(/journal could not be confirmed in the expected named volume/s);
+    expect(calls.map(args => args[0])).toEqual(['--version', 'inspect', 'start']);
+    expect(httpCalls).toEqual([]);
   });
 
   it('does not claim a journal policy when docker inspect JSON is malformed', async () => {
@@ -532,6 +589,55 @@ describe('provisionBlazegraphDocker', () => {
       `type=volume,source=dkg-blazegraph-mynode-data,target=${BLAZEGRAPH_DATA_PATH}`,
     ]);
     expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
+  });
+
+  describe('a new container for a store whose container is gone', () => {
+    const ORIGINAL = 'dkg-blazegraph-mynode-data', MIGRATED = 'dkg-blazegraph-mynode-hardened-data';
+    const provision = (volumes: (volume: string) => DockerCommandResult) => {
+      const docker = mockDocker({
+        matchers: [
+          { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+          { when: (a) => a[0] === 'inspect', respond: dockerInspectNotFound },
+          { when: (a) => a[0] === 'volume' && a[1] === 'inspect', respond: (a) => volumes(a[2]!) },
+          { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
+        ],
+      });
+      const { fn } = mockFetch((url) => (url.endsWith('/bigdata/namespace')
+        ? new Response('unexpected', { status: 500 }) : new Response('ok', { status: 200 })));
+      const result = provisionBlazegraphDocker({
+        namespace: 'mynode', docker: docker.runner, fetch: fn, isPortFree: async () => true, log: () => {},
+      });
+      return { result, calls: docker.calls };
+    };
+    const found = (volume: string): DockerCommandResult => ({ stdout: JSON.stringify([{ Name: volume }]), stderr: '', exitCode: 0 });
+
+    it('takes the migrated journal volume when it is the only one', async () => {
+      const { result, calls } = provision((volume) => (volume === MIGRATED ? found(volume) : dockerVolumeMissing(volume)));
+      await expect(result).resolves.toMatchObject({ reused: false });
+      expect(valuesForDockerFlag(calls.find((call) => call[0] === 'run') ?? [], '--mount')).toEqual([
+        `type=volume,source=${MIGRATED},target=${BLAZEGRAPH_DATA_PATH}`,
+      ]);
+    });
+
+    it('chooses nothing when the original journal volume exists too', async () => {
+      const { result, calls } = provision(found);
+      await expect(result).rejects.toThrow(`both journal volumes "${ORIGINAL}" and "${MIGRATED}"`);
+      expect(calls.some((call) => call[0] === 'run')).toBe(false);
+    });
+
+    it('keeps the original journal volume when nothing was migrated', async () => {
+      const { result, calls } = provision((volume) => (volume === ORIGINAL ? found(volume) : dockerVolumeMissing(volume)));
+      await expect(result).resolves.toMatchObject({ reused: false });
+      expect(valuesForDockerFlag(calls.find((call) => call[0] === 'run') ?? [], '--mount')).toEqual([
+        `type=volume,source=${ORIGINAL},target=${BLAZEGRAPH_DATA_PATH}`,
+      ]);
+    });
+
+    it('starts nothing while a journal volume cannot be checked', async () => {
+      const { result, calls } = provision(() => ({ stdout: '', stderr: 'Cannot connect to the Docker daemon', exitCode: 1 }));
+      await expect(result).rejects.toThrow(/Cannot check journal volume/);
+      expect(calls.some((call) => call[0] === 'run')).toBe(false);
+    });
   });
 
   it('auto-bumps the port and provisions durable data with bounded local-driver logs', async () => {

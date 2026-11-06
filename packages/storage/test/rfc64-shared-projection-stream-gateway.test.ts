@@ -301,26 +301,51 @@ describe('SyncSharedProjectionStoreV1', () => {
 
   it('enforces the deadline on a non-cooperative iterator read and closes it', async () => {
     let returned = false;
-    const source: AsyncIterable<Uint8Array> = {
-      [Symbol.asyncIterator]() {
-        return {
-          next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
-          async return() {
-            returned = true;
-            return { done: true, value: undefined };
-          },
-        };
-      },
-    };
-    const result = await new SyncSharedProjectionStoreV1(
-      fakeStore(async () => source),
-    ).open(REQUEST, {
-      operatorByteCeiling: 4096,
-      timeoutMs: 5,
-    });
+    let deadlineSignal: AbortSignal | undefined;
+    let enteredBeforeDeadline = false;
+    let enterRead!: () => void;
+    const readEntered = new Promise<void>((resolve) => { enterRead = resolve; });
+    // Freeze admission time until next() starts, so this exercises read cleanup
+    // rather than a legitimate timeout before the lazy backend is acquired.
+    const admissionTime = performance.now();
+    const admissionClock = vi.spyOn(performance, 'now').mockReturnValue(admissionTime);
+    try {
+      const source: AsyncIterable<Uint8Array> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              enteredBeforeDeadline = deadlineSignal?.aborted === false;
+              enterRead();
+              return new Promise<IteratorResult<Uint8Array>>(() => undefined);
+            },
+            async return() {
+              returned = true;
+              return { done: true, value: undefined };
+            },
+          };
+        },
+      };
+      const result = await new SyncSharedProjectionStoreV1(
+        fakeStore(async (_operation, options) => {
+          deadlineSignal = options.signal;
+          return source;
+        }),
+      ).open(REQUEST, {
+        operatorByteCeiling: 4096,
+        timeoutMs: 5,
+      });
 
-    await expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
-    expect(returned).toBe(true);
+      // Attach rejection handling before awaiting entry. The native five-ms
+      // deadline remains active; only admission's monotonic checks are frozen.
+      const timedOut = expect(collect(result.bytes)).rejects.toMatchObject({ name: 'TimeoutError' });
+      await readEntered;
+      expect(enteredBeforeDeadline).toBe(true);
+      admissionClock.mockRestore();
+      await timedOut;
+      await vi.waitFor(() => expect(returned).toBe(true));
+    } finally {
+      admissionClock.mockRestore();
+    }
   });
 
   it('preserves a timeout when synchronous iterator cleanup throws', async () => {

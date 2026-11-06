@@ -4,6 +4,7 @@ import {
   BlazegraphNamespaceManager,
   blazegraphNamespaceApiUrlFromBaseUrl,
   blazegraphNamespaceApiUrlFromSparqlEndpoint,
+  blazegraphNamespaceEndpointParts,
   normalizeBlazegraphNamespaceApiUrl,
 } from '../src/blazegraph-namespace-manager.js';
 
@@ -149,6 +150,16 @@ describe('BlazegraphNamespaceManager', () => {
         && error.errors[0].message === 'create response lost',
     );
     expect(deleteCalls).toBe(2);
+  });
+
+  it.each(['kb', 'my%20namespace', 'encoded%2Fname'])('shares decoded namespace and canonical URL parts for %s', (encoded) => {
+    const endpoint = `${NAMESPACE_API_URL}/${encoded}/sparql/`;
+    const parts = blazegraphNamespaceEndpointParts(endpoint);
+    expect(parts.namespace).toBe(decodeURIComponent(encoded));
+    expect(parts.namespaceApiUrl).toBe(NAMESPACE_API_URL);
+    expect(parts.baseUrl).toBe('http://127.0.0.1:9999');
+    expect(parts.sparqlUrl).toBe(`${NAMESPACE_API_URL}/${encodeURIComponent(parts.namespace)}/sparql`);
+    expect(blazegraphNamespaceApiUrlFromSparqlEndpoint(endpoint)).toBe(parts.namespaceApiUrl);
   });
 
   it('normalizes only explicit supported Blazegraph URL shapes', () => {

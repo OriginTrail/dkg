@@ -382,6 +382,10 @@ import {
   detectNetworkSwitch,
 } from './chain-reset-wipe.js';
 import { runPreAgentStoreBootSteps } from './pre-agent-store-boot.js';
+import {
+  startDaemonStoreMonitor,
+  stopDaemonStoreMonitor,
+} from './store-monitor-wiring.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
 import { resolveLanAddressesEnabled, resolvePublicAddressesOnly } from '../lan-addresses.js';
@@ -2526,6 +2530,8 @@ async function runDaemonInnerWithStartupOwnership(
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
+  startDaemonStoreMonitor({ storeConfig: runtimeStore, dkgHome: dkgDir(), state: daemonState, log });
+
   // Version check + auto-update. Each mode's gate holds off a per-node random
   // delay between detecting an update and applying it, so a release never
   // restarts the whole fleet in one window (the 2026-07-10 bootstrap-storm
@@ -3679,6 +3685,10 @@ async function runDaemonInnerWithStartupOwnership(
       );
     };
     const cleanup = (async () => {
+      const monitorRetirement = stopDaemonStoreMonitor(daemonState);
+      // Observe rejection immediately, then join the original promise below.
+      void monitorRetirement.catch(() => undefined);
+      let backingStoresClosed = false;
       try {
         autoUpdate.stop();
         clearInterval(pingTimer);
@@ -3760,18 +3770,21 @@ async function runDaemonInnerWithStartupOwnership(
         // retirement timeout is a dependency quarantine, not an ordinary
         // best-effort cleanup failure: killing Oxigraph/SQLite underneath the
         // still-running writer would defeat the agent's fail-stop boundary.
-        const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
+        backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
           closeDashboardDb: () => dashDb.close(),
           log,
         });
-        if (backingStoresClosed) log("Stopped.");
       } finally {
-        await cleanupStateFiles();
-        // Nothing signs any more: close the connections to an external signer.
-        evmSigning.release();
+        try { await monitorRetirement; }
+        finally {
+          await cleanupStateFiles();
+          // Nothing signs any more: close the connections to an external signer.
+          evmSigning.release();
+        }
       }
+      if (backingStoresClosed) log("Stopped.");
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
     }).finally(async () => {
