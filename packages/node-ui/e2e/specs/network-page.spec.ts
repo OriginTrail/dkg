@@ -18,8 +18,8 @@ test.describe('Network Debug Page (/ui/network)', () => {
       .waitFor({ state: 'visible', timeout: 15_000 });
   });
 
-  test('renders the "Network" page-title heading', async ({ page }) => {
-    const heading = page.getByRole('heading', { name: 'Network', level: 1 });
+  test('opens the Network tab in Observability', async ({ page }) => {
+    const heading = page.getByRole('heading', { name: 'Observability', level: 1 });
     await expect(heading).toBeVisible();
     await expect(heading).toHaveClass(/page-title/);
   });

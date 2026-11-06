@@ -153,6 +153,7 @@ A badge states a fact (status, role, type, layer). It is never the click target.
 - **Segmented control** (`.ds-seg` + `.ds-seg-item` with `aria-pressed`) switches what a panel shows (Agents / Network / Sessions; table / graph). Not for navigation between places.
 - **Filter chips** (`.ds-filter` with `aria-pressed`) are things you set: a 6px rectangle, never a pill.
 
+- **The right panel** expands over the centre area for longer agent work; going to another place brings it back. Network shows who you're connected to; Observability's Network tab shows how.
 - **Breadcrumbs** (`<Breadcrumbs items />`) lead back from deep views: a document, agent, memory layer, Knowledge Asset or PCA. Top-level pages have none, and there are no separate back buttons.
 
 ### Things you open

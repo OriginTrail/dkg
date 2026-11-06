@@ -6,6 +6,9 @@ import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
 import { Badge } from '../../ds/Badge.js';
 import { humanizeStatus } from '../../../lib/formatLabels.js';
 import { Loading } from '../../ds/Loading.js';
+import { useTabsStore } from '../../../stores/tabs.js';
+import { useObservabilityStore } from '../../../stores/observability.js';
+import { PLACES } from '../../../lib/tab-target.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -140,6 +143,11 @@ export function NetworkTab(props: {
   onRefresh: () => void;
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
+  const openTab = useTabsStore((s) => s.openTab);
+  const openConnectionDetails = () => {
+    useObservabilityStore.getState().setTab('network');
+    openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
+  };
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);
 
@@ -176,6 +184,7 @@ export function NetworkTab(props: {
         >
           {directCount} direct / {relayedCount} relayed
         </span>
+        <button type="button" className="v10-agents-details" onClick={openConnectionDetails}>Connection details</button>
         <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
           <RefreshCw size={12} />Refresh
         </button>

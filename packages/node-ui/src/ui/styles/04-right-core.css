@@ -19,6 +19,8 @@
 }
 /* Agents / Network / Sessions fills the bar. */
 .v10-agent-mode-tabs .ds-seg, .v10-agent-mode-tabs .ds-seg > * { flex: 1; }
+.v10-panel-expand { flex: none; margin-left: 6px; }
+@media (max-width: 860px) { .v10-panel-expand { display: none; } }
 /* Agent tab */
 .v10-agents-tab {
   display: flex;
@@ -104,6 +106,7 @@
   padding: 8px 0; margin-bottom: 8px;
   font-size: var(--fs-control); color: var(--text-secondary);
 }
+.v10-agents-details { margin-left: auto; font-size: var(--fs-control); color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); background: none; }
 .v10-agents-stat { display: flex; align-items: center; gap: 4px; }
 .v10-agents-stat-dot { width: 6px; height: 6px; border-radius: 50%; }
 .v10-agents-stat-dot.connected { background: var(--accent-green); }

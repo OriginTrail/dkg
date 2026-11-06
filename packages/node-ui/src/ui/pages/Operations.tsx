@@ -32,6 +32,8 @@ import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { formatDateTime } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 import { StatTile } from '../components/ds/StatTile.js';
+import { NetworkTab } from './Network.js';
+import { useObservabilityStore } from '../stores/observability.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -147,7 +149,7 @@ function PeriodSelect({ value, onChange }: { value: string; onChange: (v: string
 }
 
 export function ObservabilitySection() {
-  const [tab, setTab] = useState<'operations' | 'replication' | 'hardware' | 'logs' | 'errors'>('operations');
+  const { tab, setTab } = useObservabilityStore();
 
   return (
     <div>
@@ -157,8 +159,9 @@ export function ObservabilitySection() {
         <button className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
         <button className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
         <button className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button className={`ds-tab ${tab === 'network' ? 'active' : ''}`} onClick={() => setTab('network')}>Network</button>
       </div>
-      {tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
+      {tab === 'network' ? <NetworkTab /> : tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
     </div>
   );
 }

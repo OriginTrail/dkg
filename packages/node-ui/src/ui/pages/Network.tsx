@@ -1,5 +1,4 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
 import { useFetch, shortId, formatDuration } from '../hooks.js';
 import { fetchConnections, fetchAgents } from '../api.js';
 import { Badge } from '../components/ds/Badge.js';
@@ -7,7 +6,6 @@ import { humanizeStatus } from '../lib/formatLabels.js';
 import { formatNodeRole } from '../lib/format.js';
 import { Link2, UsersRound } from 'lucide-react';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
-import { PageHeader } from '../components/ds/PageHeader.js';
 import { StatTile } from '../components/ds/StatTile.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
@@ -30,7 +28,7 @@ function ConnectionBadge({ agent: a }: { agent: any }) {
   return <Badge tone="danger" size="sm">Disconnected</Badge>;
 }
 
-export function NetworkPage() {
+export function NetworkTab() {
   const { data: connData } = useFetch(fetchConnections, [], 10_000);
   const { data: agentData } = useFetch(fetchAgents, [], 15_000);
 
@@ -38,17 +36,7 @@ export function NetworkPage() {
   const agents = agentData?.agents ?? [];
 
   return (
-    <main className="network-page">
-      {/* This page renders standalone (outside the app shell), so without an
-          explicit affordance the operator has no way back to the dashboard
-          once they land here. Keep a back link at the top. */}
-      <Link to="/" className="network-page-back">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
-        Back to dashboard
-      </Link>
-
-      <PageHeader title="Network" />
-
+    <div className="network-tab">
       <div className="stats-grid">
         <StatTile label="Total connections" value={connData?.total ?? '—'} />
         <StatTile label="Direct" value={connData?.direct ?? '—'} />
@@ -115,6 +103,6 @@ export function NetworkPage() {
           </table></div>
         )}
       </div>
-    </main>
+    </div>
   );
 }

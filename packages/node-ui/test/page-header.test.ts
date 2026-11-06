@@ -7,7 +7,7 @@ const UI = join(__dirname, '../src/ui');
 const read = (file: string) => readFileSync(join(UI, file), 'utf8');
 const PAGES = [
   'views/DashboardView.tsx', 'views/MemoryStackView.tsx', 'pages/Operations.tsx', 'pages/Settings.tsx',
-  'pages/AgentHub.tsx', 'pages/Network.tsx', 'pages/conviction/ConvictionOverview.tsx',
+  'pages/conviction/ConvictionOverview.tsx',
 ];
 
 describe('pages', () => {

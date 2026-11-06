@@ -4,6 +4,8 @@ import { create } from 'zustand';
 interface LayoutState {
   leftCollapsed: boolean;
   rightCollapsed: boolean;
+  /** The right panel fills the centre area. Never saved. */
+  rightExpanded: boolean;
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
   leftSectionMyProjectsOpen: boolean;
@@ -18,6 +20,7 @@ interface LayoutState {
 
   toggleLeft: () => void;
   toggleRight: () => void;
+  setRightExpanded: (expanded: boolean) => void;
   closeNarrowPanel: () => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
@@ -184,6 +187,7 @@ const initial = loadPersisted();
 export const useLayoutStore = create<LayoutState>((set, get) => ({
   leftCollapsed: initial.leftCollapsed,
   rightCollapsed: initial.rightCollapsed,
+  rightExpanded: false,
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
@@ -203,12 +207,13 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
     set((s) => ({ leftCollapsed: !s.leftCollapsed }));
     persist(snapshot(get()));
   },
+  setRightExpanded: (expanded) => set({ rightExpanded: expanded }),
   toggleRight: () => {
     if (isNarrowViewport()) {
       set((s) => ({ narrowPanel: s.narrowPanel === 'right' ? null : 'right' }));
       return;
     }
-    set((s) => ({ rightCollapsed: !s.rightCollapsed }));
+    set((s) => ({ rightCollapsed: !s.rightCollapsed, rightExpanded: false }));
     persist(snapshot(get()));
   },
   closeNarrowPanel: () => set({ narrowPanel: null }),

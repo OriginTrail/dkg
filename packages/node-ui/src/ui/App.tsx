@@ -18,6 +18,9 @@ import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
 import { Loading } from './components/ds/Loading.js';
+import { useObservabilityStore } from './stores/observability.js';
+import { PLACES } from './lib/tab-target.js';
+import { tabIdToPath } from './lib/tab-routes.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -202,6 +205,18 @@ function AppShell() {
     setBottomHeight(Math.min(eff - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
+  // The expanded panel covers the centre, so going anywhere else brings it back.
+  const rightExpanded = useLayoutStore((s) => s.rightExpanded);
+  const setRightExpanded = useLayoutStore((s) => s.setRightExpanded);
+  const activeTabId = useTabsStore((s) => s.activeTabId);
+  const lastTabId = useRef(activeTabId);
+  useEffect(() => {
+    if (lastTabId.current === activeTabId) return;
+    lastTabId.current = activeTabId;
+    setRightExpanded(false);
+  }, [activeTabId, setRightExpanded]);
+  const expanded = rightExpanded && rightOpen && !narrow;
+
   const leftHandle = useDragResize(onDragLeft);
   const rightHandle = useDragResize(onDragRight);
   const bottomHandle = useDragResizeV(onDragBottom);
@@ -224,7 +239,7 @@ function AppShell() {
           </>
         )}
 
-        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className="v10-center-region" hidden={expanded} style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
             <PanelCenter />
           </div>
@@ -234,8 +249,8 @@ function AppShell() {
 
         {rightOpen && (
           <>
-            <div className="v10-resize-handle-h" ref={rightHandle} />
-            <div className="v10-panel-right" role="complementary" aria-label="Agents" style={{ width: rightWidth }}>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
               <PanelRight />
             </div>
           </>
@@ -245,9 +260,28 @@ function AppShell() {
   );
 }
 
-const NetworkDebugPage = React.lazy(() =>
-  import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
-);
+/** Old address: Network is a tab in Observability now. */
+function NetworkRoute() {
+  const openTab = useTabsStore((s) => s.openTab);
+
+  useLayoutEffect(() => {
+    useObservabilityStore.getState().setTab('network');
+    openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
+  }, [openTab]);
+
+  return <Navigate to={PLACES.operations.path} replace />;
+}
+
+/** Old address: Agent hub is the right panel, expanded. */
+function AgentHubRoute() {
+  useLayoutEffect(() => {
+    const layout = useLayoutStore.getState();
+    if (layout.rightCollapsed) layout.toggleRight();
+    useLayoutStore.getState().setRightExpanded(true);
+  }, []);
+
+  return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace />;
+}
 
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);
@@ -267,14 +301,8 @@ export function App() {
 
   return (
     <Routes>
-      <Route path="/network" element={
-        <>
-          <ApiTokenPrompt />
-          <React.Suspense fallback={<Loading block label="Loading…" />}>
-            <NetworkDebugPage />
-          </React.Suspense>
-        </>
-      } />
+      <Route path="/network" element={<NetworkRoute />} />
+      <Route path="/agent-hub" element={<AgentHubRoute />} />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />

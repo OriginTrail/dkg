@@ -18,9 +18,6 @@ const OperationsView = createRecoverableLazyView(() =>
   import('../../pages/Operations.js').then((m) => m.OperationsPage)
 , 'operations');
 
-const AgentHubView = createRecoverableLazyView(() =>
-  import('../../pages/AgentHub.js').then((m) => m.AgentHubPage)
-, 'agent hub');
 
 const SettingsView = createRecoverableLazyView(() =>
   import('../../pages/Settings.js').then((m) => m.SettingsPage)
@@ -257,10 +254,6 @@ function ViewContainer() {
 
   if (activeTabId === 'operations') {
     return <OperationsView />;
-  }
-
-  if (activeTabId === 'agent-hub') {
-    return <AgentHubView />;
   }
 
   if (activeTabId === 'settings') {
