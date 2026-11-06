@@ -60,7 +60,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
   });
 
   test('Join Context Graph button opens join modal', async ({ page }) => {
-    await page.locator('.v10-new-project-btn').filter({ hasText: 'Join Context Graph' }).click();
+    await page.locator('.v10-new-project-btn').filter({ hasText: /^Join$/ }).click();
     await expect(page.locator('.v10-modal-overlay')).toBeVisible();
   });
 });

@@ -607,7 +607,6 @@ export function DashboardView() {
     };
   });
 
-  const walletSym = wb?.symbol || 'TRAC';
   const walletRows = wb?.balances ?? [];
   const shortAddr = truncateAddress;
 

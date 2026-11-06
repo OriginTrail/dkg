@@ -87,8 +87,13 @@
 .v10-agent-chip-md .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -3px; right: -4px; }
 
 .v10-agent-chip-lg { min-height: 40px; box-sizing: border-box; padding: var(--space-4) 14px var(--space-4) var(--space-4); font-size: var(--fs-body); }
-.v10-agent-chip-lg .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
-.v10-agent-chip-lg .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -2px; right: -4px; }
+.v10-agent-chip-lg .v10-agent-chip-avatar, .v10-agent-title .v10-agent-chip-avatar { width: 32px; height: 32px; font-size: var(--fs-control); }
+.v10-agent-chip-lg .v10-agent-chip-glyph, .v10-agent-title .v10-agent-chip-glyph { width: 14px; height: 14px; font-size: var(--fs-micro); bottom: -2px; right: -4px; }
+
+/* An agent as a page title. The name stays on one line, so a long ID can't push the page wider. */
+.v10-agent-title { display: flex; align-items: center; gap: var(--space-12); min-width: 0; max-width: 100%; }
+.v10-agent-title-text { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.v10-agent-title .ds-page-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Agent dot: the chip's avatar on its own (AgentDot / AgentDotStack).
    Same circle as agent nodes in the graphs. ── */
@@ -246,7 +251,6 @@
     transparent 100%
   );
 }
-.v10-agent-profile-heading { min-width: 0; margin: 0; font: inherit; }
 .v10-agent-profile-head {
   display: flex; align-items: center; gap: var(--space-16);
   flex-wrap: wrap;

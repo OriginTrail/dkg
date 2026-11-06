@@ -8,6 +8,9 @@
  *   - md  : default pill for timeline / cross-ref links
  *   - lg  : prominent header pill — name + framework + operator subtitle
  *
+ * `AgentTitle` is the same identity as a page title: the page is the agent,
+ * so it has no pill and no click-through.
+ *
  * Colors come from useAgents (hash(URI) -> HSL hue), so the same agent
  * is the same color in every view. Framework glyph is the tiny icon on
  * the avatar corner: ⦿ claude-code, ◈ openclaw, ⬡ hermes, ● gemini,
@@ -59,6 +62,44 @@ function truncateFallbackId(raw: string): string {
   return truncateAddress(raw);
 }
 
+const agentColorVar = (color: string) => ({ '--agent-color': color }) as React.CSSProperties;
+
+function agentIdentity(agent: AgentSummary | null | undefined, fallbackUri?: string) {
+  const name = agent?.name
+    ?? (fallbackUri ? truncateFallbackId(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
+  const kind = agent?.kind ?? 'ai';
+  const framework = agent?.framework;
+  return { name, kind, framework, Glyph: framedGlyph(framework, kind), color: agent?.color ?? 'var(--identity-fallback)' };
+}
+
+const AgentAvatar: React.FC<{ identity: ReturnType<typeof agentIdentity>; glyphSize: number }> = ({ identity, glyphSize }) => {
+  const { name, kind, framework, Glyph, color } = identity;
+  return (
+    <span className="v10-agent-chip-avatar" style={{ background: color, color: agentInitialsColor(color) }}>
+      <span className="v10-agent-chip-initials">{initials(name)}</span>
+      <span className="v10-agent-chip-glyph" title={framework ?? kind}><Glyph size={glyphSize} /></span>
+    </span>
+  );
+};
+
+/** Framework and operator, under the name. Renders nothing when neither is known. */
+const AgentSubline: React.FC<{ agent: AgentSummary | null | undefined; identity: ReturnType<typeof agentIdentity> }> = ({ agent, identity }) => {
+  const { kind, framework } = identity;
+  if (!agent?.operatorName && !framework) return null;
+  return (
+    <span className="v10-agent-chip-sub">
+      {framework && kind === 'ai' && <span className="v10-agent-chip-fw">{framework}</span>}
+      {agent?.operatorName && kind === 'ai' && (
+        <>
+          {framework && <span className="v10-agent-chip-sep">·</span>}
+          <span className="v10-agent-chip-op">driven by {agent.operatorName}</span>
+        </>
+      )}
+      {kind === 'human' && <span className="v10-agent-chip-fw">human</span>}
+    </span>
+  );
+};
+
 export const AgentChip: React.FC<AgentChipProps> = ({
   agent,
   fallbackUri,
@@ -79,12 +120,8 @@ export const AgentChip: React.FC<AgentChipProps> = ({
   // N6 polish (item 4) — only truncate the FALLBACK path. Resolved
   // agents already have a human-readable `name`; truncating that
   // would hide useful display info.
-  const name = agent?.name
-    ?? (fallbackUri ? truncateFallbackId(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
-  const kind = agent?.kind ?? 'ai';
-  const framework = agent?.framework;
-  const Glyph = framedGlyph(framework, kind);
-  const color = agent?.color ?? 'var(--identity-fallback)';
+  const identity = agentIdentity(agent, fallbackUri);
+  const { name, framework, color } = identity;
   const title = [
     name,
     framework ? `framework: ${framework}` : null,
@@ -101,36 +138,36 @@ export const AgentChip: React.FC<AgentChipProps> = ({
   return (
     <span
       className={`v10-agent-chip v10-agent-chip-${size}${interactive ? ' interactive' : ''} ${className}`}
-      style={{ '--agent-color': color } as React.CSSProperties}
+      style={agentColorVar(color)}
       onClick={handle ? (e) => { e.stopPropagation(); handle(); } : undefined}
       title={title}
       role={interactive ? 'button' : undefined}
       tabIndex={interactive ? 0 : undefined}
     >
-      <span className="v10-agent-chip-avatar" style={{ background: color, color: agentInitialsColor(color) }}>
-        <span className="v10-agent-chip-initials">{initials(name)}</span>
-        <span className="v10-agent-chip-glyph" title={framework ?? kind}><Glyph size={size === 'sm' ? 8 : 10} /></span>
-      </span>
+      <AgentAvatar identity={identity} glyphSize={size === 'sm' ? 8 : 10} />
       <span className="v10-agent-chip-body">
         <span className="v10-agent-chip-name">{name}</span>
-        {size === 'lg' && (agent?.operatorName || framework) && (
-          <span className="v10-agent-chip-sub">
-            {framework && kind === 'ai' && <span className="v10-agent-chip-fw">{framework}</span>}
-            {agent?.operatorName && kind === 'ai' && (
-              <>
-                {framework && <span className="v10-agent-chip-sep">·</span>}
-                <span className="v10-agent-chip-op">driven by {agent.operatorName}</span>
-              </>
-            )}
-            {kind === 'human' && <span className="v10-agent-chip-fw">human</span>}
-          </span>
-        )}
-        {size === 'md' && showOperator && agent?.operatorName && kind === 'ai' && (
+        {size === 'lg' && <AgentSubline agent={agent} identity={identity} />}
+        {size === 'md' && showOperator && agent?.operatorName && identity.kind === 'ai' && (
           <span className="v10-agent-chip-sub">
             <span className="v10-agent-chip-op">· {agent.operatorName}</span>
           </span>
         )}
       </span>
     </span>
+  );
+};
+
+/** An agent as the title of its own page: avatar, the page's h1, then framework and operator. */
+export const AgentTitle: React.FC<{ agent: AgentSummary | null | undefined; fallbackUri: string }> = ({ agent, fallbackUri }) => {
+  const identity = agentIdentity(agent, fallbackUri);
+  return (
+    <div className="v10-agent-title" style={agentColorVar(identity.color)}>
+      <AgentAvatar identity={identity} glyphSize={10} />
+      <div className="v10-agent-title-text">
+        <h1 className="ds-page-title" title={identity.name}>{identity.name}</h1>
+        <AgentSubline agent={agent} identity={identity} />
+      </div>
+    </div>
   );
 };

@@ -340,20 +340,7 @@
   font-weight: 700;
   text-transform: uppercase;
 }
-.v10-primer-header h1 {
-  margin: 0;
-  color: var(--text-primary);
-  font-size: var(--fs-display);
-  font-weight: 700;
-  line-height: var(--lh-tight);
-}
-.v10-primer-header p {
-  max-width: 720px;
-  margin: 10px 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-body);
-  line-height: var(--lh-loose);
-}
+.v10-primer-header .ds-page-header { margin-bottom: 0; }
 .v10-primer-pipeline {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 32px minmax(0, 1fr) 32px minmax(0, 1fr);
