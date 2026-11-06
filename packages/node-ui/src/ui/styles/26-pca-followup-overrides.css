@@ -207,23 +207,6 @@
 .v10-pca-detail .v10-pca-device-progress + .v10-stat-strip {
   margin-top: 16px;
 }
-@media (max-width: 720px) {
-  .v10-pca-section-head > .v10-pca-overview-cta-group {
-    justify-content: flex-end;
-    margin-left: auto;
-  }
-  .v10-pca-get-added-body .v10-pca-detail-form {
-    grid-template-columns: 1fr;
-  }
-  .v10-pca-node-picker-option {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-  .v10-pca-node-picker-option .ds-badge,
-  .v10-pca-node-picker-stake,
-  .v10-pca-node-picker-own {
-    grid-column: 2;
-  }
-}
 .v10-center-content[data-narrow] .v10-pca-section-head > .v10-pca-overview-cta-group {
     justify-content: flex-end;
     margin-left: auto; }

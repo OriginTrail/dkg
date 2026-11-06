@@ -95,6 +95,15 @@ function collect(): Record<string, Hit[]> {
   return hits;
 }
 
+/** Every match of a pattern in the UI source, as "file  match". */
+function findInUi(pattern: RegExp): string[] {
+  return walk(UI).flatMap((full) => {
+    const file = relative(UI, full).split('\\').join('/');
+    if (isIgnored(file)) return [];
+    return [...readFileSync(full, 'utf8').matchAll(pattern)].map((m) => `  ${file}  ${m[0]}`);
+  });
+}
+
 describe('design tokens', { timeout: 20_000 }, () => {
   it('has no hard-coded colours or corner sizes (use the tokens in styles/00-theme.css)', () => {
     const found = Object.entries(collect()).flatMap(([file, hs]) =>
@@ -103,22 +112,12 @@ describe('design tokens', { timeout: 20_000 }, () => {
   });
 
   it('has no text below the 10px floor (DESIGN.md · Type)', () => {
-    const small = walk(UI).flatMap((full) => {
-      const file = relative(UI, full).split('\\').join('/');
-      if (isIgnored(file)) return [];
-      const text = readFileSync(full, 'utf8');
-      return [...text.matchAll(/font-size:\s*(?:[0-9]|9\.\d+)px|fontSize:\s*[0-9](?:\.\d+)?\b/g)].map((m) => `  ${file}  ${m[0]}`);
-    });
+    const small = findInUi(/font-size:\s*(?:[0-9]|9\.\d+)px|fontSize:\s*[0-9](?:\.\d+)?\b/g);
     expect(small, `Use --fs-micro or larger:\n${small.join('\n')}`).toEqual([]);
   });
 
   it('uses whole pixels for type sizes (DESIGN.md · Type)', () => {
-    const fractional = walk(UI).flatMap((full) => {
-      const file = relative(UI, full).split('\\').join('/');
-      if (isIgnored(file)) return [];
-      const text = readFileSync(full, 'utf8');
-      return [...text.matchAll(/(?:font-size|--fs-[a-z-]+):\s*\d+\.\d+px|fontSize:\s*\d+\.\d+/g)].map((m) => `  ${file}  ${m[0]}`);
-    });
+    const fractional = findInUi(/(?:font-size|--fs-[a-z-]+):\s*\d+\.\d+px|fontSize:\s*\d+\.\d+/g);
     expect(fractional, `Use a whole size on the type scale:\n${fractional.join('\n')}`).toEqual([]);
   });
 

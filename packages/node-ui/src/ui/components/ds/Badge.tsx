@@ -38,10 +38,6 @@ const LAYER_TONES = ['wm', 'swm', 'vm'] as const;
 type LayerTone = (typeof LAYER_TONES)[number];
 const isLayerTone = (tone: BadgeTone): tone is LayerTone => (LAYER_TONES as readonly string[]).includes(tone);
 
-const STATUS_TONES = ['success', 'warning', 'danger', 'pending'] as const;
-type StatusTone = (typeof STATUS_TONES)[number];
-const isStatusTone = (tone: BadgeTone): tone is StatusTone => (STATUS_TONES as readonly string[]).includes(tone);
-
 /** The memory-layer glyphs, the same shapes nOS draws: open circle, two circles, filled hexagon. */
 export const LayerGlyph: React.FC<{ layer: LayerTone; className?: string }> = ({ layer, className }) => (
   <svg className={cx('ds-layer-glyph', className)} viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -57,32 +53,18 @@ export const LayerGlyph: React.FC<{ layer: LayerTone; className?: string }> = ({
 );
 
 /** The status glyphs, the same shapes nOS draws: check in a circle, warning triangle, stop octagon, clock. */
-export const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
+const STATUS_GLYPHS = {
+  success: <><circle cx="12" cy="12" r="9" /><path d="m8 12.5 2.5 2.5 5-5.5" /></>,
+  warning: <><path d="M12 3 2.5 20h19Z" /><path d="M12 10v4M12 17v.5" /></>,
+  danger: <><path d="M8 2h8l6 6v8l-6 6H8l-6-6V8Z" /><path d="m9 9 6 6M15 9l-6 6" /></>,
+  pending: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></>,
+};
+type StatusTone = keyof typeof STATUS_GLYPHS;
+const isStatusTone = (tone: BadgeTone): tone is StatusTone => tone in STATUS_GLYPHS;
+
+const StatusGlyph: React.FC<{ tone: StatusTone }> = ({ tone }) => (
   <svg className="ds-status-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    {tone === 'success' ? (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="m8 12.5 2.5 2.5 5-5.5" />
-      </>
-    ) : null}
-    {tone === 'warning' ? (
-      <>
-        <path d="M12 3 2.5 20h19Z" />
-        <path d="M12 10v4M12 17v.5" />
-      </>
-    ) : null}
-    {tone === 'danger' ? (
-      <>
-        <path d="M8 2h8l6 6v8l-6 6H8l-6-6V8Z" />
-        <path d="m9 9 6 6M15 9l-6 6" />
-      </>
-    ) : null}
-    {tone === 'pending' ? (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 7v5l3.5 2" />
-      </>
-    ) : null}
+    {STATUS_GLYPHS[tone]}
   </svg>
 );
 
@@ -111,13 +93,9 @@ export const Count: React.FC<CountProps> = ({ value, tone = 'neutral', className
   <span className={cx('ds-count', tone !== 'neutral' && `ds-tone-${tone}`, className)} {...rest}>{value}</span>
 );
 
-/** Layer badge labels: the one way to say which memory layer something is in. */
-export const LAYER_BADGE: Record<'wm' | 'swm' | 'vm', { label: string }> = {
-  wm: { label: 'Working' },
-  swm: { label: 'Shared' },
-  vm: { label: 'Verifiable' },
-};
+/** The one way to say which memory layer something is in. */
+const LAYER_LABEL: Record<LayerTone, string> = { wm: 'Working', swm: 'Shared', vm: 'Verifiable' };
 
 export const LayerBadge: React.FC<Omit<BadgeProps, 'tone' | 'icon'> & { layer: 'wm' | 'swm' | 'vm'; label?: React.ReactNode }> = ({ layer, label, ...rest }) => (
-  <Badge tone={layer} {...rest}>{label ?? LAYER_BADGE[layer].label}</Badge>
+  <Badge tone={layer} {...rest}>{label ?? LAYER_LABEL[layer]}</Badge>
 );

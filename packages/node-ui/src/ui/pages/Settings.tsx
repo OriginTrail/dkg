@@ -13,8 +13,8 @@ import {
 import { formatEth, formatEthTooltip } from '../lib/formatEth.js';
 import { formatTracSymbol, formatTrac, formatTracTooltip } from '../lib/formatTrac.js';
 import { redactRpcUrl } from '../lib/redactRpcUrl.js';
-import { formatUptime, headerNodeStatus } from '../lib/formatPeerStatus.js';
-import { useAgentsStore } from '../stores/agents.js';
+import { formatUptime } from '../lib/formatPeerStatus.js';
+import { useNodeState } from '../hooks/useNodeState.js';
 import { Badge } from '../components/ds/Badge.js';
 import { PcaSettingsCard } from './conviction/PcaSettingsCard.js';
 import { IdentityWalletsSection } from './identity-wallets/IdentityWalletsSection.js';
@@ -411,11 +411,7 @@ function GeneralSettingsTab() {
   const [shutdownConfirm, setShutdownConfirm] = useState(false);
   const [shuttingDown, setShuttingDown] = useState(false);
 
-  // The header's live status, so the two can't disagree.
-  const nodeStatus = useAgentsStore((state) => state.nodeStatus);
-  const nodeStatusFailures = useAgentsStore((state) => state.nodeStatusFailures);
-  const peerCount = nodeStatus?.connectedPeers ?? nodeStatus?.peerCount ?? 0;
-  const nodeState = headerNodeStatus(nodeStatus != null, peerCount, nodeStatusFailures);
+  const { nodeStatus, peers: peerCount, state: nodeState } = useNodeState();
 
   const handleShutdown = useCallback(async () => {
     if (!shutdownConfirm) {

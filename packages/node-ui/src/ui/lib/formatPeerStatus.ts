@@ -1,4 +1,7 @@
-/** Failed status checks in a row before the header says Unavailable (30s at the 10s poll). */
+/** How often the UI checks the node. A check also times out after this long. */
+export const NODE_STATUS_POLL_MS = 10_000;
+
+/** Failed status checks in a row before the status says Unavailable. */
 export const NODE_UNAVAILABLE_AFTER_FAILURES = 3;
 
 /** A 401 comes from a running node that wants a token: not a failed check, and it clears the count. */
@@ -24,7 +27,7 @@ export function headerNodeStatus(
   statusFailures: number,
 ): HeaderNodeStatus {
   if (statusFailures >= NODE_UNAVAILABLE_AFTER_FAILURES) {
-    return { word: 'Unavailable', tone: 'danger', showPeers: false, tooltip: 'The node is not responding. Checking again every 10 seconds.' };
+    return { word: 'Unavailable', tone: 'danger', showPeers: false, tooltip: `The node is not responding. Checking again every ${NODE_STATUS_POLL_MS / 1000} seconds.` };
   }
   if (!statusLoaded) {
     return { word: 'Connecting', tone: 'pending', showPeers: false, tooltip: 'Connecting to the node' };

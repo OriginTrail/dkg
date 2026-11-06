@@ -74,11 +74,6 @@
   flex: 1 1 auto; min-height: 0;
   overflow-y: auto;
 }
-@media (max-width: 900px) {
-  .v10-layer-widgets-strip { flex-direction: column; }
-  .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
-  .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }
-}
 .v10-center-content[data-narrow] .v10-layer-widgets-strip { flex-direction: column; }
 .v10-center-content[data-narrow] .v10-layer-widgets-strip-stats { grid-template-columns: minmax(0, 1fr); }
 .v10-center-content[data-narrow] .v10-layer-widgets-strip-action { flex: 0 0 auto; max-width: none; }

@@ -419,4 +419,5 @@ body.light .ds-seg-item.active {
 
 /* A table scrolls inside its card, so no column is cut off. Wide tables pin the first column. */
 .ds-table-scroll { overflow-x: auto; max-width: 100%; }
-.ds-table-pin th:first-child, .ds-table-pin td:first-child { position: sticky; left: 0; z-index: 1; background: var(--bg-surface); }
+.ds-table-pin tr { background: var(--bg-surface); }
+.ds-table-pin th:first-child, .ds-table-pin td:first-child { position: sticky; left: 0; z-index: 1; background: inherit; }

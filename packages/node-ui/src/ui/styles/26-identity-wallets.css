@@ -125,22 +125,6 @@
   flex: 1 1 360px;
   overflow-wrap: anywhere;
 }
-
-@media (max-width: 720px) {
-  .v10-identity-wallet-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .v10-identity-wallet-signer {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .v10-identity-wallet-known .v10-wallet-trailing {
-    width: 100%;
-    margin-left: 0;
-  }
-}
 .v10-center-content[data-narrow] .v10-identity-wallet-grid {
     grid-template-columns: 1fr; }
 .v10-center-content[data-narrow] .v10-identity-wallet-signer {

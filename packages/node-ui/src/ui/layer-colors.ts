@@ -55,5 +55,5 @@ export const VM_ANCHOR_RING_WIDTH = 4;
 
 /** Signal accents for canvas marks (same values as --accent-* in both themes),
  *  e.g. SWM nodes whose attribution conflicts. */
-export const SIGNAL_HEX = { warning: '#f59e0b', danger: '#ef4444' } as const;
+export const SIGNAL_HEX = { warning: '#f59e0b' } as const;
 

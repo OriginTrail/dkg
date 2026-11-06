@@ -212,9 +212,6 @@
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
-@media (max-width: 640px) {
-  .v10-pca-handshake { grid-template-columns: 1fr; }
-}
 .v10-center-content[data-narrow] .v10-pca-handshake { grid-template-columns: 1fr; }
 .v10-pca-handshake-half {
   display: flex;

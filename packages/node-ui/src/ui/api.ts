@@ -1,3 +1,4 @@
+import { NODE_STATUS_POLL_MS } from './lib/formatPeerStatus.js';
 import { randomUUID } from './lib/randomUUID.js';
 import { executeQuery, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
 export * from './query-api.js';
@@ -94,7 +95,7 @@ export class LocalAgentApiError extends Error {
 }
 
 // --- Status ---
-export const fetchStatus = () => getWithTimeout<any>('/api/status', 10_000);
+export const fetchStatus = () => getWithTimeout<any>('/api/status', NODE_STATUS_POLL_MS);
 
 // --- LLM Settings ---
 export interface LlmSettingsResponse {

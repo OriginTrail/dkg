@@ -12,7 +12,7 @@ import { api, detectMockMode, isUsingMocks, subscribeMockMode } from './api-wrap
 import { CONTEXT_GRAPH_PRIMER_TAB } from './lib/contextGraphPrimer.js';
 import { applyTheme } from './lib/applyTheme.js';
 import { useVisibilityPolling } from './hooks/useVisibilityPolling.js';
-import { isNodeStatusFailure } from './lib/formatPeerStatus.js';
+import { NODE_STATUS_POLL_MS, isNodeStatusFailure } from './lib/formatPeerStatus.js';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
@@ -31,7 +31,7 @@ function useLiveStatus() {
       if (isNodeStatusFailure(error)) recordNodeStatusFailure();
       else clearNodeStatusFailures();
     });
-  }, 10_000);
+  }, NODE_STATUS_POLL_MS);
 }
 
 function useDragResize(onDrag: (delta: number) => void) {
@@ -144,8 +144,8 @@ function AppShell() {
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
   const { pathname } = useLocation();
-  // Going somewhere from a floating panel shows the page, not the panel.
-  useEffect(() => { closeNarrowPanel(); }, [pathname, closeNarrowPanel]);
+  // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
+  useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 
   useEffect(() => {

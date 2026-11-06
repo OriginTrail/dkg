@@ -143,7 +143,7 @@ describe('header uses live status', () => {
   });
 
   it('header gracefully handles missing status data', () => {
-    expect(header).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
+    expect(readFile('hooks/useNodeState.ts')).toMatch(/nodeStatus\?\.connectedPeers\s*\?\?\s*nodeStatus\?\.peerCount/);
   });
 });
 
@@ -308,7 +308,7 @@ describe('header node status', () => {
   const header = readFileSync(resolve(UI_DIR, 'components', 'Shell', 'Header.tsx'), 'utf-8');
 
   it('derives the status from loaded state, peers and failed checks, not a sync flag', () => {
-    expect(header).toContain('headerNodeStatus(nodeStatus != null, connectedPeers, nodeStatusFailures)');
+    expect(readFile('hooks/useNodeState.ts')).toContain('headerNodeStatus(nodeStatus != null, peers, failures)');
     expect(header).not.toContain('nodeStatus?.synced');
   });
 

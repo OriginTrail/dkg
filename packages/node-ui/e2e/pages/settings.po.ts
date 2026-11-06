@@ -4,8 +4,8 @@ import { sel } from '../helpers/selectors.js';
 /**
  * Page object for the rewritten Settings page (pages/Settings.tsx). The page
  * opens as a closable center tab from the header gear button and renders five
- * `.card` sections: Node Identity, Blockchain Config, Network Telemetry, Local
- * Data Retention, Danger Zone.
+ * `.card` sections: Node identity, Blockchain config, Network telemetry, Local
+ * Data retention, Danger zone.
  *
  * Every interactive control on this page is either reversible (telemetry
  * consent → Cancel) or non-destructive on first activation (shutdown is a
@@ -57,7 +57,7 @@ export class SettingsPage {
     );
   }
 
-  /** Card titles in render order (e.g. "Node Identity", "Danger Zone"). */
+  /** Card titles in render order (e.g. "Node identity", "Danger zone"). */
   async getSectionTitles(): Promise<string[]> {
     return this.page.locator(sel.settings.cardTitle).allTextContents().then((t) => t.map((s) => s.trim()));
   }
