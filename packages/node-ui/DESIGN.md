@@ -26,9 +26,10 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 | Borders | `--border-subtle`, `--border-default`, `--border-strong`, `--border-prominent`, `--border-control` | Default for outlines; strong for hover and selected; prominent only where 3:1 against any surface is needed. Drag and resize markers (panel handles, the tab drop marker) use prominent, never a signal, role or focus colour. |
 | Text | `--text-primary`, `--text-secondary`, `--text-tertiary` | Primary for what you read first, secondary for body text, tertiary for metadata. `--text-ghost` is decoration only, never readable text. |
 | Memory layers | `--layer-working`, `--layer-shared`, `--layer-verified`, each with `-text`, `-bg`, `-border` | Reserved for the three memory layers: slate for Working, OriginTrail cyan for Shared, OriginTrail purple for Verifiable. Nothing else uses these hues. The canvas (graph-viz) reads the same values from `layer-colors.ts`. |
-| Signals | `--text-success`, `--text-warning`, `--text-danger` (+ `--accent-green/amber/red` for non-text) | State only: done, needs attention, failed. Amber means "needs your action" (unread, pending requests). Red means an error, never a count. |
+| Signals | `--text-success`, `--text-warning`, `--text-danger` (+ `--accent-green/amber/red` for non-text) | State only: done, needs attention, failed. Amber means "needs your action" (pending requests). Red means an error, never a count. |
 | Actions | `--accent-primary` / `--text-on-primary`, `--accent-vm` / `--text-on-vm` | Primary button is white on black in dark mode. Purple fills exactly one kind of button: Publish to Verifiable Memory. |
 | Role and access | `--role`, `--role-text`, `--role-bg`, `--role-border` | Facts about you and the graph (curator, participant; public, curated, private). The role you hold is a tinted badge; access is an outline. Blue means this and nothing else: not links, not focus, not info notices (use a neutral surface). |
+| Notifications | `--notify`, `--text-on-notify` | The unread count on the bell, and nothing else. A brand purple kept apart from `--layer-verified` and `--accent-vm`, so it doesn't read as Verifiable Memory. |
 | Links | `--text-link`, `--link-underline` | Links are text colour with an underline. Blue is not a link colour. |
 | Focus | `--focus-ring` | Keyboard focus only, always as a 2px ring. Not a link colour, not a layer. |
 | Data | `--data-1`, `--data-2`, `--data-3`, `--data-4`, `--data-5`, `--data-6`, `--data-7`, `--data-8` | Charts and Context Graph identity colours. Use in this fixed order; never cycle within one chart. Separation between neighbours is validated in both themes. |
@@ -141,7 +142,7 @@ A badge states a fact (status, role, type, layer). It is never the click target.
 - Status words match nOS: `Done`, `In progress`, `Failed`, `Ready` (`Ready to connect` stays), `Partial`, `Pending`, `Blocked`. `Partial` is also the word for an agent with one capability down.
 - The header status says only what the node reports: `Connecting` before the first status, `Connected` with the peer count (green), `No peers` (warning), and `Unavailable` (red) after three failed status checks in a row. Settings shows the same status. `/api/status` has no sync state, so the header does not say Synced.
 - `<LayerBadge layer="wm|swm|vm">`: the one way to show which memory layer something is in (open circle Working, two circles Shared, filled hexagon Verifiable). Layers look the same as in nOS, which is the source of truth: same colours, glyphs, full border and 12px text. `LayerGlyph` draws the glyph on its own.
-- `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips.
+- `<Count value tone>`: numbers on tabs, sections and buttons. `attention` (amber) only when the number needs the user's action; `quiet` inside tabs and chips. The bell's unread count is the one exception: a solid `--notify` disc.
 - The notification count sits on the bell's corner, never over the glyph, and the bell brightens while anything is unread.
 
 ### Navigation

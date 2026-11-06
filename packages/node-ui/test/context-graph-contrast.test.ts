@@ -259,6 +259,10 @@ describe('Context Graph contrast tokens', () => {
         }
       }
     }
+    for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
+      expect(contrastIn('var(--text-on-notify)', vars['--notify']!, vars), `${theme} bell count text`).toBeGreaterThanOrEqual(4.5);
+      expect(contrastIn('var(--notify)', vars['--bg-panel']!, vars), `${theme} bell count on the header`).toBeGreaterThanOrEqual(3);
+    }
     // Statuses have no box: text sits straight on the surface. That background
     // comes from the grouped status rule, so the check must see grouped rules.
     for (const tone of ['success', 'warning', 'danger', 'pending']) {

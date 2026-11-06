@@ -83,6 +83,8 @@
   --accent-vm: #6344df;
   --accent-vm-hover: #7458e6;
   --text-on-vm: #ffffff;
+  --notify: #a78bfa;
+  --text-on-notify: #111111;
 
   /* Keyboard focus — indigo, ring only. Not a link colour, not a layer. */
   --focus-ring: #8b94ec;
@@ -173,6 +175,8 @@
   --accent-primary: #171717;
   --text-on-primary: #ffffff;
   --accent-vm-hover: #5236c4;
+  --notify: #6d3fd9;
+  --text-on-notify: #ffffff;
   /* Light surfaces need far less shadow to read as raised. */
   --shadow-modal: 0 20px 60px rgba(0, 0, 0, .15);
   --focus-ring: #4553c9;

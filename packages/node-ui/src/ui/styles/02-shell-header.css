@@ -170,13 +170,13 @@
 .v10-header-notif-wrap { position: relative; }
 .v10-header-notif-badge { position: absolute; top: 2px; right: 2px; }
 /* Unread count sits on the button's corner, clear of the bell glyph, as a
-   solid amber disc with a ring in the header colour. With unread items the
+   solid brand purple disc with a ring in the header colour. With unread items the
    bell itself brightens, so the icon stays the strongest mark (dark-first). */
 .v10-header-notif-badge.ds-count.ds-tone-attention {
   top: -1px; right: -3px;
   min-width: 16px; height: 16px; padding: 0 4px;
-  background: var(--text-warning);
-  color: var(--bg-root);
+  background: var(--notify);
+  color: var(--text-on-notify);
   box-shadow: 0 0 0 2px var(--bg-panel);
 }
 /* ── Notifications pane (redesign) ─────────────────────────────────────────
