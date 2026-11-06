@@ -224,7 +224,7 @@ export function ConvictionOverview() {
       <header className="v10-pca-overview-head">
         <div className="v10-pca-overview-titlerow">
           <h2 className="v10-pca-overview-title">Publisher Conviction</h2>
-          {role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {role}</Badge>}
+          {role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {role === 'core' ? 'Core' : 'Edge'}</Badge>}
         </div>
         <p className="v10-pca-overview-explainer">
           {role === 'edge'
