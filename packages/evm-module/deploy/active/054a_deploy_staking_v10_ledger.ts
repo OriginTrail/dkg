@@ -9,10 +9,12 @@ import { DeployFunction } from 'hardhat-deploy/types';
  * gates and forwards to it, so the two contracts deploy together.
  *
  * It is registered in the Hub's contract set, so the `onlyContracts` mutators
- * of `StakingStorage` and `ConvictionStakingStorage` admit it. `initialize()`
- * wires `StakingStorage`, `ConvictionStakingStorage`, `IdentityStorage` and
- * `ParametersStorage`; it admits only the contract the Hub holds as
- * `StakingV10`, looked up at each call, so `StakingV10` may deploy after it.
+ * of `StakingStorage`, `ConvictionStakingStorage` and
+ * `ConvictionWithdrawalStorage` admit it. `initialize()` wires
+ * `StakingStorage`, `ConvictionStakingStorage`, `IdentityStorage`,
+ * `ParametersStorage`, `ConvictionWithdrawalStorage` and `Chronos`; it admits
+ * only the contract the Hub holds as `StakingV10`, looked up at each call, so
+ * `StakingV10` may deploy after it.
  *
  * `StakingV10.initialize()` resolves this contract from the Hub, so it is
  * registered first: on development it is deployed and initialized here, before
@@ -36,4 +38,8 @@ func.dependencies = [
   'ConvictionStakingStorage',
   'IdentityStorage',
   'ParametersStorage',
+  // StakingV10 10.1.0 — the record a withdrawal leaves of the epoch in
+  // progress, and the epoch its claim waits for.
+  'ConvictionWithdrawalStorage',
+  'Chronos',
 ];

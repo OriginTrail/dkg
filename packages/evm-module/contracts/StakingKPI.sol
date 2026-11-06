@@ -33,10 +33,9 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     //   10.1.0 — Mirrors StakingV10 10.1.0: a node's gross reward for an
     //           epoch adds its gross from the query/inference pool (OT-RFC-27)
     //           to the publishing pool's score share before the operator fee,
-    //           read through `QueryInferenceSettlement.previewQueryInferenceGross`,
-    //           which is the frozen gross of a closed epoch and the previewed
-    //           close of an ended one still open. `initialize()` wires the
-    //           settlement where the Hub holds it.
+    //           read through `QueryInferenceSettlement.queryInferenceGross`.
+    //           The settlement is read from the Hub at each use, where the Hub
+    //           holds it.
     string private constant _VERSION = "10.1.0";
     uint256 public constant SCALE18 = 1e18;
 
@@ -58,9 +57,6 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
     RandomSamplingStorage public randomSamplingStorage;
     EpochStorage public epochStorage;
     ParametersStorage public parametersStorage;
-    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0); 0
-    ///         where the Hub holds none.
-    QueryInferenceSettlement public queryInferenceSettlement;
 
     /**
      * @dev Initializes the StakingKPI contract with the Hub address for access control
@@ -88,10 +84,14 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         randomSamplingStorage = RandomSamplingStorage(hub.getContractAddress("RandomSamplingStorage"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
-        // 10.1.0 — the query/inference pool is not deployed on every network.
-        queryInferenceSettlement = hub.isContract("QueryInferenceSettlement")
-            ? QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"))
-            : QueryInferenceSettlement(address(0));
+    }
+
+    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0), read
+    ///         from the Hub at each use, as `StakingV10` reads it; 0 where the
+    ///         Hub holds none, as on a network without the pool.
+    function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
+        if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
+        return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
     }
 
     /**
@@ -221,9 +221,8 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
      * Calculates the total rewards available to node's delegators after operator fees are deducted
      * Handles both cases: when operator fee has been claimed and when it hasn't
      * 10.1.0 — as `StakingV10._nodeEpochReward` computes it: the node's score share of the publishing
-     * pool plus its gross from the query/inference pool (OT-RFC-27), less the operator fee. Before a claim
-     * splits the epoch, the query/inference gross is previewed for an ended epoch still open, so the
-     * value is what the claim then pays; for the current epoch it is the split as if the epoch ended now.
+     * pool plus its gross from the query/inference pool (OT-RFC-27), less the operator fee. For an ended
+     * epoch that is what a claim pays; for the current epoch it is the split as if the epoch ended now.
      * @param identityId Node's identity ID to get net rewards for
      * @param epoch Epoch number to calculate net rewards for
      * @return Net rewards available for distribution to the node's delegators in the epoch
@@ -246,9 +245,9 @@ contract StakingKPI is INamed, IVersioned, ContractStatus, IInitializable {
         uint256 epocRewardsPool = epochStorage.getEpochPool(1, epoch);
 
         uint256 totalNodeRewards = (epocRewardsPool * nodeScore18) / allNodesScore18;
-        QueryInferenceSettlement settlement = queryInferenceSettlement;
+        QueryInferenceSettlement settlement = queryInferenceSettlement();
         if (address(settlement) != address(0)) {
-            totalNodeRewards += settlement.previewQueryInferenceGross(epoch, identityId);
+            totalNodeRewards += settlement.queryInferenceGross(epoch, identityId);
         }
         if (totalNodeRewards == 0) return 0;
 

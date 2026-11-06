@@ -1,9 +1,9 @@
-// PublishingConviction 10.2.0 — coverServiceCost, the allowance draw behind
+// PublishingConviction 10.2.0 — coverServiceCost, the allowance spend behind
 // Conviction Account service spending (OT-RFC-27).
 //
 // Every call goes through MockServiceSubscriptions, a stub registered in the
 // Hub as `ServiceSubscriptions`, the only caller the function admits. The stub
-// keeps the ServiceDraw of the transaction that made it.
+// keeps the ServiceSpend of the transaction that made it.
 //
 // Covered:
 //   - the gate: only the contract the Hub names ServiceSubscriptions, looked up
@@ -11,15 +11,15 @@
 //   - the refusals and their order: a zero value, a wired treasury, an unknown
 //     or expired account, an account that 10.0.8 or 10.1.0 scheduled, and an
 //     allowance short of the cost, with no partial effect;
-//   - the draw, exactly as publishing draws: every discount tier, the 1-wei
+//   - the spend, exactly as publishing spends: every discount tier, the 1-wei
 //     floor, the window allowance first and then the top-up buffer, a window
 //     shared with publishing, and a later window's own allowance;
-//   - nothing is booked to the staker pool and no TRAC moves, whether the draw
+//   - nothing is booked to the staker pool and no TRAC moves, whether the spend
 //     comes from the window or the top-up buffer: the whole cost is returned
 //     for ServiceSubscriptions to book, while a publish of the same cost books
 //     it over the Knowledge Asset's epochs;
 //   - the closed windows of an account that a build older than 10.0.8
-//     created are booked before the draw, and no window more.
+//     created are booked before the spend, and no window more.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -39,69 +39,31 @@ import {
   PublishingConvictionStorage,
   Token,
 } from '../typechain';
+import { STAKER_SHARD_ID, blockTime, deployAccountStack, poolCredits, poolsOver } from './helpers/account-stack';
 import { prorateActiveSink } from './helpers/emission-model';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
-const STAKER_SHARD_ID = 1n;
 const BPS = 10_000n;
 const TRAC = 10n ** 18n;
 // 20% discount tier + 7 wei so the `committedTRAC % lock` dust path is live.
 const COMMITTED_TRAC = ethers.parseEther('50000') + 7n;
 const SUBSCRIPTION_ID = ethers.id('subscription-1');
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  EpochStorage: EpochStorage;
-  ParametersStorage: ParametersStorage;
-  ConvictionStakingStorage: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PublishingConviction: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  Stub: MockServiceSubscriptions;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture([
-    'Token',
-    'AskStorage',
-    'EpochStorage',
-    'Chronos',
-    'Profile',
-    'Identity',
-    'KnowledgeAssetsLifecycle',
-    'ContextGraphStorage',
-    'ContextGraphs',
-    'ContextGraphValueStorage',
-    'ContextGraphWaiverStorage',
-    'DKGPublishingConvictionNFT',
-    'DKGStakingConvictionNFT',
-    'StakingV10',
-  ]);
-
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
+async function deployFixture() {
+  const {
+    ES: EpochStorage,
+    Params: ParametersStorage,
+    Vault: ConvictionStakingStorage,
+    PC: PublishingConviction,
+    ...stack
+  } = await deployAccountStack();
 
   const StubFactory = await hre.ethers.getContractFactory('MockServiceSubscriptions');
   const Stub = (await StubFactory.deploy()) as unknown as MockServiceSubscriptions;
   await Stub.waitForDeployment();
-  await Hub.setContractAddress('ServiceSubscriptions', await Stub.getAddress());
+  await stack.Hub.setContractAddress('ServiceSubscriptions', await Stub.getAddress());
 
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    ParametersStorage: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    ConvictionStakingStorage: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PublishingConviction: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-    Stub,
-  };
+  return { ...stack, EpochStorage, ParametersStorage, ConvictionStakingStorage, PublishingConviction, Stub };
 }
 
 describe('@integration PublishingConviction 10.2.0 coverServiceCost', function () {
@@ -120,7 +82,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
   let epLen: bigint;
   let lock: bigint;
   let owner: SignerWithAddress;
-  let assignee: SignerWithAddress;
+  let buyer: SignerWithAddress;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
@@ -140,7 +102,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     epLen = await ChronosContract.epochLength();
     lock = await Params.publishingConvictionEpochs();
     owner = accounts[5];
-    assignee = accounts[9];
+    buyer = accounts[9];
   });
 
   // -------------------------------------------------------------------------
@@ -165,19 +127,19 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     await NFT.connect(holder).topUp(accountId, amount);
   };
 
-  /** Fund through the stub; returns the receipt and the draw that transaction made. */
+  /** Fund through the stub; returns the receipt and the spend that transaction made. */
   const cover = async (
     accountId: bigint,
     value: bigint,
     subscriptionId: string = SUBSCRIPTION_ID,
-  ): Promise<{ receipt: ContractTransactionReceipt; draw: Awaited<ReturnType<MockServiceSubscriptions['lastDraw']>> }> => {
-    const tx = await Stub.cover(await Logic.getAddress(), accountId, assignee.address, subscriptionId, value);
+  ): Promise<{ receipt: ContractTransactionReceipt; spend: Awaited<ReturnType<MockServiceSubscriptions['lastSpend']>> }> => {
+    const tx = await Stub.cover(await Logic.getAddress(), accountId, buyer.address, subscriptionId, value);
     const receipt = (await tx.wait())!;
-    return { receipt, draw: await Stub.lastDraw() };
+    return { receipt, spend: await Stub.lastSpend() };
   };
 
   const coverCall = async (accountId: bigint, value: bigint) =>
-    Stub.cover(await Logic.getAddress(), accountId, assignee.address, SUBSCRIPTION_ID, value);
+    Stub.cover(await Logic.getAddress(), accountId, buyer.address, SUBSCRIPTION_ID, value);
 
   const impersonatedNFT = async () => {
     const nftAddress = await NFT.getAddress();
@@ -185,33 +147,15 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     return hre.ethers.getImpersonatedSigner(nftAddress);
   };
 
-  const blockTimestamp = async (receipt: ContractTransactionReceipt): Promise<bigint> =>
-    BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
-
   /** The staker-shard ranges a receipt credited, as [start, end, amount]. */
-  const creditedRanges = async (receipt: ContractTransactionReceipt): Promise<bigint[][]> => {
-    const esAddress = (await ES.getAddress()).toLowerCase();
-    const out: bigint[][] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== esAddress) continue;
-      const parsed = ES.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === 'TokensAddedToEpochRange' && BigInt(parsed.args.shardId) === STAKER_SHARD_ID) {
-        out.push([BigInt(parsed.args.startEpoch), BigInt(parsed.args.endEpoch), BigInt(parsed.args.tokenAmount)]);
-      }
-    }
-    return out;
-  };
+  const creditedRanges = (receipt: ContractTransactionReceipt) => poolCredits(ES, receipt);
 
   const tokenLogCount = async (receipt: ContractTransactionReceipt): Promise<number> => {
     const tokenAddress = (await Token.getAddress()).toLowerCase();
     return receipt.logs.filter((l) => l.address.toLowerCase() === tokenAddress).length;
   };
 
-  const poolSnapshot = async (from: bigint, to: bigint): Promise<Map<bigint, bigint>> => {
-    const out = new Map<bigint, bigint>();
-    for (let e = from; e <= to; e++) out.set(e, await ES.getEpochPool(STAKER_SHARD_ID, e));
-    return out;
-  };
+  const poolSnapshot = (from: bigint, to: bigint) => poolsOver(ES, from, to);
 
   const costOf = (value: bigint, bps: bigint): bigint => {
     const cost = (value * (BPS - bps)) / BPS;
@@ -231,9 +175,9 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     it('admits only the contract the Hub names ServiceSubscriptions', async () => {
       const { accountId } = await createAccountFor(owner);
       const nft = await impersonatedNFT();
-      for (const caller of [accounts[3], assignee, owner, accounts[0], nft]) {
+      for (const caller of [accounts[3], buyer, owner, accounts[0], nft]) {
         await expect(
-          Logic.connect(caller).coverServiceCost(accountId, assignee.address, SUBSCRIPTION_ID, TRAC),
+          Logic.connect(caller).coverServiceCost(accountId, buyer.address, SUBSCRIPTION_ID, TRAC),
         )
           .to.be.revertedWithCustomError(Logic, 'OnlyServiceSubscriptions')
           .withArgs(caller.address);
@@ -252,7 +196,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
         .to.be.revertedWithCustomError(Logic, 'OnlyServiceSubscriptions')
         .withArgs(await Stub.getAddress());
       await expect(
-        next.cover(await Logic.getAddress(), accountId, assignee.address, SUBSCRIPTION_ID, TRAC),
+        next.cover(await Logic.getAddress(), accountId, buyer.address, SUBSCRIPTION_ID, TRAC),
       ).to.emit(Logic, 'ServiceCostCovered');
     });
 
@@ -337,7 +281,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
 
       // Part of the window is already spent.
       const first = await cover(accountId, 1_000n * TRAC);
-      const spent = first.draw.cost;
+      const spent = first.spend.cost;
       const available = B - spent + buffer;
 
       // A cost one wei above what is left.
@@ -354,16 +298,16 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
 
       // Exactly what is left still goes through.
       const exact = await cover(accountId, valueFor(available), ethers.id('subscription-2'));
-      expect(exact.draw.cost).to.equal(available);
+      expect(exact.spend.cost).to.equal(available);
       expect(await PCS.topUpBalance(accountId)).to.equal(0n);
     });
   });
 
   // -------------------------------------------------------------------------
-  // The draw
+  // The spend
   // -------------------------------------------------------------------------
 
-  describe('draw', () => {
+  describe('spend', () => {
     const TIERS: Array<[bigint, bigint]> = [
       [10_000n, 0n],
       [25_000n, 1_000n],
@@ -374,7 +318,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       [1_000_000n, 7_500n],
     ];
 
-    it('at every discount tier: the cost, the draw, the event and windowSpent, with no TRAC moved and nothing emitted', async () => {
+    it('at every discount tier: the cost, the spend, the event and windowSpent, with no TRAC moved and nothing emitted', async () => {
       const value = 10n * TRAC + 3n;
       const vaultAddress = await Vault.getAddress();
       for (const [committedTrac, bps] of TIERS) {
@@ -384,18 +328,18 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
         const vaultBefore = await Token.balanceOf(vaultAddress);
         const epoch = await ChronosContract.getCurrentEpoch();
 
-        const { receipt, draw } = await cover(accountId, value);
+        const { receipt, spend } = await cover(accountId, value);
 
-        expect(draw.cost, `cost at ${bps} bps`).to.equal(cost);
-        expect(draw.drawnFromWindow).to.equal(cost);
-        expect(draw.drawnFromTopUp).to.equal(0n);
-        expect(draw.window).to.equal(0n);
-        expect(draw.epoch).to.equal(epoch);
-        expect(draw.discountBps).to.equal(bps);
+        expect(spend.cost, `cost at ${bps} bps`).to.equal(cost);
+        expect(spend.spentFromWindow).to.equal(cost);
+        expect(spend.spentFromTopUp).to.equal(0n);
+        expect(spend.window).to.equal(0n);
+        expect(spend.epoch).to.equal(epoch);
+        expect(spend.discountBps).to.equal(bps);
 
         await expect(receipt)
           .to.emit(Logic, 'ServiceCostCovered')
-          .withArgs(accountId, assignee.address, SUBSCRIPTION_ID, value, cost, epoch, 0n, cost, 0n);
+          .withArgs(accountId, buyer.address, SUBSCRIPTION_ID, value, cost, epoch, 0n, cost, 0n);
 
         expect(await PCS.windowSpent(accountId, 0n)).to.equal(cost);
         expect(await PCS.topUpBalance(accountId)).to.equal(0n);
@@ -407,28 +351,28 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
 
     it('the cost is floored at 1 wei when the discount rounds it to 0', async () => {
       const { accountId: tenPct } = await createAccountFor(owner, 25_000n * TRAC);
-      expect((await cover(tenPct, 1n)).draw.cost).to.equal(1n);
+      expect((await cover(tenPct, 1n)).spend.cost).to.equal(1n);
       expect(await PCS.windowSpent(tenPct, 0n)).to.equal(1n);
 
       const { accountId: top } = await createAccountFor(owner, 1_000_000n * TRAC);
       // 3 wei at 7,500 bps is 0.75 wei before the floor.
-      const { draw, receipt } = await cover(top, 3n);
-      expect(draw.cost).to.equal(1n);
-      expect(draw.drawnFromWindow).to.equal(1n);
+      const { spend, receipt } = await cover(top, 3n);
+      expect(spend.cost).to.equal(1n);
+      expect(spend.spentFromWindow).to.equal(1n);
       await expect(receipt).to.emit(Logic, 'ServiceCostCovered').withArgs(
         top,
-        assignee.address,
+        buyer.address,
         SUBSCRIPTION_ID,
         3n,
         1n,
-        draw.epoch,
+        spend.epoch,
         0n,
         1n,
         0n,
       );
     });
 
-    it('a base-only draw leaves every staker pool of the account span and the shard carry unchanged', async () => {
+    it('a base-only spend leaves every staker pool of the account span and the shard carry unchanged', async () => {
       const { accountId } = await createAccountFor(owner);
       const e0 = await ChronosContract.getCurrentEpoch();
       const from = e0;
@@ -437,16 +381,16 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       const carryBefore = await ES.accumulatedRemainder(STAKER_SHARD_ID);
 
       const B = COMMITTED_TRAC / lock;
-      const { draw } = await cover(accountId, valueFor(B)); // the whole window, nothing more
-      expect(draw.drawnFromWindow).to.equal(B);
-      expect(draw.drawnFromTopUp).to.equal(0n);
+      const { spend } = await cover(accountId, valueFor(B)); // the whole window, nothing more
+      expect(spend.spentFromWindow).to.equal(B);
+      expect(spend.spentFromTopUp).to.equal(0n);
 
       const after = await poolSnapshot(from, to);
       for (let e = from; e <= to; e++) expect(after.get(e), `epoch ${e}`).to.equal(before.get(e));
       expect(await ES.accumulatedRemainder(STAKER_SHARD_ID)).to.equal(carryBefore);
     });
 
-    it('an overflow beyond the window draws the top-up buffer and books nothing to the staker pool: the whole cost is the draw', async () => {
+    it('an overflow beyond the window spends the top-up buffer and books nothing to the staker pool: the whole cost is the spend', async () => {
       const { accountId } = await createAccountFor(owner);
       const buffer = 1_000n * TRAC;
       await topUp(owner, accountId, buffer);
@@ -463,16 +407,16 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       const carryBefore = await ES.accumulatedRemainder(STAKER_SHARD_ID);
       const vaultBefore = await Token.balanceOf(await Vault.getAddress());
 
-      const { receipt, draw } = await cover(accountId, value);
+      const { receipt, spend } = await cover(accountId, value);
 
-      expect(draw.cost).to.equal(cost);
-      expect(draw.drawnFromWindow).to.equal(B);
-      expect(draw.drawnFromTopUp).to.equal(overflow);
-      expect(draw.drawnFromWindow + draw.drawnFromTopUp).to.equal(draw.cost);
-      expect(draw.epoch).to.equal(e0);
+      expect(spend.cost).to.equal(cost);
+      expect(spend.spentFromWindow).to.equal(B);
+      expect(spend.spentFromTopUp).to.equal(overflow);
+      expect(spend.spentFromWindow + spend.spentFromTopUp).to.equal(spend.cost);
+      expect(spend.epoch).to.equal(e0);
       await expect(receipt)
         .to.emit(Logic, 'ServiceCostCovered')
-        .withArgs(accountId, assignee.address, SUBSCRIPTION_ID, value, cost, e0, 0n, B, overflow);
+        .withArgs(accountId, buyer.address, SUBSCRIPTION_ID, value, cost, e0, 0n, B, overflow);
 
       // Neither part reaches the staker pool: the caller books the whole cost.
       expect(await creditedRanges(receipt)).to.deep.equal([]);
@@ -485,16 +429,16 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       expect(await tokenLogCount(receipt)).to.equal(0);
       expect(await Token.balanceOf(await Vault.getAddress())).to.equal(vaultBefore);
 
-      // With the window spent, the next draw comes from the buffer alone.
+      // With the window spent, the next spend comes from the buffer alone.
       const next = await cover(accountId, 100n * TRAC, ethers.id('subscription-2'));
-      expect(next.draw.drawnFromWindow).to.equal(0n);
-      expect(next.draw.drawnFromTopUp).to.equal(80n * TRAC);
-      expect(next.draw.cost).to.equal(80n * TRAC);
+      expect(next.spend.spentFromWindow).to.equal(0n);
+      expect(next.spend.spentFromTopUp).to.equal(80n * TRAC);
+      expect(next.spend.cost).to.equal(80n * TRAC);
       expect(await creditedRanges(next.receipt)).to.deep.equal([]);
       expect(await PCS.topUpBalance(accountId)).to.equal(buffer - overflow - 80n * TRAC);
     });
 
-    it('in one block, a service draw and a publish of the same cost draw the same split; only the publish books it, over the Knowledge Asset epochs', async () => {
+    it('in one block, a service spend and a publish of the same cost spend the same split; only the publish books it, over the Knowledge Asset epochs', async () => {
       const agent = accounts[8];
       const { accountId: publishingId } = await createAccountFor(owner);
       const { accountId: serviceId } = await createAccountFor(owner);
@@ -515,7 +459,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
         publishTx = await Logic.connect(nft).coverPublishingCost(agent.address, value, e0, kaEpochs, {
           gasLimit: 5_000_000,
         });
-        serviceTx = await Stub.cover(await Logic.getAddress(), serviceId, assignee.address, SUBSCRIPTION_ID, value, {
+        serviceTx = await Stub.cover(await Logic.getAddress(), serviceId, buyer.address, SUBSCRIPTION_ID, value, {
           gasLimit: 5_000_000,
         });
         await hre.network.provider.send('evm_mine', []);
@@ -536,24 +480,24 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
           }
         })
         .find((p) => p?.name === 'CostCovered');
-      const draw = await Stub.lastDraw();
-      expect(draw.cost).to.equal(covered!.args.discountedCost);
-      expect(draw.drawnFromWindow).to.equal(covered!.args.drawnFromEpoch);
-      expect(draw.drawnFromTopUp).to.equal(covered!.args.drawnFromTopUp);
-      expect(draw.drawnFromTopUp).to.be.greaterThan(0n);
+      const spend = await Stub.lastSpend();
+      expect(spend.cost).to.equal(covered!.args.discountedCost);
+      expect(spend.spentFromWindow).to.equal(covered!.args.spentFromEpoch);
+      expect(spend.spentFromTopUp).to.equal(covered!.args.spentFromTopUp);
+      expect(spend.spentFromTopUp).to.be.greaterThan(0n);
       expect(await PCS.windowSpent(serviceId, 0n)).to.equal(await PCS.windowSpent(publishingId, 0n));
       expect(await PCS.topUpBalance(serviceId)).to.equal(await PCS.topUpBalance(publishingId));
 
       // The publish books the whole cost over the KA's epochs from the current
-      // epoch, as a wallet publish spreads its payment; the service draw none.
-      const timeRemaining = (await ChronosContract.timestampForEpoch(e0 + 1n)) - (await blockTimestamp(publishRc));
+      // epoch, as a wallet publish spreads its payment; the service spend none.
+      const timeRemaining = (await ChronosContract.timestampForEpoch(e0 + 1n)) - (await blockTime(publishRc));
       expect(await creditedRanges(publishRc)).to.deep.equal(
-        prorateActiveSink(draw.cost, e0, kaEpochs, epLen, timeRemaining).map((r) => [r.start, r.end, r.amount]),
+        prorateActiveSink(spend.cost, e0, kaEpochs, epLen, timeRemaining).map((r) => [r.start, r.end, r.amount]),
       );
       expect(await creditedRanges(serviceRc)).to.deep.equal([]);
     });
 
-    it('publishing and service draws share one window allowance, first come first served', async () => {
+    it('publishing and service spends share one window allowance, first come first served', async () => {
       const agent = accounts[8];
       const { accountId } = await createAccountFor(owner);
       await NFT.connect(owner).registerAgent(accountId, agent.address);
@@ -561,10 +505,10 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       const e0 = await ChronosContract.getCurrentEpoch();
       const B = COMMITTED_TRAC / lock;
 
-      await Logic.connect(nft).coverPublishingCost(agent.address, 1_000n * TRAC, e0, lock); // 800 TRAC drawn
-      const { draw } = await cover(accountId, 2_000n * TRAC); // 1,600 TRAC drawn
-      expect(draw.drawnFromWindow).to.equal(1_600n * TRAC);
-      await Logic.connect(nft).coverPublishingCost(agent.address, 500n * TRAC, e0, lock); // 400 TRAC drawn
+      await Logic.connect(nft).coverPublishingCost(agent.address, 1_000n * TRAC, e0, lock); // 800 TRAC spent
+      const { spend } = await cover(accountId, 2_000n * TRAC); // 1,600 TRAC spent
+      expect(spend.spentFromWindow).to.equal(1_600n * TRAC);
+      await Logic.connect(nft).coverPublishingCost(agent.address, 500n * TRAC, e0, lock); // 400 TRAC spent
 
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(2_800n * TRAC);
       expect(await Logic.getRemainingAllowance(accountId, e0)).to.equal(B - 2_800n * TRAC);
@@ -573,28 +517,28 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       // allowance left (KnowledgeAssetsLifecycle then falls through to direct spend).
       const rest = B - 2_800n * TRAC;
       const last = await cover(accountId, valueFor(rest), ethers.id('subscription-2'));
-      expect(last.draw.cost).to.equal(rest);
+      expect(last.spend.cost).to.equal(rest);
       await expect(Logic.connect(nft).coverPublishingCost(agent.address, 10n * TRAC, e0, lock))
         .to.be.revertedWithCustomError(Logic, 'InsufficientAllowance')
         .withArgs(accountId, e0, 8n * TRAC, 0n);
     });
 
-    it('a later billing window draws its own allowance', async () => {
+    it('a later billing window spends its own allowance', async () => {
       const { accountId } = await createAccountFor(owner);
       const B = COMMITTED_TRAC / lock;
       await cover(accountId, valueFor(B)); // window 0 spent
       await time.increase(epLen);
-      const { draw, receipt } = await cover(accountId, 100n * TRAC, ethers.id('subscription-2'));
-      expect(draw.window).to.equal(1n);
-      expect(draw.drawnFromWindow).to.equal(80n * TRAC);
+      const { spend, receipt } = await cover(accountId, 100n * TRAC, ethers.id('subscription-2'));
+      expect(spend.window).to.equal(1n);
+      expect(spend.spentFromWindow).to.equal(80n * TRAC);
       expect(await PCS.windowSpent(accountId, 1n)).to.equal(80n * TRAC);
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(B);
       await expect(receipt)
         .to.emit(Logic, 'ServiceCostCovered')
-        .withArgs(accountId, assignee.address, ethers.id('subscription-2'), 100n * TRAC, 80n * TRAC, draw.epoch, 1n, 80n * TRAC, 0n);
+        .withArgs(accountId, buyer.address, ethers.id('subscription-2'), 100n * TRAC, 80n * TRAC, spend.epoch, 1n, 80n * TRAC, 0n);
     });
 
-    it('books the closed windows of an account created before 10.0.8 before it draws, and no window more', async () => {
+    it('books the closed windows of an account created before 10.0.8 before it spends, and no window more', async () => {
       // A synthetic pre-10.0.8 account, planted in storage by the Hub owner:
       // created two and a third windows ago, nothing booked yet, and a
       // window-0 spend made (and booked) under the old rules.
@@ -623,7 +567,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       await PCS.increaseWindowSpent(synthId, 0n, spent0);
       const B = committed / lock;
 
-      const { receipt, draw } = await cover(synthId, 10n * TRAC);
+      const { receipt, spend } = await cover(synthId, 10n * TRAC);
       // Windows 0 and 1 have closed: B − spent each, to the staker pool.
       await expect(receipt)
         .to.emit(Logic, 'EmissionScheduled')
@@ -632,8 +576,8 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       expect(credited).to.equal(B - spent0 + B);
       // The cursor stops at the current window: the account still pays at use time.
       expect((await PCS.getAccount(synthId)).lastSettledWindow).to.equal(2n);
-      expect(draw.window).to.equal(2n);
-      expect(draw.cost).to.equal(10n * TRAC);
+      expect(spend.window).to.equal(2n);
+      expect(spend.cost).to.equal(10n * TRAC);
       expect(await PCS.windowSpent(synthId, 2n)).to.equal(10n * TRAC);
       expect(await PCS.windowSpent(synthId, 0n)).to.equal(spent0);
     });

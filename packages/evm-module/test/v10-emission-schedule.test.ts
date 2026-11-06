@@ -47,6 +47,7 @@ import {
   PublishingConvictionStorage,
   Token,
 } from '../typechain';
+import { STAKER_SHARD_ID, TREASURY_SHARD_ID, deployAccountStack, poolsOver } from './helpers/account-stack';
 import {
   PoolModel,
   feeOf,
@@ -55,71 +56,20 @@ import {
 } from './helpers/emission-model';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
-const STAKER_SHARD_ID = 1n;
-const TREASURY_SHARD_ID = 2n;
 // 20% discount tier + 7 wei so the `committedTRAC % lock` dust path is live.
 const COMMITTED_TRAC = ethers.parseEther('50000') + 7n;
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  EpochStorage: EpochStorage;
-  ParametersStorage: ParametersStorage;
-  ConvictionStakingStorage: ConvictionStakingStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PublishingConviction: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  Harness: PublishingConvictionScheduleHarness;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture([
-    'Token',
-    'AskStorage',
-    'EpochStorage',
-    'Chronos',
-    'Profile',
-    'Identity',
-    'KnowledgeAssetsLifecycle',
-    'ContextGraphStorage',
-    'ContextGraphs',
-    'ContextGraphValueStorage',
-    'ContextGraphWaiverStorage',
-    'DKGPublishingConvictionNFT',
-    'DKGStakingConvictionNFT',
-    'StakingV10',
-  ]);
-
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  await Hub.setContractAddress('HubOwner', accounts[0].address);
-  const Harness = await deployScheduleHarness(Hub);
-
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    EpochStorage: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    ParametersStorage:
-      await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    ConvictionStakingStorage:
-      await hre.ethers.getContract<ConvictionStakingStorage>(
-        'ConvictionStakingStorage',
-      ),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>(
-      'DKGPublishingConvictionNFT',
-    ),
-    PublishingConviction: await hre.ethers.getContract<PublishingConviction>(
-      'PublishingConviction',
-    ),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>(
-      'PublishingConvictionStorage',
-    ),
-    Harness,
-  };
+async function deployFixture() {
+  const {
+    ES: EpochStorage,
+    Params: ParametersStorage,
+    Vault: ConvictionStakingStorage,
+    PC: PublishingConviction,
+    ...stack
+  } = await deployAccountStack();
+  await stack.Hub.setContractAddress('HubOwner', stack.accounts[0].address);
+  const Harness = await deployScheduleHarness(stack.Hub);
+  return { ...stack, EpochStorage, ParametersStorage, ConvictionStakingStorage, PublishingConviction, Harness };
 }
 
 describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under PublishingConviction 10.2.0', function () {
@@ -158,17 +108,7 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
   });
 
   /** Read getEpochPool(shard, e) over [from, to] into a map. */
-  const poolSnapshot = async (
-    from: bigint,
-    to: bigint,
-    shard: bigint = STAKER_SHARD_ID,
-  ): Promise<Map<bigint, bigint>> => {
-    const out = new Map<bigint, bigint>();
-    for (let e = from; e <= to; e++) {
-      out.set(e, await ES.getEpochPool(shard, e));
-    }
-    return out;
-  };
+  const poolSnapshot = (from: bigint, to: bigint, shard?: bigint) => poolsOver(ES, from, to, shard);
 
   const poolDiff = (
     before: Map<bigint, bigint>,
@@ -458,9 +398,9 @@ describe('@integration Accounts scheduled by 10.0.8 and 10.1.0, under Publishing
     const bookedIn = await epochOfTx((await booking.wait())!);
     expect(bookedIn).to.equal(e1);
 
-    // Windows 0 and 1, each forward from its close, as the 10.0.8 schedule
-    // spread them; the share of the epochs that have ended is booked into
-    // the current epoch.
+    // Windows 0 and 1, each with the curve the 10.0.8 schedule gave it, a
+    // window whose close epoch has ended shifted to start in the current
+    // epoch.
     const model = new PoolModel(remBefore);
     const { scheduled } = await scheduleModel({
       chronos: ChronosContract,

@@ -64,8 +64,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *     publishing pool in `EpochStorage` plus, from the activation epoch of
  *     the query/inference pool (OT-RFC-27, 10.1.0), its gross from that pool,
  *     `QueryInferenceSettlement.queryInferenceGross`. The operator fee comes
- *     off the sum, and the delegators split the rest by score. A claim first
- *     makes sure the pool has closed through the last epoch it reads.
+ *     off the sum, and the delegators split the rest by score.
  *
  * Withdraw model (D14 — atomic):
  *   - `withdraw()` is a single transaction. Pre-expiry is disallowed (lock
@@ -169,16 +168,22 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     //             every e from the pool's activation epoch. The operator fee
     //             and the delegator split apply to the sum, and the reward
     //             compounds into `raw` as before; reward carries take it too.
-    //           * Before it reads an epoch at or after activation, a claim
-    //             (and so a withdraw) calls `ensureClosed` for the last epoch
-    //             of its window, which closes the pool's epochs up to it, at
-    //             most `maxCloseStepsPerClaim` of them, or reverts
-    //             `QueryInferenceCloseBehind`; the permissionless
-    //             `closeEpochs` clears that.
-    //           * `initialize()` wires `QueryInferenceSettlement` and
-    //             `QueryInferenceStorage` where the Hub holds the settlement,
-    //             and leaves both 0 where it does not, as on a network without
-    //             the pool, whose rewards are those of 10.0.6.
+    //           * A claim reads only epochs that have ended, whose pool and
+    //             counts are final, so nothing has to run first and the pool
+    //             never holds a claim or a withdrawal back.
+    //           * A claim reads `QueryInferenceSettlement` from the Hub, as
+    //             the NFT gate reads its caller, and the activation epoch from
+    //             the storage that settlement uses, so a settlement replaced
+    //             in the Hub serves the next claim without a
+    //             re-initialization. Where the Hub holds no settlement, as on
+    //             a network without the pool, the rewards are those of 10.0.6.
+    //           * A withdrawal leaves the epoch in progress claimable: it
+    //             settles the position's score in that epoch and records it,
+    //             with the epoch's reward carries, in
+    //             `ConvictionWithdrawalStorage`, and once the epoch has ended
+    //             the permissionless `claimWithdrawnEpoch` pays its share of
+    //             both pools to the staker the withdrawal paid. Before, that
+    //             share counted in the node's total and stayed in the vault.
     string private constant _VERSION = "10.1.0";
 
     /// @notice Emitted when a node crosses `minimumStake` during a
@@ -224,13 +229,6 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     /// @dev Runs the operator-fee withdrawal and the V8 drains (10.0.6).
     ///      Internal, so the ABI is unchanged.
     StakingV10Ledger internal ledger;
-    /// @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0): its
-    ///         close and each node's gross from it. 0 where the Hub holds no
-    ///         settlement.
-    QueryInferenceSettlement public queryInferenceSettlement;
-    /// @notice The query/inference pool's storage, for its activation epoch.
-    ///         0 where the Hub holds no settlement.
-    QueryInferenceStorage public queryInferenceStorage;
 
     // ========================================================================
     // Events
@@ -250,6 +248,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         wrapper burns `tokenId` on the back half.
     event Withdrawn(uint256 indexed tokenId, address indexed staker, uint96 amount);
     event RewardsClaimed(uint256 indexed tokenId, uint96 amount);
+    /// @notice The withdrawn position `tokenId` left its share of `epoch`,
+    ///         the epoch in progress at its withdrawal, to be claimed once
+    ///         that epoch has ended (10.1.0).
+    event WithdrawnEpochRecorded(uint256 indexed tokenId, address indexed staker, uint256 epoch);
+    /// @notice `amount` of TRAC, the withdrawn position's share of `epoch`,
+    ///         was paid to `staker` (10.1.0).
+    event WithdrawnEpochClaimed(uint256 indexed tokenId, address indexed staker, uint256 epoch, uint96 amount);
 
     // ========================================================================
     // Errors
@@ -275,13 +280,12 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     error AmountExceedsOperatorFeeBalance(uint96 feeBalance, uint96 amount);
     error WithdrawalWasntInitiated();
     error WithdrawalPeriodPending(uint256 nowTimestamp, uint256 endTimestamp);
-    /// @notice A claim (or a withdraw) reads up to `epoch`, which the
-    ///         query/inference pool has not closed within
-    ///         `maxCloseStepsPerClaim` steps from `closedThrough`; the
-    ///         permissionless `QueryInferenceSettlement.closeEpochs` clears it.
-    ///         Raised by `QueryInferenceSettlement.ensureClosed` and declared
-    ///         here so it stays in this contract's ABI (10.1.0).
-    error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
+    /// @notice `tokenId` holds no withdrawn epoch to claim: none was
+    ///         recorded, or it has been claimed (10.1.0).
+    error NoWithdrawnEpoch(uint256 tokenId);
+    /// @notice `epoch`, the epoch `tokenId` was withdrawn in, has not ended
+    ///         yet (10.1.0).
+    error WithdrawnEpochInProgress(uint256 tokenId, uint256 epoch);
 
     // ========================================================================
     // Constructor + initialize
@@ -311,14 +315,65 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         token = IERC20(hub.getContractAddress("Token"));
         epochStorage = EpochStorage(hub.getContractAddress("EpochStorageV8"));
         ledger = StakingV10Ledger(hub.getContractAddress("StakingV10Ledger"));
-        // 10.1.0 — the query/inference pool is not deployed on every network.
-        if (hub.isContract("QueryInferenceSettlement")) {
-            queryInferenceSettlement = QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
-            queryInferenceStorage = QueryInferenceStorage(hub.getContractAddress("QueryInferenceStorage"));
-        } else {
-            queryInferenceSettlement = QueryInferenceSettlement(address(0));
-            queryInferenceStorage = QueryInferenceStorage(address(0));
-        }
+    }
+
+    /**
+     * @notice The query/inference pool's settlement (OT-RFC-27, 10.1.0), which
+     *         gives each node's gross from the pool, read from the Hub at each
+     *         claim, so a replaced settlement serves the next claim. 0 where
+     *         the Hub holds no settlement.
+     * @dev    Replacing the settlement in the Hub with a fixed one
+     *         (`Hub.setContractAddress`, then its `initialize()`) strands
+     *         nothing, and comes first: the new one reads the same
+     *         `QueryInferenceStorage`, so every count and all the money are
+     *         kept.
+     *
+     *         Removing it from the Hub is the emergency switch: with no
+     *         settlement, a claim pays the rewards of 10.0.6, without the
+     *         pool. It strands money, so:
+     *           1. Funding goes on. Wallet and Conviction Account subscriptions
+     *              are still funded and topped up until `QueryInferenceStorage`
+     *              is paused too; `setPaused(true)` stops both.
+     *           2. While the settlement is out, any one claim fixes the split
+     *              of each node-epoch it passes without the pool, and for good:
+     *              the pool's share stays in the vault, and registering a
+     *              settlement again does not restore it. `claimFor` is
+     *              permissionless, a withdrawal claims first, and
+     *              `claimWithdrawnEpoch` spends its record the same way. So
+     *              stop your own upkeep calls before pulling the switch, and
+     *              keep the outage short.
+     *           3. Sellers stop. `submitReceiptBatch` reverts, because
+     *              `QueryInferenceStorage` takes writes only from Hub
+     *              contracts. Work delivered but not yet batched loses its
+     *              served value if its subscription's epoch ends during the
+     *              outage. The money itself is not lost: an epoch with no
+     *              served value rolls it forward.
+     *           4. Pull the switch only with `Hub.removeContractByName`. On
+     *              the Hub's last entry, `removeContractByAddress` leaves the
+     *              name's pointer dangling in
+     *              `UnorderedNamedContractDynamicSet`, so this lookup, and
+     *              every claim and withdrawal with it, reverts until a
+     *              contract under another name is added. Switch back on with
+     *              a fresh deployment of the settlement and its
+     *              `initialize()`: removing the last entry by name leaves its
+     *              address's pointer dangling instead, and a settlement
+     *              registered again is always the last entry, so registering
+     *              the same address again can revert `AddressAlreadyInSet`.
+     */
+    function queryInferenceSettlement() public view returns (QueryInferenceSettlement) {
+        if (!hub.isContract("QueryInferenceSettlement")) return QueryInferenceSettlement(address(0));
+        return QueryInferenceSettlement(hub.getContractAddress("QueryInferenceSettlement"));
+    }
+
+    /// @notice The query/inference pool's storage, for its activation epoch:
+    ///         the one the settlement the Hub holds reads. 0 where
+    ///         the Hub holds no settlement. `QueryInferenceStorage` activates
+    ///         only once this names it, so no epoch from activation on is
+    ///         split without the pool.
+    function queryInferenceStorage() public view returns (QueryInferenceStorage) {
+        QueryInferenceSettlement settlement = queryInferenceSettlement();
+        if (address(settlement) == address(0)) return QueryInferenceStorage(address(0));
+        return settlement.queryInferenceStorage();
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -646,7 +701,29 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      re-stake the remainder, which gives the same economic
      *      result (tier-0 with 1x multiplier is effectively liquid
      *      stake). Q3 — rewards are auto-claimed inside this call so
-     *      the user sees a single button in the UI.
+     *      the user sees a single button in the UI. That auto-claim walks
+     *      every unclaimed epoch in this one transaction, under Base's
+     *      per-transaction cap of 2^24 gas, at the cost `claim` states
+     *      (about 92k gas per scored epoch before the query/inference pool,
+     *      about 110k after): a position claimed at least every 100 scored
+     *      epochs withdraws within it.
+     *
+     *      10.1.0 — the auto-claim covers every epoch that has ended. The
+     *      position's score in the epoch in progress counts in its node's
+     *      total for that epoch too, so it is settled here and recorded,
+     *      with that epoch's reward carries, in `ConvictionWithdrawalStorage`
+     *      before the position is deleted; once the epoch has ended,
+     *      `claimWithdrawnEpoch` pays its share of both pools to `staker`.
+     *      Nothing is recorded when there is nothing to claim.
+     *
+     *      So a withdrawal pays in two parts. This call pays the stake and
+     *      every epoch that has ended. The epoch in progress is paid later,
+     *      by `claimWithdrawnEpoch`, which anyone may call once that epoch
+     *      has ended and which pushes TRAC to `staker` in a transaction of
+     *      its own. A contract that stakes, such as a vault, must expect TRAC
+     *      it did not call for. Someone, a keeper or the staker, has to call
+     *      it: nothing claims the record by itself. No view previews the
+     *      amount.
      */
     function withdraw(
         address staker,
@@ -665,6 +742,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
         // happen BEFORE reading the final raw, because compounding grows
         // it. No-op when `currentEpoch <= 1` or nothing is unclaimed.
         _claim(tokenId);
+
+        // 10.1.0 — the epoch in progress, claimed once it has ended.
+        _recordWithdrawnEpoch(staker, tokenId, pos.identityId);
 
         // Re-read after auto-claim — raw may have grown via compounding.
         pos = convictionStorage.getPosition(tokenId);
@@ -772,6 +852,14 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *           statistic-only lifetime counter.
      *        4. `cs.setLastClaimedEpoch(tokenId, toEpoch)` — advance cursor.
      *      No StakingStorage writes.
+     *
+     *      Gas: a claim walks every unclaimed epoch of the position in this
+     *      one transaction, and Base caps a transaction at 2^24 gas
+     *      (16,777,216). The first claim on a node in an epoch costs about
+     *      92k gas per scored epoch before the query/inference pool and about
+     *      110k once the pool is active, more for a node with value after a run
+     *      of epochs with none, so a position is to be claimed at least every 100
+     *      scored epochs.
      */
     // The first arg (the staker address) is intentionally UNNAMED: it is
     // retained only for ABI compatibility with the DEPLOYED DKGStakingConvictionNFT
@@ -792,8 +880,74 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         the per-epoch operator fee) without touching the stateful ERC-721
     ///         wrapper. `_claim` reverts `PositionNotFound` for a nonexistent or
     ///         already-withdrawn position, so no extra guard is required.
+    ///         As `claim`, it walks every unclaimed epoch in one transaction,
+    ///         under Base's per-transaction cap of 2^24 gas: about 92k gas per
+    ///         scored epoch before the query/inference pool and about 110k
+    ///         after, so a position is to be claimed at least every 100 scored
+    ///         epochs.
     function claimFor(uint256 tokenId) external {
         _claim(tokenId);
+    }
+
+    /**
+     * @notice Pay a withdrawn position's share of the epoch that was in
+     *         progress at its withdrawal, once that epoch has ended, to the
+     *         staker the withdrawal paid. Permissionless, and once per
+     *         position.
+     * @dev    10.1.0 — the withdrawal settled the position's score in that
+     *         epoch and recorded it with the epoch's reward carries
+     *         (`ConvictionWithdrawalStorage`). This runs the split `_claim`
+     *         runs for an epoch: the position's score and each carry's take
+     *         their share of their node's reward for the epoch (`_nodeEpochReward`),
+     *         the publishing pool's and the query/inference pool's, net of
+     *         the operator fee. The score is the one the position had earned
+     *         by its withdrawal: a later proof on the node in that epoch adds
+     *         to the positions still staked, not to it. With no position
+     *         left to compound into, the share is paid in TRAC from the
+     *         vault. The record is deleted before the payment.
+     *
+     *         It is the second part of a withdrawal's payment: the payment
+     *         goes to `staker`, whoever calls, so a contract that staked
+     *         receives TRAC it did not call for. Nothing calls this by
+     *         itself, so a keeper or the staker does, and no view previews
+     *         the amount (`StakingKPI` has none).
+     * @return amount The TRAC paid.
+     */
+    function claimWithdrawnEpoch(uint256 tokenId) external returns (uint96 amount) {
+        // Exists, has ended, and is deleted: `StakingV10Ledger.takeWithdrawal`.
+        (address staker, uint72 node, uint256 epoch, ConvictionStakingStorage.RewardCarry[] memory carries) = ledger
+            .takeWithdrawal(tokenId);
+
+        (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _queryInferenceFrom();
+        bytes32 delegatorKey = bytes32(tokenId);
+        uint256 reward;
+        // Each carry, but one that points at the position's own slot, which
+        // is read once, after them.
+        for (uint256 i = 0; i < carries.length; i++) {
+            reward += _carryReward(node, delegatorKey, qiFromEpoch, settlement, carries[i]);
+        }
+        uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(epoch, node, delegatorKey);
+        if (score18 > 0) reward += _nodeEpochReward(epoch, node, score18, qiFromEpoch, settlement);
+
+        if (reward > type(uint96).max) revert RewardOverflow();
+        amount = uint96(reward);
+        if (amount > 0) convictionStorage.transferStake(staker, amount);
+        emit WithdrawnEpochClaimed(tokenId, staker, epoch, amount);
+    }
+
+    /// @dev 10.1.0 — settle `tokenId`'s score in the epoch in progress on
+    ///      `identityId`, and have it recorded, with the position's reward
+    ///      carries, for `claimWithdrawnEpoch` (`StakingV10Ledger`), unless
+    ///      there is nothing to claim. The auto-claim before it has matured
+    ///      and cleared the carries of every epoch that has ended, so those
+    ///      left are of the epoch in progress; the claim reads each at its
+    ///      own epoch all the same.
+    function _recordWithdrawnEpoch(address staker, uint256 tokenId, uint72 identityId) internal {
+        uint256 epoch = chronos.getCurrentEpoch();
+        uint256 score18 = _prepareForStakeChangeV10(epoch, tokenId, identityId);
+        if (ledger.recordWithdrawal(tokenId, staker, identityId, epoch, score18)) {
+            emit WithdrawnEpochRecorded(tokenId, staker, epoch);
+        }
     }
 
     /**
@@ -884,9 +1038,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
 
         _prepareForStakeChangeV10(currentEpoch, tokenId, pos.identityId);
 
-        // 10.1.0 — the query/inference pool closes through the window before
-        // any epoch of it is read; the epochs from `qiFromEpoch` on take it.
-        uint256 qiFromEpoch = _closeQueryInference(claimToEpoch);
+        // 10.1.0 — the epochs from `qiFromEpoch` on take the query/inference
+        // pool, through the settlement the Hub holds now.
+        (uint256 qiFromEpoch, QueryInferenceSettlement settlement) = _queryInferenceFrom();
 
         // Local cache.
         uint256 rawU = uint256(pos.raw);
@@ -935,7 +1089,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
             );
             uint256 delegatorScore18 = settledDelegatorScore18 + unsettledDelegatorScore18;
 
-            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18, qiFromEpoch);
+            rewardTotal += _nodeEpochReward(e, identityId, delegatorScore18, qiFromEpoch, settlement);
         }
 
         // v10.0.3 — integrate matured reward carries (pointers to RSS score
@@ -946,26 +1100,13 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 convictionStorage.getRewardCarries(tokenId);
             bool carriesMatured = false;
             for (uint256 i = 0; i < carries.length; i++) {
-                if (uint256(carries[i].epoch) > claimToEpoch) continue;
+                ConvictionStakingStorage.RewardCarry memory carry = carries[i];
+                if (uint256(carry.epoch) > claimToEpoch) continue;
                 carriesMatured = true;
                 // The main loop above already integrated the position's
-                // CURRENT (node, key) slot for every epoch in the window —
-                // skip a carry that points at it (e.g. A→B→A round-trip).
-                if (carries[i].identityId == identityId && carries[i].delegatorKey == delegatorKey) {
-                    continue;
-                }
-                uint256 carryScore18 = randomSamplingStorage.getEpochNodeDelegatorScore(
-                    uint256(carries[i].epoch),
-                    carries[i].identityId,
-                    carries[i].delegatorKey
-                );
-                if (carryScore18 == 0) continue;
-                rewardTotal += _nodeEpochReward(
-                    uint256(carries[i].epoch),
-                    carries[i].identityId,
-                    carryScore18,
-                    qiFromEpoch
-                );
+                // CURRENT (node, key) slot for every epoch in the window, so
+                // a carry that points at it (e.g. A→B→A round-trip) pays 0.
+                rewardTotal += _carryReward(identityId, delegatorKey, qiFromEpoch, settlement, carry);
             }
             if (carriesMatured) {
                 convictionStorage.clearRewardCarries(tokenId, uint32(claimToEpoch));
@@ -1147,16 +1288,18 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      to collect and no reward.
      *
      *      10.1.0 — for `e >= qiFromEpoch` the node's gross from the
-     *      query/inference pool joins the publishing pool's share before the
-     *      operator fee and the delegator split. A node finalizes receipt
-     *      value in an epoch only with a positive node score in it, so a node
-     *      with such a gross never takes the early return above.
+     *      query/inference pool, read from `settlement`, joins the publishing
+     *      pool's share before the operator fee and the delegator split. A
+     *      node counts receipt value in an epoch only with a positive node
+     *      score in it, so a node with such a gross never takes the early
+     *      return above.
      */
     function _nodeEpochReward(
         uint256 e,
         uint72 identityId,
         uint256 delegatorScore18,
-        uint256 qiFromEpoch
+        uint256 qiFromEpoch,
+        QueryInferenceSettlement settlement
     ) internal returns (uint256 epochReward) {
         uint256 nodeScore18 = randomSamplingStorage.getNodeEpochScore(e, identityId);
         if (nodeScore18 == 0) return 0;
@@ -1168,7 +1311,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
                 uint256 grossNodeRewards = (epochStorage.getEpochPool(EPOCH_POOL_INDEX, e)
                     * nodeScore18) / allNodesScore18;
                 if (e >= qiFromEpoch) {
-                    grossNodeRewards += queryInferenceSettlement.queryInferenceGross(e, identityId);
+                    grossNodeRewards += settlement.queryInferenceGross(e, identityId);
                 }
                 uint96 operatorFeeAmount = uint96(
                     (grossNodeRewards
@@ -1191,24 +1334,44 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     }
 
     /**
-     * @dev 10.1.0 — make sure the query/inference pool (OT-RFC-27) has closed
-     *      through `throughEpoch`, the last epoch a claim reads, and return
-     *      the first epoch whose rewards take it: its activation epoch. With
-     *      no settlement wired, the activation epoch unset, or a window that
-     *      ends before it, no epoch of the window takes the pool: it returns
-     *      `type(uint256).max` and calls nothing. Otherwise `ensureClosed`
-     *      closes the pool's epochs up to `throughEpoch`, at most
-     *      `maxCloseStepsPerClaim` of them, or reverts
-     *      `QueryInferenceCloseBehind` while it cannot, which the
-     *      permissionless `closeEpochs` clears. Epochs before activation never
-     *      close and take nothing from the pool.
+     * @dev The reward of `carry`, the position's score on the slot it points
+     *      at, a node the position left by a redelegation or its token before
+     *      a relock: that score's share of the slot node's reward for the
+     *      carry's epoch (`_nodeEpochReward`). 0 for a carry that points at
+     *      the position's own slot, (`identityId`, `delegatorKey`), which the
+     *      caller reads once itself, as an A→B→A round trip leaves one. The
+     *      claim of a position (`_claim`) and of a withdrawn one's epoch
+     *      (`claimWithdrawnEpoch`) both pay carries through it.
      */
-    function _closeQueryInference(uint256 throughEpoch) internal returns (uint256 qiFromEpoch) {
-        QueryInferenceStorage qis = queryInferenceStorage;
-        if (address(qis) == address(0)) return type(uint256).max;
-        qiFromEpoch = qis.activationEpoch();
-        if (qiFromEpoch == 0 || throughEpoch < qiFromEpoch) return type(uint256).max;
-        queryInferenceSettlement.ensureClosed(throughEpoch);
+    function _carryReward(
+        uint72 identityId,
+        bytes32 delegatorKey,
+        uint256 qiFromEpoch,
+        QueryInferenceSettlement settlement,
+        ConvictionStakingStorage.RewardCarry memory carry
+    ) internal returns (uint256) {
+        if (carry.identityId == identityId && carry.delegatorKey == delegatorKey) return 0;
+        uint256 score18 = randomSamplingStorage.getEpochNodeDelegatorScore(
+            uint256(carry.epoch),
+            carry.identityId,
+            carry.delegatorKey
+        );
+        if (score18 == 0) return 0;
+        return _nodeEpochReward(uint256(carry.epoch), carry.identityId, score18, qiFromEpoch, settlement);
+    }
+
+    /**
+     * @dev 10.1.0 — the first epoch whose rewards take the query/inference pool
+     *      (OT-RFC-27), its activation epoch, with the settlement the Hub holds
+     *      now, which a claim reads each epoch's gross from. With no settlement
+     *      in the Hub, or the activation epoch unset, no epoch takes the pool,
+     *      and it returns `type(uint256).max`.
+     */
+    function _queryInferenceFrom() internal view returns (uint256 qiFromEpoch, QueryInferenceSettlement settlement) {
+        settlement = queryInferenceSettlement();
+        if (address(settlement) == address(0)) return (type(uint256).max, settlement);
+        qiFromEpoch = settlement.queryInferenceStorage().activationEpoch();
+        if (qiFromEpoch == 0) qiFromEpoch = type(uint256).max;
     }
 
     /**

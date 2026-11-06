@@ -1,6 +1,7 @@
 // Gas of the StakingV10 entry points, through the DKGStakingConvictionNFT
 // wrapper that stakers call: stake, claim over one epoch and over several,
-// redelegate, relock, withdraw, and the operator-fee withdrawal. Each case is
+// redelegate, relock, withdraw, the claim of a withdrawn position's epoch in
+// progress, and the operator-fee withdrawal. Each case is
 // measured and printed for review; none has a target, so the test holds each
 // transaction to succeeding and to the per-transaction gas of the test
 // network.
@@ -165,6 +166,19 @@ describe('@gas StakingV10 entry points', function () {
     const t5 = await f.NFT.nextTokenId();
     await record('withdraw: nothing to claim', f.NFT.connect(d3).withdraw(t5));
     expect((await f.Vault.getPosition(t4)).identityId).to.equal(nodeB);
+  });
+
+  it('withdraws mid-epoch with a score in the epoch in progress, and claims that epoch once it has ended', async () => {
+    const d1 = f.accounts[10];
+    await stake(d1, nodeA, 0n);
+    const t1 = await f.NFT.nextTokenId();
+    await injectRewards(await f.Chronos.getCurrentEpoch(), nodeA);
+    await nextEpoch();
+    // The node has proven in the epoch in progress: the withdrawal records it.
+    await injectRewards(await f.Chronos.getCurrentEpoch(), nodeA);
+    await record('withdraw: 1 epoch to claim, the epoch in progress recorded', f.NFT.connect(d1).withdraw(t1));
+    await nextEpoch();
+    await record('claimWithdrawnEpoch: the first claim on the node in its epoch', f.StakingV10.claimWithdrawnEpoch(t1));
   });
 
   it('withdraws an operator fee: request, cancel, request again, finalize', async () => {

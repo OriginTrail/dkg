@@ -2,8 +2,8 @@
 // fork-rehearsal.ts — V8→V10 migration high-fidelity pre-flight (Base mainnet fork)
 // =============================================================================
 //
-// Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the 3 new
-// migration contracts onto the REAL Hub, wires them by impersonating the Hub
+// Forks Base mainnet at the live freeze Hub (0x99Aa…), deploys ONLY the new
+// V10 staking contracts onto the REAL Hub, wires them by impersonating the Hub
 // owner. Then it exercises the admin-push flow against REAL deployed state:
 // the impersonated Hub owner ADMIN-DRAINS a REAL mainnet delegator's V8 stake
 // into that delegator's migration credit (adminMigrateToCredit), and the
@@ -111,6 +111,10 @@ async function main() {
   // ---- 2. deploy the new contracts onto the REAL Hub ----
   console.log('\nDeploying migration contracts onto the forked Hub:');
   const cssAddr = await deploy('ConvictionStakingStorage', funder);
+  // StakingV10Ledger wires ConvictionWithdrawalStorage at initialize(), as
+  // the hardhat deploy registers it first (054b before 054a). It has no
+  // initialize() of its own.
+  const withdrawalStorageAddr = await deploy('ConvictionWithdrawalStorage', funder);
   // StakingV10 forwards its operator-fee withdrawal and V8 drains here, and
   // resolves it at initialize().
   const ledgerAddr = await deploy('StakingV10Ledger', funder);
@@ -121,6 +125,7 @@ async function main() {
   console.log('\nRegistering in Hub (as owner):');
   for (const [n, a] of [
     ['ConvictionStakingStorage', cssAddr],
+    ['ConvictionWithdrawalStorage', withdrawalStorageAddr],
     ['StakingV10Ledger', ledgerAddr],
     ['StakingV10', stakingV10Addr],
     ['DKGStakingConvictionNFT', wrapperAddr],
