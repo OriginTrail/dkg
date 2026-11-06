@@ -1,0 +1,118 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "publishingConviction",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "buyer",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint96",
+        "name": "value",
+        "type": "uint96"
+      }
+    ],
+    "name": "cover",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceSpend",
+        "name": "spend",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "lastSpend",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint96",
+            "name": "cost",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromWindow",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint96",
+            "name": "spentFromTopUp",
+            "type": "uint96"
+          },
+          {
+            "internalType": "uint40",
+            "name": "window",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint40",
+            "name": "epoch",
+            "type": "uint40"
+          },
+          {
+            "internalType": "uint16",
+            "name": "discountBps",
+            "type": "uint16"
+          }
+        ],
+        "internalType": "struct PublishingConviction.ServiceSpend",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]
