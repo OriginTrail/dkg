@@ -20,6 +20,7 @@ import { agentColorForUri, type AgentSummary } from './hooks/useAgents.js';
 import { BadgePercent, ChevronRight, Copy, RefreshCw, X } from 'lucide-react';
 import { Loading } from './components/ds/Loading.js';
 import { EmptyState } from './components/ContextGraphPrimitives.js';
+import { StateMatrix } from './design-system-states.js';
 
 type Theme = 'dark' | 'light';
 
@@ -142,7 +143,7 @@ const App: React.FC = () => {
       </header>
 
       <nav className="dsp-toc" aria-label="Sections">
-        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Toggle', 'Icons', 'Feedback', 'Inputs'].map((s) => (
+        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Toggle', 'Icons', 'Feedback', 'Inputs', 'States'].map((s) => (
           <a key={s} href={`#${s.toLowerCase().replace(/\s+/g, '-')}`}>{s}</a>
         ))}
       </nav>
@@ -365,6 +366,10 @@ const App: React.FC = () => {
           <textarea className="ds-input dsp-textarea" placeholder="SELECT ?s ?p ?o WHERE { … }" aria-label="Query" />
         </Row>
       </Section>
+
+      <Section id="states" title="States" lead="Every control in every state it has, in the theme chosen above. Hover and focus cells use the app's own rules. A dash means the control has no such state.">
+        <StateMatrix />
+      </Section>
     </div>
   );
 };
@@ -401,6 +406,16 @@ html, body { background: var(--bg-root); color: var(--text-primary); font-family
 .dsp-nested-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .dsp-nested { background: var(--bg-panel); gap: 4px; padding: 12px; }
 .dsp-textarea { width: min(100%, 480px); min-height: 72px; padding: 8px 10px; font-family: var(--font-mono); }
+.dsp-matrix { border-collapse: collapse; width: 100%; font-size: var(--fs-control); }
+.dsp-matrix th { padding: 8px 12px 8px 0; text-align: left; font-weight: 500; color: var(--text-secondary); white-space: nowrap; }
+.dsp-matrix thead th { font-size: var(--fs-label); color: var(--text-tertiary); }
+.dsp-matrix tbody th { display: grid; gap: 2px; }
+.dsp-matrix tbody th b { font-weight: 500; }
+.dsp-matrix tbody th span { color: var(--text-tertiary); font-size: var(--fs-label); white-space: normal; max-width: 180px; }
+.dsp-matrix td { padding: 8px 12px 8px 0; min-width: 120px; vertical-align: middle; }
+.dsp-matrix tr { border-top: 1px solid var(--border-subtle); }
+.dsp-matrix .ds-input { width: 112px; }
+.dsp-none { color: var(--text-tertiary); }
 @media (max-width: 720px) { .dsp-row, .dsp-type { grid-template-columns: 1fr; gap: 8px; } }
 `;
 

@@ -185,15 +185,22 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 | Group | Tokens | Use |
 |---|---|---|
 | Layer colours | `--layer-shared-bg`, `--layer-shared-border`, `--layer-shared-text`, `--layer-verified-bg`, `--layer-verified-border`, `--layer-verified-text`, `--layer-working-bg`, `--layer-working-border`, `--layer-working-text` | Fills, outlines and text for the memory layers |
-| Signal variants | `--accent-amber`, `--accent-blue`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-info`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
-| Layout and scale | `--accent-vm-hover`, `--font-mono`, `--font-sans`, `--fs-layer`, `--header-h`, `--tab-h`, `--toolbar-h` | Fixed shell heights and the remaining scale steps |
+| Signal variants | `--accent-amber`, `--accent-red`, `--danger-bg-strong`, `--danger-border`, `--danger-stripe`, `--success-bg-strong`, `--success-border`, `--text-danger-hover`, `--text-on-accent`, `--warning-bg-strong`, `--warning-border` | Stronger washes, outlines and text for the signals |
+| Layout and scale | `--accent-vm-hover`, `--font-mono`, `--font-sans`, `--fs-layer`, `--header-h`, `--tab-h` | Fixed shell heights and the remaining scale steps |
 
 ## Changing the system
 
 - **A value:** edit the token. Everything using it updates.
 - **A rule:** change this file, the token or component, and the reference page in one PR. The design owner in `.github/CODEOWNERS` reviews it.
 - **Something new:** add it to `src/ui/components/ds/`, not to one page, and describe it here.
+- **Retiring a class or token:** remove it in the PR that replaces it, with no deprecation period. Nothing outside this package reads these names, but its e2e tests do, so change their selectors in the same PR.
 - **Layers and status words:** nOS is the source of truth, and nothing keeps the two repos in step automatically. A change there needs a matching PR here.
+
+### Names kept for now
+
+A class or token that has to outlive its replacement is listed here with the reason, and `test/retired-names.test.ts` allows it. Remove the line when the name goes.
+
+None today.
 
 ## Checks
 
@@ -208,12 +215,13 @@ There are no exceptions. If no token fits, add one (see below). Canvas palettes 
 - `test/feedback-states.test.ts`: loading copy, empty states, the disabled look and form errors.
 - `test/data-format.test.ts`: shared formats and table scrolling.
 - `test/layout-tokens.test.ts`: layers, breakpoints, motion and line height.
+- `test/retired-names.test.ts`: stylesheet classes no markup uses, tokens nothing reads, and e2e selectors for classes that are gone.
 
 ## Adding to the system
 
 1. Check the reference page first: most needs are covered by an existing token or component.
 2. A new colour or size is a new token in `00-theme.css`, with a value for both themes and a line in this file saying what job it does.
-3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, and a section on the reference page.
+3. A new component goes in `components/ds/` with its CSS in `27-ds-components.css`, a section on the reference page, and a row in the page's state matrix (`design-system-states.tsx`) if it's interactive.
 4. Put the shared classes on the element (`ds-btn ds-primary ds-sm`, `ds-tab`, `ds-seg-item`, `ds-filter`, `ds-card`, `ds-card-nested`, `ds-input ds-sm`, or render `<Button>`) and keep the screen's own class only for layout. `27-ds-components.css` holds the shared rules and never lists screen classes; a screen that needs a variation refines it in its own stylesheet (`test/button-classes.test.ts` and `test/ds-classes.test.ts` check both directions).
 
 ## Data display

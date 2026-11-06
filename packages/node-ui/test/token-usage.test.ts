@@ -46,12 +46,4 @@ describe('token usage', () => {
     const offenders = codeFiles.filter((f) => inline.test(readFileSync(f, 'utf-8'))).map((f) => f.slice(UI.length + 1));
     expect(offenders).toEqual([]);
   });
-
-  it('blue stays off links, focus and tints: only the role tokens carry it', () => {
-    const uses = cssFiles
-      .filter((f) => !f.endsWith('00-theme.css'))
-      .filter((f) => /var\(--accent-blue/.test(withoutComments(readFileSync(f, 'utf-8'))))
-      .map((f) => f.slice(UI.length + 1));
-    expect(uses).toEqual([]);
-  });
 });

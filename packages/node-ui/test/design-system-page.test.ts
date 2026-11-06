@@ -6,6 +6,7 @@
 // opens the page.
 import { act } from 'react';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { STATES, forcedSelector } from '../src/ui/design-system-states.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -36,6 +37,26 @@ describe('design system page', () => {
     expect(root().querySelectorAll('.v10-agent-dot, .v10-agent-chip').length).toBeGreaterThan(0);
   });
 
+  it('shows each control in a full row of states', () => {
+    const table = root().querySelector('.dsp-matrix')!;
+    expect([...table.querySelectorAll('thead th')].map((th) => th.textContent)).toEqual(['Component', ...STATES]);
+    const rows = [...table.querySelectorAll('tbody tr')];
+    expect(rows.length).toBeGreaterThan(10);
+    for (const row of rows) expect(row.querySelectorAll('td').length).toBe(STATES.length);
+    expect(table.querySelectorAll('td[data-state="Hover"] .ds-btn.dsp-hover').length).toBeGreaterThan(5);
+    expect(table.querySelectorAll('td[data-state="Focus"] .dsp-focus').length).toBeGreaterThan(10);
+    expect(table.querySelectorAll('td[data-state="Disabled"] button:disabled').length).toBeGreaterThan(10);
+    expect(table.querySelectorAll('td[data-state="Loading"] [aria-busy="true"]').length).toBe(2);
+  });
+
+  it('copies hover and focus rules onto the forcing classes', () => {
+    expect(forcedSelector('.ds-btn:hover:not(:disabled)')).toBe('.ds-btn.dsp-hover:not(:disabled)');
+    expect(forcedSelector('.a:focus-visible, .b, .c:focus')).toBe('.a.dsp-focus, .c.dsp-focus');
+    expect(forcedSelector(':where(input:not([type="range"]), select):focus-visible')).toBe(':where(input:not([type="range"]), select).dsp-focus');
+    expect(forcedSelector('.a:focus-within')).toBe('');
+    expect(forcedSelector('.a:disabled, .b')).toBe('');
+  });
+
   it('switches theme on the document and remembers it', async () => {
     expect(document.body.classList.contains('light')).toBe(false);
     const light = buttons('.dsp-section ~ * .ds-seg-item, .ds-seg-item').find(b => b.textContent === 'Light')!;
@@ -49,9 +70,9 @@ describe('design system page', () => {
   });
 
   it('drives its interactive examples: tabs, segmented control and filter chips', async () => {
-    const tabs = buttons('[role="tab"].ds-tab');
+    const tabs = buttons('#navigation [role="tab"].ds-tab');
     await act(async () => { tabs[1].click(); });
-    expect(buttons('[role="tab"].ds-tab').filter(t => t.getAttribute('aria-selected') === 'true').map(t => t.textContent)).toEqual([tabs[1].textContent]);
+    expect(buttons('#navigation [role="tab"].ds-tab').filter(t => t.getAttribute('aria-selected') === 'true').map(t => t.textContent)).toEqual([tabs[1].textContent]);
 
     const segs = buttons('.ds-seg-item').filter(b => b.textContent !== 'Light' && b.textContent !== 'Dark');
     const target = segs.find(b => b.getAttribute('aria-pressed') !== 'true')!;

@@ -40,13 +40,11 @@
   --accent-red: #ef4444;
   --accent-amber: #f59e0b;
   --accent-green: #22c55e;
-  --accent-blue: #3b82f6;
 
   /* Semantic foregrounds (theme-aware) */
   --text-success: #86efac;
   --text-warning: #fbbf24;
   /* Info is neutral (icon + text); sky blue sat next to SWM cyan. */
-  --text-info: var(--text-secondary);
   --text-danger: #fca5a5;
   --text-danger-hover: #fecaca;
   /* Links: text colour + underline. Blue is no longer a UI role. */
@@ -110,7 +108,6 @@
   /* Sizing */
   --header-h: 44px;
   --tab-h: 36px;
-  --toolbar-h: 38px;
 }
 
 /* ══════════════════════════════════════════
@@ -153,7 +150,6 @@
      surface: 13% badge, 16% count; worst case the count on --bg-elevated
      (4.76:1). context-graph-contrast.test.ts checks. */
   --text-warning: #8e4706;
-  --text-info: var(--text-secondary);
   --text-danger: #b91c1c;
   --text-danger-hover: #991b1b;
   --text-link: var(--text-primary);
