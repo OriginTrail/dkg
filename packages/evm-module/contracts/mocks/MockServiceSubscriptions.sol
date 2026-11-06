@@ -8,10 +8,10 @@ import {PublishingConviction} from "../PublishingConviction.sol";
 /// @notice Test-only stand-in for the contract the Hub names
 ///         `ServiceSubscriptions`, the only caller `PublishingConviction`'s
 ///         `coverServiceCost` admits. It forwards a draw and keeps the last
-///         `ServiceDraw` returned, so tests can read the exact draw of the
+///         `ServiceSpend` returned, so tests can read the exact spend of the
 ///         transaction that made it.
 contract MockServiceSubscriptions {
-    PublishingConviction.ServiceDraw internal _lastDraw;
+    PublishingConviction.ServiceSpend internal _lastSpend;
 
     function cover(
         address publishingConviction,
@@ -19,12 +19,12 @@ contract MockServiceSubscriptions {
         address assignee,
         bytes32 subscriptionId,
         uint96 value
-    ) external returns (PublishingConviction.ServiceDraw memory d) {
+    ) external returns (PublishingConviction.ServiceSpend memory d) {
         d = PublishingConviction(publishingConviction).coverServiceCost(accountId, assignee, subscriptionId, value);
-        _lastDraw = d;
+        _lastSpend = d;
     }
 
-    function lastDraw() external view returns (PublishingConviction.ServiceDraw memory) {
-        return _lastDraw;
+    function lastSpend() external view returns (PublishingConviction.ServiceSpend memory) {
+        return _lastSpend;
     }
 }

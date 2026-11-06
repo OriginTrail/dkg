@@ -46,15 +46,15 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     windows of length `Chronos.epochLength()`, anchored at
  *     `Account.createdAtTimestamp`. Per-window base budget is
  *     `B = committedTRAC / lockDurationEpochs`; `windowSpent[id][w]` is what
- *     window w has drawn of it.
+ *     window w has spent of it.
  *   - A publish (`coverPublishingCost`) and a service plan period
- *     (`coverServiceCost`) draw their discounted cost from the current
+ *     (`coverServiceCost`) spend their discounted cost from the current
  *     window's budget first, then from the `topUpBalance` buffer.
- *   - A publish books the whole draw into the staker pool over the Knowledge
+ *   - A publish books the whole spend into the staker pool over the Knowledge
  *     Asset's epochs, with the spread of a wallet publish
- *     (`KnowledgeAssetsLifecycle._distributeTokens`). A service draw books
- *     nothing here: `ServiceSubscriptions` books it as due in the
- *     query/inference pool.
+ *     (`KnowledgeAssetsLifecycle._distributeTokens`). A service spend books
+ *     nothing here: `ServiceSubscriptions` books it in the query/inference
+ *     pool.
  *   - Once window w has closed, its unused budget `B − windowSpent[w]` goes
  *     to the staker pool, spread over the `lockDurationEpochs` epoch-lengths
  *     that FOLLOW the window's close (prorated at chain-epoch boundaries via
@@ -63,7 +63,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     the last window. This is the per-window math of the 10.0.8 schedule,
  *     run one closed window at a time by `_bookWindows`, with
  *     `lastSettledWindow` as its cursor. Every touch runs it (publish,
- *     service draw, top-up, transfer, `settle`), and the permissionless
+ *     service spend, top-up, transfer, `settle`), and the permissionless
  *     `settle` and `settleMany` let anyone bring accounts current.
  *   - No booking credits an epoch that has ended. A window booked after the
  *     epoch it closed in keeps the shape of its spread, shifted to start in
@@ -80,7 +80,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * account's migration or first touch — and marked it with
  * `lastSettledWindow == lockDurationEpochs`. While its lock is live such an
  * account keeps that behaviour: a publish is a budget gate for the base
- * portion, and only the top-up overflow it draws is booked, forward over the
+ * portion, and only the top-up overflow it spends is booked, forward over the
  * lock from the current epoch. It cannot pay for services
  * (`EmissionAlreadyScheduled`): its base is already the staker pool's. Every
  * other account pays at use time: one created at 10.2.0 or later, or created
@@ -93,20 +93,20 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * destinations:
  *   (a) the staker reward pool, credited via
  *       `EpochStorage.addTokensToEpochRange(STAKER_SHARD_ID, ...)`;
- *   (b) the query/inference pool, as the service draws that
+ *   (b) the query/inference pool, as the service spends that
  *       `ServiceSubscriptions` books as due there;
  *   (c) the protocol treasury — as the treasury EMISSION pool
  *       (`TREASURY_SHARD_ID`, written alongside (a) by `_bookWindows` and
  *       paid out per elapsed epoch via `collectTreasuryEmission`) plus the
  *       immediate `ConvictionStakingStorage.transferStake` skims on
- *       publishing draws and on the expiry tail.
+ *       publishing spends and on the expiry tail.
  * Fee basis: the treasury fee (`ParametersStorage.protocolTreasuryFee`, bps,
  * read when an amount is booked) is ASSESSED on every staker-bound amount.
  * `_bookWindows` splits a window's remainder into `net` to the staker shard
  * and `fee` to the treasury shard on the SAME forward curve, an accounting
  * split with no TRAC moving in the call, as the 10.0.8 schedule did. A
- * publishing draw and the expiry tail skim their fee at once — the vault is
- * funded at those points. Service draws are refused while a treasury is
+ * publishing spend and the expiry tail skim their fee at once — the vault is
+ * funded at those points. Service spends are refused while a treasury is
  * wired, so they carry no fee. Every fee term is 0 while
  * `protocolTreasury == address(0)` (the live state on every chain today —
  * note `protocolTreasuryFee` itself is live at 300 bps; the unset recipient
@@ -130,7 +130,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     OT-RFC-27) is `onlyServiceSubscriptions` — only the contract the Hub
  *     names `ServiceSubscriptions`, resolved on every call. That contract
  *     checks the owner's opt-in and the buyer key's assignment and caps
- *     before it calls; this one only draws the allowance.
+ *     before it calls; this one only spends the allowance.
  */
 contract PublishingConviction is
     INamed,
@@ -186,7 +186,7 @@ contract PublishingConviction is
     //          so the pool schedule is fully determined by the commitment's
     //          own terms at account creation. `coverPublishingCost` keeps
     //          the windowSpent budget accounting but no longer re-emits the
-    //          base portion (only topUp-drawn overflow emits, forward over the
+    //          base portion (only topUp-spent overflow emits, forward over the
     //          lock from the current epoch). The passive window sweep
     //          (`_settleElapsed`/`_sweepWindowProrated`) is replaced by the
     //          idempotent `_scheduleRemaining` (same call sites); `settle()`
@@ -218,7 +218,7 @@ contract PublishingConviction is
     //          chains; the bps parameter itself is live at 300).
     // 10.1.0 — Conviction Account service spending (OT-RFC-27). Adds
     //          `coverServiceCost`, callable only by the Hub-registered
-    //          `ServiceSubscriptions`: the same allowance draw as
+    //          `ServiceSubscriptions`: the same allowance spend as
     //          `coverPublishingCost` (the current window's base allowance
     //          first, then the top-up buffer, at the account's discount tier,
     //          with the 1-wei floor) and the same emission of the top-up
@@ -232,11 +232,11 @@ contract PublishingConviction is
     //          books nothing, and `_scheduleRemaining` becomes `_bookWindows`,
     //          the same per-window math run one closed window at a time, from
     //          `lastSettledWindow` to the current window, on every touch and
-    //          from `settle`. A use-time account books each publishing draw,
+    //          from `settle`. A use-time account books each publishing spend,
     //          base and top-up overflow alike, over the Knowledge Asset's
     //          epochs as a wallet publish does, with the treasury fee skimmed
     //          at once; its `coverServiceCost` books nothing to the staker pool
-    //          and returns the draw for the caller to book (`ServiceDraw`
+    //          and returns the spend for the caller to book (`ServiceSpend`
     //          drops `topUpRanges`). Accounts that 10.0.8 or 10.1.0 scheduled
     //          (`lastSettledWindow == lockDurationEpochs` while live) publish
     //          as before and are refused services (`EmissionAlreadyScheduled`).
@@ -244,7 +244,7 @@ contract PublishingConviction is
     //          `migrateEmissionSchedule`, whose migration would now write a
     //          full schedule. `EmissionScheduled` reports each booking's
     //          windows. `_distributeProratedRanges` folds back into
-    //          `_distributeProrated`; the two draws share `_draw`. No booking
+    //          `_distributeProrated`; the two spends share `_spend`. No booking
     //          credits an epoch that has ended: a late window's whole spread,
     //          staker and treasury side alike, starts in the current epoch
     //          with the shape of its on-time spread, shifted later
@@ -267,14 +267,14 @@ contract PublishingConviction is
     ///         counter per epoch is the payout's idempotence source.
     uint256 public constant TREASURY_SHARD_ID = 2;
 
-    /// @notice The result of a `coverServiceCost` draw (10.1.0), returned to
-    ///         `ServiceSubscriptions`, which books `cost` as due in the
+    /// @notice The result of a `coverServiceCost` spend (10.1.0), returned to
+    ///         `ServiceSubscriptions`, which books `cost` in the
     ///         query/inference pool (10.2.0) and records the period.
-    struct ServiceDraw {
-        uint96 cost; // value × (10000 − discountBps) / 10000, at least 1 wei: the whole draw
-        uint96 drawnFromWindow; // from the current billing window's base allowance
-        uint96 drawnFromTopUp; // from the top-up buffer
-        uint40 window; // the billing window drawn: _currentBillingWindow(acct)
+    struct ServiceSpend {
+        uint96 cost; // value × (10000 − discountBps) / 10000, at least 1 wei: the whole spend
+        uint96 spentFromWindow; // from the current billing window's base allowance
+        uint96 spentFromTopUp; // from the top-up buffer
+        uint40 window; // the billing window spent: _currentBillingWindow(acct)
         uint40 epoch; // chronos.getCurrentEpoch()
         uint16 discountBps;
     }
@@ -343,8 +343,8 @@ contract PublishingConviction is
         uint40 indexed epoch,
         uint96 baseCost,
         uint96 discountedCost,
-        uint96 drawnFromEpoch,
-        uint96 drawnFromTopUp
+        uint96 spentFromEpoch,
+        uint96 spentFromTopUp
     );
     event AgentRegistered(uint256 indexed accountId, address indexed agent);
     event AgentDeregistered(uint256 indexed accountId, address indexed agent);
@@ -416,8 +416,8 @@ contract PublishingConviction is
         uint96 cost,
         uint40 epoch,
         uint40 window,
-        uint96 drawnFromWindow,
-        uint96 drawnFromTopUp
+        uint96 spentFromWindow,
+        uint96 spentFromTopUp
     );
 
     // ============================================================
@@ -652,7 +652,7 @@ contract PublishingConviction is
         }
 
         // 10.2.0: nothing goes to the pools at creation. The account pays
-        // when it draws, and each window's unused budget is booked once the
+        // when it spends, and each window's unused budget is booked once the
         // window has closed (`_bookWindows`). The K_n score seeding above is
         // unchanged: it follows the commitment, not the money.
     }
@@ -870,17 +870,17 @@ contract PublishingConviction is
      *        1. Reject if the publish's KA lifetime (`kaEpochs`) exceeds
      *           the account's `lockDurationEpochs`.
      *        2. Book the windows that have closed (`_sweepClosedWindows`),
-     *           before the draw below writes `windowSpent`.
+     *           before the spend below writes `windowSpent`.
      *        3. Compute `discountedCost = baseCost * (1 - discountBps/1e4)`,
      *           floored at 1 wei.
      *        4. Spend order against the current window: base allowance
-     *           first, then `topUpBalance` overflow (`_draw`).
-     *        5. Book what the draw pays for into the staker pool:
-     *             - a use-time account books the whole draw over the KA's
+     *           first, then `topUpBalance` overflow (`_spend`).
+     *        5. Book what the spend pays for into the staker pool:
+     *             - a use-time account books the whole spend over the KA's
      *               `kaEpochs` from the current epoch, the spread of a wallet
      *               publish (`KnowledgeAssetsLifecycle._distributeTokens`);
      *             - a scheduled account (10.0.8 / 10.1.0) books only the
-     *               topUp-drawn overflow, forward over `lockDurationEpochs`
+     *               topUp-spent overflow, forward over `lockDurationEpochs`
      *               from the current epoch: its base is already scheduled,
      *               and `windowSpent` is its budget gate.
      *           The treasury fee is skimmed at once.
@@ -934,11 +934,11 @@ contract PublishingConviction is
         // `baseCost`, so the trivially-honest `coverPublishingCost(_, 0, _, _)`
         // shape (no path exercises it today; defensive) stays a no-op.
         discountedCost = _discounted(baseCost, acct.discountBps);
-        (uint96 drawnFromEpoch, uint96 drawnFromTopUp) =
-            _draw(acct, accountId, discountedCost, currentBillingWindow, currentEpoch);
+        (uint96 spentFromEpoch, uint96 spentFromTopUp) =
+            _spend(acct, accountId, discountedCost, currentBillingWindow, currentEpoch);
 
         (uint96 booked, uint256 epochs) = scheduled
-            ? (drawnFromTopUp, uint256(acct.lockDurationEpochs))
+            ? (spentFromTopUp, uint256(acct.lockDurationEpochs))
             : (discountedCost, uint256(kaEpochs));
         if (booked > 0) {
             (address treasury, uint256 feeBps) = _treasuryParams();
@@ -952,7 +952,7 @@ contract PublishingConviction is
             _payTreasury(treasury, fee);
         }
 
-        emit CostCovered(accountId, currentEpoch, baseCost, discountedCost, drawnFromEpoch, drawnFromTopUp);
+        emit CostCovered(accountId, currentEpoch, baseCost, discountedCost, spentFromEpoch, spentFromTopUp);
     }
 
     // ============================================================
@@ -960,31 +960,31 @@ contract PublishingConviction is
     // ============================================================
 
     /**
-     * @notice Draw `accountId`'s allowance for a service plan period that the
-     *         buyer key `assignee` funds, exactly as a publish draws it, and
-     *         return the draw for the caller to book (10.1.0, OT-RFC-27).
+     * @notice Spend `accountId`'s allowance for a service plan period that the
+     *         buyer key `assignee` funds, exactly as a publish spends it, and
+     *         return the spend for the caller to book (10.1.0, OT-RFC-27).
      *
      * @dev Caller gate: `onlyServiceSubscriptions`. That contract checks the
      *      owner's opt-in, the assignment and its caps before it calls, and
-     *      books `d.cost` as due in the query/inference pool after it; this
-     *      function checks neither and adds only the draw.
+     *      books `d.cost` in the query/inference pool after it; this
+     *      function checks neither and adds only the spend.
      *
      *      Behaviour — `coverPublishingCost` without the agent lookup, the
      *      KA-lifetime check and the staker-pool booking:
      *        1. `value == 0` reverts `ZeroServiceValue`.
      *        2. A wired protocol treasury reverts
-     *           `ServiceFundingPausedTreasuryWired`: a service draw carries no
+     *           `ServiceFundingPausedTreasuryWired`: a service spend carries no
      *           treasury fee and moves no TRAC.
      *        3. An unknown account reverts `UnknownAccount`, an expired one
      *           `AccountExpired`, and one that 10.0.8 or 10.1.0 scheduled
      *           `EmissionAlreadyScheduled` (10.2.0): its base is already the
-     *           staker pool's, so a service draw would count it twice.
+     *           staker pool's, so a service spend would count it twice.
      *        4. Book the windows that have closed (`_sweepClosedWindows`).
      *        5. `cost = value × (1 − discountBps / 1e4)`, floored at 1 wei.
      *        6. Spend order against the current window: base allowance
      *           first, then the `topUpBalance` buffer. Short of both reverts
-     *           `InsufficientAllowance`; nothing is drawn partially.
-     *        7. Book nothing to the staker pool (10.2.0): the whole draw,
+     *           `InsufficientAllowance`; nothing is spent partially.
+     *        7. Book nothing to the staker pool (10.2.0): the whole spend,
      *           window part and top-up part alike, is `d.cost`, which the
      *           caller books.
      *
@@ -995,7 +995,7 @@ contract PublishingConviction is
         address assignee,
         bytes32 subscriptionId,
         uint96 value
-    ) external onlyServiceSubscriptions returns (ServiceDraw memory d) {
+    ) external onlyServiceSubscriptions returns (ServiceSpend memory d) {
         if (value == 0) revert ZeroServiceValue();
         address treasury = parametersStorage.protocolTreasury();
         if (treasury != address(0)) revert ServiceFundingPausedTreasuryWired(treasury);
@@ -1011,7 +1011,7 @@ contract PublishingConviction is
         d.epoch = uint40(chronos.getCurrentEpoch());
         d.discountBps = acct.discountBps;
         d.cost = _discounted(value, acct.discountBps);
-        (d.drawnFromWindow, d.drawnFromTopUp) = _draw(acct, accountId, d.cost, d.window, d.epoch);
+        (d.spentFromWindow, d.spentFromTopUp) = _spend(acct, accountId, d.cost, d.window, d.epoch);
 
         emit ServiceCostCovered(
             accountId,
@@ -1021,17 +1021,17 @@ contract PublishingConviction is
             d.cost,
             d.epoch,
             d.window,
-            d.drawnFromWindow,
-            d.drawnFromTopUp
+            d.spentFromWindow,
+            d.spentFromTopUp
         );
     }
 
-    /// @dev The allowance draw shared by publishing and services (10.2.0):
+    /// @dev The allowance spend shared by publishing and services (10.2.0):
     ///      `cost` comes from billing window `window`'s base budget first,
     ///      then from the top-up buffer. Short of both reverts
-    ///      `InsufficientAllowance`, so nothing is drawn partially. Returns
+    ///      `InsufficientAllowance`, so nothing is spent partially. Returns
     ///      the two parts, which sum to `cost`.
-    function _draw(
+    function _spend(
         PublishingConvictionStorage.Account memory acct,
         uint256 accountId,
         uint96 cost,
@@ -1062,7 +1062,7 @@ contract PublishingConviction is
     }
 
     /// @dev `amount × (1 − bps / 1e4)`, floored at 1 wei for a non-zero
-    ///      `amount`: the post-discount floor of both draws.
+    ///      `amount`: the post-discount floor of both spends.
     function _discounted(uint96 amount, uint16 bps) internal pure returns (uint96 cost) {
         cost = uint96((uint256(amount) * (BPS_DENOMINATOR - uint256(bps))) / BPS_DENOMINATOR);
         if (cost == 0 && amount > 0) cost = 1;
@@ -1286,8 +1286,8 @@ contract PublishingConviction is
     ///         close — and move the cursor to `toWindow`.
     /// @dev    The per-window math of the 10.0.8 schedule, which ran it over
     ///         every window at once. Exact per window, because every amount in
-    ///         `windowSpent[w]` was booked when it was drawn: by a 10.2.0
-    ///         publish into the staker pool, by a service draw as due in the
+    ///         `windowSpent[w]` was booked when it was spent: by a 10.2.0
+    ///         publish into the staker pool, by a service spend in the
     ///         query/inference pool, or by a publish before 10.0.8 into the
     ///         staker pool (remainder + spent == B). The spread is anchored
     ///         purely on STORED account fields (never `block.timestamp`), so a

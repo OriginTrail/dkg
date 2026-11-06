@@ -14,7 +14,7 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *         Marketplace"). The owner of a Conviction Account opts it in and
  *         assigns bounded plan-funding authority to buyer keys, and each buyer
  *         key funds plan periods from the account's existing allowance. A
- *         period funded from an account moves no TRAC: its cost is drawn from
+ *         period funded from an account moves no TRAC: its cost is spent from
  *         the account's allowance and booked in the query/inference
  *         pool (`QueryInferenceStorage`), as a wallet period's value is. A
  *         buyer key may also fund periods from its wallet; those are recorded
@@ -115,8 +115,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         address owner; // the account's owner who switched it on
     }
 
-    /// @notice A buyer key's authority over one account: the most it may draw
-    ///         for one period, in COST (TRAC wei drawn from the account's
+    /// @notice A buyer key's authority over one account: the most it may spend
+    ///         for one period, in COST (TRAC wei spent from the account's
     ///         allowance after its discount), until it expires. It funds only
     ///         while the owner who consented to it holds the account.
     struct Assignment {
@@ -151,13 +151,13 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
         uint40 periodStart; // the later of the funding's block time and the epoch's start; 0 = no record
         uint40 periodEnd; // the start of the next epoch
         uint40 fundedEpoch; // the epoch the funding ran in
-        uint40 fundedWindow; // the account's billing window drawn; 0 for a wallet period
+        uint40 fundedWindow; // the account's billing window spent; 0 for a wallet period
         uint16 discountBps; // 0 for a wallet period
         uint8 bucketCount;
         uint96 value; // sum of the bucket values, before the discount
-        uint96 cost; // drawn from the allowance; the value for a wallet period
-        uint96 drawnFromWindow;
-        uint96 drawnFromTopUp;
+        uint96 cost; // spent from the allowance; the value for a wallet period
+        uint96 spentFromWindow;
+        uint96 spentFromTopUp;
     }
 
     /// @notice One service bucket of a funded period.
@@ -174,8 +174,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     struct TopUpAmounts {
         uint96 value;
         uint96 cost;
-        uint96 drawnFromWindow;
-        uint96 drawnFromTopUp;
+        uint96 spentFromWindow;
+        uint96 spentFromTopUp;
     }
 
     // ============================================================
@@ -220,7 +220,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     /// @dev accountId => assignee => membership index for `_assignees`.
     mapping(uint256 => mapping(address => bool)) internal _listed;
     /// @dev Slots 7 to 12: where 1.1.0 kept the service labels and the window
-    ///      draws they were based on. Never written since 1.2.0; held empty so
+    ///      spends they were based on. Never written since 1.2.0; held empty so
     ///      the period records keep slots 13 to 15.
     uint256[6] private _retiredLabelSlots;
     /// @dev subscriptionId => funded period record.
@@ -351,7 +351,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
     /// @notice Top up a recorded period: add `added[i]` to the value of its
     ///         stored bucket `i`, append `appended` after its stored buckets,
-    ///         add `t` to its value, cost and draw split, and replace its plan
+    ///         add `t` to its value, cost and spend split, and replace its plan
     ///         commitment.
     /// @dev    It refuses an id with no record (`SubscriptionNotFound`), whose
     ///         buckets would then belong to no period, and more entries in
@@ -383,9 +383,9 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
 
         s.value += t.value;
         s.cost += t.cost;
-        if (t.drawnFromWindow != 0 || t.drawnFromTopUp != 0) {
-            s.drawnFromWindow += t.drawnFromWindow;
-            s.drawnFromTopUp += t.drawnFromTopUp;
+        if (t.spentFromWindow != 0 || t.spentFromTopUp != 0) {
+            s.spentFromWindow += t.spentFromWindow;
+            s.spentFromTopUp += t.spentFromTopUp;
         }
         s.planDigest = planDigest;
     }
@@ -456,7 +456,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ///         repeats: `bucketCount` with the stored buckets
     ///         (`storedBucketCount`, `appendBucket`), `value` with the sum of
     ///         their values (`setBucket`, `appendBucket`), `cost` with
-    ///         `drawnFromWindow + drawnFromTopUp`, or with `value` for a wallet
+    ///         `spentFromWindow + spentFromTopUp`, or with `value` for a wallet
     ///         period, `accountId` with the account's list
     ///         (`appendAccountSubscription`), and `assignee` and `epoch` with
     ///         the id, keccak256(abi.encode(assignee, epoch)). The money booked

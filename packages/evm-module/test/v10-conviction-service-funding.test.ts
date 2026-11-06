@@ -10,7 +10,7 @@
 //     each with its cost under the period's epoch;
 //   - fund, refusals: the period limit, the period's epoch, the buckets, the
 //     assignment, the allowance, an expired account, a wired treasury, the gate
-//     on coverServiceCost, a mismatched draw and an account scheduled in full,
+//     on coverServiceCost, a mismatched spend and an account scheduled in full,
 //     each without partial effect;
 //   - period records: the record is always visible, and a buyer key funds one
 //     period per epoch;
@@ -29,7 +29,7 @@ import { expect } from 'chai';
 import { ContractTransactionReceipt, ethers } from 'ethers';
 import hre from 'hardhat';
 
-import { MockSkewedServiceDraw } from '../typechain';
+import { MockSkewedServiceSpend } from '../typechain';
 import { STAKER_SHARD_ID, blockTime, eventsOf } from './helpers/account-stack';
 import {
   CLASS_INFERENCE,
@@ -59,7 +59,7 @@ const TIERS: Array<[bigint, bigint]> = [
   [500_000n * TRAC, 5_000n],
   [1_000_000n * TRAC, 7_500n],
 ];
-// A limit that no test of the draw itself reaches.
+// A limit that no test of the spend itself reaches.
 const WIDE: Partial<Terms> = { maxCostPerPeriod: 50_000n * TRAC };
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
@@ -167,8 +167,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
           bucketCount: 2n,
           value,
           cost,
-          drawnFromWindow: cost,
-          drawnFromTopUp: 0n,
+          spentFromWindow: cost,
+          spentFromTopUp: 0n,
         });
         expect(asTuples(await f.CSS.getBuckets(subscriptionId))).to.deep.equal(asTuples(r.buckets));
         expect(await f.CSS.accountSubscriptionCount(accountId)).to.equal(1n);
@@ -192,7 +192,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const { cost, receipt } = await h.fund(await h.inference(accountId, 3n));
       expect(cost).to.equal(1n);
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
-      expect([covered.value, covered.cost, covered.drawnFromWindow]).to.deep.equal([3n, 1n, 1n]);
+      expect([covered.value, covered.cost, covered.spentFromWindow]).to.deep.equal([3n, 1n, 1n]);
       expect(await f.QIS.convictionFunding(await h.epochNow())).to.equal(1n);
       expect((await f.CSS.getSubscription(await f.SS.subscriptionIdOf(buyer.address, await h.epochNow()))).cost).to.equal(1n);
     });
@@ -212,7 +212,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(cost).to.equal(700n * TRAC);
 
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
-      expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([0n, cost]);
+      expect([covered.spentFromWindow, covered.spentFromTopUp]).to.deep.equal([0n, cost]);
       expect(await h.creditedRanges(receipt)).to.have.length(0);
       expect(await h.poolSnapshot(first - 1n, last + 1n)).to.deep.equal(pool);
 
@@ -221,10 +221,10 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await f.QIS.convictionFunding(next - 1n)).to.equal(B);
       expect(await f.PCS.topUpBalance(accountId)).to.equal(2_000n * TRAC - cost);
       const s = await f.CSS.getSubscription(subscriptionId);
-      expect([s.drawnFromWindow, s.drawnFromTopUp]).to.deep.equal([0n, cost]);
+      expect([s.spentFromWindow, s.spentFromTopUp]).to.deep.equal([0n, cost]);
     });
 
-    it("a draw split between the window and the top-up buffer is booked in full under the period's epoch", async () => {
+    it("a spend split between the window and the top-up buffer is booked in full under the period's epoch", async () => {
       const { accountId } = await h.openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
       await h.fund(await h.inference(accountId, valueFor(B - 100n * TRAC, 3_000n)));
@@ -233,7 +233,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const { cost, receipt } = await h.fund(await h.inference(accountId, valueFor(300n * TRAC, 3_000n), { epoch: next }));
       expect(cost).to.equal(300n * TRAC);
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
-      expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([100n * TRAC, 200n * TRAC]);
+      expect([covered.spentFromWindow, covered.spentFromTopUp]).to.deep.equal([100n * TRAC, 200n * TRAC]);
       expect(await h.creditedRanges(receipt)).to.have.length(0);
       expect(await f.QIS.convictionFunding(next)).to.equal(300n * TRAC);
       expect(await f.QIS.convictionFunding(next - 1n)).to.equal(B - 100n * TRAC);
@@ -377,7 +377,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       // Exactly what is left: the window, then the buffer.
       const { receipt } = await h.fund(await h.inference(accountId, 500n * TRAC, { epoch: next }));
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
-      expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([400n * TRAC, 100n * TRAC]);
+      expect([covered.spentFromWindow, covered.spentFromTopUp]).to.deep.equal([400n * TRAC, 100n * TRAC]);
     });
 
     it('AccountExpired, for an assignment that outlives the account', async () => {
@@ -410,21 +410,21 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       }
     });
 
-    it('a draw that does not match the cost or the window computed here reverts DrawMismatch', async () => {
+    it('a spend that does not match the cost or the window computed here reverts SpendMismatch', async () => {
       const discounted = await h.openAccount({ caps: WIDE });
       const plain = await h.openAccount({ committed: SMALL, caps: WIDE });
-      const Skew = await hre.ethers.getContractFactory('MockSkewedServiceDraw');
-      const skew = (await Skew.deploy()) as unknown as MockSkewedServiceDraw;
+      const Skew = await hre.ethers.getContractFactory('MockSkewedServiceSpend');
+      const skew = (await Skew.deploy()) as unknown as MockSkewedServiceSpend;
       await f.Hub.setContractAddress('PublishingConviction', await skew.getAddress());
 
       // The stand-in charges the undiscounted value.
       await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(discounted.accountId, 10n * TRAC)))
-        .to.be.revertedWithCustomError(f.SS, 'DrawMismatch')
+        .to.be.revertedWithCustomError(f.SS, 'SpendMismatch')
         .withArgs(7n * TRAC, 10n * TRAC, 0n, 0n);
       // With no discount the cost matches, and a wrong window is refused.
       await skew.setWindow(5n);
       await expect(f.SS.connect(buyer).fundFromConviction(await h.inference(plain.accountId, 10n * TRAC)))
-        .to.be.revertedWithCustomError(f.SS, 'DrawMismatch')
+        .to.be.revertedWithCustomError(f.SS, 'SpendMismatch')
         .withArgs(10n * TRAC, 10n * TRAC, 0n, 5n);
     });
 
@@ -513,8 +513,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         bucketCount: 1n,
         value: TRAC,
         cost: TRAC,
-        drawnFromWindow: TRAC,
-        drawnFromTopUp: 0n,
+        spentFromWindow: TRAC,
+        spentFromTopUp: 0n,
       };
       const buckets = [bucket(0, CLASS_INFERENCE, TRAC)];
       await expect(f.CSS.createSubscription(id, record, buckets))
@@ -573,7 +573,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
 
       const { receipt } = await h.fund(await h.inference(accountId, 1_000n * TRAC, { epoch: await h.epochNext() }));
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
-      expect(covered.drawnFromTopUp).to.equal(700n * TRAC);
+      expect(covered.spentFromTopUp).to.equal(700n * TRAC);
       expect(await tokenLogs(receipt)).to.have.length(0);
       expect(await h.creditedRanges(receipt)).to.have.length(0);
       expect(await f.Token.balanceOf(await f.Vault.getAddress())).to.equal(vault);
@@ -618,7 +618,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await time.increaseTo((await f.Chronos.timestampForEpoch(createdEpoch + 1n)) + createdOffset + 10n);
       expect(await f.SS.currentWindowAllowance(accountId)).to.deep.equal([1n, B, 70n * TRAC, false]);
       expect(await f.PC.getRemainingAllowance(accountId, createdEpoch + 1n)).to.equal(B - 400n * TRAC + 70n * TRAC);
-      // A funding draws on window 1, as currentWindowAllowance said.
+      // A funding spends on window 1, as currentWindowAllowance said.
       const { receipt } = await h.fund(await h.inference(accountId, 10n * TRAC));
       expect((await eventsOf(receipt, f.PC, 'ServiceCostCovered'))[0].window).to.equal(1n);
 

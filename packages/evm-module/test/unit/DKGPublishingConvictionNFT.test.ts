@@ -274,7 +274,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
   describe('createAccount: nothing booked at creation (10.2.0)', () => {
     it('books nothing to the staker pool — the escrow moves to CSS and the account pays at use time', async () => {
       // 10.2.0 model: the account books its money when it uses it — a
-      // publish when it is drawn, a closed window's unused budget once the
+      // publish when it is spent, a closed window's unused budget once the
       // window has closed. The TRAC itself escrows in the CSS vault.
       const amount = hre.ethers.parseEther('1200000');
       const current = await ChronosContract.getCurrentEpoch();
@@ -786,7 +786,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       );
       expect(returned).to.equal(expectedDiscount);
 
-      // 10.2.0: the account pays when it draws, as a wallet publish does —
+      // 10.2.0: the account pays when it spends, as a wallet publish does —
       // the whole discounted cost is credited over the KA's `kaEpochs` from
       // the current epoch, and nothing else is.
       const tx = await NFT.connect(Kav10Signer).coverPublishingCost(
@@ -810,14 +810,14 @@ describe('@unit DKGPublishingConvictionNFT', function () {
     });
 
     describe('PublishingMathLib integration', () => {
-      it('a use-time PCA draw, top-up overflow included, books the ranges of the shared active-sink calculator over the KA epochs', async () => {
+      it('a use-time PCA spend, top-up overflow included, books the ranges of the shared active-sink calculator over the KA epochs', async () => {
         const source = readFileSync(
           join(__dirname, '../../contracts/PublishingConviction.sol'),
           'utf8',
         );
         expect(source).to.include('PublishingMathLib.prorateActiveSink(');
 
-        // 10.2.0: a use-time account books its whole draw, window part and
+        // 10.2.0: a use-time account books its whole spend, window part and
         // topUp overflow alike, over the KA's epochs from the current epoch,
         // as a wallet publish does — assert its event ranges byte-match the
         // shared calculator.
@@ -1129,7 +1129,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       const execEpoch = await ChronosContract.getCurrentEpoch();
       expect(credits).to.deep.equal([[execEpoch + kaEpochs, execEpoch + kaEpochs, 1n]]);
 
-      // windowSpent accounting must increment by 1 (drawnFromEpoch is the
+      // windowSpent accounting must increment by 1 (spentFromEpoch is the
       // floored amount when the base allowance covers it) — this is the
       // guard against the free-publish truncation bug.
       const windowSpentAfter = await NFT.windowSpent(1, currentWindow);
@@ -1434,8 +1434,8 @@ describe('@unit DKGPublishingConvictionNFT', function () {
      * 10.2.0 semantics:
      *   - `EmissionScheduled.scheduled` — the unused base budget of the
      *     windows the tx booked (each closed window once).
-     *   - `CostCovered.discountedCost` — a publishing draw, booked to the
-     *     staker pool over the KA's epochs at use time. Reported as `drawn`.
+     *   - `CostCovered.discountedCost` — a publishing spend, booked to the
+     *     staker pool over the KA's epochs at use time. Reported as `spent`.
      *   - `AccountFinalSwept.topUpSwept + dustSwept` — post-expiry tail
      *     (`dustSwept` is 0: the dust rides the last window's booking).
      *   - `WindowSettled` never fires (declaration kept for indexers).
@@ -1444,14 +1444,14 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       tx: Awaited<ReturnType<typeof NFT.settle>>,
     ): Promise<{
       scheduled: bigint;
-      drawn: bigint;
+      spent: bigint;
       tail: bigint;
       windowSettledCount: number;
       bookedWindows: Array<[bigint, bigint]>;
     }> {
       const receipt = await tx.wait();
       let scheduled = 0n;
-      let drawn = 0n;
+      let spent = 0n;
       let tail = 0n;
       let windowSettledCount = 0;
       const bookedWindows: Array<[bigint, bigint]> = [];
@@ -1474,12 +1474,12 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         } else if (parsed.name === 'WindowSettled') {
           windowSettledCount += 1;
         } else if (parsed.name === 'CostCovered') {
-          drawn += BigInt(parsed.args.discountedCost);
+          spent += BigInt(parsed.args.discountedCost);
         } else if (parsed.name === 'AccountFinalSwept') {
           tail += BigInt(parsed.args.topUpSwept) + BigInt(parsed.args.dustSwept);
         }
       }
-      return { scheduled, drawn, tail, windowSettledCount, bookedWindows };
+      return { scheduled, spent, tail, windowSettledCount, bookedWindows };
     }
 
     it('createAccount books nothing; settle() before any window closes is a pure no-op (cursor at 0)', async () => {
@@ -1527,7 +1527,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       expect(again.bookedWindows).to.have.length(0);
     });
 
-    it('mixed publish + settle: the publish books its whole draw at once; the closed window books only B − spent', async () => {
+    it('mixed publish + settle: the publish books its whole spend at once; the closed window books only B − spent', async () => {
       const committed = hre.ethers.parseEther('120000');
       const baseAllowance = committed / 12n;
       const discountBps = 3000n;
@@ -1550,7 +1550,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
         LOCK_DURATION,
       );
       const publishSums = await sumStakerPoolDistributionFromEvents(txPublish);
-      expect(publishSums.drawn).to.equal(actualDisc);
+      expect(publishSums.spent).to.equal(actualDisc);
       expect(publishSums.scheduled).to.equal(0n);
       expect(publishSums.windowSettledCount).to.equal(0);
 
@@ -1560,7 +1560,7 @@ describe('@unit DKGPublishingConvictionNFT', function () {
       expect(settleSums.scheduled).to.equal(baseAllowance - actualDisc);
       expect(settleSums.bookedWindows).to.deep.equal([[0n, 1n]]);
       // Window 0 is fully accounted: published + booked == B.
-      expect(publishSums.drawn + settleSums.scheduled).to.equal(baseAllowance);
+      expect(publishSums.spent + settleSums.scheduled).to.equal(baseAllowance);
 
       // Idempotency: again a no-op.
       const sums2 = await sumStakerPoolDistributionFromEvents(await NFT.settle(1));

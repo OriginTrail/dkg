@@ -162,32 +162,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint96",
-        "name": "expectedCost",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint96",
-        "name": "cost",
-        "type": "uint96"
-      },
-      {
-        "internalType": "uint40",
-        "name": "expectedWindow",
-        "type": "uint40"
-      },
-      {
-        "internalType": "uint40",
-        "name": "window",
-        "type": "uint40"
-      }
-    ],
-    "name": "DrawMismatch",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "uint256",
         "name": "accountId",
         "type": "uint256"
@@ -435,6 +409,32 @@
       }
     ],
     "name": "ServiceSpendingUnchanged",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint96",
+        "name": "expectedCost",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint96",
+        "name": "cost",
+        "type": "uint96"
+      },
+      {
+        "internalType": "uint40",
+        "name": "expectedWindow",
+        "type": "uint40"
+      },
+      {
+        "internalType": "uint40",
+        "name": "window",
+        "type": "uint40"
+      }
+    ],
+    "name": "SpendMismatch",
     "type": "error"
   },
   {

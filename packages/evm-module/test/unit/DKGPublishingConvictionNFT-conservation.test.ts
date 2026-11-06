@@ -4,10 +4,10 @@
  *
  * 10.2.0 use-time model: over an account's complete lifetime the total TRAC
  * accounted to the staker pool MUST equal `committedTRAC + sum(topUps)`
- * (with no service draws, which would be due in the query/inference pool),
+ * (with no service spends, which would be due in the query/inference pool),
  * composed as
  *
- *   Σ publishing draws at use time (`CostCovered.discountedCost`, window part
+ *   Σ publishing spends at use time (`CostCovered.discountedCost`, window part
  *     and topUp overflow alike)
  *   + Σ closed windows' unused budget (`EmissionScheduled.scheduled`, each
  *     window booked once, dust with the last)
@@ -132,9 +132,9 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
   type Distribution = {
     scheduled: bigint;
     scheduledFee: bigint;
-    drawn: bigint;
-    budgetDraw: bigint;
-    topUpDraw: bigint;
+    spent: bigint;
+    budgetSpend: bigint;
+    topUpSpend: bigint;
     tail: bigint;
     windowSettledCount: number;
   };
@@ -147,9 +147,9 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     const logicAddr = (await LogicContract.getAddress()).toLowerCase();
     let scheduled = 0n;
     let scheduledFee = 0n;
-    let drawn = 0n;
-    let budgetDraw = 0n;
-    let topUpDraw = 0n;
+    let spent = 0n;
+    let budgetSpend = 0n;
+    let topUpSpend = 0n;
     let tail = 0n;
     let windowSettledCount = 0;
     for (const log of receipt!.logs) {
@@ -170,14 +170,14 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
       } else if (parsed.name === 'WindowSettled') {
         windowSettledCount += 1;
       } else if (parsed.name === 'CostCovered') {
-        drawn += BigInt(parsed.args.discountedCost);
-        budgetDraw += BigInt(parsed.args.drawnFromEpoch);
-        topUpDraw += BigInt(parsed.args.drawnFromTopUp);
+        spent += BigInt(parsed.args.discountedCost);
+        budgetSpend += BigInt(parsed.args.spentFromEpoch);
+        topUpSpend += BigInt(parsed.args.spentFromTopUp);
       } else if (parsed.name === 'AccountFinalSwept') {
         tail += BigInt(parsed.args.topUpSwept) + BigInt(parsed.args.dustSwept);
       }
     }
-    return { scheduled, scheduledFee, drawn, budgetDraw, topUpDraw, tail, windowSettledCount };
+    return { scheduled, scheduledFee, spent, budgetSpend, topUpSpend, tail, windowSettledCount };
   }
 
   it('createAccount + mixed publishes across N windows + topUp + post-expiry settle: total accounted == committed + topUps', async () => {
@@ -200,12 +200,12 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     // 10.2.0: the creation books nothing — the account pays at use time.
     const txCreate = await NFT.createAccount(committed, 0);
     const dCreate = await tally(txCreate);
-    expect(dCreate.scheduled + dCreate.drawn + dCreate.tail).to.equal(0n);
+    expect(dCreate.scheduled + dCreate.spent + dCreate.tail).to.equal(0n);
     let totalAccounted = 0n;
     await NFT.registerAgent(1, agent.address);
 
     const epochLength = await ChronosContract.epochLength();
-    let topUpDrawTotal = 0n;
+    let topUpSpendTotal = 0n;
     const publish = async (baseCost: bigint) =>
       tally(
         await NFT.connect(Kav10Signer).coverPublishingCost(
@@ -222,12 +222,12 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
       const baseCost = (w0 * BPS) / (BPS - discountBps);
       const expected = (baseCost * (BPS - discountBps)) / BPS;
       const d = await publish(baseCost);
-      expect(d.drawn).to.equal(expected);
-      expect(d.budgetDraw).to.equal(expected);
-      expect(d.topUpDraw).to.equal(0n);
+      expect(d.spent).to.equal(expected);
+      expect(d.budgetSpend).to.equal(expected);
+      expect(d.topUpSpend).to.equal(0n);
       expect(d.scheduled).to.equal(0n);
       expect(d.windowSettledCount).to.equal(0);
-      totalAccounted += d.drawn;
+      totalAccounted += d.spent;
     }
     const spent0 = (((w0 * BPS) / (BPS - discountBps)) * (BPS - discountBps)) / BPS;
 
@@ -239,12 +239,12 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
       const baseCost = (w1 * BPS) / (BPS - discountBps);
       const expected = (baseCost * (BPS - discountBps)) / BPS;
       const d = await publish(baseCost);
-      expect(d.drawn).to.equal(expected);
-      expect(d.topUpDraw).to.equal(0n);
+      expect(d.spent).to.equal(expected);
+      expect(d.topUpSpend).to.equal(0n);
       expect(d.windowSettledCount).to.equal(0);
       // Window 0 closed: its unused budget, once.
       expect(d.scheduled).to.equal(baseAllowance - spent0);
-      totalAccounted += d.drawn + d.scheduled;
+      totalAccounted += d.spent + d.scheduled;
       spent1 = expected;
     }
 
@@ -252,7 +252,7 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     {
       const tx = await NFT.topUp(1, top1);
       const d = await tally(tx);
-      expect(d.drawn + d.scheduled + d.tail).to.equal(0n);
+      expect(d.spent + d.scheduled + d.tail).to.equal(0n);
     }
 
     // ---- Window 3: advance 2 more windows + drain base + dip into topUp ----
@@ -263,23 +263,23 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
       const baseCost = (drainW3 * BPS) / (BPS - discountBps) + 10n;
       const expected = (baseCost * (BPS - discountBps)) / BPS;
       const d = await publish(baseCost);
-      // The whole draw is booked, window part and overflow alike.
-      expect(d.budgetDraw).to.equal(baseAllowance);
-      expect(d.topUpDraw).to.equal(expected - baseAllowance);
-      expect(d.topUpDraw).to.be.gt(0n);
-      expect(d.drawn).to.equal(expected);
+      // The whole spend is booked, window part and overflow alike.
+      expect(d.budgetSpend).to.equal(baseAllowance);
+      expect(d.topUpSpend).to.equal(expected - baseAllowance);
+      expect(d.topUpSpend).to.be.gt(0n);
+      expect(d.spent).to.equal(expected);
       // Windows 1 and 2 closed: window 1's rest and all of window 2.
       expect(d.scheduled).to.equal(baseAllowance - spent1 + baseAllowance);
       expect(d.windowSettledCount).to.equal(0);
-      topUpDrawTotal += d.topUpDraw;
-      totalAccounted += d.drawn + d.scheduled;
+      topUpSpendTotal += d.topUpSpend;
+      totalAccounted += d.spent + d.scheduled;
     }
 
     // ---- Second top-up (again no accounting side effects) ----
     {
       const tx = await NFT.topUp(1, top2);
       const d = await tally(tx);
-      expect(d.drawn + d.scheduled + d.tail).to.equal(0n);
+      expect(d.spent + d.scheduled + d.tail).to.equal(0n);
     }
 
     // ---- Advance past expiry; post-expiry settle ----
@@ -291,7 +291,7 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
       // the dust rides the last; then the leftover topUp tail.
       const dust = committed - baseAllowance * 12n;
       expect(d.scheduled).to.equal(8n * baseAllowance + dust);
-      expect(d.tail).to.equal(top1 + top2 - topUpDrawTotal);
+      expect(d.tail).to.equal(top1 + top2 - topUpSpendTotal);
       expect(d.windowSettledCount).to.equal(0);
       totalAccounted += d.scheduled + d.tail;
     }
@@ -309,7 +309,7 @@ describe('@unit DKGPublishingConvictionNFT — TRAC conservation across full lif
     // Idempotency: subsequent settles do nothing.
     const txNoop = await NFT.settle(1);
     const noop = await tally(txNoop);
-    expect(noop.scheduled + noop.drawn + noop.tail).to.equal(0n);
+    expect(noop.scheduled + noop.spent + noop.tail).to.equal(0n);
   });
 
   it('protocol treasury fee: each window splits net/fee when it is booked; the fee pays out via collectTreasuryEmission; the topUp tail keeps the immediate skim', async () => {
