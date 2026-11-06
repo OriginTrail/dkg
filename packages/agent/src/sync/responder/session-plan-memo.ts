@@ -14,7 +14,20 @@ export interface SessionPlanMemo<T> {
   get(
     key: string,
     load: () => Promise<T>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    options?: {
+      refresh?: boolean;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+      /**
+       * The session generation the caller belongs to. A plan built for another
+       * generation of the same key is not this session's plan: it is replaced
+       * (or, with `requireExisting`, reported as missing), whether or not this
+       * call carries `refresh`. A session's one refresh can be spent on a
+       * request that fails before the plan is built; without the generation
+       * its retry would walk the previous session's plan.
+       */
+      generation?: string;
+    },
   ): Promise<T | null>;
 }
 
@@ -31,8 +44,8 @@ export function createSessionPlanMemo<T>(
   maxEntries: number,
   accounting?: SessionPlanBudgetAccounting<T>,
 ): SessionPlanMemo<T> {
-  const cached = new Map<string, { value: T; cachedAt: number; budgetEntryId?: symbol }>();
-  const inflight = new Map<string, Promise<T>>();
+  const cached = new Map<string, { value: T; cachedAt: number; budgetEntryId?: symbol; generation?: string }>();
+  const inflight = new Map<string, { promise: Promise<T>; generation?: string }>();
   const deleteEntry = (key: string, reason: 'expired' | 'released' | 'replaced') => {
     const entry = cached.get(key);
     if (!entry) return;
@@ -49,7 +62,13 @@ export function createSessionPlanMemo<T>(
       throwIfAborted(options?.signal);
       const now = Date.now();
       prune(now);
-      const pending = inflight.get(key);
+      const otherGeneration = (generation: string | undefined) =>
+        options?.generation !== undefined && generation !== options.generation;
+      // A load for another session generation is waited out, never joined.
+      for (let other = inflight.get(key); other && otherGeneration(other.generation); other = inflight.get(key)) {
+        try { await raceAgainstAbort(other.promise, options?.signal); } catch { throwIfAborted(options?.signal); }
+      }
+      const pending = inflight.get(key)?.promise;
       if (pending) {
         if (!accounting?.drainOnAbort) return raceAgainstAbort(pending, options?.signal);
         if (!options?.refresh) {
@@ -63,7 +82,7 @@ export function createSessionPlanMemo<T>(
         throwIfAborted(options?.signal);
       }
       const existing = cached.get(key);
-      if (!options?.refresh && existing) {
+      if (!options?.refresh && existing && !otherGeneration(existing.generation)) {
         cached.delete(key);
         cached.set(key, { ...existing, cachedAt: now });
         if (existing.budgetEntryId) {
@@ -108,11 +127,13 @@ export function createSessionPlanMemo<T>(
           if (!cached.has(key)) {
             while (cached.size >= maxEntries) deleteEntry(cached.keys().next().value!, 'released');
           }
-          cached.set(key, { value, cachedAt: Date.now(), budgetEntryId });
+          cached.set(key, { value, cachedAt: Date.now(), budgetEntryId, generation: options?.generation });
           return value;
         })
-        .finally(() => inflight.delete(key));
-      inflight.set(key, pendingLoad);
+        .finally(() => {
+          if (inflight.get(key)?.promise === pendingLoad) inflight.delete(key);
+        });
+      inflight.set(key, { promise: pendingLoad, generation: options?.generation });
       if (!accounting?.drainOnAbort) return raceAgainstAbort(pendingLoad, options?.signal);
       const value = await pendingLoad;
       throwIfAborted(options?.signal);

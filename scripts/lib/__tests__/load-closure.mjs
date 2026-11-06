@@ -115,6 +115,8 @@ export const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/oxigraph-server-native.test.ts: binaryPath', 'the pinned installed Oxigraph binary, checked with --version; it is outside the repository'],
   ['packages/cli/test/oxigraph-server.test.ts: command', 'what the server spawns, passed through an injected spawnProcess: the Oxigraph binary or its standin'],
   ['packages/cli/test/oxigraph-server.test.ts: standin', 'an Oxigraph standin binary fixture'],
+  ['packages/cli/test/sync-large-graph-store-deadline-native.test.ts: binaryPath',
+    'the pinned installed Oxigraph binary, run as `load` to fill a temporary store; it is outside the repository'],
   ['packages/core/src/daemon-lifecycle.ts: node',
     'process.execPath running the CLI entry resolveDkgCli() finds (packages/cli/dist/cli.js, or an installed CLI), CLI code the CLI rule routes'],
   ['scripts/lib/release-process.mjs: command', 'manual prepared-package runner for git/pnpm/npm; scripts/lib changes select full CI, and script tests inject no build execution'],
