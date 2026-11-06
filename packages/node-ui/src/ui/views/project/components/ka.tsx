@@ -14,6 +14,7 @@ import { GraphSurface, RdfGraph } from './graph.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { LayerBadge, LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 import { Loading } from '../../../components/ds/Loading.js';
+import { Breadcrumbs } from '../../../components/ds/Breadcrumbs.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -429,7 +430,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   return (
     <div className="v10-ka-detail">
       <div className="v10-ka-header">
-        <button className="v10-ka-back" onClick={onClose}>← Back to Context Graph</button>
+        <Breadcrumbs items={[{ label: 'Context Graph', onClick: onClose }, { label: 'Knowledge Asset' }]} />
         <div className="v10-ka-header-left">
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">

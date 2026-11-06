@@ -433,6 +433,13 @@ body.light .ds-seg-item.active {
 
 .ds-external-mark { vertical-align: -1px; }
 
+/* Breadcrumbs: the one way back from a deep view. */
+.ds-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; min-width: 0; font-size: var(--fs-control); line-height: var(--lh-tight); color: var(--text-tertiary); }
+.ds-crumb { max-width: 280px; padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); background: none; }
+button.ds-crumb:hover { color: var(--text-primary); text-decoration: underline; }
+.ds-crumbs-bar { margin-bottom: 12px; }
+.ds-crumb-current { color: var(--text-primary); font-weight: 500; }
+
 /* Page: the content panel sets the gutter, so a page adds no padding of its own. */
 .ds-page { max-width: var(--page-max); }
 .ds-page-narrow { max-width: var(--page-max-narrow); }

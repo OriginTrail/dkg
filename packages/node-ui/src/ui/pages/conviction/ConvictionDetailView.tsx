@@ -30,6 +30,8 @@ import { BadgePercent, RefreshCw } from 'lucide-react';
 import { Loading } from '../../components/ds/Loading.js';
 import { bpsToPercent } from '../../lib/format.js';
 import { ExternalMark } from '../../components/ds/ExternalMark.js';
+import { Breadcrumbs } from '../../components/ds/Breadcrumbs.js';
+import { useTabsStore } from '../../stores/tabs.js';
 
 function formatExpiryTileValue(expiresAtTimestamp?: number): string {
   return formatRelativeExpiry(expiresAtTimestamp).replace(/^Expires in /, '');
@@ -188,8 +190,12 @@ function DetailBody({
       ? 'Connect the PCA owner wallet to manage this account. Provider metadata is display-only.'
       : 'Connect a wallet to view and manage wallet-owned PCAs from this tab.';
 
+  const openTab = useTabsStore.getState().openTab;
   return (
     <div className="v10-pca-detail" data-testid="pca-detail">
+      <div className="ds-crumbs-bar">
+        <Breadcrumbs items={[{ label: 'Publisher Conviction', onClick: () => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true }) }, { label: `PCA #${accountId}` }]} />
+      </div>
       <div className="v10-pca-detail-band">
         <span className="v10-pca-detail-id">PCA #{accountId}</span>
         <Badge size="sm" icon={<BadgePercent size={12} />}>{pct}% discount</Badge>

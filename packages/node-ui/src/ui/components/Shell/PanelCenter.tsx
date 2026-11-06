@@ -9,6 +9,8 @@ import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
 import { FileText } from 'lucide-react';
+import { Breadcrumbs } from '../ds/Breadcrumbs.js';
+import { useContextGraphCrumb } from '../../hooks/useContextGraphCrumb.js';
 import { Loading } from '../ds/Loading.js';
 
 
@@ -73,10 +75,10 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
   const currentTab = tabs.find(t => t.id === activeTabId);
   const docLabel = currentTab?.label ?? 'Document';
 
+  const graphTab = tabs.find(t => decodeTabId(t.id).kind === 'graph');
   const handleBack = () => {
-    const projectTab = tabs.find(t => decodeTabId(t.id).kind === 'graph');
-    if (projectTab) {
-      setActiveTab(projectTab.id);
+    if (graphTab) {
+      setActiveTab(graphTab.id);
     }
     closeTab(activeTabId);
   };
@@ -162,17 +164,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
         padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-panel)',
       }}>
-        <button
-          onClick={handleBack}
-          style={{
-            border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)', background: 'none',
-            color: 'var(--text-secondary)', fontSize: 'var(--fs-label)', fontWeight: 600, padding: '4px 10px',
-            cursor: 'pointer', fontFamily: 'var(--font-sans)',
-          }}
-        >
-          ← Back to Project
-        </button>
-        <span style={{ fontSize: 'var(--fs-body)', fontWeight: 600, color: 'var(--text-primary)' }}><FileText size={14} /> {docLabel}</span>
+        <Breadcrumbs items={[{ label: graphTab?.label ?? 'Context Graph', onClick: handleBack }, { label: docLabel }]} />
         {showToggle && (
           <div
             role="group"
@@ -291,7 +283,7 @@ function ViewContainer() {
     // data; a future "global agent profile" view could drop it.
     case 'agent': return <AgentProfilePage contextGraphId={target.contextGraphId} agentUri={target.agentUri} />;
     case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} />;
-    case 'layer': return <MemoryLayerView layer={target.layer} contextGraphId={target.contextGraphId} />;
+    case 'layer': return <LayerPage layer={target.layer} contextGraphId={target.contextGraphId} />;
     default: break;
   }
 
@@ -327,5 +319,17 @@ export function PanelCenter() {
         <ViewContainer />
       </div>
     </main>
+  );
+}
+
+const LAYER_NAMES: Record<string, string> = { wm: 'Working Memory', swm: 'Shared Working Memory', vm: 'Verifiable Memory' };
+
+function LayerPage({ layer, contextGraphId }: { layer: React.ComponentProps<typeof MemoryLayerView>['layer']; contextGraphId: string }) {
+  const graph = useContextGraphCrumb(contextGraphId);
+  return (
+    <>
+      <div className="ds-crumbs-bar"><Breadcrumbs items={[graph, { label: LAYER_NAMES[layer] ?? 'Memory layer' }]} /></div>
+      <MemoryLayerView layer={layer} contextGraphId={contextGraphId} />
+    </>
   );
 }

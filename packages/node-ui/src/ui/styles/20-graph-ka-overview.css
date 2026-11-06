@@ -172,12 +172,6 @@ body.light .v10-ka-graph-shell .v10-graph-canvas {
   padding: 12px 20px; border-bottom: 1px solid var(--border-subtle);
   display: flex; flex-direction: column; gap: 8px; flex-shrink: 0;
 }
-.v10-ka-back {
-  align-self: flex-start; border: 1px solid var(--border-default); border-radius: var(--radius-xs);
-  background: none; color: var(--text-secondary); font-size: var(--fs-label); font-weight: 600;
-  padding: 4px 10px; cursor: pointer; font-family: var(--font-sans); transition: all var(--motion-base);
-}
-.v10-ka-back:hover { color: var(--text-primary); border-color: var(--border-strong); }
 .v10-ka-header-left { display: flex; flex-direction: column; gap: 2px; }
 .v10-ka-label { font-size: var(--fs-micro); color: var(--text-tertiary); text-transform: uppercase; letter-spacing: var(--ls-caps); }
 .v10-ka-name { font-size: var(--fs-title); font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }

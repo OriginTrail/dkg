@@ -20,6 +20,7 @@ import { useProjectProfileContext } from '../hooks/useProjectProfile.js';
 import { ActivityFeed } from './ActivityFeed.js';
 import { AgentChip } from './AgentChip.js';
 import { Copy } from 'lucide-react';
+import { Breadcrumbs } from './ds/Breadcrumbs.js';
 
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
 
@@ -38,6 +39,7 @@ export interface AgentProfileViewProps {
   onSelectEntity: (uri: string) => void;
   onOpenAgent?: (uri: string) => void;
   onBack: () => void;
+  contextGraphName?: string;
 }
 
 export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
@@ -47,6 +49,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   onSelectEntity,
   onOpenAgent,
   onBack,
+  contextGraphName = 'Context Graph',
 }) => {
   const agents = useAgentsContext();
   const profile = useProjectProfileContext();
@@ -85,7 +88,7 @@ export const AgentProfileView: React.FC<AgentProfileViewProps> = ({
   return (
     <div className="v10-agent-profile">
       <div className="v10-agent-profile-header">
-        <button type="button" className="v10-ka-back" onClick={onBack}>← Back</button>
+        <Breadcrumbs items={[{ label: contextGraphName, onClick: onBack }, { label: 'Agent' }]} />
         <div className="v10-agent-profile-head">
           <AgentChip agent={agent ?? undefined} fallbackUri={agentUri} size="lg" showOperator />
           {agent?.reputation && (
