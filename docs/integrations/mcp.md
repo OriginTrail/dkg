@@ -18,6 +18,10 @@ dkg mcp setup --network testnet
 
 Setup initializes a fresh node, starts it, and offers to register DKG in detected clients. Restart the chosen client. Existing nodes keep their network. Use `dkg mcp setup --dry-run` to inspect changes first.
 
+For a manually configured client, run `dkg mcp setup --print-only` and copy the generated entry, including `env.DKG_HOME`. GUI clients do not inherit your terminal environment. Without an explicit home or workspace `.dkg/config.yaml`, the MCP server discovers the local node home using the same resolver as the other adapters; an explicit workspace or home keeps precedence.
+
+If tools appear but return **401 Unauthorized**, check `dkg_status`'s `mcpAuth` field and the MCP client's startup log. `missing-token` means no credential was loaded; set `DKG_HOME` to your node home or set `DKG_TOKEN` in the client's environment, then restart it. `token-configured` reports only that a token was loaded, not that the daemon accepted it. An explicitly selected remote API needs its own explicit token; the server does not forward an automatically discovered local credential to another endpoint.
+
 ## Verify
 
 1. Run `dkg status` in the terminal.

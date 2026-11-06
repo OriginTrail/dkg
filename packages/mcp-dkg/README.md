@@ -325,3 +325,9 @@ Ten V9-era and coding-project tools were dropped from the V10 surface during con
 ### Large tool responses
 
 The stdio server limits each serialized JSON-RPC response to 8 MiB, below the MCP SDK client's default 10 MiB receive buffer. JSON escaping can make an artifact response larger than its original file. An oversized result returns an error without closing the session: narrow/paginate a query, or retrieve large artifacts through the daemon HTTP API. Markdown reads return the whole file; `maxBytes` is an acceptance cap, so lowering it returns HTTP 413 rather than a smaller result. For partial artifact retrieval outside MCP, use the daemon `/api/knowledge-assets/import-artifact/read` endpoint with `offset` and `maxBytes`. The daemon's 5 MiB artifact-read maximum is a source-byte limit, not a guarantee that the fully formatted result fits over MCP.
+
+### Manual client authentication
+
+When neither `DKG_HOME` nor a workspace `.dkg/config.yaml` is present, the MCP server resolves the default local node home and its token. Explicit workspace/home configuration keeps precedence. Prefer the entry from `dkg mcp setup --print-only` for GUI clients. A `missing-token` status or 401 hint means the client needs `DKG_HOME` or `DKG_TOKEN`; `token-configured` does not prove the daemon accepted the credential. An explicit API endpoint different from the discovered local node uses only explicit credentials and graph selection (`DKG_TOKEN`, `DKG_PROJECT`, or tool arguments), without importing the local token or graph defaults.
+
+CLI `status --daemon` and `join --daemon` resolve the selected endpoint before loading automatic credentials. For a remote daemon, supply `--token`, `DKG_TOKEN`, or an explicit `--token-file` for join. The legacy implicit token-file fallback is restricted to a token-only home at its recorded local port (9200 when unrecorded); configured homes use normal configuration resolution.
