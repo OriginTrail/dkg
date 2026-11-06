@@ -15,11 +15,10 @@
 # can force a small heartbeat (config.network.agentProfileHeartbeatMs) and assert
 # zero growth across N heartbeats.
 #
-# Requires a running devnet (./scripts/devnet.sh start 6). Self-contained.
-#
-# Standalone MANUAL proof — run directly; intentionally NOT wired into
-# devnet-comprehensive.sh / _devnet-full-sweep.sh (these gap proofs are kept out
-# of the shared orchestrated run; see PR #1244).
+# Requires a running devnet (./scripts/devnet.sh start 6). Self-contained and
+# read-only. Registered in scripts/devnet-comprehensive.sh (group "regression"),
+# late in the run: the longer the fleet has been heartbeating, the more the
+# bound means.
 #   Run:  ./scripts/devnet-test-agents-meta-bounded.sh
 set -uo pipefail
 
@@ -37,13 +36,18 @@ bad() { echo "[agents-meta]   FAIL: $*" >&2; FAIL=$((FAIL+1)); }
 # shared node auth / HTTP / JSON helpers (node_token, node_port, api, field, …)
 . "$REPO_ROOT/scripts/devnet-lib.sh" || { echo "[agents-meta] FATAL: cannot source devnet-lib.sh" >&2; exit 2; }
 
-qcount() { # node graph -> integer count ("" on error)
-  local n="$1" g="$2" port token
-  port=$(node_port "$n"); token=$(node_token "$n")
-  curl -s -m 12 -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
-    -X POST "http://127.0.0.1:${port}/api/query" \
-    -d "{\"sparql\":\"SELECT (COUNT(*) AS ?c) WHERE { GRAPH <$g> { ?s ?p ?o } }\"}" 2>/dev/null \
-  | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const b=(j.result?.bindings||j.result?.results?.bindings||j.results?.bindings||j.bindings||[])[0];const v=b?.c?.value??b?.c??"";const m=String(v).match(/\d+/);process.stdout.write(m?m[0]:"")}catch(e){process.stdout.write("")}})'
+# validated query observations: an error answer is never read as a count
+. "$REPO_ROOT/scripts/devnet-observation-helpers.sh" || { echo "[agents-meta] FATAL: cannot source devnet-observation-helpers.sh" >&2; exit 2; }
+
+# node graph -> integer count ("" when the node gave no valid count).
+# The query is scoped to the agents context graph: since v10.0.17 a node answers
+# an unscoped query only on a store with all-writer consistency coverage, and a
+# scoped query may name the graph itself and its `_meta` (any other graph is
+# refused, not read as empty).
+qcount() {
+  local n="$1" g="$2"
+  devnet_query_api "http://127.0.0.1:$(node_port "$n")" "$(node_token "$n")" \
+    "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <$g> { ?s ?p ?o } }" c count '{"contextGraphId":"agents"}' 2>/dev/null || true
 }
 
 AG='did:dkg:context-graph:agents'

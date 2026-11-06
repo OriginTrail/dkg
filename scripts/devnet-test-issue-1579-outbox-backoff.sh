@@ -12,8 +12,12 @@ DB="$DEVNET_DIR/node1/node-ui.db"
 MESSAGE_ID="devnet-issue-1579-$(date +%s)"
 
 fail() { echo "[#1579] FAIL: $*" >&2; exit 1; }
+# better-sqlite3 is a dependency of packages/cli, not of the repository root:
+# a script that opens the node's database runs there. The seeding step below
+# imports built packages by path and runs from the repository root.
+sqlite() { ( cd "$ROOT/packages/cli" && node --input-type=module ); }
 cleanup() {
-  DB="$DB" MESSAGE_ID="$MESSAGE_ID" node --input-type=module <<'NODE' >/dev/null 2>&1 || true
+  DB="$DB" MESSAGE_ID="$MESSAGE_ID" sqlite <<'NODE' >/dev/null 2>&1 || true
 import Database from 'better-sqlite3';
 const db = new Database(process.env.DB);
 db.prepare('DELETE FROM protocol_outbox WHERE message_id = ?').run(process.env.MESSAGE_ID);
@@ -21,6 +25,7 @@ db.close();
 NODE
 }
 trap cleanup EXIT
+cd "$ROOT"
 
 [[ -f "$DB" ]] || fail "node1 database missing; start a devnet first"
 . "$ROOT/scripts/devnet-lib.sh"
@@ -73,7 +78,7 @@ connect="$(api 1 POST /api/connect "{\"peerId\":\"$peer2\"}")"
 [[ "$(code_of "$connect")" == 200 ]] || fail "node1 could not reconnect to node2"
 sleep 5
 
-row="$(DB="$DB" MESSAGE_ID="$MESSAGE_ID" node --input-type=module <<'NODE'
+row="$(DB="$DB" MESSAGE_ID="$MESSAGE_ID" sqlite <<'NODE'
 import Database from 'better-sqlite3';
 const db = new Database(process.env.DB, { readonly: true });
 const row = db.prepare('SELECT attempts, next_attempt_at FROM protocol_outbox WHERE message_id = ?').get(process.env.MESSAGE_ID);
