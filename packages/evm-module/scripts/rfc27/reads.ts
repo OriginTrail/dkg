@@ -5,7 +5,7 @@
 
 import { ethers } from 'ethers';
 
-import { Fault } from '../../test/helpers/query-inference';
+import { Fault, stakeFactorOf } from '../../test/helpers/query-inference';
 import type { Contracts } from './contracts';
 
 const SCALE18 = 10n ** 18n;
@@ -15,6 +15,28 @@ const BPS = 10_000n;
 export const groupFault = (g: number, fault: keyof typeof Fault): string => `GroupFault(${g}, ${Fault[fault]})`;
 /** A batch's refusal for item `i` of group `g`, in the words of `decodeError`. */
 export const receiptFault = (g: number, i: number, fault: keyof typeof Fault): string => `ReceiptFault(${g}, ${i}, ${Fault[fault]})`;
+
+/**
+ * The stake factor a batch should capture, from the stake alone: the node's live
+ * effective stake, or its challenge's snapshot if that took one and is lower,
+ * against the maximum stake. A check compares a batch with this, so a factor
+ * that went wrong on its way into the batch can't vouch for itself.
+ */
+export const stakeFactorFrom = (s: { live: bigint; snapshotSet: boolean; snapshot: bigint; maximumStake: bigint }): bigint =>
+  stakeFactorOf(s.snapshotSet && s.snapshot < s.live ? s.snapshot : s.live, s.maximumStake);
+
+/** A batch's captured factor is right: what the stake gives, and above 0, since a seller with no stake gives no reason to trust either side. */
+export const capturedFactorHolds = (captured: bigint, expected: bigint): boolean => expected > 0n && captured === expected;
+
+/** `stakeFactorFrom` over what the chain holds for `node` now. */
+export async function expectedStakeFactor(c: Contracts, node: bigint): Promise<bigint> {
+  return stakeFactorFrom({
+    live: await c.css.getNodeEffectiveStake(node),
+    snapshotSet: await c.rss.nodeChallengeStakeSnapshotSet(node),
+    snapshot: await c.rss.nodeChallengeStakeSnapshot(node),
+    maximumStake: await c.params.maximumStake(),
+  });
+}
 
 export type EpochReward = { epoch: bigint; scored: boolean; score: bigint; nodeScore: bigint; net: bigint; reward: bigint };
 export type ClaimPreview = { total: bigint; per: EpochReward[] };

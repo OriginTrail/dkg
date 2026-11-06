@@ -4,7 +4,7 @@
 //
 // Covered, on the real account stack with ServiceSubscriptions registered and
 // a Hub-registered stand-in for KnowledgeAssetsLifecycle:
-//   - a publish books its whole discounted draw over the Knowledge Asset's
+//   - a publish books its whole discounted spend over the Knowledge Asset's
 //     epochs, with the spread of a wallet publish, and nothing else;
 //   - a plan period's cost is booked in QueryInferenceStorage under the
 //     period's epoch, funded now or ahead, with nothing in the staker pool;
@@ -167,7 +167,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Publishing
   // -------------------------------------------------------------------------
 
-  it('a publish books its whole discounted draw over the Knowledge Asset epochs, as a wallet publish spreads its payment', async () => {
+  it('a publish books its whole discounted spend over the Knowledge Asset epochs, as a wallet publish spreads its payment', async () => {
     const { accountId } = await createAccount();
     const e0 = await epochNow();
     const before = await poolSnapshot(e0, e0 + lock + 1n);
@@ -180,7 +180,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const cost = costOf(baseCost, BPS);
     const receipt = await publish(baseCost, kaEpochs, e0 + 5n);
     const [covered] = await eventsOf(receipt, PC, 'CostCovered');
-    expect([covered.discountedCost, covered.drawnFromEpoch, covered.drawnFromTopUp]).to.deep.equal([cost, cost, 0n]);
+    expect([covered.discountedCost, covered.spentFromEpoch, covered.spentFromTopUp]).to.deep.equal([cost, cost, 0n]);
 
     // prorateActiveSink over the KA's epochs from the current epoch, with the
     // time left in it: KnowledgeAssetsLifecycle._distributeTokens' spread.
@@ -192,7 +192,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const after = await poolSnapshot(e0, e0 + lock + 1n);
     for (const [e, v] of after) expect(v - before.get(e)!, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
 
-    // Nothing else is booked, and the draw is on the window.
+    // Nothing else is booked, and the spend is on the window.
     expect(await eventsOf(receipt, PC, 'EmissionScheduled')).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(cost);
     expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(0n);
@@ -261,7 +261,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     );
     expect(await PCS.topUpBalance(accountId)).to.equal(1_000n * TRAC - overflow);
 
-    // Services: the opt-in is refused, and so is a draw.
+    // Services: the opt-in is refused, and so is a spend.
     await expect(SS.connect(owner).setServiceSpending(accountId, true))
       .to.be.revertedWithCustomError(SS, 'EmissionAlreadyScheduled')
       .withArgs(accountId);
@@ -276,7 +276,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect(swept.topUpSwept).to.equal(1_000n * TRAC - overflow);
   });
 
-  it('an account scheduled in full after it opted in has its draws refused through ServiceSubscriptions, with nothing drawn', async () => {
+  it('an account scheduled in full after it opted in has its spends refused through ServiceSubscriptions, with nothing spent', async () => {
     const { accountId } = await createAccount();
     await openForServices(accountId);
     await Harness.scheduleInFull(accountId);
@@ -340,7 +340,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect(await PCS.topUpBalance(accountId)).to.equal(100n * TRAC);
   });
 
-  it("top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service draw books both under the period's epoch", async () => {
+  it("top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service spend books both under the period's epoch", async () => {
     const B = COMMITTED / lock;
     // The publishing path.
     const { accountId: publishingId } = await createAccount();
@@ -350,7 +350,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const e0 = await epochNow();
     const receipt = await publish(value, 6n);
     const [covered] = await eventsOf(receipt, PC, 'CostCovered');
-    expect([covered.drawnFromEpoch, covered.drawnFromTopUp]).to.deep.equal([B, cost - B]);
+    expect([covered.spentFromEpoch, covered.spentFromTopUp]).to.deep.equal([B, cost - B]);
     const ts = await blockTime(receipt);
     expect(await credits(receipt)).to.deep.equal(
       prorateActiveSink(cost, e0, 6n, epLen, await timeLeftAt(ts)).map((r) => [r.start, r.end, r.amount]),
@@ -362,8 +362,8 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     await openForServices(serviceId);
     await topUp(serviceId, 2_000n * TRAC);
     const funded = await fund(serviceId, value);
-    const [drawn] = await eventsOf(funded, PC, 'ServiceCostCovered');
-    expect([drawn.cost, drawn.drawnFromWindow, drawn.drawnFromTopUp]).to.deep.equal([cost, B, cost - B]);
+    const [spent] = await eventsOf(funded, PC, 'ServiceCostCovered');
+    expect([spent.cost, spent.spentFromWindow, spent.spentFromTopUp]).to.deep.equal([cost, B, cost - B]);
     expect(await credits(funded)).to.have.length(0);
     expect(await QIS.convictionFunding(await epochNow())).to.equal(cost);
     expect(await PCS.topUpBalance(serviceId)).to.equal(2_000n * TRAC - (cost - B));

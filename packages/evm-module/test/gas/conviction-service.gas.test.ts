@@ -4,7 +4,7 @@
 // targets, not limits: a change that goes above one needs the figure explained
 // and the target revised on purpose, in the same change.
 //
-// A funding draws the cost from the account's allowance through
+// A funding spends the cost from the account's allowance through
 // PublishingConviction.coverServiceCost and books it under the period's epoch
 // in QueryInferenceStorage (10.2.0, ServiceSubscriptions 1.2.0): the same slots
 // whatever the lock, and nothing in the staker pool. A funding is the
@@ -263,7 +263,7 @@ describe('@gas Conviction Account service spending', () => {
     const epoch = await ChronosContract.getCurrentEpoch();
     const receipt = await fundBase(accountId, 500n * TRAC);
     const [covered] = await eventsOf(receipt, PC, 'ServiceCostCovered');
-    expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([10n * TRAC, 490n * TRAC]);
+    expect([covered.spentFromWindow, covered.spentFromTopUp]).to.deep.equal([10n * TRAC, 490n * TRAC]);
     await expectBooked(receipt, 500n * TRAC, epoch);
     record('fundFromConviction, one bucket, with top-up overflow', receipt);
   });

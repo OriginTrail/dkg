@@ -12,7 +12,7 @@
 //     from a wallet and from a Conviction Account, each in its own ledger;
 //   - wallet top-ups and upgrades: caps unchanged, new buckets appended, the
 //     value into the vault and booked under the period's epoch;
-//   - Conviction Account top-ups and upgrades: the draw at the account's tier
+//   - Conviction Account top-ups and upgrades: the spend at the account's tier
 //     and its cost under the period's epoch, the period limit counting the
 //     period's earlier cost, and the usage without another period; a top-up
 //     only while the assignment the period was funded under is live, so a new
@@ -272,8 +272,8 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         bucketCount: 2n,
         value,
         cost: value,
-        drawnFromWindow: 0n,
-        drawnFromTopUp: 0n,
+        spentFromWindow: 0n,
+        spentFromTopUp: 0n,
       });
       expect(tuples(await f.CSS.getBuckets(subscriptionId))).to.deep.equal(tuples(r.buckets));
       expect(await f.CSS.accountSubscriptionCount(0n)).to.equal(1n);
@@ -497,7 +497,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
         ]),
       );
       const s = await f.CSS.getSubscription(subscriptionId);
-      expect([s.value, s.cost, s.bucketCount, s.planDigest, s.drawnFromWindow, s.drawnFromTopUp]).to.deep.equal([
+      expect([s.value, s.cost, s.bucketCount, s.planDigest, s.spentFromWindow, s.spentFromTopUp]).to.deep.equal([
         16n * TRAC,
         16n * TRAC,
         4n,
@@ -605,7 +605,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       ({ subscriptionId } = await h.caFund(accountId, epoch, 20n * TRAC));
     });
 
-    it("draws at the account tier, books the cost under the period's epoch, adds to the record and counts no new period", async () => {
+    it("spends at the account tier, books the cost under the period's epoch, adds to the record and counts no new period", async () => {
       const additions = [bucket(0, CLASS_INFERENCE, 10n * TRAC), bucket(3, CLASS_QUERY, 5n * TRAC)];
       const cost = costOf(15n * TRAC, BPS);
       const vaultBefore = await vaultBalance();
@@ -618,7 +618,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
 
       const s = await f.CSS.getSubscription(subscriptionId);
       const fundedCost = costOf(20n * TRAC, BPS);
-      expect([s.value, s.cost, s.drawnFromWindow + s.drawnFromTopUp, s.bucketCount]).to.deep.equal([
+      expect([s.value, s.cost, s.spentFromWindow + s.spentFromTopUp, s.bucketCount]).to.deep.equal([
         35n * TRAC,
         fundedCost + cost,
         fundedCost + cost,
@@ -692,7 +692,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await f.SS.currentWindowAllowance(account),
     ];
 
-    it("a new assignment of the buyer key reopens no period whose own assignment has ended: after a revocation or an expiry, a top-up is refused and draws nothing", async () => {
+    it("a new assignment of the buyer key reopens no period whose own assignment has ended: after a revocation or an expiry, a top-up is refused and spends nothing", async () => {
       const add = [bucket(0, CLASS_INFERENCE, 10n * TRAC)];
       const fundedUnder = (await f.CSS.getSubscription(subscriptionId)).assignmentNonce;
 
@@ -746,7 +746,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       await h.assign(accountId, buyer, 1_000n * TRAC);
       expect(await f.CSS.assignmentEnd(accountId, buyer.address, s.assignmentNonce)).to.equal(expiresAt);
 
-      // Until then the period takes requests, and so a top-up, drawn and
+      // Until then the period takes requests, and so a top-up, spent and
       // booked as any other, under the key's new assignment's limit.
       await time.setNextBlockTimestamp(expiresAt - 1n);
       await f.SS.connect(buyer).topUpFromConviction(subscriptionId, add, ethers.ZeroHash);

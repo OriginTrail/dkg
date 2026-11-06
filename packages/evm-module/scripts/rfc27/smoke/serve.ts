@@ -106,7 +106,7 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     `${plan.caAfterTopUp.count} request: account ${fmt(afterTopUpValue)} TRAC`,
     r.seller,
     secondGroups,
-    { done: (await landed(ca, BigInt(plan.caFirst.count))) ? 'the seller has landed the request after the top-up' : undefined },
+    { needs: ['serve.top-up'], done: (await landed(ca, BigInt(plan.caFirst.count))) ? 'the seller has landed the request after the top-up' : undefined },
   );
   if (b2.receipt || b2.skipped) {
     const [caFilled, walletFilled] = [await c.qis.bucketFilled(ca, 0), await c.qis.bucketFilled(wallet, 0)];

@@ -193,7 +193,7 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
   const when = s?.E !== undefined ? ` = ${E}` : E > current ? ` = ${E}, the activation epoch, from ${iso(await ts(E))}` : ` (now ${current}, ends ${iso(await ts(current + 1n))})`;
   say(
     `  setup     epoch E${when}: stake ${fmt(a.stake)} TRAC on the seller's node at tier 0; account of ${fmt(a.committed)} TRAC ` +
-      `(floor ${fmt(a.committedFloor)}: ${a.lock} windows × ${fmt(a.caValue + a.caTopUp + a.edgeValue)} drawn in the first; discount ${a.discountBps} bps); ` +
+      `(floor ${fmt(a.committedFloor)}: ${a.lock} windows × ${fmt(a.caValue + a.caTopUp + a.edgeValue)} spent in the first; discount ${a.discountBps} bps); ` +
       `opt-in; buyer key assigned; account period ${fmt(a.caValue)} TRAC; wallet period ${fmt(a.walletValue)} TRAC; ${fmt(a.keyEth)} ETH to each buyer key`,
   );
   say(

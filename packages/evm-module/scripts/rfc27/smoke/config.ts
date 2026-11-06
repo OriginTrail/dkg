@@ -110,10 +110,10 @@ export function amountFromEnv(name: string, def: string): bigint {
 /**
  * The amounts of a new run, from the environment and the lock on chain. A
  * running one reads its own from the state. There is no contract minimum for
- * a commitment: the floor is the lock times what the run draws in the first
+ * a commitment: the floor is the lock times what the run spends in the first
  * billing window, the account period, its top-up and the edge period, at no
- * discount. The default rounds the draws up to whole TRAC and adds 1 TRAC a
- * window, so the first window keeps room beyond the run's own draws.
+ * discount. The default rounds the spends up to whole TRAC and adds 1 TRAC a
+ * window, so the first window keeps room beyond the run's own spends.
  */
 export async function plannedAmounts(c: BaseContracts, state: SmokeState | undefined, maxFee: bigint): Promise<Amounts> {
   if (state) return state.amounts;
@@ -130,14 +130,14 @@ export async function plannedAmounts(c: BaseContracts, state: SmokeState | undef
   ] as const) {
     if (v < units * UNIT_ASK) throw new Error(`${n} must be at least ${fmt(units * UNIT_ASK)} TRAC: each request is at least one unit of ${fmt(UNIT_ASK)} TRAC`);
   }
-  const draws = caValue + caTopUp + edgeValue;
-  const committedFloor = lock * draws;
+  const spends = caValue + caTopUp + edgeValue;
+  const committedFloor = lock * spends;
   const committed = process.env.RFC27_SMOKE_COMMITTED
     ? amountFromEnv('RFC27_SMOKE_COMMITTED', '0')
-    : lock * (((draws + TRAC - 1n) / TRAC) * TRAC + TRAC);
+    : lock * (((spends + TRAC - 1n) / TRAC) * TRAC + TRAC);
   if (committed < committedFloor) {
     throw new Error(
-      `RFC27_SMOKE_COMMITTED is ${fmt(committed)} TRAC, under the ${fmt(committedFloor)} TRAC the run draws: the lock of ${lock} windows times the ${fmt(draws)} TRAC drawn in the first`,
+      `RFC27_SMOKE_COMMITTED is ${fmt(committed)} TRAC, under the ${fmt(committedFloor)} TRAC the run spends: the lock of ${lock} windows times the ${fmt(spends)} TRAC spent in the first`,
     );
   }
   if (committed >= 1n << 96n) throw new Error('RFC27_SMOKE_COMMITTED does not fit a uint96');

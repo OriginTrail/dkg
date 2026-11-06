@@ -46,8 +46,8 @@
 // Amounts, in TRAC: RFC27_SMOKE_STAKE (50), RFC27_SMOKE_CA_VALUE (3),
 // RFC27_SMOKE_CA_TOPUP (1), RFC27_SMOKE_EDGE_VALUE (0.5),
 // RFC27_SMOKE_WALLET_VALUE (2), RFC27_SMOKE_COMMITTED (by default the lock
-// times the first window's draws, rounded up, plus 1 TRAC a window; there is
-// no contract minimum, and the floor is the lock times those draws), and
+// times the first window's spends, rounded up, plus 1 TRAC a window; there is
+// no contract minimum, and the floor is the lock times those spends), and
 // RFC27_SMOKE_KEY_ETH, the ETH the owner sends each derived buyer key (0.0002,
 // or what its gas needs at the current fee if more). Setup records them; later
 // phases read them from the state file.

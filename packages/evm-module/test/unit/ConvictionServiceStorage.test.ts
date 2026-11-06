@@ -95,8 +95,8 @@ const subscriptionRecord = (accountId: bigint, overrides: Record<string, bigint 
   bucketCount: 3n,
   value: 10n * TRAC,
   cost: 7n * TRAC,
-  drawnFromWindow: 7n * TRAC,
-  drawnFromTopUp: 0n,
+  spentFromWindow: 7n * TRAC,
+  spentFromTopUp: 0n,
   ...overrides,
 });
 
@@ -110,8 +110,8 @@ const bucketOf = (label: string, serviceClass: bigint, value: bigint, maxAsk: bi
 const topUpOf = (overrides: Record<string, bigint> = {}) => ({
   value: TRAC,
   cost: TRAC,
-  drawnFromWindow: 0n,
-  drawnFromTopUp: 0n,
+  spentFromWindow: 0n,
+  spentFromTopUp: 0n,
   ...overrides,
 });
 
@@ -580,11 +580,11 @@ describe('@unit ConvictionServiceStorage', () => {
       await CSS.connect(logic).createSubscription(id, subscriptionRecord(7n), stored());
     });
 
-    it('applyTopUp adds to the stored buckets by index, appends new ones, and adds to the value, cost and draws', async () => {
+    it('applyTopUp adds to the stored buckets by index, appends new ones, and adds to the value, cost and spends', async () => {
       const appended = [bucketOf('model-c', 2n, 4n * TRAC, 70n)];
       await CSS.connect(logic).applyTopUp(
         id,
-        topUpOf({ value: 7n * TRAC, cost: 5n * TRAC, drawnFromWindow: 4n * TRAC, drawnFromTopUp: TRAC }),
+        topUpOf({ value: 7n * TRAC, cost: 5n * TRAC, spentFromWindow: 4n * TRAC, spentFromTopUp: TRAC }),
         ethers.id('plan-2'),
         [2n * TRAC, 0n, TRAC],
         appended,
@@ -603,8 +603,8 @@ describe('@unit ConvictionServiceStorage', () => {
           bucketCount: 4n,
           value: 17n * TRAC,
           cost: 12n * TRAC,
-          drawnFromWindow: 11n * TRAC,
-          drawnFromTopUp: TRAC,
+          spentFromWindow: 11n * TRAC,
+          spentFromTopUp: TRAC,
         }),
       );
       // The account's list holds the period once, as before.

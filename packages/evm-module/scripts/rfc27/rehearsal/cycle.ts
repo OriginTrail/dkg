@@ -18,7 +18,7 @@ import { Contracts, eventsIn } from '../contracts';
 import type { NodeSigner } from '../fork';
 import { chainNow } from '../network';
 import { inference } from '../plans';
-import { claimPreview, delegatorKey, groupFault, positionScore, receiptFault } from '../reads';
+import { capturedFactorHolds, claimPreview, delegatorKey, expectedStakeFactor, groupFault, positionScore, receiptFault } from '../reads';
 import { fmt, sum, toJson } from '../report';
 import { Ctx, expectRevert, send, withPool } from './context';
 import { payOut } from './cycle-pay';
@@ -174,7 +174,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   await send(ctx, 'account owner: registerAgent', caOwner, await c.nft.getAddress(), c.nft.interface.encodeFunctionData('registerAgent', [accountId, agent.address]));
   const publish = await publishAs(ctx, c.pc, accountId, agent.address, PUBLISH_BASE_COST, PUBLISH_KA_EPOCHS, 'fork-only (KnowledgeAssetsLifecycle impersonated):');
   check(
-    'a use-time publish books its whole draw to the staker pool over the Knowledge Asset epochs',
+    'a use-time publish books its whole spend to the staker pool over the Knowledge Asset epochs',
     sum(publish.stakerCredits.map((x) => x.amount)) === publish.discountedCost && publish.stakerCredits.every((x) => x.start >= A && x.end <= A + PUBLISH_KA_EPOCHS),
     `${fmt(publish.discountedCost)} TRAC over ${JSON.stringify(toJson(publish.stakerCredits))}`,
   );
@@ -225,11 +225,12 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
 
   const batches: { seller: bigint; items: bigint; claimed: bigint; counted: bigint; stakeFactor18: bigint; gasUsed: bigint }[] = [];
   const land = async (seller: bigint, groups: ReceiptGroup[], label: string) => {
+    const expectedFactor = await expectedStakeFactor(c, seller);
     const b = await submitBatch(ctx, c.qs, await impersonate(ctx, opOf(seller)), label, groups);
     const [acc] = eventsIn(b.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
     if (!acc) throw new Error(`node ${seller}'s batch emitted no ReceiptBatchAccepted`);
     batches.push({ seller, items: acc.itemCount, claimed: acc.claimed, counted: acc.counted, stakeFactor18: acc.stakeFactor18, gasUsed: b.gasUsed });
-    return { accepted: acc, groups: eventsIn(b.receipt, c.qs, c.qs.getEvent('ReceiptsClaimed')) };
+    return { accepted: acc, expectedFactor, groups: eventsIn(b.receipt, c.qs, c.qs.getEvent('ReceiptsClaimed')) };
   };
 
   const firstLanded = await land(first, firstGroups, `node ${first} operational key: submitReceiptBatch (2 groups)`);
@@ -289,11 +290,16 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   out.batches = batches;
 
   // What counted, worked out without the contract: at the account's discount,
-  // and each seller's at the stake factor its batch captured.
+  // and each seller's at the stake factor its stake gives, read before its batch.
   const discounted = (x: bigint) => (x * (BPS - acct.discountBps)) / BPS;
   const scoreAt = (r: bigint, factor: bigint) => (r * factor) / SCALE18;
-  const f1 = firstLanded.accepted.stakeFactor18;
-  const f2 = secondLanded.accepted.stakeFactor18;
+  const f1 = firstLanded.expectedFactor;
+  const f2 = secondLanded.expectedFactor;
+  check(
+    'each batch captured the stake factor its node\'s stake gives, worked out without the batch, and above 0',
+    capturedFactorHolds(firstLanded.accepted.stakeFactor18, f1) && capturedFactorHolds(secondLanded.accepted.stakeFactor18, f2),
+    `expected ${f1}, ${f2}; captured ${firstLanded.accepted.stakeFactor18}, ${secondLanded.accepted.stakeFactor18}`,
+  );
   const r1 = { ca: discounted(8n * TRAC), wallet: 4n * TRAC };
   const r2 = { ca: discounted(2n * TRAC), wallet: 3n * TRAC };
   const n1 = await c.qis.getNodeEpoch(first, A + 1n);
@@ -305,7 +311,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     `${fmt(n1.r)} and ${fmt(n2.r)} TRAC`,
   );
   check(
-    'each node\'s score is its R at the stake factor its batch captured',
+    'each node\'s score is its R at the stake factor its stake gives',
     n1.score === scoreAt(r1.ca, f1) + scoreAt(r1.wallet, f1) && n2.score === scoreAt(r2.ca, f2) + scoreAt(r2.wallet, f2),
     `factors ${f1}, ${f2}`,
   );

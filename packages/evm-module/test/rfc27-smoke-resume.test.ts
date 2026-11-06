@@ -937,17 +937,44 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx?.report.status).to.equal('deferred');
     });
 
-    it('sends nothing in withdraw, and leaves the position', async () => {
+    it('sends nothing in withdraw, simulates the withdrawal it would send, and leaves the position', async () => {
       use(await loadFixture(afterClaim));
       editState((raw) => {
         raw.network = 'fork';
         raw.forkBlock = '1';
       });
       const s = stateNow();
-      await toEpoch((await fx.f.Chronos.getCurrentEpoch()) + 1n, 86_400n);
-      const calls = await rpcCalls(async () => phaseWithdraw(await ctxOf('withdraw', { send: false, local: true, warp: true, proofs: true })));
+      const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
+      await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
+      await scoreIn(e);
+      let ctx: PoolCtx | undefined;
+      const calls = await rpcCalls(async () => {
+        ctx = await ctxOf('withdraw', { send: false, local: true, warp: true, proofs: true });
+        await phaseWithdraw(ctx);
+      });
       expect(calls.filter((m) => MUTATING.test(m))).to.deep.equal([]);
+      expect(ctx?.report.txs.find((t) => t.key === 'withdraw.withdraw')?.status).to.equal('simulated');
       expect((await fx.f.Vault.getPosition(s.tokenId)).identityId).to.equal(fx.seller.identityId);
+      expect(await fx.f.StakingNFT.ownerOf(s.tokenId)).to.equal(ownerWallet().address);
+    });
+
+    it('resumed after the first batch, plans the second, which needs the top-up, rather than failing to simulate it', async () => {
+      use(await loadFixture(afterProof));
+      await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.batch-1' })));
+      editState((raw) => {
+        raw.network = 'fork';
+        raw.forkBlock = '1';
+      });
+      let ctx: PoolCtx | undefined;
+      const calls = await rpcCalls(async () => {
+        ctx = await ctxOf('serve', { send: false, local: true, warp: true, proofs: true });
+        await phaseServe(ctx);
+      });
+      expect(calls.filter((m) => MUTATING.test(m))).to.deep.equal([]);
+      const status = (key: string) => ctx?.report.txs.find((t) => t.key === key)?.status;
+      expect(status('serve.top-up')).to.equal('simulated');
+      expect(status('serve.batch-2')).to.equal('planned');
+      expect(ctx?.report.status).to.not.equal('failed');
     });
   });
 
