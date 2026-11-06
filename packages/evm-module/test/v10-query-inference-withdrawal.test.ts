@@ -13,20 +13,13 @@
 // they were.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { loadFixture, mine, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
+import { loadFixture, takeSnapshot, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
 import hre from 'hardhat';
 
-import {
-  CGWeightTreeStorage,
-  ContextGraphStorage,
-  ContextGraphValueStorage,
-  DKGKnowledgeAssets,
-  RandomSampling,
-} from '../typechain';
 import { TRAC } from './helpers/conviction-service';
 import { SCALE18, hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
-import { RewardsHelpers, Seller, TIER_12, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
+import { RewardsHelpers, TIER_12, deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {
@@ -119,81 +112,6 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       expect(await claimWithdrawn(t1, d1)).to.equal(stayed);
     });
 
-    /**
-     * RandomSampling registered and initialized on the Hub, as the
-     * development deploy does, and one public knowledge asset of a single
-     * leaf in a context graph valued from the current epoch, the only one the
-     * value-weighted draw can pick. Returns a proof of it by `node`: a
-     * challenge and its proof in the next proof period, which RandomSampling
-     * scores over the node's effective stake at that time.
-     */
-    const realProofs = async () => {
-      const noPrivateData = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('DKG_NO_PRIVATE_DATA_V10'));
-      const content = hre.ethers.toUtf8Bytes('a withdrawal in the epoch in progress');
-      const root = hre.ethers.keccak256(hre.ethers.concat([hre.ethers.keccak256(content), noPrivateData]));
-      const owner = f.accounts[0];
-      const rs = (await (
-        await hre.ethers.getContractFactory('RandomSampling')
-      ).deploy(await f.Hub.getAddress())) as unknown as RandomSampling;
-      await rs.waitForDeployment();
-      await f.Hub.setContractAddress('RandomSampling', await rs.getAddress());
-      await h.forward(rs, 'initialize');
-      const tree = (await hre.ethers.getContractAt(
-        'CGWeightTreeStorage',
-        await f.Hub.getContractAddress('CGWeightTreeStorage'),
-      )) as unknown as CGWeightTreeStorage;
-      const graphs = (await hre.ethers.getContractAt(
-        'ContextGraphStorage',
-        await f.Hub.getAssetStorageAddress('ContextGraphStorage'),
-      )) as unknown as ContextGraphStorage;
-      const assets = (await hre.ethers.getContractAt(
-        'DKGKnowledgeAssets',
-        await f.Hub.getAssetStorageAddress('DKGKnowledgeAssets'),
-      )) as unknown as DKGKnowledgeAssets;
-      const values = (await hre.ethers.getContractAt(
-        'ContextGraphValueStorage',
-        await f.Hub.getContractAddress('ContextGraphValueStorage'),
-      )) as unknown as ContextGraphValueStorage;
-      await tree.finishBackfill();
-      const [publicAccess, openPublishing] = [0, 1];
-      await graphs.createContextGraph(
-        owner.address,
-        [],
-        0n,
-        publicAccess,
-        openPublishing,
-        hre.ethers.ZeroAddress,
-        0n,
-        hre.ethers.ZeroHash,
-      );
-      const graph = await graphs.getLatestContextGraphId();
-      const now = await h.epochNow();
-      const asset = (BigInt(owner.address) << 96n) | 1n;
-      await assets.createKnowledgeAsset(
-        owner.address,
-        owner.address,
-        asset,
-        'withdrawal',
-        root,
-        1n,
-        128n,
-        now,
-        now + 5n,
-        0n,
-        false,
-        1n,
-      );
-      await graphs.registerKnowledgeAssetToContextGraph(graph, asset);
-      await values.addCGValueForEpochRange(graph, now, 5n, 1_000n);
-      await tree.settle(graph);
-      return async (node: Seller) => {
-        await mine(await rs.getActiveProofingPeriodDurationInBlocks());
-        await rs.updateAndGetActiveProofPeriodStartBlock();
-        await rs.connect(node.operational).createChallenge();
-        await rs.connect(node.operational).submitProof(content, [noPrivateData]);
-      };
-    };
-
     it("with later proofs scored by RandomSampling over the stake left, pays the withdrawn position a quarter of both pools' net for a quarter of the node's final score, and the position still staked three quarters", async () => {
       const a = await h.epochNow();
       // The node's own tier-0 position and a tier-3 one at 2x, of 3.2M
@@ -210,22 +128,20 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       expect(await f.Vault.getNodeEffectiveStake(n1.identityId)).to.equal(6_400_000n * TRAC);
       const slack = async () => (await h.balanceOf(await h.vault())) - (await h.owed([n1]));
       const start = await slack();
-      const p = await h.walletFund(f.accounts[20], a, 100n * TRAC);
-      await h.claimReceipts(n1, p, 30n * TRAC);
 
-      // Epoch e, in which the node proves, finalizes the period's value, takes
-      // a publishing pool and loses its own position, then proves again.
+      // Epoch e, in which the node proves, which lets its receipts land, takes
+      // a period's money and a publishing pool and loses its own position, then
+      // proves again.
       const e = a + 1n;
       await h.toEpoch(e);
-      const prove = await realProofs();
+      const prove = await h.realProofs();
       for (let i = 0; i < 4; i++) await prove(n1);
       const before = await f.RSS.getNodeEpochScore(e, n1.identityId);
       expect(before).to.be.greaterThan(0n);
       expect(await h.positionScore(n1.tokenId, n1, e)).to.equal(before / 2n);
       expect(await h.positionScore(t1, n1, e)).to.equal(before / 2n);
-      const deadline = (await f.Chronos.timestampForEpoch(e)) + (await f.QIS.receiptGraceSecondsAt(a));
-      await time.increaseTo(deadline + 1n);
-      await f.QS.finalizeClaims([{ subscriptionId: p, bucketIndex: 0n, seller: n1.identityId }]);
+      const p = await h.walletFund(f.accounts[20], e, 100n * TRAC);
+      await h.claimReceipts(n1, p, 30n * TRAC);
       await h.publishingPool(e, 1_000n * TRAC);
 
       await f.StakingNFT.connect(n1.operational).withdraw(n1.tokenId);

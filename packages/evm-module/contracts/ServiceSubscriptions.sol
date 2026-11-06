@@ -85,9 +85,9 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     assignment never grants publishing.
  *   - Every funding and top-up is refused while `QueryInferenceStorage` is
  *     paused, before its activation epoch and while that is unset, as wallet
- *     fundings are: epochs close from activation on, so a cost due in an
- *     earlier epoch would never reach a pool. Every funding needs a non-zero
- *     session key.
+ *     fundings are: the pool counts money from activation on, so a cost booked
+ *     in an earlier epoch would never reach a pool. Every funding needs a
+ *     non-zero session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
  *     protocol treasury is wired: a service draw carries no treasury fee. So
  *     `ParametersStorage.protocolTreasury` must stay 0 wherever this contract
@@ -397,9 +397,9 @@ contract ServiceSubscriptions is
      * @dev Immediate for new periods; funded periods are non-refundable and
      *      run to their end. A request issued under this assignment from the
      *      revocation on is refused, also after a new assignment of the same
-     *      key, while one served before it is settled as before: the
-     *      revocation moves no period's batch deadline, so it cannot withhold
-     *      a seller's receipt. It also consumes the account's nonce, so terms
+     *      key, while one served before it lands until the epoch ends, so
+     *      the revocation cannot withhold a seller's receipt. It also consumes
+     *      the account's nonce, so terms
      *      signed but not yet submitted no longer assign. A new assignment of
      *      the key afterwards serves it from its next period not yet funded:
      *      the periods funded under this one take no request issued after the
@@ -430,7 +430,7 @@ contract ServiceSubscriptions is
      *      limit below a period's cost so far is allowed, and refuses every
      *      top-up of that period. An earlier `expiresAt` refuses, from then
      *      on, the requests of the periods funded under this assignment, as a
-     *      revocation does, and moves no batch deadline. An expired
+     *      revocation does. An expired
      *      assignment is renewed only by a new `assign`, so a later
      *      `expiresAt` here never revives one. Terms
      *      signed at the current nonce stay valid; an owner who tightens the

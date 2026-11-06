@@ -357,12 +357,14 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     /// @notice Set `epoch`'s ΣR, ΣQueryInferenceScore and λ, which
     ///         `countReceipts` writes. It refuses an epoch that has ended
-    ///         (`EpochEnded`).
+    ///         (`EpochEnded`), and a λ above 10,000 basis points, at which no
+    ///         gross of the epoch could be read.
     /// @dev    The caller keeps them the sums of the epoch's nodes' `r` and
     ///         `score` (`setNodeEpoch`), and the pool reads `sumR`: 0 rolls the
     ///         epoch's money forward, anything else makes it part of the pool.
     function setEpochTotals(uint256 epoch, EpochTotals calldata t) external onlyContracts {
         _requireNotEnded(epoch);
+        if (t.lambdaBps > BPS_DENOMINATOR) revert InvalidParameter("lambdaBps");
         _epochTotals[epoch] = t;
     }
 

@@ -705,7 +705,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      every unclaimed epoch in this one transaction, under Base's
      *      per-transaction cap of 2^24 gas, at the cost `claim` states
      *      (about 92k gas per scored epoch before the query/inference pool,
-     *      about 107k after): a position claimed at least every 100 scored
+     *      about 110k after): a position claimed at least every 100 scored
      *      epochs withdraws within it.
      *
      *      10.1.0 — the auto-claim covers every epoch that has ended. The
@@ -857,9 +857,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *      one transaction, and Base caps a transaction at 2^24 gas
      *      (16,777,216). The first claim on a node in an epoch costs about
      *      92k gas per scored epoch before the query/inference pool and about
-     *      107k once the pool is active, more when the claim also closes the
-     *      pool's epochs on its way, so a position is to be claimed at least
-     *      every 100 scored epochs.
+     *      110k once the pool is active, more for a node with value after a run
+     *      of epochs with none, so a position is to be claimed at least every 100
+     *      scored epochs.
      */
     // The first arg (the staker address) is intentionally UNNAMED: it is
     // retained only for ABI compatibility with the DEPLOYED DKGStakingConvictionNFT
@@ -882,7 +882,7 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
     ///         already-withdrawn position, so no extra guard is required.
     ///         As `claim`, it walks every unclaimed epoch in one transaction,
     ///         under Base's per-transaction cap of 2^24 gas: about 92k gas per
-    ///         scored epoch before the query/inference pool and about 107k
+    ///         scored epoch before the query/inference pool and about 110k
     ///         after, so a position is to be claimed at least every 100 scored
     ///         epochs.
     function claimFor(uint256 tokenId) external {
@@ -897,9 +897,8 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      * @dev    10.1.0 — the withdrawal settled the position's score in that
      *         epoch and recorded it with the epoch's reward carries
      *         (`ConvictionWithdrawalStorage`). This runs the split `_claim`
-     *         runs for an epoch: the query/inference pool closes through it
-     *         first, then the position's score and each carry's take their
-     *         share of their node's reward for the epoch (`_nodeEpochReward`),
+     *         runs for an epoch: the position's score and each carry's take
+     *         their share of their node's reward for the epoch (`_nodeEpochReward`),
      *         the publishing pool's and the query/inference pool's, net of
      *         the operator fee. The score is the one the position had earned
      *         by its withdrawal: a later proof on the node in that epoch adds
