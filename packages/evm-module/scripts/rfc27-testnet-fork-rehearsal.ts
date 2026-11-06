@@ -81,17 +81,19 @@
 //
 //   # 6. existing accounts and positions after the upgrade, with every
 //   #    position's first-claim gas and the longest history's withdrawal gas;
-//   # 7. one full cycle: claims skipped NoScore before their sellers prove,
-//   #    then finalized once they have; a withdrawal in the middle of an epoch,
-//   #    its payout against the views, and its claimWithdrawnEpoch; and the
-//   #    settlement removed in a reverted snapshot;
+//   # 7. one full cycle: a batch refused before its seller proves in the epoch;
+//   #    a bucket's funding overrun, with the first batch landed counting whole
+//   #    and a later one what is left; a minimum that refuses less, and a top-up
+//   #    that lifts it; a withdrawal in the middle of an epoch, its payout against
+//   #    the views, and its claimWithdrawnEpoch; the claims of the next epoch, with
+//   #    nothing run first; and the settlement removed in a reverted snapshot;
 //   # 8. an account untouched for several epochs, booked late;
-//   # 9. the close falling more than maxCloseStepsPerClaim epochs behind;
-//   # 10. the unused share of every closed epoch, read from storage
+//   # 9. the money, value, pool and unused share of every ended epoch, read from
+//   #    storage against the rollover rule, and, in a reverted snapshot, a sale
+//   #    after a long quiet spell, whose pool walks the whole run back
 //   PHASE=existing $RUN
 //   PHASE=cycle $RUN
 //   PHASE=late-booking $RUN
-//   PHASE=close-behind $RUN
 //   PHASE=unused $RUN
 //
 // Each phase writes cache/rfc27-fork/<phase>.json (REHEARSAL_DIR overrides the
@@ -141,7 +143,6 @@ import hre from 'hardhat';
 import { decodeError, errorData, errorMessage } from './rfc27/contracts';
 import { rpc } from './rfc27/network';
 import { Redactor, Report } from './rfc27/report';
-import { phaseCloseBehind } from './rfc27/rehearsal/close-behind';
 import { Ctx, createContext } from './rfc27/rehearsal/context';
 import { phaseCycle } from './rfc27/rehearsal/cycle';
 import { phaseExisting } from './rfc27/rehearsal/existing';
@@ -158,7 +159,6 @@ const PHASES: Readonly<Record<string, (ctx: Ctx) => Promise<void>>> = {
   existing: phaseExisting,
   cycle: phaseCycle,
   'late-booking': phaseLateBooking,
-  'close-behind': phaseCloseBehind,
   unused: phaseUnused,
 };
 

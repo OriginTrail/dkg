@@ -16,7 +16,7 @@ import { ethers } from 'ethers';
 import hre from 'hardhat';
 
 import { CLASS_INFERENCE, DAY, TRAC, bucket, costOf, requestOf, signTerms, subscriptionIdOf } from './helpers/conviction-service';
-import { Fault, ReceiptItem, hardhatWallet, openConvictionAccount, queryInferenceDomain } from './helpers/query-inference';
+import { Fault, ReceiptItem, hardhatWallet, openConvictionAccount, queryInferenceDomain, scoreNode } from './helpers/query-inference';
 import {
   COMMITTED_TIER_BPS as BPS,
   FundingHelpers,
@@ -93,7 +93,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
     };
 
     const refusedAs = async (p: string, item: ReceiptItem, fault: bigint) =>
-      expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [item] }]))
+      expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [item] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, fault);
 
@@ -117,11 +117,12 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       await refusedAs(p, during, Fault.InactiveAssignment);
       // Nor does a request issued under the new assignment count in the period funded under the old one.
       await refusedAs(p, h.itemFor(await h.requestFor(p, 0, s1, { nonce: 1n })), Fault.InactiveAssignment);
-      expect(await f.QIS.bucketClaimed(p, 0n)).to.equal(0n);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(0n);
     });
 
-    it('a request issued after the assignment expired is refused before a renewal and after it, and one served before the expiry lands', async () => {
-      const expiresAt = (await h.epochStart(epoch + 1n)) - DAY;
+    it('a request issued after the assignment expired is refused before a renewal and after it, and one served before the expiry lands until the epoch ends', async () => {
+      const epochEnd = await h.epochStart(epoch + 1n);
+      const expiresAt = epochEnd - DAY;
       const { accountId } = await openConvictionAccount({
         ...f,
         owner,
@@ -140,8 +141,19 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       await reassign(accountId, expiresAt + 400n * DAY);
       await refusedAs(p, late, Fault.InactiveAssignment);
       await time.setNextBlockTimestamp(expiresAt + 7_200n);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served] }]);
-      expect(await f.QIS.bucketClaimed(p, 0n)).to.equal(served.valueWei);
+      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [served] }]);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(served.valueWei);
+
+      // The expiry moves no deadline: a request served before it lands in the
+      // epoch's last second, and at the epoch's end another does not.
+      const atLast = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 2n, issuedAt: expiresAt - 1n }));
+      const atEnd = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 3n, issuedAt: expiresAt - 1n }));
+      await scoreNode(f.RSS, epoch + 1n, s1.identityId);
+      await h.acceptAt(epochEnd - 1n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [atLast] }]);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(served.valueWei + atLast.valueWei);
+      await expect(h.submitAt(epochEnd, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [atEnd] }]))
+        .to.be.revertedWithCustomError(f.QS, 'GroupFault')
+        .withArgs(0n, Fault.OutsideEpoch);
     });
 
     it('a period funded under the new assignment follows it, beside the period of the old one', async () => {
@@ -167,8 +179,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         secondNonce,
       ]);
       const start = await h.epochStart(epoch + 1n);
-      await time.setNextBlockTimestamp(start);
-      await h.accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [h.itemFor(await h.requestFor(q, 0, s1, { nonce: 0n, issuedAt: start }))] }]);
+      await h.acceptAt(start, s1, [{ subscriptionId: q, bucketIndex: 0n, minCounted: 0n, items: [h.itemFor(await h.requestFor(q, 0, s1, { nonce: 0n, issuedAt: start }))] }]);
 
       // Revoking the new assignment ends the new period's requests from then
       // on, and its request served before lands later.
@@ -178,7 +189,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const secondEnd = (await f.CSS.getAssignment(accountId, buyer2.address)).revokedAt;
       await time.setNextBlockTimestamp(secondEnd + 7_200n);
       await refusedAs(q, h.itemFor(await h.requestFor(q, 0, s1, { nonce: 2n, issuedAt: secondEnd })), Fault.InactiveAssignment);
-      await h.accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [served] }]);
+      await h.accept(s1, [{ subscriptionId: q, bucketIndex: 0n, minCounted: 0n, items: [served] }]);
 
       // Each period keeps the end of its own assignment.
       expect(await f.CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(firstEnd);
@@ -202,14 +213,15 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       expect(await f.CSS.assignmentEnd(accountId, buyer2.address, firstNonce)).to.equal(expiresAt);
 
       // Before it, the period is topped up, and a request issued after the
-      // top-up lands, against the bucket's raised cap.
+      // top-up lands, against the bucket's raised value, at the period's discount.
       await f.SS.connect(buyer2).topUpFromConviction(p, [bucket(0, CLASS_INFERENCE, 5n * TRAC, CAP)], ethers.ZeroHash);
       const s = await f.CSS.getSubscription(p);
-      expect(await f.QS.fundedCap(p, 0n)).to.equal((15n * TRAC * (10_000n - s.discountBps)) / 10_000n);
+      expect(await f.QS.bucketLeft(p, 0n)).to.equal(15n * TRAC);
       const served = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 0n, issuedAt: expiresAt - 1n }));
-      await time.setNextBlockTimestamp(expiresAt - 1n);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served] }]);
-      expect(await f.QIS.bucketClaimed(p, 0n)).to.equal(served.valueWei);
+      await h.acceptAt(expiresAt - 1n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [served] }]);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(served.valueWei);
+      expect(await f.QS.bucketLeft(p, 0n)).to.equal(15n * TRAC - served.valueWei);
+      expect((await f.QIS.getNodeEpoch(s1.identityId, epoch)).r).to.equal((served.valueWei * (10_000n - s.discountBps)) / 10_000n);
 
       // From its expiry on, neither: the key's new assignment reopens nothing.
       await time.setNextBlockTimestamp(expiresAt);
@@ -262,7 +274,7 @@ describe('@integration Plan-period funding for the query/inference pool', functi
           .to.be.revertedWithCustomError(f.SS, 'AssignmentEndsBeforePeriod')
           .withArgs(accountId, buyer.address, expiresAt, nextStart);
         expect(await f.CSS.subscriptionExists(subscriptionIdOf(buyer.address, now + 1n))).to.equal(false);
-        expect(await f.QIS.convictionDue(now + 2n)).to.equal(0n);
+        expect(await f.QIS.convictionFunding(now + 1n)).to.equal(0n);
       }
       await expireAt(nextStart + 1n);
       await h.caFund(accountId, now + 1n, 10n * TRAC);
@@ -295,13 +307,13 @@ describe('@integration Plan-period funding for the query/inference pool', functi
 
     it('a period funded ahead takes no top-up once its own assignment ends before it starts, though the buyer key is assigned again', async () => {
       const add = [bucket(0, CLASS_INFERENCE, TRAC)];
-      const due = async () => f.QIS.convictionDue(now + 2n);
+      const booked = async () => f.QIS.convictionFunding(now + 1n);
 
       // Revoked before the period starts, then assigned again.
       const ahead = await h.caFund(accountId, now + 1n, 10n * TRAC);
       await f.SS.connect(owner).revoke(accountId, buyer.address);
       await h.assign(accountId, buyer, 100n * TRAC);
-      const before = await due();
+      const before = await booked();
       await expect(f.SS.connect(buyer).topUpFromConviction(ahead.subscriptionId, add, ethers.ZeroHash))
         .to.be.revertedWithCustomError(f.SS, 'AssignmentExpired')
         .withArgs(accountId, buyer.address);
@@ -313,11 +325,11 @@ describe('@integration Plan-period funding for the query/inference pool', functi
       const expiresAt = nextStart - 60n;
       await f.SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, { maxCostPerPeriod: 100n * TRAC, expiresAt });
       await h.assign(accountId, buyer2, 100n * TRAC);
-      const funded = await due();
+      const funded = await booked();
       await expect(f.SS.connect(buyer2).topUpFromConviction(second.subscriptionId, add, ethers.ZeroHash))
         .to.be.revertedWithCustomError(f.SS, 'AssignmentEndsBeforePeriod')
         .withArgs(accountId, buyer2.address, expiresAt, nextStart);
-      expect([before, funded, await due()]).to.deep.equal([
+      expect([before, funded, await booked()]).to.deep.equal([
         costOf(10n * TRAC, BPS),
         2n * costOf(10n * TRAC, BPS),
         2n * costOf(10n * TRAC, BPS),

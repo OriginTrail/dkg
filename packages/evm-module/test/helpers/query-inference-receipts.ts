@@ -21,6 +21,7 @@ import {
   fullReceipt,
   itemOf,
   requestDigestOf,
+  scoreNode,
   signCompact,
 } from './query-inference';
 
@@ -53,8 +54,29 @@ export function receiptsHelpers({ f, domain, key }: ReceiptsContext) {
     return { identityId, operational, admin };
   }
 
-  const submit = (by: Seller, groups: ReceiptGroup[]) => f.QS.connect(by.operational).submitReceiptBatch(groups);
+  /** A batch from `by`, given a node score in the current epoch first, as a batch needs one. */
+  const submit = async (by: Seller, groups: ReceiptGroup[]) => {
+    const epoch = await epochNow();
+    if ((await f.RSS.getNodeEpochScore(epoch, by.identityId)) === 0n) await scoreNode(f.RSS, epoch, by.identityId);
+    return f.QS.connect(by.operational).submitReceiptBatch(groups);
+  };
   const accept = async (by: Seller, groups: ReceiptGroup[]) => (await (await submit(by, groups)).wait())!;
+
+  /**
+   * A batch from `by` in the block at `timestamp`, given a node score in that
+   * block's epoch first if it has none, so the score's own transactions take
+   * earlier blocks. `submit` reads the epoch of the latest block, so after a
+   * block time set ahead it would score in the block meant for the batch, or in
+   * the epoch before the batch's.
+   */
+  const submitAt = async (timestamp: bigint, by: Seller, groups: ReceiptGroup[]) => {
+    const epoch = await f.Chronos.epochAtTimestamp(timestamp);
+    if ((await f.RSS.getNodeEpochScore(epoch, by.identityId)) === 0n) await scoreNode(f.RSS, epoch, by.identityId);
+    await time.setNextBlockTimestamp(timestamp);
+    return f.QS.connect(by.operational).submitReceiptBatch(groups);
+  };
+  const acceptAt = async (timestamp: bigint, by: Seller, groups: ReceiptGroup[]) =>
+    (await (await submitAt(timestamp, by, groups)).wait())!;
 
   /** One request for `by` on a period's bucket, with `overrides`, and its full receipt. */
   const requestFor = async (
@@ -83,5 +105,5 @@ export function receiptsHelpers({ f, domain, key }: ReceiptsContext) {
   const itemFor = (r: ServiceRequest, receipt: Partial<Receipt> = {}, wallet = key): ReceiptItem =>
     itemOf(r, fullReceipt(r, receipt), signCompact(wallet, requestDigestOf(domain, r)));
 
-  return { latest, epochNow, epochStart, seller, submit, accept, requestFor, itemFor };
+  return { latest, epochNow, epochStart, seller, submit, accept, submitAt, acceptAt, requestFor, itemFor };
 }

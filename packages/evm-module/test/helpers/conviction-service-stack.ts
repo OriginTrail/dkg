@@ -140,7 +140,7 @@ export function serviceHelpers({ f, owner, buyer, epLen, lock }: ServiceContext)
     return {
       windowSpent: await f.PCS.windowSpent(accountId, window),
       topUpBalance: await f.PCS.topUpBalance(accountId),
-      due: [await f.QIS.convictionDue(now + 1n), await f.QIS.convictionDue(now + 2n)],
+      funded: [await f.QIS.convictionFunding(now), await f.QIS.convictionFunding(now + 1n)],
       usage: [u.periods],
       periods: await f.CSS.accountSubscriptionCount(accountId),
     };

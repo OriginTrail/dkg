@@ -9,10 +9,11 @@ import { PoolModel, scheduleModel } from './helpers/emission-model';
 import { ParametersConfig, contractParameters } from '../utils/helpers';
 import { Fork } from '../scripts/rfc27/fork';
 import { expectedParameterIn, requireParameter } from '../scripts/rfc27/parameters';
+import { groupFault, grossOf, poolsFromMoney, receiptFault } from '../scripts/rfc27/reads';
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
-import { checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existing';
+import { bookedBy1020, checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existing';
 import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
 import { claimAll } from '../scripts/rfc27/rehearsal/operations';
 import { closedWindows } from '../scripts/rfc27/rehearsal/reads';
@@ -336,6 +337,44 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
     });
   });
 
+  describe('the pool, worked out without the contract', () => {
+    it('leaves an epoch with no value no pool, and its money waiting for the next epoch with value', () => {
+      const rows = [
+        { money: 5n, sumR: 3n },
+        { money: 2n, sumR: 0n },
+        { money: 0n, sumR: 0n },
+        { money: 1n, sumR: 0n },
+        { money: 4n, sumR: 1n },
+        { money: 7n, sumR: 0n },
+      ];
+      expect(poolsFromMoney(rows)).to.deep.equal({ pools: [5n, 0n, 0n, 0n, 7n, 0n], waiting: 7n });
+    });
+
+    it('holds nothing back with value in every epoch, and everything back with value in none', () => {
+      expect(poolsFromMoney([{ money: 5n, sumR: 1n }, { money: 2n, sumR: 1n }])).to.deep.equal({ pools: [5n, 2n], waiting: 0n });
+      expect(poolsFromMoney([{ money: 5n, sumR: 0n }, { money: 2n, sumR: 0n }])).to.deep.equal({ pools: [0n, 0n], waiting: 7n });
+      expect(poolsFromMoney([])).to.deep.equal({ pools: [], waiting: 0n });
+    });
+
+    it('pays a gross by the formula, each term floored on its own', () => {
+      // Half the pool by R, half by score: 100 × (1/2 × 1/3) + 100 × (1/2 × 3/4), floored apart.
+      expect(grossOf(100n, 5_000n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(16n + 37n);
+      expect(grossOf(100n, 0n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(33n);
+      expect(grossOf(100n, 10_000n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(75n);
+    });
+
+    it('gives the second term the R share when no node has a score, and a node with no value nothing', () => {
+      expect(grossOf(100n, 5_000n, { r: 1n, score: 0n }, { sumR: 2n, sumScore: 0n })).to.equal(25n + 25n);
+      expect(grossOf(100n, 5_000n, { r: 0n, score: 0n }, { sumR: 2n, sumScore: 1n })).to.equal(0n);
+    });
+
+    it('words a refusal of a batch as a decoded revert does, by the fault\'s place in the enum', () => {
+      expect(groupFault(0, 'OutsideEpoch')).to.equal('GroupFault(0, 3)');
+      expect(groupFault(1, 'BelowMinCounted')).to.equal('GroupFault(1, 5)');
+      expect(receiptFault(0, 2, 'DuplicateNonce')).to.equal('ReceiptFault(0, 2, 8)');
+    });
+  });
+
   describe('parameters.json, as the deploy helper and the scripts read it', () => {
     const config = {
       testnet: {
@@ -397,8 +436,9 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
     });
 
     it('reads the tracked file\'s query/inference parameters', () => {
-      expect(requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps'])).to.deep.equal({ key: 'latestLambdaBps', value: 5000n });
-      expect(requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds'])).to.deep.equal({ key: 'latestReceiptGraceSeconds', value: 3600n });
+      expect(requireParameter('QueryInferenceStorage', ['lambdaBps'])).to.deep.equal({ key: 'lambdaBps', value: 5000n });
+      expect(requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value).to.equal(256n);
+      expect(requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value).to.equal(32n);
       expect(requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value).to.equal(16n);
     });
   });
@@ -414,7 +454,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
     const swept = [8n, 9n, 10n];
     const settleMany = (c: ReturnType<typeof credits>, s = swept) => {
       const report = new QuietReport();
-      checkSettleMany(report, { credits: c, swept: s }, old);
+      checkSettleMany(report, { credits: c, swept: s }, old, 659n);
       return report;
     };
 
@@ -452,6 +492,33 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
     it('fails when a credit is missing or added', () => {
       expect(settleMany(credits().slice(0, 1)).checks[0].detail).to.contain('credit 1: none, 10.0.8: 200.0 TRAC over epochs 659..659');
       expect(settleMany([...credits(), { start: 659n, end: 659n, amount: 1n }]).failed).to.equal(1);
+    });
+
+    it('passes when a booking 10.0.8 put into an ended epoch comes shifted to the current one, and fails when it does not', () => {
+      const late = [{ id: 9n, stakerCredits: [{ start: 658n, end: 658n, amount: 500n * TRAC }], events: ['TokensAddedToEpochRange', 'AccountFinalSwept'] }];
+      const run = (start: bigint) => {
+        const report = new QuietReport();
+        checkSettleMany(report, { credits: [{ start, end: start, amount: 500n * TRAC }], swept: [9n] }, late, 659n);
+        return report;
+      };
+      expect(run(659n).failed).to.equal(0);
+      expect(run(658n).checks[0].detail).to.contain('credit 0: 500.0 TRAC over epochs 658..658, 10.0.8: 500.0 TRAC over epochs 659..659');
+      expect(run(660n).failed).to.equal(1);
+    });
+
+    it('shifts a late booking as one, keeping its shape, and leaves a booking of the current epoch or a later one as it is', () => {
+      const curve = [
+        { start: 656n, end: 656n, amount: 1n },
+        { start: 657n, end: 667n, amount: 2n },
+        { start: 668n, end: 668n, amount: 3n },
+      ];
+      expect(bookedBy1020(curve, 659n)).to.deep.equal([
+        { start: 659n, end: 659n, amount: 1n },
+        { start: 660n, end: 670n, amount: 2n },
+        { start: 671n, end: 671n, amount: 3n },
+      ]);
+      expect(bookedBy1020(curve, 656n)).to.deep.equal(curve);
+      expect(bookedBy1020([], 659n)).to.deep.equal([]);
     });
 
     it('fails when settleMany sweeps other accounts than 10.0.8 settle did', () => {

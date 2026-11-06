@@ -533,6 +533,21 @@ describe('@unit deploy/052e — QueryInferenceStorage, and the StakingV10 and St
       expect(lines.join('\n')).to.match(new RegExp(`${network}: the query/inference pool is not deployed on mainnet yet`));
     }
   });
+
+  it('the parameters of each environment that deploys it are the batch bounds and λ, each with its getter and setter, so a run of the step finds them all', () => {
+    const parameters = JSON.parse(
+      fs.readFileSync(path.join(__dirname, '..', 'deployments', 'parameters.json'), 'utf-8'),
+    ) as Record<string, Record<string, Record<string, string>>>;
+    const qis = new Interface(abiOf('QueryInferenceStorage'));
+    for (const environment of ['development', 'testnet']) {
+      const config = parameters[environment].QueryInferenceStorage;
+      expect(config, environment).to.deep.equal({ maxItemsPerBatch: '256', maxGroupsPerBatch: '32', lambdaBps: '5000' });
+      for (const getter of Object.keys(config)) {
+        expect(qis.getFunction(getter), getter).to.not.equal(null);
+        expect(qis.getFunction(`set${getter[0].toUpperCase()}${getter.slice(1)}`), getter).to.not.equal(null);
+      }
+    }
+  });
 });
 
 describe('@unit deploy/998b — the activation of the query/inference pool', () => {
@@ -767,7 +782,7 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
     (helpers.setParametersEncodedData as unknown[]).push({
       contractName: 'QueryInferenceStorage',
       encodedData: [
-        qisInterface.encodeFunctionData('setReceiptGraceSeconds', [3_600n]),
+        qisInterface.encodeFunctionData('setMaxItemsPerBatch', [256n]),
         qisInterface.encodeFunctionData('setLambdaBps', [5_000n]),
       ],
     });
@@ -777,7 +792,7 @@ describe('@unit deploy/998 — the Hub transaction, sent or printed for the Hub 
     const out = (await captured(() => initializeContracts(hre as never))).join('\n');
     expect(out).to.contain('QueryInferenceStorage -> ' + QIS);
     expect(out).to.contain(`1. ${QIS} (QueryInferenceStorage)`);
-    expect(out).to.contain('QueryInferenceStorage.setReceiptGraceSeconds(3600)');
+    expect(out).to.contain('QueryInferenceStorage.setMaxItemsPerBatch(256)');
     expect(out).to.contain('QueryInferenceStorage.setLambdaBps(5000)');
   });
 

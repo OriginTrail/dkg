@@ -30,9 +30,9 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * Money: the whole payment moves from the buyer key into the vault
  * (`ConvictionStakingStorage`), with no protocol fee, whether or not a
  * treasury is wired: every subscription token enters the query/inference pool.
- * It is booked to `QueryInferenceStorage` as due in the epoch after the
- * period, the epoch in which the period's receipt value first counts. The
- * payment is non-refundable, and no TRAC is ever sent to a seller.
+ * It is booked to `QueryInferenceStorage` under the period's epoch, the epoch
+ * in which the period's receipt value counts. The payment is non-refundable,
+ * and no TRAC is ever sent to a seller.
  *
  * Architecture: stateless logic, as `ServiceSubscriptions`, whose Conviction
  * Account paths it complements; the two contracts apply the same period rules
@@ -50,7 +50,7 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * cannot be rotated or revoked on-chain: a wallet period has no assignment to
  * revoke. Whoever holds a leaked key can sign the period's requests for any
  * seller, a node they run included, and so direct the period's R to it. The
- * loss is bounded by that one period: its claims finalize to at most its
+ * loss is bounded by that one period: its receipts count for at most its
  * buckets' funded value, top-ups included, and the key signs for no other
  * period. Only the buyer key tops a period up, so it can add nothing more and
  * fund its next period under a new key. (A Conviction Account period's key is
@@ -118,7 +118,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
      * @dev In order: funding is live, the session key, the period's epoch (the
      *      current one or the next), the buckets and the value by the funding
      *      rules, and one period per buyer key and epoch. Then the value is
-     *      booked as due in the epoch after the period, the record is written
+     *      booked under the period's epoch, the record is written
      *      under account 0 with a cost equal to the value and no discount,
      *      window or draw, and last the payment is pulled. The buyer key
      *      approves this contract for the value beforehand.
@@ -142,8 +142,8 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         subscriptionId = ServicePeriodLib.subscriptionIdOf(buyer, r.epoch);
         if (css.subscriptionExists(subscriptionId)) revert PeriodAlreadyFunded(subscriptionId);
 
-        // 4. The value due in the epoch after the period.
-        qis.addWalletDue(r.epoch + 1, value);
+        // 4. The value under the period's epoch.
+        qis.addWalletFunding(r.epoch, value);
 
         // 5. The record, under account 0.
         css.createSubscription(
@@ -195,8 +195,8 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
      * @dev Refused unless funding is live, the period was funded from a wallet
      *      by `msg.sender`, and it has not ended. An addition to a stored bucket repeats its
      *      class and price cap, which never change within a period; a new
-     *      bucket is appended under the funding rules. The added value is due
-     *      in the epoch after the period, as the period's own value is.
+     *      bucket is appended under the funding rules. The added value is
+     *      booked under the period's epoch, as the period's own value is.
      * @return value The value added, and paid.
      */
     function topUpFromWallet(
@@ -222,8 +222,8 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         );
         value = t.value;
 
-        // 3. The value due in the epoch after the period, and the record.
-        qis.addWalletDue(uint256(s.epoch) + 1, value);
+        // 3. The value under the period's epoch, and the record.
+        qis.addWalletFunding(s.epoch, value);
         css.applyTopUp(
             subscriptionId,
             ConvictionServiceStorage.TopUpAmounts({value: value, cost: value, drawnFromWindow: 0, drawnFromTopUp: 0}),

@@ -5,17 +5,15 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
 
 /**
  * V10 — deploys `QueryInferenceStorage`, the state store of the
- * query/inference reward pool (OT-RFC-27): the money due per epoch from funded
- * plan periods, the frozen inputs of closed epochs, the QIF inputs, the claims
- * and the replay bitmap, and its parameters (the activation epoch, the receipt
- * grace, the batch and close bounds, the pause and the λ schedule).
+ * query/inference reward pool (OT-RFC-27): the money per epoch from funded
+ * plan periods, the QIF inputs, each bucket's fill and the replay bitmap, and
+ * its parameters (the activation epoch, the batch bounds, the pause and λ).
  *
  * It is registered in the Hub's contract set: its mutators are `onlyContracts`,
  * which reads the contract set. On a live network `998_initialize_contracts.ts`
- * registers it, runs its `initialize()` (which seeds the grace and the bounds
- * where unset) and then forwards the parameters of `deployments/parameters.json`,
- * all in one `Hub.setAndReinitializeContracts`. A λ set while the activation
- * epoch is unset applies at once.
+ * registers it, runs its `initialize()` (which seeds the bounds where unset)
+ * and then forwards the parameters of `deployments/parameters.json`, all in one
+ * `Hub.setAndReinitializeContracts`.
  *
  * StakingV10 pays the pool, so a run that would keep a StakingV10 below 10.1.0
  * is refused by 000: the deployments file marks it deployed, and the run reuses
@@ -33,7 +31,7 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
  *
  * Replacing it. Once the pool is active, a new `QueryInferenceStorage` starts
  * empty: node-epochs not yet claimed lose their share of the old pool, and
- * the old carry and money due are stranded. So a redeploy of this storage
+ * money not yet in a pool is stranded. So a redeploy of this storage
  * needs a migration, which no step here runs; the contract's NatSpec says
  * what one must do. Redeploy the settlement instead to change the logic.
  *

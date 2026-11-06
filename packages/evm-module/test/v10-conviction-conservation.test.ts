@@ -291,7 +291,7 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
       }
       let due = 0n;
       const endEpoch = (await f.Chronos.getCurrentEpoch()) + 2n;
-      for (let e = startEpoch; e <= endEpoch; e++) due += await f.QIS.convictionDue(e);
+      for (let e = startEpoch; e <= endEpoch; e++) due += await f.QIS.convictionFunding(e);
       const received = (await f.Token.balanceOf(treasury.address)) - treasuryBefore;
 
       expect(staker + due + treasuryShard + received + alreadyBooked).to.equal(committed + topUps);

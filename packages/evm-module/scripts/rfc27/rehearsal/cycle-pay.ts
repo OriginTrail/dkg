@@ -1,77 +1,109 @@
-// The cycle's epoch A + 2: the close of the pool epoch A + 1, the emergency
-// switch inside a reverted snapshot, the sellers' delegators' claims against
-// StakingKPI's preview, the withdrawn epoch paid by claimWithdrawnEpoch, the
-// node-epoch accounting of A + 1, the operator fee withdrawn, the account's
-// closed windows booked, and the TRAC the vault took in and paid out.
+// The cycle's epoch A + 2: the pool epoch A + 1 has ended, which makes its numbers
+// final, and nothing runs before they are paid. What an ended epoch refuses, a
+// change of λ that moves nothing, the emergency switch inside a reverted snapshot,
+// the sellers' delegators' claims against StakingKPI's preview, the withdrawn epoch
+// paid by claimWithdrawnEpoch, the node-epoch accounting of A + 1, the operator fee
+// withdrawn, the account's closed windows booked, and the TRAC the vault took in
+// and paid out.
+
+import { ethers } from 'ethers';
 
 import { eventsIn } from '../contracts';
 import { chainNow } from '../network';
-import { poolShareOf } from '../reads';
+import { inference } from '../plans';
+import { epochNumbers, groupFault, grossOf, poolShareOf, poolsFromMoney } from '../reads';
 import { fmt, sum } from '../report';
 import { HUB, expectRevert, saveResults, send, succeeds } from './context';
 import type { CycleRun } from './cycle';
-import { approve, claimAll, walletRequest } from './operations';
+import { approve, claimAll, requestDomain, signedGroup, walletRequest } from './operations';
 import { impersonate } from './plumbing';
 import { ExpectedReward, closedWindows, expectedReward, positions, stakerCredits } from './reads';
-import { COMMITTED, LATE_COMMITTED, SELLERS, TRAC, WALLET_PERIOD_VALUE } from './scenario';
+import { COMMITTED, LATE_COMMITTED, ROLLED_VALUE, SELLERS, TRAC, WALLET_PERIOD_VALUE, WALLET_TOP_UP } from './scenario';
 
-export async function closeAndPay(run: CycleRun): Promise<void> {
-  const { ctx, c, out, A, E0, actors, feeNode, feeBalance0, vault, vault0, accountId, B, cost, publish, withdrawn } = run;
+export async function payOut(run: CycleRun): Promise<void> {
+  const { ctx, c, out, A, E0, actors, feeNode, feeBalance0, vault, vault0, accountId, B, cost, publish, walletPeriod, operational, withdrawn } = run;
   const { report } = ctx;
   const check = report.check.bind(report);
   const { hubOwner: owner, walletBuyer, walletSession, keeper, nodeAdmin } = actors;
   const w = withdrawn.position;
   const h = ctx.stack.hub;
   const qsAddr = await c.qs.getAddress();
+  const qisAddr = await c.qis.getAddress();
   const snftAddr = await c.snft.getAddress();
   const sswAddr = await c.ssw.getAddress();
   const sv10Addr = await c.sv10.getAddress();
 
-  // ---- epoch A + 2: close, claims, withdrawal, window booking ----
-  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(A + 2n)) + 120n);
+  // ---- epoch A + 2: the claims, with nothing run first; the window booking ----
+  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(A + 2n)) + 1n);
   const E3 = await c.chronos.getCurrentEpoch();
-  report.say(`\nEpoch ${E3}: close and pay`);
-  const [previewPool] = await c.qs.previewEpochClose(A + 1n);
+  report.say(`\nEpoch ${E3}: epoch ${A + 1n} has ended, its numbers are final, and nothing has to run before they are paid`);
+
+  // What an ended epoch refuses: a batch, even from a seller that has proved in
+  // the new epoch (in a reverted snapshot), a top-up, and any write to its money
+  // or its totals, here from the Hub owner, whom the storage's gate admits.
+  const lateSeller = SELLERS[1];
+  const lateBatch = await ctx.fork.inSnapshot(async () => {
+    await ctx.fork.proof(c, lateSeller, 1n, `node ${lateSeller}'s first proof of epoch ${E3}, in a reverted snapshot`);
+    const late = await signedGroup({ domain: await requestDomain(c), session: walletSession, subscriptionId: walletPeriod, seller: lateSeller, firstNonce: 500n, values: [TRAC], issuedAt: await chainNow(ctx.hre) - 3_600n });
+    return expectRevert(ctx, `node ${lateSeller}: a batch for the period of ${A + 1n}, in ${E3}`, operational[String(lateSeller)], qsAddr, c.qs.interface.encodeFunctionData('submitReceiptBatch', [[late]]));
+  });
+  check(`a receipt that misses the end of epoch ${A + 1n} never counts`, lateBatch === groupFault(0, 'OutsideEpoch'), lateBatch);
+  const lateTopUp = await expectRevert(ctx, `wallet buyer: a top-up of the period of ${A + 1n}, in ${E3}`, walletBuyer.address, sswAddr, c.ssw.interface.encodeFunctionData('topUpFromWallet', [walletPeriod, inference(TRAC), ethers.id('rehearsal wallet plan')]));
+  check('a period that has ended takes no top-up', lateTopUp.startsWith('PeriodEnded'), lateTopUp);
+  const ownerAddr = await h.owner();
+  const lateMoney = await expectRevert(ctx, `addWalletFunding(${A + 1n}, 1) from the Hub owner, in ${E3}`, ownerAddr, qisAddr, c.qis.interface.encodeFunctionData('addWalletFunding', [A + 1n, 1n]));
+  const lateCount = await expectRevert(ctx, `countReceipts for epoch ${A + 1n} from the Hub owner, in ${E3}`, ownerAddr, qisAddr, c.qis.interface.encodeFunctionData('countReceipts', [walletPeriod, 0, SELLERS[0], A + 1n, 1n, 1n, 1n]));
+  check(`the storage refuses any write to an ended epoch's money or totals`, lateMoney === `EpochEnded(${A + 1n}, ${E3})` && lateCount === `EpochEnded(${A + 1n}, ${E3})`, `${lateMoney}, ${lateCount}`);
+
   const kpiPreview: Record<string, bigint> = {};
   for (const p of await positions(c)) {
     for (let e = E0; e <= A + 1n; e++) kpiPreview[`${p.node}:${e}`] ??= await c.kpi.getNetNodeRewards(p.node, e);
   }
-  const closed = await send(ctx, 'keeper: closeEpochs(10)', keeper, qsAddr, c.qs.interface.encodeFunctionData('closeEpochs', [10n]));
-  const closes = eventsIn(closed.receipt, c.qs, c.qs.getEvent('EpochClosed')).map((e) => ({
-    epoch: e.epoch,
-    walletDue: e.walletDue,
-    convictionDue: e.convictionDue,
-    carryIn: e.carryIn,
-    pool: e.pool,
-    sumR: e.sumR,
-    sumScore: e.sumScore,
-    lambdaBps: e.lambdaBps,
-  }));
-  out.closes = closes;
-  const pool = await c.qs.epochPool(A + 1n);
-  check(`the close of ${A + 1n} pools the wallet value and the account cost (${fmt(pool)} TRAC)`, pool === WALLET_PERIOD_VALUE + cost);
-  check('the previewed close equals the close', previewPool === pool);
+
+  // The pool, read straight from what storage holds, with nothing written since the epoch ended.
+  const rolled = await epochNumbers(c, A);
+  const poolEpoch = await epochNumbers(c, A + 1n);
+  const pool = poolEpoch.pool;
+  check(`no value counted in epoch ${A}, so its pool is 0 and its ${fmt(ROLLED_VALUE)} TRAC rolls forward`, rolled.sumR === 0n && rolled.pool === 0n && rolled.money === ROLLED_VALUE);
+  check(
+    `the pool of epoch ${A + 1n} is its wallet value, its top-up, the account cost and the money rolled from ${A} (${fmt(pool)} TRAC)`,
+    pool === ROLLED_VALUE + WALLET_PERIOD_VALUE + WALLET_TOP_UP + cost && pool === poolsFromMoney([rolled, poolEpoch]).pools[1],
+  );
   const gross: Record<string, bigint> = {};
   for (const n of SELLERS) gross[String(n)] = await c.qs.queryInferenceGross(A + 1n, n);
   const grossSum = sum(Object.values(gross));
+  const nodeInputs = await Promise.all(SELLERS.map((n) => c.qis.getNodeEpoch(n, A + 1n)));
+  check(
+    'each seller\'s gross is the formula\'s, worked out without the contract',
+    SELLERS.every((n, i) => gross[String(n)] === grossOf(pool, poolEpoch.lambdaBps, nodeInputs[i], poolEpoch)),
+  );
   check(
     'the sellers\' query/inference gross adds up to the pool, less floor dust',
     grossSum <= pool && pool - grossSum <= 4n,
     `${Object.entries(gross).map(([n, g]) => `node ${n} ${fmt(g)}`).join(', ')}; dust ${pool - grossSum} wei`,
   );
 
-  // The unused share of each closed epoch: its money less the receipt value
-  // finalized in it. The whole money is the pool once any value is finalized.
-  const unused = closes.map((x) => {
-    const money = x.walletDue + x.convictionDue + x.carryIn;
-    return { epoch: x.epoch, money, served: x.sumR, unused: money - x.sumR, pool: x.pool };
-  });
+  // The unused share of the pool: what no counted receipt value stands for. It
+  // stays in the pool, as OT-RFC-27's shared margin.
+  const unused = [{ epoch: A + 1n, money: poolEpoch.money, rolledIn: rolled.money, served: poolEpoch.sumR, unused: pool - poolEpoch.sumR, pool }];
   out.unused = unused;
-  report.say('  unused share per closed epoch (money = walletDue + convictionDue + carryIn, served = sumR):');
-  for (const u of unused) report.say(`    epoch ${u.epoch}: money ${fmt(u.money)}, served ${fmt(u.served)}, unused ${fmt(u.unused)}, pool ${fmt(u.pool)}`);
+  report.say('  unused share of the pool (pool = money + rolled in, served = sumR):');
+  for (const u of unused) report.say(`    epoch ${u.epoch}: money ${fmt(u.money)}, rolled in ${fmt(u.rolledIn)}, served ${fmt(u.served)}, unused ${fmt(u.unused)}, pool ${fmt(u.pool)}`);
+  check(`epoch ${A + 1n}: 2 TRAC of the 16 went unserved, and all 16 are the pool`, pool === 16n * TRAC && poolEpoch.sumR === 14n * TRAC);
+
+  // λ: an epoch took it when its first value counted, so a change moves no epoch
+  // with value, while the formula at the new λ would pay differently.
+  const NEW_LAMBDA = 1_000n;
+  const lambdaMoved = await ctx.fork.inSnapshot(async () => {
+    await send(ctx, `Hub owner: forwardCall(QueryInferenceStorage, setLambdaBps(${NEW_LAMBDA})) (in a snapshot)`, owner, HUB, h.interface.encodeFunctionData('forwardCall', [qisAddr, c.qis.interface.encodeFunctionData('setLambdaBps', [NEW_LAMBDA])]));
+    const after = await Promise.all(SELLERS.map((n) => c.qs.queryInferenceGross(A + 1n, n)));
+    return { lambda: await c.qis.lambdaBps(), same: SELLERS.every((n, i) => after[i] === gross[String(n)]) };
+  });
+  const wouldPay = SELLERS.map((n, i) => grossOf(pool, NEW_LAMBDA, nodeInputs[i], poolEpoch));
   check(
-    `epoch ${A + 1n}: 2 TRAC of the 12 went unserved, and the pool is the whole money`,
-    unused.some((u) => u.epoch === A + 1n && u.money === 12n * TRAC && u.served === 10n * TRAC && u.unused === 2n * TRAC && u.pool === 12n * TRAC),
+    `a change of λ to ${NEW_LAMBDA} moves no epoch that has value`,
+    lambdaMoved.lambda === NEW_LAMBDA && lambdaMoved.same,
+    `at λ ${NEW_LAMBDA} the formula would pay ${wouldPay.map((g, i) => `node ${SELLERS[i]} ${fmt(g)}`).join(', ')}`,
   );
 
   const cyclePositions = (await positions(c)).filter((p) => SELLERS.includes(p.node));
@@ -245,14 +277,14 @@ export async function closeAndPay(run: CycleRun): Promise<void> {
   // Conservation.
   const vault1 = await c.token.balanceOf(vault);
   check(
-    'TRAC into ConvictionStakingStorage: the wallet value and both commitments in; the withdrawal, its epoch and the operator fee out',
-    vault1 - vault0 === WALLET_PERIOD_VALUE + COMMITTED + LATE_COMMITTED - withdrawn.paidOut - tailPaid - feePaid,
-    `Δ ${fmt(vault1 - vault0)} = ${fmt(WALLET_PERIOD_VALUE)} + ${fmt(COMMITTED)} + ${fmt(LATE_COMMITTED)} − ${fmt(withdrawn.paidOut)} − ${fmt(tailPaid)} − ${fmt(feePaid)}`,
+    'TRAC into ConvictionStakingStorage: the wallet periods, the top-up and both commitments in; the withdrawal, its epoch and the operator fee out',
+    vault1 - vault0 === ROLLED_VALUE + WALLET_PERIOD_VALUE + WALLET_TOP_UP + COMMITTED + LATE_COMMITTED - withdrawn.paidOut - tailPaid - feePaid,
+    `Δ ${fmt(vault1 - vault0)} = ${fmt(ROLLED_VALUE + WALLET_PERIOD_VALUE + WALLET_TOP_UP)} + ${fmt(COMMITTED)} + ${fmt(LATE_COMMITTED)} − ${fmt(withdrawn.paidOut)} − ${fmt(tailPaid)} − ${fmt(feePaid)}`,
   );
   const publishCredits = sum(publish.stakerCredits.map((x) => x.amount));
   const bookedCredits = sum(booking.map((x) => x.amount));
   check(
-    'the account money is booked once: service cost (query/inference due) + publish credits + window booking = the booked windows\' budget',
+    'the account money is booked once: service cost (query/inference funding) + publish credits + window booking = the booked windows\' budget',
     cost + publishCredits + bookedCredits === B * (toW - fromW),
     `${fmt(cost)} + ${fmt(publishCredits)} + ${fmt(bookedCredits)} = ${fmt(B * (toW - fromW))}`,
   );

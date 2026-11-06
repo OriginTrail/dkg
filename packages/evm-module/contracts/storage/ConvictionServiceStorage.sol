@@ -15,7 +15,7 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *         assigns bounded plan-funding authority to buyer keys, and each buyer
  *         key funds plan periods from the account's existing allowance. A
  *         period funded from an account moves no TRAC: its cost is drawn from
- *         the account's allowance and booked as due in the query/inference
+ *         the account's allowance and booked in the query/inference
  *         pool (`QueryInferenceStorage`), as a wallet period's value is. A
  *         buyer key may also fund periods from its wallet; those are recorded
  *         here too, under account 0, which no account has. A plan period is
@@ -29,7 +29,7 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *     records with their buckets, which top-ups grow. A period record names
  *     the assignment it was funded under by its nonce, so the period keeps
  *     that assignment's end whatever later assignment its buyer key gets.
- *     It never holds or moves TRAC; the money due is in
+ *     It never holds or moves TRAC; the money is booked in
  *     `QueryInferenceStorage`.
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
  *     contract, and the Hub owner), and the logic contracts enforce every
@@ -71,7 +71,7 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     //           (`applyTopUp`); one bucket read by index (`getBucket`). The
     //           mapping slots are unchanged.
     //   1.2.0 — no service labels: a Conviction Account period's cost is booked
-    //           as due in `QueryInferenceStorage`. Removed with the labels are
+    //           in `QueryInferenceStorage`. Removed with the labels are
     //           their state and views (`serviceSpent`, `baseLabel`,
     //           `topUpLabel`, `labelCursor`, `epochServiceLabel`,
     //           `accountServiceLabelTotal`, `serviceLabel`, `accountLabel`),
@@ -459,8 +459,8 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ///         `drawnFromWindow + drawnFromTopUp`, or with `value` for a wallet
     ///         period, `accountId` with the account's list
     ///         (`appendAccountSubscription`), and `assignee` and `epoch` with
-    ///         the id, keccak256(abi.encode(assignee, epoch)). The money due is
-    ///         `QueryInferenceStorage`'s, and does not follow.
+    ///         the id, keccak256(abi.encode(assignee, epoch)). The money booked
+    ///         is `QueryInferenceStorage`'s, and does not follow.
     ///         `createSubscription` and `applyTopUp` remain the normal path.
     function setSubscription(bytes32 subscriptionId, Subscription calldata s) external onlyContracts {
         _requireRecorded(subscriptionId);
@@ -472,9 +472,10 @@ contract ConvictionServiceStorage is INamed, IVersioned, HubDependent, IInitiali
     ///         with no record (`SubscriptionNotFound`), and reverts past the
     ///         period's stored buckets, as `getBucket` does.
     /// @dev    The caller keeps in step the record's `value`, the sum of the
-    ///         buckets' values (`setSubscription`). Claims are kept by the
-    ///         bucket's index (`QueryInferenceStorage`), so a bucket with claims
-    ///         keeps its `bucketId`. `applyTopUp` remains the normal path.
+    ///         buckets' values (`setSubscription`). Fills are kept by the
+    ///         bucket's index (`QueryInferenceStorage`), so a filled bucket keeps
+    ///         its `bucketId` and at least its fill. `applyTopUp` remains the
+    ///         normal path.
     function setBucket(bytes32 subscriptionId, uint256 index, Bucket calldata b) external onlyContracts {
         _requireRecorded(subscriptionId);
         _buckets[subscriptionId][index] = b;

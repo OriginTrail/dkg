@@ -2,8 +2,9 @@
 // the real deploy steps 052c, 052d, 052e and 052f on the in-process network:
 //   - every contract is registered in the Hub and wired, in an order that lets
 //     each initialize as it is deployed;
-//   - the parameters of deployments/parameters.json are set, λ at once, and a
-//     later run forwards no λ or grace equal to the latest one accepted;
+//   - the parameters of deployments/parameters.json are set, λ among them, and
+//     a later run forwards a λ only if it differs from the one set, which then
+//     applies at once;
 //   - the activation epoch is the deployment epoch, so a period can be funded
 //     right after the deploy, as the suites and the local devnet do.
 
@@ -83,17 +84,14 @@ describe('@integration The development deploy of the plan-period contracts', () 
 
   it('sets the parameters of the development environment, λ included', async () => {
     const { QIS, CSS } = await loadFixture(deployFixture);
-    expect(await QIS.receiptGraceSeconds()).to.equal(3_600n);
     expect(await QIS.maxItemsPerBatch()).to.equal(256n);
     expect(await QIS.maxGroupsPerBatch()).to.equal(32n);
-    expect(await QIS.maxCloseStepsPerClaim()).to.equal(32n);
     expect(await QIS.lambdaBps()).to.equal(5_000n);
-    expect(await QIS.nextLambdaFromEpoch()).to.equal(0n);
     expect(await QIS.paused()).to.equal(false);
     expect(await CSS.maxBucketsPerPeriod()).to.equal(16n);
   });
 
-  it('a later run forwards no λ or receipt grace equal to the latest accepted, scheduled or already in force', async () => {
+  it('a later run forwards no λ equal to the one set, before an epoch boundary or after it, and a λ that differs applies at once', async () => {
     const { Hub, Chronos, QIS } = await loadFixture(deployFixture);
     const forward = async (fn: string, args: unknown[]) =>
       Hub.forwardCall(await QIS.getAddress(), QIS.interface.encodeFunctionData(fn, args));
@@ -120,30 +118,23 @@ describe('@integration The development deploy of the plan-period contracts', () 
       return lines.filter((l) => l.includes('Setting parameter'));
     };
     try {
-      const c = await Chronos.getCurrentEpoch();
-      // Governance schedules λ 3,000 and a grace of 1,800 s for the next
-      // epoch, and the configuration follows.
-      await forward('setLambdaBps', [3_000n]);
-      await forward('setReceiptGraceSeconds', [1_800n]);
-      Object.assign(config, {
-        latestLambdaBps: { setter: 'setLambdaBps', setterArgs: ['3000'] },
-        latestReceiptGraceSeconds: { setter: 'setReceiptGraceSeconds', setterArgs: ['1800'] },
-      });
-      const schedule = async () => [
-        await QIS.nextLambdaBps(),
-        await QIS.nextLambdaFromEpoch(),
-        await QIS.nextReceiptGraceSeconds(),
-        await QIS.nextReceiptGraceFromEpoch(),
-      ];
-
-      // Scheduled, not yet in force: nothing is forwarded.
+      // The deploy's own values: nothing to forward.
       expect(await rerun()).to.deep.equal([]);
-      // In force, in the epoch where it took effect, with the epoch before it
-      // still open: forwarding either value would revert the whole run.
+
+      // Governance sets λ 3,000, and the configuration follows.
+      const c = await Chronos.getCurrentEpoch();
+      await forward('setLambdaBps', [3_000n]);
+      config.lambdaBps = '3000';
+      expect(await rerun()).to.deep.equal([]);
       await time.increaseTo(await Chronos.timestampForEpoch(c + 1n));
       expect(await rerun()).to.deep.equal([]);
-      expect(await schedule()).to.deep.equal([3_000n, c + 1n, 1_800n, c + 1n]);
-      expect([await QIS.latestLambdaBps(), await QIS.latestReceiptGraceSeconds()]).to.deep.equal([3_000n, 1_800n]);
+      expect(await QIS.lambdaBps()).to.equal(3_000n);
+
+      // A configuration that differs is forwarded, and reads at once.
+      config.lambdaBps = '2500';
+      expect(await rerun()).to.deep.equal(["[QueryInferenceStorage] Setting parameter 'lambdaBps' value to be 2500."]);
+      expect(await QIS.lambdaBps()).to.equal(2_500n);
+      expect(await rerun()).to.deep.equal([]);
     } finally {
       for (const key of Object.keys(config)) delete config[key];
       Object.assign(config, saved);
@@ -155,13 +146,15 @@ describe('@integration The development deploy of the plan-period contracts', () 
     const { Chronos, Token, QIS, CSS, SSW, accounts } = await loadFixture(deployFixture);
     const epoch = await Chronos.getCurrentEpoch();
     expect(await QIS.activationEpoch()).to.equal(epoch);
-    expect(await QIS.closedThrough()).to.equal(epoch - 1n);
-    expect(await QIS.lambdaBpsAt(epoch)).to.equal(5_000n);
+    // The epoch takes λ when its first value counts.
+    expect(await QIS.lambdaBps()).to.equal(5_000n);
+    expect(await QIS.getEpochTotals(epoch)).to.deep.equal([0n, 0n, 0n]);
 
     const buyer = accounts[21];
     await Token.connect(buyer).approve(await SSW.getAddress(), 10n * TRAC);
     await SSW.connect(buyer).fundFromWallet(walletRequestOf(epoch));
     expect(await CSS.subscriptionExists(subscriptionIdOf(buyer.address, epoch))).to.equal(true);
-    expect(await QIS.walletDue(epoch + 1n)).to.equal(10n * TRAC);
+    expect(await QIS.walletFunding(epoch)).to.equal(10n * TRAC);
+    expect(await QIS.walletFunding(epoch + 1n)).to.equal(0n);
   });
 });
