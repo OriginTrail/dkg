@@ -4,6 +4,8 @@ pragma solidity ^0.8.20;
 
 import {StakingStorage} from "./storage/StakingStorage.sol";
 import {ConvictionStakingStorage} from "./storage/ConvictionStakingStorage.sol";
+import {ConvictionWithdrawalStorage} from "./storage/ConvictionWithdrawalStorage.sol";
+import {Chronos} from "./storage/Chronos.sol";
 import {IdentityStorage} from "./storage/IdentityStorage.sol";
 import {ParametersStorage} from "./storage/ParametersStorage.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
@@ -19,7 +21,9 @@ import {TokenLib} from "./libraries/TokenLib.sol";
  * @title StakingV10Ledger
  * @notice The balance moves of `StakingV10` that touch no position: the
  *         operator-fee withdrawal (request, finalize, cancel) and the drains
- *         of V8 stake and V8 operator fees into migration credit. They run
+ *         of V8 stake and V8 operator fees into migration credit, and the
+ *         record a withdrawal leaves of the epoch in progress
+ *         (`ConvictionWithdrawalStorage`, StakingV10 10.1.0). They run
  *         here, called by `StakingV10` only, because `StakingV10` with them
  *         inline measured 24,524 bytes, 52 under the EIP-170 limit.
  *
@@ -45,7 +49,9 @@ contract StakingV10Ledger is INamed, IVersioned, ContractStatus, IInitializable 
     string private constant _NAME = "StakingV10Ledger";
     // Version history:
     //   1.0.0 — the operator-fee withdrawal and the V8 drains into migration
-    //           credit, moved out of StakingV10 10.0.5 unchanged.
+    //           credit, moved out of StakingV10 10.0.5 unchanged; the record
+    //           of the epoch in progress at a withdrawal, written at the
+    //           withdrawal and taken by its claim (StakingV10 10.1.0).
     string private constant _VERSION = "1.0.0";
 
     // ========================================================================
@@ -61,6 +67,10 @@ contract StakingV10Ledger is INamed, IVersioned, ContractStatus, IInitializable 
     IdentityStorage public identityStorage;
     /// @notice The operator-fee withdrawal delay (`stakeWithdrawalDelay`).
     ParametersStorage public parametersStorage;
+    /// @notice The records of the epoch in progress at a withdrawal.
+    ConvictionWithdrawalStorage public withdrawalStorage;
+    /// @notice The current epoch, which a record's epoch must be before.
+    Chronos public chronos;
 
     // ========================================================================
     // Errors
@@ -71,6 +81,12 @@ contract StakingV10Ledger is INamed, IVersioned, ContractStatus, IInitializable 
     /// @notice A drain while the V8 `Staking` logic is still registered; the
     ///         error `StakingV10` declares.
     error V8StakingStillLive();
+    /// @notice `tokenId` holds no record to claim; the error `StakingV10`
+    ///         declares.
+    error NoWithdrawnEpoch(uint256 tokenId);
+    /// @notice The epoch of `tokenId`'s record has not ended; the error
+    ///         `StakingV10` declares.
+    error WithdrawnEpochInProgress(uint256 tokenId, uint256 epoch);
 
     // solhint-disable-next-line no-empty-blocks
     constructor(address hubAddress) ContractStatus(hubAddress) {}
@@ -83,6 +99,8 @@ contract StakingV10Ledger is INamed, IVersioned, ContractStatus, IInitializable 
         convictionStorage = ConvictionStakingStorage(hub.getContractAddress("ConvictionStakingStorage"));
         identityStorage = IdentityStorage(hub.getContractAddress("IdentityStorage"));
         parametersStorage = ParametersStorage(hub.getContractAddress("ParametersStorage"));
+        withdrawalStorage = ConvictionWithdrawalStorage(hub.getContractAddress("ConvictionWithdrawalStorage"));
+        chronos = Chronos(hub.getContractAddress("Chronos"));
     }
 
     function name() external pure virtual override returns (string memory) {
@@ -96,6 +114,57 @@ contract StakingV10Ledger is INamed, IVersioned, ContractStatus, IInitializable 
     modifier onlyStakingV10() {
         if (msg.sender != hub.getContractAddress("StakingV10")) revert OnlyStakingV10();
         _;
+    }
+
+    // ========================================================================
+    // The epoch in progress at a withdrawal (StakingV10 10.1.0)
+    //
+    // `StakingV10.withdraw` settles the position's score in the epoch in
+    // progress and has it recorded here, with the position's reward carries,
+    // before it deletes the position. Once that epoch has ended,
+    // `StakingV10.claimWithdrawnEpoch` takes the record and pays the share.
+    // ========================================================================
+
+    /// @notice Record what withdrawn position `tokenId` leaves to claim of
+    ///         `epoch`, the epoch in progress, for `staker`: its settled score
+    ///         `score18` on `identityId`, and its reward carries, read here
+    ///         before the position is deleted. Records nothing, and returns
+    ///         false, when there is nothing to claim.
+    function recordWithdrawal(
+        uint256 tokenId,
+        address staker,
+        uint72 identityId,
+        uint256 epoch,
+        uint256 score18
+    ) external onlyStakingV10 returns (bool recorded) {
+        ConvictionStakingStorage.RewardCarry[] memory carries = convictionStorage.getRewardCarries(tokenId);
+        if (score18 == 0 && carries.length == 0) return false;
+        withdrawalStorage.setWithdrawal(
+            tokenId,
+            ConvictionWithdrawalStorage.Withdrawal({staker: staker, identityId: identityId, epoch: uint40(epoch)}),
+            carries
+        );
+        return true;
+    }
+
+    /// @notice Take withdrawn position `tokenId`'s record for its claim: it
+    ///         must exist (`NoWithdrawnEpoch`), and its epoch must have ended
+    ///         (`WithdrawnEpochInProgress`). The record is deleted, so it is
+    ///         taken once.
+    function takeWithdrawal(
+        uint256 tokenId
+    )
+        external
+        onlyStakingV10
+        returns (address staker, uint72 identityId, uint256 epoch, ConvictionStakingStorage.RewardCarry[] memory carries)
+    {
+        ConvictionWithdrawalStorage.Withdrawal memory w;
+        (w, carries) = withdrawalStorage.getWithdrawal(tokenId);
+        epoch = w.epoch;
+        if (epoch == 0) revert NoWithdrawnEpoch(tokenId);
+        if (chronos.getCurrentEpoch() <= epoch) revert WithdrawnEpochInProgress(tokenId, epoch);
+        withdrawalStorage.deleteWithdrawal(tokenId);
+        return (w.staker, w.identityId, epoch, carries);
     }
 
     // ========================================================================

@@ -1,13 +1,14 @@
 // StakingV10Ledger 1.0.0 runs the operator-fee withdrawal and the V8 drains
-// into migration credit for StakingV10 10.0.6, which keeps those entry
+// into migration credit for StakingV10 (from 10.0.6), which keeps those entry
 // points, their signatures and their caller gates, and forwards.
 //
 // Covered here: the ledger admits only the contract the Hub holds as
-// StakingV10, looked up at each call; and the operator-fee withdrawal,
-// reached through StakingV10 as before, keeps its checks, its custom errors
-// as StakingV10 reports them, its cooldown and its payout to the calling
-// admin key. The V8 drains are covered through DKGStakingConvictionNFT by the
-// migration suites.
+// StakingV10, looked up at each call, on every entry point, the two that write
+// and take the record a withdrawal leaves included, whose record a refused
+// caller leaves as it is; and the operator-fee withdrawal, reached through
+// StakingV10 as before, keeps its checks, its custom errors as StakingV10
+// reports them, its cooldown and its payout to the calling admin key. The V8
+// drains are covered through DKGStakingConvictionNFT by the migration suites.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
@@ -15,7 +16,9 @@ import { expect } from 'chai';
 import hre from 'hardhat';
 
 import {
+  Chronos,
   ConvictionStakingStorage,
+  ConvictionWithdrawalStorage,
   DKGStakingConvictionNFT,
   Hub,
   ParametersStorage,
@@ -38,6 +41,8 @@ type Fixture = {
   Ledger: StakingV10Ledger;
   NFT: DKGStakingConvictionNFT;
   Vault: ConvictionStakingStorage;
+  Chronos: Chronos;
+  CWS: ConvictionWithdrawalStorage;
 };
 
 async function deployFixture(): Promise<Fixture> {
@@ -57,6 +62,8 @@ async function deployFixture(): Promise<Fixture> {
     Ledger: await hre.ethers.getContract<StakingV10Ledger>('StakingV10Ledger'),
     NFT: await hre.ethers.getContract<DKGStakingConvictionNFT>('DKGStakingConvictionNFT'),
     Vault: await hre.ethers.getContract<ConvictionStakingStorage>('ConvictionStakingStorage'),
+    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
+    CWS: await hre.ethers.getContract<ConvictionWithdrawalStorage>('ConvictionWithdrawalStorage'),
   };
 }
 
@@ -81,10 +88,9 @@ describe('@unit StakingV10Ledger', () => {
     await f.Token.mint(await f.Vault.getAddress(), FEE);
   });
 
-  it('is named StakingV10Ledger at 1.0.0, and StakingV10 at 10.0.6 wires it', async () => {
+  it('is named StakingV10Ledger at 1.0.0, and StakingV10 wires it', async () => {
     expect(await f.Ledger.name()).to.equal('StakingV10Ledger');
     expect(await f.Ledger.version()).to.equal('1.0.0');
-    expect(await f.StakingV10.version()).to.equal('10.0.6');
     expect(await f.Ledger.stakingStorage()).to.equal(await f.Hub.getContractAddress('StakingStorage'));
     expect(await f.Ledger.convictionStorage()).to.equal(await f.Vault.getAddress());
     expect(await f.Ledger.identityStorage()).to.equal(await f.Hub.getContractAddress('IdentityStorage'));
@@ -133,6 +139,69 @@ describe('@unit StakingV10Ledger', () => {
     await f.Hub.setContractAddress('StakingV10', before);
     await f.StakingV10.connect(admin).requestOperatorFeeWithdrawal(identityId, 1n);
     expect(await f.Vault.getOperatorFeeWithdrawalRequestAmount(identityId)).to.equal(1n);
+  });
+
+  describe('the record of the epoch in progress at a withdrawal', () => {
+    const TOKEN = 77n; // holds a record whose epoch has ended, ready to be paid
+    const OTHER = 78n; // holds none
+    let epoch: bigint;
+
+    const impersonate = async (address: string) => {
+      await hre.network.provider.send('hardhat_setBalance', [address, '0x56BC75E2D63100000']);
+      return hre.ethers.getImpersonatedSigner(address);
+    };
+
+    const recordOf = async (tokenId: bigint) => {
+      const [w, carries] = await f.CWS.getWithdrawal(tokenId);
+      return {
+        staker: w.staker,
+        identityId: w.identityId,
+        epoch: w.epoch,
+        carries: carries.map((c) => [c.identityId, c.epoch, c.delegatorKey]),
+      };
+    };
+
+    beforeEach(async () => {
+      epoch = await f.Chronos.getCurrentEpoch();
+      // Written as the ledger writes it: the Hub owner passes the storage's `onlyContracts`.
+      await f.CWS.setWithdrawal(TOKEN, { staker: admin.address, identityId, epoch }, [
+        { identityId, epoch, delegatorKey: hre.ethers.toBeHex(TOKEN, 32) },
+      ]);
+      await time.increase(await f.Chronos.epochLength());
+    });
+
+    it('recordWithdrawal and takeWithdrawal refuse an ordinary caller, the Hub owner and the staking wrapper, and leave the records as they are', async () => {
+      const held = await recordOf(TOKEN);
+      const none = await recordOf(OTHER);
+      expect(held.epoch).to.equal(epoch);
+      expect(held.carries).to.have.length(1);
+      expect(none.epoch).to.equal(0n);
+
+      const wrapper = await impersonate(await f.NFT.getAddress());
+      for (const caller of [stranger, f.accounts[0], wrapper]) {
+        const ledger = f.Ledger.connect(caller);
+        await expect(ledger.takeWithdrawal(TOKEN)).to.be.revertedWithCustomError(f.Ledger, 'OnlyStakingV10');
+        await expect(ledger.recordWithdrawal(OTHER, caller.address, identityId, epoch, 1n)).to.be.revertedWithCustomError(
+          f.Ledger,
+          'OnlyStakingV10',
+        );
+        expect(await recordOf(TOKEN)).to.deep.equal(held);
+        expect(await recordOf(OTHER)).to.deep.equal(none);
+      }
+    });
+
+    it('both admit the StakingV10 the Hub holds: it writes a record, and takes one once', async () => {
+      const ledger = f.Ledger.connect(await impersonate(await f.StakingV10.getAddress()));
+
+      await ledger.recordWithdrawal(OTHER, stranger.address, identityId, epoch, 1n);
+      expect(await recordOf(OTHER)).to.deep.equal({ staker: stranger.address, identityId, epoch, carries: [] });
+
+      const taken = await ledger.takeWithdrawal.staticCall(TOKEN);
+      expect([taken.staker, taken.identityId, taken.epoch]).to.deep.equal([admin.address, identityId, epoch]);
+      await ledger.takeWithdrawal(TOKEN);
+      expect((await recordOf(TOKEN)).epoch).to.equal(0n);
+      await expect(ledger.takeWithdrawal(TOKEN)).to.be.revertedWithCustomError(f.Ledger, 'NoWithdrawnEpoch').withArgs(TOKEN);
+    });
   });
 
   describe('the operator-fee withdrawal through StakingV10', () => {

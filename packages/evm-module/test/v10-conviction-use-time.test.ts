@@ -4,15 +4,15 @@
 //
 // Covered, on the real account stack with ServiceSubscriptions registered and
 // a Hub-registered stand-in for KnowledgeAssetsLifecycle:
-//   - a publish books its whole discounted draw over the Knowledge Asset's
+//   - a publish books its whole discounted spend over the Knowledge Asset's
 //     epochs, with the spread of a wallet publish, and nothing else;
-//   - a plan period's cost is due in QueryInferenceStorage in the epoch after
-//     the period, funded now or ahead, with nothing in the staker pool;
+//   - a subscription's cost is booked in QueryInferenceStorage under the
+//     subscription's epoch, funded now or ahead, with nothing in the staker pool;
 //   - an account that 10.0.8 or 10.1.0 scheduled publishes exactly as before
-//     (a budget gate, its top-up overflow forward over the lock) and is
+//     (a allowance gate, its top-up overflow forward over the lock) and is
 //     refused services;
-//   - a publish and a service spend in one window share its budget, and the
-//     window books only what neither drew;
+//   - a publish and a service spend in one window share its allowance, and the
+//     window books only what neither spent;
 //   - a top-up books the windows that have closed, as every touch does;
 //   - top-up overflow on both paths, and the 1-wei floor on both paths;
 //   - a use-time account never reaches the scheduled-account marker while its
@@ -21,30 +21,28 @@
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { loadFixture, time } from '@nomicfoundation/hardhat-network-helpers';
 import { expect } from 'chai';
-import { BaseContract, ContractTransactionReceipt, Result } from 'ethers';
+import { ContractTransactionReceipt } from 'ethers';
 import hre from 'hardhat';
 
 import {
   Chronos,
   DKGPublishingConvictionNFT,
   EpochStorage,
-  Hub,
   ParametersStorage,
   PublishingConviction,
   PublishingConvictionScheduleHarness,
   PublishingConvictionStorage,
   QueryInferenceStorage,
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   ServiceSubscriptions,
   Token,
 } from '../typechain';
 import {
-  ACCOUNT_STACK_TAGS,
   CLASS_INFERENCE,
   DAY,
   TRAC,
   Terms,
-  bucket,
+  budget,
   costOf,
   registerServiceContracts,
   requestOf,
@@ -52,54 +50,22 @@ import {
   subscriptionIdOf,
   valueFor,
 } from './helpers/conviction-service';
+import { STAKER_SHARD_ID, blockTime, deployAccountStack, eventsOf, poolCredits, poolsOver } from './helpers/account-stack';
 import { PoolModel, prorateActiveSink } from './helpers/emission-model';
 import { deployScheduleHarness } from './helpers/scheduled-accounts';
 
-const STAKER_SHARD_ID = 1n;
 // The 20 % tier, with `committed mod lock` dust.
 const COMMITTED = 50_000n * TRAC + 7n;
 const BPS = 2_000n;
 
-type Fixture = {
-  accounts: SignerWithAddress[];
-  Hub: Hub;
-  Token: Token;
-  Chronos: Chronos;
-  ES: EpochStorage;
-  Params: ParametersStorage;
-  NFT: DKGPublishingConvictionNFT;
-  PC: PublishingConviction;
-  PCS: PublishingConvictionStorage;
-  QIS: QueryInferenceStorage;
-  CSS: ConvictionServiceStorage;
-  SS: ServiceSubscriptions;
-  Harness: PublishingConvictionScheduleHarness;
-};
-
-async function deployFixture(): Promise<Fixture> {
-  await hre.deployments.fixture(ACCOUNT_STACK_TAGS);
-  const accounts = await hre.ethers.getSigners();
-  const Hub = await hre.ethers.getContract<Hub>('Hub');
-  const { QIS, CSS, SS } = await registerServiceContracts(Hub);
-  const Harness = await deployScheduleHarness(Hub);
+async function deployFixture() {
+  const stack = await deployAccountStack();
+  const { QIS, SSS, SS } = await registerServiceContracts(stack.Hub);
+  const Harness = await deployScheduleHarness(stack.Hub);
   // A Hub-registered stand-in for KnowledgeAssetsLifecycle, the only caller the
   // NFT's coverPublishingCost admits.
-  await Hub.setContractAddress('KnowledgeAssetsLifecycle', accounts[5].address);
-  return {
-    accounts,
-    Hub,
-    Token: await hre.ethers.getContract<Token>('Token'),
-    Chronos: await hre.ethers.getContract<Chronos>('Chronos'),
-    ES: await hre.ethers.getContract<EpochStorage>('EpochStorageV8'),
-    Params: await hre.ethers.getContract<ParametersStorage>('ParametersStorage'),
-    NFT: await hre.ethers.getContract<DKGPublishingConvictionNFT>('DKGPublishingConvictionNFT'),
-    PC: await hre.ethers.getContract<PublishingConviction>('PublishingConviction'),
-    PCS: await hre.ethers.getContract<PublishingConvictionStorage>('PublishingConvictionStorage'),
-    QIS,
-    CSS,
-    SS,
-    Harness,
-  };
+  await stack.Hub.setContractAddress('KnowledgeAssetsLifecycle', stack.accounts[5].address);
+  return { ...stack, QIS, SSS, SS, Harness };
 }
 
 describe('@integration Conviction Accounts pay at use time (PublishingConviction 10.2.0)', function () {
@@ -112,7 +78,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   let PC: PublishingConviction;
   let PCS: PublishingConvictionStorage;
   let QIS: QueryInferenceStorage;
-  let CSS: ConvictionServiceStorage;
+  let SSS: ServiceSubscriptionsStorage;
   let SS: ServiceSubscriptions;
   let Harness: PublishingConvictionScheduleHarness;
 
@@ -125,7 +91,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Token, Chronos: ChronosContract, ES, Params, NFT, PC, PCS, QIS, CSS, SS, Harness } =
+    ({ accounts, Token, Chronos: ChronosContract, ES, Params, NFT, PC, PCS, QIS, SSS, SS, Harness } =
       await loadFixture(deployFixture));
     epLen = await ChronosContract.epochLength();
     lock = await Params.publishingConvictionEpochs();
@@ -139,8 +105,6 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Helpers
   // -------------------------------------------------------------------------
 
-  const blockTime = async (receipt: ContractTransactionReceipt) =>
-    BigInt((await hre.ethers.provider.getBlock(receipt.blockNumber))!.timestamp);
   const epochNow = async () => ChronosContract.getCurrentEpoch();
   /** Time left in the current epoch at a block time, as Chronos computes it. */
   const timeLeftAt = async (ts: bigint) => {
@@ -172,56 +136,38 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
       await NFT.connect(kal).coverPublishingCost(agent.address, baseCost, kaStartEpoch ?? (await epochNow()), kaEpochs)
     ).wait())!;
 
-  /** Opt the account in and assign `buyer` under a limit no test reaches. */
+  /** Opt the account in and add `buyer` under a limit no test reaches. */
   const openForServices = async (accountId: bigint) => {
     await SS.connect(owner).setServiceSpending(accountId, true);
     const terms: Terms = {
       accountId,
-      assignee: buyer.address,
-      maxCostPerPeriod: 1_000_000n * TRAC,
+      buyer: buyer.address,
+      maxCostPerEpoch: 1_000_000n * TRAC,
       expiresAt: BigInt(await time.latest()) + 800n * DAY,
-      nonce: await CSS.assignmentNonce(accountId),
+      nonce: await SSS.grantNonce(accountId),
     };
-    await SS.connect(owner).assign(terms, '0x', await signTerms(buyer, SS, terms));
+    await SS.connect(owner).addBuyer(terms, '0x', await signTerms(buyer, SS, terms));
   };
 
   const fund = async (accountId: bigint, value: bigint, epoch?: bigint) =>
     (await (
-      await SS.connect(buyer).fundFromConviction(
-        requestOf(accountId, epoch ?? (await epochNow()), { buckets: [bucket(0, CLASS_INFERENCE, value)] }),
+      await SS.connect(buyer).fundFromAccount(
+        requestOf(accountId, epoch ?? (await epochNow()), { budgets: [budget(0, CLASS_INFERENCE, value)] }),
       )
     ).wait())!;
 
-  const eventsOf = async (receipt: ContractTransactionReceipt, contract: BaseContract, name: string) => {
-    const address = (await contract.getAddress()).toLowerCase();
-    const out: Result[] = [];
-    for (const log of receipt.logs) {
-      if (log.address.toLowerCase() !== address) continue;
-      const parsed = contract.interface.parseLog({ topics: [...log.topics], data: log.data });
-      if (parsed?.name === name) out.push(parsed.args);
-    }
-    return out;
-  };
-
   /** The staker-shard ranges a receipt credited, as [start, end, amount]. */
-  const credits = async (receipt: ContractTransactionReceipt): Promise<bigint[][]> =>
-    (await eventsOf(receipt, ES, 'TokensAddedToEpochRange'))
-      .filter((a) => a.shardId === STAKER_SHARD_ID)
-      .map((a) => [a.startEpoch, a.endEpoch, a.tokenAmount]);
+  const credits = (receipt: ContractTransactionReceipt) => poolCredits(ES, receipt);
 
   const sumOf = (ranges: bigint[][]) => ranges.reduce((s, r) => s + r[2], 0n);
 
-  const poolSnapshot = async (from: bigint, to: bigint) => {
-    const out = new Map<bigint, bigint>();
-    for (let e = from; e <= to; e++) out.set(e, await ES.getEpochPool(STAKER_SHARD_ID, e));
-    return out;
-  };
+  const poolSnapshot = (from: bigint, to: bigint) => poolsOver(ES, from, to);
 
   // -------------------------------------------------------------------------
   // Publishing
   // -------------------------------------------------------------------------
 
-  it('a publish books its whole discounted draw over the Knowledge Asset epochs, as a wallet publish spreads its payment', async () => {
+  it('a publish books its whole discounted spend over the Knowledge Asset epochs, as a wallet publish spreads its payment', async () => {
     const { accountId } = await createAccount();
     const e0 = await epochNow();
     const before = await poolSnapshot(e0, e0 + lock + 1n);
@@ -234,7 +180,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const cost = costOf(baseCost, BPS);
     const receipt = await publish(baseCost, kaEpochs, e0 + 5n);
     const [covered] = await eventsOf(receipt, PC, 'CostCovered');
-    expect([covered.discountedCost, covered.drawnFromEpoch, covered.drawnFromTopUp]).to.deep.equal([cost, cost, 0n]);
+    expect([covered.discountedCost, covered.spentFromEpoch, covered.spentFromTopUp]).to.deep.equal([cost, cost, 0n]);
 
     // prorateActiveSink over the KA's epochs from the current epoch, with the
     // time left in it: KnowledgeAssetsLifecycle._distributeTokens' spread.
@@ -246,7 +192,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const after = await poolSnapshot(e0, e0 + lock + 1n);
     for (const [e, v] of after) expect(v - before.get(e)!, `epoch ${e}`).to.equal(model.perEpoch.get(e) ?? 0n);
 
-    // Nothing else is booked, and the draw is on the window.
+    // Nothing else is booked, and the spend is on the window.
     expect(await eventsOf(receipt, PC, 'EmissionScheduled')).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(cost);
     expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(0n);
@@ -256,7 +202,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Services
   // -------------------------------------------------------------------------
 
-  it("a plan period's cost is due in the epoch after the period, funded now or ahead, and nothing reaches the staker pool", async () => {
+  it("a subscription's cost is booked under the subscription's epoch, funded now or ahead, and nothing reaches the staker pool", async () => {
     const { accountId } = await createAccount();
     await openForServices(accountId);
     const e0 = await epochNow();
@@ -269,19 +215,21 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
     for (const receipt of [now, ahead]) expect(await credits(receipt)).to.have.length(0);
     expect(await poolSnapshot(e0, e0 + 2n * lock + 2n)).to.deep.equal(before);
-    expect(await QIS.convictionDue(e0)).to.equal(0n);
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(nowCost);
-    expect(await QIS.convictionDue(e0 + 2n)).to.equal(aheadCost);
-    expect(await QIS.dueIn(e0 + 1n)).to.deep.equal([0n, nowCost]);
+    expect(await QIS.accountFunding(e0 - 1n)).to.equal(0n);
+    expect(await QIS.accountFunding(e0)).to.equal(nowCost);
+    expect(await QIS.accountFunding(e0 + 1n)).to.equal(aheadCost);
+    expect(await QIS.accountFunding(e0 + 2n)).to.equal(0n);
+    expect(await QIS.fundingIn(e0)).to.deep.equal([0n, nowCost]);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(nowCost + aheadCost);
 
-    // A top-up of the current period is due with it.
-    await SS.connect(buyer).topUpFromConviction(
+    // A top-up of the current subscription is booked with it.
+    await SS.connect(buyer).topUpFromAccount(
       subscriptionIdOf(buyer.address, e0),
-      [bucket(0, CLASS_INFERENCE, 10n * TRAC)],
+      [budget(0, CLASS_INFERENCE, 10n * TRAC)],
       hre.ethers.id('plan-2'),
     );
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(nowCost + costOf(10n * TRAC, BPS));
+    expect(await QIS.accountFunding(e0)).to.equal(nowCost + costOf(10n * TRAC, BPS));
+    expect(await QIS.accountFunding(e0 + 1n)).to.equal(aheadCost);
   });
 
   // -------------------------------------------------------------------------
@@ -294,7 +242,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(lock);
     const B = COMMITTED / lock;
 
-    // Within the window budget: a budget gate only, nothing booked.
+    // Within the window allowance: a allowance gate only, nothing booked.
     const base = await publish(1_000n * TRAC, 4n);
     expect(await credits(base)).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(800n * TRAC);
@@ -313,7 +261,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     );
     expect(await PCS.topUpBalance(accountId)).to.equal(1_000n * TRAC - overflow);
 
-    // Services: the opt-in is refused, and so is a draw.
+    // Services: the opt-in is refused, and so is a spend.
     await expect(SS.connect(owner).setServiceSpending(accountId, true))
       .to.be.revertedWithCustomError(SS, 'EmissionAlreadyScheduled')
       .withArgs(accountId);
@@ -328,11 +276,11 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect(swept.topUpSwept).to.equal(1_000n * TRAC - overflow);
   });
 
-  it('an account scheduled in full after it opted in has its draws refused through ServiceSubscriptions, with nothing drawn', async () => {
+  it('an account scheduled in full after it opted in has its spends refused through ServiceSubscriptions, with nothing spent', async () => {
     const { accountId } = await createAccount();
     await openForServices(accountId);
     await Harness.scheduleInFull(accountId);
-    await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, await epochNow())))
+    await expect(SS.connect(buyer).fundFromAccount(requestOf(accountId, await epochNow())))
       .to.be.revertedWithCustomError(PC, 'EmissionAlreadyScheduled')
       .withArgs(accountId);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(0n);
@@ -342,18 +290,18 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Mixed spending and edge cases
   // -------------------------------------------------------------------------
 
-  it('a publish and a service spend in one window share its budget; once it closes, the window books only what neither drew', async () => {
+  it('a publish and a service spend in one window share its allowance; once it closes, the window books only what neither spent', async () => {
     const { accountId, createdAt } = await createAccount();
     await openForServices(accountId);
     const B = COMMITTED / lock;
     const e0 = await epochNow();
 
     const published = await publish(1_000n * TRAC, lock); // 800 TRAC booked at once
-    const funded = await fund(accountId, 500n * TRAC); // 400 TRAC due after the period
+    const funded = await fund(accountId, 500n * TRAC); // 400 TRAC under the subscription's epoch
     expect(sumOf(await credits(published))).to.equal(800n * TRAC);
     expect(await credits(funded)).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(1_200n * TRAC);
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(400n * TRAC);
+    expect(await QIS.accountFunding(e0)).to.equal(400n * TRAC);
 
     // Window 0 closes; the next touch books what is left of it.
     await time.increaseTo(createdAt + epLen);
@@ -392,7 +340,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect(await PCS.topUpBalance(accountId)).to.equal(100n * TRAC);
   });
 
-  it('top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service draw has both due', async () => {
+  it("top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service spend books both under the subscription's epoch", async () => {
     const B = COMMITTED / lock;
     // The publishing path.
     const { accountId: publishingId } = await createAccount();
@@ -402,7 +350,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const e0 = await epochNow();
     const receipt = await publish(value, 6n);
     const [covered] = await eventsOf(receipt, PC, 'CostCovered');
-    expect([covered.drawnFromEpoch, covered.drawnFromTopUp]).to.deep.equal([B, cost - B]);
+    expect([covered.spentFromEpoch, covered.spentFromTopUp]).to.deep.equal([B, cost - B]);
     const ts = await blockTime(receipt);
     expect(await credits(receipt)).to.deep.equal(
       prorateActiveSink(cost, e0, 6n, epLen, await timeLeftAt(ts)).map((r) => [r.start, r.end, r.amount]),
@@ -414,14 +362,14 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     await openForServices(serviceId);
     await topUp(serviceId, 2_000n * TRAC);
     const funded = await fund(serviceId, value);
-    const [drawn] = await eventsOf(funded, PC, 'ServiceCostCovered');
-    expect([drawn.cost, drawn.drawnFromWindow, drawn.drawnFromTopUp]).to.deep.equal([cost, B, cost - B]);
+    const [spent] = await eventsOf(funded, PC, 'ServiceCostCovered');
+    expect([spent.cost, spent.spentFromWindow, spent.spentFromTopUp]).to.deep.equal([cost, B, cost - B]);
     expect(await credits(funded)).to.have.length(0);
-    expect(await QIS.convictionDue((await epochNow()) + 1n)).to.equal(cost);
+    expect(await QIS.accountFunding(await epochNow())).to.equal(cost);
     expect(await PCS.topUpBalance(serviceId)).to.equal(2_000n * TRAC - (cost - B));
   });
 
-  it('the 1-wei floor holds on both paths: a 1-wei publish books 1 wei in the KA last epoch, and a value the discount rounds to 0 is due as 1 wei', async () => {
+  it('the 1-wei floor holds on both paths: a 1-wei publish books 1 wei in the KA last epoch, and a value the discount rounds to 0 is booked as 1 wei', async () => {
     // The 75 % tier: 3 wei is 0.75 wei after the discount.
     const { accountId } = await createAccount(1_000_000n * TRAC);
     await openForServices(accountId);
@@ -434,7 +382,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const funded = await fund(accountId, 3n);
     expect((await eventsOf(funded, PC, 'ServiceCostCovered'))[0].cost).to.equal(1n);
     expect(await credits(funded)).to.have.length(0);
-    expect(await QIS.convictionDue(e0 + 1n)).to.equal(1n);
+    expect(await QIS.accountFunding(e0)).to.equal(1n);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(2n);
   });
 
