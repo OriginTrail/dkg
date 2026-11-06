@@ -547,3 +547,6 @@ export { ProtocolReadLimitError } from './bounded-stream-read.js';
 
 export * from './async-admission-usage.js';
 export * from './async-admission-diagnostic-context.js';
+
+// Exact store readback form; unlike the hash canonicalizer, rejects precision loss.
+export { canonicalizeAuthorSealStoreXsdDateTimeValue as canonicalizeExactStoreDateTime } from './xsd-date-time.js';

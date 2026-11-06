@@ -87,6 +87,7 @@ export default defineConfig({
           'test/local-private-first-write.test.ts',
           'test/write-preflight-resilience.test.ts',
           'test/semantic-runtime-asset-program.test.ts',
+          'test/semantic-runtime-receipt-lifecycle.test.ts',
           'test/semantic-runtime-sparql-adapter.test.ts',
           'test/semantic-runtime-configuration-api.test.ts',
           'test/semantic-runtime-routes.test.ts',

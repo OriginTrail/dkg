@@ -1,7 +1,7 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { ExecutionReceiptJournal, ReceiptProgress } from '@origintrail-official/dkg-semantic-runtime';
 import { Parser } from 'n3';
-import { sparqlIri } from '@origintrail-official/dkg-core';
+import { canonicalizeExactStoreDateTime, sparqlIri } from '@origintrail-official/dkg-core';
 import { type PersistenceEvidence, type SemanticMemoryLayer, SemanticProgramError } from './semantic-runtime-types.js';
 import { historyIsAtLayer, historyLayerLabel } from './semantic-runtime-values.js';
 
@@ -10,7 +10,14 @@ function tripleKey(q: Triple): string {
   const [parsed] = new Parser({ format: 'N-Triples' }).parse(
     `${sparqlIri(q.subject)} ${sparqlIri(q.predicate)} ${q.object.startsWith('"') ? q.object : sparqlIri(q.object)} .`);
   const term = parsed.object;
-  return JSON.stringify([parsed.subject.value, parsed.predicate.value, term.termType, term.value,
+  // Receipts journal ISO millisecond instants, while stores can trim zeroes or
+  // spell the same timezone differently. Compare exact values on BOTH sides so
+  // old journals recover without rewriting them or reissuing guest effects.
+  // The hash canonicalizer truncates submilliseconds and is unsafe here.
+  const value = term.termType === 'Literal' && term.datatype.value === 'http://www.w3.org/2001/XMLSchema#dateTime'
+    ? canonicalizeExactStoreDateTime(term.value) ?? term.value
+    : term.value;
+  return JSON.stringify([parsed.subject.value, parsed.predicate.value, term.termType, value,
     term.termType === 'Literal' ? term.language.toLowerCase() : '', term.termType === 'Literal' ? term.datatype.value : '']);
 }
 

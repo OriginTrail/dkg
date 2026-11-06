@@ -43,7 +43,7 @@ afterEach(async () => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-function fixture(layer: Layer = 'wm') {
+function fixture(layer: Layer = 'wm', storeReadback = false) {
   const binding: SemanticProgramBinding = {
     operationIri: operation, contextGraphId: graph, enabled: true,
     allowedCallerAgentAddresses: [caller], executorAgentAddress: executor,
@@ -82,7 +82,16 @@ function fixture(layer: Layer = 'wm') {
     }),
     assertion: {
       history: vi.fn(async (_graph: string, name: string) => assets.get(name) ? { ...required(name) } : null),
-      query: vi.fn(async (_graph: string, name: string) => [...required(name).quads]),
+      query: vi.fn(async (_graph: string, name: string) => {
+        if (!storeReadback) return [...required(name).quads];
+        const store = new OxigraphStore();
+        try {
+          await store.insert(required(name).quads.map(q => ({ ...q, graph: 'urn:receipt-readback' })));
+          const result = await store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:receipt-readback> { ?s ?p ?o } }');
+          if (result.type !== 'quads') throw new Error('Expected receipt quads');
+          return result.quads.map(({ subject, predicate, object }) => ({ subject, predicate, object }));
+        } finally { await store.close(); }
+      }),
       create: vi.fn(async (_graph: string, name: string) => { if (assets.has(name)) throw new Error('duplicate create'); assets.set(name, { quads: [], memoryLayer: 'WM' }); return `urn:asset:${name}`; }),
       write: vi.fn(async (_graph: string, name: string, input: typeof quads) => { required(name).quads.push(...input); }),
       finalize: vi.fn(async (_graph: string, name: string) => { Object.assign(required(name), { wmCurrentAssertion: assertion, memoryLayer: 'WM' }); }),
@@ -105,7 +114,37 @@ function fixture(layer: Layer = 'wm') {
 }
 
 describe('tenant-approved asset creation through real Wasm', () => {
-  it.each(['write', 'finalize'] as const)('recovers lost %s against native DKG create/history/query/finalize and SQLite reopen', async phase => {
+  it.each(['wm', 'swm', 'vm'] as const)('recovers canonical %s receipt readback after a committed write loses its answer, without another asset effect', async layer => {
+    const f = fixture(layer, true);
+    const dir = mkdtempSync(join(tmpdir(), 'canonical-receipt-')); dirs.push(dir);
+    const database = join(dir, 'runtime.sqlite');
+    const first = await f.start(database);
+    const write = f.agent.assertion.write.getMockImplementation()!;
+    let injected = false;
+    f.agent.assertion.write.mockImplementation(async (...args) => {
+      await write(...args);
+      if (!injected && args[1].startsWith('semantic-execution-')) {
+        injected = true;
+        throw new Error('receipt write committed but answer lost');
+      }
+    });
+    await expect(f.invoke(first)).rejects.toMatchObject({ code: 'EXECUTION_PERSIST_FAILED' });
+    expect(injected).toBe(true);
+    // Keep the original durable receipt, including its lexical timestamps.
+    const before = new ExecutionReceiptJournal(first.store, `urn:sr:execution:${id}`).terminal!;
+    await first.stop(); runtimes.splice(runtimes.indexOf(first), 1);
+    const second = await f.start(database);
+    const start = vi.spyOn(second.host, 'startPlan');
+    const result = await f.invoke(second);
+    expect(result).toMatchObject({ persisted: true, executionLayer: layer });
+    expect(new ExecutionReceiptJournal(second.store, result.executionIri).terminal).toEqual(before);
+    expect(f.created()).toHaveLength(1);
+    expect(start).not.toHaveBeenCalled();
+    expect(f.agent.assertion.write.mock.calls.filter(([, name]) => name.startsWith('semantic-execution-'))).toHaveLength(1);
+    expect(await f.invoke(second)).toEqual(result);
+  });
+
+  it.each(['write', 'committed-write', 'finalize'] as const)('recovers lost %s against native DKG create/history/query/finalize and SQLite reopen', async phase => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter(), wallet = new ethers.Wallet(`0x${'11'.repeat(32)}`);
     const publisher = new DKGPublisher({ store, chain, eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair(), publisherPrivateKey: wallet.privateKey });
@@ -118,9 +157,10 @@ describe('tenant-approved asset creation through real Wasm', () => {
     const native = agent.assertion;
     const assertion = Object.fromEntries(Object.entries(native).map(([key, fn]) => [key, typeof fn === 'function' ? vi.fn((...args: any[]) => (fn as any)(...args)) : fn]));
     Object.defineProperty(agent, 'assertion', { value: assertion });
-    const original = assertion[phase].getMockImplementation();
-    assertion[phase].mockImplementationOnce(async (...args: any[]) => {
-      if (phase === 'finalize') await original(...args);
+    const method = phase === 'committed-write' ? 'write' : phase;
+    const original = assertion[method].getMockImplementation();
+    assertion[method].mockImplementationOnce(async (...args: any[]) => {
+      if (phase !== 'write') await original(...args);
       throw new Error('lost native receipt acknowledgement');
     });
     const dir = mkdtempSync(join(tmpdir(), 'native-receipt-')); dirs.push(dir);
@@ -130,7 +170,7 @@ describe('tenant-approved asset creation through real Wasm', () => {
       journalStore.registerStrategyArtifact({ artifactHash: hashCanonicalPlan(new Uint8Array([1])), strategyId: 'native', version: '1', canonicalPlan: new Uint8Array([1]), sourceRef: 'urn:native', reviewState: 'approved', createdAt: 1 });
       journalStore.createExecution({ executionId, planId: hashCanonicalPlan(new Uint8Array([1])), partitionId: 'native', status: 'active', graphRevision: 'native-request', policyEpoch: 1n, rootProcessId: executionId, leaseEpoch: 0n });
       const terminal = { contextGraphId: graph, name: 'native-execution-receipt', agentAddress: wallet.address, layer: 'wm' as const,
-        requestIdentity: 'native-request', quads: [{ subject: executionId, predicate: SR + 'orderedOutputs', object: JSON.stringify('["private-result"]') }], outputs: ['private-result'] };
+        requestIdentity: 'native-request', quads: [{ subject: executionId, predicate: SR + 'orderedOutputs', object: JSON.stringify('["private-result"]') }, { subject: executionId, predicate: 'http://www.w3.org/ns/prov#endedAtTime', object: '"2026-11-03T10:40:28.300Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }], outputs: ['private-result'] };
       let journal = new ExecutionReceiptJournal(journalStore, executionId); journal.prepare(terminal);
       const persist = async () => persistExecutionKnowledgeAsset(agent, graph, terminal.name, wallet.address, terminal.quads,
         await assertion.history(graph, terminal.name, { agentAddress: wallet.address }), 'wm', async () => {}, journal);
@@ -144,7 +184,7 @@ describe('tenant-approved asset creation through real Wasm', () => {
       expect((await assertion.history(graph, terminal.name)).wmCurrentAssertion).toMatch(/^[0-9a-f]{64}$/);
       expect(assertion.create).toHaveBeenCalledTimes(1);
       expect(assertion.finalize).toHaveBeenCalledTimes(1);
-      expect(await assertion.query(graph, terminal.name)).toEqual(expect.arrayContaining(terminal.quads.map(q => expect.objectContaining(q))));
+      expect(await assertion.query(graph, terminal.name)).toEqual(expect.arrayContaining(terminal.quads.map(q => expect.objectContaining({ ...q, object: q.object.replace('.300Z', '.3Z') }))));
     } finally { journalStore.close(); await store.close(); }
   });
 
