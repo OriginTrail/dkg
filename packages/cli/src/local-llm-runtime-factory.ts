@@ -27,6 +27,8 @@ export interface DkgLocalLlmRuntimeSessionOptions {
   profile?: ToolProfile;
   allowWrite?: boolean;
   adapterPaths?: readonly string[];
+  /** Entry-point digests verified against the operator's Program approval. */
+  adapterHashes?: readonly { path: string; sha256: string }[];
   additionalToolNames?: readonly string[];
   domainProfile?: DkgLocalLlmDomainProfile;
   systemContextAddendum?: string;
@@ -78,6 +80,7 @@ export async function createDkgLocalLlmRuntimeSession(
   if (options.adapterPaths?.length) {
     environment.DKG_ADAPTERS = options.adapterPaths.join(',');
   }
+  if (options.adapterHashes) environment.DKG_ADAPTER_HASHES = JSON.stringify(options.adapterHashes);
 
   const transport = new StdioClientTransport({
     command: process.execPath,

@@ -149,6 +149,24 @@
         "statements": 97
       }
     },
+    "graph-computer": {
+      "sourceRevision": "60786a373e0d3403dfe34eb70722f4a86959a0ef",
+      "measuredAt": "2026-10-22",
+      "node": "22.23.1",
+      "platform": "darwin-arm64",
+      "measured": {
+        "lines": 97.83,
+        "functions": 95.06,
+        "branches": 84.48,
+        "statements": 90.48
+      },
+      "thresholds": {
+        "lines": 96,
+        "functions": 94,
+        "branches": 83,
+        "statements": 89
+      }
+    },
     "graph-viz": {
       "measured": {
         "lines": 24.48,
@@ -411,6 +429,24 @@
         "functions": 93,
         "branches": 79,
         "statements": 86
+      }
+    },
+    "semantic-runtime": {
+      "sourceRevision": "d21eaa04434f4a9cfa9d7ee442e8507bc4b3ceb0",
+      "measuredAt": "2026-09-15",
+      "node": "26.8.2",
+      "platform": "darwin-arm64",
+      "measured": {
+        "lines": 87.79,
+        "functions": 90.78,
+        "branches": 76.05,
+        "statements": 84.07
+      },
+      "thresholds": {
+        "lines": 86,
+        "functions": 89,
+        "branches": 75,
+        "statements": 83
       }
     },
     "storage": {

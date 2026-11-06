@@ -182,7 +182,7 @@ describe('who shares a probe', () => {
   it('gives each caller a copy of every declared field, nested records included, that no other caller can change', async () => {
     const { agent, pending } = fakeAgent();
     const full: Probe = {
-      storeAvailable: false, exists: true, hasLocalContent: false, declarationFound: true, accessPolicy: 'private',
+      storeAvailable: false, exists: true, hasLocalContent: false, locallyCreated: true, declarationFound: true, accessPolicy: 'private',
       curator: 'did:dkg:agent:0x9999999999999999999999999999999999999999', callerAuthorized: false,
       inMemorySubscription: { subscribed: true, synced: false },
       persistedSubscription: { subscribed: false, synced: true },

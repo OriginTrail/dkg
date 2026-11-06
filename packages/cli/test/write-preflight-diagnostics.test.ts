@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { OxigraphWorkerStore } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
+import { LocalContextGraphProvenance } from '../../agent/src/local-context-graph-provenance.js';
 import { describe, expect, it, vi } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { createOperationContext } from '@origintrail-official/dkg-core';
@@ -126,6 +127,7 @@ it('correlates a real HTTP 503 after a real Oxigraph worker closes', async () =>
   const store = new OxigraphWorkerStore(); await store.query('ASK {}'); await store.close();
   const proto = ContextGraphResolveMethods.prototype;
   const harness = { store, config: {}, subscribedContextGraphs: new Map(),
+    localContextGraphProvenance: new LocalContextGraphProvenance(),
     contextGraphExists: proto.contextGraphExists, contextGraphHasLocalContent: proto.contextGraphHasLocalContent,
   };
   const agent = { listContextGraphs: vi.fn(async () => []),

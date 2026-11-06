@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { readFileSync, existsSync } from 'fs';
 import { join, resolve } from 'path';
+import { monacoAssetsPlugin } from './monaco-workers.js';
 import { homedir } from 'os';
 
 function readTokenFile(path: string): string {
@@ -53,6 +54,7 @@ const { port, token } = readDkgConfig();
 export default defineConfig({
   plugins: [
     react(),
+    monacoAssetsPlugin(),
     {
       name: 'inject-dkg-token',
       apply: 'serve',

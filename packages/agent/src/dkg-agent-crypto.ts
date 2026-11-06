@@ -7,266 +7,27 @@
  * 1:1 move; methods take `this: DKGAgent` so cross-calls resolve against the
  * composed class.
  */
-
-
 import { collectProjectedDelegatees } from './internal/workspace-projected-delegatees.js';
 import { createHash, randomUUID } from 'node:crypto';
-import {
-  DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
-  LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
-  contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  contextGraphSharedMemoryUri,
-  contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
-  contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
-  deriveCuratorDidFromCgId,
-  MemoryLayer,
-  computeACKDigest,
-  encodePublishRequest,
-  encodeKAUpdateRequest,
-  encodeGossipEnvelope,
-  computeGossipSigningPayload,
-  GOSSIP_ENVELOPE_VERSION,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH,
-  encodeFinalizationMessage, type FinalizationMessageMsg,
-  decodeGossipEnvelope, type GossipEnvelopeMsg,
-  decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
-  decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
-  logKaLifecycleEvent,
-  TrustLevel,
-  TRUST_LEVEL_PREDICATE,
-  buildTrustLevelQuads,
-  isTrustLevelQuad,
-  buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, type AuthorAttestationTypedData,
-  buildAssertionSealQuads, buildAssertionPublishReceiptQuads,
-  parseAssertionSealQuads, type AssertionSeal,
-  WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-  WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE,
-  computeWorkspaceAgentEncryptionKeyProofPayload,
-  computeWorkspaceAgentEncryptionKeyRevocationPayload,
-  decodeWorkspaceEncryptionKey,
-  encodeWorkspaceEncryptionKey,
-  workspaceAgentEncryptionKeyId,
-  SWM_SENDER_KEY_PACKAGE_ACK_TYPE,
-  SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES,
-  SWM_SENDER_KEY_PACKAGE_VERSION,
-  computeSwmSenderKeyMembershipHash,
-  computeSwmSenderKeyPackageAAD,
-  decodeWorkspacePublishRequest,
-  decodeSwmSenderKeyPackage,
-  decodeSwmSenderKeyPackageAck,
-  decryptSwmSenderKeyMessage,
-  decryptSwmSenderKeyPackage,
-  encodeSwmSenderKeyMessage,
-  encodeSwmSenderKeyPackage,
-  encodeSwmSenderKeyPackageAck,
-  encodeSwmShareAck,
-  decodeSwmShareAck,
-  encryptSwmSenderKeyMessage,
-  encryptSwmSenderKeyPackage,
-  generateEd25519Keypair,
-  generateSwmSenderChainKey,
-  generateSwmSenderEpochId,
-  ratchetSwmSenderChainKey,
-  uint64ForProto,
-  SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
-  type SwmSenderKeyMessageMsg,
-  type SwmSenderKeyPackageAckReasonCode,
-  type SwmSenderKeyPackageMsg,
-  type WorkspaceRecipientEncryptionKey,
-  InMemoryMessageIdempotencyStore,
-  InMemoryProtocolOutboxStore,
-  type MessageIdempotencyStore,
-  type ProtocolOutboxStore,
-  type ProtocolOutboxEntry,
-  encryptV10PublishPayload,
-  encryptChunked,
-  buildCiphertextChunksRoot,
-  computeGossipSigningPayloadV2,
-  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
-  ciphertextChunkStoreGraph,
-  ciphertextChunkStoreSubject,
-  CIPHERTEXT_CHUNK_PREDICATE,
-  type SubscriptionSource,
-  SUBSCRIPTION_SOURCES,
-  pickNetworkTunables,
-  tryCanonicalPeerIdString,
-} from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, createRpcTimeoutError, enrichEvmError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
-import {
-  DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
-  PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler,
-  VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
-  resolveWorkspaceAgentRecipients,
-  isWorkspaceAgentEncryptionKeyMissingError,
-  WorkspaceAgentEncryptionKeyMissingError,
-  computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
-  canonicalPublishPayload,
-  resolveLiftWorkspaceSlice,
-  validateLiftPublishPayload,
-  subtractFinalizedExactQuads,
-  TripleStoreAsyncLiftPublisher,
-  TripleStoreAsyncPromoteQueue,
-  FileWorkspacePublicSnapshotStore,
-  parseWorkspacePublicSnapshotNQuads,
-  type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteJob, type PromoteListFilter,
-  wrapAsRpcPreconditionIfApplicable,
-  type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
-  type CollectedACK,
-  type WorkspaceAgentRecipient,
-  type WorkspaceAgentRecipientResolution,
-  type WorkspaceAgentRecipientResolverInput,
-  type WorkspaceSenderKeyEncryptInput,
-  type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
-} from '@origintrail-official/dkg-publisher';
+import { hasVerifiedEncryptionCustody } from './encryption-key-enrollment.js';
+import { PROTOCOL_SWM_SENDER_KEY, encodeGossipEnvelope, computeGossipSigningPayload, GOSSIP_ENVELOPE_VERSION, GOSSIP_TYPE_WORKSPACE_PUBLISH, redactLogEntry, createOperationContext, logKaLifecycleEvent, WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519, WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE, decodeWorkspaceEncryptionKey, SWM_SENDER_KEY_PACKAGE_ACK_TYPE, SWM_SENDER_KEY_PACKAGE_ACK_RETRYABLE_REASON_CODES, SWM_SENDER_KEY_PACKAGE_VERSION, computeSwmSenderKeyMembershipHash, computeSwmSenderKeyPackageAAD, decodeWorkspacePublishRequest, decodeSwmSenderKeyPackage, decodeSwmSenderKeyPackageAck, decryptSwmSenderKeyMessage, decryptSwmSenderKeyPackage, encodeSwmSenderKeyMessage, encodeSwmSenderKeyPackage, encodeSwmSenderKeyPackageAck, encryptSwmSenderKeyMessage, encryptSwmSenderKeyPackage, generateEd25519Keypair, generateSwmSenderChainKey, generateSwmSenderEpochId, ratchetSwmSenderChainKey, uint64ForProto, SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT, type OperationContext, type SwmSenderKeyMessageMsg, type SwmSenderKeyPackageAckReasonCode, type SwmSenderKeyPackageMsg, type WorkspaceRecipientEncryptionKey, tryCanonicalPeerIdString } from '@origintrail-official/dkg-core';
+import { createRpcTimeoutError, withRpcRequestContext, type ChainAdapter } from '@origintrail-official/dkg-chain';
+import { resolveWorkspaceAgentRecipients, isWorkspaceAgentEncryptionKeyMissingError, WorkspaceAgentEncryptionKeyMissingError, type WorkspaceAgentRecipient, type WorkspaceAgentRecipientResolution, type WorkspaceAgentRecipientResolverInput, type WorkspaceSenderKeyEncryptInput } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
-import { join } from 'node:path';
-import {
-  DKGQueryEngine, QueryHandler,
-  emptyQueryResultForKind,
-  validateReadOnlySparql,
-  type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
-} from '@origintrail-official/dkg-query';
-import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-import {
-  resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof,
-  type ActivePublicContextGraphChainProof,
-} from './active-public-context-graph-chain-proof.js';
-import {
-  resolveContextGraphAgentGateAuthorityDecision,
-} from './internal/context-graph-authority/context-graph-agent-gate-authority.js';
-import {
-  resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState,
-  type LiveOnChainAccessPolicyState,
-} from './internal/context-graph-authority/context-graph-access-policy.js';
-import {
-  createContextGraphAuthorityError,
-  createRecipientAuthorityChangedError,
-  isContextGraphAuthorityUnavailableMarker,
-  isRetryableContextGraphAuthorityUnavailableReason,
-  type ContextGraphAgentGateAuthority,
-} from './internal/context-graph-authority/context-graph-authority.js';
+import { resolveActivePublicContextGraphChainProof as resolveStrictActivePublicChainProof, type ActivePublicContextGraphChainProof } from './active-public-context-graph-chain-proof.js';
+import { resolveContextGraphAgentGateAuthorityDecision } from './internal/context-graph-authority/context-graph-agent-gate-authority.js';
+import { resolveLiveOnChainAccessPolicyState as resolveLiveAccessPolicyState, type LiveOnChainAccessPolicyState } from './internal/context-graph-authority/context-graph-access-policy.js';
+import { createContextGraphAuthorityError, createRecipientAuthorityChangedError, isContextGraphAuthorityUnavailableMarker, isRetryableContextGraphAuthorityUnavailableReason, type ContextGraphAgentGateAuthority } from './internal/context-graph-authority/context-graph-authority.js';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
-import {
-  resolveSwmMemberRecoveryAuthorityDecision,
-  resolveSwmRegisteredAuthorityDecision,
-  resolveSwmTransportAuthorityDecision,
-  type SwmRegisteredAuthorityReadOptions,
-  type SwmTransportAuthority,
-} from './internal/context-graph-authority/swm-transport-authority.js';
+import { resolveSwmMemberRecoveryAuthorityDecision, resolveSwmRegisteredAuthorityDecision, resolveSwmTransportAuthorityDecision, type SwmRegisteredAuthorityReadOptions, type SwmTransportAuthority } from './internal/context-graph-authority/swm-transport-authority.js';
 import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
+import { FANOUT_RESPONSE_REJECTED, FANOUT_RESPONSE_RETRYABLE } from './swm/substrate-fanout.js';
 import { refuseUnlistedWorkspaceSigner } from './internal/context-graph-authority/approved-member-metadata-pending.js';
-import { ProfileManager } from './profile-manager.js';
-import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
-import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
-import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
-import {
-  signAgentDelegation,
-  verifyAgentDelegation,
-  type SignedAgentDelegation,
-} from './auth/agent-delegation.js';
-import { SyncVerifyWorker } from './sync-verify-worker.js';
-import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
-import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
-import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
-import {
-  createCGMemberEnumerator,
-  type CGMemberEnumerator,
-} from './swm/enumerate-cg-members.js';
-import {
-  chooseFanOutTier,
-  executeSubstrateFanOut,
-  classifySendResult,
-  FANOUT_RESPONSE_REJECTED,
-  FANOUT_RESPONSE_RETRYABLE,
-  type FanOutBookkeeper,
-  type FanOutPeerRecord,
-  type FanOutPlan,
-} from './swm/substrate-fanout.js';
-import {
-  createSwmAckQuorum,
-  type SwmAckQuorum,
-} from './swm/ack-quorum.js';
-import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
-import {
-  BEACON_ACCESS_POLICY_CURATED,
-  BEACON_REANNOUNCE_INTERVAL_MS,
-  DKG_CG_DISCOVERY_TOPIC,
-  decodeCgDiscoveryBeacon,
-  encodeCgDiscoveryBeacon,
-  mintCgDiscoveryBeacon,
-  verifyCgDiscoveryBeacon,
-} from './swm/cg-discovery-beacon.js';
-import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
-import {
-  decodeSwmHostCatchupRequest,
-  encodeSwmHostCatchupRequest,
-  encodeSwmHostCatchupResponse,
-  decodeSwmHostCatchupResponse,
-  DEFAULT_MAX_BYTES as SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_ENTRIES as SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES,
-  SWM_HOST_CATCHUP_WIRE_VERSION,
-  type SwmHostCatchupResponseEntry,
-} from './swm/host-catchup-wire.js';
-import {
-  CatchupReplayGuard,
-  mintSignedCatchupRequest,
-  verifySignedCatchupRequest,
-} from './swm/host-catchup-sign.js';
-import {
-  createCiphertextChunkCatchupReplayGuard,
-  decodeCiphertextChunkCatchupRequest,
-  encodeCiphertextChunkCatchupRequest,
-  encodeCiphertextChunkCatchupResponse,
-  decodeCiphertextChunkCatchupResponse,
-  mintSignedCiphertextChunkCatchupRequest,
-  verifySignedCiphertextChunkCatchupRequest,
-  CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION,
-  type CiphertextChunkCatchupRequest,
-  type CiphertextChunkCatchupResponse,
-} from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
-import { orderCatchupPeers } from './p2p/peer-selection.js';
-import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
-import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
-import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
 import { SyncTargetSupersededError } from './sync/error-tags.js';
-import { runDurableSync } from './sync/requester/durable-sync.js';
-import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
-import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
-import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
-import { registerSyncHandler } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import { resolveAssetUalFromKaIdentity } from './ka-identity.js';
 
-import {
-  generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
-  ensureWorkspaceEncryptionKey,
-  hashAgentToken,
-  activeWorkspaceEncryptionKeys,
-  appendCustodialWorkspaceEncryptionKey,
-  revokeCustodialWorkspaceEncryptionKey,
-  attachRevocationToWorkspaceEncryptionKey,
-  migrateLegacyWorkspaceEncryptionFields,
-  refreshDefaultEncryptionKeyView,
-  type AgentKeyRecord,
-  type KeystoreEntry,
-  type WorkspaceEncryptionKeyEntry,
-} from './agent-keystore.js';
+import { type AgentKeyRecord } from './agent-keystore.js';
 import { externalAuthorGossipSigner, localGossipSigner, signGossipEnvelopeInTime, type WorkspaceGossipSigner } from './external-author-signing.js';
-import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler } from './finalization-handler.js';
-import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
-import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -281,151 +42,16 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
-import { multiaddr } from '@multiformats/multiaddr';
-import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
-import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
-import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
-import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
-import {
-  strip, stripLiteral, jsonLdToQuads,
-  type JsonLdContent,
-} from './dkg-agent-utils.js';
-import {
-  PRIVATE_DATA_ANCHOR,
-  SYNC_PAGE_SIZE,
-  SYNC_PAGE_RETRY_ATTEMPTS,
-  SYNC_TOTAL_TIMEOUT_MS,
-  SYNC_PAGE_TIMEOUT_MS,
-  SYNC_ROUTER_ATTEMPTS,
-  SYNC_PROTOCOL_CHECK_ATTEMPTS,
-  SYNC_PROTOCOL_CHECK_DELAY_MS,
-  SYNC_AUTH_MAX_AGE_MS,
-  JOIN_DELEGATION_VALIDITY_MS,
-  JOIN_REQUEST_SEND_TIMEOUT_MS,
-  SYNC_ACCESS_DENIED_MARKER,
-  LOCAL_ACCESS_OPEN,
-  LOCAL_ACCESS_CURATED,
-  EVM_PUBLISH_CURATED,
-  EVM_PUBLISH_OPEN,
-  MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
-  META_REFRESH_COOLDOWN_MS,
-  SYNC_MIN_GRAPH_BUDGET_MS,
-  DEBUG_SYNC_PROGRESS,
-  DEFAULT_SWM_TTL_MS,
-  SWM_RECIPIENT_KEY_FETCH_WAIT_MS,
-  SWM_CLEANUP_INTERVAL_MS,
-  SYNC_DENIED_RESPONSE,
-  GOSSIP_DIAL_COOLDOWN_MS,
-  GOSSIP_DIAL_TIMEOUT_MS,
-  CATCHUP_ON_CONNECT_COOLDOWN_MS,
-  SYNC_RECONCILER_INTERVAL_MS,
-  SYNC_STALENESS_THRESHOLD_MS,
-  RANDOM_SAMPLING_BIND_RETRY_MS,
-  STORAGE_ACK_REGISTRATION_RETRY_MS,
-  JOIN_APPROVAL_RETRY_TICK_MS,
-  MESSAGE_OUTBOX_TICK_MS,
-  AGENT_PROFILE_HEARTBEAT_MS,
-  AGENT_PROFILE_STALE_THRESHOLD_MS,
-  WARM_CORE_CONNECTIONS_ENABLED,
-  WARM_CORE_RECONCILE_INTERVAL_MS,
-  WARM_CORE_MAX,
-  WARM_CORE_KEEPALIVE_TAG,
-  WARM_CORE_DIAL_TIMEOUT_MS,
-  CIPHERTEXT_CHUNK_SIZE_BYTES,
-  BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
-  MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
-  TIMEOUT_SENTINEL,
-  ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
-  CHAIN_POLICY_READ_TIMEOUT_MS,
-  SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
-} from './dkg-agent-constants.js';
+import { SWM_RECIPIENT_KEY_FETCH_WAIT_MS, TIMEOUT_SENTINEL, CHAIN_POLICY_READ_TIMEOUT_MS, SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX } from './dkg-agent-constants.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
-import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
-import {
-  isBoundedOperationTimeoutError,
-  runBoundedOperation,
-} from './bounded-operation.js';
-import * as diagnostics from './dkg-agent-diagnostics.js';
-import {
-  ContextGraphNotFoundError,
-  InvalidContentError,
-  StaleSenderKeyTargetError,
-  SwmSenderKeySetupRejectionError,
-  SyncAccessDeniedError,
-  type PreSignedAuthorAttestation,
-  type LocalSwmSenderKeySendState,
-  type LocalSwmSenderKeyReceiveState,
-  type PendingSenderKeyEntry,
-  type ACKSignerResolution,
-  type SyncRequestEnvelope,
-  type CclPublishedResultEntry,
-  type CclPublishedEvaluationRecord,
-  type PublishOpts,
-  type PublishAsyncOpts,
-  type PublishAsyncQuadEnvelope,
-  type PublishAsyncContent,
-  type PeerHealth,
-  type PeerConnectionSnapshot,
-  type PeerDiagnostics,
-  type ChatSendResult,
-  type ContextGraphSub,
-  type ContextGraphSubscriptionRecord,
-  type ContextGraphSubscriptionStore,
-  type ContextGraphMemberPrincipalType,
-  type ContextGraphMemberStatus,
-  type ContextGraphMembershipRecord,
-  type ContextGraphMembershipStore,
-  type DurableSyncDiagnostics,
-  type SharedMemorySyncDiagnostics,
-  type CatchupSyncDiagnostics,
-  type DurableSyncResult,
-  type SharedMemorySyncResult,
-  type DKGAgentConfig,
-  type ReplicationEvent,
-} from './dkg-agent-types.js';
-import {
-  normalizePublishContextGraphId,
-  isPublishAsyncQuadEnvelope,
-  assertQuadArray,
-  normalizeAgentDid,
-  joinDelegationScope,
-  normalizeSyncPhase,
-  normalizeAdapterPublisherAddress,
-  recoverCompactSigner,
-  adapterOperationalPrivateKeyAddress,
-  adapterHasOperationalPrivateKey,
-  adapterGenericSignMessageMatchesAddress,
-  adapterAdvertisesPublisherSigner,
-  privateKeyAddress,
-  inferAdapterPublisherAddress,
-  defaultLargeLiteralStorage,
-  createPublicSnapshotStore,
-  applyDefaultLargeLiteralStorage,
-  isLocalOxigraphConfig,
-  sliceIntoCiphertextChunks,
-} from './dkg-agent-helpers.js';
-import {
-  computeSwmSenderKeyRecipientRouteHash,
-  swmSenderStateKey,
-  swmReceiverStateKey,
-  serializeSwmSenderSendState,
-  serializeSwmSenderReceiveState,
-  serializePendingSenderKeyEntry,
-  deserializeSwmSenderSendState,
-  deserializeSwmSenderReceiveState,
-  deserializePendingSenderKeyEntry,
-} from './dkg-agent-swm-state.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
+import { StaleSenderKeyTargetError, SwmSenderKeySetupRejectionError, type LocalSwmSenderKeySendState, type LocalSwmSenderKeyReceiveState, type PendingSenderKeyEntry } from './dkg-agent-types.js';
+import { computeSwmSenderKeyRecipientRouteHash, swmSenderStateKey, swmReceiverStateKey, serializeSwmSenderSendState, serializeSwmSenderReceiveState, serializePendingSenderKeyEntry, deserializeSwmSenderSendState, deserializeSwmSenderReceiveState, deserializePendingSenderKeyEntry } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
-import {
-  isCanonicalPositiveContextGraphId,
-  localContextGraphIdMatchesCommittedNameHash,
-} from './context-graph-binding-state.js';
-import {
-  CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
-  withRpcUsageSite,
-} from '@origintrail-official/dkg-chain';
+import { isCanonicalPositiveContextGraphId, localContextGraphIdMatchesCommittedNameHash } from './context-graph-binding-state.js';
+import { CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite } from '@origintrail-official/dkg-chain';
 
 const KA_LIFECYCLE_ASSET_UAL_RESOLVE_TIMEOUT_MS = 50;
 const SWM_RECIPIENT_AUTHORITY_STABILITY_ATTEMPTS = 3;
@@ -774,6 +400,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return null;
   }
 
+  hasAuthorizedWorkspaceEncryptionCustodyForAddress(this: DKGAgent, address: string): boolean {
+    const record = [...this.localAgents.values()].find((agent) =>
+      agent.agentAddress.toLowerCase() === address.toLowerCase());
+    return record !== undefined
+      && hasVerifiedEncryptionCustody(address, this.peerId, record.workspaceEncryptionKeys);
+  }
+
   protected async resolveContextGraphAgentGateAuthority(
     this: DKGAgent,
     contextGraphId: string,
@@ -797,11 +430,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async getContextGraphAgentGateAddresses(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; requireAvailable?: boolean } = {},
   ): Promise<string[] | null> {
     const authority = await this.resolveContextGraphAgentGateAuthority(contextGraphId, options);
     if (authority.kind === 'ungated') return null;
     if (authority.kind === 'available') return authority.agentAddresses;
+    if (options.requireAvailable) {
+      // Raw RPC errors can contain credential-bearing URLs. Retain the typed
+      // cause on the error; expose only its stable reason and a correlatable
+      // digest/category in transport diagnostics.
+      const detail = authority.detail ?? '';
+      const diagnostic = `detailSha256=${createHash('sha256').update(detail).digest('hex')}`
+        + ` timeout=${/timeout|timed out|deadline/iu.test(detail)}`;
+      throw createContextGraphAuthorityError(
+        `Context graph "${contextGraphId}" sender-key authority unavailable (${authority.reason}); ${diagnostic}`,
+        authority,
+      );
+    }
     return [];
   }
 
@@ -2214,7 +1859,29 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
               && canonicalRecipientPeerId === canonicalLocalPeerId
             );
         }
-        if (recipientIsLocal && targetsLocalPeer) {
+        const localRecipient = [...this.localAgents.values()].find(
+          record => record.agentAddress.toLowerCase() === recipientAgentAddress.toLowerCase(),
+        );
+        // Public API identity registration does not prove custody of this key.
+        // Keep current peer routing and strict validation of owned/revoked keys.
+        const externalApiRecipient = localRecipient?.mode === 'self-sovereign'
+          && !localRecipient.privateKey
+          && !localRecipient.workspaceEncryptionKeys.some(key =>
+            key.encryptionKeyId === recipient.recipientKeyId
+            && (key.privateEncryptionKey || key.revokedAt));
+        const ownedKey = !externalApiRecipient && localRecipient?.workspaceEncryptionKeys.find(
+          key => key.encryptionKeyId === recipient.recipientKeyId,
+        );
+        if (ownedKey && (ownedKey.revokedAt || !ownedKey.privateEncryptionKey)) {
+          return {
+            kind: 'failure', agentAddress: recipientAgentAddress, keyId: recipient.recipientKeyId,
+            error: new SwmSenderKeySetupRejectionError(
+              ownedKey.revokedAt ? 'revoked-key' : 'active-private-key-missing',
+              `Local recipient key ${recipient.recipientKeyId} is revoked or missing private custody`,
+            ),
+          };
+        }
+        if (recipientIsLocal && targetsLocalPeer && !externalApiRecipient) {
           try {
             await this.acceptSwmSenderKeyPackage(pkg, this.node.peerId.toString(), input.ctx);
             return { kind: 'success', agentAddress: recipientAgentAddress };
@@ -2226,6 +1893,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
               error: err instanceof Error ? err : new Error(String(err)),
             };
           }
+        }
+
+        if (externalApiRecipient && (!recipient.peerId || recipient.peerId === this.node.peerId.toString())) {
+          return {
+            kind: 'failure',
+            agentAddress: recipientAgentAddress,
+            keyId: recipient.recipientKeyId,
+            error: new Error(`External API agent ${recipientAgentAddress} requires a remote peer for SWM key ${recipient.recipientKeyId}`),
+          };
         }
 
         if (!recipient.peerId) {
@@ -2463,6 +2139,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   swmSenderKeySetupAckReasonCode(this: DKGAgent, err: unknown): SwmSenderKeyPackageAckReasonCode {
+    if (isContextGraphAuthorityUnavailableMarker(err)) {
+      return isRetryableContextGraphAuthorityUnavailableReason(err.reason)
+        ? 'agent-gate-pending'
+        : 'agent-gate-unavailable';
+    }
     if (err instanceof StaleSenderKeyTargetError) {
       return 'stale-target';
     }
@@ -3178,10 +2859,17 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         // recipient not local, and revoked-key targeting (the
         // last of which throws a generic `Error` with the explicit
         // `was revoked at` message above and therefore stays at WARN).
+        const authorityDetail = isContextGraphAuthorityUnavailableMarker(err)
+          ? redactLogEntry({
+            ...ctx, level: 'warn', module: 'DKGAgent',
+            message: (err.detail ?? '').replace(/(?:https?|wss?):\/\/[^\s"'<>]+/giu, '[redacted-endpoint]'),
+          }).message.slice(0, 512)
+          : undefined;
         const message =
           `SWM sender-key setup receive rejected: senderAgent=${pkg.senderAgentAddress} recipientAgent=${pkg.recipientAgentAddress} ` +
           `fromPeer=${fromPeerId} contextGraph=${pkg.contextGraphId}${pkg.subGraphName ? `/${pkg.subGraphName}` : ''} ` +
-          `epoch=${pkg.epochId} membershipHash=${pkg.membershipHash} reason=${reason}`;
+          `epoch=${pkg.epochId} membershipHash=${pkg.membershipHash} reasonCode=${reasonCode} reason=${reason}`
+          + (authorityDetail === undefined ? '' : ` authorityDetail=${JSON.stringify(authorityDetail)}`);
         if (err instanceof StaleSenderKeyTargetError) {
           this.log.debug(ctx, message);
         } else {
@@ -3233,11 +2921,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // sender to retain and retry the package; one that needs a software or
       // configuration change is terminal, classified exactly as the promote
       // retry is (isRetryableContextGraphAuthorityUnavailableReason).
-      throw new SwmSenderKeySetupRejectionError(
-        isRetryableContextGraphAuthorityUnavailableReason(agentGateAuthority.reason)
-          ? 'agent-gate-pending'
-          : 'agent-gate-unavailable',
-        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason})`,
+      const detail = agentGateAuthority.detail ?? '';
+      const diagnostic = `detailSha256=${createHash('sha256').update(detail).digest('hex')}`
+        + ` timeout=${/timeout|timed out|deadline/iu.test(detail)}`;
+      throw createContextGraphAuthorityError(
+        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason}); ${diagnostic}`,
+        agentGateAuthority,
       );
     }
     const agentGateAddresses = agentGateAuthority.kind === 'available'

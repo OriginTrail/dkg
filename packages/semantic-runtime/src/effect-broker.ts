@@ -1,0 +1,660 @@
+import { realpathSync } from 'node:fs';
+import { decode } from 'cborg';
+import { type CapabilityRecord, type DurableIdempotencyClass, type EffectRecord, SemanticRuntimeStore } from './persistence.js';
+import type { AdmittedPlanSummary } from './codec.js';
+import { assertDigest, bytesEqual, computeEffectRequestDigest, decodeCapabilityMetadata, digest, digestHex, encodeCanonical, requireValue, resourceContains, safeErrorCode } from './effect-capability-codec.js';
+
+export interface RuntimeCapabilityMetadata {
+  subject: string;
+  audience: string;
+  executionId: string;
+  verbs: string[];
+  resources: string[];
+  delegationDepth: number;
+  oneShot: boolean;
+  budgetMicros: bigint;
+  parentCapabilityId?: string;
+}
+
+export interface RuntimePolicyInput {
+  executionId: string;
+  principal: string;
+  capabilityId: string;
+  adapterId: string;
+  adapterVersion: string;
+  verb: string;
+  resource: string;
+  requestDigest: Uint8Array;
+  policyEpoch: bigint;
+}
+
+export interface RuntimePolicyDecision {
+  decision: 'allow' | 'deny';
+  policyId: string;
+  policyEpoch: bigint;
+  factsDigest: Uint8Array;
+  reasonCode: string;
+}
+
+export interface RuntimePolicyAdapter {
+  evaluate(input: RuntimePolicyInput): Promise<RuntimePolicyDecision>;
+}
+
+export interface ReconciliationResult {
+  status: 'applied' | 'not_applied' | 'unknown';
+  evidenceRef: string;
+  output?: unknown;
+}
+
+export interface PreparedEffectToken {
+  readonly effectId: string;
+  readonly attemptId: string;
+  readonly requestDigest: Uint8Array;
+  readonly capabilityId: string;
+  readonly policyDecisionId: string;
+}
+
+export interface RuntimeAdapterOperation<I = unknown, O = unknown> {
+  readonly id: string;
+  readonly version: string;
+  /** Component Model interface identity bound to the explicit host import. */
+  readonly witInterface?: string;
+  /** Version and digest of the locally installed host implementation. */
+  readonly implementationVersion?: string;
+  readonly implementationHash?: string;
+  readonly enabled?: () => boolean;
+  readonly effectClass: string;
+  readonly verb: string;
+  readonly idempotencyClass: DurableIdempotencyClass;
+  readonly reconciliationRule: string;
+  readonly compensationRule?: string;
+  validateInput(input: unknown): I;
+  dispatch(authorization: Readonly<PreparedEffectToken>, input: I): Promise<{
+    status: 'succeeded' | 'failed';
+    output: O;
+    evidenceRef: string;
+  }>;
+  /** Opt-in continuation from durable checkpoints; never replay unresolved effects. */
+  resume?(authorization: Readonly<PreparedEffectToken>, input: I): Promise<{
+    status: 'succeeded' | 'failed';
+    output: O;
+    evidenceRef: string;
+  }>;
+  reconcile(
+    effect: Readonly<EffectRecord>,
+    input: I,
+  ): Promise<ReconciliationResult>;
+  couldHaveReachedTarget(error: unknown): boolean;
+}
+
+export interface RuntimeAdapterDescriptor {
+  id: string;
+  version: string;
+  witInterface: string | null;
+  implementationVersion: string | null;
+  implementationHash: string | null;
+  enabled: boolean;
+  effectClass: string;
+  verb: string;
+}
+
+export const REGISTERED_ADAPTERS = new WeakMap<RuntimeAdapterRegistry, Map<string, RuntimeAdapterOperation>>();
+export const CONTINUATIONS = new Map<string, Promise<unknown>>();
+export const MEMORY_STORES = new WeakMap<SemanticRuntimeStore, number>();
+export let memoryStoreId = 0;
+
+// A daemon owns its local runtime database. Share the gate across broker/store
+// instances, but only for the same effect; unrelated Programs continue freely.
+// This is process-local ownership, not a multi-process execution lease.
+export async function withContinuation<T>(store: SemanticRuntimeStore, effectId: string, run: () => Promise<T>): Promise<T> {
+  if (store.databasePath === ':memory:' && !MEMORY_STORES.has(store)) MEMORY_STORES.set(store, ++memoryStoreId);
+  const database = store.databasePath === ':memory:' ? `memory:${MEMORY_STORES.get(store)}` : realpathSync(store.databasePath);
+  const key = JSON.stringify([database, effectId]);
+  const prior = CONTINUATIONS.get(key) ?? Promise.resolve();
+  const current = prior.then(run, run);
+  CONTINUATIONS.set(key, current);
+  try { return await current; }
+  finally { if (CONTINUATIONS.get(key) === current) CONTINUATIONS.delete(key); }
+}
+
+export class RuntimeAdapterRegistry {
+  constructor() {
+    REGISTERED_ADAPTERS.set(this, new Map());
+  }
+
+  register<I, O>(operation: RuntimeAdapterOperation<I, O>): void {
+    const version = Number(operation.version);
+    if (
+      !operation.id
+      || !/^[1-9]\d*$/.test(operation.version)
+      || !Number.isInteger(version)
+      || version > 0xffff
+    ) {
+      throw new Error('adapter registration requires a stable id and exact positive V1 version');
+    }
+    const key = adapterKey(operation.id, operation.version);
+    const operations = requireRegistry(this);
+    if (operations.has(key)) throw new Error(`adapter already registered: ${key}`);
+    operations.set(key, operation as RuntimeAdapterOperation);
+  }
+
+  describe(id: string, version: string): RuntimeAdapterDescriptor | null {
+    const operation = requireRegistry(this).get(adapterKey(id, version));
+    if (!operation) return null;
+    return {
+      id: operation.id,
+      version: operation.version,
+      witInterface: operation.witInterface ?? null,
+      implementationVersion: operation.implementationVersion ?? null,
+      implementationHash: operation.implementationHash ?? null,
+      enabled: operation.enabled?.() ?? true,
+      effectClass: operation.effectClass,
+      verb: operation.verb,
+    };
+  }
+}
+
+export interface RuntimeEffectOutcome {
+  state: EffectRecord['state'];
+  output?: unknown;
+  evidenceRef?: string;
+}
+
+export interface RuntimeReadOutcome {
+  state: 'succeeded' | 'failed';
+  output: unknown;
+  evidenceRef: string;
+}
+
+export interface AdmittedPlanAuthority {
+  readonly adapterVersions: ReadonlyMap<string, string>;
+  readonly allowedEffectClasses: ReadonlySet<string>;
+}
+
+export function admittedPlanAuthority(plan: AdmittedPlanSummary): AdmittedPlanAuthority {
+  return {
+    adapterVersions: new Map(
+      [...plan.adapterVersions].map(([adapter, version]) => [adapter, String(version)]),
+    ),
+    allowedEffectClasses: new Set(plan.effectUpperBound),
+  };
+}
+
+export interface EffectProposal {
+  effectId: string;
+  executionId: string;
+  processId: string;
+  stepId: string;
+  attemptId: string;
+  principal: string;
+  adapterId: string;
+  adapterVersion: string;
+  verb: string;
+  resource: string;
+  normalizedInput: unknown;
+  capabilityId: string;
+  approvalId?: string;
+  idempotencyKey: string;
+  budgetReservation: bigint;
+  now: number;
+}
+
+export interface EffectBrokerHooks {
+  boundary?(name: EffectBoundary, effect: EffectRecord): void | Promise<void>;
+}
+
+export type EffectBoundary =
+  | 'prepared-committed'
+  | 'dispatching-committed'
+  | 'adapter-returned'
+  | 'outcome-committed'
+  | 'reconciling-committed';
+
+export class RuntimeEffectBroker {
+  constructor(
+    private readonly store: SemanticRuntimeStore,
+    private readonly policy: RuntimePolicyAdapter,
+    private readonly adapters: RuntimeAdapterRegistry,
+    private readonly plan: AdmittedPlanAuthority,
+    private readonly hooks: EffectBrokerHooks = {},
+  ) {}
+
+  readOutcome(effectId: string): RuntimeEffectOutcome | null {
+    const effect = this.store.effect(effectId);
+    if (!effect) return null;
+    const transition = this.store.effectTransitions(effectId).at(-1);
+    return {
+      state: effect.state,
+      ...(transition?.cbor.byteLength ? { output: decode(transition.cbor) } : {}),
+      ...(transition?.evidenceRef ? { evidenceRef: transition.evidenceRef } : {}),
+    };
+  }
+
+  /** Authorize and dispatch a pure read without creating a protected effect journal entry. */
+  async dispatchRead(proposal: EffectProposal): Promise<RuntimeReadOutcome> {
+    const operation = this.requirePlanAdapter(proposal.adapterId, proposal.adapterVersion);
+    if (operation.effectClass !== 'read') {
+      throw new Error('only pure reads may bypass the protected effect journal');
+    }
+    if (operation.verb !== proposal.verb) throw new Error('effect verb does not match adapter schema');
+    const input = operation.validateInput(proposal.normalizedInput);
+    const requestDigest = computeEffectRequestDigest(
+      proposal.adapterId,
+      proposal.adapterVersion,
+      proposal.verb,
+      proposal.resource,
+      input,
+    );
+    const { policyDecisionId } = await this.authorize(proposal, requestDigest);
+    const result = await operation.dispatch(Object.freeze({
+      effectId: proposal.effectId,
+      attemptId: proposal.attemptId,
+      requestDigest,
+      capabilityId: proposal.capabilityId,
+      policyDecisionId,
+    }), input);
+    return { state: result.status, output: result.output, evidenceRef: result.evidenceRef };
+  }
+
+  async prepareEffect(proposal: EffectProposal): Promise<EffectRecord> {
+    const operation = this.requirePlanAdapter(proposal.adapterId, proposal.adapterVersion);
+    if (operation.effectClass === 'read') {
+      throw new Error('pure reads do not use the protected effect journal');
+    }
+    if (operation.verb !== proposal.verb) throw new Error('effect verb does not match adapter schema');
+    const input = operation.validateInput(proposal.normalizedInput);
+    const normalizedInput = encodeCanonical(input);
+    const requestDigest = computeEffectRequestDigest(
+      proposal.adapterId,
+      proposal.adapterVersion,
+      proposal.verb,
+      proposal.resource,
+      input,
+    );
+    const existing = this.store.effect(proposal.effectId);
+    if (existing) {
+      if (
+        existing.executionId !== proposal.executionId
+        || existing.processId !== proposal.processId
+        || existing.stepId !== proposal.stepId
+        || existing.attemptId !== proposal.attemptId
+        || existing.idempotencyKey !== proposal.idempotencyKey
+        || existing.adapterId !== proposal.adapterId
+        || existing.adapterVersion !== proposal.adapterVersion
+        || existing.verb !== proposal.verb
+        || existing.resource !== proposal.resource
+        || existing.capabilityId !== proposal.capabilityId
+        || existing.approvalId !== (proposal.approvalId ?? null)
+        || existing.budgetReservation !== proposal.budgetReservation
+        || !bytesEqual(existing.normalizedInput, normalizedInput)
+        || !bytesEqual(existing.requestDigest, requestDigest)
+      ) {
+        throw new Error('effect identity was reused with different proposal semantics');
+      }
+      return existing;
+    }
+    const approvalId = this.requireApproval(proposal, operation.effectClass, requestDigest);
+    const { decision: policyDecision, policyDecisionId } =
+      await this.authorize(proposal, requestDigest);
+    const effect = this.store.prepareEffect({
+      effectId: proposal.effectId,
+      executionId: proposal.executionId,
+      processId: proposal.processId,
+      stepId: proposal.stepId,
+      attemptId: proposal.attemptId,
+      idempotencyKey: proposal.idempotencyKey,
+      idempotencyClass: operation.idempotencyClass,
+      requestDigest,
+      normalizedInput,
+      capabilityId: proposal.capabilityId,
+      policyDecisionId,
+      approvalId,
+      adapterId: proposal.adapterId,
+      adapterVersion: proposal.adapterVersion,
+      verb: proposal.verb,
+      resource: proposal.resource,
+      reconciliationRule: operation.reconciliationRule,
+      compensationRule: operation.compensationRule ?? null,
+      budgetReservation: proposal.budgetReservation,
+      preparedAt: proposal.now,
+      authorization: {
+        decisionId: policyDecisionId,
+        policyId: policyDecision.policyId,
+        policyEpoch: policyDecision.policyEpoch,
+        factsDigest: policyDecision.factsDigest,
+        principal: proposal.principal,
+        reasonCode: policyDecision.reasonCode,
+      },
+    });
+    await this.hooks.boundary?.('prepared-committed', effect);
+    return effect;
+  }
+
+  async dispatchPrepared(effectId: string, now: number): Promise<EffectRecord> {
+    const prepared = requireValue(this.store.effect(effectId), 'prepared effect does not exist');
+    if (prepared.state !== 'prepared') {
+      throw new Error(`effect ${effectId} is ${prepared.state}; dispatch requires prepared`);
+    }
+    const operation = this.requirePlanAdapter(prepared.adapterId, prepared.adapterVersion);
+    await this.revalidateFinalPolicy(prepared, operation, now);
+    const input = operation.validateInput(decode(prepared.normalizedInput));
+    const dispatching = this.store.transitionEffect(
+      effectId,
+      'dispatching',
+      `attempt:${prepared.attemptId}`,
+      new Uint8Array(),
+      now,
+    );
+    await this.hooks.boundary?.('dispatching-committed', dispatching);
+    const token: PreparedEffectToken = Object.freeze({
+      effectId: prepared.effectId,
+      attemptId: prepared.attemptId,
+      requestDigest: Uint8Array.from(prepared.requestDigest),
+      capabilityId: prepared.capabilityId,
+      policyDecisionId: prepared.policyDecisionId,
+    });
+    try {
+      const result = await operation.dispatch(token, input);
+      await this.hooks.boundary?.('adapter-returned', dispatching);
+      const next = result.status;
+      const outcome = this.store.transitionEffect(
+        effectId,
+        next,
+        result.evidenceRef,
+        encodeCanonical(result.output),
+        now,
+      );
+      await this.hooks.boundary?.('outcome-committed', outcome);
+      return outcome;
+    } catch (error) {
+      const current = requireValue(this.store.effect(effectId), 'effect disappeared during dispatch');
+      if (current.state !== 'dispatching') throw error;
+      const ambiguous = operation.couldHaveReachedTarget(error);
+      return this.store.transitionEffect(
+        effectId,
+        ambiguous ? 'unknown' : 'failed',
+        ambiguous ? 'adapter-dispatch-ambiguous' : 'adapter-definitive-failure',
+        encodeCanonical({ error: safeErrorCode(error) }),
+        now,
+      );
+    }
+  }
+
+  async reconcileUnknown(effectId: string, now: number): Promise<EffectRecord> {
+    return withContinuation(this.store, effectId, () => this.reconcileExclusive(effectId, now));
+  }
+
+  private async reconcileExclusive(effectId: string, now: number): Promise<EffectRecord> {
+    const unknown = requireValue(this.store.effect(effectId), 'effect does not exist');
+    if (unknown.state === 'succeeded' || unknown.state === 'failed') return unknown;
+    if (unknown.state !== 'unknown' && unknown.state !== 'reconciling') {
+      throw new Error('only unknown/reconciling effects can reconcile');
+    }
+    const operation = this.requirePlanAdapter(unknown.adapterId, unknown.adapterVersion);
+    const input = operation.validateInput(decode(unknown.normalizedInput));
+    const reconciling = unknown.state === 'unknown'
+      ? this.store.transitionEffect(
+        effectId,
+        'reconciling',
+        'read-only-reconciliation-started',
+        new Uint8Array(),
+        now,
+      )
+      : unknown;
+    if (unknown.state === 'unknown') {
+      await this.hooks.boundary?.('reconciling-committed', reconciling);
+    }
+    const result = await operation.reconcile(reconciling, input);
+    if (result.status === 'unknown') {
+      return this.store.transitionEffect(
+        effectId,
+        'manual_review_required',
+        result.evidenceRef,
+        encodeCanonical(result.output ?? null),
+        now,
+      );
+    }
+    return this.store.completeReconciliation(
+      effectId,
+      result.status === 'applied' ? 'succeeded' : 'failed',
+      result.evidenceRef,
+      encodeCanonical(result.output ?? null),
+      now,
+    );
+  }
+
+  /** Explicit authenticated continuation, distinct from read-only reconciliation. */
+  async resumeUnknown(effectId: string, now: number): Promise<EffectRecord> {
+    const startedAt = Date.now();
+    return withContinuation(this.store, effectId, () => this.resumeExclusive(effectId, now + Math.max(0, Date.now() - startedAt)));
+  }
+
+  private async resumeExclusive(effectId: string, now: number): Promise<EffectRecord> {
+    const effect = requireValue(this.store.effect(effectId), 'effect does not exist');
+    const operation = this.requirePlanAdapter(effect.adapterId, effect.adapterVersion);
+    if (!operation.resume) throw new Error('adapter does not support checkpointed continuation');
+    await this.revalidateFinalPolicy(effect, operation, now);
+    // A preceding continuation may have completed while this request waited
+    // for its gate. Recheck authorization, then use its durable result.
+    if (effect.state === 'succeeded' || effect.state === 'failed') return effect;
+    if (!['unknown', 'reconciling', 'manual_review_required'].includes(effect.state)) {
+      throw new Error('only interrupted effects can resume');
+    }
+    const input = operation.validateInput(decode(effect.normalizedInput));
+    if (effect.state !== 'reconciling') {
+      this.store.transitionEffect(effectId, 'reconciling', 'checkpointed-continuation-authorized', new Uint8Array(), now);
+    }
+    try {
+      const result = await operation.resume(Object.freeze({
+        effectId, attemptId: effect.attemptId, requestDigest: Uint8Array.from(effect.requestDigest),
+        capabilityId: effect.capabilityId, policyDecisionId: effect.policyDecisionId,
+      }), input);
+      return this.store.completeReconciliation(effectId, result.status, result.evidenceRef, encodeCanonical(result.output), Date.now());
+    } catch (error) {
+      // A later retry may obtain the missing durable receipt. Do not turn a
+      // transient status failure into either a new dispatch or a terminal loss.
+      return this.store.transitionEffect(effectId, 'unknown', 'checkpointed-continuation-pending',
+        encodeCanonical({ error: safeErrorCode(error) }), Date.now());
+    }
+  }
+
+  private async revalidateFinalPolicy(effect: EffectRecord, operation: RuntimeAdapterOperation, now: number): Promise<void> {
+    const startedAt = Date.now();
+    const capability = this.revalidatePreparedCapability(effect, operation, now);
+    const metadata = decodeCapabilityMetadata(capability.metadataCbor);
+    const policy = await this.policy.evaluate({
+      executionId: effect.executionId, principal: metadata.subject, capabilityId: effect.capabilityId,
+      adapterId: effect.adapterId, adapterVersion: effect.adapterVersion, verb: effect.verb,
+      resource: effect.resource, requestDigest: effect.requestDigest, policyEpoch: capability.policyEpoch,
+    });
+    if (policy.decision !== 'allow' || policy.policyEpoch !== capability.policyEpoch) {
+      throw new Error('prepared effect failed final pinned-policy authorization');
+    }
+    assertDigest(policy.factsDigest, 'current policy facts digest');
+    const checkedAt = now + Math.max(0, Date.now() - startedAt);
+    // Policy evaluation may await graph/network reads. Revocation, expiry,
+    // execution status, and adapter enablement must still hold when it returns.
+    this.requirePlanAdapter(effect.adapterId, effect.adapterVersion);
+    this.revalidatePreparedCapability(effect, operation, checkedAt);
+    if (effect.approvalId) {
+      const approval = requireValue(this.store.approval(effect.approvalId), 'prepared approval disappeared');
+      if (approval.executionId !== effect.executionId || approval.effectClass !== operation.effectClass
+        || approval.principal !== metadata.subject || checkedAt < approval.notBefore || checkedAt >= approval.expiresAt
+        || !bytesEqual(approval.requestDigest, effect.requestDigest)
+        || (approval.oneShot && approval.consumedAt === null)) {
+        throw new Error('prepared effect failed final approval checks');
+      }
+    }
+  }
+
+  private requirePlanAdapter(id: string, version: string): RuntimeAdapterOperation {
+    if (this.plan.adapterVersions.get(id) !== version) {
+      throw new Error(`adapter ${id}@${version} is not pinned by the admitted plan`);
+    }
+    const operation = requireRegistry(this.adapters).get(adapterKey(id, version));
+    if (!operation) throw new Error(`adapter ${id}@${version} is not registered`);
+    if (operation.enabled?.() === false) throw new Error(`adapter ${id}@${version} is disabled`);
+    if (!this.plan.allowedEffectClasses.has(operation.effectClass)) {
+      throw new Error(`effect class ${operation.effectClass} is outside the admitted upper bound`);
+    }
+    return operation;
+  }
+
+  private async authorize(proposal: EffectProposal, requestDigest: Uint8Array) {
+    const capability = this.requireActiveCapability(proposal, requestDigest);
+    const execution = requireValue(
+      this.store.execution(proposal.executionId),
+      'runtime execution does not exist',
+    );
+    if (execution.status !== 'active' || execution.policyEpoch !== capability.policyEpoch) {
+      throw new Error('runtime execution is inactive or has a stale policy epoch');
+    }
+    const decision = await this.policy.evaluate({
+      executionId: proposal.executionId,
+      principal: proposal.principal,
+      capabilityId: proposal.capabilityId,
+      adapterId: proposal.adapterId,
+      adapterVersion: proposal.adapterVersion,
+      verb: proposal.verb,
+      resource: proposal.resource,
+      requestDigest,
+      policyEpoch: capability.policyEpoch,
+    });
+    if (decision.decision !== 'allow') {
+      throw new Error(`runtime policy denied request: ${decision.reasonCode}`);
+    }
+    if (decision.policyEpoch !== capability.policyEpoch) {
+      throw new Error('runtime policy decision epoch does not match capability epoch');
+    }
+    assertDigest(decision.factsDigest, 'policy facts digest');
+    return {
+      decision,
+      policyDecisionId: digestHex(
+        'DKG-SEMANTIC-RUNTIME-POLICY-DECISION-V1\0',
+        proposal.effectId,
+        decision.policyId,
+        decision.policyEpoch.toString(),
+        decision.factsDigest,
+      ),
+    };
+  }
+
+  private requireActiveCapability(
+    proposal: EffectProposal,
+    requestDigest: Uint8Array,
+  ): CapabilityRecord {
+    const capability = requireValue(
+      this.store.capability(proposal.capabilityId),
+      'effect capability does not exist',
+    );
+    const metadata = decodeCapabilityMetadata(capability.metadataCbor);
+    if (
+      capability.executionId !== proposal.executionId
+      || metadata.executionId !== proposal.executionId
+      || metadata.subject !== proposal.principal
+      || metadata.audience !== 'dkg-semantic-runtime'
+      || capability.revokedAt !== null
+      || capability.oneShot !== metadata.oneShot
+      || (capability.oneShot && capability.consumedAt !== null)
+      || proposal.now < capability.notBefore
+      || proposal.now >= capability.expiresAt
+      || !metadata.verbs.includes(proposal.verb)
+      || !metadata.resources.some((scope) => resourceContains(scope, proposal.resource))
+      || proposal.budgetReservation > metadata.budgetMicros
+    ) {
+      throw new Error('effect capability is inactive or does not cover the request');
+    }
+    assertDigest(requestDigest, 'request digest');
+    return capability;
+  }
+
+  private requireApproval(
+    proposal: EffectProposal,
+    effectClass: string,
+    requestDigest: Uint8Array,
+  ): string | null {
+    // These effects require explicit plan admission and host policy. Asset creation
+    // is granted by the tenant binding; remote execution also carries a signed delegation.
+    if (effectClass === 'model-invocation' || effectClass === 'remote-execution' || effectClass === 'asset-creation') return null;
+    if (!proposal.approvalId) throw new Error(`effect class ${effectClass} requires approval`);
+    const approval = requireValue(
+      this.store.approval(proposal.approvalId),
+      'effect approval does not exist',
+    );
+    if (
+      approval.executionId !== proposal.executionId
+      || approval.effectClass !== effectClass
+      || approval.principal !== proposal.principal
+      || proposal.now < approval.notBefore
+      || proposal.now >= approval.expiresAt
+      || (approval.oneShot && approval.consumedAt !== null)
+      || !bytesEqual(approval.requestDigest, requestDigest)
+    ) {
+      throw new Error('effect approval is inactive or does not match the request');
+    }
+    return proposal.approvalId;
+  }
+
+  private revalidatePreparedCapability(
+    effect: EffectRecord,
+    operation: RuntimeAdapterOperation,
+    now: number,
+  ): CapabilityRecord {
+    const capability = requireValue(
+      this.store.capability(effect.capabilityId),
+      'prepared capability disappeared',
+    );
+    const execution = requireValue(
+      this.store.execution(effect.executionId),
+      'prepared execution disappeared',
+    );
+    if (
+      execution.status !== 'active'
+      || capability.executionId !== effect.executionId
+      || capability.revokedAt !== null
+      || (capability.oneShot && capability.consumedAt === null)
+      || now < capability.notBefore
+      || now >= capability.expiresAt
+      || operation.idempotencyClass !== effect.idempotencyClass
+    ) {
+      throw new Error('prepared effect failed final gateway authorization checks');
+    }
+    const expectedDigest = digest(
+      'DKG-SEMANTIC-RUNTIME-EFFECT-REQUEST-V1\0',
+      effect.adapterId,
+      effect.adapterVersion,
+      effect.verb,
+      effect.resource,
+      effect.normalizedInput,
+    );
+    const metadata = decodeCapabilityMetadata(capability.metadataCbor);
+    if (
+      operation.verb !== effect.verb
+      || metadata.executionId !== effect.executionId
+      || metadata.audience !== 'dkg-semantic-runtime'
+      || capability.oneShot !== metadata.oneShot
+      || capability.policyEpoch !== execution.policyEpoch
+      || effect.budgetReservation > metadata.budgetMicros
+      || !metadata.verbs.includes(effect.verb)
+      || !metadata.resources.some((scope) => resourceContains(scope, effect.resource))
+      || !bytesEqual(expectedDigest, effect.requestDigest)
+    ) {
+      throw new Error('prepared request no longer passes final gateway binding checks');
+    }
+    return capability;
+  }
+}
+
+export function requireRegistry(registry: RuntimeAdapterRegistry): Map<string, RuntimeAdapterOperation> {
+  const operations = REGISTERED_ADAPTERS.get(registry);
+  if (!operations) throw new Error('adapter registry is not initialized');
+  return operations;
+}
+
+export function adapterKey(id: string, version: string): string {
+  return `${id}@${version}`;
+}
+
+export { encodeCapabilityMetadata } from './effect-capability-codec.js';
+export { computeEffectRequestDigest } from './effect-capability-codec.js';
+export { decodeCapabilityMetadata } from './effect-capability-codec.js';

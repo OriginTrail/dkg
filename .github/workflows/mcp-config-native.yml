@@ -55,7 +55,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          node scripts/build-runtime-packages.mjs
+          # This fixture exercises config setup/uninstall with daemon startup
+          # forbidden. Compile its CLI module graph without building an unused
+          # optional Rust/Wasm execution engine on the Windows host.
+          # These runtime dependencies are not in the CLI tsconfig reference graph.
+          pnpm exec tsc --build packages/random-sampling packages/adapter-hermes packages/adapter-prime-agent
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec tsc --build packages/cli
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/copy-cli-runtime-assets.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --check packages/cli/test/fixtures/mcp-windows-client.fixture.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

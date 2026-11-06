@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-01T14:52:55.457Z",
+  "baselineCommit": "6d67d9b07f1d08ae7700c59680d022b105623ab1",
+  "mode": "real-four-node-dkg-public-remote-denial-local-wasi-codex-cross-node-vm",
+  "contextGraphId": "devnet-test",
+  "nodeUrls": {
+    "sourceAuthor": "http://127.0.0.1:24251",
+    "forkAuthor": "http://127.0.0.1:24252",
+    "secondNodeVerification": "http://127.0.0.1:24253"
+  },
+  "programs": {
+    "source": {
+      "iri": "urn:sr:program:codex-live",
+      "ual": "did:dkg:evm:31337/0x6e607ec852e0653cf9d42924d3b33c1ca1ab5683/0"
+    },
+    "fork": {
+      "iri": "urn:sr:program:codex-live-fork",
+      "ual": "did:dkg:evm:31337/0x084b851553057387b2bcac2b31409114eda59b48/1",
+      "derivedFrom": "urn:sr:program:codex-live"
+    },
+    "query": {
+      "iri": "urn:sr:program:query-live",
+      "ual": "did:dkg:evm:31337/0x6e607ec852e0653cf9d42924d3b33c1ca1ab5683/1"
+    }
+  },
+  "executions": {
+    "sourceLlm": {
+      "iri": "urn:sr:execution:1f24096a-f0c8-40a9-9f11-55e2552d5546",
+      "ual": "did:dkg:evm:31337/0x6e607ec852e0653cf9d42924d3b33c1ca1ab5683/5",
+      "layer": "vm",
+      "output": "semantic-runtime-llm-ok",
+      "outputHash": "sha256:04491f14f4f9a71e2a38f2ebdcbfa9b1d89c7d3661e5cb2cc0e803cf59a245d1",
+      "status": "https://origintrail.io/semantic-runtime/v1#Succeeded"
+    },
+    "forkLlm": {
+      "iri": "urn:sr:execution:9e88618f-898c-416c-9db2-0e852588c753",
+      "ual": "did:dkg:evm:31337/0x084b851553057387b2bcac2b31409114eda59b48/2",
+      "layer": "vm",
+      "output": "semantic-runtime-llm-ok",
+      "outputHash": "sha256:04491f14f4f9a71e2a38f2ebdcbfa9b1d89c7d3661e5cb2cc0e803cf59a245d1",
+      "status": "https://origintrail.io/semantic-runtime/v1#Succeeded"
+    },
+    "query": {
+      "iri": "urn:sr:execution:9efa3a8a-3912-4e5d-b897-acf05ec6124e",
+      "ual": "did:dkg:evm:31337/0x6e607ec852e0653cf9d42924d3b33c1ca1ab5683/4",
+      "layer": "vm",
+      "outputHash": "sha256:5182f0d60da659fc1880bfaf0557c1f985ac715aba76b2a034f05ff94f8afcaf",
+      "status": "https://origintrail.io/semantic-runtime/v1#Succeeded"
+    }
+  },
+  "secondNodeQueryEvidence": {
+    "node": "node-c",
+    "source": "verifiable-memory-query",
+    "httpInvocationResponseUsed": false,
+    "localReceiptUsedAsPersistenceProof": false,
+    "sourceLlmExecutionCount": 1,
+    "forkLlmExecutionCount": 1,
+    "queryExecutionCount": 1,
+    "exactLlmOutputMatched": true,
+    "exactUtf8Sha256Matched": true,
+    "allStatusesSucceeded": true
+  },
+  "concurrency": {
+    "realCodexCallsOverlap": true,
+    "llmAndQueryCatalogOverlap": true,
+    "sourceLlm": {
+      "startMonotonicNs": "1580289902865666",
+      "finishMonotonicNs": "1580299876107500",
+      "componentInstanceId": "ed04df7c-86b0-4e7e-b14c-4279b65d4b58"
+    },
+    "forkLlm": {
+      "startMonotonicNs": "1580289893323333",
+      "finishMonotonicNs": "1580300383941375",
+      "componentInstanceId": "7b583846-b31b-451c-8dd7-f6cdf05ee61a"
+    },
+    "query": {
+      "startMonotonicNs": "1580290492877333",
+      "finishMonotonicNs": "1580290531911833",
+      "componentInstanceId": "8783da39-7702-44ed-96b3-8c06a14b5fd2"
+    },
+    "distinctComponentInstances": true
+  },
+  "remoteInvocation": {
+    "publicContextGraphDenied": true,
+    "code": "REMOTE_INVOCATION_PRIVATE_GRAPH_REQUIRED"
+  },
+  "artifactHashes": {
+    "legacyWasmSha256": "fc72bd19e0555523b55f3f96b1a26414db84ce3c31f121baecba79c8fcf15ea7",
+    "componentSha256": "203ccb6ba08e00c33d7c3f2b0f502a776ac83bbfed2fe43e92df832a48785947",
+    "witSha256": "920e32afe3cb0ad9c3e9d4619cf35ac6779c1d86d55e257594efd9270d31609e",
+    "integritySha256": "c8d26abc636480c033b73c38f8b83709ab49e4d3a4d96685c03f2f6b833fc07b"
+  }
+}

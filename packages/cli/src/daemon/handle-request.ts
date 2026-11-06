@@ -335,6 +335,7 @@ import { handleQueryRoutes } from './routes/query.js';
 import { handleEntityRoutes } from './routes/entities.js';
 import { handleBoundedQueryRoutes } from './routes/bounded-query.js';
 import { handleCclRoutes } from './routes/ccl.js';
+import { handleSemanticRuntimeRoutes } from './routes/semantic-runtime.js';
 import { handleLocalAgentsRoutes } from './routes/local-agents.js';
 import { handleEpcisRoutes } from './routes/epcis.js';
 import { handlePcaRoutes } from './routes/pca.js';
@@ -439,6 +440,9 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   if (res.writableEnded) return;
 
   await handleCclRoutes(ctx);
+  if (res.writableEnded) return;
+
+  await handleSemanticRuntimeRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleLocalAgentsRoutes(ctx);

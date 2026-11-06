@@ -1,0 +1,6 @@
+package origintrail:typescript-program@1.0.0;
+world workflow {
+  export start: func(input-json: string);
+  export settle: func(id: u32, response-json: string);
+  export inspect: func() -> string;
+}

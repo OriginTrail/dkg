@@ -1,8 +1,8 @@
+import type { LocalFirstWriteProvenance } from './context-graph-write-provenance.js';
 import type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 import type { PreparedContentCacheConfig } from './sync/responder/prepared-content-cache.js';
 import type { ContextGraphJoinPolicyReservationRelease } from './context-graph-join-policy-release.js';
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Type and error-class surface for `DKGAgent` extracted from
  * `dkg-agent.ts` as part of a mechanical file-size reduction. Behaviour
@@ -985,7 +985,7 @@ export type ContextGraphSubscriptionRehydrationInternalStatus = Omit<
   keyof ContextGraphDormancyProjection | 'dormant'
 >;
 
-export interface ContextGraphWritePreflightProbe {
+export interface ContextGraphWritePreflightProbe extends LocalFirstWriteProvenance {
   /**
    * Explicit, REQUIRED store-availability discriminant. `true` when every
    * store-backed read the probe issued answered, `false` when at least one
@@ -2053,8 +2053,7 @@ export type ResolvedDKGAgentConfig =
     /** Graphs the manual peer table of `rfc64Catalog.accessPolicyAuthority` covers. */
     rfc64CatalogManualTrustRootContextGraphs?: readonly string[];
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
-    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
-      .Rfc64CatalogExecutionPlanV1;
+    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js').Rfc64CatalogExecutionPlanV1;
     rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };
