@@ -1,5 +1,6 @@
 import React from 'react';
 import type { ReactNode } from 'react';
+import { Badge } from '../ds/Badge.js';
 
 /**
  * The publish-eligibility verdict (UX §5.5, expanded by invariant #6). FOUR
@@ -28,7 +29,7 @@ function pctLabel(bps?: number): string | null {
   return `${p.toFixed(p % 1 === 0 ? 0 : 1)}%`;
 }
 
-/** Compact chip uses the shared Badge look (components/ds/Badge). */
+/** Compact chip is a Badge; its label carries any glyph, so the badge adds none. */
 const CHIP_TONE: Record<PcaVerdict, 'success' | 'warning' | 'danger' | 'neutral'> = {
   eligible: 'success',
   fallthrough: 'warning',
@@ -110,15 +111,17 @@ export function EligibilityVerdictBanner({
             ? '⚠ Publish will fail'
             : 'PCA status unknown';
     return (
-      <span
-        className={['ds-badge', `ds-tone-${CHIP_TONE[verdict]}`, 'v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
+      <Badge
+        tone={CHIP_TONE[verdict]}
+        icon={null}
+        className={['v10-pca-verdict-chip', meta.toneClass, className].filter(Boolean).join(' ')}
         data-testid="pca-eligibility-chip"
         data-verdict={verdict}
       >
         <span className="v10-pca-verdict-chip-label" role={role} aria-live={ariaLive}>
           {chipLabel}
         </span>
-      </span>
+      </Badge>
     );
   }
 

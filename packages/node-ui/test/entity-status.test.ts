@@ -9,7 +9,7 @@ import { DecisionCardImpl as DecisionCard, PRCardImpl as PRCard, TaskCardImpl as
 describe('entity status tone', () => {
   it('maps every known status to one badge tone', () => {
     expect(['accepted', 'done', 'merged'].map(entityStatusTone)).toEqual(['success', 'success', 'success']);
-    expect(['proposed', 'open', 'in_progress'].map(entityStatusTone)).toEqual(['warning', 'warning', 'warning']);
+    expect(['proposed', 'open', 'in_progress'].map(entityStatusTone)).toEqual(['pending', 'pending', 'pending']);
     expect(['rejected', 'superseded', 'cancelled', 'blocked', 'closed'].map(entityStatusTone)).toEqual(['danger', 'danger', 'danger', 'danger', 'danger']);
     expect(['', 'unknown'].map(entityStatusTone)).toEqual(['neutral', 'neutral']);
   });
@@ -20,6 +20,6 @@ describe('entity status tone', () => {
     expect(tone(render(DecisionCard, { title: 'D', status: 'accepted' }))).toBe('success');
     expect(tone(render(TaskCard, { title: 'T', status: 'blocked' }))).toBe('danger');
     expect(tone(render(PRCard, { title: 'P', state: 'closed' }))).toBe('danger');
-    expect(tone(render(PRCard, { title: 'P', state: 'open' }))).toBe('warning');
+    expect(tone(render(PRCard, { title: 'P', state: 'open' }))).toBe('pending');
   });
 });

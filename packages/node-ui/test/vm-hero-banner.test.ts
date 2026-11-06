@@ -101,7 +101,7 @@ describe('VerifiableMemoryHeroBanner', () => {
     await unmount();
   });
 
-  it('keeps populated stats numeric and moves the context graph id out of the stat row', async () => {
+  it('keeps populated stats numeric and moves the Context Graph id out of the stat row', async () => {
     const { container, unmount } = await renderVmHero({
       entities: [
         memoryEntity('asset-1', ['http://schema.org/Thing']),

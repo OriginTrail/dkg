@@ -53,3 +53,9 @@ pnpm build
 ### Unavailable node
 
 If both initial status probes fail or time out, the dashboard shows a connection recovery screen and hides operational panels, including node health, balances, graphs and integration readiness. Fallback fixtures are never shown as live state. Check the daemon and use **Retry connection** to reload; detection remains latched for the current page. A `401` response still opens the existing API token prompt rather than declaring the node unavailable.
+
+After the dashboard has loaded, the header shows the live status: `Connecting`, `Connected` with the peer count, `No peers`, or `Unavailable` after three failed status checks in a row. One good check clears it.
+
+### Design system
+
+[DESIGN.md](DESIGN.md) holds the rules, tokens and components, and how to change them. Run `pnpm dev:ui` and open `/ui/design-system.html` to see them live. `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` enforce what can be checked.

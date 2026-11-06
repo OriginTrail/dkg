@@ -41,7 +41,7 @@ test.describe('Inter-node messaging (devnet API)', () => {
 });
 
 test.describe('Ownership transfer UI prerequisites (devnet API)', () => {
-  test('participants list is readable for first context graph', async () => {
+  test('participants list is readable for first Context Graph', async () => {
     const cgs = await devnetApiFetch('/api/context-graphs');
     const { contextGraphs } = (await cgs.json()) as { contextGraphs: Array<{ id: string }> };
     requireDevnetPrecondition(test, contextGraphs.length === 0, 'No CGs');

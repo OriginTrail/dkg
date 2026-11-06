@@ -31,7 +31,7 @@
 }
 .v10-dash-section:hover {
   border-color: var(--border-strong);
-  box-shadow: 0 2px 8px rgba(0,0,0,.15);
+  box-shadow: var(--shadow-sm);
 }
 .v10-dash-section-header {
   display: flex;
@@ -51,9 +51,9 @@
 
 /* ── PR6 dashboard: 3 stat panels + My Context Graphs list ── */
 .v10-dash-stats-3 { grid-template-columns: repeat(3, 1fr); }
-@media (max-width: 720px) { .v10-dash-stats-3 { grid-template-columns: 1fr; } }
+.v10-center-content[data-narrow] .v10-dash-stats-3 { grid-template-columns: 1fr; }
 .v10-dash-grid-2 { grid-template-columns: minmax(0, 2.2fr) minmax(320px, 1fr); }
-@media (max-width: 720px) { .v10-dash-grid-2 { grid-template-columns: 1fr; } }
+.v10-center-content[data-narrow] .v10-dash-grid-2 { grid-template-columns: 1fr; }
 .v10-dash-section-wide { min-width: 0; }
 
 /* Curator/Joined split bar in the My Context Graphs card — same
@@ -127,7 +127,7 @@
   display: flex;
   gap: 1px;
   height: 7px;
-  border-radius: 3px;
+  border-radius: var(--radius-hair);
   overflow: hidden;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);

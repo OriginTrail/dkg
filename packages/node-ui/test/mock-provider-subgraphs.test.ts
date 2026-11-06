@@ -20,7 +20,7 @@ describe('mockApi.fetchSubGraphs (GH#1763)', () => {
     expect(result.subGraphs.map((s) => s.name)).toEqual(['interactions', 'contraindications']);
   });
 
-  it('falls back to an empty list for a context graph with no override', async () => {
+  it('falls back to an empty list for a Context Graph with no override', async () => {
     // `cg:supply-chain-eu` is a real mock CG deliberately left out of
     // MOCK_SUBGRAPHS so the fallback path stays covered.
     expect(MOCK_SUBGRAPHS['cg:supply-chain-eu']).toBeUndefined();
@@ -30,13 +30,13 @@ describe('mockApi.fetchSubGraphs (GH#1763)', () => {
     expect(result).toEqual({ contextGraphId: 'cg:supply-chain-eu', subGraphs: [] });
   });
 
-  it('falls back to an empty list for an entirely unknown context graph', async () => {
+  it('falls back to an empty list for an entirely unknown Context Graph', async () => {
     const result = await mockApi.fetchSubGraphs('cg:does-not-exist');
 
     expect(result).toEqual({ contextGraphId: 'cg:does-not-exist', subGraphs: [] });
   });
 
-  it('only overrides context graphs that mock mode actually lists', () => {
+  it('only overrides Context Graphs that mock mode actually lists', () => {
     const knownCgIds = new Set(MOCK_CONTEXT_GRAPHS.contextGraphs.map((cg) => cg.id));
     for (const id of Object.keys(MOCK_SUBGRAPHS)) {
       expect(knownCgIds.has(id)).toBe(true);

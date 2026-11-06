@@ -12,7 +12,7 @@ import type { BadgeTone } from '../components/ds/Badge.js';
 export function entityStatusTone(status: string): BadgeTone {
   switch (status) {
     case 'accepted': case 'done': case 'merged': return 'success';
-    case 'proposed': case 'in_progress': case 'open': return 'warning';
+    case 'proposed': case 'in_progress': case 'open': return 'pending';
     case 'rejected': case 'superseded': case 'cancelled': case 'blocked': case 'closed': return 'danger';
     default: return 'neutral';
   }

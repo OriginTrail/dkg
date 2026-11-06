@@ -9,7 +9,7 @@ export const sel = {
     version: '.v10-header-logo-version',
     sidebarToggle: 'button[title="Toggle sidebar"]',
     agentName: '.v10-header-agent-name',
-    statusDot: '.v10-header-status-dot',
+    status: '.v10-header-meta .ds-badge',
     meta: '.v10-header-meta',
     notifWrap: '.v10-header-notif-wrap',
     notifBadge: '.v10-header-notif-badge',
@@ -245,9 +245,9 @@ export const sel = {
 
   shareModal: {
     title: '.v10-modal-title',
-    inviteLabel: '.v10-form-label:has-text("Invite Code")',
-    allowedAgents: '.v10-form-label:has-text("Allowed Agents")',
-    pendingRequests: '.v10-form-label:has-text("Pending Join Requests")',
+    inviteLabel: '.v10-form-label:has-text("Invite code")',
+    allowedAgents: '.v10-form-label:has-text("Allowed agents")',
+    pendingRequests: '.v10-form-label:has-text("Pending join requests")',
     copyInviteBtn: 'button:has-text("Copy Invite")',
   },
 
@@ -267,7 +267,7 @@ export const sel = {
     cardTitle: '.settings-stack .card-title',
     fieldLabel: '.settings-field-label',
     fieldValue: '.settings-field-value',
-    onlinePill: '.settings-stack .card-body .mono',
+    nodeStatus: '.settings-node-status .ds-badge',
     telemetrySwitch: 'button[role="switch"][aria-label="Share telemetry with the network"]',
     telemetryDialog: '[role="dialog"][aria-label="Enable Telemetry Streaming?"]',
     retentionSelect: '#retention-select',

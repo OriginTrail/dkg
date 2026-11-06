@@ -58,7 +58,7 @@
   padding: 4px;
   border: 1px solid var(--border-default);
   background: var(--bg-panel);
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+  box-shadow: var(--shadow-menu);
 }
 .v10-layer-more-item {
   width: 100%;
@@ -196,7 +196,7 @@
 }
 .v10-stat-strip-cell:hover {
   border-color: color-mix(in srgb, var(--v10-stat-accent) 35%, var(--border-strong));
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-sm);
 }
 .v10-stat-strip-value {
   display: block;

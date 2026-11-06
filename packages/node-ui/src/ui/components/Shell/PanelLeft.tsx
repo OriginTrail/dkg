@@ -61,7 +61,7 @@ function ProjectTreeItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this context graph from the sidebar (reversible)"
+          title="Hide this Context Graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
           ×
@@ -111,7 +111,7 @@ function OracleCatalogueItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this context graph from the sidebar (reversible)"
+          title="Hide this Context Graph from the sidebar (reversible)"
           onClick={onHide}
         >
           ×
@@ -127,16 +127,16 @@ function OracleCatalogueItem({
 function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
   switch (status) {
     case 'chat_ready':
-      return 'var(--accent-green, #22c55e)';
+      return 'var(--accent-green)';
     case 'connecting':
-      return 'var(--accent-yellow, #eab308)';
     case 'degraded':
+      return 'var(--accent-amber)';
     case 'bridge_offline':
-      return 'var(--accent-orange, #f97316)';
+      return 'var(--accent-red)';
     case 'available':
     case 'coming_soon':
     default:
-      return 'var(--text-tertiary, #6b7280)';
+      return 'var(--text-tertiary)';
   }
 }
 
@@ -166,7 +166,7 @@ function IntegrationsSectionBody() {
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 11, color: 'var(--accent-orange, #f97316)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 11, color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}
@@ -272,12 +272,12 @@ export function PanelLeft() {
 
       {inventoryError && (
         <div className="v10-journey-empty-card ds-card" role="alert">
-          <div>{listError ? 'Context graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
-          <div>{contextGraphs.length ? 'Showing the last available context graphs.' : 'Context graph membership is unknown.'}</div>
+          <div>{listError ? 'Context Graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
+          <div>{contextGraphs.length ? 'Showing the last available Context Graphs.' : 'Context Graph membership is unknown.'}</div>
           <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
         </div>
       )}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading context graphs…</div>}
+      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading Context Graphs…</div>}
 
       {treeMode === 'explorer' && (
         <div className="v10-tree-content">
@@ -294,11 +294,11 @@ export function PanelLeft() {
               stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading && (
             <div className="v10-journey-empty-card ds-card">
-              <div className="v10-jec-title">No context graphs yet</div>
+              <div className="v10-jec-title">No Context Graphs yet</div>
               <div className="v10-jec-hint">
                 {stage === 0
                   ? 'Connect an agent to get started.'
-                  : 'Create your first context graph to give your agent structured memory.'}
+                  : 'Create your first Context Graph to give your agent structured memory.'}
               </div>
               {stage === 1 && (
                 <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
@@ -340,7 +340,7 @@ export function PanelLeft() {
                       className="v10-tree-item"
                       style={{ cursor: 'default', color: 'var(--text-tertiary)', fontStyle: 'italic' }}
                     >
-                      <span className="v10-tree-item-label">{inventoryError ? 'Context graph membership unavailable.' : inventoryLoading ? 'Loading context graphs…' : 'No context graphs in this view yet.'}</span>
+                      <span className="v10-tree-item-label">{inventoryError ? 'Context Graph membership unavailable.' : inventoryLoading ? 'Loading Context Graphs…' : 'No Context Graphs in this view yet.'}</span>
                     </div>
                   ) : myProjects.map((cg) => (
                     <ProjectTreeItem
@@ -367,9 +367,9 @@ export function PanelLeft() {
               type="button"
               className="v10-tree-show-hidden"
               onClick={unhideAll}
-              title="Restore all context graphs dismissed from the sidebar"
+              title="Restore all Context Graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
+              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
 
@@ -457,9 +457,9 @@ export function PanelLeft() {
               type="button"
               className="v10-tree-show-hidden"
               onClick={unhideAll}
-              title="Restore all context graphs dismissed from the sidebar"
+              title="Restore all Context Graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden context graph{hiddenCount !== 1 ? 's' : ''}
+              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
         </div>

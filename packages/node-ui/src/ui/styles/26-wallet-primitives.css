@@ -81,7 +81,7 @@
   padding: 8px;
   border: 1px solid var(--border-strong);
   background: var(--bg-surface);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-menu);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -125,8 +125,8 @@
   background: var(--bg-surface);
 }
 .v10-wallet-pill[data-state='wrong-network'] {
-  border-color: rgba(245, 158, 11, 0.45);
-  background: var(--amber-dim);
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
 }
 .v10-wallet-pill-main {
   font-family: var(--font-mono);

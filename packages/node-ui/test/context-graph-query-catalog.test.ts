@@ -137,13 +137,13 @@ describe('ContextGraphQueryView', () => {
   it('frames the page as a catalogue first and editor second', async () => {
     const { container, root } = await renderWithProfile(profile());
 
-    await waitForText(container, 'Query Catalogue');
+    await waitForText(container, 'Query catalogue');
 
     const buttonLabels = Array.from(container.querySelectorAll('button'))
       .map(button => button.textContent?.trim())
       .filter(Boolean);
 
-    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query Catalogue');
+    expect(container.querySelector('h2.v10-mlv-title')?.textContent).toBe('Query catalogue');
     expect(container.querySelector('#query-catalogue-saved-title')?.textContent).toBe('Choose a query');
     expect(container.querySelector('#query-catalogue-editor-title')?.textContent).toBe('Editor and results');
     expect(container.querySelector('textarea')).toBeTruthy();
@@ -455,7 +455,7 @@ describe('ContextGraphQueryView', () => {
       }],
     }));
 
-    await waitForText(container, 'Query Catalogue');
+    await waitForText(container, 'Query catalogue');
 
     const textarea = container.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {

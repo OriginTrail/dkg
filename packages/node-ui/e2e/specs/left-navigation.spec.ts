@@ -17,7 +17,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     await expect(leftPanel.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Dashboard' })).toBeVisible();
   });
 
-  test('My Context Graphs peer group lists the seeded context graphs', async ({ leftPanel }) => {
+  test('My Context Graphs peer group lists the seeded Context Graphs', async ({ leftPanel }) => {
     // The devnet seeds devnet-test + devnet-isolation on boot; the node may also
     // surface a local "Agent Context" CG. Assert the deterministic anchors are
     // present (tolerant to extra CGs) rather than a brittle exact count.
@@ -27,7 +27,7 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(names.length).toBeGreaterThanOrEqual(2);
   });
 
-  test('clicking a context graph opens its project tab', async ({ leftPanel, centerPanel }) => {
+  test('clicking a Context Graph opens its project tab', async ({ leftPanel, centerPanel }) => {
     await leftPanel.expandProject(PRIMARY_CG);
     const tabs = await centerPanel.getTabNames();
     expect(tabs.some((t) => t.includes(PRIMARY_CG))).toBe(true);

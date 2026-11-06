@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createRecoverableLazyView } from './RecoverableLazyView.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
@@ -163,7 +163,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         <button
           onClick={handleBack}
           style={{
-            border: '1px solid var(--border-default)', borderRadius: 5, background: 'none',
+            border: '1px solid var(--border-default)', borderRadius: 'var(--radius-control)', background: 'none',
             color: 'var(--text-secondary)', fontSize: 11, fontWeight: 600, padding: '4px 10px',
             cursor: 'pointer', fontFamily: 'var(--font-sans)',
           }}
@@ -302,11 +302,26 @@ function ViewContainer() {
   );
 }
 
+/** Below this content width a view stacks. Media queries can't see the open side panels. */
+const CENTER_NARROW_PX = 560;
+
 export function PanelCenter() {
+  const contentRef = useRef<HTMLDivElement>(null);
+  // Not a CSS container: that would trap the fixed drawers and dialogs inside this panel.
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      el.toggleAttribute('data-narrow', entry.contentRect.width < CENTER_NARROW_PX);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <div className="v10-panel-center">
       <TabBar />
-      <div className="v10-center-content">
+      <div className="v10-center-content" ref={contentRef}>
         <ViewContainer />
       </div>
     </div>

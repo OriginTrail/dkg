@@ -235,7 +235,7 @@ describe('useProjectProfile — forSubGraph Root binding (S3, Codex Bug E)', () 
     } finally { document.documentElement.classList.remove('light'); }
   });
 
-  it('keeps a hostile context graph id inside one literal at every profile query sink', async () => {
+  it('keeps a hostile Context Graph id inside one literal at every profile query sink', async () => {
     const contextGraphId = ['cg-', '\\', '"', '\n', '") } UNION { ?s ?p ?o } #'].join('');
     const prefix = `did:dkg:context-graph:${contextGraphId}/meta`;
     const expectedFilter = `FILTER(strstarts(str(?g), ${JSON.stringify(prefix)}))`;

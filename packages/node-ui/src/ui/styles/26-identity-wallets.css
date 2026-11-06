@@ -23,6 +23,7 @@
   color: var(--text-secondary);
 }
 
+.v10-identity-wallet-btn.ds-btn { max-width: 100%; height: auto; min-height: var(--h-control-md); white-space: normal; }
 .v10-identity-wallet-btn:disabled { opacity: 0.5; }
 
 .v10-identity-wallet-counts,
@@ -124,19 +125,11 @@
   flex: 1 1 360px;
   overflow-wrap: anywhere;
 }
-
-@media (max-width: 720px) {
-  .v10-identity-wallet-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .v10-identity-wallet-signer {
+.v10-center-content[data-narrow] .v10-identity-wallet-grid {
+    grid-template-columns: 1fr; }
+.v10-center-content[data-narrow] .v10-identity-wallet-signer {
     align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .v10-identity-wallet-known .v10-wallet-trailing {
+    flex-direction: column; }
+.v10-center-content[data-narrow] .v10-identity-wallet-known .v10-wallet-trailing {
     width: 100%;
-    margin-left: 0;
-  }
-}
+    margin-left: 0; }

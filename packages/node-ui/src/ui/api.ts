@@ -1,3 +1,4 @@
+import { NODE_STATUS_POLL_MS } from './lib/formatPeerStatus.js';
 import { randomUUID } from './lib/randomUUID.js';
 import { executeQuery, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
 export * from './query-api.js';
@@ -94,7 +95,7 @@ export class LocalAgentApiError extends Error {
 }
 
 // --- Status ---
-export const fetchStatus = () => get<any>('/api/status');
+export const fetchStatus = () => getWithTimeout<any>('/api/status', NODE_STATUS_POLL_MS);
 
 // --- LLM Settings ---
 export interface LlmSettingsResponse {
@@ -1314,7 +1315,7 @@ export const PARTIAL_PUBLISH_STATUS_SUFFIX = 'binding incomplete';
  */
 export function partialPublishWarning(contextGraphError?: string): string {
   const base =
-    'Published on-chain, but linking it into the context graph did not complete, ' +
+    'Published on-chain, but linking it into the Context Graph did not complete, ' +
     'so context-graph views may be incomplete.';
   return contextGraphError ? `${base} (${contextGraphError})` : base;
 }
@@ -2477,11 +2478,11 @@ async function mapLocalAgentIntegrationRecord(
   let detail: string;
   if (persistentChat && degraded) {
     status = 'degraded';
-    statusLabel = 'Degraded';
+    statusLabel = 'Partial';
     detail = hermesRuntimeDetail
       ?? health?.error
       ?? record.runtime?.lastError
-      ?? `${record.name} is attached to this node, but one capability is degraded.`;
+      ?? 'One capability is unavailable.';
   } else if (persistentChat && record.runtime?.status === 'connecting') {
     status = 'connecting';
     statusLabel = 'Connecting';
@@ -2489,7 +2490,7 @@ async function mapLocalAgentIntegrationRecord(
       ?? `${record.name} is registered and still starting up.`;
   } else if (bridgeOnline) {
     status = 'chat_ready';
-    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Chat ready';
+    statusLabel = primeTurnDetached ? 'Still working' : health?.busy ? 'Working' : 'Ready';
     detail = primeTurnDetached
       ? `${record.name} is still working after the browser stream disconnected. Wait for it to finish before sending another message.`
       : health?.busy
@@ -2522,7 +2523,7 @@ async function mapLocalAgentIntegrationRecord(
     : status === 'connecting'
       ? 'Connecting'
       : status === 'degraded'
-        ? 'Degraded'
+        ? 'Partial'
       : persistentChat
         ? 'Unavailable'
         : connectSupported

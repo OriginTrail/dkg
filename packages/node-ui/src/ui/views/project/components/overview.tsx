@@ -130,7 +130,7 @@ export function LayerSwitcher({ active, counts, onSwitch, onShare, onImport, onR
               onClick={() => switchTo('query')}
             >
               <span className="v10-layer-switch-icon">⟐</span>
-              Query Catalogue
+              Query catalogue
             </button>
           </div>
         )}
@@ -181,7 +181,7 @@ export function ProjectHeaderStrip({
         className="v10-project-strip-name"
         onClick={activeSubGraph ? onClearSubGraph : undefined}
         disabled={!activeSubGraph}
-        title={activeSubGraph ? 'Back to context graph overview' : cg.id}
+        title={activeSubGraph ? 'Back to Context Graph overview' : cg.id}
       >
         {name}
       </button>
@@ -529,10 +529,10 @@ export function ProjectOverviewCard({
           ]}
         />
       </div>
-      <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge Pipeline">
+      <div className="v10-po-pipeline" data-section="pipeline" aria-label="Knowledge pipeline">
         <div className="v10-po-pipeline-head">
           <div>
-            <div className="v10-po-section-title">Knowledge Pipeline</div>
+            <div className="v10-po-section-title">Knowledge pipeline</div>
             <div className="v10-po-section-desc">Entities move from private staging to shared review; published assertion bundles become Knowledge Assets with on-chain provenance.</div>
           </div>
         </div>
@@ -864,7 +864,7 @@ export function OverviewPrimerEntry({ onOpenPrimer }: { onOpenPrimer: () => void
         What is a Context Graph?
       </button>
       <div className="v10-po-primer-footer-sub">
-        A short primer on context graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
+        A short primer on Context Graphs, the WM → SWM → VM pipeline, and how participant agents collaborate.
       </div>
     </div>
   );

@@ -49,8 +49,8 @@ function classifyLine(line: string): 'error' | 'warn' | 'info' | 'debug' {
 }
 
 const LEVEL_COLORS: Record<string, string> = {
-  error: 'var(--accent-red, #ef4444)',
-  warn:  'var(--accent-yellow, #f59e0b)',
+  error: 'var(--accent-red)',
+  warn:  'var(--accent-amber)',
   info:  'var(--text-primary)',
   debug: 'var(--text-tertiary)',
 };
@@ -177,7 +177,7 @@ function TransactionsContent() {
 
   return (
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
         <thead>
           <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
@@ -185,7 +185,7 @@ function TransactionsContent() {
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Status</th>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Duration</th>
             <th style={{ padding: '6px 12px', fontWeight: 600 }}>Time</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx Hash</th>
+            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx hash</th>
           </tr>
         </thead>
         <tbody>
@@ -197,7 +197,7 @@ function TransactionsContent() {
               <React.Fragment key={op.operation_id}>
                 <tr
                   onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
-                  style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'rgba(255,255,255,.03)' : undefined }}
+                  style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'var(--tint-subtle)' : undefined }}
                 >
                   <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
                     {op.operation_name}
@@ -208,8 +208,8 @@ function TransactionsContent() {
                   <td style={{ padding: '7px 12px' }}>
                     <span style={{
                       padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
-                      background: op.status === 'success' ? 'rgba(34,197,94,.15)' : op.status === 'error' ? 'rgba(239,68,68,.15)' : 'rgba(245,158,11,.15)',
-                      color: op.status === 'success' ? '#22c55e' : op.status === 'error' ? '#ef4444' : '#f59e0b',
+                      background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
+                      color: op.status === 'success' ? 'var(--accent-green)' : op.status === 'error' ? 'var(--accent-red)' : 'var(--accent-amber)',
                     }}>{op.status}</span>
                   </td>
                   <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
@@ -232,20 +232,20 @@ function TransactionsContent() {
                   </td>
                 </tr>
                 {isExp && (
-                  <tr style={{ background: 'rgba(0,0,0,.2)' }}>
+                  <tr style={{ background: 'var(--shade)' }}>
                     <td colSpan={6} style={{ padding: '8px 16px' }}>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 11, color: 'var(--text-secondary)' }}>
                         <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
                         {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
                         {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
-                        {op.error_message && <span style={{ color: '#ef4444' }}><b>Error:</b> {op.error_message}</span>}
+                        {op.error_message && <span style={{ color: 'var(--accent-red)' }}><b>Error:</b> {op.error_message}</span>}
                       </div>
                       {(op.phases ?? []).length > 0 && (
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {op.phases.map((p: any) => (
                             <span key={p.phase} style={{
                               padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
-                              background: 'rgba(255,255,255,.06)', color: 'var(--text-secondary)',
+                              background: 'var(--tint-strong)', color: 'var(--text-secondary)',
                             }}>
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}
                             </span>
@@ -259,7 +259,7 @@ function TransactionsContent() {
             );
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 }

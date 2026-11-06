@@ -1475,7 +1475,7 @@ describe('DashboardDB — WAL reclaim', () => {
   });
 });
 
-describe('DashboardDB — context graph subscriptions', () => {
+describe('DashboardDB — Context Graph subscriptions', () => {
   it('persists shared-memory sync state across upserts', () => {
     db.upsertContextGraphSubscription({
       context_graph_id: 'project-a',
@@ -1547,7 +1547,7 @@ describe('DashboardDB — context graph subscriptions', () => {
     }]);
   });
 
-  it('loads one context graph subscription by id', () => {
+  it('loads one Context Graph subscription by id', () => {
     db.upsertContextGraphSubscription({
       context_graph_id: 'project-a',
       subscribed: 1,
@@ -2044,7 +2044,7 @@ describe('DashboardDB — authority index schema migration', () => {
   });
 });
 
-describe('DashboardDB — context graph memberships', () => {
+describe('DashboardDB — Context Graph memberships', () => {
   it('upserts, lists, and deletes node/agent membership rows', () => {
     db.upsertContextGraphMember({
       context_graph_id: 'project-a',
@@ -2646,7 +2646,7 @@ describe('DashboardDB — resolveActivityDigestRowIds (CR-3 digest read-marking)
     expect(db.resolveActivityDigestRowIds('activity:cg-1:created:notanumber')).toEqual([]);
   });
 
-  it('handles a context graph id containing colons (URI form)', () => {
+  it('handles a Context Graph id containing colons (URI form)', () => {
     const cgId = 'did:dkg:context-graph:abc123';
     const baseTs = 7 * ACTIVITY_DIGEST_WINDOW_MS + 500; // bucket = 7
     const id1 = activityRow(cgId, 'published', baseTs);

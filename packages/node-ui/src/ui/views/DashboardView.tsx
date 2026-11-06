@@ -25,7 +25,7 @@ import { Count } from '../components/ds/Badge.js';
 // card (one line, no separate footnote — round-2 feedback: the split
 // copy + divider read as misplaced).
 const CG_DEFINITION =
-  'Context graphs you created or joined — scoped knowledge domains with ' +
+  'Context Graphs you created or joined — scoped knowledge domains with ' +
   'configurable access (private, curated and peer-shared, or public) where ' +
   'agents build and collaborate on shared context with verifiable provenance.';
 
@@ -190,14 +190,14 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
             {curator > 0 && (
               <span
                 className="v10-layerbar-seg"
-                title={`Curator (${curator}) — context graphs you created and curate`}
+                title={`Curator (${curator}) — Context Graphs you created and curate`}
                 style={{ width: `${(curator / sum) * 100}%`, background: CUR }}
               />
             )}
             {joined > 0 && (
               <span
                 className="v10-layerbar-seg"
-                title={`Joined (${joined}) — context graphs you joined as a member`}
+                title={`Joined (${joined}) — Context Graphs you joined as a member`}
                 style={{ width: `${(joined / sum) * 100}%`, background: JOIN }}
               />
             )}
@@ -207,13 +207,13 @@ function RoleBar({ curator, joined, refreshing }: { curator: number; joined: num
       <div className="v10-layer-legend">
         <span
           className="v10-layer-legend-item"
-          title="Curator — context graphs you created and curate"
+          title="Curator — Context Graphs you created and curate"
         >
           <span className="v10-layer-legend-dot" style={{ background: CUR }} />Curator {curator}
         </span>
         <span
           className="v10-layer-legend-item"
-          title="Joined — context graphs you joined as a member"
+          title="Joined — Context Graphs you joined as a member"
         >
           <span className="v10-layer-legend-dot" style={{ background: JOIN }} />Joined {joined}
         </span>
@@ -416,8 +416,8 @@ function CgRow({
       <span className="v10-cg-cell v10-cg-name"><ContextGraphMark id={cg.id} name={cg.name} />{cg.name || cg.id.slice(0, 16)}</span>
       <span
         className="v10-cg-cell v10-cg-type"
-        title={`${typeLabel} context graph`}
-        aria-label={`${typeLabel} context graph`}
+        title={`${typeLabel} Context Graph`}
+        aria-label={`${typeLabel} Context Graph`}
       >
         {policy === 'private'
           ? <Lock size={13} aria-hidden="true" />
@@ -478,8 +478,8 @@ export function DashboardView() {
   const inventoryFailed = Boolean(inventoryError);
   const cgsResolving = inventoryLoading && myCgs.length === 0;
   const graphCount = inventoryFailed ? (myCgs.length ? `~${myCgs.length}` : '—') : myCgs.length;
-  const emptyInventoryMessage = inventoryFailed ? 'Context graph inventory is unavailable.'
-    : cgsResolving ? 'Loading context graphs…' : 'No context graphs yet.';
+  const emptyInventoryMessage = inventoryFailed ? 'Context Graph inventory is unavailable.'
+    : cgsResolving ? 'Loading Context Graphs…' : 'No Context Graphs yet.';
 
   const [reports, setReports] = useState<Record<string, CgReport>>({});
   const onReport = useCallback((id: string, r: CgReport) => {
@@ -620,7 +620,7 @@ export function DashboardView() {
 
       {inventoryFailed ? (
         <div role="alert" className="v10-cg-empty">
-          {cgsError ? 'Context graph list could not be loaded. ' : ''}
+          {cgsError ? 'Context Graph list could not be loaded. ' : ''}
           {identityError ? 'Agent identity could not be loaded. ' : ''}
           {myCgs.length ? 'Showing the last available graphs; counts may be incomplete. ' : 'Graph availability is unknown. '}
           <button type="button" disabled={inventoryLoading} onClick={() => { void retry(); }}>Retry</button>
@@ -643,7 +643,7 @@ export function DashboardView() {
           ) : null}
         </StatCard>
         <StatCard
-          label="Context Graph Size"
+          label="Context Graph size"
           icon={<TrendingUp size={13} aria-hidden />}
           className="v10-stat-tight"
         >
@@ -679,13 +679,13 @@ export function DashboardView() {
           <div className="stat-sub">
             {agg.hasCgs
               ? (agg.sizePartial
-                  ? 'Partial preview — some memory layers are capped or unavailable. Context graphs may contain more entities; triple totals may increase or decrease as layers load.'
-                  : 'Totals across all your context graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
+                  ? 'Partial preview — some memory layers are capped or unavailable. Context Graphs may contain more entities; triple totals may increase or decrease as layers load.'
+                  : 'Totals across all your Context Graphs, summed over Working, Shared Working & Verifiable Memory. Knowledge Assets are entities that have been published to Verifiable Memory.')
               : emptyInventoryMessage}
           </div>
         </StatCard>
         <StatCard
-          label="Collaborating Agents"
+          label="Collaborating agents"
           icon={<UsersRound size={13} aria-hidden />}
           value={!agg.hasCgs
             ? <span className="v10-stat-empty">—</span>
@@ -698,8 +698,8 @@ export function DashboardView() {
           sub={!agg.hasCgs
             ? emptyInventoryMessage
             : agg.agentsPartial
-              ? 'Some context graphs could not report agents; count is partial.'
-              : "Unique agents — your own and others' — allow-listed and collaborating across your context graphs."}
+              ? 'Some Context Graphs could not report agents; count is partial.'
+              : "Unique agents — your own and others' — allow-listed and collaborating across your Context Graphs."}
         >
           {agg.hasCgs && !agg.agentsLoading && agg.agentList.length > 0 && (
             <div className="v10-stat-agents">
@@ -719,12 +719,12 @@ export function DashboardView() {
             <Count value={cgsResolving ? '…' : graphCount} className="v10-dash-section-badge" />
           </div>
           {cgsResolving ? (
-            <p className="v10-cg-empty">Loading context graphs…</p>
+            <p className="v10-cg-empty">Loading Context Graphs…</p>
           ) : inventoryFailed && myCgs.length === 0 ? (
-            <p className="v10-cg-empty">Context graphs could not be confirmed. Retry the failed request above.</p>
+            <p className="v10-cg-empty">Context Graphs could not be confirmed. Retry the failed request above.</p>
           ) : myCgs.length === 0 ? (
             <p className="v10-cg-empty">
-              No context graphs yet — create or join one from the sidebar.
+              No Context Graphs yet — create or join one from the sidebar.
             </p>
           ) : (
             <>
@@ -734,7 +734,7 @@ export function DashboardView() {
                 <span className="v10-cg-cell v10-cg-size">Size</span>
                 <span
                   className="v10-cg-cell v10-cg-agents"
-                  title="Agents allow-listed with access to this context graph"
+                  title="Agents allow-listed with access to this Context Graph"
                 >
                   Agents
                 </span>

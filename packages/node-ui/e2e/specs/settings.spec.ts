@@ -33,17 +33,17 @@ test.describe('Settings page (rc.12 rewrite)', () => {
 
   test('renders exactly the seven section cards in order', async ({ settingsPage }) => {
     expect(await settingsPage.getSectionTitles()).toEqual([
-      'Node Identity',
-      'Node Identity Wallets',
-      'Blockchain Config',
+      'Node identity',
+      'Node identity wallets',
+      'Blockchain config',
       'Publisher Conviction',
-      'Network Telemetry',
-      'Local Data Retention',
-      'Danger Zone',
+      'Network telemetry',
+      'Local data retention',
+      'Danger zone',
     ]);
   });
 
-  test('Node Identity fields are populated from the live node (no em-dash placeholders)', async ({ settingsPage }) => {
+  test('Node identity fields are populated from the live node (no em-dash placeholders)', async ({ settingsPage }) => {
     for (const label of ['Name', 'Peer ID', 'Role', 'Network', 'Store']) {
       const value = (await settingsPage.fieldValue(label).first().textContent())?.trim() ?? '';
       expect(value.length, `${label} should render a real value`).toBeGreaterThan(0);
@@ -59,7 +59,7 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect((await settingsPage.fieldValue('Peer ID').first().textContent())?.trim()).toMatch(/^12D3Koo\w{20,}$/);
   });
 
-  test('Node Identity Name + Peer ID exactly match GET /api/status', async ({ settingsPage, page }) => {
+  test('Node identity Name + Peer ID exactly match GET /api/status', async ({ settingsPage, page }) => {
     // Authed in-page fetch (same bearer the UI uses) — a raw fetch would 401 on
     // an auth-enabled node and falsely fail even though Settings rendered fine.
     // Retries ride out transient 5xx under heavy parallel load, like the UI poll.
@@ -70,15 +70,13 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect((await settingsPage.fieldValue('Peer ID').first().textContent())?.trim()).toBe(status.peerId);
   });
 
-  test('Node Identity status pill reports ONLINE for a live daemon', async ({ settingsPage }) => {
-    await expect(settingsPage.onlinePill).toBeVisible();
-    expect(await settingsPage.getOnlinePillText()).toMatch(/●\s*ONLINE/);
-    // The pill summary line carries peer/connection/uptime detail, never the
-    // "Node is not responding" string a dead daemon would show.
-    await expect(settingsPage.root.getByText('Node is not responding')).toHaveCount(0);
+  test('Node identity shows the same status as the header for a live daemon', async ({ settingsPage, header }) => {
+    await expect(settingsPage.nodeStatus).toHaveText(/^(Connected|No peers)$/, { timeout: 5_000 });
+    await expect(settingsPage.nodeStatus).toHaveText((await header.status.textContent()) ?? '');
+    await expect(settingsPage.root.getByText('The node is not responding')).toHaveCount(0);
   });
 
-  test('Blockchain Config shows the local hardhat chain, a wallet, and the testnet banner', async ({ settingsPage }) => {
+  test('Blockchain config shows the local hardhat chain, a wallet, and the testnet banner', async ({ settingsPage }) => {
     // Chain + wallet derive from the async /api/wallets/balances fetch — until it
     // resolves the field reads the "Unknown" fallback. The testnet banner renders
     // from the SAME payload, so waiting for it gates the whole assertion on a
@@ -103,7 +101,7 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     await expect(page.locator(sel.settings.rpcRevealBtn)).toBeVisible();
   });
 
-  test('Local Data Retention select exposes all five windows and a valid current value', async ({ settingsPage }) => {
+  test('Local data retention select exposes all five windows and a valid current value', async ({ settingsPage }) => {
     await expect(settingsPage.retentionSelect).toBeVisible();
     await expect(settingsPage.retentionSelect).toBeEnabled();
     expect(await settingsPage.getRetentionOptions()).toEqual([
@@ -137,7 +135,7 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     await expect(settingsPage.telemetrySwitch).toHaveAttribute('aria-checked', 'false');
   });
 
-  test('Danger Zone Shutdown is a two-click confirm — the first click only arms it and never kills the node', async ({ settingsPage, page }) => {
+  test('Danger zone Shutdown is a two-click confirm — the first click only arms it and never kills the node', async ({ settingsPage, page }) => {
     await expect(settingsPage.shutdownButton).toHaveText('Shutdown Node');
 
     // First click arms the confirm; it must NOT shut the daemon down.

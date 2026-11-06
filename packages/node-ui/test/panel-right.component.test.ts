@@ -188,7 +188,7 @@ describe('PanelRight component', () => {
       configured: true,
       detected: true,
       status: 'chat_ready',
-      statusLabel: 'Chat ready',
+      statusLabel: 'Ready',
       detail: 'ready',
       source: 'live',
     }] });
@@ -272,7 +272,7 @@ describe('PanelRight component', () => {
     container.remove();
   });
 
-  it('always injects target context graph name alongside id and URI', async () => {
+  it('always injects target Context Graph name alongside id and URI', async () => {
     const { buildChatContextEntries } = await import('../src/ui/components/Shell/PanelRight.js');
 
     expect(buildChatContextEntries(
@@ -314,7 +314,7 @@ describe('PanelRight component', () => {
       configured: true,
       detected: true,
       status: 'chat_ready',
-      statusLabel: 'Chat ready',
+      statusLabel: 'Ready',
       detail: 'ready',
       source: 'live',
       defaultSessionId: memorySessionId,

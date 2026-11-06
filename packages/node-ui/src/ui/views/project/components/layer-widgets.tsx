@@ -57,7 +57,7 @@ export function TypeBreakdownWidget({ entities }: { entities: MemoryEntity[] }) 
   if (breakdown.length === 0) return null;
 
   return (
-    <GenWidget title="Entity Types">
+    <GenWidget title="Entity types">
       <StatStrip
         compact
         items={breakdown.map(([type, { icon, count }]) => ({
@@ -86,7 +86,7 @@ export function LayerStatsWidget({ entities, entityCount, triples, layer }: {
   );
   const avgConns = entities.length > 0 ? (totalConns / entities.length).toFixed(1) : '0';
   return (
-    <GenWidget title="Layer Stats">
+    <GenWidget title="Layer stats">
       <StatStrip
         compact
         layer={layer}
@@ -227,7 +227,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     <LayerActionShell
       title="Share complete Knowledge Assets"
       footnote="Shares each complete owning Knowledge Asset atomically to Shared Working Memory."
-      context={<>Shares all eligible complete Working Memory Knowledge Assets in this context graph, including assets outside the loaded preview.</>}
+      context={<>Shares all eligible complete Working Memory Knowledge Assets in this Context Graph, including assets outside the loaded preview.</>}
       result={result}
       error={error}
     >
@@ -296,7 +296,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
   return (
     <LayerActionShell
       title="Publish"
-      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this context graph on-chain."
+      footnote="Publishes all eligible complete Shared Working Memory Knowledge Assets in this Context Graph on-chain."
       context={<>Publishes all eligible complete Shared Working Memory Knowledge Assets, including assets outside the loaded preview. On-chain publishing incurs a cost.</>}
       result={result}
       error={error}

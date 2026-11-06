@@ -52,10 +52,10 @@ test.describe('Network Debug Page (/ui/network)', () => {
     }
   });
 
-  test('Active Connections section renders the empty-state on cold devnet', async ({ page }) => {
+  test('Active connections section renders the empty-state on cold devnet', async ({ page }) => {
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Active Connections' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Active connections' }) });
     await expect(card).toBeVisible();
     // Either the empty-state copy renders (single-node devnet) or
     // a real `.data-table` does. Both are valid.
@@ -64,17 +64,17 @@ test.describe('Network Debug Page (/ui/network)', () => {
     await expect(empty.or(table).first()).toBeVisible();
   });
 
-  test('Discovered Agents section renders the empty-state on cold devnet', async ({ page }) => {
+  test('Discovered agents section renders the empty-state on cold devnet', async ({ page }) => {
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Discovered Agents' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Discovered agents' }) });
     await expect(card).toBeVisible();
     const empty = card.locator('.empty-state-title', { hasText: 'No agents discovered' });
     const table = card.locator('table.data-table');
     await expect(empty.or(table).first()).toBeVisible();
   });
 
-  test('Active Connections card shows either the explanatory empty state or a connections table', async ({ page }) => {
+  test('Active connections card shows either the explanatory empty state or a connections table', async ({ page }) => {
     // On a 2-node devnet node1↔node2 may or may not have dialled by the time
     // this loads, so the card resolves to one of two valid shapes: the
     // explanatory empty-state copy ("Connections will appear here…") OR a
@@ -82,16 +82,16 @@ test.describe('Network Debug Page (/ui/network)', () => {
     // still catches a card that renders NEITHER (the real regression).
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Active Connections' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Active connections' }) });
     const desc = card.getByText(/Connections will appear here/i);
     const table = card.locator('table.data-table');
     await expect(desc.or(table).first()).toBeVisible();
   });
 
-  test('Discovered Agents card shows either the explanatory empty state or an agents table', async ({ page }) => {
+  test('Discovered agents card shows either the explanatory empty state or an agents table', async ({ page }) => {
     const card = page
       .locator('.card')
-      .filter({ has: page.locator('.card-title', { hasText: 'Discovered Agents' }) });
+      .filter({ has: page.locator('.card-title', { hasText: 'Discovered agents' }) });
     const desc = card.getByText(/Agents will be listed here/i);
     const table = card.locator('table.data-table');
     await expect(desc.or(table).first()).toBeVisible();

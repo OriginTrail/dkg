@@ -20,23 +20,59 @@ function readStylesSources(): string {
 
 const css = readStylesSources();
 
-function ruleFor(selector: string): string {
-  const match = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);
-  if (!match) throw new Error(`Missing selector ${selector}`);
-  const open = css.indexOf('{', match.index);
-  const close = css.indexOf('}', open);
-  return css.slice(open + 1, close);
+interface CssRule { selectors: string[]; body: string }
+
+/** Top-level style rules in source order, grouped selectors split apart.
+ *  At-rules (@media, @keyframes) are skipped: they aren't the resting style. */
+function parseRules(source: string): CssRule[] {
+  const text = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules: CssRule[] = [];
+  let start = 0;
+  for (let open = text.indexOf('{'); open !== -1; open = text.indexOf('{', start)) {
+    let end = open + 1;
+    for (let depth = 1; end < text.length && depth > 0; end++) {
+      if (text[end] === '{') depth++;
+      else if (text[end] === '}') depth--;
+    }
+    const prelude = text.slice(start, open).split(';').pop()!.trim();
+    if (!prelude.startsWith('@')) {
+      rules.push({ selectors: prelude.split(',').map((s) => s.trim()), body: text.slice(open + 1, end - 1) });
+    }
+    start = end;
+  }
+  return rules;
 }
 
-function blockFor(selector: string): string {
-  return ruleFor(selector);
+const cssRules = parseRules(css);
+
+/** Body of the first rule listing exactly this selector, alone or in a group. */
+function ruleFor(selector: string): string {
+  const rule = cssRules.find(({ selectors }) => selectors.includes(selector));
+  if (!rule) throw new Error(`Missing selector ${selector}`);
+  return rule.body;
+}
+
+/** The custom properties declared in a rule body. */
+function declarations(body: string): Record<string, string> {
+  return Object.fromEntries(
+    [...body.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)].map(([, key, value]) => [key, value.trim()]),
+  );
 }
 
 function customProperties(selector: string): Record<string, string> {
-  const block = blockFor(selector);
-  return Object.fromEntries(
-    [...block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)].map(([, key, value]) => [key, value.trim()]),
-  );
+  return declarations(ruleFor(selector));
+}
+
+/** The custom properties an element with exactly these classes ends up with:
+ *  every plain class selector that matches it, grouped rules included, applied
+ *  in cascade order (fewer classes first, then source order). */
+function effectiveProperties(classes: string[], rules: CssRule[] = cssRules): Record<string, string> {
+  const own = new Set(classes);
+  const matches = rules.flatMap(({ selectors, body }) => selectors
+    .filter((s) => /^(?:\.[\w-]+)+$/.test(s) && s.slice(1).split('.').every((c) => own.has(c)))
+    .map((s) => ({ classes: s.split('.').length - 1, body })));
+  matches.sort((a, b) => a.classes - b.classes);
+  return Object.assign({}, ...matches.map(({ body }) => declarations(body)));
 }
 
 const rootVars = customProperties(':root');
@@ -89,18 +125,9 @@ function compositedBackground(value: string, surface: string, vars: Record<strin
   return '#' + fg.map((c, i) => Math.round((c * p + bg[i] * (1 - p)) * 255).toString(16).padStart(2, '0')).join('');
 }
 
-/** The rule whose selector is exactly `selector` (at the start of a line),
- *  not a descendant rule that ends with it (the bell's `… .ds-count…`). */
-function ownRule(selector: string): string {
-  const m = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{`).exec(css);
-  if (!m) throw new Error(`Missing rule ${selector}`);
-  const open = css.indexOf('{', m.index);
-  return css.slice(open + 1, css.indexOf('}', open));
-}
-
 /** Declared value of a property in a rule, without resolving var(). */
 function declared(selector: string, property: string): string {
-  const m = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`).exec(ownRule(selector));
+  const m = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`).exec(ruleFor(selector));
   if (!m) throw new Error(`Missing ${property} in ${selector}`);
   return m[1].trim();
 }
@@ -215,13 +242,14 @@ describe('Context Graph contrast tokens', () => {
     // Badges and counts: text against the background they actually render,
     // their tint composited over every surface they can sit on, both themes.
     const BADGE_TONES = ['neutral', 'success', 'warning', 'danger', 'wm', 'swm', 'vm', 'role', 'muted'];
+    const badgeContrast = (tone: string, surface: string, vars: Record<string, string>, rules = cssRules) => {
+      const t = effectiveProperties(['ds-badge', `ds-tone-${tone}`], rules);
+      return contrastIn(t['--badge-fg'], compositedBackground(t['--badge-bg'], `var(${surface})`, vars), vars);
+    };
     for (const [theme, vars] of [['dark', rootVars], ['light', lightVars]] as const) {
-      const base = customProperties('.ds-badge');
       for (const tone of BADGE_TONES) {
-        const t = tone === 'neutral' ? base : { ...base, ...customProperties(`.ds-badge.ds-tone-${tone}`) };
         for (const surface of SURFACES) {
-          const bg = compositedBackground(t['--badge-bg'], `var(${surface})`, vars);
-          expect(contrastIn(t['--badge-fg'], bg, vars), `${theme} badge ${tone} on ${surface}`).toBeGreaterThanOrEqual(4.5);
+          expect(badgeContrast(tone, surface, vars), `${theme} badge ${tone} on ${surface}`).toBeGreaterThanOrEqual(4.5);
         }
       }
       for (const [tone, selector] of [['neutral', '.ds-count'], ['attention', '.ds-count.ds-tone-attention'], ['quiet', '.ds-count.ds-tone-quiet']] as const) {
@@ -231,13 +259,24 @@ describe('Context Graph contrast tokens', () => {
         }
       }
     }
+    // Statuses have no box: text sits straight on the surface. That background
+    // comes from the grouped status rule, so the check must see grouped rules.
+    for (const tone of ['success', 'warning', 'danger', 'pending']) {
+      expect(effectiveProperties(['ds-badge', `ds-tone-${tone}`])['--badge-bg'], tone).toBe('transparent');
+    }
+    const groupedStatusRule = /(\.ds-tone-pending\s*\{\s*)--badge-bg:\s*transparent/;
+    expect(css).toMatch(groupedStatusRule);
+    const unreadable = parseRules(css.replace(groupedStatusRule, '$1--badge-bg: var(--text-success)'));
+    expect(badgeContrast('success', '--bg-surface', rootVars, unreadable)).toBeLessThan(4.5);
+    // A more specific rule wins over a later, less specific one.
+    const laterBase = parseRules(`${css}\n.ds-badge { --badge-bg: #123456; }`);
+    expect(effectiveProperties(['ds-badge', 'ds-tone-success'], laterBase)['--badge-bg']).toBe('transparent');
     // Regression: the notification pane's attention count sits on --bg-elevated.
     // #a35207 rendered 3.94:1 there; the check must fail anything below AA.
     const attentionOn = (warning: string) => {
       const vars = { ...lightVars, '--text-warning': warning };
       return contrastIn('var(--text-warning)', compositedBackground(declared('.ds-count.ds-tone-attention', 'background'), 'var(--bg-elevated)', vars), vars);
     };
-    console.log('DBG2', JSON.stringify(declared('.ds-count.ds-tone-attention', 'background')), JSON.stringify(ruleFor('.ds-count.ds-tone-attention').slice(0, 120)));
     expect(attentionOn('#a35207')).toBeLessThan(4.5);
     expect(attentionOn(lightVars['--text-warning'])).toBeGreaterThanOrEqual(4.5);
     // The bell's solid disc puts --bg-root on --text-warning.

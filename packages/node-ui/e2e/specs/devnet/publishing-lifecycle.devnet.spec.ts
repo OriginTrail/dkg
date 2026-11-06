@@ -14,7 +14,7 @@ test.beforeAll(async () => {
 });
 
 test.describe('Publishing lifecycle (devnet)', () => {
-  test('UI loads real context graphs from devnet daemon', async ({ shell, leftPanel, page }) => {
+  test('UI loads real Context Graphs from devnet daemon', async ({ shell, leftPanel, page }) => {
     await shell.goto();
     await page.waitForTimeout(2000);
     const names = await leftPanel.getProjectNames();
@@ -34,7 +34,7 @@ test.describe('Publishing lifecycle (devnet)', () => {
     expect(cgs.ok).toBe(true);
     const body = (await cgs.json()) as { contextGraphs: Array<{ id: string; name: string }> };
     const cg = body.contextGraphs[0];
-    requireDevnetPrecondition(test, !cg, 'No context graphs on devnet');
+    requireDevnetPrecondition(test, !cg, 'No Context Graphs on devnet');
 
     const stamp = Date.now();
     const res = await devnetApiFetch('/api/knowledge-assets', {
