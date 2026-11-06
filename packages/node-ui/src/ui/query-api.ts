@@ -1,11 +1,10 @@
 import type { GetView } from '@origintrail-official/dkg-core';
 import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
 import type { PublicQueryQuad, PublicQueryResponse, PublicQueryResult } from '@origintrail-official/dkg-core/query-result';
-import { BASE, authHeaders, HttpError, getWithTimeout } from './http.js';
+import { BASE, authHeaders, HttpError } from './http.js';
+import { loadContextGraphList } from './context-graph-api.js';
 import { fetchQueryJson, AUTOMATIC_QUERY_TIMEOUT_MS, AUTOMATIC_QUERY_MAX_BYTES } from './query-transport.js';
 import { CachedRead, UI_READ_MAX_AGE_MS } from './lib/read-cache.js';
-
-const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60_000;
 
 // Concurrent identical requests share one fetch. Ordinary query execution
 // remains fresh; inventory callers may explicitly reuse bounded cached reads.
@@ -131,13 +130,9 @@ export async function fetchContextGraphs(options: { fresh?: boolean } = {}): Pro
   const session = JSON.stringify(authHeaders());
   if (session !== querySession) { invalidateQueryCache(); querySession = session; }
   if (options.fresh) graphLists.invalidate();
-  return graphLists.run(session, { maxAgeMs: UI_READ_MAX_AGE_MS }, isCurrent => getWithTimeout<{ contextGraphs?: any[] }>(
-    '/api/context-graph/list',
-    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
-  ).then(data => {
+  return graphLists.run(session, { maxAgeMs: UI_READ_MAX_AGE_MS }, isCurrent => loadContextGraphList().then(view => {
     if (session !== JSON.stringify(authHeaders())) throw new HttpError(401, 'The session changed while loading data.');
-    const result = { contextGraphs: (data.contextGraphs ?? []).filter((p: any) => !p.isSystem) };
-    return result;
+    return view;
   }).catch(error => {
     if (isCurrent() && error instanceof HttpError && (error.status === 401 || error.status === 403)) invalidateQueryCache();
     throw error;

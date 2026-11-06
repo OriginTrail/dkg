@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CachedRead, ReadCache, UI_READ_MAX_AGE_MS } from '../src/ui/lib/read-cache.js';
 import { fetchContextGraphs, invalidateQueryCache, postQueryDeduped, subscribeToContextGraph, submitJoinRequest } from '../src/ui/api.js';
 
+const graphRow = (id: string) => ({ id, name: id, isSystem: false, subscribed: false, synced: false });
+
 const body = (cg = 'cg-a') => ({ sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 50', contextGraphId: cg });
 const read = { maxAgeMs: UI_READ_MAX_AGE_MS };
 const response = (value = 'urn:one') => new Response(JSON.stringify({ result: { type: 'bindings', bindings: [{ s: value }] } }));
@@ -58,7 +60,7 @@ describe('scoped UI reads', () => {
     vi.stubGlobal('fetch', fetch);
     const load = kind === 'query' ? () => postQueryDeduped(body(), read) : () => fetchContextGraphs();
     const result = (id: string) => kind === 'query' ? response(id)
-      : new Response(JSON.stringify({ contextGraphs: [{ id }] }));
+      : new Response(JSON.stringify({ contextGraphs: [graphRow(id)] }));
     const old = load();
     invalidateQueryCache('cg-a');
     const replacement = load();
@@ -79,7 +81,7 @@ describe('scoped UI reads', () => {
     invalidateQueryCache('cg-a'); const replacement = load();
     pending[0](new Response('{"error":"revoked"}', { status: 403 })); await failure;
     const joined = load(); expect(fetch).toHaveBeenCalledTimes(2);
-    pending[1](kind === 'query' ? response('new') : new Response('{"contextGraphs":[{"id":"new"}]}'));
+    pending[1](kind === 'query' ? response('new') : new Response(JSON.stringify({ contextGraphs: [graphRow('new')] })));
     const fresh = await replacement;
     expect(await joined).toEqual(fresh); expect(await load()).toEqual(fresh);
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -95,14 +97,14 @@ describe('scoped UI reads', () => {
   it.each(['subscribe', 'join'])('invalidates a pre-mutation list after successful %s without SSE', async action => {
     let joined = false;
     const fetch = vi.fn(async (url: string) => {
-      if (url.includes('/list')) return new Response(JSON.stringify({ contextGraphs: joined ? [{ id: 'cg-new' }] : [] }));
+      if (url.includes('/list')) return new Response(JSON.stringify({ contextGraphs: joined ? [graphRow('cg-new')] : [] }));
       joined = true; return new Response('{"success":true,"approved":true}');
     });
     vi.stubGlobal('fetch', fetch);
     expect((await fetchContextGraphs()).contextGraphs).toHaveLength(0);
     if (action === 'subscribe') await subscribeToContextGraph('cg-new');
     else await submitJoinRequest('cg-new', { delegation: {} as any });
-    expect((await fetchContextGraphs()).contextGraphs).toEqual([{ id: 'cg-new' }]);
+    expect((await fetchContextGraphs()).contextGraphs).toEqual([graphRow('cg-new')]);
     expect(fetch.mock.calls.filter(([url]) => url.includes('/list'))).toHaveLength(2);
   });
   it('coalesces concurrent reads and reuses them on tab return, with TTL and scoped refresh', async () => {
@@ -158,7 +160,7 @@ describe('scoped UI reads', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
   it('reuses the graph list, but a mutation signal or session change invalidates it', async () => {
-    const fetch = vi.fn(async () => new Response('{"contextGraphs":[{"id":"cg-a"}]}'));
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ contextGraphs: [graphRow('cg-a')] })));
     vi.stubGlobal('fetch', fetch);
     await fetchContextGraphs(); await fetchContextGraphs();
     expect(fetch).toHaveBeenCalledTimes(1);
