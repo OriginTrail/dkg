@@ -899,7 +899,6 @@ export function PanelRight() {
           className="v10-panel-expand ds-btn ds-ghost ds-sm ds-icon"
           aria-label={rightExpanded ? 'Collapse agents panel' : 'Expand agents panel'}
           title={rightExpanded ? 'Collapse panel' : 'Expand panel'}
-          aria-pressed={rightExpanded}
           onClick={() => setRightExpanded(!rightExpanded)}
         >
           {rightExpanded ? <Minimize2 size={14} aria-hidden="true" /> : <Maximize2 size={14} aria-hidden="true" />}

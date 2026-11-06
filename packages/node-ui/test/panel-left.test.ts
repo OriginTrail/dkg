@@ -239,6 +239,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).toContain('My First CG');
   });
 
+  it('offers one restore button when Context Graphs are hidden', async () => {
+    localStorage.setItem('v10:hiddenProjectIds', JSON.stringify(['cg-1']));
+    const { container } = await renderPanel();
+    expect(container.querySelectorAll('.v10-tree-show-hidden').length).toBe(1);
+    localStorage.removeItem('v10:hiddenProjectIds');
+  });
+
   it('renders all three section chevron headers with the v10-peer-group pattern', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');
@@ -285,7 +292,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('still renders the "My Context Graphs" header when the membership filter yields zero (with empty-body hint)', async () => {
     // qa-lead Pass 1 #2: at stage>=2 with CGs that all live in the
-    // Context Oracle view (no callerInvolved match), the sidebar must
+    // Public Context Graphs view (no callerInvolved match), the sidebar must
     // still surface the My CG header so the user has a visible anchor —
     // otherwise it shrinks to a lone collapsed "Integrations" toggle.
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');

@@ -53,7 +53,7 @@ export const sel = {
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
     layerHeader: '.v10-tree-layer-header',
-    oraclePlaceholder: '.v10-oracle-placeholder',
+    publicPlaceholder: '.v10-oracle-placeholder',
     integrationDot: '.v10-tree-integration-dot',
     // PR8 sibling-section pattern (My Context Graphs + Integrations):
     peerGroup: '.v10-peer-group',

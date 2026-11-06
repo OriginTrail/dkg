@@ -6,7 +6,7 @@ export class LeftPanelPage {
   readonly root: Locator;
   readonly newProjectBtn: Locator;
   readonly joinProjectBtn: Locator;
-  readonly oraclePlaceholder: Locator;
+  readonly publicPlaceholder: Locator;
   /** The sidebar's "Node" group: Observability, Publisher Conviction, Settings. */
   readonly nodePlaces: Locator;
 
@@ -19,7 +19,7 @@ export class LeftPanelPage {
     // by visible label to disambiguate.
     this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New$/ });
     this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/ });
-    this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
+    this.publicPlaceholder = page.locator(sel.leftPanel.publicPlaceholder);
     this.nodePlaces = page.getByRole('navigation', { name: 'Node' });
   }
 

@@ -27,7 +27,7 @@ export interface PlaceMeta {
 
 export const PLACES: Readonly<Record<PlaceId, PlaceMeta>> = {
   dashboard: { path: '/', label: 'Dashboard', title: 'Dashboard' },
-  operations: { path: '/observability', label: 'Observability', title: 'Observability: operations, replication, hardware, logs', node: true },
+  operations: { path: '/observability', label: 'Observability', title: 'Observability: operations, replication, hardware, logs, errors and network', node: true },
   conviction: { path: '/conviction', label: 'Publisher Conviction', title: 'Publisher Conviction: publishing discounts', node: true, testId: 'pca-launch-btn' },
   settings: { path: '/settings', label: 'Settings', title: 'Node settings', node: true },
   'context-graph-primer': { path: '/primer', label: 'What is a Context Graph?', title: 'What is a Context Graph?' },

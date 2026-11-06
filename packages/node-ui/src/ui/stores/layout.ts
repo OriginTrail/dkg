@@ -193,7 +193,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
   leftSectionPublicOpen: initial.leftSectionPublicOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
-  theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
+  theme: (typeof localStorage === 'undefined' ? null : localStorage.getItem('dkg-theme') as 'dark' | 'light' | null) || 'dark',
   leftWidth: initial.leftWidth,
   rightWidth: initial.rightWidth,
   bottomHeight: initial.bottomHeight,

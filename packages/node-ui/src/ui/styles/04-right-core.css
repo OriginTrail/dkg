@@ -106,7 +106,7 @@
   padding: var(--space-8) 0; margin-bottom: var(--space-8);
   font-size: var(--fs-control); color: var(--text-secondary);
 }
-.v10-agents-details { margin-left: auto; font-size: var(--fs-control); color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); background: none; }
+.v10-agents-details { margin-left: auto; flex: none; white-space: nowrap; font-size: var(--fs-control); color: var(--text-link); text-decoration: underline; text-decoration-color: var(--link-underline); background: none; }
 .v10-agents-stat { display: flex; align-items: center; gap: var(--space-4); }
 .v10-agents-stat-dot { width: 6px; height: 6px; border-radius: 50%; }
 .v10-agents-stat-dot.connected { background: var(--accent-green); }
@@ -311,3 +311,5 @@
 .v10-local-agent-chat-shell > .v10-local-agent-warning {
   margin: var(--space-8) var(--space-12) 0;
 }
+
+.v10-agents-details + .v10-agents-refresh { margin-left: 0; }

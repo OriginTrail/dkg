@@ -33,7 +33,7 @@ vi.mock('../src/ui/components/Shell/PanelRight.js', () => ({
   PanelRight: () => React.createElement('aside', { 'data-testid': 'right-panel' }),
 }));
 vi.mock('../src/ui/pages/Network.js', () => ({
-  NetworkTab: () => React.createElement('section', { 'data-testid': 'network-page' }),
+  NetworkConnections: () => React.createElement('section', { 'data-testid': 'network-page' }),
 }));
 
 const { Root } = await import('../src/ui/Root.js');

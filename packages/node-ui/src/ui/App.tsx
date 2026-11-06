@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
@@ -17,7 +17,6 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
-import { Loading } from './components/ds/Loading.js';
 import { useObservabilityStore } from './stores/observability.js';
 import { PLACES } from './lib/tab-target.js';
 import { tabIdToPath } from './lib/tab-routes.js';
@@ -39,12 +38,12 @@ function useLiveStatus() {
 }
 
 function useDragResize(onDrag: (delta: number) => void) {
-  const handleRef = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onDrag);
   cbRef.current = onDrag;
+  // A handle comes and goes with its panel, so track the node and rebind when it changes.
+  const [handle, setHandle] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const handle = handleRef.current;
     if (!handle) return;
 
     let startX = 0;
@@ -75,9 +74,9 @@ function useDragResize(onDrag: (delta: number) => void) {
 
     handle.addEventListener('mousedown', onMouseDown);
     return () => handle.removeEventListener('mousedown', onMouseDown);
-  }, []);
+  }, [handle]);
 
-  return handleRef;
+  return setHandle;
 }
 
 // Vertical twin of useDragResize for the bottom panel — tracks clientY
@@ -147,9 +146,18 @@ function AppShell() {
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
-  const { pathname } = useLocation();
+  const { pathname, state: routeState } = useLocation();
+  const navigate = useNavigate();
   // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
   useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
+  // Arrived from /agent-hub: wide screens get the panel expanded, narrow ones the floating panel.
+  useEffect(() => {
+    if (!(routeState as { openAgents?: boolean } | null)?.openAgents) return;
+    const layout = useLayoutStore.getState();
+    if (narrow || layout.rightCollapsed) layout.toggleRight();
+    if (!narrow) layout.setRightExpanded(true);
+    navigate(pathname, { replace: true, state: null });
+  }, [routeState, narrow, pathname, navigate]);
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
@@ -205,16 +213,7 @@ function AppShell() {
     setBottomHeight(Math.min(eff - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
-  // The expanded panel covers the centre, so going anywhere else brings it back.
   const rightExpanded = useLayoutStore((s) => s.rightExpanded);
-  const setRightExpanded = useLayoutStore((s) => s.setRightExpanded);
-  const activeTabId = useTabsStore((s) => s.activeTabId);
-  const lastTabId = useRef(activeTabId);
-  useEffect(() => {
-    if (lastTabId.current === activeTabId) return;
-    lastTabId.current = activeTabId;
-    setRightExpanded(false);
-  }, [activeTabId, setRightExpanded]);
   const expanded = rightExpanded && rightOpen && !narrow;
 
   const leftHandle = useDragResize(onDragLeft);
@@ -224,7 +223,7 @@ function AppShell() {
   return (
     <div className="v10-app">
       <ApiTokenPrompt />
-      <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById('main-content')?.focus()}>Skip to content</button></nav>
+      <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById(expanded ? 'agents-panel' : 'main-content')?.focus()}>Skip to content</button></nav>
       <Header />
       <div className="v10-app-body">
         {narrow && (leftOpen || rightOpen) && (
@@ -239,7 +238,7 @@ function AppShell() {
           </>
         )}
 
-        <div className="v10-center-region" hidden={expanded} style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
             <PanelCenter />
           </div>
@@ -250,7 +249,7 @@ function AppShell() {
         {rightOpen && (
           <>
             {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-            <div className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
+            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
               <PanelRight />
             </div>
           </>
@@ -272,15 +271,9 @@ function NetworkRoute() {
   return <Navigate to={PLACES.operations.path} replace />;
 }
 
-/** Old address: Agent hub is the right panel, expanded. */
+/** Old address: Agent hub is the right panel. AppShell opens it once it has mounted. */
 function AgentHubRoute() {
-  useLayoutEffect(() => {
-    const layout = useLayoutStore.getState();
-    if (layout.rightCollapsed) layout.toggleRight();
-    useLayoutStore.getState().setRightExpanded(true);
-  }, []);
-
-  return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace />;
+  return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace state={{ openAgents: true }} />;
 }
 
 function ContextGraphPrimerRoute() {

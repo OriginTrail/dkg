@@ -4,7 +4,7 @@ import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { authHeaders, fileUrl } from '../../api.js';
-import { decodeTabId } from '../../lib/tab-target.js';
+import { decodeTabId, type LayerKey } from '../../lib/tab-target.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
 import { TabBar } from './TabBar.js';
@@ -58,7 +58,7 @@ function isTextContentType(ct: string) { return TEXT_CONTENT_TYPES.some(t => ct.
 // headers. `docRef` is the full `urn:dkg:file:keccak256:<hex>` urn, or — when
 // the document has no source file — the entity uri, which does not start with
 // `urn:dkg:file:` and drives the "source not available" empty state.
-function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: string; contentType: string }) {
+function DocumentViewer({ docRef, contentType: expectedContentType, contextGraphId }: { docRef: string; contentType: string; contextGraphId?: string }) {
   const { tabs, activeTabId, closeTab } = useTabsStore();
   const setActiveTab = useTabsStore(s => s.setActiveTab);
   const [content, setContent] = useState<string | null>(null);
@@ -72,13 +72,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
   const currentTab = tabs.find(t => t.id === activeTabId);
   const docLabel = currentTab?.label ?? 'Document';
 
-  const graphTab = tabs.find(t => decodeTabId(t.id).kind === 'graph');
-  const handleBack = () => {
-    if (graphTab) {
-      setActiveTab(graphTab.id);
-    }
-    closeTab(activeTabId);
-  };
+  const graph = useContextGraphCrumb(contextGraphId ?? '');
 
   useEffect(() => {
     let cancelled = false;
@@ -161,7 +155,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         flexShrink: 0, display: 'flex', alignItems: 'center', gap: 10,
         padding: '8px 16px', borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-panel)',
       }}>
-        <Breadcrumbs items={[{ label: graphTab?.label ?? 'Context Graph', onClick: handleBack }, { label: docLabel }]} />
+        <Breadcrumbs items={[contextGraphId ? graph : { label: 'Context Graph' }, { label: docLabel }]} />
         {showToggle && (
           <div
             role="group"
@@ -275,7 +269,7 @@ function ViewContainer() {
     // The graph part of an agent tab scopes the profile to one context graph's
     // data; a future "global agent profile" view could drop it.
     case 'agent': return <AgentProfilePage contextGraphId={target.contextGraphId} agentUri={target.agentUri} />;
-    case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} />;
+    case 'document': return <DocumentViewer docRef={target.docRef} contentType={target.contentType} contextGraphId={target.contextGraphId} />;
     case 'layer': return <LayerPage layer={target.layer} contextGraphId={target.contextGraphId} />;
     default: break;
   }
@@ -315,13 +309,13 @@ export function PanelCenter() {
   );
 }
 
-const LAYER_NAMES: Record<string, string> = { wm: 'Working Memory', swm: 'Shared Working Memory', vm: 'Verifiable Memory' };
+const LAYER_NAMES: Record<LayerKey, string> = { wm: 'Working Memory', swm: 'Shared Working Memory', vm: 'Verifiable Memory' };
 
-function LayerPage({ layer, contextGraphId }: { layer: React.ComponentProps<typeof MemoryLayerView>['layer']; contextGraphId: string }) {
+function LayerPage({ layer, contextGraphId }: { layer: LayerKey; contextGraphId: string }) {
   const graph = useContextGraphCrumb(contextGraphId);
   return (
     <>
-      <div className="ds-crumbs-bar"><Breadcrumbs items={[graph, { label: LAYER_NAMES[layer] ?? 'Memory layer' }]} /></div>
+      <div className="ds-crumbs-bar"><Breadcrumbs items={[graph, { label: LAYER_NAMES[layer] }]} /></div>
       <MemoryLayerView layer={layer} contextGraphId={contextGraphId} />
     </>
   );

@@ -32,7 +32,7 @@ import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { formatDateTime } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
 import { StatTile } from '../components/ds/StatTile.js';
-import { NetworkTab } from './Network.js';
+import { NetworkConnections } from './Network.js';
 import { useObservabilityStore } from '../stores/observability.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
@@ -154,14 +154,14 @@ export function ObservabilitySection() {
   return (
     <div>
       <div className="tab-group" style={{ marginBottom: 16 }}>
-        <button className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All operations</button>
-        <button className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
-        <button className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
-        <button className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
-        <button className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
-        <button className={`ds-tab ${tab === 'network' ? 'active' : ''}`} onClick={() => setTab('network')}>Network</button>
+        <button aria-pressed={tab === 'operations'} className={`ds-tab ${tab === 'operations' ? 'active' : ''}`} onClick={() => setTab('operations')}>All operations</button>
+        <button aria-pressed={tab === 'replication'} className={`ds-tab ${tab === 'replication' ? 'active' : ''}`} onClick={() => setTab('replication')}>Replication</button>
+        <button aria-pressed={tab === 'hardware'} className={`ds-tab ${tab === 'hardware' ? 'active' : ''}`} onClick={() => setTab('hardware')}>Hardware</button>
+        <button aria-pressed={tab === 'logs'} className={`ds-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => setTab('logs')}>Logs</button>
+        <button aria-pressed={tab === 'errors'} className={`ds-tab ${tab === 'errors' ? 'active' : ''}`} onClick={() => setTab('errors')}>Errors</button>
+        <button aria-pressed={tab === 'network'} className={`ds-tab ${tab === 'network' ? 'active' : ''}`} onClick={() => setTab('network')}>Network</button>
       </div>
-      {tab === 'network' ? <NetworkTab /> : tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
+      {tab === 'network' ? <NetworkConnections /> : tab === 'operations' ? <OperationsTabWithStats /> : tab === 'replication' ? <ReplicationTab /> : tab === 'hardware' ? <HardwareTab /> : tab === 'errors' ? <HealthTab /> : <LogsTab />}
     </div>
   );
 }
@@ -443,14 +443,14 @@ function FailedOperationsList({ operations, expandedOp, onToggleOp }: {
       {operations.map((op: any) => (
         <div key={`${op.operation_id}-${op.phase_started_at}`} style={{ borderBottom: '1px solid var(--border-default)' }}>
           <div
-            role="button" aria-expanded={expandedOp === op.operation_id} {...pressable(() => onToggleOp(op.operation_id))}
+            onClick={() => onToggleOp(op.operation_id)}
             style={{
               display: 'flex', alignItems: 'center', gap: 10, padding: '10px 20px', cursor: 'pointer',
               background: expandedOp === op.operation_id ? 'var(--danger-bg)' : undefined,
             }}
           >
             <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{expandedOp === op.operation_id ? <ChevronDown size={12} /> : <ChevronRight size={12} />}</span>
-            <span style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color: opTypeText(op.operation_name) }}>{op.operation_name}</span>
+            <button type="button" className="ds-row-open" aria-expanded={expandedOp === op.operation_id} style={{ fontWeight: 600, fontSize: 'var(--fs-control)', color: opTypeText(op.operation_name) }}>{op.operation_name}</button>
             <StatusBadge status={op.status} />
             <span className="mono" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)' }}>{op.operation_id} <CopyButton text={op.operation_id} /></span>
             <span style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginLeft: 'auto' }}>{formatTime(op.phase_started_at)}</span>

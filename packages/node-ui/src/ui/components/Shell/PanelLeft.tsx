@@ -16,9 +16,9 @@ import {
 } from '../../api.js';
 import { ContextGraphMark } from '../../context-graph-colors.js';
 import {
-  belongsInContextOracleSidebar,
+  belongsInPublicSidebar,
   belongsInMyProjectsSidebar,
-  classifyContextOracleEntry,
+  classifyPublicEntry,
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
@@ -61,7 +61,7 @@ function ProjectTreeItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          aria-label="Hide this Context Graph from the sidebar (reversible)" title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this Context Graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
           <X size={14} />
@@ -71,7 +71,7 @@ function ProjectTreeItem({
   );
 }
 
-interface OracleCatalogueItemProps {
+interface PublicCatalogueItemProps {
   cg: ContextGraph;
   isBrowsing: boolean;
   onBrowse: () => void;
@@ -79,13 +79,13 @@ interface OracleCatalogueItemProps {
   onHide: () => void;
 }
 
-function OracleCatalogueItem({
+function PublicCatalogueItem({
   cg,
   isBrowsing,
   onBrowse,
   onSubscribe,
   onHide,
-}: OracleCatalogueItemProps) {
+}: PublicCatalogueItemProps) {
   const label = cg.name || cg.id.slice(0, 16);
   return (
     <div className="v10-tree-section">
@@ -111,7 +111,7 @@ function OracleCatalogueItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          aria-label="Hide this Context Graph from the sidebar (reversible)" title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this Context Graph from the sidebar (reversible)"
           onClick={onHide}
         >
           <X size={14} />
@@ -227,8 +227,8 @@ export function PanelLeft() {
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
   const myProjects = visibleContextGraphs.filter((cg) =>
     belongsInMyProjectsSidebar(cg, agentIdentity));
-  const contextOracleProjects = visibleContextGraphs.filter((cg) =>
-    belongsInContextOracleSidebar(cg, agentIdentity));
+  const publicContextGraphs = visibleContextGraphs.filter((cg) =>
+    belongsInPublicSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -295,7 +295,7 @@ export function PanelLeft() {
               </div>
               {stage === 1 && (
                 <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
-                  <Plus size={14} aria-hidden="true" />Create First Context Graph
+                  <Plus size={14} aria-hidden="true" />Create your first Context Graph
                 </button>
               )}
             </div>
@@ -355,16 +355,6 @@ export function PanelLeft() {
             </div>
           )}
 
-          {hiddenCount > 0 && (
-            <button
-              type="button"
-              className="v10-tree-show-hidden"
-              onClick={unhideAll}
-              title="Restore all Context Graphs dismissed from the sidebar"
-            >
-              <Eye size={12} /> Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
-            </button>
-          )}
 
           {/* Section B: public Context Graphs this node has discovered but
               not joined. A catalogue, so rows offer browse and subscribe. */}
@@ -386,14 +376,14 @@ export function PanelLeft() {
               </button>
               {leftSectionPublicOpen && (
                 <div id={publicGraphsBodyId} className="v10-peer-group-body">
-                  {contextOracleProjects.map((cg) => {
+                  {publicContextGraphs.map((cg) => {
                     const onHide = () => {
                       hideProject(cg.id);
                       if (activeProjectId === cg.id) setActiveProject(null);
                     };
-                    if (classifyContextOracleEntry(cg) === 'catalogue') {
+                    if (classifyPublicEntry(cg) === 'catalogue') {
                       return (
-                        <OracleCatalogueItem
+                        <PublicCatalogueItem
                           key={cg.id}
                           cg={cg}
                           isBrowsing={activeTabId === `project:${cg.id}`}
@@ -423,7 +413,7 @@ export function PanelLeft() {
                       />
                     );
                   })}
-                  {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
+                  {publicContextGraphs.length === 0 && !inventoryError && !inventoryLoading && (
                     <p className="v10-tree-hint">Public Context Graphs appear here as your node discovers them. Use <strong>Join</strong> to subscribe by ID.</p>
                   )}
                 </div>

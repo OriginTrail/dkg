@@ -28,7 +28,7 @@ function ConnectionBadge({ agent: a }: { agent: any }) {
   return <Badge tone="danger" size="sm">Disconnected</Badge>;
 }
 
-export function NetworkTab() {
+export function NetworkConnections() {
   const { data: connData } = useFetch(fetchConnections, [], 10_000);
   const { data: agentData } = useFetch(fetchAgents, [], 15_000);
 

@@ -15,6 +15,7 @@ import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { LayerBadge, LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 import { Loading } from '../../../components/ds/Loading.js';
 import { Breadcrumbs } from '../../../components/ds/Breadcrumbs.js';
+import { useContextGraphCrumb } from '../../../hooks/useContextGraphCrumb.js';
 
 // ─── KA Detail View (split-pane: content+triples+graph | provenance) ─────
 
@@ -426,11 +427,12 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
   // disagree with the tab on overview-scoped opens. `entityTriples`
   // is already the filtered set the Triples tab counts rows from.
   const tripleCount = entityTriples.length;
+  const graphName = useContextGraphCrumb(contextGraphId).label;
 
   return (
     <div className="v10-ka-detail">
       <div className="v10-ka-header">
-        <Breadcrumbs items={[{ label: 'Context Graph', onClick: onClose }, { label: 'Knowledge Asset' }]} />
+        <Breadcrumbs items={[{ label: graphName, onClick: onClose }, { label: 'Knowledge Asset' }]} />
         <div className="v10-ka-header-left">
           <div className="v10-ka-label">{detailNoun}</div>
           <div className="v10-ka-name">
