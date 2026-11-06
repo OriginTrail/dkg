@@ -6,7 +6,7 @@ The rules behind the node UI's look and behaviour. The values live in code; this
 - **Components:** `src/ui/components/ds/` (`Button`, `Badge`, `Count`, `LayerBadge`, `ContextGraphChip`) plus `AgentChip` and `AgentDot`
 - **Component CSS:** `src/ui/styles/27-ds-components.css`, loaded last
 - **Reference page (development only):** run `pnpm dev:ui` and open <http://127.0.0.1:5173/ui/design-system.html>. It renders every token and component live in both themes. `vite build` only bundles `index.html`, so the page is not part of the released UI.
-- **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts` and `test/design-docs.test.ts` (see [Checks](#checks))
+- **Checks:** `test/design-tokens.test.ts`, `test/class-has-css.test.ts`, `test/design-docs.test.ts` and `test/writing-rules.test.ts` (see [Checks](#checks))
 
 ## Principles
 
@@ -57,6 +57,36 @@ Instrument Sans for the interface, JetBrains Mono for identifiers (DIDs, UALs, h
 | `--fs-micro` | 10 | Small badges and counts; the floor, nothing is smaller |
 
 Type sizes are whole pixels, here and in nOS. Sentence case everywhere, including buttons, tabs and badges. Names keep their capitals: Context Graph, Working Memory, Shared Working Memory, Verifiable Memory, Knowledge Asset, Publisher Conviction. Uppercase is only for small section kickers.
+
+## Writing
+
+The same rules as nOS, so the two products read alike. Write for someone who runs a node but doesn't know how it works inside. Say what happens, what's affected and what stays. `test/writing-rules.test.ts` checks the word list below.
+
+- Short sentences, active voice, and words people use. Say what the node does for them, not how it's built. Contractions are fine.
+- Full sentences end with a full stop.
+- Sentence case and capitals follow [Type](#type). Edge and Core are names too: write "Edge node" and "runs as Core", never "Core Node".
+- Labels, tags, modes and notes start with a capital. So does a status or a description shown as a value (`Stopped`, `No runs yet`). Raw values stay as they are (`15 min`), and so do names people typed.
+- A status followed by its reason takes a colon, not a dash (`Not observed: the node is stopped`).
+- No spec notes on screen. A line that only states a rule for developers is removed.
+- A middle dot sits only between plain values of the same kind (`PDF · 8.4 MB`). A label followed by its name or detail takes a colon (`Step 2 of 4: Commitment`). When the text says something, write a sentence.
+- An error says what failed and what to do next, and includes useful details when there are any.
+- Status words are the ones the nOS brief lists: `Done`, `Failed`, `In progress`, `Partial`, `Pending`, `Ready`, `Blocked`. Words only the node UI has stay, such as `Proposed`, `Merged` and `Healthy`.
+- Keep a technical word only when people need it to act: SPARQL in the query editor, UAL when copying one, RPC URL in Settings.
+- A security statement says only what the system guarantees. Check it with the owner of that guarantee before it ships.
+
+| Use | Not |
+|---|---|
+| node | daemon |
+| agent | principal, runtime |
+| check | probe |
+| `Connected` | reachable |
+| `In progress` | processing |
+| `Approval needed` | awaiting approval, pending review |
+| `Outcome unknown` | outcome not confirmed |
+| `Done` | carried out |
+| `Refused` | not admitted |
+| saved, stored | vaulted |
+| Say what happens | atomic, bootstrap, canonical, seeded, envelope, triage, nonce |
 
 ## Shape and size
 
@@ -173,6 +203,8 @@ Every token in `00-theme.css` is listed in this file, and `test/design-docs.test
 - a hard-coded corner size (`border-radius` / `borderRadius` in px) instead of a `--radius-*` token. `0` and `50%` (circles) are allowed.
 
 There are no exceptions. If no token fits, add one (see below). Canvas palettes (`*-colors.ts`) are the only code allowed literal colours, because graph-viz can't read CSS variables.
+
+`test/writing-rules.test.ts` fails when text a person can read uses a word [Writing](#writing) rules out. Lines waiting for a wording decision sit in its `PENDING` list, which only gets shorter: a line that changes has to leave the list.
 
 ## Adding to the system
 
