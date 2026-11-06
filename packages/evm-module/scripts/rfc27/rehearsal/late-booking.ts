@@ -6,7 +6,7 @@ import { PoolModel, Range, curveStart, scheduleModel } from '../../../test/helpe
 import { eventsIn } from '../contracts';
 import { Report, fmt, sum } from '../report';
 import { Ctx, saveResults, send, withPool } from './context';
-import { WindowRange, closedWindows, sameRanges, stakerCredits } from './reads';
+import { StoredPools, WindowRange, closedWindows, poolsHold, sameRanges, stakerCredits, stakerPools } from './reads';
 import { loadCycle } from './results';
 
 /** What one settle had to book, worked out without it, and what it did. */
@@ -22,6 +22,8 @@ export type LateBooking = {
   emitted: WindowRange & { scheduled: bigint };
   cursorAfter: bigint;
   credits: Range[];
+  /** The staker pools as storage holds them around the settle, and what the model has them gain. */
+  stored: { before: StoredPools; after: StoredPools; model: PoolModel };
 };
 
 /** The late booking's checks, each against what the settlement did not get to choose. */
@@ -51,6 +53,11 @@ export function checkLateBooking(report: Report, b: LateBooking): void {
     sum(credits.map((x) => x.amount)) === emitted.scheduled && emitted.scheduled === b.budget * windows,
     `${fmt(sum(credits.map((x) => x.amount)))} TRAC = ${windows} × ${fmt(b.budget)}`,
   );
+  report.check(
+    'the staker pools in storage gained what the model books, epoch by epoch, with the remainder it carries',
+    poolsHold(b.stored.before, b.stored.after, b.stored.model),
+    `${b.stored.model.perEpoch.size} epochs; remainder ${b.stored.after.remainder}`,
+  );
 }
 
 export async function phaseLateBooking(ctx: Ctx): Promise<void> {
@@ -71,6 +78,8 @@ export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   report.say(`\nEpoch ${E}: account ${id}, created in epoch ${await c.chronos.epochAtTimestamp(created)}, untouched since`);
   check(`account ${id} has booked no window yet`, acct.lastSettledWindow === 0n);
 
+  // No window booked now reaches past one lock from this epoch.
+  const before = await stakerPools(c, E, E + lock + 1n);
   const settled = await send(ctx, `keeper: settle(${id})`, keeper, await c.pc.getAddress(), c.pc.interface.encodeFunctionData('settle', [id]));
   const [sched] = eventsIn(settled.receipt, c.pc, c.pc.getEvent('EmissionScheduled'));
   if (!sched) throw new Error(`settle(${id}) emitted no EmissionScheduled`);
@@ -83,7 +92,8 @@ export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   // the time left in that epoch, shifted to start in the current one.
   const spent = new Map<bigint, bigint>();
   for (let w = expected.fromWindow; w < expected.toWindow; w++) spent.set(w, await c.pcs.windowSpent(id, w));
-  const model = await scheduleModel({ chronos: c.chronos, model: new PoolModel(0n), committed, createdAtTimestamp: created, lock, epLen, currentEpoch: E, fromWindow: expected.fromWindow, toWindow: expected.toWindow, spent });
+  const pool = new PoolModel(before.remainder);
+  const model = await scheduleModel({ chronos: c.chronos, model: pool, committed, createdAtTimestamp: created, lock, epLen, currentEpoch: E, fromWindow: expected.fromWindow, toWindow: expected.toWindow, spent });
   const windows = model.curves.map((cv) => {
     const start = curveStart(cv.anchorEpoch, E);
     return { window: cv.window, closeEpoch: cv.anchorEpoch, startEpoch: start, shiftedBy: start - cv.anchorEpoch, remainder: sum(cv.booked.map((r) => r.amount)), ranges: cv.booked };
@@ -91,6 +101,7 @@ export async function phaseLateBooking(ctx: Ctx): Promise<void> {
   report.say(`  windows ${expected.fromWindow}..${expected.toWindow - 1n} closed, in epochs ${windows.map((x) => x.closeEpoch).join(', ')}`);
   const cursorAfter = (await c.pcs.getAccount(id)).lastSettledWindow;
   const emitted = { fromWindow: sched.fromWindow, toWindow: sched.toWindow, scheduled: sched.scheduled };
-  checkLateBooking(report, { expected, curves: model.curves, budget: B, epoch: E, emitted, cursorAfter, credits });
+  const after = await stakerPools(c, E, E + lock + 1n);
+  checkLateBooking(report, { expected, curves: model.curves, budget: B, epoch: E, emitted, cursorAfter, credits, stored: { before, after, model: pool } });
   saveResults(ctx, 'late-booking', { epoch: E, accountId: id, fromWindow: expected.fromWindow, toWindow: expected.toWindow, emitted, cursorAfter, windows, credits, gasUsed: settled.gasUsed });
 }

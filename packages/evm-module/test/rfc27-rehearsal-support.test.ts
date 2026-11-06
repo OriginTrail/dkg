@@ -327,6 +327,12 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         toWindow,
       });
     const expected = closedWindows({ cursor: 0n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: AT });
+    /** The pools around a settle that books `curves`, storage holding what the model has it hold. */
+    const storedFor = (curves: Awaited<ReturnType<typeof model>>['curves']) => {
+      const pool = new PoolModel(0n);
+      for (const r of curves.flatMap((cv) => cv.booked)) pool.add(r);
+      return { before: { pools: new Map<bigint, bigint>(), remainder: 0n }, after: { pools: new Map(pool.perEpoch), remainder: pool.remainder }, model: pool };
+    };
 
     it('works out the closed windows from the cursor, the creation, the epoch length, the lock and the time', () => {
       expect(expected).to.deep.equal({ fromWindow: 0n, toWindow: 5n });
@@ -347,9 +353,38 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
         cursorAfter: 5n,
         credits: curves.flatMap((cv) => cv.booked),
+        stored: storedFor(curves),
       });
       expect(report.failed).to.equal(0);
-      expect(report.checks).to.have.length(4);
+      expect(report.checks).to.have.length(5);
+    });
+
+    it('fails when the events are all right and the staker pools in storage are not', async () => {
+      const { curves } = await model(0n, 5n);
+      const failedWith = (edit: (s: ReturnType<typeof storedFor>) => void) => {
+        const report = new QuietReport();
+        const stored = storedFor(curves);
+        edit(stored);
+        checkLateBooking(report, {
+          expected,
+          curves,
+          budget: B,
+          epoch: E,
+          emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
+          cursorAfter: 5n,
+          credits: curves.flatMap((cv) => cv.booked),
+          stored,
+        });
+        return report.checks.filter((c) => !c.ok).map((c) => c.label);
+      };
+      const POOLS = ['the staker pools in storage gained what the model books, epoch by epoch, with the remainder it carries'];
+      const [first] = storedFor(curves).model.perEpoch.keys();
+
+      expect(failedWith(() => {})).to.deep.equal([]);
+      expect(failedWith((s) => s.after.pools.set(first, s.after.pools.get(first)! - 1n))).to.deep.equal(POOLS);
+      expect(failedWith((s) => s.after.pools.set(first + 10_000n, 1n))).to.deep.equal(POOLS);
+      expect(failedWith((s) => s.after.pools.delete(first))).to.deep.equal(POOLS);
+      expect(failedWith((s) => (s.after.remainder += 1n))).to.deep.equal(POOLS);
     });
 
     it('fails when the settle books only one of the five closed windows, though its event and its credits agree', async () => {
@@ -364,6 +399,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         emitted: { fromWindow: 0n, toWindow: 1n, scheduled: B },
         cursorAfter: 1n,
         credits: one.flatMap((cv) => cv.booked),
+        stored: storedFor(curves),
       });
       const failed = report.checks.filter((c) => !c.ok).map((c) => c.label);
       expect(failed).to.have.length(3);
@@ -381,6 +417,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
         cursorAfter: 1n,
         credits: curves.flatMap((cv) => cv.booked),
+        stored: storedFor(curves),
       });
       expect(report.checks.filter((c) => !c.ok).map((c) => c.detail)).to.deep.equal(['emitted 0..4, cursor 1']);
     });

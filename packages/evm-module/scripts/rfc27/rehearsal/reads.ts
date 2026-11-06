@@ -5,7 +5,7 @@
 import type { HardhatRuntimeEnvironment } from 'hardhat/types';
 import type { Interface, TransactionReceipt } from 'ethers';
 
-import type { Range } from '../../../test/helpers/emission-model';
+import type { PoolModel, Range } from '../../../test/helpers/emission-model';
 import { BaseContracts, Contracts, eventsIn } from '../contracts';
 import { chainNow } from '../network';
 import { claimPreview } from '../reads';
@@ -91,10 +91,36 @@ export async function storedNets(c: BaseContracts, keys: string[]): Promise<Reco
   return out;
 }
 
-/** What a transaction booked to the staker pool (shard 1 of EpochStorageV8), range by range. */
+/** The shard of EpochStorageV8 that holds the staker pools. */
+const STAKER_SHARD_ID = 1n;
+
+/** The staker shard's pools, by epoch, and the remainder it carries, as storage holds them. */
+export type StoredPools = { pools: Map<bigint, bigint>; remainder: bigint };
+
+export async function stakerPools(c: BaseContracts, from: bigint, to: bigint): Promise<StoredPools> {
+  const pools = new Map<bigint, bigint>();
+  for (let e = from; e <= to; e++) pools.set(e, await c.es.getEpochPool(STAKER_SHARD_ID, e));
+  return { pools, remainder: await c.es.accumulatedRemainder(STAKER_SHARD_ID) };
+}
+
+/**
+ * The pools moved exactly as `model` books them: every epoch read gained what it
+ * books for that epoch, it books none outside those read, and the remainder is
+ * its own. A credit's event can't stand in for this: it says what was asked for,
+ * and these say what stakers can be paid.
+ */
+export function poolsHold(before: StoredPools, after: StoredPools, model: PoolModel): boolean {
+  for (const e of model.perEpoch.keys()) if (!after.pools.has(e)) return false;
+  for (const [e, pool] of after.pools) {
+    if (pool - (before.pools.get(e) ?? 0n) !== (model.perEpoch.get(e) ?? 0n)) return false;
+  }
+  return after.remainder === model.remainder;
+}
+
+/** What a transaction booked to the staker pool, range by range. */
 export const stakerCredits = (receipt: TransactionReceipt, c: BaseContracts): Range[] =>
   eventsIn(receipt, c.es, c.es.getEvent('TokensAddedToEpochRange'))
-    .filter((e) => e.shardId === 1n)
+    .filter((e) => e.shardId === STAKER_SHARD_ID)
     .map((e) => ({ start: e.startEpoch, end: e.endEpoch, amount: e.tokenAmount }));
 
 /** Every interface whose events a settle's receipt may carry, in the order they are tried. */
