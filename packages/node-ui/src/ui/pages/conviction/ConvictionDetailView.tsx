@@ -219,7 +219,7 @@ function DetailBody({
             {walletsUnreadable ? (
               <button type="button" className="v10-pca-card-btn ds-btn" onClick={onRetryWallets}>Retry</button>
             ) : (
-              'Wallet probe stays available.'
+              'You can still check a wallet.'
             )}
           </div>
         )

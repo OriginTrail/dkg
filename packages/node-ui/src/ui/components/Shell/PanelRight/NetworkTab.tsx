@@ -171,7 +171,7 @@ export function NetworkTab(props: {
             isn't completely hidden. */}
         <span
           className="v10-agents-stat"
-          title="Preferred transport per peer (peers reachable via direct + relay are bucketed under direct)"
+          title="How each peer connects. A peer connected both ways counts as direct."
         >
           {directCount} direct / {relayedCount} relayed
         </span>

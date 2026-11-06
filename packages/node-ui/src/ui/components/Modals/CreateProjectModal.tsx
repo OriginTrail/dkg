@@ -437,11 +437,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={access === 'curated'} onChange={() => setAccess('curated')} />
-                Invite-only — only invited agents can read and subscribe
+                Invite-only: only invited agents can read and subscribe
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={access === 'public'} onChange={() => setAccess('public')} />
-                Open — publicly discoverable; anyone can subscribe
+                Open: publicly discoverable; anyone can subscribe
               </label>
             </div>
           </div>
@@ -451,11 +451,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'curator-only'} onChange={() => setPublishPolicy('curator-only')} />
-                Curators-only — only the curator may publish to Verifiable Memory
+                Curators-only: only the curator may publish to Verifiable Memory
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'open'} onChange={() => setPublishPolicy('open')} />
-                Open — any wallet may publish to Verifiable Memory (not just members)
+                Open: any wallet may publish to Verifiable Memory (not just members)
               </label>
             </div>
             {access === 'curated' && publishPolicy === 'open' && (
@@ -479,7 +479,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               <span>
                 Register on chain now (required for Verifiable Memory publishing)
                 <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
-                  Off by default — the project is created locally and can be registered later
+                  Off by default: the project is created locally and can be registered later
                   from its Settings tab when your wallet is funded and a working RPC is configured.
                 </div>
               </span>
@@ -491,7 +491,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={ontology === 'community'} onChange={() => setOntology('community')} />
-                Choose a starter — install one of the bundled context-graph-type ontologies
+                Choose a starter: install one of the bundled context-graph-type ontologies
               </label>
               {ontology === 'community' && (
                 <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
@@ -511,7 +511,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               )}
               <label className="v10-form-radio">
                 <input type="radio" checked={ontology === 'agent'} onChange={() => setOntology('agent')} />
-                Let agent decide — defaults to the closest starter (v1)
+                Let agent decide: defaults to the closest starter (v1)
               </label>
               {ontology === 'agent' && (
                 <div className="v10-form-radio-desc" style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
@@ -537,10 +537,10 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               <div className="v10-form-group">
                 <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
                 <select className="v10-form-select ds-input" value={quorum} disabled>
-                  <option value="off">Off — no consensus verification required</option>
-                  <option value="2of3">2 of 3 — lightweight consensus</option>
-                  <option value="3of5">3 of 5 — standard consensus (recommended for teams)</option>
-                  <option value="custom">Custom — set your own M of N</option>
+                  <option value="off">Off: no consensus verification required</option>
+                  <option value="2of3">2 of 3: lightweight consensus</option>
+                  <option value="3of5">3 of 5: standard consensus (recommended for teams)</option>
+                  <option value="custom">Custom: set your own M of N</option>
                 </select>
               </div>
               <div className="v10-form-group">
@@ -569,7 +569,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
             <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
-              {identityLoading ? 'Retrying…' : 'Retry Loading Agent'}
+              {identityLoading ? 'Retrying…' : 'Retry loading agent'}
             </button>
           )}
           <button

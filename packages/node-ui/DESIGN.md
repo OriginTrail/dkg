@@ -66,7 +66,7 @@ The same rules as nOS, so the two products read alike. Write for someone who run
 - Full sentences end with a full stop.
 - Sentence case and capitals follow [Type](#type). Edge and Core are names too: write "Edge node" and "runs as Core", never "Core Node".
 - Labels, tags, modes and notes start with a capital. So does a status or a description shown as a value (`Stopped`, `No runs yet`). Raw values stay as they are (`15 min`), and so do names people typed.
-- A status followed by its reason takes a colon, not a dash (`Not observed: the node is stopped`).
+- A status followed by its reason, or an option followed by its description, takes a colon, not a dash (`Not observed: the node is stopped`, `Open: publicly discoverable`).
 - No spec notes on screen. A line that only states a rule for developers is removed.
 - A middle dot sits only between plain values of the same kind (`PDF · 8.4 MB`). A label followed by its name or detail takes a colon (`Step 2 of 4: Commitment`). When the text says something, write a sentence.
 - An error says what failed and what to do next, and includes useful details when there are any.

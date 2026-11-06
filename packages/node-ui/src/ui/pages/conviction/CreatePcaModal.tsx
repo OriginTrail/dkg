@@ -463,8 +463,8 @@ export function CreatePcaModal({
     <PcaModalShell
       onClose={onClose}
       testId="pca-create-modal"
-      title={replacingAccountId ? `Renew — new PCA to replace #${replacingAccountId}` : 'Create a Publisher Conviction Account'}
-      subtitle={replacingAccountId ? 'Re-mint a fresh account seeded from the expiring one.' : 'Lock TRAC up front to publish at a discount.'}
+      title={replacingAccountId ? `Renew: new PCA to replace #${replacingAccountId}` : 'Create a Publisher Conviction Account'}
+      subtitle={replacingAccountId ? 'Create a new account based on the expiring one.' : 'Lock TRAC up front to publish at a discount.'}
       dismissDisabled={hardwareDismissDisabled}
     >
       <div className="v10-modal-body">
@@ -485,7 +485,7 @@ export function CreatePcaModal({
 
         {/* Section 1 — Owner key (H-D). Hardware is recommended but not verifiable; hot stays daemon-signed. */}
         <section className="v10-pca-create-section" data-testid="pca-create-owner-key">
-          <h3 className="v10-pca-create-section-title">1 · Owner key</h3>
+          <h3 className="v10-pca-create-section-title">Step 1 of 4: Owner key</h3>
           <div className="v10-pca-owner-key-grid" role="radiogroup" aria-label="PCA owner key">
             <label className={`v10-pca-owner-key-card ds-card-nested${ownerKey === 'hardware' ? ' selected' : ''}`}>
               <input
@@ -515,7 +515,7 @@ export function CreatePcaModal({
               />
               <span>
                 <strong>This node&apos;s hot wallet</strong>
-                <small>No connected browser wallet is required. The daemon signs with this node&apos;s primary operational wallet.</small>
+                <small>No connected browser wallet is required. The node signs with its primary operational wallet.</small>
               </span>
             </label>
           </div>
@@ -599,7 +599,7 @@ export function CreatePcaModal({
 
         {/* Section 2 — Commitment */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">2 · Commitment</h3>
+          <h3 className="v10-pca-create-section-title">Step 2 of 4: Commitment</h3>
           <div className="v10-form-group">
             <label className="v10-form-label" htmlFor="pca-create-tokens">Commit amount (TRAC)</label>
             <input
@@ -630,7 +630,7 @@ export function CreatePcaModal({
 
         {/* Section 3 — Primary node (§3b: the always-visible, REQUIRED staked-node picker) */}
         <section className="v10-pca-create-section" data-testid="pca-create-primary-node">
-          <h3 className="v10-pca-create-section-title">3 · Primary node</h3>
+          <h3 className="v10-pca-create-section-title">Step 3 of 4: Primary node</h3>
           {/* S2b renew (LOW) — the old account's primary node couldn't be read, so the picker
               fell back to THIS node. Surface it rather than silently defaulting. */}
           {replacingAccountId && seed?.primaryNodeUnknown && (
@@ -654,7 +654,7 @@ export function CreatePcaModal({
 
         {/* Section 4 — Review */}
         <section className="v10-pca-create-section">
-          <h3 className="v10-pca-create-section-title">4 · Review</h3>
+          <h3 className="v10-pca-create-section-title">Step 4 of 4: Review</h3>
           <div className="v10-pca-create-review">
             <div><span>Commit</span><strong>{amountValid ? `${formatPcaTrac(tokens)} TRAC` : '—'}</strong></div>
             <div><span>Discount tier</span><strong>{pctFromBps(estTier.bps)}</strong></div>

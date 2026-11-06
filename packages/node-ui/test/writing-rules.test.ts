@@ -36,36 +36,8 @@ const WORDS: [RegExp, string][] = [
  * has changed fails the last test until it is removed here.
  */
 const PENDING = new Set<string>([
-  ". The lock period can’t be extended — Renew creates a fresh replacement account seeded from this one (the old TRAC stays locked until its own expiry).",
-  "1 · Owner key",
-  "2 · Commitment",
-  "3 · Primary node",
-  "4 · Review",
-  "Absolute path. Created if it doesn't exist. Daemon writes only inside this dir (plus optionally",
-  "Awaiting approval…",
-  "Chain not bootstrapped.",
-  "Choose a directory for the new project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can join the project from turn one.",
-  "Choose a local directory for this project and which coding tool you want it wired for. The daemon will populate the workspace with the right config files so your agent can collaborate on this project.",
-  "Connect an owner wallet to discover and manage wallet-owned PCAs. Node-owned PCAs use the daemon wallet.",
-  "Could not bootstrap wallet contract reads.",
   "Daemon-owned PCAs. Owner writes use the node daemon.",
-  "Knowledge Assets are shared atomically; omit entities to share the complete asset",
-  "Knowledge Assets are shared atomically; root-entity selection is not supported",
-  "No connected browser wallet is required. The daemon signs with this node's primary operational wallet.",
-  "Node status, balances, graphs and integration readiness are unavailable. Check the daemon, then reload to retry the connection.",
-  "Note: Couldn't load wallet contract bootstrap, so connected-wallet PCA discovery is paused.",
-  "Preferred transport per peer (peers reachable via direct + relay are bucketed under direct)",
-  "Probe",
-  "Project ontology atomic share did not reach Shared Working Memory",
-  "Re-mint a fresh account seeded from the expiring one.",
-  "The network didn’t confirm in time — the transaction may still be processing. Re-check before retrying.",
-  "This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.",
-  "Wallet probe stays available.",
-  "Workspace path must be an absolute path (start with `/`). The daemon will create the directory if it does not exist.",
-  "is too large to share atomically. Split its content into smaller Knowledge Assets before sharing.",
   "wallet publish to Verifiable Memory — the on-chain publish check is not gated by the allowlist. See SPEC_CG_MEMORY_MODEL §2.5.",
-  "you publish via the canonical assertion-write flow",
-  "ⓘ The chain exposes how many wallets are approved, not the full list — only this node’s wallets and any you probe are shown here.",
 ]);
 
 const VISIBLE_ATTRIBUTES = new Set([
@@ -146,7 +118,7 @@ describe('writing rules', () => {
   });
 
   it('finds real text in the UI', () => {
-    for (const known of ['Retry Loading Agent', 'Copy UAL', 'Context Graph']) {
+    for (const known of ['Retry loading agent', 'Copy UAL', 'Context Graph']) {
       expect([...allText].some((line) => line.includes(known)), known).toBe(true);
     }
   });

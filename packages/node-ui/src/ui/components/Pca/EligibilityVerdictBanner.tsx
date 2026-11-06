@@ -152,7 +152,7 @@ export function EligibilityVerdictBanner({
       <>
         {/* Q2 — source-agnostic: DANGER now fires on no TRAC (R3) OR no gas (Q2);
             the specific cause is carried in reasonText. */}
-        This publish will FAIL — no signing wallet can cover it
+        This publish will fail: no signing wallet can cover it.
         {disc ? `, forfeiting ${pcaLabel}’s ${disc} discount` : ''}
         {ownerPublish ? escrowCaveat : ''}.{reasonText}
       </>

@@ -76,7 +76,7 @@ export function SubGraphOverviewGrid({
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setFetchError(err instanceof Error ? err.message : 'Failed to load subgraphs');
+          setFetchError(err instanceof Error ? err.message : 'Couldn’t load subgraphs.');
           // Don't blow away prior `subGraphs` on a refresh failure —
           // the error branch below gates on `cards.length === 0` so
           // last-good cards stay rendered with a stale-but-readable

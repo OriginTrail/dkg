@@ -672,7 +672,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
             {sending
               ? intent.sendingLabel
               : pending
-                ? 'Awaiting approval…'
+                ? 'Approval needed'
                 : approved
                   ? 'Approved'
                   : intent.idleLabel}

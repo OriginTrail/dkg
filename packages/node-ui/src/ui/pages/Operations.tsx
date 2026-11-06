@@ -903,10 +903,10 @@ function MiniGantt({ phases, totalMs }: { phases: any[]; totalMs: number }) {
                 ({Math.round(((phases[hover].duration_ms ?? 0) / totalMs) * 100)}%)
               </span>
               {phases[hover].status === 'error' && (
-                <span style={{ color: 'var(--accent-red)', marginLeft: 6, fontWeight: 600 }}>FAILED</span>
+                <span style={{ color: 'var(--accent-red)', marginLeft: 6, fontWeight: 600 }}>Failed</span>
               )}
               {phases[hover].status === 'cancelled' && (
-                <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>CANCELLED</span>
+                <span style={{ color: CANCELLED_COLOR, marginLeft: 6, fontWeight: 600 }}>Cancelled</span>
               )}
             </div>
             {desc && (
@@ -1190,9 +1190,9 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
                 <div
                   title={`${p.phase}: ${formatDuration(phaseDuration)}${
                     isError
-                      ? ` — FAILED: ${p.details ?? ''}`
+                      ? ` — Failed: ${p.details ?? ''}`
                       : isCancelled
-                        ? ` — CANCELLED: ${p.details ?? ''}`
+                        ? ` — Cancelled: ${p.details ?? ''}`
                         : ''
                   }`}
                   style={{
@@ -1228,7 +1228,7 @@ function PhaseTimeline({ phases, op }: { phases: any[]; op: any }) {
         )}
         {phases.some((p: any) => p.status === 'in_progress') && (
           <span style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-amber)', display: 'inline-block' }} /> In Progress
+            <span style={{ width: 8, height: 8, borderRadius: 'var(--radius-hair)', background: 'var(--accent-amber)', display: 'inline-block' }} /> In progress
           </span>
         )}
       </div>

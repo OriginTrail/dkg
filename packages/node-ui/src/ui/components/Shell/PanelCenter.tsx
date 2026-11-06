@@ -224,7 +224,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType }: { docRef: 
         ) : (
           <>
             {loading && <div style={{ color: 'var(--text-tertiary)', fontSize: 12 }}>Loading document...</div>}
-            {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Failed to load: {error}</div>}
+            {error && <div style={{ color: 'var(--accent-red)', fontSize: 12 }}>Couldn&apos;t load: {error}</div>}
             {!loading && isImage && blobUrl && (
               <img src={blobUrl} alt={docLabel} style={{ maxWidth: '100%', borderRadius: 'var(--radius-nested)' }} />
             )}

@@ -96,7 +96,7 @@ export function PublishingWalletsSection({
         <h3 className="v10-pca-detail-section-title">Publishing wallets — {snapshot.agentCount} / 100</h3>
         <div className="v10-pca-detail-form">
           <AddressCrux mode="single" value={probe} onChange={setProbe} label="Check a wallet" cruxNote={null} />
-          <button type="button" className="v10-pca-card-btn ds-btn" onClick={runProbe}>Probe</button>
+          <button type="button" className="v10-pca-card-btn ds-btn" onClick={runProbe}>Check</button>
         </div>
         {probeResult && <p className="v10-pca-detail-hint" role="status">{probeResult}</p>}
 
@@ -149,7 +149,7 @@ export function PublishingWalletsSection({
             </div>
             <p className="v10-pca-overview-caveat">
               ⓘ The chain exposes how many wallets are approved, not the full list — only this node’s
-              wallets and any you probe are shown here.
+              wallets and any you check are shown here.
             </p>
           </>
         )}

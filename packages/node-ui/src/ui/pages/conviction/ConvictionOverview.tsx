@@ -81,7 +81,7 @@ export function ConvictionOverview() {
         if (cancelled) return;
         setBootstrapState({
           status: 'error',
-          error: (err as Error)?.message ?? 'Could not bootstrap wallet contract reads.',
+          error: (err as Error)?.message ?? 'Couldn’t load wallet contract details.',
         });
         initWallet();
       }
@@ -308,7 +308,7 @@ export function ConvictionOverview() {
               <div>
                 <h3 className="v10-pca-section-title">Owned by me</h3>
                 <p className="v10-pca-overview-caveat">
-                  Connect an owner wallet to discover and manage wallet-owned PCAs. Node-owned PCAs use the daemon wallet.
+                  Connect an owner wallet to discover and manage wallet-owned PCAs. Node-owned PCAs use the node&apos;s wallet.
                 </p>
               </div>
               <div className="v10-pca-overview-cta-group">
@@ -402,7 +402,7 @@ export function ConvictionOverview() {
       {bootstrapState.status === 'error' && (
         <section className="v10-pca-discovered" data-testid="pca-wallet-bootstrap-error" role="status">
           <p className="v10-pca-overview-caveat">
-            Note: Couldn&apos;t load wallet contract bootstrap, so connected-wallet PCA discovery is paused.{' '}
+            Couldn&apos;t load wallet contract details, so PCAs for your connected wallet can&apos;t be found yet.{' '}
             <button type="button" className="v10-pca-card-btn ds-btn" onClick={retryWalletBootstrap}>Retry</button>
           </p>
         </section>

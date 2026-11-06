@@ -745,7 +745,7 @@ describe('UI API tests', () => {
       requestLog.length = 0;
       expect(() =>
         knowledgeAssetShare('cg-1', 'asset', { entities: ['urn:root'] } as any),
-      ).toThrow('root-entity selection is not supported');
+      ).toThrow('share only some of its entities');
       expect(requestLog).toHaveLength(0);
 
       expect(() =>
@@ -810,7 +810,7 @@ describe('UI API tests', () => {
 
       requestLog.length = 0;
       expect(() => promoteAssertion('cg-1', 'asset', ['urn:root'])).toThrow(
-        'root-entity selection is not supported',
+        'share only some of its entities',
       );
       expect(requestLog).toHaveLength(0);
     });

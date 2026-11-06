@@ -30,7 +30,7 @@ export function PcaDashboardRow() {
           ? 'Couldn’t verify your wallets — retry'
           : covered
             ? `${pct(bestCoveringDiscountBps)} discount`
-            : 'None — publishing at the direct cost'}
+            : 'None: publishing at the direct cost'}
       </span>
       <button
         type="button"

@@ -382,7 +382,7 @@ export function ShareProjectModal({ open, onClose, contextGraphId, contextGraphN
                         cursor: 'pointer',
                       }}
                     >
-                      {copied === 'invite' ? 'Copied' : 'Copy Invite'}
+                      {copied === 'invite' ? 'Copied' : 'Copy invite'}
                     </button>
                   </div>
                 )}

@@ -490,7 +490,7 @@ function GeneralSettingsTab() {
             </div>
           ) : w?.chainId?.includes('84532') || w?.chainId?.includes('31337') || w?.chainId?.includes('11155111') ? (
             <div style={{ padding: '8px 12px', borderRadius: 'var(--radius-nested)', background: 'var(--warning-bg)', border: '1px solid var(--warning-border)' }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent-amber)', marginBottom: 2 }}>⚠ Testnet Mode</div>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--accent-amber)', marginBottom: 2 }}>⚠ Testnet mode</div>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>No real TRAC is spent. Perfect for development.</div>
             </div>
           ) : null}
@@ -524,7 +524,7 @@ function GeneralSettingsTab() {
                 opacity: shuttingDown ? 0.5 : 1,
               }}
             >
-              {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm Shutdown' : 'Shutdown Node'}
+              {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm shutdown' : 'Shut down node'}
             </button>
             <span aria-live="polite">
               {shutdownConfirm && (

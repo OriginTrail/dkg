@@ -240,7 +240,7 @@ export function ApproveWalletsModal({
     <PcaModalShell
       onClose={onClose}
       testId="pca-approve-modal"
-      title={`Approve publishing wallets — PCA #${accountId}`}
+      title={`Approve publishing wallets: PCA #${accountId}`}
       dismissDisabled={walletBatchSigning}
     >
       <div className="v10-modal-body">
@@ -297,7 +297,7 @@ export function ApproveWalletsModal({
               testId="pca-approve-address"
               value={bulk}
               onChange={setBulk}
-              label="Wallet address(es) — one per line"
+              label="Wallet address(es): one per line"
               disabled={running}
             />
             <p className="v10-pca-approve-counts">
@@ -397,7 +397,7 @@ export function ApproveWalletsModal({
         {done && mode === 'sponsor' && !deregisterFrom && (
           <div className="v10-pca-approve-handoff">
             <div className="v10-modal-warning ds-card-nested">
-              Remind the other operator: these wallets must hold NATIVE GAS to publish — the account
+              Remind the other operator: these wallets must hold native gas to publish — the account
               covers TRAC, never gas.
             </div>
             <SponsorshipHandshake wallets={approvedWallets} accountId={accountId} role="core" />
