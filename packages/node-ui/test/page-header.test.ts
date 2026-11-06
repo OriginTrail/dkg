@@ -17,6 +17,11 @@ describe('pages', () => {
     expect(source).not.toMatch(/<h1\b/);
   });
 
+  it('keeps Publisher Conviction at the narrow page width', () => {
+    expect(read('pages/conviction/ConvictionOverview.tsx')).toContain('className="ds-page ds-page-narrow"');
+    expect(read('styles/27-ds-components.css')).toMatch(/\.ds-page-narrow \{ max-width: var\(--page-max-narrow\); \}/);
+  });
+
   it('takes the gutter from one token', () => {
     expect(read('styles/03-left-center.css')).toMatch(/\.v10-center-content \{[^}]*padding: var\(--page-gutter\)/);
     const styles = readdirSync(join(UI, 'styles')).map((name) => read(`styles/${name}`)).join('\n');

@@ -248,7 +248,7 @@ Every table header looks the same: `--fs-label`, weight 500, uppercase with `--l
 
 ## Layout and overlays
 
-**Pages.** A page is a `ds-page` that starts with `<PageHeader title description badge />`. The header holds the page's only `h1`, at `--fs-heading` weight 600, with a `--fs-body` description in `--text-secondary`. The content panel sets the gutter with `--page-gutter`, so a page adds no padding of its own. `--page-max` caps the width. A view that fills the panel edge to edge cancels the gutter with a negative margin of the same token.
+**Pages.** A page is a `ds-page` that starts with `<PageHeader title description badge />`. The header holds the page's only `h1`, at `--fs-heading` weight 600, with a `--fs-body` description in `--text-secondary`. The content panel sets the gutter with `--page-gutter`, so a page adds no padding of its own. `--page-max` caps the width. A page of text and forms adds `ds-page-narrow` (`--page-max-narrow`), so its actions stay close to the words they belong to. A view that fills the panel edge to edge cancels the gutter with a negative margin of the same token.
 
 **Layers.** Each layer has a token, and anything above 10 uses one. Numbers up to 10 only order things inside one component.
 

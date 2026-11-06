@@ -221,7 +221,7 @@ export function ConvictionOverview() {
   );
 
   return (
-    <div className="ds-page" data-testid="pca-landing">
+    <div className="ds-page ds-page-narrow" data-testid="pca-landing">
       <PageHeader
         title="Publisher Conviction"
         badge={role && <Badge tone="role" size="sm" className="v10-pca-role-chip">Node role: {formatNodeRole(role)}</Badge>}

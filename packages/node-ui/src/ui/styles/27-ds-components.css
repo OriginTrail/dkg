@@ -433,6 +433,7 @@ body.light .ds-seg-item.active {
 
 /* Page: the content panel sets the gutter, so a page adds no padding of its own. */
 .ds-page { max-width: var(--page-max); }
+.ds-page-narrow { max-width: var(--page-max-narrow); }
 .ds-page-header { margin-bottom: var(--page-gutter); }
 .ds-page-titlerow { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .ds-page-title { margin: 0; font-size: var(--fs-heading); font-weight: 600; line-height: var(--lh-tight); color: var(--text-primary); }
