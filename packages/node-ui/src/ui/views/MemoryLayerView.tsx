@@ -29,10 +29,10 @@ const OnChainProvenanceCard = lazy(() =>
 type MemoryLayer = 'wm' | 'swm' | 'vm';
 type ViewMode = 'table' | 'graph';
 
-const LAYER_META: Record<MemoryLayer, { label: string; color: string; icon: React.ReactNode; description: string }> = {
-  wm: { label: 'Working Memory', color: 'var(--layer-working)', icon: <LayerGlyph layer="wm" />, description: 'Private agent drafts. Fast local storage.' },
-  swm: { label: 'Shared Working Memory', color: 'var(--layer-shared)', icon: <LayerGlyph layer="swm" />, description: 'Shared proposals with collaborators. TTL-bounded.' },
-  vm: { label: 'Verifiable Memory', color: 'var(--layer-verified)', icon: <LayerGlyph layer="vm" />, description: 'Endorsed, published, on-chain knowledge.' },
+const LAYER_META: Record<MemoryLayer, { label: string; icon: React.ReactNode; description: string }> = {
+  wm: { label: 'Working Memory', icon: <LayerGlyph layer="wm" />, description: 'Private agent drafts. Fast local storage.' },
+  swm: { label: 'Shared Working Memory', icon: <LayerGlyph layer="swm" />, description: 'Shared proposals with collaborators. TTL-bounded.' },
+  vm: { label: 'Verifiable Memory', icon: <LayerGlyph layer="vm" />, description: 'Endorsed, published, on-chain knowledge.' },
 };
 
 const TABLE_ICON = (
@@ -223,7 +223,7 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
   return (
     <div className="v10-memory-layer-view">
       <div className="v10-mlv-header">
-        <span className="v10-mlv-icon" style={{ color: meta.color }}>{meta.icon}</span>
+        <span className={`v10-mlv-icon v10-layer-tone-text layer-tone-${layer}`}>{meta.icon}</span>
         <div>
           <h1 className="v10-mlv-title">{meta.label}</h1>
           <p className="v10-mlv-desc">{meta.description}</p>
@@ -403,7 +403,6 @@ export function MemoryLayerView({ layer, contextGraphId, externalQuery, external
               format="triples"
               options={graphOptionsForView}
               viewConfig={graphViewConfig}
-              style={{ width: '100%', height: '100%' }}
               onNodeClick={handleNodeClick}
               initialFit
             >

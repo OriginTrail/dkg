@@ -402,3 +402,7 @@
 .v10-item-name.v10-wm-item-mono { font-family: var(--font-mono); font-size: var(--fs-label); }
 .v10-item-ual.v10-wm-item-ual { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--text-tertiary); opacity: 0.7; word-break: break-all; margin-top: 1px; }
 .v10-wm-nav { display: flex; gap: var(--space-12); padding: var(--space-16); }
+
+.v10-assertion-scroll { flex: 1; overflow: auto; }
+.v10-assertion-result { padding: var(--space-6) var(--space-16); font-size: var(--fs-label); color: var(--text-success); }
+.v10-assertion-result-warn { color: var(--text-warning); }

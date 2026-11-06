@@ -165,11 +165,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     }
   }, [contextGraphId, layer, refresh, onComplete]);
 
-  const scrollRootStyle = { flex: 1, overflow: 'auto' } as const;
 
   if (loading) {
     return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+      <div className="v10-layer-empty-shell v10-assertion-scroll" data-cg-scroll-key={scrollKey}>
         <EmptyState
           busy
           compact
@@ -180,11 +179,11 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
+  if (loadError) return <div role="alert" className="v10-assertion-scroll">Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
 
   if (!assertions.length && !page?.nextCursor && pageIndex === 0) {
     return (
-      <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+      <div className="v10-layer-empty-shell v10-assertion-scroll" data-cg-scroll-key={scrollKey}>
         <EmptyState
           tone={toneForLayer(layer)}
           icon={LAYER_CONFIG[layer].icon}
@@ -206,7 +205,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   ).length;
 
   return (
-    <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
+    <div className="v10-assertion-scroll" data-cg-scroll-key={scrollKey}>
       <div className="v10-wm-bar">
         <span className="v10-wm-bar-label">Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
@@ -215,7 +214,6 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
             title="Applies to all assertions in this layer across every page. Query catalog assertions are excluded."
             disabled={busy !== null}
             onClick={handlePromoteAll}
-            style={{ opacity: busy === '__all__' ? 0.5 : 1 }}
           >
             {busy === '__all__' ? '...' : actionAllLabel}
           </button>
@@ -224,7 +222,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {result && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: resultWarn ? 'var(--text-warning)' : 'var(--text-success)' }}
+          className={resultWarn ? 'v10-assertion-result v10-assertion-result-warn' : 'v10-assertion-result'}
         >
           <StatusGlyph tone={resultWarn ? 'warning' : 'success'} /> {result}
         </div>
@@ -267,7 +265,6 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
             className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
             disabled={busy !== null}
             onClick={ev => { ev.stopPropagation(); handlePromote(a); }}
-            style={{ opacity: busy === a.graphUri ? 0.5 : 1, flexShrink: 0 }}
           >
             {busy === a.graphUri ? '...' : actionLabel}
           </button>

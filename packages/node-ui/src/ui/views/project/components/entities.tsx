@@ -9,7 +9,6 @@ import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
 import { useTabsStore } from '../../../stores/tabs.js';
 import type { SwmAttributionsResult } from '../../../hooks/useSwmAttributions.js';
-import { LAYER_VAR } from '../../../layer-colors.js';
 import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 import { LAYER_CONFIG, VM_TRIPLE_STAT, SOURCE_CONTENT_TYPE, MARKDOWN_FORM, SOURCE_FILE, DKG_SIZE, entityAuthorUri, entityMeta, layerNoun, useLayerTriples, entityTimestamp, formatRelativeTime, type LayerContentTab } from '../helpers.js';
 import { EmptyState, StatStrip, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
@@ -21,6 +20,8 @@ import { kindColorForType } from '../../../entity-kind-colors.js';
 import { humanizeTypeName } from '../../../lib/formatLabels.js';
 import { FileText } from 'lucide-react';
 import { formatDateTime, formatNumber } from '../../../lib/format.js';
+
+const TRUST_TONE = { working: 'wm', shared: 'swm', verified: 'vm' } as const;
 export { AssertionsList } from './assertions.js';
 
 // ─── Enhanced Entity list (sorted by triple count, with type pill) ──────
@@ -472,7 +473,7 @@ export function LayerDetailView({
   return (
     <div className="v10-layer-detail">
       <div className="v10-layer-detail-header">
-        <span className="v10-layer-detail-icon" style={{ color: LAYER_VAR[config.trustLevel] }}>{config.icon}</span>
+        <span className={`v10-layer-detail-icon v10-layer-tone-text layer-tone-${TRUST_TONE[config.trustLevel]}`}>{config.icon}</span>
         <div>
           <div className="v10-layer-detail-title">{config.title}</div>
           <div className="v10-layer-detail-desc">{config.desc}</div>

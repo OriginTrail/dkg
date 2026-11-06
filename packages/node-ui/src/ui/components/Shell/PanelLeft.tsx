@@ -124,19 +124,19 @@ function PublicCatalogueItem({
 // Maps local-agent integration status → status-dot color. Kept inline (vs new
 // CSS classes) because the four states map 1:1 to existing semantic palette
 // vars and there's no shared status-dot component to extend.
-function localAgentDotColor(status: LocalAgentIntegrationStatus): string {
+function localAgentDotClass(status: LocalAgentIntegrationStatus): string {
   switch (status) {
     case 'chat_ready':
-      return 'var(--accent-green)';
+      return 'v10-local-agent-dot v10-local-agent-dot-ready';
     case 'connecting':
     case 'degraded':
-      return 'var(--accent-amber)';
+      return 'v10-local-agent-dot v10-local-agent-dot-warn';
     case 'bridge_offline':
-      return 'var(--accent-red)';
+      return 'v10-local-agent-dot v10-local-agent-dot-down';
     case 'available':
     case 'coming_soon':
     default:
-      return 'var(--text-tertiary)';
+      return 'v10-local-agent-dot';
   }
 }
 
@@ -183,13 +183,7 @@ function IntegrationsSectionBody() {
         >
           <span
             aria-label={a.statusLabel}
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: '50%',
-              background: localAgentDotColor(a.status),
-              flexShrink: 0,
-            }}
+            className={localAgentDotClass(a.status)}
           />
           <span className="v10-tree-item-label">{a.name}</span>
           <span className="v10-tree-item-meta">

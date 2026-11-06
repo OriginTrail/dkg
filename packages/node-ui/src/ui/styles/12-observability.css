@@ -529,3 +529,6 @@ select.input {
 /* ── Network table ── */
 .mono.v10-network-id.v10-network-id.v10-network-id { font-size: var(--fs-label); }
 .v10-network-name.v10-network-name.v10-network-name { font-weight: 600; }
+
+.ds-btn.settings-shutdown { background: var(--warning-bg); border-color: var(--warning-border); color: var(--text-warning); }
+.ds-btn.settings-shutdown-confirm { background: var(--danger-bg-strong); border-color: var(--accent-red); color: var(--text-danger); }

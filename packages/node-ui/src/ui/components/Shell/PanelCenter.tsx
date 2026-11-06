@@ -166,13 +166,7 @@ function DocumentViewer({ docRef, contentType: expectedContentType, contextGraph
                   type="button"
                   aria-pressed={active}
                   onClick={() => setViewMode(mode)}
-                  style={{
-                    border: 'none', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
-                    padding: '3px 12px', fontSize: 'var(--fs-label)', fontWeight: 600,
-                    fontFamily: 'var(--font-sans)',
-                    color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                    background: active ? 'var(--bg-elevated)' : 'transparent',
-                  }}
+                  className={active ? 'v10-doc-mode v10-doc-mode-active' : 'v10-doc-mode'}
                 >
                   {mode === 'formatted' ? 'Formatted' : 'Raw'}
                 </button>

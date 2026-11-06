@@ -116,3 +116,5 @@
   font-size: var(--fs-label);
   color: var(--text-warning);
 }
+
+.v10-modal-close.ds-btn.ds-ghost.v10-pca-modal-close { position: absolute; top: var(--space-12); right: var(--space-12); z-index: 1; color: var(--text-tertiary); }

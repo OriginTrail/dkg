@@ -101,3 +101,15 @@
 /* ── Query results ── */
 .v10-mlv-status.v10-mlv-status-success.v10-mlv-status-success { color: var(--text-success); }
 .v10-mlv-status.v10-mlv-status-failed.v10-mlv-status-failed { color: var(--text-danger); }
+
+.v10-layer-action-result { margin-bottom: var(--space-8); font-size: var(--fs-label); color: var(--text-success); }
+.v10-layer-action-warn { color: var(--text-warning); }
+.v10-layer-action-error { color: var(--text-danger); }
+.v10-decision-btn-blocked { opacity: var(--opacity-disabled); }
+
+/* Layer colours by class: a layer's colour is known from its name, not from data. */
+.layer-tone-wm { --layer-tone: var(--layer-working); }
+.layer-tone-swm { --layer-tone: var(--layer-shared); }
+.layer-tone-vm { --layer-tone: var(--layer-verified); }
+.v10-layer-tone-text.v10-layer-tone-text { color: var(--layer-tone); }
+.v10-layer-tone-fill.v10-layer-tone-fill { background: var(--layer-tone); }

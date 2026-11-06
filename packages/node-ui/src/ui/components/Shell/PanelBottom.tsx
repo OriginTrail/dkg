@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
-import { opTypeText } from '../../op-type-colors.js';
+import { opTone } from '../../op-type-colors.js';
 import { pressable } from '../../lib/pressable.js';
 
 const BOTTOM_TABS = ['Node Log', 'Transactions'] as const;
@@ -49,11 +49,11 @@ function classifyLine(line: string): 'error' | 'warn' | 'info' | 'debug' {
   return 'info';
 }
 
-const LEVEL_COLORS: Record<string, string> = {
-  error: 'var(--text-danger)',
-  warn:  'var(--text-warning)',
-  info:  'var(--text-primary)',
-  debug: 'var(--text-tertiary)',
+const LEVEL_CLASS: Record<string, string> = {
+  error: 'v10-log-line v10-log-line-error',
+  warn:  'v10-log-line v10-log-line-warn',
+  info:  'v10-log-line v10-log-line-info',
+  debug: 'v10-log-line v10-log-line-debug',
 };
 
 function useAutoScroll(dep: unknown) {
@@ -124,7 +124,7 @@ function NodeLogContent() {
       </div>
       <div className="v10-log-output" ref={scrollRef}>
         {visible.map((line, i) => (
-          <div key={i} className="v10-log-line" style={{ color: LEVEL_COLORS[classifyLine(line)] }}>{line}</div>
+          <div key={i} className={LEVEL_CLASS[classifyLine(line)]}>{line}</div>
         ))}
         {visible.length === 0 && (
           <div className="v10-log-line v10-log-line-muted">No log output</div>
@@ -198,20 +198,16 @@ function TransactionsContent() {
               <React.Fragment key={op.operation_id}>
                 <tr
                   aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
-                  style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'var(--tint-subtle)' : undefined }}
+                  className={isExp ? 'v10-bottom-op-row v10-bottom-op-row-open' : 'v10-bottom-op-row'}
                 >
-                  <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
+                  <td className={`v10-bottom-td-op v10-bottom-op-${opTone(op.operation_name)}`}>
                     {op.operation_name}
                   </td>
                   <td className="v10-bottom-td-mono">
                     {shortId(op.operation_id)}
                   </td>
                   <td className="v10-bottom-td">
-                    <span style={{
-                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
-                      background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
-                      color: op.status === 'success' ? 'var(--text-success)' : op.status === 'error' ? 'var(--text-danger)' : 'var(--accent-amber)',
-                    }}>{op.status}</span>
+                    <span className={op.status === 'success' ? 'v10-bottom-status v10-bottom-status-done' : op.status === 'error' ? 'v10-bottom-status v10-bottom-status-failed' : 'v10-bottom-status'}>{op.status}</span>
                   </td>
                   <td className="v10-bottom-td-muted">
                     {op.duration_ms != null ? formatDuration(op.duration_ms) : '—'}
@@ -338,16 +334,17 @@ export function PanelBottom() {
           </button>
         ))}
         <div className="v10-bottom-spacer" />
-        <button
-          className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
-          onClick={toggleBottomMaximised}
-          title={bottomMaximised ? 'Restore' : 'Maximise'}
-          style={{ display: bottomCollapsed ? 'none' : undefined }}
-        >
-          {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
-        </button>
+        {!bottomCollapsed && (
+          <button
+            className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon"
+            onClick={toggleBottomMaximised}
+            title={bottomMaximised ? 'Restore' : 'Maximise'}
+          >
+            {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
+          </button>
+        )}
         <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
-          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform var(--motion-base)' }}>
+          <span className={bottomCollapsed ? 'v10-bottom-chevron v10-bottom-chevron-up' : 'v10-bottom-chevron'}>
             {CHEVRON_DOWN}
           </span>
         </button>

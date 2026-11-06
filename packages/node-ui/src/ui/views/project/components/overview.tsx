@@ -455,7 +455,6 @@ export function ProjectOverviewCard({
       desc: 'Private staging area',
       count: working,
       status: memory.layerStatus?.wm ?? 'ok',
-      color: 'var(--layer-working)',
     },
     {
       key: 'swm' as const,
@@ -463,7 +462,6 @@ export function ProjectOverviewCard({
       desc: 'Collaborative review',
       count: shared,
       status: memory.layerStatus?.swm ?? 'ok',
-      color: 'var(--layer-shared)',
     },
     {
       key: 'vm' as const,
@@ -471,7 +469,6 @@ export function ProjectOverviewCard({
       desc: 'Published on-chain',
       count: verified,
       status: memory.layerStatus?.vm ?? 'ok',
-      color: 'var(--layer-verified)',
     },
   ];
   const pipelineHasUnavailableLayer = pipeline.some(item => item.status === 'error');
@@ -546,8 +543,8 @@ export function ProjectOverviewCard({
               return (
                 <span
                   key={item.key}
-                  className={`v10-po-pipeline-seg ${item.key}`}
-                  style={{ width: `${width}%`, background: item.color }}
+                  className={`v10-po-pipeline-seg v10-layer-tone-fill layer-tone-${item.key}`}
+                  style={{ width: `${width}%` }}
                 />
               );
             })
@@ -558,9 +555,8 @@ export function ProjectOverviewCard({
             <button
               key={item.key}
               type="button"
-              className={`v10-po-pipeline-step ds-card-nested ${item.key}`}
+              className={`v10-po-pipeline-step ds-card-nested ${item.key} layer-tone-${item.key}`}
               onClick={() => onSwitchLayer?.(item.key)}
-              style={{ '--po-layer-color': item.color } as React.CSSProperties}
             >
               <span className="v10-po-pipeline-step-index">{index + 1}</span>
               <span className="v10-po-pipeline-step-copy">

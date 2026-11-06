@@ -420,3 +420,5 @@
     width: 1px;
     height: 18px;
     justify-self: center; }
+
+.v10-memstack-cell { --cell-color: var(--layer-tone); }

@@ -180,7 +180,6 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
             disabled={status === 'uploading'}
             aria-label="Close import dialog"
             title="Close (Esc)"
-            style={{ flexShrink: 0, cursor: status === 'uploading' ? 'not-allowed' : 'pointer' }}
           >
             <X size={14} />
           </button>
@@ -308,7 +307,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                         {r.status === 'success' ? <Check size={14} /> : r.status === 'skipped' ? <Minus size={14} /> : <X size={14} />}
                       </span>
                       <span className="v10-import-file-name">{r.fileName}</span>
-                      <span className="v10-import-file-size" style={r.status === 'error' ? { color: 'var(--text-danger)' } : undefined}>
+                      <span className={r.status === 'error' ? 'v10-import-file-size v10-import-file-size-error' : 'v10-import-file-size'}>
                         {r.status === 'success' && r.triplesWritten != null ? `${r.triplesWritten} triples` :
                          r.status === 'skipped' ? 'stored (no extraction)' :
                          r.error ?? 'failed'}

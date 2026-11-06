@@ -360,3 +360,9 @@ body.light .v10-import-dropzone.drag-over { border-color: var(--border-strong); 
 .v10-form-input.ds-input.v10-wire-input.v10-wire-input { font-family: var(--font-mono); font-size: var(--fs-control); }
 .v10-wire-hint { font-size: var(--fs-micro); color: var(--text-tertiary); margin-top: var(--space-4); }
 .v10-form-input.ds-input.v10-wire-input-readonly.v10-wire-input-readonly.v10-wire-input-readonly { font-family: var(--font-mono); font-size: var(--fs-label); opacity: 0.75; }
+
+.v10-cg-name-help { margin-top: var(--space-4); font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-tertiary); }
+.v10-cg-name-help-error { color: var(--text-danger); }
+.v10-import-file-size-error { color: var(--text-danger); }
+.v10-join-sync { display: flex; align-items: flex-start; gap: var(--space-8); font-size: var(--fs-control); color: var(--text-secondary); cursor: pointer; }
+.v10-join-sync-busy { cursor: default; }

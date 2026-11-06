@@ -289,7 +289,6 @@ function ActivityRow({
     if (typeBinding?.color && !typeBinding.isFallback) return typeBinding.color;
     return kindColorForType(item.kindUri ?? undefined) ?? 'var(--text-tertiary)';
   })();
-  const layerColor = LAYER_COLOR[item.layer];
 
   // Surface status when the entity has one — decisions.status / tasks.status /
   // github.state — because "rejected" / "blocked" / "merged" is often the
@@ -315,8 +314,7 @@ function ActivityRow({
   const rowBody = (
     <>
       <span
-        className="v10-activity-feed-layer"
-        style={{ color: layerColor }}
+        className={`v10-activity-feed-layer v10-layer-tone-text layer-tone-${LAYER_TONE[item.layer]}`}
         title={`${item.layer} memory`}
       >
         <LayerGlyph layer={LAYER_TONE[item.layer]} />

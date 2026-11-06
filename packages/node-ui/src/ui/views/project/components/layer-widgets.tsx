@@ -175,7 +175,7 @@ function LayerActionShell({ title, footnote, context, result, warn = false, erro
   return (
     <GenWidget title={title} footnote={footnote}>
       <div className="v10-decision-context v10-decision-context-gap">{context}</div>
-      {result && <div data-testid="layer-action-result" style={{ fontSize: 'var(--fs-label)', color: warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}><StatusGlyph tone={warn ? 'warning' : 'success'} /> {result}</div>}
+      {result && <div data-testid="layer-action-result" className={warn ? 'v10-layer-action-result v10-layer-action-warn' : 'v10-layer-action-result'}><StatusGlyph tone={warn ? 'warning' : 'success'} /> {result}</div>}
       {/* #1464 — errors render under a DISTINCT testid so a failed action can't be mistaken for a
           successful result by a testid-agnostic reader (the mask that hid the promote failure). */}
       {error && <div data-testid="layer-action-error" className="v10-decision-error"><StatusGlyph tone="danger" /> {error}</div>}
@@ -245,8 +245,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
     >
       <button
         data-testid="widget-promote-all-btn"
-        className="v10-decision-btn ds-btn ds-primary"
-        style={{ borderColor: 'var(--layer-shared-border)', color: 'var(--layer-shared-text)', background: 'var(--layer-shared-bg)', opacity: busy ? 0.5 : 1 }}
+        className="v10-decision-btn ds-btn ds-swm"
         disabled={busy}
         onClick={promote}
       >
@@ -331,8 +330,7 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
     >
       <button
         data-testid="widget-publish-vm-btn"
-        className="v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg"
-        style={{ opacity: busy || gate.blocked ? 0.5 : 1 }}
+        className={busy || gate.blocked ? 'v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg v10-decision-btn-blocked' : 'v10-decision-btn primary-cta publish-vm ds-btn ds-vm ds-lg'}
         // Native `disabled` only for the TRANSIENT busy state; the PERSISTENT policy gate uses
         // aria-disabled so SR/keyboard users keep focus + hear the reason (publish no-ops when
         // blocked). aria-describedby references only rendered targets (describedBy, above).
@@ -368,7 +366,7 @@ export function LayerWidgetStrip({ layer, entities, entityCount, actionEntityCou
     <div
       // #1464 — success vs failure must not collide on one testid (see LayerActionShell).
       data-testid={lastAction.ok ? 'layer-action-result' : 'layer-action-error'}
-      style={{ fontSize: 'var(--fs-label)', color: !lastAction.ok ? 'var(--text-danger)' : lastAction.warn ? 'var(--text-warning)' : 'var(--text-success)', marginBottom: 8 }}
+      className={!lastAction.ok ? 'v10-layer-action-result v10-layer-action-error' : lastAction.warn ? 'v10-layer-action-result v10-layer-action-warn' : 'v10-layer-action-result'}
     >
       <StatusGlyph tone={!lastAction.ok ? 'danger' : lastAction.warn ? 'warning' : 'success'} /> {lastAction.text}
     </div>

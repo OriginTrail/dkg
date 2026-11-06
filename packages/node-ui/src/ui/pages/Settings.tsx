@@ -460,15 +460,7 @@ function GeneralSettingsTab() {
             <button
               onClick={handleShutdown}
               disabled={shuttingDown}
-              style={{
-                padding: '8px 16px', borderRadius: 'var(--radius-nested)',
-                border: `1px solid ${shutdownConfirm ? 'var(--accent-red)' : 'var(--warning-border)'}`,
-                background: shutdownConfirm ? 'var(--danger-bg-strong)' : 'var(--warning-bg)',
-                color: shutdownConfirm ? 'var(--accent-red)' : 'var(--accent-amber)',
-                fontSize: 'var(--fs-control)', fontWeight: 600,
-                cursor: shuttingDown ? 'not-allowed' : 'pointer',
-                opacity: shuttingDown ? 0.5 : 1,
-              }}
+              className={shutdownConfirm ? 'ds-btn settings-shutdown settings-shutdown-confirm' : 'ds-btn settings-shutdown'}
             >
               {shuttingDown ? 'Shutting down…' : shutdownConfirm ? 'Confirm Shutdown' : 'Shutdown Node'}
             </button>

@@ -627,10 +627,7 @@ export function JoinProjectModal({ open, onClose, initialContextGraphId }: JoinP
           </div>
 
           {intent.kind === 'publicSubscribe' && (
-            <label style={{
-              display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 'var(--fs-control)',
-              color: 'var(--text-secondary)', cursor: sending ? 'default' : 'pointer',
-            }}>
+            <label className={sending ? 'v10-join-sync v10-join-sync-busy' : 'v10-join-sync'}>
               <input
                 type="checkbox"
                 checked={keepSynced}

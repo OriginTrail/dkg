@@ -238,7 +238,7 @@ function AppShell() {
           </>
         )}
 
-        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className={expanded ? 'v10-center-region v10-center-region-hidden' : 'v10-center-region'}>
           <div className="v10-center-main">
             <PanelCenter />
           </div>
@@ -249,7 +249,7 @@ function AppShell() {
         {rightOpen && (
           <>
             {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
-            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
+            <div id="agents-panel" tabIndex={-1} className={expanded ? 'v10-panel-right v10-panel-right-expanded' : 'v10-panel-right'} role="complementary" aria-label="Agents" style={expanded ? undefined : { width: rightWidth }}>
               <PanelRight />
             </div>
           </>

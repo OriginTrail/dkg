@@ -348,3 +348,6 @@
 
 /* Collaborating agents: the agents themselves as avatars under the count. */
 .v10-stat-agents { margin: var(--space-2) 0 var(--space-6); }
+
+.v10-role-fill-curator { background: var(--role); }
+.v10-role-fill-joined { background: var(--text-secondary); }

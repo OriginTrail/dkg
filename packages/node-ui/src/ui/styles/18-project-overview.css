@@ -371,3 +371,5 @@
 
 /* ── Project view ── */
 .v10-project-note { color: var(--text-tertiary); font-size: var(--fs-control); margin-bottom: var(--space-8); }
+
+.v10-po-pipeline-step.layer-tone-wm, .v10-po-pipeline-step.layer-tone-swm, .v10-po-pipeline-step.layer-tone-vm { --po-layer-color: var(--layer-tone); }

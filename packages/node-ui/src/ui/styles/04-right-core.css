@@ -313,3 +313,5 @@
 }
 
 .v10-agents-details + .v10-agents-refresh { margin-left: 0; }
+
+.v10-panel-right.v10-panel-right-expanded { flex: 1; min-width: 0; }

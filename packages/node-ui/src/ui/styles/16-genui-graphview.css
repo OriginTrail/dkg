@@ -160,3 +160,5 @@ a.v10-genui-chip:hover { border-color: var(--border-strong); }
 .v10-genui-vm-timeline-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--layer-verified); }
 .v10-genui-vm-timeline-label { color: var(--text-primary); }
 .v10-genui-vm-timeline-at { font: 11px var(--font-mono); color: var(--text-tertiary); }
+
+.v10-graph-fill { position: absolute; inset: 0; }

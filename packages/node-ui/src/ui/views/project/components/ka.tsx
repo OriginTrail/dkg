@@ -575,7 +575,7 @@ export function KADetailView({ entity, allEntities, allTriples, onNavigate, onCl
                       format="triples"
                       options={graphOptions}
                       viewConfig={entityViewConfig}
-                      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+                      className="v10-graph-fill"
                       onNodeClick={(n: any) => n?.id && n.id !== entity.uri && onNavigate(n.id)}
                       initialFit
                       initialFocus={entity.uri}

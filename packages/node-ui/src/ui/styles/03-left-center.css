@@ -343,3 +343,15 @@
 /* ── Node unavailable ── */
 .v10-unavailable { align-items: center; justify-content: center; padding: var(--space-24); }
 .v10-unavailable-card { max-width: 480px; line-height: var(--lh-loose); }
+
+/* Centre region: gives way when the right panel expands. */
+.v10-center-region { display: flex; flex: 1; flex-direction: column; min-width: 0; overflow: hidden; }
+.v10-center-region.v10-center-region-hidden { display: none; }
+
+.v10-doc-mode { padding: var(--space-4) var(--space-12); background: transparent; border: none; border-radius: var(--radius-xs); font-family: var(--font-sans); font-size: var(--fs-label); font-weight: 600; color: var(--text-secondary); cursor: pointer; }
+.v10-doc-mode-active { background: var(--bg-elevated); color: var(--text-primary); }
+
+.v10-local-agent-dot { flex-shrink: 0; width: 7px; height: 7px; background: var(--text-tertiary); border-radius: 50%; }
+.v10-local-agent-dot-ready { background: var(--accent-green); }
+.v10-local-agent-dot-warn { background: var(--accent-amber); }
+.v10-local-agent-dot-down { background: var(--accent-red); }

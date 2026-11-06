@@ -611,7 +611,7 @@ export function LayerGraphPanel({
               format="triples"
               options={graphOptions}
               viewConfig={graphViewConfig}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}
+              className="v10-graph-fill"
               onNodeClick={nodeLayerContext
                 ? (node: any) => onNodeClick?.({ ...node, trustLayer: nodeLayerContext })
                 : onNodeClick}
