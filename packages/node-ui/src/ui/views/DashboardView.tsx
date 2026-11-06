@@ -633,7 +633,6 @@ export function DashboardView() {
       <div className="v10-dash-stats v10-dash-stats-3">
         <StatCard
           label="My Context Graphs"
-          className="v10-stat-tight"
           icon={<Share2 size={14} aria-hidden />}
           value={cgsResolving ? <span className="v10-stat-loading">loading…</span> : graphCount}
           sub={CG_DEFINITION}
@@ -649,7 +648,6 @@ export function DashboardView() {
         <StatCard
           label="Context Graph size"
           icon={<TrendingUp size={14} aria-hidden />}
-          className="v10-stat-tight"
         >
           {!agg.hasCgs ? (
             <div className="v10-stat-empty">—</div>

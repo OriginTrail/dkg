@@ -107,7 +107,7 @@ select.input {
 .tx-link-icon:hover { opacity: 1; color: var(--text-primary); }
 
 /* Stat cards */
-.stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:16px 18px;flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color var(--motion-base),box-shadow var(--motion-base)}
+.stat-card{background:var(--bg-surface);border:1px solid var(--border-default);padding:var(--pad-compact);flex:1;min-width:0;position:relative;overflow:hidden;transition:border-color var(--motion-base),box-shadow var(--motion-base)}
 .stat-card:hover{border-color:var(--border-strong);box-shadow: var(--shadow-sm)}
 .stat-card .accent{position:absolute;top:0;left:0;right:0;height:2px}
 .stat-label{font-size: var(--fs-control);color:var(--text-secondary);font-weight:600;letter-spacing: var(--ls-caps);text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:6px}

@@ -88,7 +88,6 @@
 /* Tighter padding for content-heavy stat cards (Size + My Context
    Graphs) so the inner bar's right edge aligns across both cards
    (round-3 feedback). */
-.stat-card.v10-stat-tight { padding: 16px 18px; }
 /* Loading placeholder used in every stat card's value slot AND in the
    Size card's inline empty/loading area. Reset the inherited
    `.stat-value` (28px/700) so "loading…" reads as a quiet placeholder

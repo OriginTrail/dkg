@@ -31,6 +31,7 @@ import { Loading } from '../components/ds/Loading.js';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { formatDateTime } from '../lib/format.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
+import { StatTile } from '../components/ds/StatTile.js';
 
 const CANCELLED_COLOR = 'var(--border-strong)';
 
@@ -210,26 +211,10 @@ function ReplicationTab() {
 
       {/* KPI cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-          <div className="card-title">Promotions</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>Landed in Verifiable Memory this period</div>
-        </div>
-        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-          <div className="card-title">Success rate</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{successPct}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>Promoted out of all attempts</div>
-        </div>
-        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-          <div className="card-title">Promotion latency</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>Median · 95th percentile {fmtMs(summary?.latencyP95Ms)}</div>
-        </div>
-        <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
-          <div className="card-title">Active fetches</div>
-          <div style={{ fontSize: 'var(--fs-display)', fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
-          <div style={{ fontSize: 'var(--fs-control)', color: 'var(--text-secondary)' }}>Missing Knowledge Assets pulled from Core nodes first</div>
-        </div>
+        <StatTile label="Promotions" value={summary?.promotes ?? '—'} sub="Landed in Verifiable Memory this period" />
+        <StatTile label="Success rate" value={successPct} sub="Promoted out of all attempts" />
+        <StatTile label="Promotion latency" value={fmtMs(summary?.latencyP50Ms)} sub={<>Median · 95th percentile {fmtMs(summary?.latencyP95Ms)}</>} />
+        <StatTile label="Active fetches" value={summary?.fetches ?? '—'} sub="Missing Knowledge Assets pulled from Core nodes first" />
       </div>
 
       {/* Timeline */}

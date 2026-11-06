@@ -80,7 +80,7 @@ Type sizes are whole pixels, here and in nOS. Every size is one of these tokens;
 | Token | px | Use |
 |---|---|---|
 | `--pad-card` | 16 | Cards and their header and body |
-| `--pad-compact` | 12 | Small cards in a dense grid: stat tiles, chart tiles |
+| `--pad-compact` | 12 | Small cards in a dense grid: `<StatTile label value sub />`, chart tiles |
 | `--pad-nested` | 10 / 14 | Anything inside a card |
 | `--pad-nested-sm` | 8 / 10 | Small nested rows and notes |
 

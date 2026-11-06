@@ -8,6 +8,7 @@ import { formatNodeRole } from '../lib/format.js';
 import { Link2, UsersRound } from 'lucide-react';
 import { EmptyState } from '../components/ContextGraphPrimitives.js';
 import { PageHeader } from '../components/ds/PageHeader.js';
+import { StatTile } from '../components/ds/StatTile.js';
 
 function ConnectionBadge({ agent: a }: { agent: any }) {
   if (a.connectionStatus === 'self') {
@@ -49,22 +50,10 @@ export function NetworkPage() {
       <PageHeader title="Network" />
 
       <div className="stats-grid">
-        <div className="stat-card ds-card">
-          <div className="stat-label">Total connections</div>
-          <div className="stat-value">{connData?.total ?? '—'}</div>
-        </div>
-        <div className="stat-card ds-card">
-          <div className="stat-label">Direct</div>
-          <div className="stat-value">{connData?.direct ?? '—'}</div>
-        </div>
-        <div className="stat-card ds-card">
-          <div className="stat-label">Relayed</div>
-          <div className="stat-value">{connData?.relayed ?? '—'}</div>
-        </div>
-        <div className="stat-card ds-card">
-          <div className="stat-label">Known agents</div>
-          <div className="stat-value">{agents.length}</div>
-        </div>
+        <StatTile label="Total connections" value={connData?.total ?? '—'} />
+        <StatTile label="Direct" value={connData?.direct ?? '—'} />
+        <StatTile label="Relayed" value={connData?.relayed ?? '—'} />
+        <StatTile label="Known agents" value={agents.length} />
       </div>
 
       <div className="card ds-card">
