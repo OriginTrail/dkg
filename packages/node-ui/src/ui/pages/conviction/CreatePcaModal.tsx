@@ -26,19 +26,20 @@ import {
   DeviceConfirmProgress,
   DiscountTierLadder,
   WalletConnectControl,
-  WalletPill,
   WalletRow,
   formatPcaTrac,
   discountTierForTrac,
   PrimaryNodePicker,
 } from '../../components/Pca/index.js';
 import { PcaModalShell } from './PcaModalShell.js';
+import { StatusGlyph } from '../../components/ds/Badge.js';
+import { formatBps } from '../../lib/format.js';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 type Phase = 'form' | 'creating' | 'success' | 'reconcile';
 
 function pctFromBps(bps: number): string {
-  const p = bps / 100;
-  return `${p % 1 === 0 ? p.toFixed(0) : p.toFixed(1)}%`;
+  return formatBps(bps);
 }
 
 const AMOUNT_RE = /^\d+(\.\d+)?$/;
@@ -334,7 +335,7 @@ export function CreatePcaModal({
       <PcaModalShell onClose={onClose} testId="pca-create-modal" title="Confirm before retrying">
         <div className="v10-modal-body">
           <div className="v10-modal-warning ds-card-nested" role="alert">
-            ⚠ Your create transaction was submitted but we lost confirmation. We’re checking the chain
+            <StatusGlyph tone="warning" /> Your create transaction was submitted but we lost confirmation. We’re checking the chain
             before letting you retry — creating again could lock a <strong>second</strong> commitment of
             TRAC.
           </div>
@@ -343,7 +344,7 @@ export function CreatePcaModal({
               <p>
                 Broadcast tx{' '}
                 {txUrl ? (
-                  <a href={txUrl} target="_blank" rel="noreferrer">{pendingTxHash} ↗</a>
+                  <a href={txUrl} target="_blank" rel="noreferrer">{pendingTxHash} <ExternalMark /></a>
                 ) : (
                   <code>{pendingTxHash}</code>
                 )}
@@ -356,7 +357,7 @@ export function CreatePcaModal({
               </p>
             ) : (
               <p className="v10-pca-create-warn ds-card-nested" role="alert">
-                ⚠ This browser blocked saving the safety marker (storage disabled or full), so this
+                <StatusGlyph tone="warning" /> This browser blocked saving the safety marker (storage disabled or full), so this
                 guard will <strong>NOT</strong> survive a refresh. Do not create again until you’ve
                 verified on the explorer whether a PCA was minted to{' '}
                 <code>{pendingOwner ?? 'your owner wallet'}</code>:
@@ -370,7 +371,7 @@ export function CreatePcaModal({
         </div>
         <div className="v10-modal-footer">
           {txUrl && (
-            <a className="v10-modal-btn ds-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer ↗</a>
+            <a className="v10-modal-btn ds-btn" href={txUrl} target="_blank" rel="noreferrer">Recheck on explorer <ExternalMark /></a>
           )}
           <button
             type="button"
@@ -430,11 +431,11 @@ export function CreatePcaModal({
             {result.txHash && (
               <p className="v10-pca-create-tx">
                 Tx{' '}
-                {txUrl ? <a href={txUrl} target="_blank" rel="noreferrer">{result.txHash} ↗</a> : <code>{result.txHash}</code>}
+                {txUrl ? <a href={txUrl} target="_blank" rel="noreferrer">{result.txHash} <ExternalMark /></a> : <code>{result.txHash}</code>}
               </p>
             )}
             <div className="v10-pca-create-warn ds-card-nested" role="alert">
-              ⚠ 0/100 wallets approved — this PCA discounts nothing yet. It covers nothing until you
+              <StatusGlyph tone="warning" /> 0/100 wallets approved — this PCA discounts nothing yet. It covers nothing until you
               approve this node’s operational (signing) wallets.
             </div>
           </div>
@@ -552,7 +553,7 @@ export function CreatePcaModal({
             sponsor PCA are actually "free"; dead ones get the separate warning below.) */}
         {b1.zeroSelfCoverage && (
           <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-b1-zero-coverage">
-            ⚠ All of this node’s operational wallets are already approved on other PCAs
+            <StatusGlyph tone="warning" /> All of this node’s operational wallets are already approved on other PCAs
             {b1.sponsorBound.length > 0 ? ' (you already get the discount free where those are live)' : ''}.
             This new account will <strong>NOT</strong> discount your own publishes. Create it only if
             you intend to approve publishing wallets for other nodes; otherwise getting added to an
@@ -578,7 +579,7 @@ export function CreatePcaModal({
             already owns. Independent of the sponsor-bound preview (fires even when sponsorBound===0). */}
         {!b1.zeroSelfCoverage && b1.ownBound.length > 0 && (
           <div className="v10-modal-warning ds-card-nested" role="status" data-testid="pca-b1-own-bound">
-            ⚠ {b1.ownBound.length} of this node’s wallet(s) are already approved on a PCA you own.
+            <StatusGlyph tone="warning" /> {b1.ownBound.length} of this node’s wallet(s) are already approved on a PCA you own.
             Self-coverage will <strong>move</strong> them — deregister from that account, then approve
             on the new one. The old account’s committed TRAC stays locked until its own expiry and
             would then cover nothing, so only proceed if you’re replacing it.
@@ -622,7 +623,7 @@ export function CreatePcaModal({
           )}
           {belowMinTier && (
             <div className="v10-modal-warning ds-card-nested">
-              ⚠ Under 25,000 TRAC earns a 0% discount — you’d lock TRAC for no benefit.
+              <StatusGlyph tone="warning" /> Under 25,000 TRAC earns a 0% discount — you’d lock TRAC for no benefit.
             </div>
           )}
           <DiscountTierLadder committedTrac={amountValid ? amountNum : null} />

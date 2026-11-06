@@ -10,6 +10,8 @@ import { useMemoryGraphEvents } from '../../../hooks/useNodeEvents.js';
 import { truncateMiddle } from '../../../lib/truncate.js';
 import { LAYER_CONFIG } from '../helpers.js';
 import { EmptyState, toneForLayer } from '../../../components/ContextGraphPrimitives.js';
+import { FileText, RefreshCw } from 'lucide-react';
+import { StatusGlyph } from '../../../components/ds/Badge.js';
 
 export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = false, onComplete, scrollKey }: {
   contextGraphId: string;
@@ -37,6 +39,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   useMemoryGraphEvents(contextGraphId, loadPage, { layers: [layer] });
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  const [resultWarn, setResultWarn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handlePromote = useCallback(async (assertion: AssertionInfo) => {
@@ -46,6 +49,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     // is produced by the daemon and uniquely identifies the row.
     setBusy(assertion.graphUri);
     setResult(null);
+    setResultWarn(false);
     setError(null);
     try {
       // No client-side CG pre-registration: atomic WM→SWM sharing is off-chain,
@@ -71,9 +75,10 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // Publish THIS assertion as one Knowledge Asset (Design B, any entity
         // count) via the direct canonical publish API, preserving 207 partial handling.
         const res = await knowledgeAssetPublish(contextGraphId, assertion.name, assertion.subGraph ? { subGraphName: assertion.subGraph } : {});
+        setResultWarn(Boolean(res.contextGraphError));
         setResult(
           res.contextGraphError
-            ? `Published ${assertion.name} on-chain — ⚠ ${partialPublishWarning(res.contextGraphError)}`
+            ? `Published ${assertion.name} on-chain — ${partialPublishWarning(res.contextGraphError)}`
             : `Published ${assertion.name} to Verifiable Memory`,
         );
       }
@@ -90,6 +95,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   const handlePromoteAll = useCallback(async () => {
     setBusy('__all__');
     setResult(null);
+    setResultWarn(false);
     setError(null);
     // Issue #864 (Codex review on #874) — track the in-flight
     // assertion so mid-loop failures surface "<name>: …" instead of
@@ -136,13 +142,15 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         // handling, uniform with the other batch-publish CTAs (carries the partial detail).
         const r = await publishAssertionsToVm(contextGraphId, bulkAssertions);
         const unknownNote = outcomeUnknownPublishNote(r);
-        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
+        const unknownTail = unknownNote ? ` — ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} could not be published)` : '';
-          const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          const partialTail = r.partial > 0 ? ` — ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
+          setResultWarn(r.partial > 0 || Boolean(unknownNote));
           setResult(`Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`);
         } else if (unknownNote && r.failures.length === 0) {
-          setResult(`⚠ ${unknownNote}`);
+          setResultWarn(true);
+          setResult(unknownNote);
         } else {
           throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
         }
@@ -163,16 +171,16 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     return (
       <div className="v10-layer-empty-shell" style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
         <EmptyState
+          busy
           compact
           tone={toneForLayer(layer)}
-          icon={LAYER_CONFIG[layer].icon}
-          title="Loading assertions..."
+          title="Loading assertions…"
         />
       </div>
     );
   }
 
-  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}>Retry</button></div>;
+  if (loadError) return <div role="alert" style={scrollRootStyle}>Could not load assertions: {loadError} <button onClick={refresh}><RefreshCw size={12} />Retry</button></div>;
 
   if (!assertions.length && !page?.nextCursor && pageIndex === 0) {
     return (
@@ -191,8 +199,8 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  const actionLabel = layer === 'wm' ? 'Share Complete KA → Shared' : 'Publish to VM';
-  const actionAllLabel = layer === 'wm' ? 'Share all complete KAs → Shared' : 'Publish all to Verifiable Memory';
+  const actionLabel = layer === 'wm' ? 'Share complete Knowledge Asset' : 'Publish to Verifiable Memory';
+  const actionAllLabel = layer === 'wm' ? 'Share all complete Knowledge Assets' : 'Publish all to Verifiable Memory';
   const bulkVisibleAssertionCount = assertions.filter(
     assertion => assertion.subGraph !== 'meta' || !assertion.name.startsWith('query-catalog-'),
   ).length;
@@ -200,7 +208,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
   return (
     <div style={scrollRootStyle} data-cg-scroll-key={scrollKey}>
       <div style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)' }}>
-        <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
+        <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>Page {pageIndex + 1} · {assertions.length} assertion{assertions.length !== 1 ? 's' : ''}</span>
         {bulkVisibleAssertionCount > 0 && (
           <button
             className={`v10-layer-expand-footer-btn ds-btn ds-sm ${layer === 'wm' ? 'promote ds-swm' : 'publish ds-vm'}`}
@@ -216,28 +224,28 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
       {result && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-success)' }}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: resultWarn ? 'var(--text-warning)' : 'var(--text-success)' }}
         >
-          ✓ {result}
+          <StatusGlyph tone={resultWarn ? 'warning' : 'success'} /> {result}
         </div>
       )}
       {error && (
         <div
           data-testid={layer === 'wm' ? 'assertion-promote-result' : 'assertion-publish-result'}
-          style={{ padding: '6px 16px', fontSize: 11, color: 'var(--text-danger)' }}
+          style={{ padding: '6px 16px', fontSize: 'var(--fs-label)', color: 'var(--text-danger)' }}
         >
-          ✕ {error}
+          <StatusGlyph tone="danger" /> {error}
         </div>
       )}
       {assertions.map(a => (
         <div key={a.graphUri} className="v10-item-row" data-testid="assertion-list-row">
-          <span className="v10-item-icon">▤</span>
+          <span className="v10-item-icon"><FileText size={14} /></span>
           <div className="v10-item-info">
-            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>{a.name}</div>
+            <div className="v10-item-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)' }}>{a.name}</div>
             {a.reservedUal && (
               <div
                 className="v10-item-ual"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', opacity: 0.7, wordBreak: 'break-all', marginTop: 1 }}
                 title={a.reservedUal}
               >
                 {a.reservedUal}
@@ -271,7 +279,7 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
         <button disabled={!page?.nextCursor || busy !== null} onClick={() => {
           setPaging({ scope, cursors: [...cursors.slice(0, pageIndex + 1), page!.nextCursor], index: pageIndex + 1 });
         }}>Next assertions</button>
-        <button disabled={busy !== null} onClick={refresh}>Refresh assertions</button>
+        <button disabled={busy !== null} onClick={refresh}><RefreshCw size={12} />Refresh assertions</button>
       </nav>
     </div>
   );

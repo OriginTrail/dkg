@@ -53,7 +53,7 @@ export function IdentityWalletRoleEditor({
   const empty = !value.trim();
   return (
     <div className="v10-identity-wallet-card ds-card" data-testid={`${role}-wallet-editor`}>
-      <h4>{meta.title}</h4>
+      <h3>{meta.title}</h3>
       <p>{meta.description}</p>
       <label htmlFor={inputId}>{meta.label}</label>
       <input

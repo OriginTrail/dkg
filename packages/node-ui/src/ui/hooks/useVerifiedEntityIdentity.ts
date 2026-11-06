@@ -21,8 +21,9 @@
  *   • publisherPeerId— prov:wasAttributedTo from the op
  *   • opId           — short id parsed out of the op URI (for display)
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { executeQuery } from '../api.js';
+import { truncateAddress } from '../lib/format.js';
 
 const DKG_NS  = 'http://dkg.io/ontology/';
 const PROV_NS = 'http://www.w3.org/ns/prov#';
@@ -186,7 +187,5 @@ export function agentFromPeerId(
 
 /** Truncate 0x… / peer-id to "abcd…ef12" for compact display. */
 export function truncateId(s: string | null | undefined, head = 6, tail = 4): string {
-  if (!s) return '';
-  if (s.length <= head + tail + 2) return s;
-  return `${s.slice(0, head)}…${s.slice(-tail)}`;
+  return s ? truncateAddress(s, head, tail) : '';
 }

@@ -6,7 +6,10 @@ import {
   IDENTITY_WALLET_ACTION_META,
   useIdentityWalletManagement,
 } from './useIdentityWalletManagement.js';
-import { Badge } from '../../components/ds/Badge.js';
+import { Badge, StatusGlyph } from '../../components/ds/Badge.js';
+import { Loading } from '../../components/ds/Loading.js';
+import { RefreshCw } from 'lucide-react';
+import { ExternalMark } from '../../components/ds/ExternalMark.js';
 
 /**
  * Hardware-wallet management for the node's on-chain identity keys.
@@ -90,12 +93,12 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       </div>
 
       {query.status === 'loading' && (
-        <p className="v10-identity-wallet-status" role="status">Loading node identity wallets…</p>
+        <Loading label="Loading node identity wallets…" />
       )}
       {query.status === 'error' && (
         <p className="v10-modal-warning ds-card-nested" role="alert">
           Couldn&apos;t load identity wallet management: {query.message}.{' '}
-          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={refreshQuery}><RefreshCw size={12} />Retry</button>
         </p>
       )}
       {data && !data.hasProfile && (
@@ -117,7 +120,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {summaryState.status === 'error' && (
         <p className="v10-modal-warning ds-card-nested" role="alert">
           Couldn&apos;t verify identity keys: {summaryState.message}{' '}
-          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact ds-btn ds-sm" onClick={reloadSummary}><RefreshCw size={12} />Retry</button>
         </p>
       )}
 
@@ -157,7 +160,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={confirmRemoval} disabled={transactionPending}>
             Yes, remove
           </button>
-          <button type="button" className="v10-identity-wallet-btn ds-btn" onClick={cancelRemoval} disabled={transactionPending}>
+          <button autoFocus type="button" className="v10-identity-wallet-btn ds-btn" onClick={cancelRemoval} disabled={transactionPending}>
             Cancel
           </button>
         </div>
@@ -174,9 +177,9 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {completed && (
         <div className="v10-identity-wallet-status" role="status" data-testid="identity-wallet-result">
           {completed.confirmed
-            ? `✓ ${IDENTITY_WALLET_ACTION_META[completed.action].label}: ${completed.address}. `
+            ? <><StatusGlyph tone="success" /> {`${IDENTITY_WALLET_ACTION_META[completed.action].label}: ${completed.address}. `}</>
             : `Transaction broadcast for ${completed.address}, but confirmation is unknown. Check it before retrying. `}
-          {resultUrl && <a href={resultUrl} target="_blank" rel="noreferrer">View transaction ↗</a>}
+          {resultUrl && <a href={resultUrl} target="_blank" rel="noreferrer">View transaction <ExternalMark /></a>}
           {completed.confirmed && IDENTITY_WALLET_ACTION_META[completed.action].role === 'operational' && (
             <span> Restart the node before relying on the updated operational signer rotation.</span>
           )}

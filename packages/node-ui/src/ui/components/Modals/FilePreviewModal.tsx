@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { fetchExtractionStatus, fileUrl, authHeaders, type ExtractionStatus } from '../../api.js';
 import { useModalDismiss } from './useModalDismiss.js';
+import { X } from 'lucide-react';
+import { Loading } from '../ds/Loading.js';
+import { formatDateTime } from '../../lib/format.js';
 
 interface FilePreviewModalProps {
   open: boolean;
@@ -116,15 +119,15 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
       >
         <div className="v10-modal-header">
           <div id="dkg-file-preview-title" className="v10-modal-title">{assertionName}</div>
-          <button type="button" className="v10-modal-close ds-btn ds-ghost ds-icon" onClick={onClose} aria-label="Close file preview" title="Close (Esc)">×</button>
+          <button type="button" className="v10-modal-close ds-btn ds-ghost ds-icon" onClick={onClose} aria-label="Close file preview" title="Close (Esc)"><X size={14} /></button>
         </div>
 
-        {loading && <div className="v10-file-preview-loading">Loading file preview...</div>}
+        {loading && <Loading label="Loading file preview…" block />}
 
         {error && (
           <div className="v10-file-preview-error ds-card-nested">
             <p>{error}</p>
-            <p style={{ fontSize: 11, marginTop: 4 }}>
+            <p style={{ fontSize: 'var(--fs-label)', marginTop: 4 }}>
               File preview requires the extraction status to still be cached on the node.
               If the node was restarted, the preview metadata may be unavailable.
             </p>
@@ -145,7 +148,7 @@ export function FilePreviewModal({ open, onClose, assertionName, contextGraphId,
               </span>
               {status.completedAt && (
                 <span className="v10-file-preview-meta-item">
-                  {new Date(status.completedAt).toLocaleString()}
+                  {formatDateTime(status.completedAt)}
                 </span>
               )}
             </div>

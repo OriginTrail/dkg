@@ -1,5 +1,7 @@
 import React, { useId, useMemo, useState } from 'react';
 import { formatWeiToTrac } from './format.js';
+import { Check, RefreshCw } from 'lucide-react';
+import { Loading } from '../ds/Loading.js';
 
 // The picker's prop type is intentionally separate from the API's `DesignatableNode`: the picker
 // doesn't display `ask`, but the API always returns it (and requires it). This type is a structural
@@ -136,7 +138,7 @@ export function PrimaryNodePicker({
       </p>
 
       {loading ? (
-        <p className="v10-pca-create-hint" role="status">Loading staked nodes…</p>
+        <Loading label="Loading staked nodes…" />
       ) : error ? (
         <div className="v10-modal-warning ds-card-nested" role="alert" data-testid="pca-primary-node-error">
           Couldn’t load the staked-node list — a primary node is required to create.{' '}
@@ -146,7 +148,7 @@ export function PrimaryNodePicker({
             data-testid="pca-primary-node-retry"
             onClick={onRetry}
           >
-            Retry
+            <RefreshCw size={12} />Retry
           </button>
           {/* Surface the best-effort default (core fell back to its own id) so it isn't
               invisible while the list is down. */}
@@ -224,7 +226,7 @@ export function PrimaryNodePicker({
                       <span className="v10-pca-node-picker-stake">
                         {formatWeiToTrac(n.stake)} TRAC staked
                       </span>
-                      {isOwn && <span className="v10-pca-node-picker-own">✓ this node</span>}
+                      {isOwn && <span className="v10-pca-node-picker-own"><Check size={12} /> this node</span>}
                     </li>
                   );
                 })}

@@ -1,5 +1,6 @@
 import React from 'react';
 import { WalletRow } from '../Wallet/WalletRow.js';
+import { ExternalMark } from '../ds/ExternalMark.js';
 
 const eq = (a?: string, b?: string) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 
@@ -87,7 +88,7 @@ export function PcaAgentList({
                         rel="noreferrer"
                         aria-label={`View ${addr} on explorer`}
                       >
-                        ↗
+                        <ExternalMark />
                       </a>
                     )}
                     <button

@@ -122,7 +122,7 @@ describe('PrimaryNodePicker', () => {
     const { container, unmount } = await render(base({ ownIdentityId: '22', role: 'core' }));
     await focus(container.querySelector('[data-testid="pca-primary-node-search"]')!);
     const ownRow = opts(container).find((o) => o.textContent?.includes('#22'))!;
-    expect(ownRow.textContent).toContain('✓ this node');
+    expect(ownRow.textContent).toContain('this node');
     await unmount();
   });
 

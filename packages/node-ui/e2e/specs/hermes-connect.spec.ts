@@ -31,7 +31,7 @@ test.describe('Local-agent connect surface (real node)', () => {
     // Another Agent" surface is NOT the default view. Explicitly select the "+"
     // add-agent tab so these specs assert the connect surface deterministically
     // regardless of pre-existing local-agent state.
-    const addTab = page.getByRole('tab', { name: 'Add another integrated agent' });
+    const addTab = page.getByRole('button', { name: 'Add another integrated agent' });
     await addTab.click({ timeout: 15_000 });
   });
 

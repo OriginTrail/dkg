@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { useLayoutStore } from './layout.js';
 
 /**
  * Centre tabs — the things you're working on (DESIGN.md · Navigation).
@@ -41,6 +42,9 @@ const RECENT_LIMIT = 10;
 
 interface Persisted { tabs: CenterTab[]; activeTabId: string; recentlyClosed: CenterTab[] }
 
+/** Saved tabs for places that no longer exist. */
+const RETIRED_TAB_IDS = new Set(['agent-hub']);
+
 /**
  * The one decoder for a saved tab record (open and recently closed alike).
  * Builds a complete `CenterTab` from what was stored: a non-empty string id
@@ -51,7 +55,7 @@ interface Persisted { tabs: CenterTab[]; activeTabId: string; recentlyClosed: Ce
 export function decodePersistedTab(value: unknown): CenterTab | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const { id, label, icon } = value as Record<string, unknown>;
-  if (typeof id !== 'string' || id === '' || id === DASHBOARD_TAB.id || typeof label !== 'string') return null;
+  if (typeof id !== 'string' || id === '' || id === DASHBOARD_TAB.id || RETIRED_TAB_IDS.has(id) || typeof label !== 'string') return null;
   return { id, label, closable: true, ...(typeof icon === 'string' && icon !== '' ? { icon } : {}) };
 }
 
@@ -125,6 +129,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   recentlyClosed: initial.recentlyClosed,
 
   openTab: (tab) => {
+    useLayoutStore.getState().setRightExpanded(false); // it covers the centre, so going anywhere brings it back
     const { tabs, activeTabId, recentlyClosed } = get();
     const existing = tabs.find((t) => t.id === tab.id);
     if (existing) {
@@ -159,6 +164,7 @@ export const useTabsStore = create<TabsState>((set, get) => ({
   },
 
   setActiveTab: (id) => {
+    useLayoutStore.getState().setRightExpanded(false); // it covers the centre, so going anywhere brings it back
     if (get().tabs.some((t) => t.id === id)) set({ activeTabId: id });
   },
 

@@ -10,12 +10,19 @@
 import React, { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
-import { Badge, Count, LayerBadge, type BadgeTone } from './components/ds/Badge.js';
+import { Badge, Count, LayerBadge, type BadgeTone, LayerGlyph, StatusGlyph } from './components/ds/Badge.js';
 import { Button, type ButtonVariant } from './components/ds/Button.js';
+import { Toggle } from './components/ds/Toggle.js';
 import { ContextGraphChip } from './components/ds/ContextGraphChip.js';
-import { AgentChip } from './components/AgentChip.js';
+import { AgentChip, AgentTitle } from './components/AgentChip.js';
 import { AgentDot, AgentDotStack } from './components/AgentDot.js';
 import { agentColorForUri, type AgentSummary } from './hooks/useAgents.js';
+import { BadgePercent, ChevronRight, Copy, RefreshCw, X } from 'lucide-react';
+import { Loading } from './components/ds/Loading.js';
+import { EmptyState } from './components/ContextGraphPrimitives.js';
+import { StateMatrix } from './design-system-states.js';
+import { PageHeader } from './components/ds/PageHeader.js';
+import { Breadcrumbs } from './components/ds/Breadcrumbs.js';
 
 type Theme = 'dark' | 'light';
 
@@ -138,7 +145,7 @@ const App: React.FC = () => {
       </header>
 
       <nav className="dsp-toc" aria-label="Sections">
-        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Inputs'].map((s) => (
+        {['Colour', 'Type', 'Shape', 'Buttons', 'Labels', 'Navigation', 'Things you open', 'Surfaces', 'Toggle', 'Icons', 'Feedback', 'Inputs', 'States'].map((s) => (
           <a key={s} href={`#${s.toLowerCase().replace(/\s+/g, '-')}`}>{s}</a>
         ))}
       </nav>
@@ -235,9 +242,9 @@ const App: React.FC = () => {
           </Row>
         ))}
         <Row label="Icon" note="square; always give it an aria-label">
-          <Button variant="ghost" icon size="sm" aria-label="Close">×</Button>
+          <Button variant="ghost" icon size="sm" aria-label="Close"><X size={14} /></Button>
           <Button variant="ghost" icon aria-label="More">⋯</Button>
-          <Button icon aria-label="Refresh">↻</Button>
+          <Button icon aria-label="Refresh"><RefreshCw size={14} /></Button>
         </Row>
       </Section>
 
@@ -255,6 +262,12 @@ const App: React.FC = () => {
         <Row label="Kind" note="entity types: neutral pill, the kind's colour as a dot">
           <Badge tone="kind" kindColor="var(--data-1)">Decision</Badge>
           <Badge tone="kind" kindColor="var(--data-3)">Task</Badge>
+        </Row>
+        <Row label="Breadcrumbs" note="the way back from a deep view; top-level pages have none">
+          <Breadcrumbs items={[{ label: 'Agent Context', onClick: () => undefined }, { label: 'Shared Working Memory' }]} />
+        </Row>
+        <Row label="PageHeader" note="the top of every page, inside ds-page: one h1, a description, an optional badge">
+          <div style={{ width: '100%' }}><PageHeader title="Publisher Conviction" description="One line on what this page is for." badge={<Badge tone="role" size="sm">Node role: Core</Badge>} /></div>
         </Row>
         <Row label="Count" note="attention = needs your action (amber, never red)">
           <Count value={12} /><Count value={3} tone="attention" /><Count value={128} tone="quiet" />
@@ -288,10 +301,11 @@ const App: React.FC = () => {
           <ContextGraphChip id="cg:climate-science" name="Climate science" onOpen={() => undefined} />
           <ContextGraphChip id="cg:supply-chain-eu" name="EU supply chain" />
         </Row>
-        <Row label="Agent" note="<AgentChip size>: 24 / 28 / 40">
+        <Row label="Agent" note="<AgentChip size>: 24 / 28 / 40. <AgentTitle> on an agent's own page">
           <AgentChip agent={SAMPLE_AGENT} size="sm" onOpenAgent={() => undefined} />
           <AgentChip agent={SAMPLE_AGENT} size="md" onOpenAgent={() => undefined} />
           <AgentChip agent={SAMPLE_AGENT} size="lg" onOpenAgent={() => undefined} />
+          <AgentTitle agent={SAMPLE_AGENT} fallbackUri={SAMPLE_AGENT.uri} />
         </Row>
         <Row label="Agent avatars" note="<AgentDot>, <AgentDotStack>">
           <AgentDot uri="did:dkg:agent:0x7a3f" label="Claude Code" size={20} />
@@ -313,6 +327,40 @@ const App: React.FC = () => {
         </div>
       </Section>
 
+      <Section id="toggle" title="Toggle" lead="An on/off setting that takes effect straight away.">
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
+          <Toggle checked={false} aria-label="Off example" />
+          <Toggle checked aria-label="On example" />
+          <Toggle checked busy aria-label="Saving example" />
+        </div>
+      </Section>
+
+      <Section id="icons" title="Icons" lead="Lucide for actions and things, LayerGlyph for memory layers, StatusGlyph for status. One icon per job.">
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', fontSize: 'var(--fs-control)' }}>
+          <span><X size={14} /> Close</span>
+          <span><RefreshCw size={14} /> Refresh</span>
+          <span><Copy size={14} /> Copy</span>
+          <span><ChevronRight size={14} /> Expand</span>
+          <span><BadgePercent size={14} /> Discount</span>
+          <span><LayerGlyph layer="wm" /> Working</span>
+          <span><LayerGlyph layer="swm" /> Shared</span>
+          <span><LayerGlyph layer="vm" /> Verifiable</span>
+          <span><StatusGlyph tone="success" /> Success</span>
+          <span><StatusGlyph tone="warning" /> Warning</span>
+          <span><StatusGlyph tone="danger" /> Danger</span>
+          <span><StatusGlyph tone="pending" /> Pending</span>
+        </div>
+      </Section>
+
+      <Section id="feedback" title="Feedback" lead="Loading, empty, error and disabled: one look each.">
+        <div style={{ display: 'grid', gap: 12 }}>
+          <Loading label="Loading peers…" />
+          <EmptyState compact inline title="No active connections" description="Connections will appear here as your node links with peers." />
+          <EmptyState compact tone="danger" title="Could not load peers" description="The node didn't respond." actions={[{ label: 'Retry', onClick: () => undefined }]} />
+          <div><Button disabled>Disabled</Button></div>
+        </div>
+      </Section>
+
       <Section id="inputs" title="Inputs" lead="Same corners and heights as the buttons beside them; one focus ring.">
         <Row label="Default · 32">
           <input className="ds-input" placeholder="Search entities" aria-label="Search entities" />
@@ -326,6 +374,10 @@ const App: React.FC = () => {
         <Row label="Text area">
           <textarea className="ds-input dsp-textarea" placeholder="SELECT ?s ?p ?o WHERE { … }" aria-label="Query" />
         </Row>
+      </Section>
+
+      <Section id="states" title="States" lead="Every control in every state it has, in the theme chosen above. Hover and focus cells use the app's own rules. A dash means the control has no such state.">
+        <StateMatrix />
       </Section>
     </div>
   );
@@ -363,6 +415,16 @@ html, body { background: var(--bg-root); color: var(--text-primary); font-family
 .dsp-nested-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .dsp-nested { background: var(--bg-panel); gap: 4px; padding: 12px; }
 .dsp-textarea { width: min(100%, 480px); min-height: 72px; padding: 8px 10px; font-family: var(--font-mono); }
+.dsp-matrix { border-collapse: collapse; width: 100%; font-size: var(--fs-control); }
+.dsp-matrix th { padding: 8px 12px 8px 0; text-align: left; font-weight: 500; color: var(--text-secondary); white-space: nowrap; }
+.dsp-matrix thead th { font-size: var(--fs-label); color: var(--text-tertiary); }
+.dsp-matrix tbody th { display: grid; gap: 2px; }
+.dsp-matrix tbody th b { font-weight: 500; }
+.dsp-matrix tbody th span { color: var(--text-tertiary); font-size: var(--fs-label); white-space: normal; max-width: 180px; }
+.dsp-matrix td { padding: 8px 12px 8px 0; min-width: 120px; vertical-align: middle; }
+.dsp-matrix tr { border-top: 1px solid var(--border-subtle); }
+.dsp-matrix .ds-input { width: 112px; }
+.dsp-none { color: var(--text-tertiary); }
 @media (max-width: 720px) { .dsp-row, .dsp-type { grid-template-columns: 1fr; gap: 8px; } }
 `;
 

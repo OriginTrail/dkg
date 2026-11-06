@@ -33,7 +33,7 @@ vi.mock('../src/ui/components/Shell/PanelRight.js', () => ({
   PanelRight: () => React.createElement('aside', { 'data-testid': 'right-panel' }),
 }));
 vi.mock('../src/ui/pages/Network.js', () => ({
-  NetworkPage: () => React.createElement('section', { 'data-testid': 'network-page' }),
+  NetworkConnections: () => React.createElement('section', { 'data-testid': 'network-page' }),
 }));
 
 const { Root } = await import('../src/ui/Root.js');
@@ -83,7 +83,7 @@ afterEach(async () => {
 describe('token prompt in the dashboard route tree', () => {
   it.each([
     ['/ui/', 'center-panel'],
-    ['/ui/network', 'network-page'],
+    ['/ui/network', 'center-panel'],
   ])('asks for the API token at %s when the node rejects the page', async (url, pageTestId) => {
     const container = await renderAt(url, 401);
     const page = () => container.querySelector(`[data-testid="${pageTestId}"]`);
@@ -95,7 +95,7 @@ describe('token prompt in the dashboard route tree', () => {
 
   it.each([
     ['/ui/', 'center-panel'],
-    ['/ui/network', 'network-page'],
+    ['/ui/network', 'center-panel'],
   ])('shows no prompt at %s when the page was served with a token', async (url, pageTestId) => {
     window.__DKG_TOKEN__ = 'served-token';
     const container = await renderAt(url, 401);

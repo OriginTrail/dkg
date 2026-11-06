@@ -124,6 +124,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
       useLayoutStore.setState({
         leftSectionMyProjectsOpen: true,
+        leftSectionPublicOpen: true,
         leftSectionIntegrationsOpen: false,
       });
     });
@@ -198,10 +199,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
     expect(container.textContent).not.toContain('No Context Graphs yet');
     expect(container.textContent).not.toContain('No Context Graphs in this view yet.');
-    const modes = container.querySelectorAll<HTMLButtonElement>('.v10-tree-mode-btn');
-    await act(async () => { modes[1].click(); });
-    expect(container.textContent).not.toContain('No discovered public Context Graphs yet');
-    await act(async () => { modes[0].click(); });
+    expect(container.textContent).not.toContain('Public Context Graphs appear here');
     const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry');
     expect(retry).toBeTruthy();
     await act(async () => { retry!.click(); });
@@ -241,19 +239,26 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).toContain('My First CG');
   });
 
-  it('renders both section chevron headers with the v10-peer-group pattern', async () => {
+  it('offers one restore button when Context Graphs are hidden', async () => {
+    localStorage.setItem('v10:hiddenProjectIds', JSON.stringify(['cg-1']));
+    const { container } = await renderPanel();
+    expect(container.querySelectorAll('.v10-tree-show-hidden').length).toBe(1);
+    localStorage.removeItem('v10:hiddenProjectIds');
+  });
+
+  it('renders all three section chevron headers with the v10-peer-group pattern', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');
-    expect(headers.length).toBe(2);
+    expect(headers.length).toBe(3);
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toEqual(['My Context Graphs', 'Integrations']);
+    expect(labels).toEqual(['My Context Graphs', 'Public Context Graphs', 'Integrations']);
   });
 
   it('expands "My Context Graphs" by default and keeps "Integrations" collapsed', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');
     const myCgHeader = headers[0] as HTMLButtonElement;
-    const integrationsHeader = headers[1] as HTMLButtonElement;
+    const integrationsHeader = headers[2] as HTMLButtonElement;
     expect(myCgHeader.getAttribute('aria-expanded')).toBe('true');
     expect(integrationsHeader.getAttribute('aria-expanded')).toBe('false');
     // My CG body should be in the DOM (chevron expanded class + a row).
@@ -272,7 +277,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
     const headers = container.querySelectorAll('.v10-peer-group-header');
     await act(async () => {
-      (headers[1] as HTMLButtonElement).click();
+      (headers[2] as HTMLButtonElement).click();
     });
     expect(useLayoutStore.getState().leftSectionIntegrationsOpen).toBe(true);
     // The persist() helper debounces with a 150ms setTimeout; wait it out
@@ -287,7 +292,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('still renders the "My Context Graphs" header when the membership filter yields zero (with empty-body hint)', async () => {
     // qa-lead Pass 1 #2: at stage>=2 with CGs that all live in the
-    // Context Oracle view (no callerInvolved match), the sidebar must
+    // Public Context Graphs view (no callerInvolved match), the sidebar must
     // still surface the My CG header so the user has a visible anchor —
     // otherwise it shrinks to a lone collapsed "Integrations" toggle.
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
@@ -308,6 +313,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
       useLayoutStore.setState({
         leftSectionMyProjectsOpen: true,
+        leftSectionPublicOpen: true,
         leftSectionIntegrationsOpen: false,
       });
     });
@@ -331,17 +337,12 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('explains that discovered public graphs are browseable before subscription', async () => {
     const { container } = await renderPanel();
-    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
 
-    await act(async () => {
-      (modeButtons[1] as HTMLButtonElement).click();
-    });
-
-    expect(container.textContent).toContain('Public graphs appear here as soon as your node discovers them');
+    expect(container.textContent).toContain('Public Context Graphs appear here as your node discovers them');
     expect(container.textContent).toContain('subscribe by ID');
   });
 
-  it('renders a successfully synchronized public graph in the Context Oracle', async () => {
+  it('renders a successfully synchronized public graph in Public Context Graphs', async () => {
     const { container } = await renderPanel();
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     act(() => {
@@ -359,10 +360,6 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
     });
 
-    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
-    await act(async () => {
-      (modeButtons[1] as HTMLButtonElement).click();
-    });
 
     expect(container.textContent).toContain('Public Ready Graph');
   });
@@ -399,10 +396,6 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
     });
 
-    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
-    await act(async () => {
-      (modeButtons[1] as HTMLButtonElement).click();
-    });
 
     const browseButton = container.querySelector(
       'button[aria-label="Browse Passive Public Graph"]',
@@ -435,7 +428,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     act(() => {
       useProjectsStore.setState({ loading: false, inventoryError: null, inventoryLoaded: false, activeProjectId: null });
       useTabsStore.setState({ tabs: [{ id: 'dashboard', label: 'Dashboard', closable: false }], activeTabId: 'dashboard' });
-      useLayoutStore.setState({ leftSectionMyProjectsOpen: true, leftSectionIntegrationsOpen: false });
+      useLayoutStore.setState({ leftSectionMyProjectsOpen: true, leftSectionPublicOpen: true, leftSectionIntegrationsOpen: false });
     });
     function Routing() { useShellRouting(); return null; }
     const container = document.createElement('div');
@@ -462,15 +455,12 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await flush();
 
     // Browse a catalogue graph: its tab opens, and the chat target stays empty.
-    await act(async () => { (container.querySelectorAll('.v10-tree-mode-btn')[1] as HTMLButtonElement).click(); });
-    await flush();
     await act(async () => { (container.querySelector('button[aria-label="Browse Passive Public Graph"]') as HTMLButtonElement).click(); });
     await flush();
     expect(useTabsStore.getState().activeTabId).toBe('project:public-passive');
     expect(useProjectsStore.getState().activeProjectId).toBeNull();
 
     // Pick a working graph in the sidebar: it becomes the target.
-    await act(async () => { (container.querySelectorAll('.v10-tree-mode-btn')[0] as HTMLButtonElement).click(); });
     const mine = [...container.querySelectorAll<HTMLElement>('.v10-tree-section-header')].find(el => el.textContent?.includes('My Working Graph'))!;
     await act(async () => { mine.click(); });
     await flush();
@@ -486,7 +476,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');
     const myCgHeader = headers[0] as HTMLButtonElement;
-    const integrationsHeader = headers[1] as HTMLButtonElement;
+    const integrationsHeader = headers[2] as HTMLButtonElement;
     const myCgControls = myCgHeader.getAttribute('aria-controls');
     const integrationsControls = integrationsHeader.getAttribute('aria-controls');
     expect(myCgControls).toBeTruthy();
@@ -514,7 +504,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     try {
       const { container } = await renderPanel();
       const headers = container.querySelectorAll('.v10-peer-group-header');
-      const integrationsHeader = headers[1] as HTMLButtonElement;
+      const integrationsHeader = headers[2] as HTMLButtonElement;
 
       // Open Integrations — the body mounts and fires its first fetch.
       await act(async () => {

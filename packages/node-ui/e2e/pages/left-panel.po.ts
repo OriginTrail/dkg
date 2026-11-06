@@ -6,7 +6,6 @@ export class LeftPanelPage {
   readonly root: Locator;
   readonly newProjectBtn: Locator;
   readonly joinProjectBtn: Locator;
-  readonly oraclePlaceholder: Locator;
   /** The sidebar's "Node" group: Observability, Publisher Conviction, Settings. */
   readonly nodePlaces: Locator;
 
@@ -17,9 +16,8 @@ export class LeftPanelPage {
     // class (`.v10-new-project-btn`) was kept for backwards-compat but
     // is now shared with "↗ Join Context Graph", so each handle filters
     // by visible label to disambiguate.
-    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /New Context Graph/i });
-    this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /Join Context Graph/i });
-    this.oraclePlaceholder = page.locator(sel.leftPanel.oraclePlaceholder);
+    this.newProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^New$/ });
+    this.joinProjectBtn = this.root.locator(sel.leftPanel.newProjectBtn).filter({ hasText: /^Join$/ });
     this.nodePlaces = page.getByRole('navigation', { name: 'Node' });
   }
 
@@ -79,20 +77,8 @@ export class LeftPanelPage {
     return this.memoryStackControl().isVisible().catch(() => false);
   }
 
-  async switchToMode(mode: 'explorer' | 'oracle') {
-    // rc11 renamed mode tab "Projects" -> "Context Graphs"; the underlying
-    // store value `treeMode` is still 'explorer'/'oracle'.
-    const label = mode === 'explorer' ? 'Context Graphs' : 'Context Oracle';
-    await this.root.locator(sel.leftPanel.modeBtn).filter({ hasText: label }).click();
-  }
-
-  async getActiveMode() {
-    const active = this.root.locator(`${sel.leftPanel.modeBtn}.active`);
-    return active.textContent();
-  }
-
   async clickNewProject() {
-    const btn = this.newProjectBtn.filter({ hasText: '+ New Context Graph' });
+    const btn = this.newProjectBtn;
     await btn.waitFor({ state: 'visible', timeout: 10_000 });
     await btn.click();
     // The modal mounts via a layout-store update. If the click lands while the
@@ -178,7 +164,7 @@ export class LeftPanelPage {
    */
   async hideProject(name: string) {
     const section = this.root.locator(sel.leftPanel.section).filter({ hasText: name }).first();
-    await section.locator(sel.leftPanel.sectionHeader).first().getByRole('button', { name: '×' }).click();
+    await section.locator(sel.leftPanel.sectionHeader).first().getByRole('button', { name: /^Hide .+ from the sidebar$/ }).click();
   }
 
   /** The "↺ Show N hidden context graphs" restore button (only present while ≥1 is hidden). */

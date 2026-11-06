@@ -37,6 +37,7 @@ import { useMemo } from 'react';
 import type { Triple } from './useMemoryEntities.js';
 import { useVmReceipts, type VmReceipt } from './useVmReceipts.js';
 import { isAtOrUnder } from './useVmReceiptSummary.js';
+import { truncateAddress } from '../lib/format.js';
 
 /** Namespace for synthetic visualisation triples — unique to VM decoration
  *  so downstream code (SubGraphBar bucketing, counts) never mistakes them
@@ -90,12 +91,10 @@ function anchorUriFor(r: VmReceipt): string {
 function agentLabel(agentId: string): string {
   if (agentId.startsWith('did:dkg:agent:')) {
     const tail = agentId.slice('did:dkg:agent:'.length);
-    if (tail.startsWith('0x')) return tail.slice(0, 6) + '…' + tail.slice(-4);
-    return tail.slice(0, 6) + '…' + tail.slice(-6);
+    return tail.startsWith('0x') ? truncateAddress(tail) : truncateAddress(tail, 6, 6);
   }
   // libp2p peer id or raw 0x address — truncate from the middle
-  if (agentId.length > 18) return agentId.slice(0, 8) + '…' + agentId.slice(-6);
-  return agentId;
+  return agentId.length > 18 ? truncateAddress(agentId, 8, 6) : agentId;
 }
 
 /** Receipts newest first; receipts without a finalize time go last.

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { createElement, useMemo, type ReactNode } from 'react';
 import {
   useMemoryEntities,
   canonicalEntityUri,
@@ -18,6 +18,7 @@ import { ENTITY_TYPE_KINDS, kindSlot } from '../../entity-kind-colors.js';
 import { dataSlotHex, type GraphPalette } from '../../graph-palette.js';
 import { agentHexForUri } from '../../hooks/useAgents.js';
 import type { ClassAppearance } from '@origintrail-official/dkg-graph-viz';
+import { AppWindow, BookOpen, Box, Building2, Calendar, Component, File, FileCode, FileText, Globe, Hash, MessageSquare, Package, Shapes, ShoppingBag, Signpost, SquareFunction, Tag, User, type LucideIcon } from 'lucide-react';
 export { LAYER_CONFIG, layerNoun, VM_TRIPLE_STAT } from './layer-presentation.js';
 
 export type LayerView = 'overview' | 'graph-overview' | 'query' | 'wm' | 'swm' | 'vm';
@@ -57,26 +58,28 @@ export function trustColors(p: GraphPalette): Record<TrustLevel, string> {
   return { verified: p.layer.verified, shared: p.layer.shared, working: p.layer.working };
 }
 
-export const TYPE_LABELS: Record<string, { icon: string; group: string }> = {
-  Person: { icon: '👤', group: 'People' },
-  SoftwareApplication: { icon: '💻', group: 'Software' },
-  SoftwareSourceCode: { icon: '📦', group: 'Code' },
-  Organization: { icon: '🏢', group: 'Organizations' },
-  Event: { icon: '📅', group: 'Events' },
-  ChooseAction: { icon: '⚡', group: 'Decisions' },
-  DefinedTerm: { icon: '📘', group: 'Concepts' },
-  CreativeWork: { icon: '📄', group: 'Documents' },
-  Product: { icon: '🪙', group: 'Products' },
-  ConversationTurn: { icon: '💬', group: 'Conversations' },
-  Thing: { icon: '◆', group: 'Other' },
-  Package: { icon: '📦', group: 'Packages' },
-  File: { icon: '📄', group: 'Files' },
-  Class: { icon: '🔷', group: 'Classes' },
-  Interface: { icon: '🔶', group: 'Interfaces' },
-  Function: { icon: 'ƒ', group: 'Functions' },
-  TypeAlias: { icon: '🏷️', group: 'Types' },
-  Enum: { icon: '🔢', group: 'Enums' },
-  ExternalModule: { icon: '🌐', group: 'External Modules' },
+const typeIcon = (Icon: LucideIcon): ReactNode => createElement(Icon, { size: 14 });
+
+export const TYPE_LABELS: Record<string, { icon: ReactNode; group: string }> = {
+  Person: { icon: typeIcon(User), group: 'People' },
+  SoftwareApplication: { icon: typeIcon(AppWindow), group: 'Software' },
+  SoftwareSourceCode: { icon: typeIcon(FileCode), group: 'Code' },
+  Organization: { icon: typeIcon(Building2), group: 'Organizations' },
+  Event: { icon: typeIcon(Calendar), group: 'Events' },
+  ChooseAction: { icon: typeIcon(Signpost), group: 'Decisions' },
+  DefinedTerm: { icon: typeIcon(BookOpen), group: 'Concepts' },
+  CreativeWork: { icon: typeIcon(FileText), group: 'Documents' },
+  Product: { icon: typeIcon(ShoppingBag), group: 'Products' },
+  ConversationTurn: { icon: typeIcon(MessageSquare), group: 'Conversations' },
+  Thing: { icon: typeIcon(Shapes), group: 'Other' },
+  Package: { icon: typeIcon(Package), group: 'Packages' },
+  File: { icon: typeIcon(File), group: 'Files' },
+  Class: { icon: typeIcon(Box), group: 'Classes' },
+  Interface: { icon: typeIcon(Component), group: 'Interfaces' },
+  Function: { icon: typeIcon(SquareFunction), group: 'Functions' },
+  TypeAlias: { icon: typeIcon(Tag), group: 'Types' },
+  Enum: { icon: typeIcon(Hash), group: 'Enums' },
+  ExternalModule: { icon: typeIcon(Globe), group: 'External Modules' },
 };
 
 export const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';

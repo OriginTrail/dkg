@@ -1,12 +1,13 @@
 import React from 'react';
+import { ArrowRight } from 'lucide-react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { usePcaOverview } from '../../hooks/usePcaOverview.js';
 import { usePcaScopeBootstrap } from '../../hooks/usePcaScopeBootstrap.js';
+import { formatBps } from '../../lib/format.js';
 
 function pct(bps: number | null): string {
   if (bps == null) return '—';
-  const p = bps / 100;
-  return `${p % 1 === 0 ? p.toFixed(0) : p.toFixed(1)}%`;
+  return formatBps(bps);
 }
 
 /**
@@ -49,7 +50,7 @@ export function PcaSettingsCard() {
           className="v10-pca-card-btn ds-btn"
           onClick={() => openTab({ id: 'conviction', label: 'Publisher Conviction', closable: true })}
         >
-          Manage publisher conviction -&gt;
+          Manage publisher conviction<ArrowRight size={14} aria-hidden="true" />
         </button>
       </div>
     </section>

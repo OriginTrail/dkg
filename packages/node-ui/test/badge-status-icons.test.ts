@@ -31,9 +31,9 @@ describe('status badge icons', () => {
   });
 
   it('lets `icon` replace the default and `icon={null}` remove it', () => {
-    const custom = render(React.createElement(Badge, { tone: 'success', icon: '◉' }, 'Label'));
+    const custom = render(React.createElement(Badge, { tone: 'success', icon: 'Mark' }, 'Label'));
     expect(count(custom, DEFAULT_GLYPH)).toBe(0);
-    expect(count(custom, '◉')).toBe(1);
+    expect(count(custom, 'Mark')).toBe(1);
     expect(count(render(React.createElement(Badge, { tone: 'success', icon: null }, 'Label')), DEFAULT_GLYPH)).toBe(0);
   });
 
@@ -47,18 +47,17 @@ describe('status badge icons', () => {
   it('gives each PCA chip its own glyph exactly once', () => {
     for (const state of Object.keys(HEALTH_CHIP_META) as Array<keyof typeof HEALTH_CHIP_META>) {
       const html = render(React.createElement(HealthChip, { state }));
-      expect(count(html, DEFAULT_GLYPH), state).toBe(0);
       expect(count(html, 'v10-pca-health-glyph'), state).toBe(1);
-      expect(count(html, HEALTH_CHIP_META[state].glyph), state).toBe(1);
+      expect(count(html, '<svg'), state).toBe(1);
     }
     const discount = render(React.createElement(DiscountAppliedBadge, {
       convictionCostCovered: { accountId: '7', epoch: 1, baseCost: '1000', discountedCost: '700', drawnFromEpoch: '700', drawnFromTopUp: '0' },
     } as React.ComponentProps<typeof DiscountAppliedBadge>));
     expect(count(discount, DEFAULT_GLYPH)).toBe(0);
-    expect(count(discount, '◉')).toBe(1);
+    expect(count(discount, 'lucide-badge-percent')).toBe(1);
     for (const verdict of ['eligible', 'fallthrough', 'fallthrough-no-funds', 'unknown'] as const) {
       const chip = render(React.createElement(EligibilityVerdictBanner, { verdict, variant: 'chip' }));
-      expect(count(chip, DEFAULT_GLYPH), verdict).toBe(0);
+      expect(count(chip, DEFAULT_GLYPH), verdict).toBe(verdict.startsWith('fallthrough') ? 1 : 0);
     }
   });
 

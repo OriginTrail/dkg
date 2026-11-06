@@ -9,15 +9,15 @@ import { useMemoryEntities, canonicalEntityUri, type TrustLevel, type MemoryEnti
 import { useProjectProfileContext, type QueryCatalog } from '../../../hooks/useProjectProfile.js';
 import { useAgentsContext } from '../../../hooks/useAgents.js';
 import { AgentChip } from '../../../components/AgentChip.js';
-import { SubGraphBar } from '../../../components/SubGraphBar.js';
-import { trustColors, LAYER_CONFIG, entityAuthorUri, entityMeta, useLayerTriples, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
+import { trustColors, LAYER_CONFIG, entityAuthorUri, entityMeta, useCanonicalTriples, applyCanonicalAdmission, filterTriplesToEntities, admitTripleForScope, entityTimestamp, formatTimelineBucket, type SubGraphTab, type SubGraphEntitySort } from '../helpers.js';
 import { EmptyState } from '../../../components/ContextGraphPrimitives.js';
 import { isUserFacingSubGraph, ROOT_SLUG_SENTINEL } from '../../../lib/subGraphs.js';
 import { applyHeaviestSubjectsCap, RdfGraph, LayerGraphPanel } from './graph.js';
 import { EntityList, DocumentsList } from './entities.js';
-import { LAYER_VAR } from '../../../layer-colors.js';
 import { useGraphPalette } from '../../../hooks/useGraphPalette.js';
 import { subGraphMiniGraphOptions } from './subgraph-mini-graph.js';
+import { Check, Play, ArrowUpRight } from 'lucide-react';
+import { LayerGlyph, StatusGlyph } from '../../../components/ds/Badge.js';
 // ─── Subgraph Explorer header (page identity + permanent intro) ────
 // Shared between the All / Subgraphs-overview state and every chip
 // detail (named or Root). The three-sentence intro is non-dismissible —
@@ -500,9 +500,9 @@ export function SubGraphOverviewGrid({
   if (loading && cards.length === 0) {
     return (
       <EmptyState
+        busy
         compact
-        icon="#"
-        title="Loading subgraphs..."
+        title="Loading subgraphs…"
         className="v10-sgov-state"
       />
     );
@@ -717,8 +717,8 @@ export function SubGraphMiniCard({
             <div className="v10-sgov-card-desc" title={card.description}>{card.description}</div>
           )}
         </div>
-        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`}>
-          ↗
+        <button type="button" className="v10-sgov-card-open" onClick={onOpen} title={`Focus on ${card.displayName}`} aria-label={`Focus on ${card.displayName}`}>
+          <ArrowUpRight size={12} aria-hidden="true" />
         </button>
       </div>
       <div className="v10-sgov-card-stats">
@@ -797,7 +797,7 @@ export function SubGraphMiniCard({
             {/* Two-branch wording locked by ux-lead in the #2 amendment.
                 `entityCount > 0` AND mini-graph empty means the
                 sub-graph has content but no WM-shaped data this card
-                can render — pair the literal with the existing ↗ open
+                can render — pair the literal with the existing arrow open
                 button so the next action is obvious. */}
             {card.entityCount > 0 ? 'Promoted — open to view' : 'No data yet'}
           </div>
@@ -1543,7 +1543,7 @@ export function SubGraphDetailView({
             aria-pressed={enabledLayers.has('working')}
             onClick={() => toggleLayer('working')}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: LAYER_VAR.working }}>◇</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" ><LayerGlyph layer="wm" /></span>
             <span className="v10-subgraph-cross-layer-cell-label">Working</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.wm}</span>
           </button>
@@ -1562,7 +1562,7 @@ export function SubGraphDetailView({
               ? 'Showing Shared Working Memory only — graph is colored by contributing agent (see legend).'
               : undefined}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: LAYER_VAR.shared }}>◈</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" ><LayerGlyph layer="swm" /></span>
             <span className="v10-subgraph-cross-layer-cell-label">Shared</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.swm}</span>
           </button>
@@ -1574,7 +1574,7 @@ export function SubGraphDetailView({
             aria-pressed={enabledLayers.has('verified')}
             onClick={() => toggleLayer('verified')}
           >
-            <span className="v10-subgraph-cross-layer-cell-icon" style={{ color: LAYER_VAR.verified }}>◉</span>
+            <span className="v10-subgraph-cross-layer-cell-icon" ><LayerGlyph layer="vm" /></span>
             <span className="v10-subgraph-cross-layer-cell-label">Verifiable</span>
             <span className="v10-subgraph-cross-layer-cell-count">{layerCounts.vm}</span>
           </button>
@@ -1625,7 +1625,7 @@ export function SubGraphDetailView({
                     disabled={queryLoading && !isActive}
                   >
                     <span className="v10-subgraph-savedquery-glyph">
-                      {requiresParameters ? '↗' : queryLoading && isActive ? '…' : isActive ? '✓' : '◎'}
+                      {requiresParameters ? <ArrowUpRight size={12} aria-hidden="true" /> : queryLoading && isActive ? '…' : isActive ? <Check size={12} /> : <Play size={12} />}
                     </span>
                     {q.name}
                   </button>
@@ -1634,7 +1634,7 @@ export function SubGraphDetailView({
             </React.Fragment>
           ))}
           {queryError && (
-            <span className="v10-subgraph-savedquery-error" title={queryError}>✕ query failed</span>
+            <span className="v10-subgraph-savedquery-error" title={queryError}><StatusGlyph tone="danger" /> query failed</span>
           )}
           {queryResults && activeQuerySlug && (
             <span className="v10-subgraph-savedquery-count">

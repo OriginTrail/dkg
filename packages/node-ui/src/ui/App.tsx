@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState, useSyncExternalStore } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Header } from './components/Shell/Header.js';
 import { PanelLeft } from './components/Shell/PanelLeft.js';
 import { PanelCenter } from './components/Shell/PanelCenter.js';
@@ -17,6 +17,9 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts.js';
 import { useShellRouting } from './hooks/useShellRouting.js';
 import { NodeUnavailableView } from './components/NodeUnavailableView.js';
 import { ApiTokenPrompt } from './components/ApiTokenPrompt.js';
+import { useObservabilityStore } from './stores/observability.js';
+import { PLACES } from './lib/tab-target.js';
+import { tabIdToPath } from './lib/tab-routes.js';
 
 function useLiveStatus() {
   const setNodeStatus = useAgentsStore((s) => s.setNodeStatus);
@@ -35,12 +38,12 @@ function useLiveStatus() {
 }
 
 function useDragResize(onDrag: (delta: number) => void) {
-  const handleRef = useRef<HTMLDivElement>(null);
   const cbRef = useRef(onDrag);
   cbRef.current = onDrag;
+  // A handle comes and goes with its panel, so track the node and rebind when it changes.
+  const [handle, setHandle] = useState<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const handle = handleRef.current;
     if (!handle) return;
 
     let startX = 0;
@@ -71,9 +74,9 @@ function useDragResize(onDrag: (delta: number) => void) {
 
     handle.addEventListener('mousedown', onMouseDown);
     return () => handle.removeEventListener('mousedown', onMouseDown);
-  }, []);
+  }, [handle]);
 
-  return handleRef;
+  return setHandle;
 }
 
 // Vertical twin of useDragResize for the bottom panel — tracks clientY
@@ -143,9 +146,18 @@ function AppShell() {
   const { bottomCollapsed, theme, leftWidth, rightWidth, setLeftWidth, setRightWidth, setBottomHeight } = useLayoutStore();
   const { narrow, leftOpen, rightOpen } = useShellPanels();
   const closeNarrowPanel = useLayoutStore((s) => s.closeNarrowPanel);
-  const { pathname } = useLocation();
+  const { pathname, state: routeState } = useLocation();
+  const navigate = useNavigate();
   // Going somewhere, or resizing past the breakpoint, shows the page, not a floating panel.
   useEffect(() => { closeNarrowPanel(); }, [pathname, narrow, closeNarrowPanel]);
+  // Arrived from /agent-hub: wide screens get the panel expanded, narrow ones the floating panel.
+  useEffect(() => {
+    if (!(routeState as { openAgents?: boolean } | null)?.openAgents) return;
+    const layout = useLayoutStore.getState();
+    if (narrow || layout.rightCollapsed) layout.toggleRight();
+    if (!narrow) layout.setRightExpanded(true);
+    navigate(pathname, { replace: true, state: null });
+  }, [routeState, narrow, pathname, navigate]);
   const [, setVpTick] = useState(0);
 
   useEffect(() => {
@@ -201,6 +213,9 @@ function AppShell() {
     setBottomHeight(Math.min(eff - delta, maxBottomHeight()));
   }, [setBottomHeight]);
 
+  const rightExpanded = useLayoutStore((s) => s.rightExpanded);
+  const expanded = rightExpanded && rightOpen && !narrow;
+
   const leftHandle = useDragResize(onDragLeft);
   const rightHandle = useDragResize(onDragRight);
   const bottomHandle = useDragResizeV(onDragBottom);
@@ -208,6 +223,7 @@ function AppShell() {
   return (
     <div className="v10-app">
       <ApiTokenPrompt />
+      <nav aria-label="Skip link"><button type="button" className="ds-skip-link" onClick={() => document.getElementById(expanded ? 'agents-panel' : 'main-content')?.focus()}>Skip to content</button></nav>
       <Header />
       <div className="v10-app-body">
         {narrow && (leftOpen || rightOpen) && (
@@ -215,14 +231,14 @@ function AppShell() {
         )}
         {leftOpen && (
           <>
-            <div className="v10-panel-left" style={{ width: leftWidth }}>
+            <div className="v10-panel-left" role="complementary" aria-label="Context Graphs and node" style={{ width: leftWidth }}>
               <PanelLeft />
             </div>
             <div className="v10-resize-handle-h" ref={leftHandle} />
           </>
         )}
 
-        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div className="v10-center-region" style={{ flex: 1, minWidth: 0, display: expanded ? 'none' : 'flex', flexDirection: 'column', overflow: 'hidden' }}>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
             <PanelCenter />
           </div>
@@ -232,8 +248,8 @@ function AppShell() {
 
         {rightOpen && (
           <>
-            <div className="v10-resize-handle-h" ref={rightHandle} />
-            <div className="v10-panel-right" style={{ width: rightWidth }}>
+            {!expanded && <div className="v10-resize-handle-h" ref={rightHandle} />}
+            <div id="agents-panel" tabIndex={-1} className="v10-panel-right" role="complementary" aria-label="Agents" style={expanded ? { flex: 1, minWidth: 0 } : { width: rightWidth }}>
               <PanelRight />
             </div>
           </>
@@ -243,9 +259,22 @@ function AppShell() {
   );
 }
 
-const NetworkDebugPage = React.lazy(() =>
-  import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
-);
+/** Old address: Network is a tab in Observability now. */
+function NetworkRoute() {
+  const openTab = useTabsStore((s) => s.openTab);
+
+  useLayoutEffect(() => {
+    useObservabilityStore.getState().setTab('network');
+    openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
+  }, [openTab]);
+
+  return <Navigate to={`${PLACES.operations.path}?tab=network`} replace />;
+}
+
+/** Old address: Agent hub is the right panel. AppShell opens it once it has mounted. */
+function AgentHubRoute() {
+  return <Navigate to={tabIdToPath(useTabsStore.getState().activeTabId)} replace state={{ openAgents: true }} />;
+}
 
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);
@@ -265,14 +294,8 @@ export function App() {
 
   return (
     <Routes>
-      <Route path="/network" element={
-        <>
-          <ApiTokenPrompt />
-          <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
-            <NetworkDebugPage />
-          </React.Suspense>
-        </>
-      } />
+      <Route path="/network" element={<NetworkRoute />} />
+      <Route path="/agent-hub" element={<AgentHubRoute />} />
       <Route path="/context-graph-primer" element={<ContextGraphPrimerRoute />} />
       <Route path="/agent" element={<Navigate to="/" replace />} />
       <Route path="/explorer" element={<Navigate to="/" replace />} />

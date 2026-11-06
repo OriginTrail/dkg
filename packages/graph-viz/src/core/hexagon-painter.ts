@@ -1,7 +1,7 @@
 import type { GraphNode, GraphEdge, HexagonConfig } from './types.js';
 import { StyleEngine } from './style-engine.js';
 import { PrefixManager } from './prefix-manager.js';
-import { agentInitials } from '../agent-initials.js';
+import { agentInitials, agentInitialsColor } from '../agent-initials.js';
 
 export { agentInitials };
 
@@ -228,7 +228,7 @@ export class HexagonPainter {
     // Agent initials inside the circle, once it is big enough on screen.
     if (isAgent && radius * globalScale >= 5) {
       ctx.globalAlpha = 1;
-      ctx.fillStyle = '#ffffff';
+      ctx.fillStyle = agentInitialsColor(color) ?? '#ffffff';
       ctx.font = `700 ${radius * 0.85}px ${styleConfig.fontFamily}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';

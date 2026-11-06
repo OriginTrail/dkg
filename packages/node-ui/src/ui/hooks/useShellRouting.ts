@@ -20,7 +20,7 @@ import { tabContextGraphId } from '../lib/tab-target.js';
  *   Tab → address: any tab action that changes the active tab (a click, open,
  *   close, reopen) pushes that tab's address, one history entry each. When
  *   the address already shows the tab (it was the address that activated
- *   it) nothing is pushed. Paths that aren't tabs (/network) are left alone.
+ *   it) nothing is pushed. Paths that aren't tabs are left alone.
  *
  * Tab metadata and order stay in the store; this hook only connects the
  * active tab to the address.
@@ -37,7 +37,7 @@ export function useShellRouting(): void {
   // Tab → address
   useEffect(() => useTabsStore.subscribe((state, prev) => {
     if (state.activeTabId === prev.activeTabId) return;
-    if (!pathToTab(here.current)) return; // a non-tab page such as /network
+    if (!pathToTab(here.current)) return; // a path that isn't a tab
     const target = tabIdToPath(state.activeTabId);
     if (target !== here.current) navigate(target);
   }), [navigate]);
