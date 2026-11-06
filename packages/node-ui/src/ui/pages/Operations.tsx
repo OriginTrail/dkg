@@ -227,7 +227,7 @@ function ReplicationTab() {
         <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Active fetches</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.fetches ?? '—'}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Core-first catch-up pulls</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Missing Knowledge Assets pulled from Core nodes first</div>
         </div>
       </div>
 
