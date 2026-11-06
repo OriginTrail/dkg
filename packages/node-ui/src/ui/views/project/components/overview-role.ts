@@ -72,7 +72,7 @@ export function overviewRoleState(
         label: cg.subscribed === true ? 'Public subscriber' : 'Public viewer',
         title: cg.subscribed === true
           ? 'This node subscribes to this public Context Graph. This agent is not listed as a curator or participant; public access is separate from membership.'
-          : 'This Context Graph is public. This agent can browse it without being listed as a curator or participant; subscribe from Context Oracle to follow updates.',
+          : 'This Context Graph is public. This agent can browse it without being listed as a curator or participant; subscribe from Public Context Graphs to follow updates.',
         tone: 'viewer',
         rank: cg.subscribed === true ? 'subscriber' : 'viewer',
       };

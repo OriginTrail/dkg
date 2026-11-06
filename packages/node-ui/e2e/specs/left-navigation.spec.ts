@@ -8,11 +8,6 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     await leftPanel.waitForProjectsLoaded();
   });
 
-  test('Context Graphs mode is active by default', async ({ leftPanel }) => {
-    const mode = await leftPanel.getActiveMode();
-    expect(mode?.trim()).toContain('Context Graphs');
-  });
-
   test('Dashboard row is visible', async ({ leftPanel }) => {
     await expect(leftPanel.root.locator(sel.leftPanel.dashboard).filter({ hasText: 'Dashboard' })).toBeVisible();
   });
@@ -39,12 +34,10 @@ test.describe('Left Panel Navigation (rc.12)', () => {
     expect(await importFilesModal.isOpen()).toBe(true);
   });
 
-  test('Context Oracle mode activates and renders the catalogue', async ({ leftPanel, page }) => {
-    await leftPanel.switchToMode('oracle');
-    expect((await leftPanel.getActiveMode())?.trim()).toContain('Context Oracle');
+  test('Public Context Graphs renders the catalogue', async ({ leftPanel, page }) => {
     // The catalogue renders EITHER discovered public CGs OR the empty-state
     // hint — both are valid on a real node depending on what's been synced.
-    const emptyState = page.getByText(/No discovered public Context Graphs yet/i);
+    const emptyState = page.getByText(/Public Context Graphs appear here/i);
     const catalogueRows = leftPanel.root.locator('.v10-tree-section');
     await expect
       .poll(async () => (await emptyState.isVisible().catch(() => false)) || (await catalogueRows.count()) > 0)
@@ -52,8 +45,6 @@ test.describe('Left Panel Navigation (rc.12)', () => {
   });
 
   test('switching back to Context Graphs mode restores project list', async ({ leftPanel }) => {
-    await leftPanel.switchToMode('oracle');
-    await leftPanel.switchToMode('explorer');
     expect((await leftPanel.getProjectNames()).length).toBeGreaterThanOrEqual(2);
   });
 

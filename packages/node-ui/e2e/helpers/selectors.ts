@@ -30,8 +30,6 @@ export const sel = {
 
   leftPanel: {
     root: '.v10-panel-left',
-    treeHeader: '.v10-tree-header',
-    modeBtn: '.v10-tree-mode-btn',
     // `.v10-collapse-btn` was removed in PR8 — the in-panel ◂ triangle
     // duplicated the always-visible global header toggle. Use the
     // global header `sidebarToggle` instead. `.v10-tree-section-badge`

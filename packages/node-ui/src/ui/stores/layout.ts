@@ -7,6 +7,7 @@ interface LayoutState {
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
   leftSectionMyProjectsOpen: boolean;
+  leftSectionPublicOpen: boolean;
   leftSectionIntegrationsOpen: boolean;
   theme: 'dark' | 'light';
   leftWidth: number;
@@ -21,6 +22,7 @@ interface LayoutState {
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMyProjects: () => void;
+  toggleLeftSectionPublic: () => void;
   toggleLeftSectionIntegrations: () => void;
   setTheme: (t: 'dark' | 'light') => void;
   setLeftWidth: (w: number) => void;
@@ -43,6 +45,7 @@ interface PersistedLayout {
   rightCollapsed?: boolean;
   bottomCollapsed?: boolean;
   leftSectionMyProjectsOpen?: boolean;
+  leftSectionPublicOpen?: boolean;
   leftSectionIntegrationsOpen?: boolean;
   leftWidth?: number;
   rightWidth?: number;
@@ -60,6 +63,7 @@ const DEFAULTS = {
   // (status check, no day-to-day click target) so it stays closed and
   // doesn't run its 30s polling loop until the user opens it.
   leftSectionMyProjectsOpen: true,
+  leftSectionPublicOpen: true,
   leftSectionIntegrationsOpen: false,
   leftWidth: 240,
   rightWidth: 360,
@@ -130,6 +134,9 @@ function loadPersisted(): Required<PersistedLayout> {
       leftSectionMyProjectsOpen: typeof parsed.leftSectionMyProjectsOpen === 'boolean'
         ? parsed.leftSectionMyProjectsOpen
         : DEFAULTS.leftSectionMyProjectsOpen,
+      leftSectionPublicOpen: typeof parsed.leftSectionPublicOpen === 'boolean'
+        ? parsed.leftSectionPublicOpen
+        : DEFAULTS.leftSectionPublicOpen,
       leftSectionIntegrationsOpen: typeof parsed.leftSectionIntegrationsOpen === 'boolean'
         ? parsed.leftSectionIntegrationsOpen
         : DEFAULTS.leftSectionIntegrationsOpen,
@@ -164,6 +171,7 @@ function snapshot(state: LayoutState): PersistedLayout {
     rightCollapsed: state.rightCollapsed,
     bottomCollapsed: state.bottomCollapsed,
     leftSectionMyProjectsOpen: state.leftSectionMyProjectsOpen,
+    leftSectionPublicOpen: state.leftSectionPublicOpen,
     leftSectionIntegrationsOpen: state.leftSectionIntegrationsOpen,
     leftWidth: state.leftWidth,
     rightWidth: state.rightWidth,
@@ -179,6 +187,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
+  leftSectionPublicOpen: initial.leftSectionPublicOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
   theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
   leftWidth: initial.leftWidth,
@@ -209,6 +218,10 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   },
   toggleBottomMaximised: () => {
     set((s) => ({ bottomMaximised: !s.bottomMaximised, bottomCollapsed: false }));
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionPublic: () => {
+    set((s) => ({ leftSectionPublicOpen: !s.leftSectionPublicOpen }));
     persist(snapshot(get()));
   },
   toggleLeftSectionMyProjects: () => {

@@ -7,19 +7,6 @@
   flex-direction: column;
   overflow: hidden;
 }
-.v10-tree-header {
-  height: var(--tab-h);
-  min-height: var(--tab-h);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: var(--fs-label);
-  font-weight: 600;
-  letter-spacing: var(--ls-caps);
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
 .v10-tree-content {
   flex: 1;
   overflow-y: auto;
@@ -91,14 +78,6 @@
    moved from --text-ghost → --text-tertiary (PR8) — ghost was never
    meant for navigational labels; the contrast was below the 3:1 floor
    even after PR8's ghost bump. */
-.v10-tree-group-label {
-  padding: 10px 14px 3px;
-  font-size: var(--fs-label);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: var(--ls-caps);
-  color: var(--text-tertiary);
-}
 
 /* Move-to-other-group button (⤑), same reveal-on-hover shape as hide */
 
@@ -326,8 +305,8 @@
 .v10-select-option{display:flex;align-items:center;gap:8px}
 .v10-select-mark{display:inline-flex;margin-right:6px}
 
-/* Sidebar create/join: stacked, full width, compact — full labels never truncate. */
-.v10-tree-create-actions { display: flex; flex-direction: column; gap: 4px; padding: 8px 8px 4px; }
-.v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: flex-start; padding: 0 10px; }
-/* The explorer / oracle switch fills the header. */
-.v10-tree-header .ds-seg, .v10-tree-header .ds-seg > * { flex: 1; }
+/* Places first, then create and join side by side, above the two lists they act on. */
+.v10-sidebar-places { flex-shrink: 0; padding-top: 8px; }
+.v10-tree-create-actions { flex-shrink: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 4px 8px 8px; }
+.v10-tree-hint { margin: 0; padding: 4px 12px 8px 28px; font-size: var(--fs-control); line-height: var(--lh-body); color: var(--text-tertiary); }
+.v10-tree-create-actions .v10-new-project-btn { width: 100%; margin: 0; height: var(--h-control-sm); font-size: var(--fs-label); justify-content: center; padding: 0 10px; }
