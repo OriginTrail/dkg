@@ -24,4 +24,11 @@ describe('My Context Graphs table', () => {
     const ownType = [...all.matchAll(/(?:^|[\s,>])th\s*\{([^}]*)\}/g)].filter((m) => /font-size|font-weight|letter-spacing|text-transform|(?:^|\s)color:/.test(m[1]!));
     expect(ownType.map((m) => m[0].trim())).toEqual([]);
   });
+
+  it('keeps a pinned header cell on the header row background', () => {
+    const dir = join(__dirname, '../src/ui/styles');
+    const fill = (file: string, selector: string) => new RegExp(`${selector} \\{[^}]*background: (var\\(--[\\w-]+\\))`).exec(readFileSync(join(dir, file), 'utf8'))?.[1];
+    const pinned = /\.ds-table-pin th:first-child \{ background: (var\(--[\w-]+\)); \}/.exec(readFileSync(join(dir, '27-ds-components.css'), 'utf8'))?.[1];
+    expect(pinned).toBe(fill('12-observability.css', '\\.data-table th'));
+  });
 });

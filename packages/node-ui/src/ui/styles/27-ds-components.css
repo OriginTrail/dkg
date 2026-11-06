@@ -435,6 +435,8 @@ body.light .ds-seg-item.active {
 .ds-table-scroll { overflow-x: auto; max-width: 100%; }
 .ds-table-pin tr { background: var(--bg-surface); }
 .ds-table-pin th:first-child, .ds-table-pin td:first-child { position: sticky; left: 0; z-index: 1; background: inherit; }
+/* Pinned cells need a solid fill, and the header cell's must match the header row. */
+.ds-table-pin th:first-child { background: var(--bg-panel); }
 /* One header style for every table. A table's own rule sets padding and borders, not type. */
 .ds-table-head,
 .data-table th,
