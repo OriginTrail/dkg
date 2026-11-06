@@ -62,7 +62,7 @@ const OP_TYPE_DESCRIPTIONS: Record<string, string> = {
   workspace:      'Manage shared memory for staging changes',
   connect:        'Establish a connection with a network peer',
   sync:           'Synchronize knowledge data with remote peers',
-  share:          'Share a SWM delta with subscribed peers',
+  share:          'Share Shared Working Memory changes with subscribed peers',
   gossip:         'Propagate updates across the peer-to-peer network via GossipSub',
   reconstruct:    'Reconstruct a Knowledge Asset from distributed shares',
   verify:         'Verify Merkle proofs and assert data integrity',
@@ -213,17 +213,17 @@ function ReplicationTab() {
         <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Promotions</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{summary?.promotes ?? '—'}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>landed in VM this period</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Landed in Verifiable Memory this period</div>
         </div>
         <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Success rate</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{successPct}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>promote / (promote + defer)</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Promoted out of all attempts</div>
         </div>
         <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Promotion latency</div>
           <div style={{ fontSize: 28, fontWeight: 600 }}>{fmtMs(summary?.latencyP50Ms)}</div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>P50 · P95 {fmtMs(summary?.latencyP95Ms)}</div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Median · 95th percentile {fmtMs(summary?.latencyP95Ms)}</div>
         </div>
         <div className="card ds-card" style={{ padding: 'var(--pad-card)' }}>
           <div className="card-title">Active fetches</div>
@@ -235,10 +235,10 @@ function ReplicationTab() {
       {/* Timeline */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>
-          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all CGs'}
+          Reconciliation timeline{selectedCg ? ` — ${selectedCg}` : ' — all Context Graphs'}
         </div>
         {buckets.length === 0 ? (
-          <EmptyState compact inline title="No reconciliation activity" description="No chain-driven VM promotions recorded in this period." />
+          <EmptyState compact inline title="No reconciliation activity" description="No chain-driven Verifiable Memory promotions recorded in this period." />
         ) : (
           <ResponsiveContainer width="100%" height={220}>
             <AreaChart data={buckets}>
@@ -259,7 +259,7 @@ function ReplicationTab() {
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
         <div className="card-title" style={{ marginBottom: 8 }}>Cursor inspector</div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-          Per-CG persisted watermark (contiguous registration ordinal promoted to VM) vs. last observed chain head.
+          How far each Context Graph has been promoted to Verifiable Memory, compared with the latest chain head.
         </p>
         {cursors.length === 0 ? (
           <EmptyState compact inline title="No subscriptions" />
@@ -275,7 +275,7 @@ function ReplicationTab() {
                   <tr key={c.context_graph_id}>
                     <td className="mono">{c.context_graph_id}</td>
                     <td className="mono">{c.on_chain_id ?? '—'}</td>
-                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public CG; fills its own gaps from chain (Phase D)">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
+                    <td>{c.core_hosted ? <Badge size="sm" title="Core hosts this public Context Graph and fills its own gaps from the chain">Host</Badge> : <Badge size="sm">Member</Badge>}</td>
                     <td>{wm}</td>
                     <td>{head ?? '—'}</td>
                     <td>{lag == null ? '—' : <Badge tone={lag === 0 ? 'success' : 'warning'} size="sm">{lag}</Badge>}</td>
@@ -290,7 +290,7 @@ function ReplicationTab() {
 
       {/* Per-CG activity */}
       <div className="card ds-card" style={{ padding: 'var(--pad-card)', marginBottom: 16 }}>
-        <div className="card-title" style={{ marginBottom: 8 }}>Per-CG activity</div>
+        <div className="card-title" style={{ marginBottom: 8 }}>Activity by Context Graph</div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>Click a row to scope the timeline + open its event stream.</p>
         {perCg.length === 0 ? (
           <EmptyState compact inline title="No activity in this period" />

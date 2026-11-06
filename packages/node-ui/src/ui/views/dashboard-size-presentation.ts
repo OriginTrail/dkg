@@ -11,7 +11,7 @@ export function dashboardSizePresentation(size: {
   const prefix = size.sizeApprox && !size.triplesUnknown ? '~' : '';
   const suffix = loaded ? '+' : '';
   const entityLabel = size.triplesUnknown ? 'Knowledge Assets (summary)'
-    : size.sizeApprox ? 'entities / KA · approx.'
+    : size.sizeApprox ? 'entities / Knowledge Assets · approx.'
     : loaded ? 'entities loaded' : 'entities / Knowledge Assets';
   const entityTitle = size.triplesUnknown
     ? 'Live entity count unavailable — showing the published Knowledge-Asset summary (not the full WM/SWM/VM entity total)'

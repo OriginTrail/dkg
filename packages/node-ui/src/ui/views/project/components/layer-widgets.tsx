@@ -250,7 +250,7 @@ export function PromoteWidget({ count, contextGraphId, onComplete, onResult }: L
         disabled={busy}
         onClick={promote}
       >
-        {busy ? '...' : 'Share Complete KAs → Shared'}
+        {busy ? '...' : 'Share complete Knowledge Assets'}
       </button>
     </LayerActionShell>
   );

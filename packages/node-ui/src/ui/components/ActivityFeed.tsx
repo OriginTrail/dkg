@@ -269,10 +269,10 @@ function ActivityRow({
       // separate rows. Hidden when missing (legacy WorkspaceOperation
       // fallback rows) or zero.
       return item.entityCount != null && item.entityCount > 0
-        ? `Promoted to SWM · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
-        : 'Promoted to SWM';
+        ? `Promoted to Shared Working Memory · ${item.entityCount} ${item.entityCount === 1 ? 'entity' : 'entities'}`
+        : 'Promoted to Shared Working Memory';
     }
-    if (item.event === 'published') return 'Published to VM';
+    if (item.event === 'published') return 'Published to Verifiable Memory';
     // A profile label wins as written; a raw type name ("PullRequest") is
     // spaced out for reading ("Pull request").
     if (typeBinding?.label && !typeBinding.isFallback) return typeBinding.label;

@@ -105,7 +105,7 @@ describe('LayerGraphPanel graph lifecycle', () => {
     expect(container.textContent).toContain('Showing all 3,004 loaded nodes');
   });
 
-  it('waits for SWM attribution colors before first graph paint', async () => {
+  it('waits for Shared Working Memory attribution colors before first graph paint', async () => {
     let resolveFetch!: (response: any) => void;
     vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => {
       resolveFetch = resolve;

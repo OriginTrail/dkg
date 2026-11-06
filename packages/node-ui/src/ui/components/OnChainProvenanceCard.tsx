@@ -142,9 +142,9 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
 
           {receipt.kaId && (
             <div className="v10-vm-identity-row">
-              <span className="v10-vm-identity-lbl">KA id</span>
+              <span className="v10-vm-identity-lbl">Knowledge Asset ID</span>
               <span className="v10-vm-identity-val mono" title={receipt.kaId}>{truncateId(receipt.kaId, 8, 8)}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} aria-label="Copy KA id" title="Copy KA id"><Copy size={12} /></button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} aria-label="Copy Knowledge Asset ID" title="Copy Knowledge Asset ID"><Copy size={12} /></button>
             </div>
           )}
 

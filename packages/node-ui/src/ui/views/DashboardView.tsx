@@ -438,7 +438,7 @@ function CgRow({
               // bare — so the row isn't empty while the card is
               // populated; triples have no summary fallback (Codex).
               <span title="Live entity count unavailable — showing the published Knowledge-Asset summary, not the full WM/SWM/VM entity total">
-                {abbrev(entities.total)} <span className="v10-cg-dim">KA (summary)</span> · <span className="v10-cg-dim">— triples</span>
+                {abbrev(entities.total)} <span className="v10-cg-dim">Knowledge Assets (summary)</span> · <span className="v10-cg-dim">— triples</span>
               </span>
             )
             : mem.partial
@@ -831,7 +831,7 @@ export function DashboardView() {
           <div className="v10-ws-spend">
             <div className="v10-ws-spend-head">
               <span>Period</span>
-              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free SWM/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to VM</span>
+              <span title="Publishes to Verifiable Memory that spent TRAC on-chain. Free Shared Working Memory/local/testnet publishes are not counted (they don't burn TRAC).">Publishes to Verifiable Memory</span>
               {/* economics totalTrac is always TRAC-denominated, independent
                   of the node wallet token symbol — label it literally. */}
               <span>TRAC</span>

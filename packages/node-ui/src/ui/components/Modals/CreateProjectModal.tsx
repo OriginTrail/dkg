@@ -545,7 +545,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group">
-                <label className="v10-form-label">SWM TTL <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <label className="v10-form-label">Shared Working Memory lifetime <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
                 <select aria-label="SWM TTL" className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
@@ -554,7 +554,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
-                <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <label className="v10-form-label">Shared Working Memory size limit <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
                 <select aria-label="SWM size cap" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>

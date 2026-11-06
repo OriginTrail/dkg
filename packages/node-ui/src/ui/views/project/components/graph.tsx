@@ -636,7 +636,7 @@ export function SwmAttributionLegend({ palette, conflicts }: { palette: AgentPal
   return (
     <div className="v10-swm-legend ds-card-nested" aria-label="SWM attribution legend">
       <div className="v10-swm-legend-row v10-swm-legend-head">
-        <span>SWM attribution</span>
+        <span>Shared Working Memory attribution</span>
         <Badge size="sm" tone="swm" className="v10-swm-legend-count">{palette.length} agent{palette.length === 1 ? '' : 's'}</Badge>
       </div>
       {palette.slice(0, 8).map(p => (
@@ -682,7 +682,7 @@ export function VerifiedGraphLegend({ anchors }: { anchors: readonly VmReceipt[]
   return (
     <div className="v10-vm-legend ds-card-nested" aria-label="Verifiable Memory legend">
       <div className="v10-vm-legend-row v10-vm-legend-head">
-        <span>VM provenance layer</span>
+        <span>Verifiable Memory provenance layer</span>
         <Badge size="sm" tone="vm" className="v10-vm-legend-count">{anchors.length} anchor{anchors.length === 1 ? '' : 's'}</Badge>
       </div>
       <div className="v10-vm-legend-row">

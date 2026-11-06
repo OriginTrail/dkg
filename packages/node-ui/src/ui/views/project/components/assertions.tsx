@@ -199,8 +199,8 @@ export function AssertionsList({ contextGraphId, layer, includeQueryCatalog = fa
     );
   }
 
-  const actionLabel = layer === 'wm' ? 'Share Complete KA → Shared' : 'Publish to VM';
-  const actionAllLabel = layer === 'wm' ? 'Share all complete KAs → Shared' : 'Publish all to Verifiable Memory';
+  const actionLabel = layer === 'wm' ? 'Share complete Knowledge Asset' : 'Publish to Verifiable Memory';
+  const actionAllLabel = layer === 'wm' ? 'Share all complete Knowledge Assets' : 'Publish all to Verifiable Memory';
   const bulkVisibleAssertionCount = assertions.filter(
     assertion => assertion.subGraph !== 'meta' || !assertion.name.startsWith('query-catalog-'),
   ).length;

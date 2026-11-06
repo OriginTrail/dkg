@@ -556,7 +556,7 @@ function AssertionList({ contextGraphId, onPromoted }: { contextGraphId: string;
           disabled={promoting !== null}
           onClick={handlePromoteAll}
         >
-          {promoting === '__all__' ? 'Sharing...' : 'Share Complete KAs → SWM'}
+          {promoting === '__all__' ? 'Sharing...' : 'Share complete Knowledge Assets'}
         </button>
       </div>
       <div className="v10-assertion-items">
@@ -709,7 +709,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
   const selectedTriples = assertions?.filter(a => selected.has(a.graphUri)).reduce((sum, a) => sum + (a.tripleCount ?? 0), 0) ?? 0;
   const isEmpty = !loading && (!assertions || assertions.length === 0);
 
-  if (loading) return <Loading label="Loading SWM contents…" block />;
+  if (loading) return <Loading label="Loading Shared Working Memory…" block />;
   if (isEmpty) {
     return (
       <div className="v10-publish-panel ds-card">
@@ -736,7 +736,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             disabled={publishing}
             onClick={handlePublishAll}
           >
-            {publishing && selected.size === 0 ? 'Publishing...' : 'Publish All → VM'}
+            {publishing && selected.size === 0 ? 'Publishing...' : 'Publish all to Verifiable Memory'}
           </button>
         </div>
       </div>
@@ -752,7 +752,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             disabled={publishing}
             onClick={handlePublishSelected}
           >
-            {publishing ? 'Publishing...' : `Publish ${selected.size} selected (${selectedTriples} triples) → VM`}
+            {publishing ? 'Publishing...' : `Publish ${selected.size} selected (${selectedTriples} triples)`}
           </button>
         )}
       </div>
