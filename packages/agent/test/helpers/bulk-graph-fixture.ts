@@ -28,6 +28,7 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
   beforePublish?: () => Promise<void>; onControl?: (frame: BulkGraphFrame) => void;
   beforeSend?: (frame: BulkGraphFrame) => Promise<void>; afterSend?: (frame: BulkGraphFrame) => Promise<void>; observe?: () => unknown;
   payloadBytes?: readonly number[]; expandedLengthMismatch?: boolean; tamperDigest?: 'asset' | 'chunk';
+  transformPayload?: (plain: string) => string;
   storeScheduler?: StorePriorityScheduler;
   onInboundFailure?: DuplexStreamOptions['onInboundFailure'];
 } = {}) {
@@ -48,8 +49,9 @@ export async function fixture(count = 20, corruptAt = -1, failClose = false, hoo
       publisherPeerId:'fixture', accessPolicy:'public', allowedPeers:[], timestamp:new Date() },
     {status:'confirmed',confirmation:{kind:'finalized-materialization', provenance:{batchId:BigInt(i),materializedVersion:{blockNumber:1,txIndex:0}}}});
     endpoint.store.load(quadsToNQuads([...data,...metadata]), { format: 'application/n-quads' });
-    if (hooks.payloadBytes) {
-      const plain = Buffer.from(quadsToNQuads(data));
+    if (hooks.payloadBytes || hooks.transformPayload) {
+      const original = quadsToNQuads(data);
+      const plain = Buffer.from(hooks.transformPayload?.(original) ?? original);
       const body = await encodeNegotiatedExactSyncResponse(plain, { request: {
         responseEncoding: 'gzip-nquads-v1', assetUals: [ual], phase: 'data',
       } });

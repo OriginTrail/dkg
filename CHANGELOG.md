@@ -4,6 +4,100 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+
+## [10.0.28] - Unreleased
+
+10.0.28 is being prepared from the changes merged into `testnet-canary`
+after 10.0.27. It improves publication and recovery behavior under load,
+repairs private graph membership and catalog revisions, and adds operator
+diagnostics. This entry describes a release candidate; publication and
+production qualification are still pending.
+
+### Highlights
+
+- **Correct catalog content after draft edits.** Sharing an asset, editing it,
+  and sharing it again before its first publication can now reconcile the
+  current revision without leaving the catalog on the original content
+  (#3667).
+- **Less repeated inventory work.** Catalog backlog scans yield, parked
+  placement passes reuse validated state, and inventory validation avoids
+  redundant JSON encoding. Parsed immutable snapshots can reuse bounded
+  canonical-byte caches (#3599, #3631, #3640, #3600, #3694, #3708, #3712).
+- **More resilient publishing.** Settled ACK rounds retire unused requests;
+  funded wallets receive work fairly; retry budgets and job cleanup retain
+  their safety boundaries. Assertion-seal admission reads use the existing
+  publisher control lane when enabled (#3647, #3613, #3614, #3612, #3594,
+  #3595, #3699).
+- **Private members can recover.** Approvals repair missing metadata for
+  existing participants, and empty private graph bootstrap keeps proving
+  membership until synchronization completes (#3689, #3630).
+- **Useful operational evidence.** Operators can record a running node's CPU
+  profile, inspect rolling prover health, see why daemon workers exited,
+  and correlate async admission with storage waits (#3606, #2627, #3653,
+  #3698).
+
+### Fixed
+
+- Keep optional native WebSocket addons out of worker threads and guard
+  embedded Oxigraph against the affected V8 optimization on Node.js below
+  24 (#3650, #3658).
+- Preserve store settings when initialization rewrites configuration; open
+  the store read-only for offline publisher reads (#3608, #3588).
+- Rotate contended chain requests fairly, prefer recent agent peers, retry
+  unfinished catalog replay on connected peers, and respect identity-probe
+  backoff and open relay circuits (#3200, #3632, #3633, #3590, #3587).
+- End durable recovery rounds on local backpressure, give graphs turns at
+  the sync slot, and represent recovery outcomes explicitly (#3596, #3637).
+- Repeat retryable publication recipient reads, treat a busy store as no
+  membership verdict, and close finalization inbox entries whose content
+  is already verified (#3617, #3616, #3607).
+- Enforce read access on the context graph membership route (#3586).
+- Report failed async job fields, bound failure messages without leaking
+  transaction data, and classify busy background poll reads as warnings
+  (#3610, #3609, #3615).
+- Avoid correlated scans for supported filtered single-triple queries and
+  parse RDF literal bodies in one linear scan (#3659, #3593).
+- Return EPCIS events without document containers or unrelated resources,
+  while recognizing the supported EPCIS namespaces (#2490).
+- Close native checkpoint resources on startup failure and preserve shutdown
+  ownership during daemon startup (#3589).
+
+### Added
+
+- JSON-LD document ingestion with inline contexts, named graphs, blank nodes,
+  lists, language tags and datatypes. Remote contexts and imports are
+  rejected without network access. Default-finalizing asset creation rejects
+  named-graph documents with guidance to use `--no-finalize` (#2506).
+- Experimental native public snapshot bootstrap for an explicitly configured
+  fresh Edge, with a pinned Java runtime, complete journal verification and
+  authenticated catch-up. Automatic/default activation remains disabled;
+  existing data directories are not migrated (#3566).
+
+### Validation and tooling
+
+- Pin browser CI to Ubuntu 24.04, stabilize live-store timing fixtures and
+  offline-read startup synchronization, and add RDF ingestion floor
+  benchmarks (#3687, #3649, #3626, #3138).
+- Remove internal working plans from the published source tree and document
+  sustained monitoring after mainnet rollout (#3665, #3620).
+
+### Before promotion
+
+- There are no smart-contract source, ABI or deployment registry changes in
+  this candidate relative to `main` at `4ef623b339`.
+- Keep native snapshot bootstrap opt-in. Its default rollout still needs a
+  mainnet cold/warm/restart comparison, including rule sampling and RPC use.
+- Catalog cache measurements establish CPU savings, not faster end-to-end
+  publication or resolution of every storage queue timeout. Validate the
+  combined candidate under representative load.
+- Qualify the final candidate commit and package bytes through the release
+  procedure. Earlier canary CI and per-PR tests do not certify this release
+  commit. Verify upgrade/rollback from 10.0.27, private graph recovery,
+  publication settlement and testnet smoke before mainnet promotion.
+- After promotion, verify the running build through `/api/status` and monitor
+  catch-up and resource use through the rollout observation period in
+  `RELEASE_PROCESS.md`.
+
 ## [10.0.27] - 2026-10-29
 
 10.0.27 makes nodes steadier and faster under load. Core nodes settle

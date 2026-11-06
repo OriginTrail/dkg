@@ -97,6 +97,7 @@ import {
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
   respondPublicationPricingPolicyError,
+  respondRetryablePublishAuthorityError,
 } from './knowledge-assets-error-mapping.js';
 
 import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from './confirmed-catalog-obligation.js';
@@ -1440,7 +1441,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
               : 'This job\'s record gives chain recovery no automatic exit (no provable absence '
                 + 'and no formable recognition), so retrying will not release it. Check the '
                 + 'transaction yourself, then clear the job with '
-            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true} — which the agent that ENQUEUED that job must run, since the override is scoped to its admission lane.`,
+            }POST /api/publisher/clear-job {"jobId":"${err.existingJobId}","allowPendingTransaction":true}, as the agent that ENQUEUED that job (an agent's override covers only its own admission lane) or with the node-operator token. Without the flag the clear refuses this job.`,
             retryable: err.retryable,
             existingJobId: err.existingJobId,
             // GH#2942 - WHY this job is held (what its record lacks, or whether this node can act on
@@ -1608,6 +1609,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, noFundedPublisherWalletBody(msg));
         }
         if (respondIfPcaFundingUnknown(res, e)) return;
+        if (respondRetryablePublishAuthorityError(res, e, { contextGraphId, name, subGraphName })) return;
         // A transient chain-RPC transport failure (all endpoints exhausted /
         // receipt lookup failed / timeout) is retryable -> 503/504, matching
         // /api/context-graph/register. Keyed strictly on err.code, so an

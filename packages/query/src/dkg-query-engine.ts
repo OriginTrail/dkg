@@ -24,6 +24,7 @@ import {
   readExactGraphPaged,
   resolveGraphScopedOrLegacyMetadata,
 } from '@origintrail-official/dkg-storage';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import {
   materializePreparedSparql,
   prepareSparql,
@@ -1081,7 +1082,9 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     }
     const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
     const sgNameRaw = metaResult.bindings[0]?.['sgName'];
-    const subGraphName = sgNameRaw ? sgNameRaw.replace(/^"(.*)".*$/, '$1') : undefined;
+    const subGraphName = sgNameRaw
+      ? rdfLiteralBody(sgNameRaw, { anySuffix: true }) ?? sgNameRaw
+      : undefined;
 
     const dataGraph = subGraphName
       ? contextGraphSubGraphUri(contextGraphId, subGraphName)
