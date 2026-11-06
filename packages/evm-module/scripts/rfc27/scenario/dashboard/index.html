@@ -88,6 +88,7 @@ h3 { font-size: 1.02rem; font-weight: 620; }
 .muted { color: var(--muted); }
 .num { font-variant-numeric: tabular-nums; }
 [data-tip], .tipped { cursor: help; }
+.hero-num .num, .tile-value .num, .figure .val .num { font-variant-numeric: normal; }
 .unit { font-size: .62em; font-weight: 500; color: var(--ink-2); margin-left: .25em; letter-spacing: .01em; }
 
 /* Now */
@@ -870,7 +871,8 @@ function renderEpochs() {
   root.replaceChildren(head, h('div', { class: 'card' },
     legend([['var(--wallet)', 'Wallet value'], ['var(--account)', 'Account cost'], ['var(--rolled)', 'Rolled in from empty epochs'], ['var(--served)', 'Served value'], ['var(--wallet)', 'Not in a pool yet: empty or funded ahead', true]]),
     box,
-    h('div', { style: 'margin-top:.4rem' }, h('button', { class: 'toggle', onclick: () => { view.showEpochTable = !view.showEpochTable; renderAll(); } }, view.showEpochTable ? 'Hide the numbers' : 'Show the numbers')),
+    h('div', { class: 'cap', style: 'margin-top:.3rem' }, 'The figure above a bar is the epoch\'s pool or, for an epoch not in a pool, its money. Click an epoch to look at it below.'),
+    h('div', { style: 'margin-top:.3rem' }, h('button', { class: 'toggle', onclick: () => { view.showEpochTable = !view.showEpochTable; renderAll(); } }, view.showEpochTable ? 'Hide the numbers' : 'Show the numbers')),
     table));
 }
 
@@ -896,7 +898,7 @@ function renderSellers() {
   const explain = h('div', { class: 'explain' },
     h('p', null, h('strong', null, 'How the pool is shared. '), 'A seller\'s QIF share blends two things: its sales share, which is its share of all served value, and its weighted share, the same with each batch\'s served value multiplied by the seller\'s stake factor. λ sets the blend.'),
     h('span', { class: 'formula' }, 'QIF share = (1 − λ) × sales share + λ × weighted share'),
-    h('p', null, lambda === null ? 'λ is set on-chain: an epoch fixes its own λ when its first value counts. ' : `Here λ = ${lambda}${row.lambdaBps === null ? ', what this epoch takes when its first value counts' : ', fixed when the epoch\'s first value counted'}: ${pct(1 - lambda, 0)} of the pool follows sales, and ${pct(lambda, 0)} follows sales weighted by stake. `, `The stake factor is √(stake ÷ ${maxStake} TRAC). A stake with no sales earns nothing from the pool; stake only tilts the share of a seller that serves.`));
+    h('p', null, lambda === null ? 'λ is set on-chain: an epoch fixes its own λ when its first value counts. ' : `${row.lambdaBps !== null ? `Here λ = ${lambda}, fixed when this epoch's first value counted` : row.state === 'ended' ? `This epoch had no served value, so it has no pool to share. λ is ${lambda} for new epochs` : `Here λ = ${lambda}, which this epoch takes when its first value counts`}: ${pct(1 - lambda, 0)} of a pool follows sales, and ${pct(lambda, 0)} follows sales weighted by stake. `, `The stake factor is √(stake ÷ ${maxStake} TRAC). A stake with no sales earns nothing from the pool; stake only tilts the share of a seller that serves.`));
 
   const sellerCards = row.sellers.filter((x) => d.sellers.find((y) => y.id === x.id)?.listed || big(x.served) > 0n).map((x) => {
     const seller = d.sellers.find((y) => y.id === x.id);
@@ -959,7 +961,7 @@ function renderBuyers() {
   if (!d.clock || !row) { root.replaceChildren(); return; }
   const cards = d.buyers.filter((b) => b.listed || row.subs.some((x) => x.buyer === b.address)).map((b) => {
     const sub = row.subs.find((x) => x.buyer === b.address);
-    const discount = sub ? sub.discountBps : null;
+    const discount = sub ? sub.discountBps : b.discountBps;
     const chipText = b.pays === 'account' ? `account${b.accountId ? ` ${b.accountId}` : ''}${discount ? ` · ${discount / 100}% discount` : ''}` : 'wallet';
     const header = h('div', { class: 'who' }, h('h3', null, b.name), h('span', { class: 'chip', tip: b.pays === 'account' ? 'Pays from a Conviction Account\'s allowance, at its discount tier, under a grant from the account\'s owner.' : 'Pays from its wallet, at no discount.' }, chipText), b.listed ? null : h('span', { class: 'chip', tip: 'This buyer is not in the scenario\'s public file.' }, 'unlisted'));
     const grant = b.grant;
@@ -1444,6 +1446,8 @@ if (SNAPSHOT) {
 } else {
   load();
   setInterval(load, 60_000);
+  // A hidden tab's timers slow down: catch up as soon as it is looked at.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
 }
 setInterval(tick, 1000);
 </script>

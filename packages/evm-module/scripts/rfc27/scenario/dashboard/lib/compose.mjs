@@ -150,6 +150,7 @@ export function compose({ state, pub, status, now, network }) {
       listed: !!p,
       pays: accountId && String(accountId) !== '0' ? 'account' : p?.pays ?? 'wallet',
       accountId: accountId === null ? null : String(accountId),
+      discountBps: Number(p?.discountBps ?? 0),
       owner: p?.owner ?? null,
       home: p?.home ?? null,
       grant: live.grant ?? null,
@@ -536,7 +537,7 @@ export function compose({ state, pub, status, now, network }) {
       if (hits.length) {
         out.status = 'seen';
         for (const h of hits) {
-          out.parts.push(`${buyerName(h.a.buyer)} added to account ${h.a.accountId} at`, { t: h.at }, 'under a grant of', { wei: h.a.maxCostPerEpoch }, 'per subscription', { tx: h.tx });
+          out.parts.push(`${buyerName(h.a.buyer)} added to account ${h.a.accountId} on`, { t: h.at }, 'under a grant of', { wei: h.a.maxCostPerEpoch }, 'per subscription', { tx: h.tx });
           const funded = logs.find((l) => l.k === 'SubscriptionFunded' && low(l.a.buyer) === low(h.a.buyer) && Number(l.a.epoch) === e);
           if (funded) out.parts.push('Then it funded this epoch at cost', { wei: funded.a.cost }, { tx: funded.tx });
         }
@@ -545,14 +546,14 @@ export function compose({ state, pub, status, now, network }) {
       const hits = logs.filter((l) => l.k === 'SubscriptionToppedUp' && inEpoch(l) && (!buyerAddr || low(l.a.buyer) === buyerAddr));
       if (hits.length) {
         out.status = 'seen';
-        for (const h of hits) out.parts.push(`${buyerName(h.a.buyer)} topped up`, { wei: h.a.value }, 'of budget at cost', { wei: h.a.cost }, 'at', { t: h.at }, { tx: h.tx });
+        for (const h of hits) out.parts.push(`${buyerName(h.a.buyer)} added`, { wei: h.a.value }, 'to its service budgets, at a cost of', { wei: h.a.cost }, ', on', { t: h.at }, { tx: h.tx });
       } else pending('No top-up on-chain.');
     } else if (kind === 'buyer-removed') {
       const hits = logs.filter((l) => l.k === 'BuyerRemoved' && inEpoch(l) && (!buyerAddr || low(l.a.buyer) === buyerAddr));
       if (hits.length) {
         out.status = 'seen';
         for (const h of hits) {
-          out.parts.push(`${buyerName(h.a.buyer)} removed from account ${h.a.accountId} at`, { t: h.at }, { tx: h.tx });
+          out.parts.push(`${buyerName(h.a.buyer)} removed from account ${h.a.accountId} on`, { t: h.at }, { tx: h.tx });
           const after = landed.filter((g) => g.buyer === low(h.a.buyer) && g.epoch === e && g.l.at > h.at);
           const counted = after.reduce((a, g) => a + g.counted, 0n);
           if (after.length) out.parts.push(`Then ${after.length} group${after.length === 1 ? '' : 's'} of receipts served before the removal landed, counting`, { wei: str(counted) }, '.');
@@ -584,10 +585,10 @@ export function compose({ state, pub, status, now, network }) {
       } else if (epochEnded) {
         out.status = 'no-trace';
         out.parts.push('No refused batch on-chain: a batch that is held and never sent leaves no transaction.');
-        if (lastOfSeller) out.parts.push(`What the chain does show: ${sellerName(lastOfSeller.seller)}'s last batch of the epoch landed at`, { t: lastOfSeller.l.at }, { tx: lastOfSeller.l.tx }, ', and it landed nothing after that.');
+        if (lastOfSeller) out.parts.push(`What the chain does show: ${sellerName(lastOfSeller.seller)}'s last batch of the epoch landed on`, { t: lastOfSeller.l.at }, { tx: lastOfSeller.l.tx }, ', and it landed nothing after that.');
       } else if (epochRunning && passed) {
         out.status = 'waiting';
-        if (lastOfSeller) out.parts.push(`${sellerName(lastOfSeller.seller)}'s last batch so far landed at`, { t: lastOfSeller.l.at }, { tx: lastOfSeller.l.tx });
+        if (lastOfSeller) out.parts.push(`${sellerName(lastOfSeller.seller)}'s last batch so far landed on`, { t: lastOfSeller.l.at }, { tx: lastOfSeller.l.tx });
         else out.parts.push(`No batch from ${ev.who ?? 'this seller'} so far in this epoch.`);
       }
     } else if (kind === 'funding-only') {
@@ -613,6 +614,7 @@ export function compose({ state, pub, status, now, network }) {
     }
     return out;
   });
+  scenario.sort((a, b) => a.scheduledAt - b.scheduledAt);
 
   // ------------------------------------------------------------------ cross-checks
 
