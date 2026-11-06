@@ -1,6 +1,6 @@
 // The query/inference pool of an epoch (OT-RFC-27), and the gross reward each
 // node spends from it, end to end on the development deploy of the staking,
-// account and plan-subscription stacks (StakingV10 wired to the settlement, the
+// account and subscription stacks (StakingV10 wired to the settlement, the
 // activation epoch at the deployment epoch, λ 0.5). No step runs when an epoch
 // ends: its pool is a plain read of what was funded and what counted.
 //

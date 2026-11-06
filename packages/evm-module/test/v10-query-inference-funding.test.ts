@@ -1,4 +1,4 @@
-// Plan-subscription funding for the query/inference pool (OT-RFC-27), end to end:
+// Subscription funding for the query/inference pool (OT-RFC-27), end to end:
 // QueryInferenceStorage, ServiceSubscriptionsStorage, ServiceSubscriptions and
 // ServiceSubscriptionsWallet registered in the Hub, on the real account stack.
 //
@@ -63,7 +63,7 @@ async function deployFixture() {
 
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
 
-describe('@integration Plan-subscription funding for the query/inference pool', function () {
+describe('@integration Subscription funding for the query/inference pool', function () {
   let f: Fixture;
   let h: FundingHelpers;
 

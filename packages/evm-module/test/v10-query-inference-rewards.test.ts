@@ -1,6 +1,6 @@
 // The query/inference pool (OT-RFC-27) paid through StakingV10 10.1.0 claims,
 // end to end on the development deploy of the staking, account and
-// plan-subscription stacks (StakingV10 and StakingKPI wired to the settlement, the
+// subscription stacks (StakingV10 and StakingKPI wired to the settlement, the
 // activation epoch at the deployment epoch, λ 0.5):
 //   - a node's gross reward for an epoch is its score share of the
 //     publishing pool plus its gross from the query/inference pool; the

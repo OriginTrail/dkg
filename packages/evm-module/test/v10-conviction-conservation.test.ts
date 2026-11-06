@@ -1,6 +1,6 @@
 // Per-account conservation of a Conviction Account over a whole lock
 // (OT-RFC-27, PublishingConviction 10.2.0, ServiceSubscriptions 1.2.0), as a
-// property test: seeded random sequences of publishes, plan-subscription fundings
+// property test: seeded random sequences of publishes, subscription fundings
 // and their top-ups, account top-ups, settles and time jumps, through the
 // lock's end and its final sweep.
 //
