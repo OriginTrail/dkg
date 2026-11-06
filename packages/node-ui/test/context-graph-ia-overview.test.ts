@@ -1325,7 +1325,7 @@ describe('Context Graph IA and Overview', () => {
       'Shared Working Memory',
       'Verifiable Memory',
       'they become a Knowledge Asset',
-      'included entities on-chain provenance',
+      'an on-chain record of where they came from',
     ]) {
       expect(container.textContent).toContain(text);
     }
