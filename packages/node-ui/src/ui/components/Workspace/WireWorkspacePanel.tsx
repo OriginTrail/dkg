@@ -32,6 +32,7 @@ import {
   type PlanInstallResult,
   type InstallResult,
 } from '../../lib/projectManifest.js';
+import { formatNumber } from '../../lib/format.js';
 
 interface WireWorkspacePanelProps {
   /** Context graph ID — used to call /api/context-graph/{id}/manifest/* . */
@@ -233,9 +234,9 @@ export function WireWorkspacePanel({
     return (
       <div>
         <div style={{
-          padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
+          padding: '12px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
           background: 'var(--success-bg)', border: '1px solid var(--success-border)',
-          color: 'var(--accent-green)',
+          color: 'var(--text-success)',
         }}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Workspace wired.</div>
           Open <code style={{ fontFamily: 'var(--font-mono)' }}>{workspaceRoot}</code> in {toolSelection === 'claude-code' ? 'Claude Code' : (toolSelection === 'both' ? 'Cursor or Claude Code' : 'Cursor')}.
@@ -243,15 +244,15 @@ export function WireWorkspacePanel({
           {variant === 'join' ? ', tasks, and decisions' : ' you publish'}.
         </div>
 
-        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-secondary)', marginBottom: 8 }}>
           Files written:
         </div>
         <pre style={{
-          fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
-          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-primary)', margin: 0,
+          fontSize: 'var(--fs-micro)', fontFamily: 'var(--font-mono)', maxHeight: 200, overflow: 'auto',
+          padding: 10, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)', margin: 0,
         }}>
-          {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${w.bytesWritten.toLocaleString()} bytes)`).join('\n')}
+          {installResult.written.map((w) => `${w.action.padEnd(9)} ${w.absPath} (${formatNumber(w.bytesWritten)} bytes)`).join('\n')}
           {installResult.skipped.length ? '\n\nSkipped:\n' + installResult.skipped.map((s) => `  - ${s}`).join('\n') : ''}
           {installResult.warnings.length ? '\n\nWarnings:\n' + installResult.warnings.map((w) => `  - ${w}`).join('\n') : ''}
         </pre>
@@ -267,16 +268,16 @@ export function WireWorkspacePanel({
   if (planResult) {
     return (
       <div>
-        {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+        {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
-        <div style={{ marginBottom: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
+        <div style={{ marginBottom: 10, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
           Review the install plan. Files are only written when you click Install.
         </div>
 
         <pre style={{
-          fontSize: 10, fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
-          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-secondary)',
-          border: '1px solid var(--border-primary)', margin: 0, whiteSpace: 'pre-wrap',
+          fontSize: 'var(--fs-micro)', fontFamily: 'var(--font-mono)', maxHeight: 320, overflow: 'auto',
+          padding: 12, borderRadius: 'var(--radius-control)', background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-default)', margin: 0, whiteSpace: 'pre-wrap',
         }}>
           {planResult.markdown}
         </pre>
@@ -311,7 +312,7 @@ export function WireWorkspacePanel({
   return (
     <div>
       <div style={{
-        padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 12,
+        padding: '10px 14px', borderRadius: 'var(--radius-nested)', marginBottom: 14, fontSize: 'var(--fs-control)',
         background: 'var(--tint-subtle)', border: '1px solid var(--border-default)',
         color: 'var(--accent-primary)',
       }}>
@@ -323,20 +324,20 @@ export function WireWorkspacePanel({
           : 'Choose a local directory for this project and which coding tool you want it wired for. The node will add the right config files to the workspace so your agent can collaborate on this project.'}
       </div>
 
-      {error && <div className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
+      {error && <div role="alert" className="v10-modal-error ds-card-nested" style={{ marginBottom: 12 }}>{error}</div>}
 
       <div className="v10-form-group">
         <label className="v10-form-label">Workspace path</label>
-        <input
+        <input aria-label="Workspace path"
           className="v10-form-input ds-input"
           type="text"
           value={workspaceRoot}
           onChange={(e) => setWorkspaceRoot(e.target.value)}
           placeholder={host ? `${host.defaultWorkspaceParent}/${slug}` : '/Users/you/code/project'}
           spellCheck={false}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)' }}
         />
-        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
           Absolute path. Created if it doesn't exist. The node writes only inside this folder
           (plus optionally <code>~/.claude/settings.json</code> if Claude Code is selected).
           {host && <> Defaulted from your <code>$HOME</code> = <code>{host.homedir}</code>.</>}
@@ -345,7 +346,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Coding tool to wire</label>
-        <select
+        <select aria-label="Coding tool to wire"
           className="v10-form-select ds-input"
           value={toolSelection}
           onChange={(e) => setToolSelection(e.target.value as ToolSelection)}
@@ -360,22 +361,22 @@ export function WireWorkspacePanel({
             </option>
           ))}
         </select>
-        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
           {toolDescription}
         </div>
       </div>
 
       <div className="v10-form-group">
         <label className="v10-form-label">Your agent identity</label>
-        <input
+        <input aria-label="Your agent identity"
           className="v10-form-input ds-input"
           type="text"
           value={agent ? `urn:dkg:agent:${agent.agentAddress.toLowerCase()}` : 'fetching…'}
           disabled
           spellCheck={false}
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 11, opacity: 0.75 }}
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-label)', opacity: 0.75 }}
         />
-        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
           Cryptographic URI derived from this node's wallet address. Same on every project on this machine. Attribution
           (<code>prov:wasAttributedTo</code>) on every chat turn uses this URI.
         </div>
@@ -383,7 +384,7 @@ export function WireWorkspacePanel({
 
       <div className="v10-form-group">
         <label className="v10-form-label">Nickname for this agent</label>
-        <input
+        <input aria-label="Nickname for this agent"
           className="v10-form-input ds-input"
           type="text"
           value={nickname}
@@ -392,7 +393,7 @@ export function WireWorkspacePanel({
           spellCheck={false}
           maxLength={80}
         />
-        <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>
+        <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
           Free-form human label rendered as the agent's name in chips, lists, and rdfs:label triples.
           Doesn't affect attribution — only changes how you appear to others.
         </div>

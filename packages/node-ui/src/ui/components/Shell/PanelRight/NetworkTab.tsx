@@ -1,10 +1,14 @@
 import React, { useId, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, RefreshCw } from 'lucide-react';
 import { formatDuration } from './format.js';
 import { buildPeers, shortAgentUri, shortPeerId } from './peer-model.js';
 import type { AgentInfo, ConnectionRow, PeerInfo } from './types.js';
 import { Badge } from '../../ds/Badge.js';
 import { humanizeStatus } from '../../../lib/formatLabels.js';
+import { Loading } from '../../ds/Loading.js';
+import { useTabsStore } from '../../../stores/tabs.js';
+import { useObservabilityStore } from '../../../stores/observability.js';
+import { PLACES } from '../../../lib/tab-target.js';
 
 // Per-peer card: header + meta + agents-as-chips. Nodes are
 // infrastructure; agents live on them. Up to 3 chips inline, with a
@@ -139,6 +143,11 @@ export function NetworkTab(props: {
   onRefresh: () => void;
 }) {
   const { peerAgents, connections, loading, onRefresh } = props;
+  const openTab = useTabsStore((s) => s.openTab);
+  const openConnectionDetails = () => {
+    useObservabilityStore.getState().setTab('network');
+    openTab({ id: 'operations', label: PLACES.operations.label, closable: true });
+  };
   const [connectedExpanded, setConnectedExpanded] = useState(true);
   const [recentlySeenExpanded, setRecentlySeenExpanded] = useState(false);
 
@@ -175,12 +184,13 @@ export function NetworkTab(props: {
         >
           {directCount} direct / {relayedCount} relayed
         </span>
+        <button type="button" className="v10-agents-details" onClick={openConnectionDetails} aria-label="Connection details" title="Connection details in Observability">Details</button>
         <button className="v10-agents-refresh ds-btn ds-sm" onClick={onRefresh} title="Refresh network peers">
-          Refresh
+          <RefreshCw size={12} />Refresh
         </button>
       </div>
 
-      {loading && <p className="v10-agents-loading">Loading peers...</p>}
+      {loading && <Loading label="Loading peers…" />}
       {!loading && connected.length === 0 && recentlySeen.length === 0 && connections.total === 0 && (
         <div className="v10-agent-empty-state">No network peers detected yet.</div>
       )}

@@ -30,8 +30,6 @@ export const sel = {
 
   leftPanel: {
     root: '.v10-panel-left',
-    treeHeader: '.v10-tree-header',
-    modeBtn: '.v10-tree-mode-btn',
     // `.v10-collapse-btn` was removed in PR8 — the in-panel ◂ triangle
     // duplicated the always-visible global header toggle. Use the
     // global header `sidebarToggle` instead. `.v10-tree-section-badge`
@@ -55,7 +53,7 @@ export const sel = {
     treeItem: '.v10-tree-item',
     itemLabel: '.v10-tree-item-label',
     layerHeader: '.v10-tree-layer-header',
-    oraclePlaceholder: '.v10-oracle-placeholder',
+    publicPlaceholder: '.v10-oracle-placeholder',
     integrationDot: '.v10-tree-integration-dot',
     // PR8 sibling-section pattern (My Context Graphs + Integrations):
     peerGroup: '.v10-peer-group',
@@ -146,8 +144,8 @@ export const sel = {
 
   dashboard: {
     root: '.v10-dashboard',
-    title: '.v10-dash-title',
-    subtitle: '.v10-dash-subtitle',
+    title: '.ds-page-title',
+    subtitle: '.ds-page-desc',
     stats: '.v10-dash-stats',
     statCard: '.stat-card',
     statLabel: '.stat-label',
@@ -261,7 +259,7 @@ export const sel = {
   // rewritten page uses the shared `.card`/`.settings-*` design-system classes.
   // Opens as a closable center tab from the header gear button.
   settings: {
-    pageTitle: '.page-title',
+    pageTitle: '.ds-page-title',
     stack: '.settings-stack',
     card: '.settings-stack .card',
     cardTitle: '.settings-stack .card-title',

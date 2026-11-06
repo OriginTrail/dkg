@@ -16,6 +16,8 @@ import type { UseNotificationsFeed } from '../../hooks/useNotificationsFeed.js';
 import type { PcaAlert } from '../../hooks/usePcaAlerts.js';
 import { JoinRequestRow, ActivityDigestRow, ConfirmationRow, PcaCostCoveredRow } from './rows.js';
 import { Count } from '../ds/Badge.js';
+import { Loading } from '../ds/Loading.js';
+import { RefreshCw } from 'lucide-react';
 
 export interface NotificationsPaneProps {
   feed: UseNotificationsFeed;
@@ -111,11 +113,11 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
         {status === 'identity-pending' ? (
           <div className="v10-notif-pane-state" role="status">Verifying access…</div>
         ) : status === 'loading' && isEmpty ? (
-          <div className="v10-notif-pane-state" role="status">Loading notifications…</div>
+          <Loading label="Loading notifications…" />
         ) : status === 'error' && isEmpty ? (
           <div className="v10-notif-pane-error" role="status" aria-live="polite">
             Couldn’t load notifications.{' '}
-            <button type="button" className="v10-notif-retry" onClick={feed.retry}>Retry</button>
+            <button type="button" className="v10-notif-retry" onClick={feed.retry}><RefreshCw size={12} />Retry</button>
           </div>
         ) : isEmpty ? (
           <div className="v10-notif-pane-empty" role="status">
@@ -131,7 +133,7 @@ export function NotificationsPane({ feed, onOpenContextGraph, pcaAlerts = [], on
             {refreshError && (
               <div className="v10-notif-pane-error v10-notif-pane-error-inline" role="status" aria-live="polite">
                 Couldn’t refresh notifications.{' '}
-                <button type="button" className="v10-notif-retry" onClick={feed.retry}>Retry</button>
+                <button type="button" className="v10-notif-retry" onClick={feed.retry}><RefreshCw size={12} />Retry</button>
               </div>
             )}
 

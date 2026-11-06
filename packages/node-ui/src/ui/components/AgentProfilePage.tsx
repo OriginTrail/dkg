@@ -14,6 +14,7 @@ import { useTabsStore } from '../stores/tabs.js';
 import { useProjectsStore } from '../stores/projects.js';
 import { AgentProfileView } from './AgentProfileView.js';
 import { MemoryReadStatus } from './MemoryReadStatus.js';
+import { useContextGraphCrumb } from '../hooks/useContextGraphCrumb.js';
 
 export interface AgentProfilePageProps {
   contextGraphId: string;
@@ -27,7 +28,7 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
   const profile = useProjectProfile(contextGraphId);
   const agentsData = useAgents(contextGraphId);
   const memory = useMemoryEntities(contextGraphId);
-  const { openTab, closeTab, activeTabId } = useTabsStore();
+  const { openTab } = useTabsStore();
   const { setActiveProject } = useProjectsStore();
 
   const selectEntity = React.useCallback((uri: string) => {
@@ -59,10 +60,7 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
     });
   }, [contextGraphId, agentsData, openTab]);
 
-  const goBack = React.useCallback(() => {
-    if (activeTabId) closeTab(activeTabId);
-  }, [activeTabId, closeTab]);
-
+  const graph = useContextGraphCrumb(contextGraphId);
   const agentsContextValue = React.useMemo(
     () => ({ ...agentsData, openAgent }),
     [agentsData, openAgent],
@@ -78,7 +76,8 @@ export const AgentProfilePage: React.FC<AgentProfilePageProps> = ({
           partial={memory.partial || memory.loading}
           onSelectEntity={selectEntity}
           onOpenAgent={openAgent}
-          onBack={goBack}
+          onBack={graph.onClick!}
+          contextGraphName={graph.label}
         />
       </AgentsContext.Provider>
     </ProjectProfileContext.Provider>

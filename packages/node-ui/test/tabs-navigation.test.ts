@@ -70,6 +70,7 @@ describe('tab store', () => {
   it('decodes every saved record into a complete tab, the same way for open and recently closed', () => {
     // The reviewer's record: no closable flag, an object icon.
     expect(decodePersistedTab({ id: 'settings', label: 'Settings', icon: {} })).toEqual({ id: 'settings', label: 'Settings', closable: true });
+    expect(decodePersistedTab({ id: 'agent-hub', label: 'Agent hub' })).toBeNull();
     expect(decodePersistedTab({ id: 'project:a', label: 'Alpha', icon: 'graph', closable: false })).toEqual({ id: 'project:a', label: 'Alpha', closable: true, icon: 'graph' });
     for (const bad of [null, 5, 'x', [], {}, { id: '', label: 'L' }, { id: 'x' }, { id: 7, label: 'L' }, { id: 'x', label: 3 }, { id: 'dashboard', label: 'Dashboard' }]) {
       expect(decodePersistedTab(bad), JSON.stringify(bad)).toBeNull();

@@ -54,7 +54,7 @@ describe('TabBar', () => {
     act(() => { useTabsStore.setState({ tabs: [DASHBOARD_TAB, tab('project:beta', 'beta'), tab('project:gamma', 'gamma')], activeTabId: 'project:beta' }); });
     act(() => { useProjectsStore.setState({ contextGraphs: [{ id: 'beta', name: 'Beta Research' } as any] }); });
     expect(titles()).toEqual(['Dashboard', 'Beta Research', 'gamma']);
-    expect(tabEl('Beta Research').querySelector('[aria-label="Close Beta Research"]')).not.toBeNull();
+    expect(tabEl('Beta Research').querySelector('.v10-center-tab-close')).not.toBeNull();
     act(() => { container.querySelector<HTMLElement>('.v10-center-tabs-all')!.click(); });
     expect([...container.querySelectorAll('.v10-tab-menu-text')].map(e => e.textContent)).toContain('Beta Research');
   });
@@ -66,7 +66,7 @@ describe('TabBar', () => {
     expect(dash.getAttribute('draggable')).toBe('false');
     expect(dash.querySelector('.v10-center-tab-close')).toBeNull();
     expect(dash.querySelector('.v10-center-tab-label')).toBeNull();
-    expect(tabEl('Alpha').querySelector('[aria-label="Close Alpha"]')).not.toBeNull();
+    expect(tabEl('Alpha').querySelector('.v10-center-tab-close')).not.toBeNull();
   });
 
   it('reorders by drag and drop, before or after the target, and never past Dashboard', () => {

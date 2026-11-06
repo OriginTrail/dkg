@@ -10,16 +10,16 @@ import { test, expect } from '../fixtures/base.js';
 // Stat-card labels are sentence case ("Total connections"); the label
 // assertion below lowercases them first.
 
-test.describe('Network Debug Page (/ui/network)', () => {
+test.describe('Network tab in Observability (/ui/network)', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('network', { waitUntil: 'domcontentloaded' });
     await page
-      .getByRole('heading', { name: 'Network', level: 1 })
+      .getByRole('heading', { name: 'Observability', level: 1 })
       .waitFor({ state: 'visible', timeout: 15_000 });
   });
 
-  test('renders the "Network" page-title heading', async ({ page }) => {
-    const heading = page.getByRole('heading', { name: 'Network', level: 1 });
+  test('opens the Network tab in Observability', async ({ page }) => {
+    const heading = page.getByRole('heading', { name: 'Observability', level: 1 });
     await expect(heading).toBeVisible();
     await expect(heading).toHaveClass(/page-title/);
   });

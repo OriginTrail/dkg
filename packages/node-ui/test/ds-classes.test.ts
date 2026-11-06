@@ -13,7 +13,7 @@ const UI = resolve(__dirname, '../src/ui');
 const PRIMITIVES: Record<string, string[]> = {
   'ds-tab': ['v10-layer-switch-btn', 'v10-bottom-tab', 'v10-layer-expand-tab', 'v10-content-tab'],
   'ds-seg': ['v10-mlv-view-toggle'],
-  'ds-seg-item': ['v10-agent-mode-tab', 'v10-tree-mode-btn', 'v10-mlv-toggle-btn'],
+  'ds-seg-item': ['v10-agent-mode-tab', 'v10-mlv-toggle-btn'],
   'ds-filter': ['v10-subgraph-chip', 'v10-subgraph-filter-chip'],
   'ds-overlay': ['v10-modal-box', 'v10-drop-overlay-card'],
   'ds-card': ['stat-card', 'v10-dash-section', 'v10-vm-hero', 'v10-genui-card', 'v10-sgov-card', 'v10-empty-state', 'v10-cg-query-zone', 'v10-publish-panel', 'v10-import-dropzone'],

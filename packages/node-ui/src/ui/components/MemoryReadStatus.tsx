@@ -1,5 +1,6 @@
 import React from 'react';
 import type { MemoryData } from '../hooks/useMemoryEntities.js';
+import { RefreshCw } from 'lucide-react';
 
 /** A continuation surface for views that consume the bounded memory preview. */
 export function MemoryReadStatus({ memory }: { memory: MemoryData }) {
@@ -10,7 +11,7 @@ export function MemoryReadStatus({ memory }: { memory: MemoryData }) {
       {memory.loading ? 'Loading…' : 'Load more graph data'}
     </button>}
     {memory.canRetry && <button type="button" className="v10-retry-btn ds-btn ds-sm" disabled={memory.loading} onClick={memory.refresh}>
-      {memory.loading ? 'Loading…' : 'Retry memory read'}
+      {memory.loading ? 'Loading…' : <><RefreshCw size={12} />Retry memory read</>}
     </button>}
   </div>;
 }

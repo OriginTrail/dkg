@@ -1,5 +1,5 @@
 /* Sessions list */
-.v10-sessions-list { padding: 8px 0; }
+.v10-sessions-list { padding: var(--space-8) 0; }
 .v10-session-item {
   display: flex;
   align-items: center;
@@ -8,21 +8,21 @@
   padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
   text-align: left;
-  transition: background 0.1s;
+  transition: background var(--motion-fast);
 }
 .v10-session-item:hover { background: var(--bg-hover); }
 .v10-session-preview {
-  font-size: 12px;
+  font-size: var(--fs-control);
   color: var(--text-secondary);
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-right: 8px;
+  margin-right: var(--space-8);
 }
 .v10-session-count {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   color: var(--text-tertiary);
   flex-shrink: 0;
 }

@@ -97,6 +97,7 @@ export function TabBar() {
               key={tab.id}
               role="tab"
               aria-selected={active}
+              aria-keyshortcuts={tab.closable ? 'Delete' : undefined}
               tabIndex={active ? 0 : -1}
               className={`v10-center-tab${active ? ' active' : ''}${pinned ? ' pinned' : ''}${drag?.id === tab.id ? ' dragging' : ''}${dropClass}`}
               title={labelOf(tab)}
@@ -129,15 +130,15 @@ export function TabBar() {
               {!pinned && <span className="v10-center-tab-label">{labelOf(tab)}</span>}
               {pinned && <span className="v10-sr-only">{labelOf(tab)}</span>}
               {tab.closable && (
-                <button
-                  type="button"
+                // A mouse shortcut only: a control can't sit inside a tab. Keyboard
+                // and screen reader users close with Delete (aria-keyshortcuts).
+                <span
                   className="v10-center-tab-close"
-                  aria-label={`Close ${labelOf(tab)}`}
-                  tabIndex={-1}
+                  aria-hidden="true"
                   onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
                 >
                   {CLOSE_ICON}
-                </button>
+                </span>
               )}
             </div>
           );

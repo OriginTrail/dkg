@@ -14,8 +14,10 @@
  * 👤 human, ◉ generic AI. Click takes you to the agent's entity detail.
  */
 import React from 'react';
-import { agentInitials } from '@origintrail-official/dkg-graph-viz/agent-initials';
+import { agentInitials, agentInitialsColor } from '@origintrail-official/dkg-graph-viz/agent-initials';
 import { useAgentsContext, type AgentSummary } from '../hooks/useAgents.js';
+import { Bot, Cpu, Feather, Sparkles, Terminal, User, type LucideIcon } from 'lucide-react';
+import { truncateAddress } from '../lib/format.js';
 
 export interface AgentChipProps {
   agent: AgentSummary | null | undefined;
@@ -27,17 +29,17 @@ export interface AgentChipProps {
   className?: string;
 }
 
-const FRAMEWORK_GLYPH: Record<string, string> = {
-  'claude-code': '⦿',
-  'openclaw':    '◈',
-  'hermes':      '⬡',
-  'gemini':      '✧',
-  'human':       '👤',
+const FRAMEWORK_GLYPH: Record<string, LucideIcon> = {
+  'claude-code': Terminal,
+  'openclaw':    Cpu,
+  'hermes':      Feather,
+  'gemini':      Sparkles,
+  'human':       User,
 };
 
-function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): string {
+function framedGlyph(framework: string | undefined, kind: 'human' | 'ai'): LucideIcon {
   if (framework && FRAMEWORK_GLYPH[framework]) return FRAMEWORK_GLYPH[framework];
-  return kind === 'human' ? '👤' : '◉';
+  return kind === 'human' ? User : Bot;
 }
 
 // Compact initials shown inside the avatar disc: the same rule as AgentDot
@@ -54,9 +56,7 @@ const initials = agentInitials;
  * an ellipsis that hides nothing.
  */
 function truncateFallbackId(raw: string): string {
-  const trimmed = raw.trim();
-  if (trimmed.length <= 11) return trimmed;
-  return `${trimmed.slice(0, 6)}…${trimmed.slice(-4)}`;
+  return truncateAddress(raw);
 }
 
 export const AgentChip: React.FC<AgentChipProps> = ({
@@ -83,7 +83,7 @@ export const AgentChip: React.FC<AgentChipProps> = ({
     ?? (fallbackUri ? truncateFallbackId(fallbackUri.split(':').pop() ?? fallbackUri) : 'unknown');
   const kind = agent?.kind ?? 'ai';
   const framework = agent?.framework;
-  const glyph = framedGlyph(framework, kind);
+  const Glyph = framedGlyph(framework, kind);
   const color = agent?.color ?? 'var(--identity-fallback)';
   const title = [
     name,
@@ -107,9 +107,9 @@ export const AgentChip: React.FC<AgentChipProps> = ({
       role={interactive ? 'button' : undefined}
       tabIndex={interactive ? 0 : undefined}
     >
-      <span className="v10-agent-chip-avatar" style={{ background: color }}>
+      <span className="v10-agent-chip-avatar" style={{ background: color, color: agentInitialsColor(color) }}>
         <span className="v10-agent-chip-initials">{initials(name)}</span>
-        <span className="v10-agent-chip-glyph" title={framework ?? kind}>{glyph}</span>
+        <span className="v10-agent-chip-glyph" title={framework ?? kind}><Glyph size={size === 'sm' ? 8 : 10} /></span>
       </span>
       <span className="v10-agent-chip-body">
         <span className="v10-agent-chip-name">{name}</span>

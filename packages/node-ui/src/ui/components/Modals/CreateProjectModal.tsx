@@ -9,6 +9,7 @@ import { publishProjectManifest } from '../../lib/projectManifest.js';
 import { WireWorkspacePanel } from '../Workspace/WireWorkspacePanel.js';
 import { useModalDismiss } from './useModalDismiss.js';
 import { CG_NAME_MAX_LENGTH, sanitiseCgName, validateCgName } from './cgNameValidation.js';
+import { ChevronRight, X, RefreshCw } from 'lucide-react';
 
 function slugify(str: string): string {
   return str
@@ -308,9 +309,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             onClick={handleWireDone}
             aria-label="Close wire workspace dialog"
             title="Close (Esc)"
-            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }}
+            style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4 }}
           >
-            ×
+            <X size={14} />
           </button>
           <div className="v10-modal-header">
             <div id="dkg-wire-modal-title" className="v10-modal-title">Wire workspace for {wiredProjectName}</div>
@@ -356,9 +357,9 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           onClick={onClose}
           aria-label="Close create Context Graph dialog"
           title="Close (Esc)"
-          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4, zIndex: 1 }}
+          style={{ position: 'absolute', top: 12, right: 12, background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 'var(--fs-title)', lineHeight: 1, padding: 4, zIndex: 1 }}
         >
-          ×
+          <X size={14} />
         </button>
         <div className="v10-modal-header">
           <div id="dkg-create-cg-title" className="v10-modal-title">Create new Context Graph</div>
@@ -369,7 +370,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
 
         <div className="v10-modal-body">
           {error && (
-            <div className="v10-modal-error ds-card-nested">
+            <div role="alert" className="v10-modal-error ds-card-nested">
               {error}
             </div>
           )}
@@ -407,7 +408,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             />
             <div
               id="dkg-cg-name-help"
-              style={{ marginTop: 4, fontSize: 11, color: nameValidationError ? 'var(--accent-red)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
+              style={{ marginTop: 4, fontSize: 'var(--fs-label)', color: nameValidationError ? 'var(--accent-red)' : 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}
             >
               {nameValidationError
                 ? nameValidationError
@@ -459,7 +460,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </label>
             </div>
             {access === 'curated' && publishPolicy === 'open' && (
-              <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
+              <div style={{ marginTop: 6, fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>
                 Note: an invite-only sharing graph with open contribution still lets <em>any</em> wallet
                 publish to Verifiable Memory — the on-chain publish check is not gated by the allowlist.
                 See SPEC_CG_MEMORY_MODEL §2.5.
@@ -478,7 +479,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               />
               <span>
                 Register on chain now (required for Verifiable Memory publishing)
-                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginTop: 4 }}>
                   Off by default: the project is created locally and can be registered later
                   from its Settings tab when your wallet is funded and a working RPC is configured.
                 </div>
@@ -495,7 +496,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </label>
               {ontology === 'community' && (
                 <div style={{ marginLeft: 24, marginTop: 4, marginBottom: 8 }}>
-                  <select
+                  <select aria-label="Community ontology"
                     className="v10-form-select ds-input"
                     value={starterSlug}
                     onChange={(e) => setStarterSlug(e.target.value)}
@@ -504,7 +505,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                       <option key={s.slug} value={s.slug}>{s.displayName}</option>
                     ))}
                   </select>
-                  <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
+                  <div style={{ marginTop: 6, fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>
                     {starters.find((s) => s.slug === starterSlug)?.description}
                   </div>
                 </div>
@@ -522,21 +523,21 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               )}
               <label className="v10-form-radio" style={{ opacity: 0.5 }}>
                 <input type="radio" checked={ontology === 'upload'} onChange={() => setOntology('upload')} disabled />
-                Upload an ontology file (.ttl, .owl, .rdf) <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span>
+                Upload an ontology file (.ttl, .owl, .rdf) <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span>
               </label>
             </div>
           </div>
 
-          <div className="v10-form-advanced-toggle" onClick={() => setShowAdvanced(!showAdvanced)}>
-            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}>▸</span>
+          <button type="button" className="v10-form-advanced-toggle" aria-expanded={showAdvanced} onClick={() => setShowAdvanced(!showAdvanced)}>
+            <span className={`v10-form-adv-chevron ${showAdvanced ? 'open' : ''}`}><ChevronRight size={12} /></span>
             <span>Advanced settings</span>
-          </div>
+          </button>
 
           {showAdvanced && (
             <div className="v10-form-advanced-body ds-card-nested" style={{ opacity: 0.5, pointerEvents: 'none' }}>
               <div className="v10-form-group">
-                <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={quorum} disabled>
+                <label className="v10-form-label">Consensus quorum <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select aria-label="Consensus quorum" className="v10-form-select ds-input" value={quorum} disabled>
                   <option value="off">Off: no consensus verification required</option>
                   <option value="2of3">2 of 3: lightweight consensus</option>
                   <option value="3of5">3 of 5: standard consensus (recommended for teams)</option>
@@ -544,8 +545,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group">
-                <label className="v10-form-label">SWM TTL <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={swmTtl} disabled>
+                <label className="v10-form-label">Shared Working Memory lifetime <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select aria-label="SWM TTL" className="v10-form-select ds-input" value={swmTtl} disabled>
                   <option value="7d">7 days (default)</option>
                   <option value="1h">1 hour</option>
                   <option value="1d">1 day</option>
@@ -553,8 +554,8 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
                 </select>
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
-                <label className="v10-form-label">SWM Size Cap <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select className="v10-form-select ds-input" value={swmCap} disabled>
+                <label className="v10-form-label">Shared Working Memory size limit <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
+                <select aria-label="SWM size cap" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>
@@ -569,7 +570,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
           <button className="v10-modal-btn ds-btn" onClick={onClose}>Cancel</button>
           {identityError && (
             <button className="v10-modal-btn ds-btn" onClick={loadAgentIdentity} disabled={identityLoading}>
-              {identityLoading ? 'Retrying…' : 'Retry loading agent'}
+              {identityLoading ? 'Retrying…' : <><RefreshCw size={12} />Retry loading agent</>}
             </button>
           )}
           <button

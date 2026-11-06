@@ -6,6 +6,7 @@ import type { PcaHealthState } from '../../pca/health.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import type { PcaOwnerAccess } from '../../pca/ownerAccess.js';
+import { Loading } from '../../components/ds/Loading.js';
 
 /** Lifecycle / Renew — re-mint a REPLACEMENT account (deliberately omits refresh; the mint is a NEW id). */
 export function LifecycleSection({
@@ -68,9 +69,7 @@ export function LifecycleSection({
       )}
       {/* LOW#3 — brief in-flight state between the mint and the seeded re-approval. */}
       {renewal.renewChaining && (
-        <div className="lazy-spinner" role="status" data-testid="pca-renew-chaining">
-          Preparing re-approval…
-        </div>
+        <Loading block label="Preparing re-approval…" data-testid="pca-renew-chaining" />
       )}
       {/* S2b renew — chained Approve, pre-seeded with the OLD account's agents, which it
           DEREGISTERS from the old account first (expiry doesn't free them — gate-HIGH). */}

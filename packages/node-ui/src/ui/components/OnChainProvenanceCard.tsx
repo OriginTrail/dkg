@@ -18,7 +18,10 @@ import React, { useEffect, useState } from 'react';
 import { useRdfGraph } from '@origintrail-official/dkg-graph-viz/react';
 import { useEntityOnChainReceipt } from '../hooks/useEntityOnChainReceipt.js';
 import { truncateId } from '../hooks/useVerifiedEntityIdentity.js';
-import { Badge } from './ds/Badge.js';
+import { Badge, LayerGlyph } from './ds/Badge.js';
+import { Check, CircleDashed, Copy, X } from 'lucide-react';
+import { formatNumber, formatDateTime } from '../lib/format.js';
+import { ExternalMark } from './ds/ExternalMark.js';
 
 export interface OnChainProvenanceCardProps {
   contextGraphId: string;
@@ -65,13 +68,13 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
   return (
     <div
       className={`v10-graph-prov-card ds-card${verified ? ' verified' : ''}`}
-      role="dialog"
+      role="region"
       aria-label="On-chain provenance"
     >
       <div className="v10-graph-prov-head">
-        <span className="v10-graph-prov-glyph">{verified ? '◉' : '◌'}</span>
+        <span className="v10-graph-prov-glyph">{verified ? <LayerGlyph layer="vm" /> : <CircleDashed size={12} />}</span>
         <span className="v10-graph-prov-title">On-chain provenance</span>
-        {verified && <Badge tone="vm" size="sm" icon="✓" className="v10-graph-prov-badge">Verified</Badge>}
+        {verified && <Badge tone="vm" size="sm" icon={<Check size={12} />} className="v10-graph-prov-badge">Verified</Badge>}
         <button
           type="button"
           className="v10-graph-prov-close"
@@ -79,7 +82,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
           aria-label="Dismiss"
           title="Dismiss"
         >
-          ×
+          <X size={14} />
         </button>
       </div>
 
@@ -106,7 +109,7 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">UAL</span>
               <span className="v10-vm-identity-val mono" title={receipt.ual}>{receipt.ual}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.ual!)} title="Copy UAL">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.ual!)} aria-label="Copy UAL" title="Copy UAL"><Copy size={12} /></button>
             </div>
           )}
 
@@ -121,12 +124,12 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
                   rel="noopener noreferrer"
                   title={receipt.txHash}
                 >
-                  {truncateId(receipt.txHash, 10, 8)} ↗
+                  {truncateId(receipt.txHash, 10, 8)} <ExternalMark />
                 </a>
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.txHash}>{truncateId(receipt.txHash, 10, 8)}</span>
               )}
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.txHash!)} title="Copy transaction hash">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.txHash!)} aria-label="Copy transaction hash" title="Copy transaction hash"><Copy size={12} /></button>
             </div>
           )}
 
@@ -139,9 +142,9 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
 
           {receipt.kaId && (
             <div className="v10-vm-identity-row">
-              <span className="v10-vm-identity-lbl">KA id</span>
+              <span className="v10-vm-identity-lbl">Knowledge Asset ID</span>
               <span className="v10-vm-identity-val mono" title={receipt.kaId}>{truncateId(receipt.kaId, 8, 8)}</span>
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} title="Copy KA id">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.kaId!)} aria-label="Copy Knowledge Asset ID" title="Copy Knowledge Asset ID"><Copy size={12} /></button>
             </div>
           )}
 
@@ -156,19 +159,19 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
                   rel="noopener noreferrer"
                   title={receipt.author}
                 >
-                  {truncateId(receipt.author, 6, 4)} ↗
+                  {truncateId(receipt.author, 6, 4)} <ExternalMark />
                 </a>
               ) : (
                 <span className="v10-vm-identity-val mono" title={receipt.author}>{truncateId(receipt.author, 6, 4)}</span>
               )}
-              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.author!)} title="Copy author address">⎘</button>
+              <button type="button" className="v10-vm-identity-copy" onClick={() => copy(receipt.author!)} aria-label="Copy author address" title="Copy author address"><Copy size={12} /></button>
             </div>
           )}
 
           {receipt.finalizedAt && (
             <div className="v10-vm-identity-row">
               <span className="v10-vm-identity-lbl">Finalized</span>
-              <span className="v10-vm-identity-val">{formatWhen(receipt.finalizedAt)}</span>
+              <span className="v10-vm-identity-val">{formatDateTime(receipt.finalizedAt)}</span>
             </div>
           )}
         </div>
@@ -179,13 +182,6 @@ export const OnChainProvenanceCard: React.FC<OnChainProvenanceCardProps> = ({
 
 function formatBlock(raw: string): string {
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) ? n.toLocaleString() : raw;
+  return Number.isFinite(n) ? formatNumber(n) : raw;
 }
 
-function formatWhen(raw: string): string {
-  const d = new Date(raw.replace(/^"|"$/g, ''));
-  if (!Number.isFinite(d.getTime())) return raw;
-  return d.toLocaleString(undefined, {
-    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
-  });
-}

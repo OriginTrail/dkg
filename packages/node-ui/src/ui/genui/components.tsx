@@ -14,6 +14,8 @@ import { kindColor, type EntityKind } from '../entity-kind-colors.js';
 import { Badge, LayerBadge } from '../components/ds/Badge.js';
 import { entityStatusTone } from '../lib/entity-status.js';
 import { humanizeStatus } from '../lib/formatLabels.js';
+import { FileText, GitPullRequest, Package, Signpost, SquareCheck } from 'lucide-react';
+import { truncateAddress } from '../lib/format.js';
 
 type RenderProps<P> = { props: P; renderNode: (value: unknown) => React.ReactNode };
 
@@ -173,7 +175,7 @@ export const PackageCardImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-card ds-card v10-genui-package-card" style={kindStyle('package')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" aria-hidden="true">▦</span>
+      <span className="v10-genui-card-icon" aria-hidden="true"><Package size={14} /></span>
       <div className="v10-genui-card-title">{props.name}</div>
       {props.folder ? <div className="v10-genui-card-type">packages/{props.folder}</div> : null}
     </div>
@@ -193,7 +195,7 @@ export const FileCardImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-card ds-card v10-genui-file-card" style={kindStyle('file')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" aria-hidden="true">▤</span>
+      <span className="v10-genui-card-icon" aria-hidden="true"><FileText size={14} /></span>
       <div className="v10-genui-card-title">{basename(props.path)}</div>
       {props.language ? <div className="v10-genui-card-type">.{props.language}</div> : null}
     </div>
@@ -214,7 +216,7 @@ export const DecisionCardImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-card ds-card v10-genui-decision-card" style={kindStyle('decision')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" aria-hidden="true">◆</span>
+      <span className="v10-genui-card-icon" aria-hidden="true"><Signpost size={14} /></span>
       <div className="v10-genui-card-title">{props.title}</div>
       {props.status ? <Badge size="sm" tone={entityStatusTone(props.status)} className={`v10-genui-status-chip status-${props.status}`}>{humanizeStatus(props.status)}</Badge> : null}
     </div>
@@ -233,7 +235,7 @@ export const PRCardImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-card ds-card v10-genui-pr-card" style={kindStyle('pr')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" aria-hidden="true">⇄</span>
+      <span className="v10-genui-card-icon" aria-hidden="true"><GitPullRequest size={14} /></span>
       <div className="v10-genui-card-title">
         {typeof props.number === 'number' ? <span className="v10-genui-pr-num">#{props.number}</span> : null}
         {props.title}
@@ -263,7 +265,7 @@ export const TaskCardImpl: React.FC<RenderProps<{
 }>> = ({ props }) => (
   <div className="v10-genui-card ds-card v10-genui-task-card" style={kindStyle('task')}>
     <div className="v10-genui-card-head">
-      <span className="v10-genui-card-icon" aria-hidden="true">✓</span>
+      <span className="v10-genui-card-icon" aria-hidden="true"><SquareCheck size={14} /></span>
       <div className="v10-genui-card-title">{props.title}</div>
       {props.status ? <Badge size="sm" tone={entityStatusTone(props.status)} className={`v10-genui-status-chip task-status-${props.status}`}>{humanizeStatus(props.status)}</Badge> : null}
       {props.priority ? <Badge size="sm" tone={props.priority === 'p0' ? 'danger' : props.priority === 'p1' ? 'warning' : 'neutral'} className={`v10-genui-priority-chip priority-${props.priority}`}>{props.priority.toUpperCase()}</Badge> : null}
@@ -384,12 +386,12 @@ function shortValue(obj: string): string {
 function shortHash(s: string): string {
   if (!s) return '';
   if (s.length <= 16) return s;
-  return `${s.slice(0, 8)}…${s.slice(-6)}`;
+  return truncateAddress(s, 8, 6);
 }
 
 function shortDid(did: string): string {
   if (!did) return '';
-  return did.length > 22 ? `${did.slice(0, 12)}…${did.slice(-6)}` : did;
+  return did.length > 22 ? truncateAddress(did, 12, 6) : did;
 }
 
 function basename(path: string): string {

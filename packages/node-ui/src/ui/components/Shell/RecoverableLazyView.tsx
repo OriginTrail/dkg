@@ -1,4 +1,6 @@
 import React, { Suspense } from 'react';
+import { Loading } from '../ds/Loading.js';
+import { RefreshCw } from 'lucide-react';
 
 type LoadingLabel<Props> = string | ((props: Props) => string);
 
@@ -21,7 +23,7 @@ function ChunkLoadFailure() {
   return (
     <div className="lazy-spinner" role="alert">
       <p>This view could not be opened. Reload the page to try again.</p>
-      <button type="button" onClick={() => window.location.reload()}>Reload page</button>
+      <button type="button" onClick={() => window.location.reload()}><RefreshCw size={12} />Reload page</button>
     </div>
   );
 }
@@ -49,7 +51,7 @@ export function createRecoverableLazyView<Props extends object>(
   function RecoverableLazyView(props: Props) {
     const loadingLabel = typeof label === 'function' ? label(props) : label;
     return (
-      <Suspense fallback={<div className="lazy-spinner">Loading {loadingLabel}...</div>}>
+      <Suspense fallback={<Loading block label={`Loading ${loadingLabel}…`} />}>
         <LazyView {...props} />
       </Suspense>
     );

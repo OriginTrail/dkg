@@ -1,5 +1,5 @@
 import React, { useCallback, useId, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Eye, X, RefreshCw, LogIn, Plus } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
 import { useProjectsStore, type ContextGraph } from '../../stores/projects.js';
@@ -16,14 +16,15 @@ import {
 } from '../../api.js';
 import { ContextGraphMark } from '../../context-graph-colors.js';
 import {
-  belongsInContextOracleSidebar,
+  belongsInPublicSidebar,
   belongsInMyProjectsSidebar,
-  classifyContextOracleEntry,
+  classifyPublicEntry,
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
 import { DASHBOARD_ICON, placeIcon } from './nav-icons.js';
 import { NODE_PLACE_IDS, PLACES } from '../../lib/tab-target.js';
+import { Loading } from '../ds/Loading.js';
 
 const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: placeIcon(id) }));
 
@@ -31,7 +32,6 @@ const NODE_PLACES = NODE_PLACE_IDS.map((id) => ({ id, ...PLACES[id], icon: place
 // Memory-layer expansion was removed by request — layers are surfaced inside
 // the project view rather than as nested sidebar items.
 
-type TreeMode = 'explorer' | 'oracle';
 
 // Hidden-context-graph dismiss is now the shared `useHiddenProjectIds`
 // (aliased import above) so PanelLeft, the Memory Stack and the Dashboard
@@ -57,21 +57,21 @@ function ProjectTreeItem({
         onClick={onSelect}
       >
         <ContextGraphMark id={cg.id} name={cg.name} />
-        <span className="v10-tree-section-label">{cg.name || cg.id.slice(0, 16)}</span>
+        <button type="button" className="v10-tree-section-label ds-row-open">{cg.name || cg.id.slice(0, 16)}</button>
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this Context Graph from the sidebar (reversible)"
           onClick={(e) => { e.stopPropagation(); onHide(); }}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
     </div>
   );
 }
 
-interface OracleCatalogueItemProps {
+interface PublicCatalogueItemProps {
   cg: ContextGraph;
   isBrowsing: boolean;
   onBrowse: () => void;
@@ -79,13 +79,13 @@ interface OracleCatalogueItemProps {
   onHide: () => void;
 }
 
-function OracleCatalogueItem({
+function PublicCatalogueItem({
   cg,
   isBrowsing,
   onBrowse,
   onSubscribe,
   onHide,
-}: OracleCatalogueItemProps) {
+}: PublicCatalogueItemProps) {
   const label = cg.name || cg.id.slice(0, 16);
   return (
     <div className="v10-tree-section">
@@ -111,10 +111,10 @@ function OracleCatalogueItem({
         <button
           type="button"
           className="v10-tree-hide-btn ds-btn ds-ghost ds-sm ds-icon"
-          title="Hide this Context Graph from the sidebar (reversible)"
+          aria-label={`Hide ${cg.name || cg.id.slice(0, 16)} from the sidebar`} title="Hide this Context Graph from the sidebar (reversible)"
           onClick={onHide}
         >
-          ×
+          <X size={14} />
         </button>
       </div>
     </div>
@@ -162,16 +162,16 @@ function IntegrationsSectionBody() {
 
   return (
     <div className="v10-tree-items" style={{ display: 'block' }}>
-      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
+      <div style={{ fontSize: 'var(--fs-label)', fontWeight: 600, color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: 0.5, padding: '6px 12px 2px 24px' }}>
         Agents
       </div>
       {localAgentsError && (
-        <div style={{ fontSize: 11, color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-danger)', padding: '4px 12px 4px 24px' }}>
           {localAgentsError}
         </div>
       )}
       {!localAgentsError && localAgents.length === 0 && (
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
+        <div style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', padding: '4px 12px 4px 24px', fontStyle: 'italic' }}>
           No agents detected.
         </div>
       )}
@@ -193,7 +193,7 @@ function IntegrationsSectionBody() {
             }}
           />
           <span className="v10-tree-item-label">{a.name}</span>
-          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', marginLeft: 4 }}>
+          <span style={{ fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)', marginLeft: 4 }}>
             {a.statusLabel}
           </span>
         </div>
@@ -206,18 +206,20 @@ export function PanelLeft() {
   const leftSectionMyProjectsOpen = useLayoutStore((s) => s.leftSectionMyProjectsOpen);
   const leftSectionIntegrationsOpen = useLayoutStore((s) => s.leftSectionIntegrationsOpen);
   const toggleLeftSectionMyProjects = useLayoutStore((s) => s.toggleLeftSectionMyProjects);
+  const leftSectionPublicOpen = useLayoutStore((s) => s.leftSectionPublicOpen);
+  const toggleLeftSectionPublic = useLayoutStore((s) => s.toggleLeftSectionPublic);
   const toggleLeftSectionIntegrations = useLayoutStore((s) => s.toggleLeftSectionIntegrations);
   // Stable per-render ids for the section bodies so the chevron buttons
   // can use `aria-controls` to point at the disclosed region (screen
   // readers can then programmatically associate trigger ↔ content).
   const myProjectsBodyId = useId();
   const integrationsBodyId = useId();
+  const publicGraphsBodyId = useId();
   const { openTab, activeTabId, setActiveTab } = useTabsStore();
   const { activeProjectId, setActiveProject } = useProjectsStore();
   const { contextGraphs, error: listError, identity: sharedAgent,
     inventoryLoading, inventoryError } = useContextGraphInventory();
   const stage = useJourneyStore((s) => s.stage);
-  const [treeMode, setTreeMode] = useState<TreeMode>('explorer');
 
   const { hidden: hiddenIds, hide: hideProject, unhideAll } = useHiddenProjectIds();
   const agentIdentity: AgentSidebarIdentity | null = sharedAgent.data ? toSidebarIdentity(sharedAgent.data) : null;
@@ -225,8 +227,8 @@ export function PanelLeft() {
   const visibleContextGraphs = contextGraphs.filter((cg) => !hiddenIds.has(cg.id));
   const myProjects = visibleContextGraphs.filter((cg) =>
     belongsInMyProjectsSidebar(cg, agentIdentity));
-  const contextOracleProjects = visibleContextGraphs.filter((cg) =>
-    belongsInContextOracleSidebar(cg, agentIdentity));
+  const publicContextGraphs = visibleContextGraphs.filter((cg) =>
+    belongsInPublicSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
 
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -246,50 +248,41 @@ export function PanelLeft() {
 
   return (
     <div className="v10-panel-left">
-      <div className="v10-tree-create-actions">
-        <button className="v10-new-project-btn ds-btn" onClick={() => setShowCreateModal(true)}>+ New Context Graph</button>
-        <button className="v10-new-project-btn ds-btn" onClick={() => openJoinModal()}>↗ Join Context Graph</button>
-      </div>
+      <nav className="v10-sidebar-places" aria-label="Places">
+        <button
+          type="button"
+          className={`v10-tree-dashboard ${activeTabId === 'dashboard' ? 'active' : ''}`}
+          aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
+          onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
+        >
+          <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span> Dashboard
+        </button>
+        <button
+          type="button"
+          className={`v10-tree-dashboard ${activeTabId === 'memory-stack' ? 'active' : ''}`}
+          aria-current={activeTabId === 'memory-stack' ? 'page' : undefined}
+          title={PLACES['memory-stack'].title}
+          onClick={() => openTab({ id: 'memory-stack', label: PLACES['memory-stack'].label, closable: true })}
+        >
+          <span className="v10-sidebar-place-icon">{placeIcon('memory-stack')}</span> {PLACES['memory-stack'].label}
+        </button>
+      </nav>
 
-      <div className="v10-tree-header">
-        <div className="ds-seg" role="group" aria-label="Sidebar view">
-        <button
-          aria-pressed={treeMode === 'explorer'}
-          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'explorer' ? 'active' : ''}`}
-          onClick={() => setTreeMode('explorer')}
-        >
-          Context Graphs
-        </button>
-        <button
-          aria-pressed={treeMode === 'oracle'}
-          className={`v10-tree-mode-btn ds-seg-item ${treeMode === 'oracle' ? 'active' : ''}`}
-          onClick={() => setTreeMode('oracle')}
-        >
-          Context Oracle
-        </button>
-        </div>
+      <div className="v10-tree-create-actions">
+        <button className="v10-new-project-btn ds-btn" aria-label="New Context Graph" title="New Context Graph" onClick={() => setShowCreateModal(true)}><Plus size={14} aria-hidden="true" />New</button>
+        <button className="v10-new-project-btn ds-btn" aria-label="Join Context Graph" title="Join Context Graph" onClick={() => openJoinModal()}><LogIn size={14} aria-hidden="true" />Join</button>
       </div>
 
       {inventoryError && (
         <div className="v10-journey-empty-card ds-card" role="alert">
           <div>{listError ? 'Context Graphs unavailable. ' : ''}{sharedAgent.error ? 'Agent identity unavailable.' : ''}</div>
           <div>{contextGraphs.length ? 'Showing the last available Context Graphs.' : 'Context Graph membership is unknown.'}</div>
-          <button type="button" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}>Retry</button>
+          <button type="button" className="ds-btn ds-sm" disabled={inventoryLoading} onClick={() => { void refreshContextGraphInventory(true); }}><RefreshCw size={12} />Retry</button>
         </div>
       )}
-      {inventoryLoading && contextGraphs.length === 0 && <div role="status">Loading Context Graphs…</div>}
+      {inventoryLoading && contextGraphs.length === 0 && <Loading label="Loading Context Graphs…" />}
 
-      {treeMode === 'explorer' && (
-        <div className="v10-tree-content">
-          <button
-            type="button"
-            className={`v10-tree-dashboard ${activeTabId === 'dashboard' ? 'active' : ''}`}
-            aria-current={activeTabId === 'dashboard' ? 'page' : undefined}
-            onClick={() => { setActiveTab('dashboard'); setActiveProject(null); }}
-          >
-            <span className="v10-sidebar-place-icon">{DASHBOARD_ICON}</span> Dashboard
-          </button>
-
+      <div className="v10-tree-content">
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && !inventoryError && !inventoryLoading && (
@@ -302,7 +295,7 @@ export function PanelLeft() {
               </div>
               {stage === 1 && (
                 <button className="v10-new-project-btn ds-btn" style={{ margin: 0 }} onClick={() => setShowCreateModal(true)}>
-                  + Create First Context Graph
+                  <Plus size={14} aria-hidden="true" />Create your first Context Graph
                 </button>
               )}
             </div>
@@ -313,8 +306,8 @@ export function PanelLeft() {
               focus-visible + prefers-reduced-motion + button semantics.
               Header renders even when `myProjects` is empty (but at
               least one CG exists, or the journey is past first-run) —
-              otherwise a sidebar with CGs only in the Context Oracle
-              view would collapse to a lone "Integrations" header
+              otherwise a sidebar with only public CGs
+              would collapse to a lone "Integrations" header
               (qa-lead). The empty-state journey card above handles the
               "no CGs at all" first-run case. */}
           {(contextGraphs.length > 0 || stage >= 2) && (
@@ -362,18 +355,73 @@ export function PanelLeft() {
             </div>
           )}
 
-          {hiddenCount > 0 && (
-            <button
-              type="button"
-              className="v10-tree-show-hidden"
-              onClick={unhideAll}
-              title="Restore all Context Graphs dismissed from the sidebar"
-            >
-              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
-            </button>
+
+          {/* Section B: public Context Graphs this node has discovered but
+              not joined. A catalogue, so rows offer browse and subscribe. */}
+          {(contextGraphs.length > 0 || stage >= 2) && (
+            <div className="v10-peer-group">
+              <button
+                type="button"
+                className="v10-peer-group-header"
+                aria-expanded={leftSectionPublicOpen}
+                aria-controls={publicGraphsBodyId}
+                onClick={toggleLeftSectionPublic}
+              >
+                <ChevronRight
+                  size={14}
+                  className={`v10-peer-group-chevron ${leftSectionPublicOpen ? 'expanded' : ''}`}
+                  aria-hidden="true"
+                />
+                <span className="v10-peer-group-label">Public Context Graphs</span>
+              </button>
+              {leftSectionPublicOpen && (
+                <div id={publicGraphsBodyId} className="v10-peer-group-body">
+                  {publicContextGraphs.map((cg) => {
+                    const onHide = () => {
+                      hideProject(cg.id);
+                      if (activeProjectId === cg.id) setActiveProject(null);
+                    };
+                    if (classifyPublicEntry(cg) === 'catalogue') {
+                      return (
+                        <PublicCatalogueItem
+                          key={cg.id}
+                          cg={cg}
+                          isBrowsing={activeTabId === `project:${cg.id}`}
+                          onBrowse={() => {
+                            setActiveProject(null);
+                            openTab({
+                              id: `project:${cg.id}`,
+                              label: cg.name || cg.id.slice(0, 16),
+                              closable: true,
+                            });
+                          }}
+                          onSubscribe={() => openJoinModal(cg.id)}
+                          onHide={onHide}
+                        />
+                      );
+                    }
+                    return (
+                      <ProjectTreeItem
+                        key={cg.id}
+                        cg={cg}
+                        isActive={activeProjectId === cg.id}
+                        onSelect={() => {
+                          setActiveProject(cg.id);
+                          openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
+                        }}
+                        onHide={onHide}
+                      />
+                    );
+                  })}
+                  {publicContextGraphs.length === 0 && !inventoryError && !inventoryLoading && (
+                    <p className="v10-tree-hint">Public Context Graphs appear here as your node discovers them. Use <strong>Join</strong> to subscribe by ID.</p>
+                  )}
+                </div>
+              )}
+            </div>
           )}
 
-          {/* Section B: Integrations (default collapsed — escape-hatch
+          {/* Section C: Integrations (default collapsed — escape-hatch
               surface). Body is only mounted while open, so the 30s
               polling effect in IntegrationsSectionBody naturally pauses
               when collapsed. */}
@@ -400,58 +448,6 @@ export function PanelLeft() {
               )}
             </div>
           )}
-        </div>
-      )}
-
-      {treeMode === 'oracle' && (
-        <div className="v10-tree-content">
-          {contextOracleProjects.length > 0 && (
-            <>
-              <div className="v10-tree-group-label">Context Oracle</div>
-              {contextOracleProjects.map((cg) => {
-                const onHide = () => {
-                  hideProject(cg.id);
-                  if (activeProjectId === cg.id) setActiveProject(null);
-                };
-                if (classifyContextOracleEntry(cg) === 'catalogue') {
-                  return (
-                    <OracleCatalogueItem
-                      key={cg.id}
-                      cg={cg}
-                      isBrowsing={activeTabId === `project:${cg.id}`}
-                      onBrowse={() => {
-                        setActiveProject(null);
-                        openTab({
-                          id: `project:${cg.id}`,
-                          label: cg.name || cg.id.slice(0, 16),
-                          closable: true,
-                        });
-                      }}
-                      onSubscribe={() => openJoinModal(cg.id)}
-                      onHide={onHide}
-                    />
-                  );
-                }
-                return (
-                  <ProjectTreeItem
-                    key={cg.id}
-                    cg={cg}
-                    isActive={activeProjectId === cg.id}
-                    onSelect={() => {
-                      setActiveProject(cg.id);
-                      openTab({ id: `project:${cg.id}`, label: cg.name || cg.id.slice(0, 16), closable: true });
-                    }}
-                    onHide={onHide}
-                  />
-                );
-              })}
-            </>
-          )}
-          {contextOracleProjects.length === 0 && !inventoryError && !inventoryLoading && (
-            <p style={{ fontSize: 12, color: 'var(--text-tertiary)', padding: '20px 12px', textAlign: 'center', lineHeight: 1.5 }}>
-              No discovered public Context Graphs yet. Public graphs appear here as soon as your node discovers them; use <strong>Join Context Graph</strong> to subscribe by ID.
-            </p>
-          )}
           {hiddenCount > 0 && (
             <button
               type="button"
@@ -459,11 +455,10 @@ export function PanelLeft() {
               onClick={unhideAll}
               title="Restore all Context Graphs dismissed from the sidebar"
             >
-              ↺ Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
+              <Eye size={12} /> Show {hiddenCount} hidden Context Graph{hiddenCount !== 1 ? 's' : ''}
             </button>
           )}
-        </div>
-      )}
+      </div>
 
       {/* Node-level places: every destination lives in the sidebar
           (DESIGN.md · Navigation); the header keeps only status and

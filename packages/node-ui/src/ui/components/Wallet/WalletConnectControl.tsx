@@ -118,7 +118,7 @@ export function WalletConnectControl({
                     <img src={detail.info.icon} alt="" aria-hidden="true" className="v10-wallet-provider-icon" />
                   )}
                   <span>{providerName(detail)}</span>
-                  {busyKey === key && <Loader2 size={13} aria-hidden="true" />}
+                  {busyKey === key && <Loader2 size={14} aria-hidden="true" />}
                 </button>
               );
             })

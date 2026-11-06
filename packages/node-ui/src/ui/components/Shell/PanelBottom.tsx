@@ -3,6 +3,7 @@ import { useLayoutStore, maxBottomHeight } from '../../stores/layout.js';
 import { api } from '../../api-wrapper.js';
 import { formatTime, formatDuration, shortId } from '../../hooks.js';
 import { opTypeText } from '../../op-type-colors.js';
+import { pressable } from '../../lib/pressable.js';
 
 const BOTTOM_TABS = ['Node log', 'Transactions'] as const;
 type BottomTab = typeof BOTTOM_TABS[number];
@@ -49,8 +50,8 @@ function classifyLine(line: string): 'error' | 'warn' | 'info' | 'debug' {
 }
 
 const LEVEL_COLORS: Record<string, string> = {
-  error: 'var(--accent-red)',
-  warn:  'var(--accent-amber)',
+  error: 'var(--text-danger)',
+  warn:  'var(--text-warning)',
   info:  'var(--text-primary)',
   debug: 'var(--text-tertiary)',
 };
@@ -169,7 +170,7 @@ function TransactionsContent() {
 
   if (ops.length === 0) {
     return (
-      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 12 }}>
+      <div style={{ padding: '20px 16px', color: 'var(--text-tertiary)', fontSize: 'var(--fs-control)' }}>
         No publish, update, or verify activity in the last 6 hours.
       </div>
     );
@@ -177,15 +178,15 @@ function TransactionsContent() {
 
   return (
     <div className="v10-log-output" style={{ overflowY: 'auto', flex: 1 }}>
-      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+      <div className="ds-table-scroll"><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 'var(--fs-label)' }}>
         <thead>
-          <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)', textAlign: 'left' }}>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Type</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>ID</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Status</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Duration</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Time</th>
-            <th style={{ padding: '6px 12px', fontWeight: 600 }}>Tx hash</th>
+          <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left' }}>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Type</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>ID</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Status</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Duration</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Time</th>
+            <th className="ds-table-head" style={{ padding: '6px 12px' }}>Tx hash</th>
           </tr>
         </thead>
         <tbody>
@@ -196,7 +197,7 @@ function TransactionsContent() {
             return (
               <React.Fragment key={op.operation_id}>
                 <tr
-                  onClick={() => setExpanded(id => id === op.operation_id ? null : op.operation_id)}
+                  aria-expanded={isExp} {...pressable(() => setExpanded(id => id === op.operation_id ? null : op.operation_id))}
                   style={{ borderBottom: '1px solid var(--border-subtle)', cursor: 'pointer', background: isExp ? 'var(--tint-subtle)' : undefined }}
                 >
                   <td style={{ padding: '7px 12px', color: opTypeText(op.operation_name), fontWeight: 600 }}>
@@ -207,9 +208,9 @@ function TransactionsContent() {
                   </td>
                   <td style={{ padding: '7px 12px' }}>
                     <span style={{
-                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
+                      padding: '2px 6px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                       background: op.status === 'success' ? 'var(--success-bg-strong)' : op.status === 'error' ? 'var(--danger-bg-strong)' : 'var(--warning-bg-strong)',
-                      color: op.status === 'success' ? 'var(--accent-green)' : op.status === 'error' ? 'var(--accent-red)' : 'var(--accent-amber)',
+                      color: op.status === 'success' ? 'var(--text-success)' : op.status === 'error' ? 'var(--text-danger)' : 'var(--accent-amber)',
                     }}>{op.status}</span>
                   </td>
                   <td style={{ padding: '7px 12px', color: 'var(--text-secondary)' }}>
@@ -234,17 +235,17 @@ function TransactionsContent() {
                 {isExp && (
                   <tr style={{ background: 'var(--shade)' }}>
                     <td colSpan={6} style={{ padding: '8px 16px' }}>
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 11, color: 'var(--text-secondary)' }}>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 'var(--fs-label)', color: 'var(--text-secondary)' }}>
                         <span><b>ID:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{op.operation_id}</span></span>
                         {txHash && <span><b>Tx:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{txHash}</span></span>}
                         {op.peer_id && <span><b>Peer:</b> <span style={{ fontFamily: 'var(--font-mono)' }}>{shortId(op.peer_id)}</span></span>}
-                        {op.error_message && <span style={{ color: 'var(--accent-red)' }}><b>Error:</b> {op.error_message}</span>}
+                        {op.error_message && <span style={{ color: 'var(--text-danger)' }}><b>Error:</b> {op.error_message}</span>}
                       </div>
                       {(op.phases ?? []).length > 0 && (
                         <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                           {op.phases.map((p: any) => (
                             <span key={p.phase} style={{
-                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 10, fontWeight: 600,
+                              padding: '2px 8px', borderRadius: 'var(--radius-xs)', fontSize: 'var(--fs-micro)', fontWeight: 600,
                               background: 'var(--tint-strong)', color: 'var(--text-secondary)',
                             }}>
                               {p.phase} {p.duration_ms != null ? formatDuration(p.duration_ms) : ''}
@@ -321,7 +322,7 @@ export function PanelBottom() {
 
   return (
     <div
-      className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
+      role="region" aria-label="Node log and transactions" className={`v10-panel-bottom ${bottomCollapsed ? 'collapsed' : ''} ${bottomMaximised ? 'maximised' : ''}`}
       style={!bottomCollapsed ? { height: panelHeight } : undefined}
     >
       {/* Resize handle — only visible when expanded and not maximised */}
@@ -349,7 +350,7 @@ export function PanelBottom() {
           {bottomMaximised ? RESTORE_ICON : MAXIMIZE_ICON}
         </button>
         <button className="v10-bottom-toggle ds-btn ds-ghost ds-sm ds-icon" onClick={toggleBottom} title={bottomCollapsed ? 'Expand' : 'Collapse'}>
-          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform 0.15s' }}>
+          <span style={{ transform: bottomCollapsed ? 'rotate(180deg)' : 'none', display: 'flex', transition: 'transform var(--motion-base)' }}>
             {CHEVRON_DOWN}
           </span>
         </button>
