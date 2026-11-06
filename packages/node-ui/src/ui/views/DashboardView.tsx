@@ -415,7 +415,7 @@ function CgRow({
 
   return (
     <button className="v10-cg-row" onClick={() => onOpen(cg)}>
-      <span className="v10-cg-cell v10-cg-name"><ContextGraphMark id={cg.id} name={cg.name} />{cg.name || cg.id.slice(0, 16)}</span>
+      <span className="v10-cg-cell v10-cg-name"><ContextGraphMark id={cg.id} name={cg.name} /><span className="v10-cg-name-text" title={cg.name || cg.id}>{cg.name || cg.id.slice(0, 16)}</span></span>
       <span
         className="v10-cg-cell v10-cg-type"
         title={`${typeLabel} Context Graph`}
@@ -730,7 +730,7 @@ export function DashboardView() {
               No Context Graphs yet — create or join one from the sidebar.
             </p>
           ) : (
-            <>
+            <div className="v10-cg-table">
               <div className="v10-cg-colhead">
                 <span className="v10-cg-cell v10-cg-name">Name</span>
                 <span className="v10-cg-cell v10-cg-type">Type</span>
@@ -757,7 +757,7 @@ export function DashboardView() {
                   />
                 ))}
               </div>
-            </>
+            </div>
           )}
         </div>
 

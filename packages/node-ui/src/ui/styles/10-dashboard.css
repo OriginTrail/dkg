@@ -142,6 +142,7 @@
 .v10-layer-legend-dot { width: 8px; height: 8px; border-radius: 50%; } /* round = data; squares are context graphs */
 
 /* My Context Graphs list — column grid shared by header + rows. */
+.v10-cg-table { container: cg-table / inline-size; }
 .v10-cg-colhead, .v10-cg-row {
   display: grid;
   /* Reverted from the round-2 over-flex: a fully-flexible Size column
@@ -155,7 +156,7 @@
 }
 .v10-cg-colhead {
   padding: 5px 8px;
-  font-size: 11px;
+  font-size: var(--fs-label);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--text-secondary);
@@ -178,13 +179,16 @@
 }
 .v10-cg-row:last-child { border-bottom: 0; }
 .v10-cg-row:hover { background: var(--bg-hover); }
-.v10-cg-cell { font-size: 13px; color: var(--text-secondary); min-width: 0; }
-.v10-cg-name {
-  color: var(--text-primary);
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.v10-cg-cell { font-size: var(--fs-body); color: var(--text-secondary); min-width: 0; }
+.v10-cg-name { color: var(--text-primary); font-weight: 500; }
+.v10-cg-name-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Header cells share their column's class, so they take the header's type here. */
+.v10-cg-colhead .v10-cg-cell { font-size: inherit; font-weight: inherit; color: inherit; }
+/* The name always gets the room. When the table is too narrow for one line, Size drops under it. */
+@container cg-table (max-width: 560px) {
+  .v10-cg-colhead, .v10-cg-row { grid-template-columns: minmax(0, 1fr) 40px 52px 76px; row-gap: 2px; }
+  .v10-cg-colhead .v10-cg-size { display: none; }
+  .v10-cg-row .v10-cg-size { grid-column: 1 / -1; grid-row: 2; padding-left: 24px; font-size: var(--fs-control); }
 }
 .v10-cg-type { display: flex; align-items: center; justify-content: center; color: var(--text-secondary); }
 .v10-cg-agents { text-align: right; font-variant-numeric: tabular-nums; }
