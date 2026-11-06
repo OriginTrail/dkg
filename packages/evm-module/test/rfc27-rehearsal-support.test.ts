@@ -9,7 +9,7 @@ import { PoolModel, scheduleModel } from './helpers/emission-model';
 import { ParametersConfig, contractParameters } from '../utils/helpers';
 import { Fork } from '../scripts/rfc27/fork';
 import { expectedParameterIn, requireParameter } from '../scripts/rfc27/parameters';
-import { groupFault, grossOf, poolsFromMoney, receiptFault } from '../scripts/rfc27/reads';
+import { capturedFactorHolds, groupFault, grossOf, poolsFromMoney, receiptFault, stakeFactorFrom } from '../scripts/rfc27/reads';
 import { Report, Redactor } from '../scripts/rfc27/report';
 import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
@@ -372,6 +372,32 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(groupFault(0, 'OutsideEpoch')).to.equal('GroupFault(0, 3)');
       expect(groupFault(1, 'BelowMinCounted')).to.equal('GroupFault(1, 5)');
       expect(receiptFault(0, 2, 'DuplicateNonce')).to.equal('ReceiptFault(0, 2, 8)');
+    });
+  });
+
+  describe('the stake factor a batch should capture, worked out without the batch', () => {
+    const MAX = 10_000_000n * 10n ** 18n;
+    const QUARTER = stakeFactorFrom({ live: MAX / 4n, snapshotSet: false, snapshot: 0n, maximumStake: MAX });
+
+    it('is the square root of the stake over the maximum', () => {
+      expect(QUARTER).to.equal(5n * 10n ** 17n);
+      expect(stakeFactorFrom({ live: MAX * 2n, snapshotSet: false, snapshot: 0n, maximumStake: MAX })).to.equal(10n ** 18n);
+    });
+
+    it("takes the challenge's snapshot only if it took one and it is lower", () => {
+      expect(stakeFactorFrom({ live: MAX, snapshotSet: true, snapshot: MAX / 4n, maximumStake: MAX })).to.equal(QUARTER);
+      expect(stakeFactorFrom({ live: MAX / 4n, snapshotSet: true, snapshot: MAX, maximumStake: MAX })).to.equal(QUARTER);
+      expect(stakeFactorFrom({ live: MAX / 4n, snapshotSet: false, snapshot: 1n, maximumStake: MAX })).to.equal(QUARTER);
+    });
+
+    it('fails a batch and the scores built on it that agree on 0, when the stake gives more', () => {
+      expect(capturedFactorHolds(0n, QUARTER)).to.equal(false);
+      expect(capturedFactorHolds(QUARTER - 1n, QUARTER)).to.equal(false);
+      expect(capturedFactorHolds(QUARTER, QUARTER)).to.equal(true);
+    });
+
+    it('fails when the stake gives 0 too, since nothing then vouches for either side', () => {
+      expect(capturedFactorHolds(0n, 0n)).to.equal(false);
     });
   });
 
