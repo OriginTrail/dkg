@@ -13,13 +13,13 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * @notice The rules of a subscription (OT-RFC-27) that both funding contracts
  *         apply, `ServiceSubscriptions` from a Conviction Account and
  *         `ServiceSubscriptionsWallet` from a wallet: the pause and the
- *         activation, which epoch a subscription may be, its id, its budgets,
- *         and how a top-up merges into them. Internal functions, so each
- *         contract carries the same code and no library is linked.
+ *         activation, which epoch a subscription may be for, its id, its
+ *         budgets, and how a top-up merges into them. Internal functions, so
+ *         each contract carries the same code and no library is linked.
  *
- * A subscription is one chain epoch. A buyer funds at most one subscription per
- * epoch, for the current epoch or the next one, so a buyer node can fund the
- * next subscription before the boundary.
+ * A subscription is for one chain epoch. A buyer funds at most one subscription
+ * per epoch, for the current epoch or the next one, so a buyer node can fund
+ * the next subscription before the boundary.
  */
 library SubscriptionLib {
     uint8 internal constant CLASS_INFERENCE = 1;

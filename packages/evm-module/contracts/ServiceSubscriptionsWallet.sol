@@ -17,11 +17,11 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 /**
  * @title ServiceSubscriptionsWallet
  * @notice Subscriptions funded from the buyer's wallet (OT-RFC-27,
- *         "NeuroSymbolic Marketplace"): a buyer pays one subscription per
- *         transaction in TRAC, and tops it up within the subscription.
+ *         "NeuroSymbolic Marketplace"): a buyer pays for one subscription per
+ *         transaction in TRAC, and tops it up while it runs.
  *
- * A subscription is one chain epoch, the current one or the next, and a buyer
- * funds at most one subscription per epoch: wallet subscriptions and
+ * A subscription is for one chain epoch, the current one or the next, and a
+ * buyer funds at most one subscription per epoch: wallet subscriptions and
  *  Conviction
  * Account subscriptions (`ServiceSubscriptions`) share one id per buyer and
  * epoch. The subscription is recorded in `ServiceSubscriptionsStorage` under
@@ -50,14 +50,14 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * The session key. A wallet subscription's session key is fixed at its funding
  * and cannot be rotated or revoked on-chain: a wallet subscription has no grant
  * to revoke. Whoever holds a leaked key can sign the subscription's requests
- * for any seller, a node they run included, and so direct the subscription's R
- * to it. The loss is bounded by that one subscription: its receipts count for
- * at most its budgets' funded value, top-ups included, and the session key
- * signs for no other subscription. Only the buyer tops a subscription up, so it
- * can add nothing more and fund its next subscription under a new session key.
- * (A Conviction Account subscription's key is fixed too, but revoking its grant
- * refuses every request issued after the revocation.) This is a known
- * limitation, accepted for testnet.
+ * for any seller, a node they run included, and so direct the subscription's
+ * served value to it. The loss is bounded by that one subscription: its
+ * receipts count for at most its budgets' funded value, top-ups included, and
+ * the session key signs for no other subscription. Only the buyer tops a
+ * subscription up, so it stops adding to it and funds its next subscription
+ * under a new session key. (A Conviction Account subscription's key is fixed
+ * too, but revoking its grant refuses every request issued after the
+ * revocation.) This is a known limitation, accepted for testnet.
  */
 contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInitializable, ISubscriptionFunding {
     string private constant _NAME = "ServiceSubscriptionsWallet";

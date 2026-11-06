@@ -18,7 +18,7 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *         booked in the query/inference pool (`QueryInferenceStorage`), as a
  *         wallet subscription's value is. A buyer may also fund subscriptions
  *         from its wallet; those are recorded here too, under account 0, which
- *         no account has. A subscription is one chain epoch.
+ *         no account has. A subscription is for one chain epoch.
  *
  * Architecture (the pattern of `PublishingConvictionStorage`):
  *   - This contract holds every byte of service-spending state: the opt-in
@@ -62,10 +62,10 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
     // Version history:
     //   1.0.0 — Conviction Account service spending: opt-ins, grants, usage,
     //           labels, and subscription records with their budgets.
-    //   1.1.0 — a subscription is one epoch; a grant holds one cost limit per
-    //           subscription and an expiry, and its usage counts subscriptions
-    //           only; `maxSubscriptionSeconds` is gone; top-ups of a recorded
-    //           subscription (`applyTopUp`); one budget read by index
+    //   1.1.0 — a subscription is for one epoch; a grant holds one cost limit
+    //           per subscription and an expiry, and its usage counts
+    //           subscriptions only; `maxPeriodSeconds` is gone; top-ups of a
+    //           recorded subscription (`applyTopUp`); one budget read by index
     //           (`getBudget`). The mapping slots are unchanged.
     //   1.2.0 — no service labels: a Conviction Account subscription's cost is
     //           booked in `QueryInferenceStorage`. Removed with the labels are
@@ -112,12 +112,13 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
         address owner; // the account's owner who switched it on
     }
 
-    /// @notice A buyer's authority over one account: the most it may spend for
-    ///         one subscription, in COST (TRAC wei spent from the account's
-    ///         allowance after its discount), until it expires. It funds only
-    ///         while the owner who consented to it holds the account.
+    /// @notice An account owner's permission for one buyer: the most it may
+    ///         spend on one subscription, in COST (TRAC wei spent from the
+    ///         account's allowance after its discount), and until when. It
+    ///         funds only while the owner who consented to it holds the
+    ///         account.
     struct BuyerGrant {
-        uint96 maxCostPerEpoch; // the subscription's cost, its top-ups included
+        uint96 maxCostPerEpoch; // the most one subscription may cost, its top-ups included
         uint40 grantedAt; // 0 = no grant
         uint40 expiresAt;
         uint40 revokedAt; // 0 = not revoked
@@ -125,8 +126,8 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
         address owner; // the account's owner who consented to it
     }
 
-    /// @notice The two limits of a grant. `setBuyerLimits` writes them and
-    ///         nothing else.
+    /// @notice The limit and the expiry of a grant. `setBuyerLimits` writes
+    ///         them and nothing else.
     struct BuyerLimits {
         uint96 maxCostPerEpoch;
         uint40 expiresAt;
@@ -137,7 +138,7 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
         uint32 subscriptions; // subscriptions funded since grantedAt; top-ups fund none
     }
 
-    /// @notice One funded subscription: one chain epoch.
+    /// @notice One funded subscription, for one chain epoch.
     struct Subscription {
         uint256 accountId; // 0 = funded from the buyer's wallet
         address buyer; // the buyer that funded it
@@ -301,9 +302,9 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
         _grants[accountId][buyer].revokedAt = at;
     }
 
-    /// @notice Overwrite the two limits of a stored grant and nothing else:
-    ///         `grantedAt`, `revokedAt`, `nonce`, `owner`, the buyer list and
-    ///         the usage stay as they are.
+    /// @notice Overwrite the limit and the expiry of a stored grant and nothing
+    ///         else: `grantedAt`, `revokedAt`, `nonce`, `owner`, the buyer list
+    ///         and the usage stay as they are.
     function setBuyerLimits(
         uint256 accountId,
         address buyer,
@@ -354,8 +355,8 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
     ///         budgets would then belong to no subscription, and more entries
     ///         in `added` than the subscription has budgets
     ///         (`BudgetTopUpOutOfRange`). Appending keeps every stored budget
-    ///         at its index, which claims are keyed by. The sums are checked,
-    ///         so an overflow reverts.
+    ///         at its index, which receipt groups and `budgetUsed` are keyed
+    ///         by. The sums are checked, so an overflow reverts.
     function applyTopUp(
         bytes32 subscriptionId,
         TopUpAmounts calldata t,
@@ -470,7 +471,7 @@ contract ServiceSubscriptionsStorage is INamed, IVersioned, HubDependent, IIniti
     /// @dev    The caller keeps in step the record's `value`, the sum of the
     ///         budgets' values (`setSubscription`). What a budget has used is
     ///         kept by its index (`QueryInferenceStorage`), so a budget in use
-    ///         keeps its `serviceId` and at least what it has used.
+    ///         keeps its `serviceId` and a value of at least what it has used.
     ///         `applyTopUp` remains the normal path.
     function setBudget(bytes32 subscriptionId, uint256 index, ServiceBudget calldata b) external onlyContracts {
         _requireRecorded(subscriptionId);
