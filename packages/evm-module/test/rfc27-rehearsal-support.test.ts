@@ -11,12 +11,13 @@ import { Fork } from '../scripts/rfc27/fork';
 import { expectedParameterIn, requireParameter } from '../scripts/rfc27/parameters';
 import { capturedFactorHolds, groupFault, grossOf, poolsFromMoney, receiptFault, stakeFactorFrom } from '../scripts/rfc27/reads';
 import { Report, Redactor } from '../scripts/rfc27/report';
-import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
+import { TX_GAS_CAP, TxOverGasCap, TxReverted, TxRunner, gasLimitFor } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
-import { bookedBy1020, checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existing';
+import { StoredAccount, bookedBy1020, checkClaims, checkSettleMany, checkSettledAccounts } from '../scripts/rfc27/rehearsal/existing';
 import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
 import { claimAll } from '../scripts/rfc27/rehearsal/operations';
 import { closedWindows } from '../scripts/rfc27/rehearsal/reads';
+import { checkQuietClaim } from '../scripts/rfc27/rehearsal/unused';
 import { passedResults } from '../scripts/rfc27/rehearsal/results';
 import type { ClaimResult, Position } from '../scripts/rfc27/rehearsal/results';
 
@@ -81,6 +82,55 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(ctx.txs).to.have.length(1);
       expect(ctx.txs[0].status).to.equal('reverted before inclusion');
       expect(ctx.txs[0].hash).to.equal(undefined);
+    });
+  });
+
+  describe("Base's 2^24 gas cap, which anvil does not enforce", () => {
+    /** A runner over a chain that estimates `estimate`, and a signer that keeps what it is asked to send. */
+    const over = (estimate: bigint) => {
+      const report = new QuietReport();
+      const hre = {
+        ethers: { provider: { estimateGas: async () => estimate, getTransactionReceipt: async () => ({ hash: HASH, status: 1, gasUsed: 7n, blockNumber: 1 }) } },
+      };
+      const sent: { gasLimit?: bigint }[] = [];
+      const signer = {
+        getAddress: async () => '0x00000000000000000000000000000000000000bb',
+        sendTransaction: async (t: { gasLimit?: bigint }) => {
+          sent.push(t);
+          return { hash: HASH };
+        },
+      };
+      const tx = { label: 'someone: something', signer: signer as unknown as Parameters<TxRunner['run']>[0]['signer'], to: '0x00000000000000000000000000000000000000aa', data: '0x' };
+      return { report, sent, tx, runner: new TxRunner(hre as unknown as Ctx['hre'], report) };
+    };
+
+    for (const estimate of [TX_GAS_CAP, TX_GAS_CAP + 1n]) {
+      it(`sends nothing with an estimate of ${estimate}, fails the check, and says why`, async () => {
+        const { report, sent, tx, runner } = over(estimate);
+        let thrown: unknown;
+        await runner.run(tx).catch((e: unknown) => {
+          thrown = e;
+        });
+        expect(thrown).to.be.instanceOf(TxOverGasCap);
+        expect((thrown as TxOverGasCap).estimate).to.equal(estimate);
+        expect(sent).to.deep.equal([]);
+        expect(report.checks.filter((c) => !c.ok).map((c) => c.label)).to.deep.equal(['someone: something fits the 2^24 gas cap']);
+      });
+    }
+
+    it('sends an estimate just under the cap, with a gas limit still under it', async () => {
+      const { report, sent, tx, runner } = over(TX_GAS_CAP - 1n);
+      const mined = await runner.run(tx);
+      expect(mined.gasLimit).to.equal(TX_GAS_CAP - 1n);
+      expect(sent.map((s) => s.gasLimit)).to.deep.equal([TX_GAS_CAP - 1n]);
+      expect(report.checks.filter((c) => !c.ok)).to.deep.equal([]);
+    });
+
+    it('pads an estimate by a quarter and 50,000, and never above the cap', () => {
+      expect(gasLimitFor(1_000_000n)).to.equal(1_300_000n);
+      const paddedToTheCap = ((TX_GAS_CAP - 50_000n) * 4n) / 5n;
+      expect(gasLimitFor(paddedToTheCap - 1n)).to.be.lessThan(TX_GAS_CAP);
+      expect(gasLimitFor(paddedToTheCap + 1n)).to.equal(TX_GAS_CAP - 1n);
     });
   });
 
@@ -278,6 +328,12 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
         toWindow,
       });
     const expected = closedWindows({ cursor: 0n, createdAt: CREATED, epLen: DAY, lock: LOCK, at: AT });
+    /** The pools around a settle that books `curves`, storage holding what the model has it hold. */
+    const storedFor = (curves: Awaited<ReturnType<typeof model>>['curves']) => {
+      const pool = new PoolModel(0n);
+      for (const r of curves.flatMap((cv) => cv.booked)) pool.add(r);
+      return { before: { pools: new Map<bigint, bigint>(), remainder: 0n }, after: { pools: new Map(pool.perEpoch), remainder: pool.remainder }, model: pool };
+    };
 
     it('works out the closed windows from the cursor, the creation, the epoch length, the lock and the time', () => {
       expect(expected).to.deep.equal({ fromWindow: 0n, toWindow: 5n });
@@ -293,14 +349,43 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       checkLateBooking(report, {
         expected,
         curves,
-        budget: B,
+        allowance: B,
         epoch: E,
         emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
         cursorAfter: 5n,
         credits: curves.flatMap((cv) => cv.booked),
+        stored: storedFor(curves),
       });
       expect(report.failed).to.equal(0);
-      expect(report.checks).to.have.length(4);
+      expect(report.checks).to.have.length(5);
+    });
+
+    it('fails when the events are all right and the staker pools in storage are not', async () => {
+      const { curves } = await model(0n, 5n);
+      const failedWith = (edit: (s: ReturnType<typeof storedFor>) => void) => {
+        const report = new QuietReport();
+        const stored = storedFor(curves);
+        edit(stored);
+        checkLateBooking(report, {
+          expected,
+          curves,
+          allowance: B,
+          epoch: E,
+          emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
+          cursorAfter: 5n,
+          credits: curves.flatMap((cv) => cv.booked),
+          stored,
+        });
+        return report.checks.filter((c) => !c.ok).map((c) => c.label);
+      };
+      const POOLS = ['the staker pools in storage gained what the model books, epoch by epoch, with the remainder it carries'];
+      const [first] = storedFor(curves).model.perEpoch.keys();
+
+      expect(failedWith(() => {})).to.deep.equal([]);
+      expect(failedWith((s) => s.after.pools.set(first, s.after.pools.get(first)! - 1n))).to.deep.equal(POOLS);
+      expect(failedWith((s) => s.after.pools.set(first + 10_000n, 1n))).to.deep.equal(POOLS);
+      expect(failedWith((s) => s.after.pools.delete(first))).to.deep.equal(POOLS);
+      expect(failedWith((s) => (s.after.remainder += 1n))).to.deep.equal(POOLS);
     });
 
     it('fails when the settle books only one of the five closed windows, though its event and its credits agree', async () => {
@@ -310,11 +395,12 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       checkLateBooking(report, {
         expected,
         curves,
-        budget: B,
+        allowance: B,
         epoch: E,
         emitted: { fromWindow: 0n, toWindow: 1n, scheduled: B },
         cursorAfter: 1n,
         credits: one.flatMap((cv) => cv.booked),
+        stored: storedFor(curves),
       });
       const failed = report.checks.filter((c) => !c.ok).map((c) => c.label);
       expect(failed).to.have.length(3);
@@ -327,11 +413,12 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       checkLateBooking(report, {
         expected,
         curves,
-        budget: B,
+        allowance: B,
         epoch: E,
         emitted: { fromWindow: 0n, toWindow: 5n, scheduled: 5n * B },
         cursorAfter: 1n,
         credits: curves.flatMap((cv) => cv.booked),
+        stored: storedFor(curves),
       });
       expect(report.checks.filter((c) => !c.ok).map((c) => c.detail)).to.deep.equal(['emitted 0..4, cursor 1']);
     });
@@ -340,32 +427,32 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
   describe('the pool, worked out without the contract', () => {
     it('leaves an epoch with no value no pool, and its money waiting for the next epoch with value', () => {
       const rows = [
-        { money: 5n, sumR: 3n },
-        { money: 2n, sumR: 0n },
-        { money: 0n, sumR: 0n },
-        { money: 1n, sumR: 0n },
-        { money: 4n, sumR: 1n },
-        { money: 7n, sumR: 0n },
+        { money: 5n, totalServed: 3n },
+        { money: 2n, totalServed: 0n },
+        { money: 0n, totalServed: 0n },
+        { money: 1n, totalServed: 0n },
+        { money: 4n, totalServed: 1n },
+        { money: 7n, totalServed: 0n },
       ];
       expect(poolsFromMoney(rows)).to.deep.equal({ pools: [5n, 0n, 0n, 0n, 7n, 0n], waiting: 7n });
     });
 
     it('holds nothing back with value in every epoch, and everything back with value in none', () => {
-      expect(poolsFromMoney([{ money: 5n, sumR: 1n }, { money: 2n, sumR: 1n }])).to.deep.equal({ pools: [5n, 2n], waiting: 0n });
-      expect(poolsFromMoney([{ money: 5n, sumR: 0n }, { money: 2n, sumR: 0n }])).to.deep.equal({ pools: [0n, 0n], waiting: 7n });
+      expect(poolsFromMoney([{ money: 5n, totalServed: 1n }, { money: 2n, totalServed: 1n }])).to.deep.equal({ pools: [5n, 2n], waiting: 0n });
+      expect(poolsFromMoney([{ money: 5n, totalServed: 0n }, { money: 2n, totalServed: 0n }])).to.deep.equal({ pools: [0n, 0n], waiting: 7n });
       expect(poolsFromMoney([])).to.deep.equal({ pools: [], waiting: 0n });
     });
 
     it('pays a gross by the formula, each term floored on its own', () => {
       // Half the pool by R, half by score: 100 × (1/2 × 1/3) + 100 × (1/2 × 3/4), floored apart.
-      expect(grossOf(100n, 5_000n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(16n + 37n);
-      expect(grossOf(100n, 0n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(33n);
-      expect(grossOf(100n, 10_000n, { r: 1n, score: 3n }, { sumR: 3n, sumScore: 4n })).to.equal(75n);
+      expect(grossOf(100n, 5_000n, { servedValue: 1n, weightedValue: 3n }, { totalServed: 3n, totalWeighted: 4n })).to.equal(16n + 37n);
+      expect(grossOf(100n, 0n, { servedValue: 1n, weightedValue: 3n }, { totalServed: 3n, totalWeighted: 4n })).to.equal(33n);
+      expect(grossOf(100n, 10_000n, { servedValue: 1n, weightedValue: 3n }, { totalServed: 3n, totalWeighted: 4n })).to.equal(75n);
     });
 
     it('gives the second term the R share when no node has a score, and a node with no value nothing', () => {
-      expect(grossOf(100n, 5_000n, { r: 1n, score: 0n }, { sumR: 2n, sumScore: 0n })).to.equal(25n + 25n);
-      expect(grossOf(100n, 5_000n, { r: 0n, score: 0n }, { sumR: 2n, sumScore: 1n })).to.equal(0n);
+      expect(grossOf(100n, 5_000n, { servedValue: 1n, weightedValue: 0n }, { totalServed: 2n, totalWeighted: 0n })).to.equal(25n + 25n);
+      expect(grossOf(100n, 5_000n, { servedValue: 0n, weightedValue: 0n }, { totalServed: 2n, totalWeighted: 1n })).to.equal(0n);
     });
 
     it('words a refusal of a batch as a decoded revert does, by the fault\'s place in the enum', () => {
@@ -465,7 +552,7 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(requireParameter('QueryInferenceStorage', ['lambdaBps'])).to.deep.equal({ key: 'lambdaBps', value: 5000n });
       expect(requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value).to.equal(256n);
       expect(requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value).to.equal(32n);
-      expect(requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value).to.equal(16n);
+      expect(requireParameter('ServiceSubscriptionsStorage', ['maxBudgetsPerSubscription']).value).to.equal(16n);
     });
   });
 
@@ -513,6 +600,32 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       c[0] = { ...c[0], amount: c[0].amount - 1n };
       c[1] = { ...c[1], amount: c[1].amount + 1n };
       expect(settleMany(c).failed).to.equal(1);
+    });
+
+    it('fails an expired account its events call swept when storage does not', () => {
+      const settled: StoredAccount = { id: 9n, fullySwept: true, topUp: 0n, lastSettledWindow: 12n, lock: 12n };
+      const run = (accounts: StoredAccount[]) => {
+        const report = new QuietReport();
+        checkSettledAccounts(report, accounts);
+        return report;
+      };
+      expect(run([settled]).failed).to.equal(0);
+      expect(run([{ ...settled, fullySwept: false }]).failed).to.equal(1);
+      expect(run([{ ...settled, topUp: 1n }]).checks[0].detail).to.contain('account 9');
+      expect(run([{ ...settled, lastSettledWindow: 11n }]).failed).to.equal(1);
+      expect(run([]).failed).to.equal(1);
+    });
+
+    it('fails a claim after a quiet spell that went through without paying its share of the pool', () => {
+      const run = (claimed: { reward: bigint; rawDelta: bigint }, expected: bigint, poolShare: bigint) => {
+        const report = new QuietReport();
+        checkQuietClaim(report, { ...claimed, gasUsed: 1n }, expected, poolShare);
+        return report;
+      };
+      expect(run({ reward: 7n, rawDelta: 7n }, 7n, 2n).failed).to.equal(0);
+      expect(run({ reward: 5n, rawDelta: 5n }, 7n, 2n).failed).to.equal(1);
+      expect(run({ reward: 7n, rawDelta: 5n }, 7n, 2n).failed).to.equal(1);
+      expect(run({ reward: 7n, rawDelta: 7n }, 7n, 0n).failed).to.equal(1);
     });
 
     it('fails when a credit is missing or added', () => {

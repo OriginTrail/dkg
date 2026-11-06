@@ -12,7 +12,7 @@
 //     while it has no value and keeps once a value has counted in it;
 //   - the money, wallet and Conviction Account: bookings accumulate per epoch,
 //     each in its own ledger;
-//   - countReceipts: the bucket's fill and the node's and the epoch's totals,
+//   - countReceipts: the budget's fill and the node's and the epoch's totals,
 //     every sum checked;
 //   - the rule that an epoch that has ended takes no write, on every write keyed
 //     by an epoch, to the second of its boundary;
@@ -34,13 +34,13 @@ const MAX_UINT96 = (1n << 96n) - 1n;
 const MAX_UINT120 = (1n << 120n) - 1n;
 const MAX_UINT128 = (1n << 128n) - 1n;
 /** The setters that write one field of the settlement state, onlyContracts as the other mutators are. */
-const NARROW_SETTERS = ['setBucketFilled', 'setEpochTotals', 'setNodeEpoch'];
+const NARROW_SETTERS = ['setBudgetUsed', 'setEpochTotals', 'setNodeEpoch'];
 /** The other functions that write that state. */
-const MUTATORS = ['addConvictionFunding', 'addWalletFunding', 'countReceipts', 'useNonces'];
+const MUTATORS = ['addAccountFunding', 'addWalletFunding', 'countReceipts', 'useNonces'];
 /** The parameters' setters, onlyHub. */
 const PARAMETER_SETTERS = ['setActivationEpoch', 'setLambdaBps', 'setMaxGroupsPerBatch', 'setMaxItemsPerBatch', 'setPaused'];
 
-const ID = ethers.id('period');
+const ID = ethers.id('subscription');
 
 type Fixture = {
   Hub: Hub;
@@ -97,9 +97,9 @@ describe('@unit QueryInferenceStorage', () => {
   const activateAt = async (epoch: bigint) => forward('setActivationEpoch', [epoch]);
   type Call = (...a: unknown[]) => Promise<ethers.ContractTransactionResponse>;
   const callerOf = (signer: SignerWithAddress) => QIS.connect(signer) as unknown as Record<string, Call>;
-  /** A count from the logic contracts: by default node 5 on bucket 3 of the period. */
-  const count = (epoch: bigint, counted: bigint, r: bigint, score: bigint, seller = 5n, bucketIndex = 3n, subscriptionId = ID) =>
-    QIS.connect(logic).countReceipts(subscriptionId, bucketIndex, seller, epoch, counted, r, score);
+  /** A count from the logic contracts: by default node 5 on budget 3 of the subscription. */
+  const count = (epoch: bigint, counted: bigint, r: bigint, score: bigint, seller = 5n, budgetIndex = 3n, subscriptionId = ID) =>
+    QIS.connect(logic).countReceipts(subscriptionId, budgetIndex, seller, epoch, counted, r, score);
 
   describe('metadata and initialization', () => {
     it('is named QueryInferenceStorage, version 1.0.0, with a 10,000 bps denominator', async () => {
@@ -156,7 +156,7 @@ describe('@unit QueryInferenceStorage', () => {
       await count(e, 100n, 70n, 40n);
       await forward('initialize');
       expect(await QIS.walletFunding(e)).to.equal(3n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(100n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(100n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([70n, 40n]);
     });
 
@@ -396,31 +396,31 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.walletFunding(20n)).to.equal(MAX_UINT96);
     });
 
-    it('addConvictionFunding refuses a caller outside the Hub, and admits a Hub contract and the Hub owner', async () => {
-      await expect(QIS.connect(stranger).addConvictionFunding(5n, 1n))
+    it('addAccountFunding refuses a caller outside the Hub, and admits a Hub contract and the Hub owner', async () => {
+      await expect(QIS.connect(stranger).addAccountFunding(5n, 1n))
         .to.be.revertedWithCustomError(QIS, 'UnauthorizedAccess')
         .withArgs('Only Contracts in Hub');
-      await QIS.connect(logic).addConvictionFunding(5n, 1n);
-      await QIS.connect(owner).addConvictionFunding(5n, 2n);
-      expect(await QIS.convictionFunding(5n)).to.equal(3n);
+      await QIS.connect(logic).addAccountFunding(5n, 1n);
+      await QIS.connect(owner).addAccountFunding(5n, 2n);
+      expect(await QIS.accountFunding(5n)).to.equal(3n);
     });
 
     it('the Conviction Account ledger accumulates per epoch apart from the wallet one, and reverts on overflow', async () => {
-      await QIS.connect(logic).addConvictionFunding(7n, 10n);
+      await QIS.connect(logic).addAccountFunding(7n, 10n);
       await QIS.connect(logic).addWalletFunding(7n, 3n);
-      await QIS.connect(logic).addConvictionFunding(8n, 4n);
-      await QIS.connect(logic).addConvictionFunding(7n, 5n);
-      expect(await QIS.convictionFunding(7n)).to.equal(15n);
+      await QIS.connect(logic).addAccountFunding(8n, 4n);
+      await QIS.connect(logic).addAccountFunding(7n, 5n);
+      expect(await QIS.accountFunding(7n)).to.equal(15n);
       expect(await QIS.walletFunding(7n)).to.equal(3n);
-      expect(await QIS.convictionFunding(8n)).to.equal(4n);
+      expect(await QIS.accountFunding(8n)).to.equal(4n);
       expect(await QIS.walletFunding(8n)).to.equal(0n);
-      expect(await QIS.convictionFunding(9n)).to.equal(0n);
+      expect(await QIS.accountFunding(9n)).to.equal(0n);
       expect(await QIS.fundingIn(7n)).to.deep.equal([3n, 15n]);
       expect(await QIS.fundingIn(8n)).to.deep.equal([0n, 4n]);
       expect(await QIS.fundingIn(9n)).to.deep.equal([0n, 0n]);
 
-      await QIS.connect(logic).addConvictionFunding(20n, MAX_UINT96);
-      await expect(QIS.connect(logic).addConvictionFunding(20n, 1n)).to.be.revertedWithPanic(0x11);
+      await QIS.connect(logic).addAccountFunding(20n, MAX_UINT96);
+      await expect(QIS.connect(logic).addAccountFunding(20n, 1n)).to.be.revertedWithPanic(0x11);
       // The two ledgers are separate words, so a full one leaves the other open.
       await QIS.connect(logic).addWalletFunding(20n, MAX_UINT96);
       expect(await QIS.fundingIn(20n)).to.deep.equal([MAX_UINT96, MAX_UINT96]);
@@ -430,7 +430,7 @@ describe('@unit QueryInferenceStorage', () => {
       const e = await currentEpoch();
       expect(await QIS.activationEpoch()).to.equal(0n);
       await QIS.connect(logic).addWalletFunding(e, 1n);
-      await QIS.connect(logic).addConvictionFunding(e, 2n);
+      await QIS.connect(logic).addAccountFunding(e, 2n);
       await count(e, 3n, 3n, 3n);
       expect(await QIS.fundingIn(e)).to.deep.equal([1n, 2n]);
       expect(await QIS.activationEpoch()).to.equal(0n);
@@ -445,39 +445,39 @@ describe('@unit QueryInferenceStorage', () => {
         .withArgs('Only Contracts in Hub');
       await QIS.connect(logic).countReceipts(ID, 3n, 5n, e, 1n, 1n, 1n);
       await QIS.connect(owner).countReceipts(ID, 3n, 5n, e, 2n, 2n, 2n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(3n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(3n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([3n, 3n]);
     });
 
-    it('fills the bucket at face value, and adds the value and the score to the node and the epoch', async () => {
+    it('fills the budget at face value, and adds the value and the score to the node and the epoch', async () => {
       const e = await currentEpoch();
       await QIS.setLambdaBps(5_000n);
       await count(e, 100n, 70n, 40n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(100n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(100n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([70n, 40n]);
       expect(await QIS.getEpochTotals(e)).to.deep.equal([70n, 40n, 5_000n]);
     });
 
-    it("adds up: a bucket's fill over its sellers, a node's totals over its buckets and periods, and an epoch's over its nodes", async () => {
+    it("adds up: a budget's fill over its sellers, a node's totals over its budgets and subscriptions, and an epoch's over its nodes", async () => {
       const e = await currentEpoch();
       const other = ethers.id('other');
       await count(e, 100n, 70n, 40n);
       await count(e, 30n, 30n, 10n, 6n);
       await count(e, 5n, 4n, 2n, 5n, 4n);
       await count(e, 8n, 8n, 1n, 5n, 3n, other);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(130n);
-      expect(await QIS.bucketFilled(ID, 4n)).to.equal(5n);
-      expect(await QIS.bucketFilled(other, 3n)).to.equal(8n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(130n);
+      expect(await QIS.budgetUsed(ID, 4n)).to.equal(5n);
+      expect(await QIS.budgetUsed(other, 3n)).to.equal(8n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([82n, 43n]);
       expect(await QIS.getNodeEpoch(6n, e)).to.deep.equal([30n, 10n]);
       expect(await QIS.getEpochTotals(e)).to.deep.equal([112n, 53n, 0n]);
     });
 
-    it('writes only what it names: another bucket, period, node or epoch reads as it was', async () => {
+    it('writes only what it names: another budget, subscription, node or epoch reads as it was', async () => {
       const e = await currentEpoch();
       await count(e, 100n, 70n, 40n);
-      expect(await QIS.bucketFilled(ID, 4n)).to.equal(0n);
-      expect(await QIS.bucketFilled(ethers.id('other'), 3n)).to.equal(0n);
+      expect(await QIS.budgetUsed(ID, 4n)).to.equal(0n);
+      expect(await QIS.budgetUsed(ethers.id('other'), 3n)).to.equal(0n);
       expect(await QIS.getNodeEpoch(6n, e)).to.deep.equal([0n, 0n]);
       expect(await QIS.getNodeEpoch(5n, e + 1n)).to.deep.equal([0n, 0n]);
       expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([0n, 0n, 0n]);
@@ -485,15 +485,15 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.fundingIn(e)).to.deep.equal([0n, 0n]);
     });
 
-    it("the bucket's fill has no epoch, while the node's and the epoch's totals are the named epoch's", async () => {
+    it("the budget's fill has no epoch, while the node's and the epoch's totals are the named epoch's", async () => {
       const e = await currentEpoch();
       await count(e, 100n, 70n, 40n);
       await count(e + 1n, 10n, 7n, 4n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(110n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(110n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([70n, 40n]);
       expect(await QIS.getNodeEpoch(5n, e + 1n)).to.deep.equal([7n, 4n]);
-      expect((await QIS.getEpochTotals(e)).sumR).to.equal(70n);
-      expect((await QIS.getEpochTotals(e + 1n)).sumR).to.equal(7n);
+      expect((await QIS.getEpochTotals(e)).totalServed).to.equal(70n);
+      expect((await QIS.getEpochTotals(e + 1n)).totalServed).to.equal(7n);
     });
 
     it('takes λ with the first value to count in an epoch, and the epoch keeps it whatever λ becomes', async () => {
@@ -535,8 +535,8 @@ describe('@unit QueryInferenceStorage', () => {
       await QIS.setLambdaBps(9_000n);
       await count(e, 1n, 0n, 0n);
       expect(await QIS.getEpochTotals(e)).to.deep.equal([70n, 40n, 7_000n]);
-      // The counts of no value still filled the bucket.
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(103n);
+      // The counts of no value still filled the budget.
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(103n);
     });
 
     it('a λ of 0 is a value like any other: an epoch takes it and keeps it', async () => {
@@ -557,11 +557,11 @@ describe('@unit QueryInferenceStorage', () => {
     });
 
     const sums: Array<[string, (e: bigint) => Promise<unknown>, [bigint, bigint, bigint]]> = [
-      ["the bucket's fill, a uint96", () => QIS.connect(logic).setBucketFilled(ID, 3n, MAX_UINT96 - 1n), [1n, 0n, 0n]],
-      ["the node's R, a uint128", (e) => QIS.connect(logic).setNodeEpoch(5n, e, { r: MAX_UINT128 - 1n, score: 0n }), [0n, 1n, 0n]],
-      ["the node's score, a uint128", (e) => QIS.connect(logic).setNodeEpoch(5n, e, { r: 0n, score: MAX_UINT128 - 1n }), [0n, 0n, 1n]],
-      ["the epoch's ΣR, a uint120", (e) => QIS.connect(logic).setEpochTotals(e, { sumR: MAX_UINT120 - 1n, sumScore: 0n, lambdaBps: 0n }), [0n, 1n, 0n]],
-      ["the epoch's ΣQIS, a uint120", (e) => QIS.connect(logic).setEpochTotals(e, { sumR: 0n, sumScore: MAX_UINT120 - 1n, lambdaBps: 0n }), [0n, 0n, 1n]],
+      ["the budget's fill, a uint96", () => QIS.connect(logic).setBudgetUsed(ID, 3n, MAX_UINT96 - 1n), [1n, 0n, 0n]],
+      ["the node's R, a uint128", (e) => QIS.connect(logic).setNodeEpoch(5n, e, { servedValue: MAX_UINT128 - 1n, weightedValue: 0n }), [0n, 1n, 0n]],
+      ["the node's score, a uint128", (e) => QIS.connect(logic).setNodeEpoch(5n, e, { servedValue: 0n, weightedValue: MAX_UINT128 - 1n }), [0n, 0n, 1n]],
+      ["the epoch's ΣR, a uint120", (e) => QIS.connect(logic).setEpochTotals(e, { totalServed: MAX_UINT120 - 1n, totalWeighted: 0n, lambdaBps: 0n }), [0n, 1n, 0n]],
+      ["the epoch's ΣQIS, a uint120", (e) => QIS.connect(logic).setEpochTotals(e, { totalServed: 0n, totalWeighted: MAX_UINT120 - 1n, lambdaBps: 0n }), [0n, 0n, 1n]],
     ];
     for (const [sum, seed, [counted, r, score]] of sums) {
       it(`checks ${sum}: a count reaches its maximum, and the next reverts instead of wrapping`, async () => {
@@ -576,12 +576,12 @@ describe('@unit QueryInferenceStorage', () => {
   describe('an epoch that has ended takes no write', () => {
     const writes: Array<[string, (e: bigint, by?: SignerWithAddress) => Promise<unknown>]> = [
       ['addWalletFunding', (e, by = logic) => QIS.connect(by).addWalletFunding(e, 7n)],
-      ['addConvictionFunding', (e, by = logic) => QIS.connect(by).addConvictionFunding(e, 7n)],
+      ['addAccountFunding', (e, by = logic) => QIS.connect(by).addAccountFunding(e, 7n)],
       ['countReceipts', (e, by = logic) => QIS.connect(by).countReceipts(ID, 3n, 5n, e, 7n, 7n, 7n)],
-      ['setNodeEpoch', (e, by = logic) => QIS.connect(by).setNodeEpoch(5n, e, { r: 7n, score: 7n })],
-      ['setEpochTotals', (e, by = logic) => QIS.connect(by).setEpochTotals(e, { sumR: 7n, sumScore: 7n, lambdaBps: 7n })],
+      ['setNodeEpoch', (e, by = logic) => QIS.connect(by).setNodeEpoch(5n, e, { servedValue: 7n, weightedValue: 7n })],
+      ['setEpochTotals', (e, by = logic) => QIS.connect(by).setEpochTotals(e, { totalServed: 7n, totalWeighted: 7n, lambdaBps: 7n })],
     ];
-    /** All that the writes above touch in `e`, but the bucket's fill, which has no epoch. */
+    /** All that the writes above touch in `e`, but the budget's fill, which has no epoch. */
     const stateOf = async (e: bigint): Promise<bigint[]> => [
       ...(await QIS.fundingIn(e)),
       ...(await QIS.getEpochTotals(e)),
@@ -607,13 +607,13 @@ describe('@unit QueryInferenceStorage', () => {
         await time.setNextBlockTimestamp(boundary - 1n);
         await write(e);
         const written = await stateOf(e);
-        const filled = await QIS.bucketFilled(ID, 3n);
+        const filled = await QIS.budgetUsed(ID, 3n);
         expect(written).to.not.deep.equal(NOTHING);
 
         await time.setNextBlockTimestamp(boundary);
         await expect(write(e)).to.be.revertedWithCustomError(QIS, 'EpochEnded').withArgs(e, e + 1n);
         expect(await stateOf(e)).to.deep.equal(written);
-        expect(await QIS.bucketFilled(ID, 3n)).to.equal(filled);
+        expect(await QIS.budgetUsed(ID, 3n)).to.equal(filled);
 
         // The epoch that has just begun takes it.
         await write(e + 1n);
@@ -629,7 +629,7 @@ describe('@unit QueryInferenceStorage', () => {
           }
         }
         expect(await stateOf(now - 1n)).to.deep.equal(NOTHING);
-        expect(await QIS.bucketFilled(ID, 3n)).to.equal(0n);
+        expect(await QIS.budgetUsed(ID, 3n)).to.equal(0n);
         for (const open of [now, now + 1n, now + 40n]) {
           await write(open);
           expect(await stateOf(open)).to.not.deep.equal(NOTHING);
@@ -654,14 +654,14 @@ describe('@unit QueryInferenceStorage', () => {
       }
     });
 
-    it('useNonces and setBucketFilled name no epoch, so they stay open however many epochs end', async () => {
+    it('useNonces and setBudgetUsed name no epoch, so they stay open however many epochs end', async () => {
       await QIS.connect(logic).useNonces(ID, 5n, 0n, 0b01n);
-      await QIS.connect(logic).setBucketFilled(ID, 3n, 10n);
+      await QIS.connect(logic).setBudgetUsed(ID, 3n, 10n);
       await time.increase(3n * epLen);
       await QIS.connect(logic).useNonces(ID, 5n, 0n, 0b10n);
-      await QIS.connect(logic).setBucketFilled(ID, 3n, 20n);
+      await QIS.connect(logic).setBudgetUsed(ID, 3n, 20n);
       expect(await QIS.nonceWord(ID, 5n, 0n)).to.equal(0b11n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(20n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(20n);
     });
   });
 
@@ -675,7 +675,7 @@ describe('@unit QueryInferenceStorage', () => {
       expect(await QIS.nonceWord(ID, 5n, 0n)).to.equal(3n);
     });
 
-    it('useNonces only ever sets bits, per period, seller and word', async () => {
+    it('useNonces only ever sets bits, per subscription, seller and word', async () => {
       await QIS.connect(logic).useNonces(ID, 5n, 2n, 0b0101n);
       await QIS.connect(owner).useNonces(ID, 5n, 2n, 0b0011n);
       await QIS.connect(logic).useNonces(ID, 5n, 2n, 0n);
@@ -696,9 +696,9 @@ describe('@unit QueryInferenceStorage', () => {
 
   describe('the narrow setters (onlyContracts)', () => {
     const calls = (): Array<[string, unknown[]]> => [
-      ['setBucketFilled', [ID, 0n, 10n]],
-      ['setNodeEpoch', [5n, 1_000n, { r: 10n, score: 7n }]],
-      ['setEpochTotals', [1_000n, { sumR: 10n, sumScore: 7n, lambdaBps: 5_000n }]],
+      ['setBudgetUsed', [ID, 0n, 10n]],
+      ['setNodeEpoch', [5n, 1_000n, { servedValue: 10n, weightedValue: 7n }]],
+      ['setEpochTotals', [1_000n, { totalServed: 10n, totalWeighted: 7n, lambdaBps: 5_000n }]],
     ];
 
     it('with the parameter setters and the mutators, they are every state-changing function', () => {
@@ -720,25 +720,25 @@ describe('@unit QueryInferenceStorage', () => {
       }
     });
 
-    it('setBucketFilled writes the fill alone, which countReceipts adds to, and may lower it', async () => {
+    it('setBudgetUsed writes the fill alone, which countReceipts adds to, and may lower it', async () => {
       const e = await currentEpoch();
       await count(e, 100n, 70n, 40n);
-      await QIS.connect(logic).setBucketFilled(ID, 3n, 30n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(30n);
-      expect(await QIS.bucketFilled(ID, 4n)).to.equal(0n);
-      expect(await QIS.bucketFilled(ethers.id('other'), 3n)).to.equal(0n);
+      await QIS.connect(logic).setBudgetUsed(ID, 3n, 30n);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(30n);
+      expect(await QIS.budgetUsed(ID, 4n)).to.equal(0n);
+      expect(await QIS.budgetUsed(ethers.id('other'), 3n)).to.equal(0n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([70n, 40n]);
-      expect((await QIS.getEpochTotals(e)).sumR).to.equal(70n);
+      expect((await QIS.getEpochTotals(e)).totalServed).to.equal(70n);
 
       await count(e, 5n, 1n, 1n);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(35n);
-      await QIS.connect(owner).setBucketFilled(ID, 3n, MAX_UINT96);
-      expect(await QIS.bucketFilled(ID, 3n)).to.equal(MAX_UINT96);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(35n);
+      await QIS.connect(owner).setBudgetUsed(ID, 3n, MAX_UINT96);
+      expect(await QIS.budgetUsed(ID, 3n)).to.equal(MAX_UINT96);
     });
 
     it("setNodeEpoch writes a node's values in an epoch alone, which countReceipts adds to", async () => {
       const e = await currentEpoch();
-      await QIS.connect(logic).setNodeEpoch(5n, e, { r: 120n, score: 45n });
+      await QIS.connect(logic).setNodeEpoch(5n, e, { servedValue: 120n, weightedValue: 45n });
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([120n, 45n]);
       expect(await QIS.getNodeEpoch(6n, e)).to.deep.equal([0n, 0n]);
       expect(await QIS.getNodeEpoch(5n, e + 1n)).to.deep.equal([0n, 0n]);
@@ -747,13 +747,13 @@ describe('@unit QueryInferenceStorage', () => {
       await count(e, 10n, 10n, 4n);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([130n, 49n]);
       // It replaces, and takes the most a uint128 holds.
-      await QIS.connect(owner).setNodeEpoch(5n, e, { r: MAX_UINT128, score: 1n });
+      await QIS.connect(owner).setNodeEpoch(5n, e, { servedValue: MAX_UINT128, weightedValue: 1n });
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([MAX_UINT128, 1n]);
     });
 
     it("setEpochTotals writes an epoch's totals and λ alone, which countReceipts adds to", async () => {
       const e = await currentEpoch();
-      await QIS.connect(logic).setEpochTotals(e, { sumR: 150n, sumScore: 75n, lambdaBps: 2_500n });
+      await QIS.connect(logic).setEpochTotals(e, { totalServed: 150n, totalWeighted: 75n, lambdaBps: 2_500n });
       expect(await QIS.getEpochTotals(e)).to.deep.equal([150n, 75n, 2_500n]);
       expect(await QIS.getEpochTotals(e + 1n)).to.deep.equal([0n, 0n, 0n]);
       expect(await QIS.getNodeEpoch(5n, e)).to.deep.equal([0n, 0n]);
@@ -762,27 +762,27 @@ describe('@unit QueryInferenceStorage', () => {
       await count(e, 10n, 10n, 4n);
       expect(await QIS.getEpochTotals(e)).to.deep.equal([160n, 79n, 2_500n]);
       // It replaces, and takes the most a uint120 holds.
-      await QIS.connect(owner).setEpochTotals(e, { sumR: MAX_UINT120, sumScore: MAX_UINT120, lambdaBps: 10_000n });
+      await QIS.connect(owner).setEpochTotals(e, { totalServed: MAX_UINT120, totalWeighted: MAX_UINT120, lambdaBps: 10_000n });
       expect(await QIS.getEpochTotals(e)).to.deep.equal([MAX_UINT120, MAX_UINT120, 10_000n]);
     });
 
     it('setEpochTotals refuses a λ above 10,000, at which no gross of the epoch could be read', async () => {
       const e = await currentEpoch();
-      await expect(QIS.connect(logic).setEpochTotals(e, { sumR: 1n, sumScore: 1n, lambdaBps: 10_001n }))
+      await expect(QIS.connect(logic).setEpochTotals(e, { totalServed: 1n, totalWeighted: 1n, lambdaBps: 10_001n }))
         .to.be.revertedWithCustomError(QIS, 'InvalidParameter')
         .withArgs('lambdaBps');
       expect(await QIS.getEpochTotals(e)).to.deep.equal([0n, 0n, 0n]);
     });
 
-    it('a count reads sumR for λ, whatever wrote it: it keeps the λ of totals with value, and takes λ over totals with none', async () => {
+    it('a count reads totalServed for λ, whatever wrote it: it keeps the λ of totals with value, and takes λ over totals with none', async () => {
       const e = await currentEpoch();
       await QIS.setLambdaBps(5_000n);
 
-      await QIS.connect(logic).setEpochTotals(e, { sumR: 1n, sumScore: 1n, lambdaBps: 2_500n });
+      await QIS.connect(logic).setEpochTotals(e, { totalServed: 1n, totalWeighted: 1n, lambdaBps: 2_500n });
       await count(e, 1n, 1n, 1n);
       expect(await QIS.getEpochTotals(e)).to.deep.equal([2n, 2n, 2_500n]);
 
-      await QIS.connect(logic).setEpochTotals(e, { sumR: 0n, sumScore: 0n, lambdaBps: 2_500n });
+      await QIS.connect(logic).setEpochTotals(e, { totalServed: 0n, totalWeighted: 0n, lambdaBps: 2_500n });
       await count(e, 1n, 1n, 1n);
       expect(await QIS.getEpochTotals(e)).to.deep.equal([1n, 1n, 5_000n]);
     });
@@ -791,12 +791,12 @@ describe('@unit QueryInferenceStorage', () => {
   describe('the mutators together', () => {
     const calls = (): Array<[string, unknown[]]> => [
       ['addWalletFunding', [1_000n, 1n]],
-      ['addConvictionFunding', [1_000n, 1n]],
+      ['addAccountFunding', [1_000n, 1n]],
       ['useNonces', [ID, 5n, 0n, 1n]],
       ['countReceipts', [ID, 0n, 5n, 1_000n, 1n, 1n, 1n]],
-      ['setBucketFilled', [ID, 0n, 10n]],
-      ['setNodeEpoch', [5n, 1_000n, { r: 10n, score: 7n }]],
-      ['setEpochTotals', [1_000n, { sumR: 10n, sumScore: 7n, lambdaBps: 5_000n }]],
+      ['setBudgetUsed', [ID, 0n, 10n]],
+      ['setNodeEpoch', [5n, 1_000n, { servedValue: 10n, weightedValue: 7n }]],
+      ['setEpochTotals', [1_000n, { totalServed: 10n, totalWeighted: 7n, lambdaBps: 5_000n }]],
     ];
 
     it('the list below covers every one of them', () => {
@@ -839,8 +839,8 @@ describe('@unit QueryInferenceStorage', () => {
           'BPS_DENOMINATOR',
           'activationEpoch',
           'batchState',
-          'bucketFilled',
-          'convictionFunding',
+          'budgetUsed',
+          'accountFunding',
           'fundingIn',
           'fundingState',
           'getEpochTotals',
@@ -860,11 +860,11 @@ describe('@unit QueryInferenceStorage', () => {
 
     it('every view reads empty for keys never written', async () => {
       expect(await QIS.walletFunding(3n)).to.equal(0n);
-      expect(await QIS.convictionFunding(3n)).to.equal(0n);
+      expect(await QIS.accountFunding(3n)).to.equal(0n);
       expect(await QIS.fundingIn(3n)).to.deep.equal([0n, 0n]);
       expect(await QIS.getEpochTotals(3n)).to.deep.equal([0n, 0n, 0n]);
       expect(await QIS.getNodeEpoch(1n, 3n)).to.deep.equal([0n, 0n]);
-      expect(await QIS.bucketFilled(ID, 0n)).to.equal(0n);
+      expect(await QIS.budgetUsed(ID, 0n)).to.equal(0n);
       expect(await QIS.nonceWord(ID, 1n, 0n)).to.equal(0n);
     });
 
@@ -899,11 +899,11 @@ describe('@unit QueryInferenceStorage', () => {
     });
 
     it('each view reads its documented slot, 1 to 6, each record packed in one word', async () => {
-      // Slot 1 walletFunding and slot 2 convictionFunding, read alone and together.
+      // Slot 1 walletFunding and slot 2 accountFunding, read alone and together.
       await plant(at('uint256', 3n, 1n), 23n);
       await plant(at('uint256', 3n, 2n), 29n);
       expect(await QIS.walletFunding(3n)).to.equal(23n);
-      expect(await QIS.convictionFunding(3n)).to.equal(29n);
+      expect(await QIS.accountFunding(3n)).to.equal(29n);
       expect(await QIS.fundingIn(3n)).to.deep.equal([23n, 29n]);
 
       // Slot 3 epochTotals: ΣR, then ΣQIS after 120 bits, then λ after 240.
@@ -914,10 +914,10 @@ describe('@unit QueryInferenceStorage', () => {
       await plant(at('uint256', 3n, at('uint72', 5n, 4n)), (13n << 128n) | 9n);
       expect(await QIS.getNodeEpoch(5n, 3n)).to.deep.equal([9n, 13n]);
 
-      // Slot 5 bucketFilled and slot 6 the nonce bitmap.
+      // Slot 5 budgetUsed and slot 6 the nonce bitmap.
       await plant(at('uint8', 2n, at('bytes32', ID, 5n)), 21n);
       await plant(at('uint64', 4n, at('uint72', 5n, at('bytes32', ID, 6n))), 0xf0n);
-      expect(await QIS.bucketFilled(ID, 2n)).to.equal(21n);
+      expect(await QIS.budgetUsed(ID, 2n)).to.equal(21n);
       expect(await QIS.nonceWord(ID, 5n, 4n)).to.equal(0xf0n);
     });
 
@@ -954,7 +954,7 @@ describe('@unit QueryInferenceStorage', () => {
         ['0', 27, 'maxItemsPerBatch', 'uint16'],
         ['0', 29, 'lambdaBps', 'uint16'],
         ['1', 0, 'walletFunding', 'mapping(uint256 => uint96)'],
-        ['2', 0, 'convictionFunding', 'mapping(uint256 => uint96)'],
+        ['2', 0, 'accountFunding', 'mapping(uint256 => uint96)'],
         ['3', 0, '_epochTotals', 'mapping(uint256 => struct QueryInferenceStorage.EpochTotals)'],
         [
           '4',
@@ -962,7 +962,7 @@ describe('@unit QueryInferenceStorage', () => {
           '_nodeEpoch',
           'mapping(uint72 => mapping(uint256 => struct QueryInferenceStorage.NodeEpoch))',
         ],
-        ['5', 0, '_bucketFilled', 'mapping(bytes32 => mapping(uint8 => uint96))'],
+        ['5', 0, '_budgetUsed', 'mapping(bytes32 => mapping(uint8 => uint96))'],
         ['6', 0, '_nonceBitmap', 'mapping(bytes32 => mapping(uint72 => mapping(uint64 => uint256)))'],
       ]);
 
@@ -977,13 +977,13 @@ describe('@unit QueryInferenceStorage', () => {
         expect(record(name).numberOfBytes, name).to.equal('32');
       }
       expect(record('EpochTotals').members!.map((m) => [m.label, m.slot, m.offset])).to.deep.equal([
-        ['sumR', '0', 0],
-        ['sumScore', '0', 15],
+        ['totalServed', '0', 0],
+        ['totalWeighted', '0', 15],
         ['lambdaBps', '0', 30],
       ]);
       expect(record('NodeEpoch').members!.map((m) => [m.label, m.slot, m.offset])).to.deep.equal([
-        ['r', '0', 0],
-        ['score', '0', 16],
+        ['servedValue', '0', 0],
+        ['weightedValue', '0', 16],
       ]);
     });
   });

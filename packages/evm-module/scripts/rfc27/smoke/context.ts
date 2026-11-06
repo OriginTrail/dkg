@@ -55,17 +55,17 @@ export const epochStart = (ctx: Ctx, e: bigint): Promise<bigint> => ctx.base.chr
 export const planDigest = (ctx: Ctx, what: string): string => ethers.id(`rfc27-smoke/${ctx.env.run}/${what}`);
 
 /**
- * Why the owner's wallet period of `epoch`, if it has one, is not this run's. Its
+ * Why the owner's wallet subscription of `epoch`, if it has one, is not this run's. Its
  * id names only the owner and the epoch, while its session key and its plan are
  * the run's: a second run of the same owner in the same epoch would skip funding
- * and sign requests its period does not accept.
+ * and sign requests its subscription does not accept.
  */
-export async function walletPeriodClash(ctx: PoolCtx, r: { ownerAddr: string; walletSession: { address: string } }, value: bigint, epoch: bigint): Promise<string | undefined> {
+export async function walletSubscriptionClash(ctx: PoolCtx, r: { ownerAddr: string; walletSession: { address: string } }, value: bigint, epoch: bigint): Promise<string | undefined> {
   const id = subscriptionIdOf(r.ownerAddr, epoch);
-  if (!(await ctx.c.cssvc.subscriptionExists(id))) return undefined;
-  const held = await ctx.c.cssvc.getSubscription(id);
+  if (!(await ctx.c.sss.subscriptionExists(id))) return undefined;
+  const held = await ctx.c.sss.getSubscription(id);
   if (held.sessionKey === r.walletSession.address && held.planDigest === planDigest(ctx, 'wallet plan') && held.value === value) return undefined;
-  return `the owner's wallet period of epoch ${epoch} is another run's: session key ${held.sessionKey}, plan ${held.planDigest}, value ${held.value}; this run's key is ${r.walletSession.address}`;
+  return `the owner's wallet subscription of epoch ${epoch} is another run's: session key ${held.sessionKey}, plan ${held.planDigest}, value ${held.value}; this run's key is ${r.walletSession.address}`;
 }
 
 /**

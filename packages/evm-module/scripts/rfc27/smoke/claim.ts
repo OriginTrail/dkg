@@ -1,10 +1,10 @@
 // PHASE claim, as soon as E has ended. An epoch's numbers are final when it ends,
 // so nothing has to run first: what the phase does is hold them to what the chain
-// shows, then claim. Every group counted in E against its ReceiptsClaimed event,
+// shows, then claim. Every group counted in E against its ReceiptsLanded event,
 // the money of E against its fundings, every ended epoch's pool against the rollover
 // rule; then claimFor on our position against the epochs' nets, and from E its money
-// (walletFunding + convictionFunding), the money rolled into it, its served value
-// (sumR), unused share and pool. Where the upkeep cron claimed first, what it did is
+// (walletFunding + accountFunding), the money rolled into it, its served value
+// (totalServed), unused share and pool. Where the upkeep cron claimed first, what it did is
 // checked from what the chain recorded instead. If the chain holds anything else
 // than those show, the cycle has failed, and goes no further.
 
@@ -21,37 +21,37 @@ import type { ServedState, SetupState } from './state';
 const SCALE18 = 10n ** 18n;
 const BPS = 10_000n;
 
-/** A group counted, as its ReceiptsClaimed event says, and what it added to R and to the score. */
-type Count = { subscriptionId: string; bucketIndex: bigint; seller: bigint; claimed: bigint; counted: bigint; r: bigint; score: bigint; tx: string; block: number };
+/** A group counted, as its ReceiptsLanded event says, and what it added to R and to the score. */
+type Count = { subscriptionId: string; budgetIndex: bigint; seller: bigint; value: bigint; counted: bigint; servedValue: bigint; weightedValue: bigint; tx: string; block: number };
 
-/** Every group counted in a period of E, of any seller on any period, from the first block of E on. */
+/** Every group counted in a subscription of E, of any seller on any subscription, from the first block of E on. */
 async function countsIn(ctx: PoolCtx, s: SetupState): Promise<Count[]> {
-  const { qs, cssvc } = ctx.c;
+  const { qs, sss } = ctx.c;
   const { provider } = ctx.hre.ethers;
   const staked = await ctx.tx.receipt(s.steps['setup.stake'].hash);
   const from = await firstBlockAt(provider, await epochStart(ctx, s.E), staked.blockNumber);
-  const logs = await pagedLogs(provider, { address: await qs.getAddress(), topics: [qs.getEvent('ReceiptsClaimed').fragment.topicHash] }, from);
+  const logs = await pagedLogs(provider, { address: await qs.getAddress(), topics: [qs.getEvent('ReceiptsLanded').fragment.topicHash] }, from);
   const discounts = new Map<string, bigint | undefined>();
   const out: Count[] = [];
   for (const l of logs) {
     const { args } = qs.interface.parseLog({ topics: [...l.topics], data: l.data }) ?? {};
-    if (!args) throw new Error(`transaction ${l.transactionHash}: a ReceiptsClaimed log that does not parse`);
+    if (!args) throw new Error(`transaction ${l.transactionHash}: a ReceiptsLanded log that does not parse`);
     const id = String(args.subscriptionId);
     if (!discounts.has(id)) {
-      const period = await cssvc.getSubscription(id);
-      discounts.set(id, period.epoch === s.E ? period.discountBps : undefined);
+      const subscription = await sss.getSubscription(id);
+      discounts.set(id, subscription.epoch === s.E ? subscription.discountBps : undefined);
     }
     const discount = discounts.get(id);
     if (discount === undefined) continue;
-    const r = (BigInt(args.counted) * (BPS - discount)) / BPS;
+    const servedValue = (BigInt(args.counted) * (BPS - discount)) / BPS;
     out.push({
       subscriptionId: id,
-      bucketIndex: BigInt(args.bucketIndex),
+      budgetIndex: BigInt(args.budgetIndex),
       seller: BigInt(args.seller),
-      claimed: BigInt(args.claimed),
+      value: BigInt(args.value),
       counted: BigInt(args.counted),
-      r,
-      score: (r * BigInt(args.stakeFactor18)) / SCALE18,
+      servedValue,
+      weightedValue: (servedValue * BigInt(args.stakeFactor18)) / SCALE18,
       tx: l.transactionHash,
       block: l.blockNumber,
     });
@@ -60,7 +60,7 @@ async function countsIn(ctx: PoolCtx, s: SetupState): Promise<Count[]> {
 }
 
 /**
- * The run's own groups, whole, by their events; each of its buckets' fill; and the node's
+ * The run's own groups, whole, by their events; each of its budgets' fill; and the node's
  * and the epoch's sums, which others' value also goes into, exactly against all that was
  * counted in E: other value cannot make up for a group of ours counted at too little, nor a
  * sum hold what no batch shows. False if any of them fails.
@@ -70,46 +70,46 @@ async function checkCounts(ctx: PoolCtx, s: ServedState): Promise<boolean> {
   const { E } = s;
   const counts = await countsIn(ctx, s);
   const plan = requestPlan(s.amounts);
-  const on = (id: string): Count[] => counts.filter((x) => x.subscriptionId.toLowerCase() === id.toLowerCase() && x.seller === s.sellerId && x.bucketIndex === 0n);
+  const on = (id: string): Count[] => counts.filter((x) => x.subscriptionId.toLowerCase() === id.toLowerCase() && x.seller === s.sellerId && x.budgetIndex === 0n);
   const counted = (xs: Count[]): bigint => sum(xs.map((x) => x.counted));
-  const claimed = (xs: Count[]): bigint => sum(xs.map((x) => x.claimed));
+  const valueOf = (xs: Count[]): bigint => sum(xs.map((x) => x.value));
   let ok = true;
   for (const [what, id, want] of [
-    ['account', s.periods.ca, planValue(plan.caFirst) + planValue(plan.caAfterTopUp)],
-    ['wallet', s.periods.wallet, planValue(plan.wallet)],
+    ['account', s.subscriptions.ca, planValue(plan.caFirst) + planValue(plan.caAfterTopUp)],
+    ['wallet', s.subscriptions.wallet, planValue(plan.wallet)],
   ] as const) {
     const ours = on(id);
-    const filled = await c.qis.bucketFilled(id, 0);
+    const filled = await c.qis.budgetUsed(id, 0);
     const held = report.check(
-      `the ${what} bucket counted all the seller claimed on it, by its ReceiptsClaimed events, and reads filled by as much`,
-      claimed(ours) === want && counted(ours) === want && filled === want,
-      `${fmt(counted(ours))} of ${fmt(claimed(ours))} TRAC claimed, in ${ours.length} group${ours.length === 1 ? '' : 's'}, ${fmt(want)} planned; filled ${fmt(filled)} TRAC`,
+      `the ${what} budget counted all the seller claimed on it, by its ReceiptsLanded events, and reads filled by as much`,
+      valueOf(ours) === want && counted(ours) === want && filled === want,
+      `${fmt(counted(ours))} of ${fmt(valueOf(ours))} TRAC claimed, in ${ours.length} group${ours.length === 1 ? '' : 's'}, ${fmt(want)} planned; filled ${fmt(filled)} TRAC`,
     );
     ok = held && ok;
   }
   const ofSeller = counts.filter((x) => x.seller === s.sellerId);
-  const r = (xs: Count[]): bigint => sum(xs.map((x) => x.r));
-  const score = (xs: Count[]): bigint => sum(xs.map((x) => x.score));
+  const served = (xs: Count[]): bigint => sum(xs.map((x) => x.servedValue));
+  const weighted = (xs: Count[]): bigint => sum(xs.map((x) => x.weightedValue));
   const node = await c.qis.getNodeEpoch(s.sellerId, E);
   const totals = await c.qis.getEpochTotals(E);
   const nodeHolds = report.check(
     `node ${s.sellerId}'s R and score in epoch ${E} are what its counted groups add up to`,
-    node.r === r(ofSeller) && node.score === score(ofSeller),
-    `R ${fmt(node.r)} TRAC, ${ofSeller.length} group${ofSeller.length === 1 ? '' : 's'} of ${fmt(r(ofSeller))} TRAC; score ${node.score} of ${score(ofSeller)}`,
+    node.servedValue === served(ofSeller) && node.weightedValue === weighted(ofSeller),
+    `R ${fmt(node.servedValue)} TRAC, ${ofSeller.length} group${ofSeller.length === 1 ? '' : 's'} of ${fmt(served(ofSeller))} TRAC; score ${node.weightedValue} of ${weighted(ofSeller)}`,
   );
   const totalsHold = report.check(
     `epoch ${E}'s ΣR and ΣQueryInferenceScore are what all its counted groups add up to`,
-    totals.sumR === r(counts) && totals.sumScore === score(counts),
-    `ΣR ${fmt(totals.sumR)} TRAC, ${counts.length} group${counts.length === 1 ? '' : 's'} of ${fmt(r(counts))} TRAC; ΣQueryInferenceScore ${totals.sumScore} of ${score(counts)}`,
+    totals.totalServed === served(counts) && totals.totalWeighted === weighted(counts),
+    `ΣR ${fmt(totals.totalServed)} TRAC, ${counts.length} group${counts.length === 1 ? '' : 's'} of ${fmt(served(counts))} TRAC; ΣQueryInferenceScore ${totals.totalWeighted} of ${weighted(counts)}`,
   );
   report.set('counts', counts);
   return ok && nodeHolds && totalsHold;
 }
 
 /**
- * What is booked in E, exactly against what every period of E, ours and others', was funded and
+ * What is booked in E, exactly against what every subscription of E, ours and others', was funded and
  * topped up with, by their events: others' money cannot make up for a booking of ours that fell
- * short, and the booking holds nothing no funding shows. A period of E can be funded from E-1,
+ * short, and the booking holds nothing no funding shows. A subscription of E can be funded from E-1,
  * and from the activation epoch at the earliest.
  */
 async function checkFunding(ctx: PoolCtx, s: SetupState): Promise<boolean> {
@@ -121,26 +121,26 @@ async function checkFunding(ctx: PoolCtx, s: SetupState): Promise<boolean> {
   const from = await firstBlockAt(provider, await epochStart(ctx, E - 1n > activation ? E - 1n : activation), staked.blockNumber);
   const logs = await pagedLogs(
     provider,
-    { address: [await c.ss.getAddress(), await c.ssw.getAddress()], topics: [[c.ss.getEvent('PeriodFunded').fragment.topicHash, c.ss.getEvent('PeriodToppedUp').fragment.topicHash]] },
+    { address: [await c.ss.getAddress(), await c.ssw.getAddress()], topics: [[c.ss.getEvent('SubscriptionFunded').fragment.topicHash, c.ss.getEvent('SubscriptionToppedUp').fragment.topicHash]] },
     from,
   );
-  const funded = { wallet: 0n, conviction: 0n };
+  const funded = { wallet: 0n, account: 0n };
   let count = 0;
   for (const l of logs) {
     const parsed = c.ss.interface.parseLog({ topics: [...l.topics], data: l.data });
     if (!parsed) throw new Error(`transaction ${l.transactionHash}: a funding log that does not parse`);
     const { subscriptionId, accountId, cost } = parsed.args;
-    if ((await c.cssvc.getSubscription(subscriptionId)).epoch !== E) continue;
+    if ((await c.sss.getSubscription(subscriptionId)).epoch !== E) continue;
     count++;
     if (BigInt(accountId) === 0n) funded.wallet += BigInt(cost);
-    else funded.conviction += BigInt(cost);
+    else funded.account += BigInt(cost);
   }
   const booked = await c.qis.fundingIn(E);
   report.set('funded', { ...funded, events: count });
   return report.check(
-    `what is booked in epoch ${E} is exactly what the periods of epoch ${E} were funded and topped up with`,
-    booked.wallet === funded.wallet && booked.conviction === funded.conviction,
-    `wallet ${fmt(booked.wallet)} of ${fmt(funded.wallet)} TRAC, account ${fmt(booked.conviction)} of ${fmt(funded.conviction)} TRAC, by ${count} events`,
+    `what is booked in epoch ${E} is exactly what the subscriptions of epoch ${E} were funded and topped up with`,
+    booked.wallet === funded.wallet && booked.account === funded.account,
+    `wallet ${fmt(booked.wallet)} of ${fmt(funded.wallet)} TRAC, account ${fmt(booked.account)} of ${fmt(funded.account)} TRAC, by ${count} events`,
   );
 }
 
@@ -199,18 +199,18 @@ export async function phaseClaim(ctx: PoolCtx): Promise<void> {
   if (!epochs) return;
   const row = epochs.find((x) => x.epoch === E);
   if (!row) throw new Error(`epoch ${E} is not among the epochs from activation`);
-  const rolledIn = row.sumR > 0n ? row.pool - row.money : 0n;
-  const unused = row.pool > row.sumR ? row.pool - row.sumR : 0n;
-  report.set('epoch', { ...row, rolledIn, served: row.sumR, unused });
-  report.say(`\n  Epoch ${E} has ended: money ${fmt(row.money)} TRAC (wallet ${fmt(row.walletFunding)} + account ${fmt(row.convictionFunding)}) + rolled in ${fmt(rolledIn)},`);
-  report.say(`  served (ΣR) ${fmt(row.sumR)}, unused ${fmt(unused)}, pool ${fmt(row.pool)} TRAC; λ ${row.lambdaBps} bps, ΣQueryInferenceScore ${fmt(row.sumScore)}`);
-  const ours = { wallet: s.amounts.walletValue, conviction: sum([s.costs.ca, s.costs.topUp, s.costs.edge]) };
+  const rolledIn = row.totalServed > 0n ? row.pool - row.money : 0n;
+  const unused = row.pool > row.totalServed ? row.pool - row.totalServed : 0n;
+  report.set('epoch', { ...row, rolledIn, served: row.totalServed, unused });
+  report.say(`\n  Epoch ${E} has ended: money ${fmt(row.money)} TRAC (wallet ${fmt(row.walletFunding)} + account ${fmt(row.accountFunding)}) + rolled in ${fmt(rolledIn)},`);
+  report.say(`  served (ΣR) ${fmt(row.totalServed)}, unused ${fmt(unused)}, pool ${fmt(row.pool)} TRAC; λ ${row.lambdaBps} bps, ΣQueryInferenceScore ${fmt(row.totalWeighted)}`);
+  const ours = { wallet: s.amounts.walletValue, account: sum([s.costs.ca, s.costs.topUp, s.costs.edge]) };
   report.check(
-    `the money includes ours: ${fmt(ours.wallet)} TRAC of wallet value and ${fmt(ours.conviction)} TRAC of account cost`,
-    row.walletFunding >= ours.wallet && row.convictionFunding >= ours.conviction,
-    row.walletFunding === ours.wallet && row.convictionFunding === ours.conviction ? 'ours alone' : 'others funded periods too',
+    `the money includes ours: ${fmt(ours.wallet)} TRAC of wallet value and ${fmt(ours.account)} TRAC of account cost`,
+    row.walletFunding >= ours.wallet && row.accountFunding >= ours.account,
+    row.walletFunding === ours.wallet && row.accountFunding === ours.account ? 'ours alone' : 'others funded subscriptions too',
   );
-  report.check('value counted, so the pool is the whole money, the unused share included', row.sumR > 0n && row.pool === row.money + rolledIn);
+  report.check('value counted, so the pool is the whole money, the unused share included', row.totalServed > 0n && row.pool === row.money + rolledIn);
   const lambda = requireParameter('QueryInferenceStorage', ['lambdaBps']);
   report.check(`epoch ${E} took λ ${lambda.value} bps when its first value counted`, row.lambdaBps === lambda.value);
   const gross = await c.qs.queryInferenceGross(E, s.sellerId);

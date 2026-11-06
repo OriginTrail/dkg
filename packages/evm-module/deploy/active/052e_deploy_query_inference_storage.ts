@@ -4,10 +4,10 @@ import { DeployFunction } from 'hardhat-deploy/types';
 import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service-deploy';
 
 /**
- * V10 — deploys `QueryInferenceStorage`, the state store of the
- * query/inference reward pool (OT-RFC-27): the money per epoch from funded
- * plan periods, the QIF inputs, each bucket's fill and the replay bitmap, and
- * its parameters (the activation epoch, the batch bounds, the pause and λ).
+ * V10 — deploys `QueryInferenceStorage`, the state store of the query/inference
+ * reward pool (OT-RFC-27): the money per epoch from funded subscriptions, the
+ * QIF inputs, what each budget has used and the replay bitmap, and its
+ * parameters (the activation epoch, the batch bounds, the pause and λ).
  *
  * It is registered in the Hub's contract set: its mutators are `onlyContracts`,
  * which reads the contract set. On a live network `998_initialize_contracts.ts`
@@ -23,7 +23,7 @@ import { reusedDeployment, versionAtLeast } from '../../utils/conviction-service
  * the deploy again. A StakingKPI below 10.1.0 only reports rewards without the
  * pool, and moves no TRAC, so the run goes on with a loud warning.
  *
- * Activation. A period funded from a wallet, and its top-ups, are refused
+ * Activation. A subscription funded from a wallet, and its top-ups, are refused
  * until `activationEpoch` is set and reached, and `setActivationEpoch` itself
  * is refused until the Hub's `QueryInferenceSettlement` and `StakingV10` read
  * this storage. So the activation comes once every contract is registered and

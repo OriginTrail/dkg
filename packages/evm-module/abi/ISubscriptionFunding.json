@@ -3,11 +3,11 @@
     "inputs": [
       {
         "internalType": "bytes32",
-        "name": "bucketId",
+        "name": "serviceId",
         "type": "bytes32"
       }
     ],
-    "name": "BucketTermsChanged",
+    "name": "BudgetTermsChanged",
     "type": "error"
   },
   {
@@ -34,45 +34,7 @@
         "type": "address"
       }
     ],
-    "name": "NotPeriodBuyer",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "PeriodAlreadyFunded",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      },
-      {
-        "internalType": "uint40",
-        "name": "periodEnd",
-        "type": "uint40"
-      }
-    ],
-    "name": "PeriodEnded",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "bytes32",
-        "name": "subscriptionId",
-        "type": "bytes32"
-      }
-    ],
-    "name": "PeriodNotFound",
+    "name": "NotSubscriptionBuyer",
     "type": "error"
   },
   {
@@ -94,6 +56,44 @@
   {
     "inputs": [],
     "name": "QueryInferencePaused",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionAlreadyFunded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint40",
+        "name": "endsAt",
+        "type": "uint40"
+      }
+    ],
+    "name": "SubscriptionEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "subscriptionId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "SubscriptionNotFound",
     "type": "error"
   },
   {
@@ -135,7 +135,7 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
@@ -159,13 +159,13 @@
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "periodStart",
+        "name": "startsAt",
         "type": "uint40"
       },
       {
         "indexed": false,
         "internalType": "uint40",
-        "name": "periodEnd",
+        "name": "endsAt",
         "type": "uint40"
       },
       {
@@ -190,7 +190,7 @@
         "components": [
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -205,17 +205,17 @@
           },
           {
             "internalType": "uint96",
-            "name": "maxAskWeiPerUnit",
+            "name": "maxPricePerUnit",
             "type": "uint96"
           }
         ],
         "indexed": false,
-        "internalType": "struct ConvictionServiceStorage.Bucket[]",
-        "name": "buckets",
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
+        "name": "budgets",
         "type": "tuple[]"
       }
     ],
-    "name": "PeriodFunded",
+    "name": "SubscriptionFunded",
     "type": "event"
   },
   {
@@ -236,7 +236,7 @@
       {
         "indexed": true,
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
@@ -261,7 +261,7 @@
         "components": [
           {
             "internalType": "bytes32",
-            "name": "bucketId",
+            "name": "serviceId",
             "type": "bytes32"
           },
           {
@@ -276,17 +276,17 @@
           },
           {
             "internalType": "uint96",
-            "name": "maxAskWeiPerUnit",
+            "name": "maxPricePerUnit",
             "type": "uint96"
           }
         ],
         "indexed": false,
-        "internalType": "struct ConvictionServiceStorage.Bucket[]",
+        "internalType": "struct ServiceSubscriptionsStorage.ServiceBudget[]",
         "name": "additions",
         "type": "tuple[]"
       }
     ],
-    "name": "PeriodToppedUp",
+    "name": "SubscriptionToppedUp",
     "type": "event"
   }
 ]

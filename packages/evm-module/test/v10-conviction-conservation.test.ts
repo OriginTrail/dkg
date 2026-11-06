@@ -1,6 +1,6 @@
 // Per-account conservation of a Conviction Account over a whole lock
 // (OT-RFC-27, PublishingConviction 10.2.0, ServiceSubscriptions 1.2.0), as a
-// property test: seeded random sequences of publishes, plan-period fundings
+// property test: seeded random sequences of publishes, subscription fundings
 // and their top-ups, account top-ups, settles and time jumps, through the
 // lock's end and its final sweep.
 //
@@ -10,7 +10,7 @@
 //   staker-pool credits + conviction due + fees == committed + top-ups
 //
 // where the staker-pool credits are EpochStorage's shard-1 credits (publishing
-// draws, window bookings and the top-up tail), the conviction due is
+// spends, window bookings and the top-up tail), the conviction due is
 // QueryInferenceStorage's ledger over the run's epochs, and the fees are the
 // treasury shard's credits plus the TRAC the treasury received. The vault keeps
 // everything but those received fees. For an account an older build created,
@@ -37,7 +37,7 @@ import {
   DAY,
   TRAC,
   Terms,
-  bucket,
+  budget,
   costOf,
   registerServiceContracts,
   requestOf,
@@ -51,9 +51,9 @@ const BUYER_KEYS = 6;
 
 async function deployFixture() {
   const stack = await deployAccountStack();
-  const { QIS, CSS, SS } = await registerServiceContracts(stack.Hub);
+  const { QIS, SSS, SS } = await registerServiceContracts(stack.Hub);
   await stack.Hub.setContractAddress('KnowledgeAssetsLifecycle', stack.accounts[5].address);
-  return { ...stack, QIS, CSS, SS };
+  return { ...stack, QIS, SSS, SS };
 }
 
 type Fixture = Awaited<ReturnType<typeof deployFixture>>;
@@ -167,24 +167,24 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
       const acct = await f.PCS.getAccount(accountId);
       const bps = acct.discountBps;
 
-      const assigned = new Set<string>();
+      const added = new Set<string>();
       const funded = new Map<string, bigint>(); // `${buyer}:${epoch}` => epoch
       if (run.services) await f.SS.connect(owner).setServiceSpending(accountId, true);
-      const assign = async (buyer: SignerWithAddress) => {
-        if (assigned.has(buyer.address)) return;
+      const addBuyer = async (buyer: SignerWithAddress) => {
+        if (added.has(buyer.address)) return;
         const terms: Terms = {
           accountId,
-          assignee: buyer.address,
-          maxCostPerPeriod: 1n << 95n,
+          buyer: buyer.address,
+          maxCostPerEpoch: 1n << 95n,
           expiresAt: BigInt(await time.latest()) + 900n * DAY,
-          nonce: await f.CSS.assignmentNonce(accountId),
+          nonce: await f.SSS.grantNonce(accountId),
         };
-        await f.SS.connect(owner).assign(terms, '0x', await signTerms(buyer, f.SS, terms));
-        assigned.add(buyer.address);
+        await f.SS.connect(owner).addBuyer(terms, '0x', await signTerms(buyer, f.SS, terms));
+        added.add(buyer.address);
       };
 
       let topUps = 0n;
-      const counts = { publishes: 0, fundings: 0, periodTopUps: 0, accountTopUps: 0, settles: 0 };
+      const counts = { publishes: 0, fundings: 0, subscriptionTopUps: 0, accountTopUps: 0, settles: 0 };
 
       while (BigInt(await time.latest()) + 2n < acct.expiresAtTimestamp) {
         const [window, baseRemaining, topUpBuffer] = await f.SS.currentWindowAllowance(accountId);
@@ -209,24 +209,24 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
           );
           counts.publishes++;
         } else if (action < 0.55 && services && available > 0n) {
-          // A plan period of the current epoch or the next, by a buyer key
+          // A subscription of the current epoch or the next, by a buyer
           // that has not funded it yet.
           const now = await f.Chronos.getCurrentEpoch();
           const epoch = rand() < 0.7 ? now : now + 1n;
           const buyer = buyers.find((b) => !funded.has(`${b.address}:${epoch}`));
           if (buyer) {
-            await assign(buyer);
+            await addBuyer(buyer);
             const cost = 1n + fractionOf(rand, available);
             await send(
-              f.SS.connect(buyer).fundFromConviction(
-                requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, valueFor(cost, bps))] }),
+              f.SS.connect(buyer).fundFromAccount(
+                requestOf(accountId, epoch, { budgets: [budget(0, CLASS_INFERENCE, valueFor(cost, bps))] }),
               ),
             );
             funded.set(`${buyer.address}:${epoch}`, epoch);
             counts.fundings++;
           }
         } else if (action < 0.65 && services && available > 0n) {
-          // A top-up of a period that has not ended.
+          // A top-up of a subscription that has not ended.
           const now = await f.Chronos.getCurrentEpoch();
           const open = [...funded.entries()].find(([, e]) => e >= now);
           if (open) {
@@ -234,13 +234,13 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
             const buyer = buyers.find((b) => key.startsWith(b.address))!;
             const cost = 1n + fractionOf(rand, available);
             await send(
-              f.SS.connect(buyer).topUpFromConviction(
+              f.SS.connect(buyer).topUpFromAccount(
                 subscriptionIdOf(buyer.address, epoch),
-                [bucket(0, CLASS_INFERENCE, valueFor(cost, bps))],
-                hre.ethers.id(`plan-${counts.periodTopUps}`),
+                [budget(0, CLASS_INFERENCE, valueFor(cost, bps))],
+                hre.ethers.id(`plan-${counts.subscriptionTopUps}`),
               ),
             );
-            counts.periodTopUps++;
+            counts.subscriptionTopUps++;
           }
         } else if (action < 0.75) {
           const amount = 1n + fractionOf(rand, 3_000n * TRAC);
@@ -291,7 +291,7 @@ describe('@integration Conviction Account conservation over a whole lock (Publis
       }
       let due = 0n;
       const endEpoch = (await f.Chronos.getCurrentEpoch()) + 2n;
-      for (let e = startEpoch; e <= endEpoch; e++) due += await f.QIS.convictionFunding(e);
+      for (let e = startEpoch; e <= endEpoch; e++) due += await f.QIS.accountFunding(e);
       const received = (await f.Token.balanceOf(treasury.address)) - treasuryBefore;
 
       expect(staker + due + treasuryShard + received + alreadyBooked).to.equal(committed + topUps);

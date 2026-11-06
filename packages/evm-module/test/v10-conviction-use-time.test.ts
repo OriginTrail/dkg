@@ -6,13 +6,13 @@
 // a Hub-registered stand-in for KnowledgeAssetsLifecycle:
 //   - a publish books its whole discounted spend over the Knowledge Asset's
 //     epochs, with the spread of a wallet publish, and nothing else;
-//   - a plan period's cost is booked in QueryInferenceStorage under the
-//     period's epoch, funded now or ahead, with nothing in the staker pool;
+//   - a subscription's cost is booked in QueryInferenceStorage under the
+//     subscription's epoch, funded now or ahead, with nothing in the staker pool;
 //   - an account that 10.0.8 or 10.1.0 scheduled publishes exactly as before
-//     (a budget gate, its top-up overflow forward over the lock) and is
+//     (a allowance gate, its top-up overflow forward over the lock) and is
 //     refused services;
-//   - a publish and a service spend in one window share its budget, and the
-//     window books only what neither drew;
+//   - a publish and a service spend in one window share its allowance, and the
+//     window books only what neither spent;
 //   - a top-up books the windows that have closed, as every touch does;
 //   - top-up overflow on both paths, and the 1-wei floor on both paths;
 //   - a use-time account never reaches the scheduled-account marker while its
@@ -33,7 +33,7 @@ import {
   PublishingConvictionScheduleHarness,
   PublishingConvictionStorage,
   QueryInferenceStorage,
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   ServiceSubscriptions,
   Token,
 } from '../typechain';
@@ -42,7 +42,7 @@ import {
   DAY,
   TRAC,
   Terms,
-  bucket,
+  budget,
   costOf,
   registerServiceContracts,
   requestOf,
@@ -60,12 +60,12 @@ const BPS = 2_000n;
 
 async function deployFixture() {
   const stack = await deployAccountStack();
-  const { QIS, CSS, SS } = await registerServiceContracts(stack.Hub);
+  const { QIS, SSS, SS } = await registerServiceContracts(stack.Hub);
   const Harness = await deployScheduleHarness(stack.Hub);
   // A Hub-registered stand-in for KnowledgeAssetsLifecycle, the only caller the
   // NFT's coverPublishingCost admits.
   await stack.Hub.setContractAddress('KnowledgeAssetsLifecycle', stack.accounts[5].address);
-  return { ...stack, QIS, CSS, SS, Harness };
+  return { ...stack, QIS, SSS, SS, Harness };
 }
 
 describe('@integration Conviction Accounts pay at use time (PublishingConviction 10.2.0)', function () {
@@ -78,7 +78,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   let PC: PublishingConviction;
   let PCS: PublishingConvictionStorage;
   let QIS: QueryInferenceStorage;
-  let CSS: ConvictionServiceStorage;
+  let SSS: ServiceSubscriptionsStorage;
   let SS: ServiceSubscriptions;
   let Harness: PublishingConvictionScheduleHarness;
 
@@ -91,7 +91,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
-    ({ accounts, Token, Chronos: ChronosContract, ES, Params, NFT, PC, PCS, QIS, CSS, SS, Harness } =
+    ({ accounts, Token, Chronos: ChronosContract, ES, Params, NFT, PC, PCS, QIS, SSS, SS, Harness } =
       await loadFixture(deployFixture));
     epLen = await ChronosContract.epochLength();
     lock = await Params.publishingConvictionEpochs();
@@ -136,23 +136,23 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
       await NFT.connect(kal).coverPublishingCost(agent.address, baseCost, kaStartEpoch ?? (await epochNow()), kaEpochs)
     ).wait())!;
 
-  /** Opt the account in and assign `buyer` under a limit no test reaches. */
+  /** Opt the account in and add `buyer` under a limit no test reaches. */
   const openForServices = async (accountId: bigint) => {
     await SS.connect(owner).setServiceSpending(accountId, true);
     const terms: Terms = {
       accountId,
-      assignee: buyer.address,
-      maxCostPerPeriod: 1_000_000n * TRAC,
+      buyer: buyer.address,
+      maxCostPerEpoch: 1_000_000n * TRAC,
       expiresAt: BigInt(await time.latest()) + 800n * DAY,
-      nonce: await CSS.assignmentNonce(accountId),
+      nonce: await SSS.grantNonce(accountId),
     };
-    await SS.connect(owner).assign(terms, '0x', await signTerms(buyer, SS, terms));
+    await SS.connect(owner).addBuyer(terms, '0x', await signTerms(buyer, SS, terms));
   };
 
   const fund = async (accountId: bigint, value: bigint, epoch?: bigint) =>
     (await (
-      await SS.connect(buyer).fundFromConviction(
-        requestOf(accountId, epoch ?? (await epochNow()), { buckets: [bucket(0, CLASS_INFERENCE, value)] }),
+      await SS.connect(buyer).fundFromAccount(
+        requestOf(accountId, epoch ?? (await epochNow()), { budgets: [budget(0, CLASS_INFERENCE, value)] }),
       )
     ).wait())!;
 
@@ -202,7 +202,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Services
   // -------------------------------------------------------------------------
 
-  it("a plan period's cost is booked under the period's epoch, funded now or ahead, and nothing reaches the staker pool", async () => {
+  it("a subscription's cost is booked under the subscription's epoch, funded now or ahead, and nothing reaches the staker pool", async () => {
     const { accountId } = await createAccount();
     await openForServices(accountId);
     const e0 = await epochNow();
@@ -215,21 +215,21 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
 
     for (const receipt of [now, ahead]) expect(await credits(receipt)).to.have.length(0);
     expect(await poolSnapshot(e0, e0 + 2n * lock + 2n)).to.deep.equal(before);
-    expect(await QIS.convictionFunding(e0 - 1n)).to.equal(0n);
-    expect(await QIS.convictionFunding(e0)).to.equal(nowCost);
-    expect(await QIS.convictionFunding(e0 + 1n)).to.equal(aheadCost);
-    expect(await QIS.convictionFunding(e0 + 2n)).to.equal(0n);
+    expect(await QIS.accountFunding(e0 - 1n)).to.equal(0n);
+    expect(await QIS.accountFunding(e0)).to.equal(nowCost);
+    expect(await QIS.accountFunding(e0 + 1n)).to.equal(aheadCost);
+    expect(await QIS.accountFunding(e0 + 2n)).to.equal(0n);
     expect(await QIS.fundingIn(e0)).to.deep.equal([0n, nowCost]);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(nowCost + aheadCost);
 
-    // A top-up of the current period is booked with it.
-    await SS.connect(buyer).topUpFromConviction(
+    // A top-up of the current subscription is booked with it.
+    await SS.connect(buyer).topUpFromAccount(
       subscriptionIdOf(buyer.address, e0),
-      [bucket(0, CLASS_INFERENCE, 10n * TRAC)],
+      [budget(0, CLASS_INFERENCE, 10n * TRAC)],
       hre.ethers.id('plan-2'),
     );
-    expect(await QIS.convictionFunding(e0)).to.equal(nowCost + costOf(10n * TRAC, BPS));
-    expect(await QIS.convictionFunding(e0 + 1n)).to.equal(aheadCost);
+    expect(await QIS.accountFunding(e0)).to.equal(nowCost + costOf(10n * TRAC, BPS));
+    expect(await QIS.accountFunding(e0 + 1n)).to.equal(aheadCost);
   });
 
   // -------------------------------------------------------------------------
@@ -242,7 +242,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect((await PCS.getAccount(accountId)).lastSettledWindow).to.equal(lock);
     const B = COMMITTED / lock;
 
-    // Within the window budget: a budget gate only, nothing booked.
+    // Within the window allowance: a allowance gate only, nothing booked.
     const base = await publish(1_000n * TRAC, 4n);
     expect(await credits(base)).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(800n * TRAC);
@@ -280,7 +280,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const { accountId } = await createAccount();
     await openForServices(accountId);
     await Harness.scheduleInFull(accountId);
-    await expect(SS.connect(buyer).fundFromConviction(requestOf(accountId, await epochNow())))
+    await expect(SS.connect(buyer).fundFromAccount(requestOf(accountId, await epochNow())))
       .to.be.revertedWithCustomError(PC, 'EmissionAlreadyScheduled')
       .withArgs(accountId);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(0n);
@@ -290,18 +290,18 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
   // Mixed spending and edge cases
   // -------------------------------------------------------------------------
 
-  it('a publish and a service spend in one window share its budget; once it closes, the window books only what neither drew', async () => {
+  it('a publish and a service spend in one window share its allowance; once it closes, the window books only what neither spent', async () => {
     const { accountId, createdAt } = await createAccount();
     await openForServices(accountId);
     const B = COMMITTED / lock;
     const e0 = await epochNow();
 
     const published = await publish(1_000n * TRAC, lock); // 800 TRAC booked at once
-    const funded = await fund(accountId, 500n * TRAC); // 400 TRAC under the period's epoch
+    const funded = await fund(accountId, 500n * TRAC); // 400 TRAC under the subscription's epoch
     expect(sumOf(await credits(published))).to.equal(800n * TRAC);
     expect(await credits(funded)).to.have.length(0);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(1_200n * TRAC);
-    expect(await QIS.convictionFunding(e0)).to.equal(400n * TRAC);
+    expect(await QIS.accountFunding(e0)).to.equal(400n * TRAC);
 
     // Window 0 closes; the next touch books what is left of it.
     await time.increaseTo(createdAt + epLen);
@@ -340,7 +340,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     expect(await PCS.topUpBalance(accountId)).to.equal(100n * TRAC);
   });
 
-  it("top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service spend books both under the period's epoch", async () => {
+  it("top-up overflow: a publish books the window part and the overflow together over the KA epochs; a service spend books both under the subscription's epoch", async () => {
     const B = COMMITTED / lock;
     // The publishing path.
     const { accountId: publishingId } = await createAccount();
@@ -365,7 +365,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const [spent] = await eventsOf(funded, PC, 'ServiceCostCovered');
     expect([spent.cost, spent.spentFromWindow, spent.spentFromTopUp]).to.deep.equal([cost, B, cost - B]);
     expect(await credits(funded)).to.have.length(0);
-    expect(await QIS.convictionFunding(await epochNow())).to.equal(cost);
+    expect(await QIS.accountFunding(await epochNow())).to.equal(cost);
     expect(await PCS.topUpBalance(serviceId)).to.equal(2_000n * TRAC - (cost - B));
   });
 
@@ -382,7 +382,7 @@ describe('@integration Conviction Accounts pay at use time (PublishingConviction
     const funded = await fund(accountId, 3n);
     expect((await eventsOf(funded, PC, 'ServiceCostCovered'))[0].cost).to.equal(1n);
     expect(await credits(funded)).to.have.length(0);
-    expect(await QIS.convictionFunding(e0)).to.equal(1n);
+    expect(await QIS.accountFunding(e0)).to.equal(1n);
     expect(await PCS.windowSpent(accountId, 0n)).to.equal(2n);
   });
 

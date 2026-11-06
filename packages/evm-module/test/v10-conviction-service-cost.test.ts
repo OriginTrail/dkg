@@ -82,7 +82,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
   let epLen: bigint;
   let lock: bigint;
   let owner: SignerWithAddress;
-  let assignee: SignerWithAddress;
+  let buyer: SignerWithAddress;
 
   beforeEach(async () => {
     hre.helpers.resetDeploymentsJson();
@@ -102,7 +102,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     epLen = await ChronosContract.epochLength();
     lock = await Params.publishingConvictionEpochs();
     owner = accounts[5];
-    assignee = accounts[9];
+    buyer = accounts[9];
   });
 
   // -------------------------------------------------------------------------
@@ -133,13 +133,13 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     value: bigint,
     subscriptionId: string = SUBSCRIPTION_ID,
   ): Promise<{ receipt: ContractTransactionReceipt; spend: Awaited<ReturnType<MockServiceSubscriptions['lastSpend']>> }> => {
-    const tx = await Stub.cover(await Logic.getAddress(), accountId, assignee.address, subscriptionId, value);
+    const tx = await Stub.cover(await Logic.getAddress(), accountId, buyer.address, subscriptionId, value);
     const receipt = (await tx.wait())!;
     return { receipt, spend: await Stub.lastSpend() };
   };
 
   const coverCall = async (accountId: bigint, value: bigint) =>
-    Stub.cover(await Logic.getAddress(), accountId, assignee.address, SUBSCRIPTION_ID, value);
+    Stub.cover(await Logic.getAddress(), accountId, buyer.address, SUBSCRIPTION_ID, value);
 
   const impersonatedNFT = async () => {
     const nftAddress = await NFT.getAddress();
@@ -175,9 +175,9 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
     it('admits only the contract the Hub names ServiceSubscriptions', async () => {
       const { accountId } = await createAccountFor(owner);
       const nft = await impersonatedNFT();
-      for (const caller of [accounts[3], assignee, owner, accounts[0], nft]) {
+      for (const caller of [accounts[3], buyer, owner, accounts[0], nft]) {
         await expect(
-          Logic.connect(caller).coverServiceCost(accountId, assignee.address, SUBSCRIPTION_ID, TRAC),
+          Logic.connect(caller).coverServiceCost(accountId, buyer.address, SUBSCRIPTION_ID, TRAC),
         )
           .to.be.revertedWithCustomError(Logic, 'OnlyServiceSubscriptions')
           .withArgs(caller.address);
@@ -196,7 +196,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
         .to.be.revertedWithCustomError(Logic, 'OnlyServiceSubscriptions')
         .withArgs(await Stub.getAddress());
       await expect(
-        next.cover(await Logic.getAddress(), accountId, assignee.address, SUBSCRIPTION_ID, TRAC),
+        next.cover(await Logic.getAddress(), accountId, buyer.address, SUBSCRIPTION_ID, TRAC),
       ).to.emit(Logic, 'ServiceCostCovered');
     });
 
@@ -339,7 +339,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
 
         await expect(receipt)
           .to.emit(Logic, 'ServiceCostCovered')
-          .withArgs(accountId, assignee.address, SUBSCRIPTION_ID, value, cost, epoch, 0n, cost, 0n);
+          .withArgs(accountId, buyer.address, SUBSCRIPTION_ID, value, cost, epoch, 0n, cost, 0n);
 
         expect(await PCS.windowSpent(accountId, 0n)).to.equal(cost);
         expect(await PCS.topUpBalance(accountId)).to.equal(0n);
@@ -361,7 +361,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       expect(spend.spentFromWindow).to.equal(1n);
       await expect(receipt).to.emit(Logic, 'ServiceCostCovered').withArgs(
         top,
-        assignee.address,
+        buyer.address,
         SUBSCRIPTION_ID,
         3n,
         1n,
@@ -416,7 +416,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       expect(spend.epoch).to.equal(e0);
       await expect(receipt)
         .to.emit(Logic, 'ServiceCostCovered')
-        .withArgs(accountId, assignee.address, SUBSCRIPTION_ID, value, cost, e0, 0n, B, overflow);
+        .withArgs(accountId, buyer.address, SUBSCRIPTION_ID, value, cost, e0, 0n, B, overflow);
 
       // Neither part reaches the staker pool: the caller books the whole cost.
       expect(await creditedRanges(receipt)).to.deep.equal([]);
@@ -459,7 +459,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
         publishTx = await Logic.connect(nft).coverPublishingCost(agent.address, value, e0, kaEpochs, {
           gasLimit: 5_000_000,
         });
-        serviceTx = await Stub.cover(await Logic.getAddress(), serviceId, assignee.address, SUBSCRIPTION_ID, value, {
+        serviceTx = await Stub.cover(await Logic.getAddress(), serviceId, buyer.address, SUBSCRIPTION_ID, value, {
           gasLimit: 5_000_000,
         });
         await hre.network.provider.send('evm_mine', []);
@@ -535,7 +535,7 @@ describe('@integration PublishingConviction 10.2.0 coverServiceCost', function (
       expect(await PCS.windowSpent(accountId, 0n)).to.equal(B);
       await expect(receipt)
         .to.emit(Logic, 'ServiceCostCovered')
-        .withArgs(accountId, assignee.address, ethers.id('subscription-2'), 100n * TRAC, 80n * TRAC, spend.epoch, 1n, 80n * TRAC, 0n);
+        .withArgs(accountId, buyer.address, ethers.id('subscription-2'), 100n * TRAC, 80n * TRAC, spend.epoch, 1n, 80n * TRAC, 0n);
     });
 
     it('books the closed windows of an account created before 10.0.8 before it spends, and no window more', async () => {

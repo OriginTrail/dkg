@@ -1,5 +1,5 @@
 // The development deploy the query/inference rewards suites (OT-RFC-27) run
-// on, and the helpers they share: the staking, account and plan-period
+// on, and the helpers they share: the staking, account and subscription
 // stacks, StakingV10 and StakingKPI wired to the settlement, the activation
 // epoch at the deployment epoch, λ 0.5. Each suite wraps the deploy in a
 // fixture function of its own, so loadFixture keeps a snapshot per suite, and
@@ -14,7 +14,7 @@ import {
   CGWeightTreeStorage,
   ContextGraphStorage,
   ContextGraphValueStorage,
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   ConvictionWithdrawalStorage,
   DKGKnowledgeAssets,
   QueryInferenceSettlement,
@@ -26,10 +26,10 @@ import {
   StakingV10Ledger,
 } from '../../typechain';
 import { deployAccountStack } from './account-stack';
-import { ACCOUNT_STACK_TAGS, BPS, CLASS_INFERENCE, Domain, TRAC, bucket, subscriptionIdOf, walletRequestOf } from './conviction-service';
+import { ACCOUNT_STACK_TAGS, BPS, CLASS_INFERENCE, Domain, TRAC, budget, subscriptionIdOf, walletRequestOf } from './conviction-service';
 import { SCALE18, signedItems } from './query-inference';
 
-export const UNIT_ASK = 10n ** 15n;
+export const UNIT_PRICE = 10n ** 15n;
 export const TIER_12 = 12n; // 366 days at 6x: no boost expiry within these runs
 
 export async function deployRewardsStack() {
@@ -49,7 +49,7 @@ export async function deployRewardsStack() {
     CWS: await hre.ethers.getContract<ConvictionWithdrawalStorage>('ConvictionWithdrawalStorage'),
     KPI: await hre.ethers.getContract<StakingKPI>('StakingKPI'),
     QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
-    CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
+    SSS: await at<ServiceSubscriptionsStorage>('ServiceSubscriptionsStorage'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
     QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
     SS: await at<ServiceSubscriptions>('ServiceSubscriptions'),
@@ -105,30 +105,30 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
     return { identityId, operational, admin, feeBps, tokenId };
   };
 
-  /** A wallet period of `epoch` for buyer `who`, one bucket of `value`: the payment moves into the vault. */
+  /** A wallet subscription of `epoch` for buyer `who`, one budget of `value`: the payment moves into the vault. */
   const walletFund = async (who: SignerWithAddress, epoch: bigint, value: bigint): Promise<string> => {
     await f.Token.mint(who.address, value);
     await f.Token.connect(who).approve(await f.SSW.getAddress(), value);
     await f.SSW.connect(who).fundFromWallet(
-      walletRequestOf(epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
+      walletRequestOf(epoch, { budgets: [budget(0, CLASS_INFERENCE, value, UNIT_PRICE)], sessionKey: key.address }),
     );
     return subscriptionIdOf(who.address, epoch);
   };
 
-  /** A receipt batch from `by` claiming `amount` of the period's bucket. `by` has a node score in the epoch already. */
+  /** A receipt batch from `by` claiming `amount` of the subscription's budget. `by` has a node score in the epoch already. */
   const claimReceipts = async (by: Seller, subscriptionId: string, amount: bigint) => {
     const { items } = signedItems({
       domain: domain,
       wallet: key,
       subscriptionId,
-      bucketId: (await f.CSS.getBucket(subscriptionId, 0n)).bucketId,
+      serviceId: (await f.SSS.getBudget(subscriptionId, 0n)).serviceId,
       seller: by.identityId,
       count: 1,
-      units: amount / UNIT_ASK,
-      ask: UNIT_ASK,
+      units: amount / UNIT_PRICE,
+      price: UNIT_PRICE,
       issuedAt: await latest(),
     });
-    await f.QS.connect(by.operational).submitReceiptBatch([{ subscriptionId, bucketIndex: 0n, minCounted: 0n, items }]);
+    await f.QS.connect(by.operational).submitReceiptBatch([{ subscriptionId, budgetIndex: 0n, minCounted: 0n, items }]);
   };
 
   /**
@@ -146,14 +146,14 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
   /**
    * RandomSampling registered and initialized on the Hub, as the development
    * deploy does, and one public knowledge asset of a single leaf in a context
-   * graph valued from the current epoch, the only one the value-weighted draw
+   * graph valued from the current epoch, the only one the value-weighted spend
    * can pick. Returns a proof of it by `node`: a challenge and its proof in the
    * next proof period, which RandomSampling scores over the node's effective
    * stake at that time.
    */
   const realProofs = async () => {
     const noPrivateData = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('DKG_NO_PRIVATE_DATA_V10'));
-    const content = hre.ethers.toUtf8Bytes('the one leaf a challenge can draw');
+    const content = hre.ethers.toUtf8Bytes('the one leaf a challenge can spend');
     const root = hre.ethers.keccak256(hre.ethers.concat([hre.ethers.keccak256(content), noPrivateData]));
     const owner = f.accounts[0];
     const rs = (await (
@@ -225,7 +225,7 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
   };
 
   /**
-   * Value for the nodes of `values` in epoch `a`: one wallet period of it, each
+   * Value for the nodes of `values` in epoch `a`: one wallet subscription of it, each
    * node scored at its score and landing its receipts, and a publishing pool of
    * `pool`. Ends inside `a`, which it returns.
    */

@@ -7,15 +7,15 @@
 // playing every role:
 //   - the owner, a hot testnet wallet with Base Sepolia ETH and test TRAC,
 //     opens a new Conviction Account under PublishingConviction 10.2.0 (an
-//     account opened under 10.0.8 cannot buy services), opts it in, assigns a
-//     buyer key, funds a wallet-paid period, stakes a small position on the
+//     account opened under 10.0.8 cannot buy services), opts it in, grants a
+//     buyer, funds a wallet-paid subscription, stakes a small position on the
 //     seller's node, so that the pool share is checked on a position it
 //     controls, and makes the upkeep calls;
-//   - the buyer key funds a Conviction Account period and tops it up;
+//   - the buyer funds a Conviction Account subscription and tops it up;
 //   - the session keys sign the requests;
 //   - the seller, one of our testnet Core Nodes, submits them as receipt
 //     batches from one of its operational keys.
-// The buyer keys and the session keys are derived from the owner key and the
+// The buyers and the session keys are derived from the owner key and the
 // run label, keccak256(ownerKey ‖ "rfc27-smoke/<run>/<role>") as an HD seed,
 // so no key is ever stored. No step is a Hub owner action.
 //
@@ -48,7 +48,7 @@
 // RFC27_SMOKE_WALLET_VALUE (2), RFC27_SMOKE_COMMITTED (by default the lock
 // times the first window's spends, rounded up, plus 1 TRAC a window; there is
 // no contract minimum, and the floor is the lock times those spends), and
-// RFC27_SMOKE_KEY_ETH, the ETH the owner sends each derived buyer key (0.0002,
+// RFC27_SMOKE_KEY_ETH, the ETH the owner sends each derived buyer (0.0002,
 // or what its gas needs at the current fee if more). Setup records them; later
 // phases read them from the state file.
 //

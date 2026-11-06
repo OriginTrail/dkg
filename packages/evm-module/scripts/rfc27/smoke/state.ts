@@ -39,7 +39,7 @@ export type SmokeState = {
   addresses: { owner: string; buyer: string; edgeBuyer: string; caSession: string; walletSession: string; edgeSession: string; seller: string };
   sellerId: bigint;
   amounts: Amounts;
-  /** The epoch of the run's periods. */
+  /** The epoch of the run's subscriptions. */
   E?: bigint;
   tokenId?: bigint;
   stakeRaw?: bigint;
@@ -48,7 +48,7 @@ export type SmokeState = {
   accountExpiresAt?: bigint;
   buyerNonce?: bigint;
   edgeNonce?: bigint;
-  periods: { ca?: string; wallet?: string; edge?: string };
+  subscriptions: { ca?: string; wallet?: string; edge?: string };
   costs: { ca?: bigint; topUp?: bigint; edge?: bigint };
   withdrawal?: Withdrawal;
   /** Fork-only: the score each stand-in proof writes, and the epochs that have one. */
@@ -67,14 +67,14 @@ export type SetupState = SmokeState & {
   accountId: bigint;
   accountExpiresAt: bigint;
   buyerNonce: bigint;
-  periods: { ca: string; wallet: string };
+  subscriptions: { ca: string; wallet: string };
   costs: { ca: bigint };
 };
 
 /** A run once serve has completed too. */
 export type ServedState = SetupState & {
   edgeNonce: bigint;
-  periods: { edge: string };
+  subscriptions: { edge: string };
   costs: { topUp: bigint; edge: bigint };
 };
 
@@ -90,13 +90,13 @@ export const setupMissing = (s: SmokeState): string[] =>
     accountId: s.accountId,
     accountExpiresAt: s.accountExpiresAt,
     buyerNonce: s.buyerNonce,
-    'periods.ca': s.periods.ca,
-    'periods.wallet': s.periods.wallet,
+    'subscriptions.ca': s.subscriptions.ca,
+    'subscriptions.wallet': s.subscriptions.wallet,
     'costs.ca': s.costs.ca,
   });
 
 /** What a completed serve must have recorded and `s` has not. */
-export const serveMissing = (s: SmokeState): string[] => missingOf({ edgeNonce: s.edgeNonce, 'periods.edge': s.periods.edge, 'costs.topUp': s.costs.topUp, 'costs.edge': s.costs.edge });
+export const serveMissing = (s: SmokeState): string[] => missingOf({ edgeNonce: s.edgeNonce, 'subscriptions.edge': s.subscriptions.edge, 'costs.topUp': s.costs.topUp, 'costs.edge': s.costs.edge });
 
 export const isSetup = (s: SmokeState): s is SetupState => setupMissing(s).length === 0;
 export const isServed = (s: SetupState): s is ServedState => serveMissing(s).length === 0;
@@ -162,6 +162,7 @@ function decodeStep(x: unknown, where: string): StepRecord {
     block: optNum(o, 'block', where),
     gasUsed: optBi(o, 'gasUsed', where),
     expected: optExpected(o, 'expected', where),
+    stakeFactor18: optBi(o, 'stakeFactor18', where),
   };
 }
 
@@ -171,7 +172,7 @@ export function decodeState(raw: unknown): SmokeState {
   const a = obj(o.addresses, 'addresses');
   const am = obj(o.amounts, 'amounts');
   const amounts = Object.fromEntries(AMOUNT_KEYS.map((k) => [k, bi(am, k, 'amounts')])) as Amounts;
-  const periods = obj(o.periods ?? {}, 'periods');
+  const subscriptions = obj(o.subscriptions ?? {}, 'subscriptions');
   const costs = obj(o.costs ?? {}, 'costs');
   const steps: Record<string, StepRecord> = {};
   for (const [k, v] of Object.entries(obj(o.steps ?? {}, 'steps'))) steps[k] = decodeStep(v, `steps.${k}`);
@@ -225,7 +226,7 @@ export function decodeState(raw: unknown): SmokeState {
     accountExpiresAt: optBi(o, 'accountExpiresAt', 'state'),
     buyerNonce: optBi(o, 'buyerNonce', 'state'),
     edgeNonce: optBi(o, 'edgeNonce', 'state'),
-    periods: { ca: optStr(periods, 'ca', 'periods'), wallet: optStr(periods, 'wallet', 'periods'), edge: optStr(periods, 'edge', 'periods') },
+    subscriptions: { ca: optStr(subscriptions, 'ca', 'subscriptions'), wallet: optStr(subscriptions, 'wallet', 'subscriptions'), edge: optStr(subscriptions, 'edge', 'subscriptions') },
     costs: { ca: optBi(costs, 'ca', 'costs'), topUp: optBi(costs, 'topUp', 'costs'), edge: optBi(costs, 'edge', 'costs') },
     withdrawal,
     fork,

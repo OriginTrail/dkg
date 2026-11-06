@@ -8,7 +8,7 @@ import { EXPECTED_VERSIONS, NEW_CONTRACTS } from '../contracts';
 import { requireParameter } from '../parameters';
 import { fmt, iso, span } from '../report';
 import { MIN_EPOCH_LEFT, NOTHING_YET, Progress, needsOf, plannedAmounts, requestPlan, planValue } from './config';
-import { Ctx, PoolCtx, epochStart, now, walletPeriodClash, withPool } from './context';
+import { Ctx, PoolCtx, epochStart, now, walletSubscriptionClash, withPool } from './context';
 import { Roles } from './roles';
 import { Amounts, PHASES } from './state';
 
@@ -41,16 +41,16 @@ export async function checkDeployment(ctx: PoolCtx, current: bigint): Promise<{ 
   report.set('versions', versions);
 
   report.say('\nWiring through the Hub:');
-  const [qs, qis, cssvc, vault, sv10] = await Promise.all([c.qs.getAddress(), c.qis.getAddress(), c.cssvc.getAddress(), c.css.getAddress(), c.sv10.getAddress()]);
+  const [qs, qis, sss, vault, sv10] = await Promise.all([c.qs.getAddress(), c.qis.getAddress(), c.sss.getAddress(), c.css.getAddress(), c.sv10.getAddress()]);
   report.check('StakingV10 10.1.0 reads the Hub\'s settlement and its storage', (await c.sv10.queryInferenceSettlement()) === qs && (await c.sv10.queryInferenceStorage()) === qis);
   report.check('StakingKPI 10.1.0 reads the Hub\'s settlement', (await c.kpi.queryInferenceSettlement()) === qs);
   report.check(
-    'QueryInferenceSettlement reads the Hub\'s QueryInferenceStorage, ConvictionServiceStorage and vault',
-    (await c.qs.queryInferenceStorage()) === qis && (await c.qs.convictionServiceStorage()) === cssvc && (await c.qs.convictionStakingStorage()) === vault,
+    'QueryInferenceSettlement reads the Hub\'s QueryInferenceStorage, ServiceSubscriptionsStorage and vault',
+    (await c.qs.queryInferenceStorage()) === qis && (await c.qs.serviceSubscriptionsStorage()) === sss && (await c.qs.convictionStakingStorage()) === vault,
   );
   report.check(
     'ServiceSubscriptions reads the Hub\'s storages',
-    (await c.ss.queryInferenceStorage()) === qis && (await c.ss.convictionServiceStorage()) === cssvc && (await c.ss.publishingConvictionStorage()) === (await c.pcs.getAddress()),
+    (await c.ss.queryInferenceStorage()) === qis && (await c.ss.serviceSubscriptionsStorage()) === sss && (await c.ss.publishingConvictionStorage()) === (await c.pcs.getAddress()),
   );
   report.check(
     'ServiceSubscriptionsWallet pays into the vault StakingV10 pays from, and reads the Hub\'s storages',
@@ -58,7 +58,7 @@ export async function checkDeployment(ctx: PoolCtx, current: bigint): Promise<{ 
       (await c.sv10.convictionStorage()) === vault &&
       (await c.ssw.tokenContract()) === (await c.token.getAddress()) &&
       (await c.ssw.queryInferenceStorage()) === qis &&
-      (await c.ssw.convictionServiceStorage()) === cssvc,
+      (await c.ssw.serviceSubscriptionsStorage()) === sss,
   );
   report.check('DKGStakingConvictionNFT calls the Hub\'s StakingV10', (await c.snft.stakingV10()) === sv10);
   report.check('StakingV10Ledger wired the Hub\'s ConvictionWithdrawalStorage', (await c.ledger.withdrawalStorage()) === (await c.cws.getAddress()));
@@ -80,10 +80,10 @@ export async function checkDeployment(ctx: PoolCtx, current: bigint): Promise<{ 
   const bounds = {
     maxItemsPerBatch: [await c.qis.maxItemsPerBatch(), requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value],
     maxGroupsPerBatch: [await c.qis.maxGroupsPerBatch(), requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value],
-    maxBucketsPerPeriod: [await c.cssvc.maxBucketsPerPeriod(), requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value],
+    maxBudgetsPerSubscription: [await c.sss.maxBudgetsPerSubscription(), requireParameter('ServiceSubscriptionsStorage', ['maxBudgetsPerSubscription']).value],
   };
   report.check(
-    'the batch and bucket bounds are parameters.json "testnet"\'s',
+    'the batch and budget bounds are parameters.json "testnet"\'s',
     Object.values(bounds).every(([onChain, want]) => onChain === want),
     Object.entries(bounds).map(([k, [onChain]]) => `${k} ${onChain}`).join(', '),
   );
@@ -138,10 +138,10 @@ export async function progressOf(ctx: Ctx): Promise<Progress> {
   return {
     staked: s.tokenId !== undefined || (await confirmed('setup.stake')),
     accountCreated: s.accountId !== undefined || (await confirmed('setup.create-account')),
-    walletFunded: s.periods.wallet !== undefined || (await confirmed('setup.fund-wallet-period')),
+    walletFunded: s.subscriptions.wallet !== undefined || (await confirmed('setup.fund-wallet-subscription')),
     buyerFunded: await confirmed('setup.eth-buyer'),
     edgeBuyerFunded: await confirmed('setup.eth-edge-buyer'),
-    sent: { owner: sentBy('owner'), buyer: sentBy('buyer key'), edgeBuyer: sentBy('edge buyer key'), seller: sentBy('seller') },
+    sent: { owner: sentBy('owner'), buyer: sentBy('buyer'), edgeBuyer: sentBy('edge buyer'), seller: sentBy('seller') },
   };
 }
 
@@ -157,13 +157,13 @@ export async function checkBalances(ctx: Ctx, a: Amounts): Promise<void> {
   const byFork = ctx.net.local ? ' (fork-only: setup sets it with anvil\'s balance setters)' : '';
   if (r.ownerAddr) {
     const [eth, trac] = [await ctx.hre.ethers.provider.getBalance(r.ownerAddr), await c.token.balanceOf(r.ownerAddr)];
-    const left = [progress.accountCreated ? '' : 'the commitment', progress.walletFunded ? '' : 'the wallet period', progress.staked ? '' : 'the stake'].filter(Boolean).join(', ');
+    const left = [progress.accountCreated ? '' : 'the commitment', progress.walletFunded ? '' : 'the wallet subscription', progress.staked ? '' : 'the stake'].filter(Boolean).join(', ');
     report.check(
       `the owner ${r.ownerAddr}${r.ownerImpersonated ? ' (fork-only: impersonated)' : ''} holds the TRAC the run still spends: ${left || 'none'}`,
       trac >= needs.ownerTrac || ctx.net.local,
       `${fmt(trac)} of ${fmt(needs.ownerTrac)} TRAC${trac < needs.ownerTrac ? byFork : ''}`,
     );
-    report.check('the owner holds the ETH the run still spends: its gas and the buyer keys\' ETH', eth >= needs.ownerEth || ctx.net.local, `${fmt(eth)} of about ${fmt(needs.ownerEth)} ETH${eth < needs.ownerEth ? byFork : ''}`);
+    report.check('the owner holds the ETH the run still spends: its gas and the buyers\' ETH', eth >= needs.ownerEth || ctx.net.local, `${fmt(eth)} of about ${fmt(needs.ownerEth)} ETH${eth < needs.ownerEth ? byFork : ''}`);
   } else {
     report.check('the owner key is set', false, 'set RFC27_SMOKE_OWNER_KEY');
   }
@@ -175,9 +175,9 @@ export async function checkBalances(ctx: Ctx, a: Amounts): Promise<void> {
   const keyHas = (funded: boolean, key: Roles['buyer']): Promise<bigint> | bigint => (funded && key ? ctx.hre.ethers.provider.getBalance(key.address) : a.keyEth);
   const [buyerHas, edgeBuyerHas] = [await keyHas(progress.buyerFunded, r.buyer), await keyHas(progress.edgeBuyerFunded, r.edgeBuyer)];
   report.check(
-    `the ${fmt(a.keyEth)} ETH the owner sends each derived buyer key covers the gas it still spends`,
+    `the ${fmt(a.keyEth)} ETH the owner sends each derived buyer covers the gas it still spends`,
     buyerHas >= needs.buyerEth && edgeBuyerHas >= needs.edgeBuyerEth,
-    `buyer key ${fmt(buyerHas)} of about ${fmt(needs.buyerEth)}, edge buyer key ${fmt(edgeBuyerHas)} of about ${fmt(needs.edgeBuyerEth)} ETH`,
+    `buyer ${fmt(buyerHas)} of about ${fmt(needs.buyerEth)}, edge buyer ${fmt(edgeBuyerHas)} of about ${fmt(needs.edgeBuyerEth)} ETH`,
   );
 }
 
@@ -188,18 +188,18 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
   const p = requestPlan(a);
   const say = (line: string) => ctx.report.say(line);
   say(`\nPlan of run "${ctx.env.run}"${s ? '' : ' (not started)'}:`);
-  say(`  roles     owner ${r.ownerAddr ?? '(no key)'}, buyer key ${r.buyer?.address ?? '?'}, edge buyer key ${r.edgeBuyer?.address ?? '?'}`);
+  say(`  roles     owner ${r.ownerAddr ?? '(no key)'}, buyer ${r.buyer?.address ?? '?'}, edge buyer ${r.edgeBuyer?.address ?? '?'}`);
   say(`            session keys: account ${r.caSession?.address ?? '?'}, wallet ${r.walletSession?.address ?? '?'}, edge ${r.edgeSession?.address ?? '?'}; seller ${r.sellerAddr ?? '?'}`);
   const when = s?.E !== undefined ? ` = ${E}` : E > current ? ` = ${E}, the activation epoch, from ${iso(await ts(E))}` : ` (now ${current}, ends ${iso(await ts(current + 1n))})`;
   say(
     `  setup     epoch E${when}: stake ${fmt(a.stake)} TRAC on the seller's node at tier 0; account of ${fmt(a.committed)} TRAC ` +
       `(floor ${fmt(a.committedFloor)}: ${a.lock} windows × ${fmt(a.caValue + a.caTopUp + a.edgeValue)} spent in the first; discount ${a.discountBps} bps); ` +
-      `opt-in; buyer key assigned; account period ${fmt(a.caValue)} TRAC; wallet period ${fmt(a.walletValue)} TRAC; ${fmt(a.keyEth)} ETH to each buyer key`,
+      `opt-in; buyer added; account subscription ${fmt(a.caValue)} TRAC; wallet subscription ${fmt(a.walletValue)} TRAC; ${fmt(a.keyEth)} ETH to each buyer`,
   );
   say(
     `  serve     epoch E, once the seller has proved in it, and before E ends: ${p.caFirst.count + p.caAfterTopUp.count + p.wallet.count} requests in two batches (account ${fmt(planValue(p.caFirst))} + ` +
       `${fmt(planValue(p.caAfterTopUp))} after its top-up of ${fmt(a.caTopUp)}, wallet ${fmt(planValue(p.wallet))} TRAC); ` +
-      `edge: a ${fmt(a.edgeValue)} TRAC period of the edge buyer key, revoked, assigned again, its top-up refused AssignmentExpired`,
+      `edge: a ${fmt(a.edgeValue)} TRAC subscription of the edge buyer, revoked, added again, its top-up refused GrantExpired`,
   );
   say(`  claim     from the start of E+1, ${iso(await ts(E + 1n))}: E's numbers against the chain's events, then claimFor against the epochs' nets`);
   say(`  withdraw  optional: in the middle of an epoch after claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 2n))})`);
@@ -228,8 +228,8 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
   const { ownerAddr, walletSession } = ctx.roles;
   if (pctx && ownerAddr && walletSession) {
     const E = s?.E ?? (activation > current ? activation : current);
-    const clash = await walletPeriodClash(pctx, { ownerAddr, walletSession }, a.walletValue, E);
-    ctx.report.check(`the owner's wallet period of epoch ${E}, if it has one, is this run's`, !clash, clash);
+    const clash = await walletSubscriptionClash(pctx, { ownerAddr, walletSession }, a.walletValue, E);
+    ctx.report.check(`the owner's wallet subscription of epoch ${E}, if it has one, is this run's`, !clash, clash);
   }
   if (!s && isDeployed) {
     const left = (await epochStart(ctx, current + 1n)) - (await now(ctx));

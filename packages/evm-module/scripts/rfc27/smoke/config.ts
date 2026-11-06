@@ -6,7 +6,7 @@ import * as path from 'path';
 import { ethers } from 'ethers';
 
 import type { BaseContracts } from '../contracts';
-import { UNIT_ASK } from '../plans';
+import { UNIT_PRICE } from '../plans';
 import { fmt } from '../report';
 import { Amounts, PHASES, PhaseName, SmokeState } from './state';
 
@@ -22,7 +22,7 @@ export const MID_EPOCH_MARGIN = 600n;
 /**
  * The gas each role's transactions are planned at, for the balance check, and
  * how many it sends: about twice what the fork run measured (owner 3.27M over 16
- * transactions, buyer key 0.75M over 2, edge buyer key 0.47M, seller 0.62M over
+ * transactions, buyer 0.75M over 2, edge buyer 0.47M, seller 0.62M over
  * 2). The gas limits come from each transaction's own estimate.
  */
 export const PLANNED_GAS = {
@@ -83,7 +83,8 @@ export function readEnv(): SmokeEnv {
   const phase = PHASES.find((p) => p === (process.env.PHASE ?? 'check'));
   if (!phase) throw new Error(`set PHASE to one of ${PHASES.join(', ')}`);
   const run = process.env.RFC27_SMOKE_RUN ?? 'smoke';
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(run)) throw new Error('RFC27_SMOKE_RUN must be 1 to 64 letters, digits, dots, dashes or underscores');
+  // No dots: a run's state and its reports share a directory, and `<run>.<phase>.json` must never name another run's state.
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(run)) throw new Error('RFC27_SMOKE_RUN must be 1 to 64 letters, digits, dashes or underscores');
   return {
     phase,
     send: process.env.SEND === '1',
@@ -111,7 +112,7 @@ export function amountFromEnv(name: string, def: string): bigint {
  * The amounts of a new run, from the environment and the lock on chain. A
  * running one reads its own from the state. There is no contract minimum for
  * a commitment: the floor is the lock times what the run spends in the first
- * billing window, the account period, its top-up and the edge period, at no
+ * billing window, the account subscription, its top-up and the edge subscription, at no
  * discount. The default rounds the spends up to whole TRAC and adds 1 TRAC a
  * window, so the first window keeps room beyond the run's own spends.
  */
@@ -128,7 +129,7 @@ export async function plannedAmounts(c: BaseContracts, state: SmokeState | undef
     ['RFC27_SMOKE_EDGE_VALUE', edgeValue, 1n],
     ['RFC27_SMOKE_WALLET_VALUE', walletValue, 4n],
   ] as const) {
-    if (v < units * UNIT_ASK) throw new Error(`${n} must be at least ${fmt(units * UNIT_ASK)} TRAC: each request is at least one unit of ${fmt(UNIT_ASK)} TRAC`);
+    if (v < units * UNIT_PRICE) throw new Error(`${n} must be at least ${fmt(units * UNIT_PRICE)} TRAC: each request is at least one unit of ${fmt(UNIT_PRICE)} TRAC`);
   }
   const spends = caValue + caTopUp + edgeValue;
   const committedFloor = lock * spends;
@@ -141,7 +142,7 @@ export async function plannedAmounts(c: BaseContracts, state: SmokeState | undef
     );
   }
   if (committed >= 1n << 96n) throw new Error('RFC27_SMOKE_COMMITTED does not fit a uint96');
-  // Each derived buyer key's ETH: 0.0002, or what its gas needs at the current fee if that is more.
+  // Each derived buyer's ETH: 0.0002, or what its gas needs at the current fee if that is more.
   const need = gasCost(PLANNED_GAS.buyer.gas > PLANNED_GAS.edgeBuyer.gas ? PLANNED_GAS.buyer.gas : PLANNED_GAS.edgeBuyer.gas, 2n, maxFee);
   const step = 10n ** 14n;
   const keyEthDefault = need > 2n * step ? ((need + step - 1n) / step) * step : 2n * step;
@@ -159,20 +160,20 @@ export async function plannedAmounts(c: BaseContracts, state: SmokeState | undef
   };
 }
 
-/** Units of UNIT_ASK each request carries, and how many requests: per batch group. */
+/** Units of UNIT_PRICE each request carries, and how many requests: per batch group. */
 export type RequestPlan = { caFirst: { count: number; units: bigint }; caAfterTopUp: { count: number; units: bigint }; wallet: { count: number; units: bigint } };
 
 /**
  * The requests the serve phase signs: two account requests up to the
- * period's value before the top-up, one more after it, and two wallet
- * requests of a quarter of the wallet period each.
+ * subscription's value before the top-up, one more after it, and two wallet
+ * requests of a quarter of the wallet subscription each.
  */
 export function requestPlan(a: Amounts): RequestPlan {
   return {
-    caFirst: { count: 2, units: a.caValue / 2n / UNIT_ASK },
-    caAfterTopUp: { count: 1, units: a.caTopUp / 2n / UNIT_ASK },
-    wallet: { count: 2, units: a.walletValue / 4n / UNIT_ASK },
+    caFirst: { count: 2, units: a.caValue / 2n / UNIT_PRICE },
+    caAfterTopUp: { count: 1, units: a.caTopUp / 2n / UNIT_PRICE },
+    wallet: { count: 2, units: a.walletValue / 4n / UNIT_PRICE },
   };
 }
 
-export const planValue = (g: { count: number; units: bigint }): bigint => BigInt(g.count) * g.units * UNIT_ASK;
+export const planValue = (g: { count: number; units: bigint }): bigint => BigInt(g.count) * g.units * UNIT_PRICE;

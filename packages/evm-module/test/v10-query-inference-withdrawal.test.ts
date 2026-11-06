@@ -1,6 +1,6 @@
 // A withdrawal mid-epoch through StakingV10 10.1.0 claims, with the
 // query/inference pool (OT-RFC-27), end to end on the development deploy of
-// the staking, account and plan-period stacks (StakingV10 and StakingKPI
+// the staking, account and subscription stacks (StakingV10 and StakingKPI
 // wired to the settlement, the activation epoch at the deployment epoch,
 // λ 0.5): once the epoch in progress has ended, the withdrawn position's
 // share of both pools, its carries of that epoch included, is claimed for
@@ -130,7 +130,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       const start = await slack();
 
       // Epoch e, in which the node proves, which lets its receipts land, takes
-      // a period's money and a publishing pool and loses its own position, then
+      // a subscription's money and a publishing pool and loses its own position, then
       // proves again.
       const e = a + 1n;
       await h.toEpoch(e);

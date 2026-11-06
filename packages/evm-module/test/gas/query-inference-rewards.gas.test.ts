@@ -1,8 +1,8 @@
 // Gas of a StakingV10 claim per claimed epoch, with and without the
 // query/inference pool (OT-RFC-27), on the development deploy of the staking,
-// account and plan-period stacks. Every case claims the same position over 1
+// account and subscription stacks. Every case claims the same position over 1
 // and over 4 epochs; in each epoch the node proves and takes the publishing
-// pool, and, with the pool active, a wallet-funded period brings the epoch its
+// pool, and, with the pool active, a wallet-funded subscription brings the epoch its
 // money. The claim comes as soon as the last epoch has ended, and it is the
 // first on the node in each epoch, so it splits off the operator fee there.
 //
@@ -24,7 +24,7 @@ import { BaseContract } from 'ethers';
 import hre from 'hardhat';
 
 import {
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   QueryInferenceSettlement,
   QueryInferenceStorage,
   ServiceSubscriptionsWallet,
@@ -35,13 +35,13 @@ import {
   CLASS_INFERENCE,
   Domain,
   TRAC,
-  bucket,
+  budget,
   subscriptionIdOf,
   walletRequestOf,
 } from '../helpers/conviction-service';
 import { SCALE18, hardhatWallet, queryInferenceDomain, signedItems } from '../helpers/query-inference';
 
-const UNIT_ASK = 10n ** 15n;
+const UNIT_PRICE = 10n ** 15n;
 const TX_GAS_LIMIT = 15_000_000n; // hardhat.node.config.ts, networks.hardhat.gas
 
 // Instrumented coverage runs say nothing about deployed gas.
@@ -61,7 +61,7 @@ async function deployFixture() {
     ...stack,
     EpochStorage,
     QIS: await at<QueryInferenceStorage>('QueryInferenceStorage'),
-    CSS: await at<ConvictionServiceStorage>('ConvictionServiceStorage'),
+    SSS: await at<ServiceSubscriptionsStorage>('ServiceSubscriptionsStorage'),
     SSW: await at<ServiceSubscriptionsWallet>('ServiceSubscriptionsWallet'),
     QS: await at<QueryInferenceSettlement>('QueryInferenceSettlement'),
   };
@@ -157,7 +157,7 @@ describe('@gas StakingV10 claims with and without the query/inference pool', fun
         await f.Token.mint(buyer.address, 40n * TRAC);
         await f.Token.connect(buyer).approve(await f.SSW.getAddress(), 40n * TRAC);
         await f.SSW.connect(buyer).fundFromWallet(
-          walletRequestOf(e, { buckets: [bucket(0, CLASS_INFERENCE, 40n * TRAC, UNIT_ASK)], sessionKey: key.address }),
+          walletRequestOf(e, { budgets: [budget(0, CLASS_INFERENCE, 40n * TRAC, UNIT_PRICE)], sessionKey: key.address }),
         );
       }
       if (mode === 'pool') {
@@ -166,14 +166,14 @@ describe('@gas StakingV10 claims with and without the query/inference pool', fun
           domain,
           wallet: key,
           subscriptionId: p,
-          bucketId: (await f.CSS.getBucket(p, 0n)).bucketId,
+          serviceId: (await f.SSS.getBudget(p, 0n)).serviceId,
           seller: node,
           count: 1,
-          units: (8n * TRAC) / UNIT_ASK,
-          ask: UNIT_ASK,
+          units: (8n * TRAC) / UNIT_PRICE,
+          price: UNIT_PRICE,
           issuedAt: await latest(),
         });
-        await f.QS.connect(operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items }]);
+        await f.QS.connect(operational).submitReceiptBatch([{ subscriptionId: p, budgetIndex: 0n, minCounted: 0n, items }]);
       }
     }
     await toEpoch(last + 1n);

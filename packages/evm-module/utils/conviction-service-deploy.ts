@@ -52,7 +52,7 @@ export async function publishingConvictionAfterRun(
  * has deployed nothing, and the corrected retry of every step registers all it
  * deploys.
  *   - `PublishingConviction` 10.1.x has `coverServiceCost` but books every
- *     account's whole budget to the staker pool up front, so an account funding
+ *     account's whole allowance to the staker pool up front, so an account funding
  *     through it would be counted in both pools. A build older than 10.1.0 has
  *     no `coverServiceCost`, so account fundings revert until 10.2.0 is
  *     registered, and the run goes on (052d notes it).
@@ -73,7 +73,7 @@ export async function requireServiceSpendingBuilds(hre: HardhatRuntimeEnvironmen
   if (publishing && versionAtLeast(publishing.version, [10, 1, 0]) && !versionAtLeast(publishing.version, [10, 2, 0])) {
     throw new Error(
       `ServiceSubscriptions needs PublishingConviction 10.2.0 or later on ${hre.network.name}, but this run ` +
-        `would leave ${publishing.version} at ${publishing.address}, which books every account's budget to the staker ` +
+        `would leave ${publishing.version} at ${publishing.address}, which books every account's allowance to the staker ` +
         'pool up front, so an account funding would be counted twice. Set ' +
         `contracts.PublishingConviction.deployed to false in deployments/${hre.network.name}_contracts.json, ` +
         'so this run redeploys it, and run the deploy again.',

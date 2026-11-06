@@ -1,23 +1,23 @@
 // The smoke test's marketplace operations, as transaction steps, built with the
 // shapes, digests and request builders of test/helpers: a
-// position, a Conviction Account opted in, an assignment with the buyer key's
-// EIP-712 consent, plan periods funded from an account or a wallet, top-ups,
+// position, a Conviction Account opted in, a grant with the buyer's
+// EIP-712 consent, subscriptions funded from an account or a wallet, top-ups,
 // revocations, and receipt batches of requests signed by session keys.
 
 import type { HDNodeWallet, Signer } from 'ethers';
 
 import type { Domain, Terms } from '../../../test/helpers/conviction-service';
-import { SERVICE_ASSIGNMENT_TYPES, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
+import { BUYER_GRANT_TYPES, domainOf, requestOf, walletRequestOf } from '../../../test/helpers/conviction-service';
 import type { ReceiptGroup } from '../../../test/helpers/query-inference';
 import { queryInferenceDomain, signedItems } from '../../../test/helpers/query-inference';
 
 import type { Contracts } from '../contracts';
-import { BUCKET0, UNIT_ASK, inference } from '../plans';
+import { SERVICE0, UNIT_PRICE, inference } from '../plans';
 import { fmt } from '../report';
 import { SmokeTx, Step, StepResult } from './tx';
 
 /** Steps that need an earlier step, and what makes them done already on chain. */
-export type StepOpts = Pick<Step, 'needs' | 'done' | 'expected'>;
+export type StepOpts = Pick<Step, 'needs' | 'done' | 'expected' | 'stakeFactor18'>;
 
 export class Marketplace {
   private qiDomain?: Domain;
@@ -84,18 +84,18 @@ export class Marketplace {
   }
 
   /**
-   * The owner assigns `assignee` over the account, consenting by sending the
-   * transaction; the assignee consents by an EIP-712 signature over the same
+   * The owner grants `buyer` over the account, consenting by sending the
+   * transaction; the buyer consents by an EIP-712 signature over the same
    * terms, at the account's current nonce. Without an account yet (a dry run
    * of a new run), the step is only listed.
    */
-  async assign(
+  async addBuyer(
     key: string,
     label: string,
     owner: Signer,
     account: { id: bigint; expiresAt: bigint } | undefined,
-    assignee: HDNodeWallet,
-    maxCostPerPeriod: bigint,
+    buyer: HDNodeWallet,
+    maxCostPerEpoch: bigint,
     opts: StepOpts = {},
   ): Promise<StepResult & { terms?: Terms }> {
     let data = '0x';
@@ -103,33 +103,33 @@ export class Marketplace {
     if (account) {
       terms = {
         accountId: account.id,
-        assignee: assignee.address,
-        maxCostPerPeriod,
+        buyer: buyer.address,
+        maxCostPerEpoch,
         expiresAt: account.expiresAt,
-        nonce: await this.c.cssvc.assignmentNonce(account.id),
+        nonce: await this.c.sss.grantNonce(account.id),
       };
       this.ssDomain ??= await domainOf(this.c.ss);
-      const consent = await assignee.signTypedData(this.ssDomain, SERVICE_ASSIGNMENT_TYPES, terms);
-      data = this.c.ss.interface.encodeFunctionData('assign', [terms, '0x', consent]);
+      const consent = await buyer.signTypedData(this.ssDomain, BUYER_GRANT_TYPES, terms);
+      data = this.c.ss.interface.encodeFunctionData('addBuyer', [terms, '0x', consent]);
     }
     const r = await this.tx.step({ key, label, role: 'owner', signer: owner, to: await this.c.ss.getAddress(), data, ...opts });
     return { ...r, terms };
   }
 
-  async revoke(key: string, owner: Signer, accountId: bigint, assignee: string, what: string, opts: StepOpts = {}): Promise<StepResult> {
+  async removeBuyer(key: string, owner: Signer, accountId: bigint, buyer: string, what: string, opts: StepOpts = {}): Promise<StepResult> {
     return this.tx.step({
       key,
       label: `owner: revoke ${what}`,
       role: 'owner',
       signer: owner,
       to: await this.c.ss.getAddress(),
-      data: this.c.ss.interface.encodeFunctionData('revoke', [accountId, assignee]),
+      data: this.c.ss.interface.encodeFunctionData('removeBuyer', [accountId, buyer]),
       ...opts,
     });
   }
 
-  /** A plan period of `epoch` funded from the account by the assigned buyer key: no TRAC moves. */
-  async fundFromConviction(
+  /** A subscription of `epoch` funded from the account by the added buyer: no TRAC moves. */
+  async fundFromAccount(
     key: string,
     who: string,
     buyer: Signer,
@@ -140,19 +140,19 @@ export class Marketplace {
     planDigest: string,
     opts: StepOpts = {},
   ): Promise<StepResult> {
-    const request = requestOf(accountId ?? 0n, epoch, { sessionKey, planDigest, buckets: inference(value) });
+    const request = requestOf(accountId ?? 0n, epoch, { sessionKey, planDigest, budgets: inference(value) });
     return this.tx.step({
       key,
-      label: `${who}: fundFromConviction(account ${accountId ?? '<new account>'}, epoch ${epoch}, ${fmt(value)} TRAC)`,
+      label: `${who}: fundFromAccount(account ${accountId ?? '<new account>'}, epoch ${epoch}, ${fmt(value)} TRAC)`,
       role: who,
       signer: buyer,
       to: await this.c.ss.getAddress(),
-      data: accountId === undefined ? '0x' : this.c.ss.interface.encodeFunctionData('fundFromConviction', [request]),
+      data: accountId === undefined ? '0x' : this.c.ss.interface.encodeFunctionData('fundFromAccount', [request]),
       ...opts,
     });
   }
 
-  /** A plan period of `epoch` paid from the buyer's wallet into the vault: the approval, then the funding. */
+  /** A subscription of `epoch` paid from the buyer's wallet into the vault: the approval, then the funding. */
   async fundFromWallet(
     prefix: string,
     who: string,
@@ -166,26 +166,26 @@ export class Marketplace {
     const ssw = await this.c.ssw.getAddress();
     await this.approve(`${prefix}.approve-wallet`, who, buyer, ssw, value, 'ServiceSubscriptionsWallet', { done: opts.done });
     return this.tx.step({
-      key: `${prefix}.fund-wallet-period`,
+      key: `${prefix}.fund-wallet-subscription`,
       label: `${who}: fundFromWallet(epoch ${epoch}, ${fmt(value)} TRAC)`,
       role: who,
       signer: buyer,
       to: ssw,
-      data: this.c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequestOf(epoch, { sessionKey, planDigest, buckets: inference(value) })]),
+      data: this.c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequestOf(epoch, { sessionKey, planDigest, budgets: inference(value) })]),
       needs: [`${prefix}.approve-wallet`],
       ...opts,
     });
   }
 
-  /** The topUpFromConviction call adding `value` to bucket 0 of `subscriptionId`, as calldata. */
+  /** The topUpFromAccount call adding `value` to budget 0 of `subscriptionId`, as calldata. */
   topUpData(subscriptionId: string, value: bigint, planDigest: string): string {
-    return this.c.ss.interface.encodeFunctionData('topUpFromConviction', [subscriptionId, inference(value), planDigest]);
+    return this.c.ss.interface.encodeFunctionData('topUpFromAccount', [subscriptionId, inference(value), planDigest]);
   }
 
   async topUp(key: string, who: string, buyer: Signer, subscriptionId: string, value: bigint, planDigest: string, opts: StepOpts = {}): Promise<StepResult> {
     return this.tx.step({
       key,
-      label: `${who}: topUpFromConviction(the account period, +${fmt(value)} TRAC)`,
+      label: `${who}: topUpFromAccount(the account subscription, +${fmt(value)} TRAC)`,
       role: who,
       signer: buyer,
       to: await this.c.ss.getAddress(),
@@ -195,8 +195,8 @@ export class Marketplace {
   }
 
   /**
-   * `count` requests of bucket 0 of `subscriptionId`, `units` units each at
-   * UNIT_ASK, signed by the period's session key, as the receipts of one
+   * `count` requests of budget 0 of `subscriptionId`, `units` units each at
+   * UNIT_PRICE, signed by the subscription's session key, as the receipts of one
    * group of a batch, completed when issued. The group lands whole or not at
    * all: a seller keeps its receipts rather than spend their nonces for less.
    */
@@ -206,15 +206,15 @@ export class Marketplace {
       domain: this.qiDomain,
       wallet: session,
       subscriptionId,
-      bucketId: BUCKET0,
+      serviceId: SERVICE0,
       seller,
       firstNonce,
       count,
       units,
-      ask: UNIT_ASK,
+      price: UNIT_PRICE,
       issuedAt,
     });
-    return { subscriptionId, bucketIndex: 0n, minCounted: BigInt(count) * units * UNIT_ASK, items };
+    return { subscriptionId, budgetIndex: 0n, minCounted: BigInt(count) * units * UNIT_PRICE, items };
   }
 
   /** The submitReceiptBatch call of `groups`, as calldata. */

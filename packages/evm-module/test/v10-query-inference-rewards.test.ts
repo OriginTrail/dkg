@@ -1,6 +1,6 @@
 // The query/inference pool (OT-RFC-27) paid through StakingV10 10.1.0 claims,
 // end to end on the development deploy of the staking, account and
-// plan-period stacks (StakingV10 and StakingKPI wired to the settlement, the
+// subscription stacks (StakingV10 and StakingKPI wired to the settlement, the
 // activation epoch at the deployment epoch, λ 0.5):
 //   - a node's gross reward for an epoch is its score share of the
 //     publishing pool plus its gross from the query/inference pool; the
@@ -24,9 +24,9 @@
 //   - with the settlement out of the Hub, the emergency switch, a batch reverts
 //     and a claim pays without the pool, for good;
 //   - a Conviction Account's money (PublishingConviction 10.2.0,
-//     ServiceSubscriptions 1.2.0) through claims over its whole lock: a plan
-//     period's cost in its epoch beside a wallet period, a period's cost alone
-//     rolled over, a publishing draw and the closed windows' unused budget in the
+//     ServiceSubscriptions 1.2.0) through claims over its whole lock: a 
+//     subscription's cost in its epoch beside a wallet subscription, a subscription's cost alone
+//     rolled over, a publishing spend and the closed windows' unused allowance in the
 //     publishing pool; the commitment is booked exactly once, and the vault
 //     keeps only the floors once everything is withdrawn.
 //
@@ -47,7 +47,7 @@ import {
   Domain,
   TRAC,
   Terms,
-  bucket,
+  budget,
   costOf,
   requestOf,
   signTerms,
@@ -58,7 +58,7 @@ import {
   RewardsHelpers,
   Seller,
   TIER_12,
-  UNIT_ASK,
+  UNIT_PRICE,
   deployRewardsStack,
   rewardsHelpers,
 } from './helpers/query-inference-rewards';
@@ -361,9 +361,9 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     await h.scoreEpoch(a, n1, 200n * TRAC);
     await h.scoreEpoch(a, n2, 100n * TRAC);
 
-    // Wallet payments over three periods move into the vault, and nowhere else.
+    // Wallet payments over three subscriptions move into the vault, and nowhere else.
     let funded = 0n;
-    const periods: string[][] = [[], []];
+    const subscriptions: string[][] = [[], []];
     for (const [i, [epoch, value]] of ([
       [a, 37n * TRAC],
       [a, 13n * TRAC],
@@ -371,21 +371,21 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     ] as const).entries()) {
       if (epoch > (await h.epochNow())) await h.toEpoch(epoch);
       const before = await h.balanceOf(await h.vault());
-      periods[Number(epoch - a)].push(await h.walletFund(f.accounts[20 + i], epoch, value));
+      subscriptions[Number(epoch - a)].push(await h.walletFund(f.accounts[20 + i], epoch, value));
       expect((await h.balanceOf(await h.vault())) - before).to.equal(value);
       funded += value;
       if (epoch === a) {
-        await h.claimReceipts(n1, periods[0][periods[0].length - 1], 6n * TRAC);
-        await h.claimReceipts(n2, periods[0][periods[0].length - 1], 4n * TRAC);
+        await h.claimReceipts(n1, subscriptions[0][subscriptions[0].length - 1], 6n * TRAC);
+        await h.claimReceipts(n2, subscriptions[0][subscriptions[0].length - 1], 4n * TRAC);
       }
     }
     for (const c of bystanders) expect(await h.balanceOf(c), await c.getAddress()).to.equal(0n);
     // The wallet money is not owed to anyone yet: it is the vault's slack.
     expect((await slack()) - start).to.equal(funded);
 
-    // a's periods counted in a; n1 proves in a + 1, and a + 1's period counts there.
+    // a's subscriptions counted in a; n1 proves in a + 1, and a + 1's subscription counts there.
     await h.scoreEpoch(a + 1n, n1, 150n * TRAC);
-    await h.claimReceipts(n1, periods[1][0], 9n * TRAC);
+    await h.claimReceipts(n1, subscriptions[1][0], 9n * TRAC);
     await h.toEpoch(a + 2n);
 
     // Claims credit TRAC without moving any: what they credit comes out of the slack.
@@ -723,14 +723,14 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       domain,
       wallet: key,
       subscriptionId: p,
-      bucketId: (await f.CSS.getBucket(p, 0n)).bucketId,
+      serviceId: (await f.SSS.getBudget(p, 0n)).serviceId,
       seller: n1.identityId,
       count: 1,
-      units: (30n * TRAC) / UNIT_ASK,
-      ask: UNIT_ASK,
+      units: (30n * TRAC) / UNIT_PRICE,
+      price: UNIT_PRICE,
       issuedAt: await h.latest(),
     });
-    await fresh.connect(n1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items }]);
+    await fresh.connect(n1.operational).submitReceiptBatch([{ subscriptionId: p, budgetIndex: 0n, minCounted: 0n, items }]);
     await h.publishingPool(e, 1_000n * TRAC);
     await h.toEpoch(e + 1n);
 
@@ -823,16 +823,16 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     await f.SS.connect(owner).setServiceSpending(accountId, true);
     const terms: Terms = {
       accountId,
-      assignee: buyer.address,
-      maxCostPerPeriod: 1_000n * TRAC,
+      buyer: buyer.address,
+      maxCostPerEpoch: 1_000n * TRAC,
       expiresAt: BigInt(await time.latest()) + 400n * DAY,
-      nonce: await f.CSS.assignmentNonce(accountId),
+      nonce: await f.SSS.grantNonce(accountId),
     };
-    await f.SS.connect(owner).assign(terms, '0x', await signTerms(buyer, f.SS, terms));
-    const accountPeriod = async (epoch: bigint, value: bigint) => {
+    await f.SS.connect(owner).addBuyer(terms, '0x', await signTerms(buyer, f.SS, terms));
+    const accountSubscription = async (epoch: bigint, value: bigint) => {
       await send(
-        f.SS.connect(buyer).fundFromConviction(
-          requestOf(accountId, epoch, { buckets: [bucket(0, CLASS_INFERENCE, value, UNIT_ASK)], sessionKey: key.address }),
+        f.SS.connect(buyer).fundFromAccount(
+          requestOf(accountId, epoch, { budgets: [budget(0, CLASS_INFERENCE, value, UNIT_PRICE)], sessionKey: key.address }),
         ),
       );
       return subscriptionIdOf(buyer.address, epoch);
@@ -843,28 +843,28 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       if ((await h.latest()) < ts) await time.increaseTo(ts);
     };
 
-    // Epoch a, the account's first window: a plan period from the account, a
-    // wallet period beside it, and a publish over 2 epochs. The period's cost
-    // is booked in a and moves no TRAC; the publish books its draw into the
+    // Epoch a, the account's first window: a subscription from the account, a
+    // wallet subscription beside it, and a publish over 2 epochs. The subscription's cost
+    // is booked in a and moves no TRAC; the publish books its spend into the
     // publishing pool. Both nodes prove, and their receipts land.
     const vaultNow = await h.balanceOf(await h.vault());
-    const pA = await accountPeriod(a, 20n * TRAC);
+    const pA = await accountSubscription(a, 20n * TRAC);
     const costA = costOf(20n * TRAC, bps);
-    expect(await f.QIS.convictionFunding(a)).to.equal(costA);
+    expect(await f.QIS.accountFunding(a)).to.equal(costA);
     expect(await h.balanceOf(await h.vault())).to.equal(vaultNow);
     expect(booked(accountTxs.slice(-1))).to.equal(0n);
     const pW = await h.walletFund(walletBuyer, a, 5n * TRAC);
     const publishCost = costOf(900n * TRAC, bps);
     const published = await send(f.NFT.connect(kal).coverPublishingCost(agent.address, 900n * TRAC, a, 2n));
     expect(booked([published])).to.equal(publishCost);
-    expect(await f.QIS.convictionFunding(a)).to.equal(costA);
+    expect(await f.QIS.accountFunding(a)).to.equal(costA);
     await scoreAll(a);
     await h.claimReceipts(n1, pA, 6n * TRAC);
     await h.claimReceipts(n2, pA, 3n * TRAC);
     await h.claimReceipts(n2, pW, 5n * TRAC);
 
     // Epoch a + 1, in which window 0 closes: what it did not spend reaches the
-    // publishing pool. The account funds a period of a + 1 that sells nothing,
+    // publishing pool. The account funds a subscription of a + 1 that sells nothing,
     // so its cost rolls over alone.
     await h.toEpoch(a + 1n);
     await scoreAll(a + 1n);
@@ -872,13 +872,13 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const window0 = await settle();
     expect(booked([window0])).to.equal(B - costA - publishCost);
     expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(costA + publishCost);
-    const pB = await accountPeriod(a + 1n, 8n * TRAC);
+    const pB = await accountSubscription(a + 1n, 8n * TRAC);
     const costB = costOf(8n * TRAC, bps);
     expect(pB).to.equal(subscriptionIdOf(buyer.address, a + 1n));
-    expect(await f.QIS.convictionFunding(a + 1n)).to.equal(costB);
+    expect(await f.QIS.accountFunding(a + 1n)).to.equal(costB);
 
-    // Epoch a + 2: window 1 closes with only the period's cost spent; a wallet
-    // period of a + 2 sells, so a + 2 pays the rolled-over account cost too.
+    // Epoch a + 2: window 1 closes with only the subscription's cost spent; a wallet
+    // subscription of a + 2 sells, so a + 2 pays the rolled-over account cost too.
     await h.toEpoch(a + 2n);
     await scoreAll(a + 2n);
     const pW2 = await h.walletFund(walletBuyer, a + 2n, 4n * TRAC);
@@ -896,9 +896,9 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     expect((await f.PCS.getAccount(accountId)).fullySwept).to.equal(true);
 
     // The commitment is booked exactly once: as query/inference cost in the
-    // period's epoch, into the publishing pool, or to the treasury (nothing, with
+    // subscription's epoch, into the publishing pool, or to the treasury (nothing, with
     // none wired).
-    const costs = (await f.QIS.convictionFunding(a)) + (await f.QIS.convictionFunding(a + 1n));
+    const costs = (await f.QIS.accountFunding(a)) + (await f.QIS.accountFunding(a + 1n));
     expect(costs).to.equal(costA + costB);
     expect(booked(accountTxs, TREASURY_SHARD_ID)).to.equal(0n);
     expect(booked(accountTxs) + costs).to.equal(committed);
@@ -915,7 +915,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
 
     // The KPI reads what the claims then pay: the account cost beside a
     // wallet's in a, the rolled-over account cost in a + 2, and the windows'
-    // budget in the publishing pool after the lock.
+    // allowance in the publishing pool after the lock.
     const kpiCases: Array<[Seller, bigint]> = [
       [n1, a],
       [n2, a],

@@ -26,6 +26,7 @@ export type StepRecord = {
   block?: number;
   gasUsed?: bigint;
   expected?: WithdrawalExpected;
+  stakeFactor18?: bigint;
 };
 
 /** Where a run keeps the transactions it sent, by step key. */
@@ -44,6 +45,8 @@ export type Step = Tx & {
   done?: string;
   /** What is expected of it, worked out before it is sent and journaled with it, for what it destroys. */
   expected?: WithdrawalExpected;
+  /** The stake factor a batch should capture, worked out from the stake before it is sent, and journaled with it. */
+  stakeFactor18?: bigint;
   /** The contract keeps it from doing its work twice: an attempt that reverted is made again, and does not stop the run. */
   retriesReverted?: boolean;
 };
@@ -60,6 +63,7 @@ export type StepResult = {
   estimate?: bigint;
   gasLimit?: bigint;
   expected?: WithdrawalExpected;
+  stakeFactor18?: bigint;
 };
 
 /**
@@ -126,7 +130,7 @@ export class SmokeTx extends TxRunner {
         }
         this.report.note(`=     ${s.label}: done earlier, tx ${earlier.hash}, gas ${receipt.gasUsed}`);
         this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'done earlier', hash: earlier.hash, gasUsed: receipt.gasUsed });
-        return { sent: true, skipped: false, replayed: true, receipt, expected: earlier.expected };
+        return { sent: true, skipped: false, replayed: true, receipt, expected: earlier.expected, stakeFactor18: earlier.stakeFactor18 };
       }
       if (!s.retriesReverted) throw new Error(`${s.label}: transaction ${earlier.hash} of an earlier run reverted`);
       this.report.note(`=     ${s.label}: transaction ${earlier.hash} of an earlier run reverted: the step is made again`);
@@ -170,7 +174,7 @@ export class SmokeTx extends TxRunner {
       return { sent: false, skipped: false, estimate, gasLimit };
     }
     const hash = await this.broadcast(s, sized);
-    const sent: StepRecord = { status: 'sent', label: s.label, role: s.role, hash, estimate, gasLimit, expected: s.expected };
+    const sent: StepRecord = { status: 'sent', label: s.label, role: s.role, hash, estimate, gasLimit, expected: s.expected, stakeFactor18: s.stakeFactor18 };
     this.log.put(s.key, sent);
     let receipt: TransactionReceipt;
     try {
@@ -181,6 +185,6 @@ export class SmokeTx extends TxRunner {
     }
     this.log.put(s.key, { ...sent, status: 'mined', block: receipt.blockNumber, gasUsed: receipt.gasUsed });
     this.report.tx({ key: s.key, label: s.label, role: s.role, status: 'mined', hash, block: receipt.blockNumber, estimate, gasLimit, gasUsed: receipt.gasUsed });
-    return { sent: true, skipped: false, receipt, estimate, gasLimit, expected: s.expected };
+    return { sent: true, skipped: false, receipt, estimate, gasLimit, expected: s.expected, stakeFactor18: s.stakeFactor18 };
   }
 }

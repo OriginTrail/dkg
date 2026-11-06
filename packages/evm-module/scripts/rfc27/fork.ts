@@ -137,10 +137,10 @@ export class Fork {
     const css = await c.css.getAddress();
     await this.send('settleNodeTo', rs, css, c.css.interface.encodeFunctionData('settleNodeTo', [node, await chainNow(this.hre)]));
     const effective = await c.css.getNodeRunningEffectiveStake(node);
-    const periodStart = await c.rss.getActiveProofPeriodStartBlock();
+    const proofPeriodStart = await c.rss.getActiveProofPeriodStartBlock();
     const write = (fn: string, data: string) => this.send(fn, rs, rss, data);
     await write('incrementEpochNodeValidProofsCount', c.rss.interface.encodeFunctionData('incrementEpochNodeValidProofsCount', [e, node]));
-    await write('addToNodeEpochProofPeriodScore', c.rss.interface.encodeFunctionData('addToNodeEpochProofPeriodScore', [e, periodStart, node, score18]));
+    await write('addToNodeEpochProofPeriodScore', c.rss.interface.encodeFunctionData('addToNodeEpochProofPeriodScore', [e, proofPeriodStart, node, score18]));
     await write('addToNodeEpochScore', c.rss.interface.encodeFunctionData('addToNodeEpochScore', [e, node, score18]));
     await write('addToAllNodesEpochScore', c.rss.interface.encodeFunctionData('addToAllNodesEpochScore', [e, score18]));
     const last = await c.rss.getEpochLastScorePerStake(node, e);

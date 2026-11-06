@@ -9,7 +9,7 @@
 // write goes to the local anvil; the upstream RPC is only ever read, by anvil.
 // The procedure it rehearses is scripts/RFC27_TESTNET_DEPLOY_RUNBOOK.md.
 //
-// The stack: ConvictionServiceStorage (052c), ServiceSubscriptions and
+// The stack: ServiceSubscriptionsStorage (052c), ServiceSubscriptions and
 // ServiceSubscriptionsWallet (052d), QueryInferenceStorage (052e),
 // QueryInferenceSettlement (052f), StakingV10Ledger (054a) and
 // ConvictionWithdrawalStorage (054b) are new; PublishingConviction moves to
@@ -82,7 +82,7 @@
 //   # 6. existing accounts and positions after the upgrade, with every
 //   #    position's first-claim gas and the longest history's withdrawal gas;
 //   # 7. one full cycle: a batch refused before its seller proves in the epoch;
-//   #    a bucket's funding overrun, with the first batch landed counting whole
+//   #    a budget's funding overrun, with the first batch landed counting whole
 //   #    and a later one what is left; a minimum that refuses less, and a top-up
 //   #    that lifts it; a withdrawal in the middle of an epoch, its payout against
 //   #    the views, and its claimWithdrawnEpoch; the claims of the next epoch, with
@@ -111,7 +111,7 @@
 // support of scripts/rfc27/ that the smoke test shares: the contracts through
 // the Hub, the chain guard, the fork-only stand-ins, the report, and the
 // transaction runner. The shapes, digests and builders of requests, receipts
-// and periods, and the emission model, are test/helpers'.
+// and subscriptions, and the emission model, are test/helpers'.
 //
 // Fork-only shortcuts, each named where it is taken:
 //   - the Hub owner, the KnowledgeAssetsLifecycle contract, RandomSampling,

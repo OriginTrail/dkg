@@ -91,7 +91,7 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
   // own guard refuses while either reader is missing.
   const qisNew = registered('QueryInferenceStorage');
   const qsNew = registered('QueryInferenceSettlement');
-  const cssvcNew = registered('ConvictionServiceStorage');
+  const cssvcNew = registered('ServiceSubscriptionsStorage');
   const qisIface = (await ctx.hre.ethers.getContractFactory('QueryInferenceStorage')).interface;
   const qsIface = (await ctx.hre.ethers.getContractFactory('QueryInferenceSettlement')).interface;
   const forward = (to: string, data: string) => h.interface.encodeFunctionData('forwardCall', [to, data]);
@@ -104,7 +104,7 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
   await ctx.fork.inSnapshot(async () => {
     await ctx.fork.send('Hub.setContractAddress(QueryInferenceStorage)', owner, HUB, register('QueryInferenceStorage', qisNew));
     guards.storageOnly = await expectRevert(ctx, 'setActivationEpoch with only QueryInferenceStorage registered', ownerAddr, HUB, activateData(E0 + 1n));
-    await ctx.fork.send('Hub.setContractAddress(ConvictionServiceStorage)', owner, HUB, register('ConvictionServiceStorage', cssvcNew));
+    await ctx.fork.send('Hub.setContractAddress(ServiceSubscriptionsStorage)', owner, HUB, register('ServiceSubscriptionsStorage', cssvcNew));
     await ctx.fork.send('Hub.setContractAddress(QueryInferenceSettlement)', owner, HUB, register('QueryInferenceSettlement', qsNew));
     await ctx.fork.send('Hub.forwardCall(QueryInferenceSettlement, initialize)', owner, HUB, forward(qsNew, qsIface.encodeFunctionData('initialize')));
     guards.stakingV10Old = await expectRevert(ctx, `setActivationEpoch with the settlement registered and StakingV10 ${replaced.StakingV10}`, ownerAddr, HUB, activateData(E0 + 1n));
@@ -148,7 +148,7 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
   report.say('\nAfter the Hub transaction:');
   const versions: Record<string, string> = {};
   for (const n of [
-    'ConvictionServiceStorage',
+    'ServiceSubscriptionsStorage',
     'ServiceSubscriptions',
     'ServiceSubscriptionsWallet',
     'QueryInferenceStorage',
@@ -181,7 +181,7 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
     maxGroupsPerBatch: await qis.maxGroupsPerBatch(),
     lambdaBps: await qis.lambdaBps(),
     activationEpoch: await qis.activationEpoch(),
-    maxBucketsPerPeriod: await pool.cssvc.maxBucketsPerPeriod(),
+    maxBudgetsPerSubscription: await pool.sss.maxBudgetsPerSubscription(),
     epochLength: await c.chronos.epochLength(),
   };
   report.say(`  ${JSON.stringify(toJson(params))}`);
@@ -190,13 +190,13 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
     items: requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value,
     groups: requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value,
     lambda: requireParameter('QueryInferenceStorage', ['lambdaBps']).value,
-    buckets: requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value,
+    budgets: requireParameter('ServiceSubscriptionsStorage', ['maxBudgetsPerSubscription']).value,
   };
   check(
     `QueryInferenceStorage holds parameters.json "testnet" (${want.items}, ${want.groups}, λ ${want.lambda})`,
     params.maxItemsPerBatch === want.items && params.maxGroupsPerBatch === want.groups && params.lambdaBps === want.lambda,
   );
-  check(`ConvictionServiceStorage.maxBucketsPerPeriod is ${want.buckets}`, params.maxBucketsPerPeriod === want.buckets);
+  check(`ServiceSubscriptionsStorage.maxBudgetsPerSubscription is ${want.budgets}`, params.maxBudgetsPerSubscription === want.budgets);
   check(`activation epoch ${activation} = current + 1`, params.activationEpoch === activation);
   for (const n of ['PublishingConviction', 'StakingV10', 'StakingKPI']) {
     check(`the old ${n} ${replaced[n]} left the Hub's contract set`, !(await h['isContract(address)'](LIVE[n].evmAddress)));

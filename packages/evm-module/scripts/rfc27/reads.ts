@@ -147,11 +147,11 @@ export async function poolShareOf(c: Contracts, node: bigint, e: bigint, score: 
 export type EpochNumbers = {
   epoch: bigint;
   walletFunding: bigint;
-  convictionFunding: bigint;
-  /** What was funded for the epoch's own periods. */
+  accountFunding: bigint;
+  /** What was funded for the epoch's own subscriptions. */
   money: bigint;
-  sumR: bigint;
-  sumScore: bigint;
+  totalServed: bigint;
+  totalWeighted: bigint;
   /** The λ the epoch took when its first value counted; 0 until then. */
   lambdaBps: bigint;
   pool: bigint;
@@ -163,10 +163,10 @@ export async function epochNumbers(c: Contracts, e: bigint): Promise<EpochNumber
   return {
     epoch: e,
     walletFunding: funded.wallet,
-    convictionFunding: funded.conviction,
-    money: funded.wallet + funded.conviction,
-    sumR: totals.sumR,
-    sumScore: totals.sumScore,
+    accountFunding: funded.account,
+    money: funded.wallet + funded.account,
+    totalServed: totals.totalServed,
+    totalWeighted: totals.totalWeighted,
     lambdaBps: totals.lambdaBps,
     pool: await c.qs.epochPool(e),
   };
@@ -178,11 +178,11 @@ export async function epochNumbers(c: Contracts, e: bigint): Promise<EpochNumber
  * the next epoch with value, whose pool takes all of it. `waiting` is what is
  * still waiting after the last epoch.
  */
-export function poolsFromMoney(epochs: readonly { money: bigint; sumR: bigint }[]): { pools: bigint[]; waiting: bigint } {
+export function poolsFromMoney(epochs: readonly { money: bigint; totalServed: bigint }[]): { pools: bigint[]; waiting: bigint } {
   let waiting = 0n;
   const pools = epochs.map((x) => {
     waiting += x.money;
-    if (x.sumR === 0n) return 0n;
+    if (x.totalServed === 0n) return 0n;
     const pool = waiting;
     waiting = 0n;
     return pool;
@@ -191,9 +191,9 @@ export function poolsFromMoney(epochs: readonly { money: bigint; sumR: bigint }[
 }
 
 /** A node's gross from a pool, worked out without the contract: each term floored on its own, the second by R when no node has a score. */
-export function grossOf(pool: bigint, lambdaBps: bigint, node: { r: bigint; score: bigint }, totals: { sumR: bigint; sumScore: bigint }): bigint {
-  if (node.r === 0n) return 0n;
-  const first = (pool * (BPS - lambdaBps) * node.r) / (BPS * totals.sumR);
-  const second = totals.sumScore === 0n ? (pool * lambdaBps * node.r) / (BPS * totals.sumR) : (pool * lambdaBps * node.score) / (BPS * totals.sumScore);
+export function grossOf(pool: bigint, lambdaBps: bigint, node: { servedValue: bigint; weightedValue: bigint }, totals: { totalServed: bigint; totalWeighted: bigint }): bigint {
+  if (node.servedValue === 0n) return 0n;
+  const first = (pool * (BPS - lambdaBps) * node.servedValue) / (BPS * totals.totalServed);
+  const second = totals.totalWeighted === 0n ? (pool * lambdaBps * node.servedValue) / (BPS * totals.totalServed) : (pool * lambdaBps * node.weightedValue) / (BPS * totals.totalWeighted);
   return first + second;
 }

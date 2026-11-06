@@ -331,9 +331,9 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *         Removing it from the Hub is the emergency switch: with no
      *         settlement, a claim pays the rewards of 10.0.6, without the
      *         pool. It strands money, so:
-     *           1. Funding goes on. Wallet and Conviction Account periods are
-     *              still funded and topped up until `QueryInferenceStorage` is
-     *              paused too; `setPaused(true)` stops both.
+     *           1. Funding goes on. Wallet and Conviction Account subscriptions
+     *              are still funded and topped up until `QueryInferenceStorage`
+     *              is paused too; `setPaused(true)` stops both.
      *           2. While the settlement is out, any one claim fixes the split
      *              of each node-epoch it passes without the pool, and for good:
      *              the pool's share stays in the vault, and registering a
@@ -344,10 +344,10 @@ contract StakingV10 is INamed, IVersioned, ContractStatus, IInitializable {
      *              keep the outage short.
      *           3. Sellers stop. `submitReceiptBatch` reverts, because
      *              `QueryInferenceStorage` takes writes only from Hub
-     *              contracts. Work delivered but not yet batched loses its R if
-     *              its period's epoch ends during the outage. The money itself
-     *              is not lost: an epoch with no counted value rolls it
-     *              forward.
+     *              contracts. Work delivered but not yet batched loses its
+     *              served value if its subscription's epoch ends during the
+     *              outage. The money itself is not lost: an epoch with no
+     *              served value rolls it forward.
      *           4. Pull the switch only with `Hub.removeContractByName`. On
      *              the Hub's last entry, `removeContractByAddress` leaves the
      *              name's pointer dangling in
