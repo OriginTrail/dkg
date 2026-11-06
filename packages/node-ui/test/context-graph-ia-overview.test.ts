@@ -978,7 +978,7 @@ describe('Context Graph IA and Overview', () => {
       expect(cell!.querySelector('.v10-stat-strip-hint')).toBeNull();
     }
     expect(container.textContent).not.toContain('Topical partitions inside this Context Graph.');
-    expect(container.textContent).not.toContain('Canonical triple total across all layers.');
+    expect(container.textContent).not.toContain('Total facts stored across all memory layers.');
     expect(container.textContent).not.toContain('Canonical current-layer entity counts.');
     expect(container.querySelectorAll('.v10-stat-strip-hint')).toHaveLength(0);
 

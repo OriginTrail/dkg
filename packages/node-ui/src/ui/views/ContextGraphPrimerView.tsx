@@ -13,11 +13,15 @@ const primerSections = [
   },
   {
     title: 'Entities and Knowledge Assets',
-    body: 'Working Memory and Shared Working Memory contain entities. When published, an assertion/triple bundle is anchored as a Knowledge Asset in Verifiable Memory, giving included entities on-chain provenance.',
+    body: 'Working Memory and Shared Working Memory contain entities. When you publish those entities to Verifiable Memory, they become a Knowledge Asset, with an on-chain record of where they came from.',
+  },
+  {
+    title: 'Triples',
+    body: 'A triple is one fact: a subject, a relation and a value, such as “Aspirin treats headache”. Counts in the node UI show how many facts are stored.',
   },
   {
     title: 'Assertions',
-    body: 'Assertions are batches of triples that explain how entities entered or moved through the Context Graph. They are useful for reviewing provenance and lifecycle state.',
+    body: 'An assertion is a batch of facts added to the Context Graph together. Use assertions to see where information came from and what happened to it.',
   },
   {
     title: 'Roles',

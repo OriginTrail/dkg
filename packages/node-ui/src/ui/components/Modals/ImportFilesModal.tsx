@@ -282,7 +282,7 @@ export function ImportFilesModal({ open, onClose, contextGraphId, contextGraphNa
                     {successCount > 0 && (
                       <>
                         Imported {successCount} file{successCount !== 1 ? 's' : ''}.
-                        {totalTriples > 0 && <> Extracted <strong>{formatNumber(totalTriples)}</strong> triples into working memory.</>}
+                        {totalTriples > 0 && <> Extracted <strong>{formatNumber(totalTriples)}</strong> triples (facts) into Working Memory.</>}
                       </>
                     )}
                     {skippedCount > 0 && (

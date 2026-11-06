@@ -438,11 +438,11 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={access === 'curated'} onChange={() => setAccess('curated')} />
-                Invite-only: only invited agents can read and subscribe
+                <strong>Invite-only:</strong> only invited agents can read and subscribe
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={access === 'public'} onChange={() => setAccess('public')} />
-                Open: publicly discoverable; anyone can subscribe
+                <strong>Open:</strong> publicly discoverable; anyone can subscribe
               </label>
             </div>
           </div>
@@ -452,18 +452,16 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
             <div className="v10-form-radio-group">
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'curator-only'} onChange={() => setPublishPolicy('curator-only')} />
-                Curators-only: only the curator may publish to Verifiable Memory
+                <strong>Curators-only:</strong> only the curator may publish to Verifiable Memory
               </label>
               <label className="v10-form-radio">
                 <input type="radio" checked={publishPolicy === 'open'} onChange={() => setPublishPolicy('open')} />
-                Open: any wallet may publish to Verifiable Memory (not just members)
+                <strong>Open:</strong> any wallet may publish to Verifiable Memory (not just members)
               </label>
             </div>
             {access === 'curated' && publishPolicy === 'open' && (
               <div style={{ marginTop: 6, fontSize: 'var(--fs-label)', color: 'var(--text-tertiary)' }}>
-                Note: an invite-only sharing graph with open contribution still lets <em>any</em> wallet
-                publish to Verifiable Memory — the on-chain publish check is not gated by the allowlist.
-                See SPEC_CG_MEMORY_MODEL §2.5.
+                Note: invites control who can read this graph, not who can publish. With open contribution, any wallet can publish to Verifiable Memory.
               </div>
             )}
           </div>
@@ -555,7 +553,7 @@ export function CreateProjectModal({ open, onClose }: CreateProjectModalProps) {
               </div>
               <div className="v10-form-group" style={{ marginBottom: 0 }}>
                 <label className="v10-form-label">Shared Working Memory size limit <span style={{ fontSize: 'var(--fs-micro)', fontWeight: 400, color: 'var(--text-tertiary)' }}>(coming soon)</span></label>
-                <select aria-label="SWM size cap" className="v10-form-select ds-input" value={swmCap} disabled>
+                <select aria-label="Shared Working Memory size limit" className="v10-form-select ds-input" value={swmCap} disabled>
                   <option value="100k">100K triples (default)</option>
                   <option value="10k">10K triples</option>
                   <option value="1m">1M triples</option>

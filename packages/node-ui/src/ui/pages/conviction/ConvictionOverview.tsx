@@ -323,7 +323,7 @@ export function ConvictionOverview() {
               <div className="v10-pca-owned-groups">
                 <AccountGroup
                   title="This node (hot wallet)"
-                  description="Daemon-owned PCAs. Owner writes use the node daemon."
+                  description="PCAs owned by this node’s wallet. The node signs owner actions."
                   accounts={daemonOwned}
                   blockExplorerUrl={blockExplorerUrl}
                   onManage={onManage}

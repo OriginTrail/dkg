@@ -338,8 +338,7 @@ export function WireWorkspacePanel({
           style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-control)' }}
         />
         <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-          Absolute path. Created if it doesn't exist. The node writes only inside this folder
-          (plus optionally <code>~/.claude/settings.json</code> if Claude Code is selected).
+          Use a full path. The folder is created if it doesn't exist. The node writes only to this folder, and to <code>~/.claude/settings.json</code> if you choose Claude Code.
           {host && <> Defaulted from your <code>$HOME</code> = <code>{host.homedir}</code>.</>}
         </div>
       </div>
@@ -394,7 +393,7 @@ export function WireWorkspacePanel({
           maxLength={80}
         />
         <div style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-tertiary)', marginTop: 4 }}>
-          Free-form human label rendered as the agent's name in chips, lists, and rdfs:label triples.
+          Your agent's name in the node UI, and in the data it writes.
           Doesn't affect attribution — only changes how you appear to others.
         </div>
       </div>

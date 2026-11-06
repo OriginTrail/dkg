@@ -35,10 +35,7 @@ const WORDS: [RegExp, string][] = [
  * Lines waiting for a wording decision. This list only gets shorter: a line that
  * has changed fails the last test until it is removed here.
  */
-const PENDING = new Set<string>([
-  "Daemon-owned PCAs. Owner writes use the node daemon.",
-  "wallet publish to Verifiable Memory — the on-chain publish check is not gated by the allowlist. See SPEC_CG_MEMORY_MODEL §2.5.",
-]);
+const PENDING = new Set<string>([]);
 
 const VISIBLE_ATTRIBUTES = new Set([
   'alt', 'aria-description', 'aria-label', 'body', 'caption', 'confirmLabel', 'cancelLabel', 'description',

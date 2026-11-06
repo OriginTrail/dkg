@@ -314,7 +314,7 @@ function hintForJoinRejectReasons(reasons: string, reachedAndRejected: boolean):
   // online and the invite carries the right peer id".
   if (/not curator/i.test(reasons)) {
     return 'Your node reached other peers, but none of them curate this Context Graph. ' +
-      'Make sure the curator\'s daemon is online and the invite carries the right curator peer id.';
+      'Make sure the curator\'s node is online and the invite has the right curator peer ID.';
   }
   return null;
 }
