@@ -58,10 +58,10 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * is the deadline, and a receipt that misses it never counts. A group counts in
  * the transaction that lands it:
  *   - `counted`, the lesser of the group's value and what the budget has left,
- *     fills the budget at face value. Batches count in the order they land, and
- *     what has landed is never reduced. A group refuses to land for less than
- *     its `minCounted`, so a seller that sets one keeps its receipts for a
- *     later top-up rather than spending their nonces.
+ *     is used of the budget at face value. Batches count in the order they
+ *     land, and what has landed is never reduced. A group refuses to land for
+ *     less than its `minCounted`, so a seller that sets one keeps its receipts
+ *     for a later top-up rather than spending their nonces.
  *   - R (`servedValue`), which is `counted` at the subscription's discount,
  *     floored, and QueryInferenceScore (`weightedValue`), which is R at the
  *     batch's stake factor, join the node's and the epoch's totals in the
@@ -364,7 +364,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         The group then counts the lesser of its value and what the budget
      *         has left, which must be at least `minCounted`. Value above what
      *         the budget has left does not count, and its receipts' nonces stay
-     *         used. So a `minCounted` of 0 never refuses, whoever filled the
+     *         used. So a `minCounted` of 0 never refuses, whoever used the
      *         budget first: a seller uses it for a batch that must land, such
      *         as the last of an epoch.
      * @return batchDigest The hash of the batch's receipt digests, in order.
@@ -632,9 +632,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         if (used != 0) qis.useNonces(subscriptionId, b.seller, uint64(word), used);
 
         // What the budget has left counts, in the order batches land. Its value
-        // only grows, so the fill never exceeds it, and each cast below is of
-        // at most that uint96: the discount and the stake factor, at most 1,
-        // only lower it.
+        // only grows, so what it has used never exceeds it, and each cast below
+        // is of at most that uint96: the discount and the stake factor, at most
+        // 1, only lower it.
         uint256 left = ctx.budgetValue - qis.budgetUsed(subscriptionId, group.budgetIndex);
         uint256 counted = value < left ? value : left;
         if (counted < group.minCounted) revert GroupFault(g, Fault.BelowMinCounted);

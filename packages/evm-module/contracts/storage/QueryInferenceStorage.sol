@@ -25,7 +25,7 @@ import {Chronos} from "./Chronos.sol";
  *     booked when the subscription is paid for: a Conviction Account pays as a
  *     wallet does.
  *   - The QIF inputs per epoch and per node, each epoch's λ, how much of each
- *     budget is filled, and the request replay bitmap.
+ *     budget is used, and the request replay bitmap.
  *   - The parameters: the activation epoch, the batch bounds, the pause switch
  *     and λ.
  *
@@ -301,10 +301,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         _nonceBitmap[subscriptionId][seller][word] |= bits;
     }
 
-    /// @notice Count a group of receipts: `counted` of face value fills the
-    ///         budget, and `servedValue` and `weightedValue` join the node's
-    ///         and the epoch's totals in `epoch`. The first value to count in
-    ///         an epoch fixes its λ.
+    /// @notice Count a group of receipts: `counted` of face value is used of
+    ///         the budget, and `servedValue` and `weightedValue` join the
+    ///         node's and the epoch's totals in `epoch`. The first value to
+    ///         count in an epoch fixes its λ.
     /// @dev    It refuses an epoch that has ended (`EpochEnded`). The sums are
     ///         checked.
     function countReceipts(
