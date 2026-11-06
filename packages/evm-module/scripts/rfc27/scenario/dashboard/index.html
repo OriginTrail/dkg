@@ -1,0 +1,1418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Marketplace on Base Sepolia</title>
+<style>
+:root {
+  color-scheme: light;
+  --plane: #f4f4f1; --surface: #fcfcfb; --surface-2: #efeeea; --ink: #0b0b0b; --ink-2: #52514e; --muted: #6e6d67;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11, 11, 11, .10);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+  --wallet: #6250d6; --account: #e87ba4; --rolled: #898781; --served: #0b0b0b; --pool: #008300; --publishing: #898781;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --good-ink: #006300; --warning-ink: #7a5200; --serious-ink: #a8431b; --critical-ink: #b02a2a;
+  --good-wash: rgba(12, 163, 12, .10); --warning-wash: rgba(250, 178, 25, .18); --serious-wash: rgba(236, 131, 90, .18); --critical-wash: rgba(208, 59, 59, .12);
+  --link: #1c5cab;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane: #0d0d0d; --surface: #1a1a19; --surface-2: #262625; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #a09f96;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, .10);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --wallet: #9085e9; --account: #d55181; --rolled: #898781; --served: #f0efec; --pool: #199e70; --publishing: #898781;
+    --good-ink: #2fc42f; --warning-ink: #fab219; --serious-ink: #ec835a; --critical-ink: #ee7272;
+    --good-wash: rgba(12, 163, 12, .16); --warning-wash: rgba(250, 178, 25, .14); --serious-wash: rgba(236, 131, 90, .16); --critical-wash: rgba(208, 59, 59, .20);
+    --link: #86b6ef;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d; --surface: #1a1a19; --surface-2: #262625; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #a09f96;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, .10);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --wallet: #9085e9; --account: #d55181; --rolled: #898781; --served: #f0efec; --pool: #199e70; --publishing: #898781;
+  --good-ink: #2fc42f; --warning-ink: #fab219; --serious-ink: #ec835a; --critical-ink: #ee7272;
+  --good-wash: rgba(12, 163, 12, .16); --warning-wash: rgba(250, 178, 25, .14); --serious-wash: rgba(236, 131, 90, .16); --critical-wash: rgba(208, 59, 59, .20);
+  --link: #86b6ef;
+}
+
+* { box-sizing: border-box; }
+html { font-size: clamp(15px, .5vw + 9.6px, 20px); -webkit-text-size-adjust: 100%; scroll-padding-top: 5.5rem; }
+body { margin: 0; background: var(--plane); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; line-height: 1.45; }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button { font: inherit; color: inherit; }
+h1, h2, h3, p { margin: 0; }
+.wrap { max-width: 96rem; margin: 0 auto; padding: 0 clamp(.75rem, 2.2vw, 2rem); }
+
+.masthead { padding: 1.4rem 0 1rem; display: flex; flex-wrap: wrap; align-items: flex-end; gap: .4rem 2rem; justify-content: space-between; }
+.masthead h1 { font-size: 1.65rem; font-weight: 650; letter-spacing: -.01em; }
+.masthead .sub { color: var(--ink-2); font-size: 1rem; }
+.truth { display: flex; gap: .7rem; align-items: flex-start; background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--ink-2); border-radius: 10px; padding: .7rem 1rem; font-size: 1rem; margin-bottom: 1rem; }
+.truth strong { font-weight: 650; }
+
+.bar { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--plane) 90%, transparent); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+.bar-in { display: flex; align-items: center; gap: .5rem 1.2rem; padding-top: .55rem; padding-bottom: .55rem; flex-wrap: wrap; }
+.picker { display: flex; align-items: center; gap: .3rem; overflow-x: auto; scrollbar-width: none; max-width: 100%; }
+.picker::-webkit-scrollbar { display: none; }
+.picker-label { color: var(--ink-2); font-size: .9rem; white-space: nowrap; margin-right: .2rem; }
+.pill { border: 1px solid var(--border); background: var(--surface); border-radius: 999px; padding: .22rem .68rem; cursor: pointer; font-size: .92rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.pill:hover { background: var(--surface-2); }
+.pill[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); font-weight: 600; }
+.pill .tag { font-size: .78em; opacity: .75; margin-left: .3em; }
+.nav { display: flex; gap: .9rem; font-size: .92rem; margin-left: auto; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.nav::-webkit-scrollbar { display: none; }
+.nav a { color: var(--ink-2); white-space: nowrap; }
+.theme { background: none; border: 1px solid var(--border); border-radius: 8px; padding: .18rem .55rem; cursor: pointer; font-size: .86rem; color: var(--ink-2); white-space: nowrap; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 23rem; gap: 1.4rem; align-items: start; padding-bottom: 3rem; }
+.layout > main, .layout > aside { min-width: 0; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1.4rem; }
+section { scroll-margin-top: 5.5rem; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 1.05rem 1.2rem; }
+.head { margin-bottom: .8rem; }
+.head h2 { font-size: 1.4rem; font-weight: 650; letter-spacing: -.01em; display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+.head h2 .scope { font-weight: 500; color: var(--ink-2); font-size: .8em; }
+.head p { color: var(--ink-2); max-width: 75ch; margin-top: .25rem; }
+h3 { font-size: 1.02rem; font-weight: 620; }
+.cap { color: var(--ink-2); font-size: .9rem; }
+.small { font-size: .86rem; }
+.muted { color: var(--muted); }
+.num { font-variant-numeric: tabular-nums; }
+[data-tip], .tipped { cursor: help; }
+.unit { font-size: .62em; font-weight: 500; color: var(--ink-2); margin-left: .25em; letter-spacing: .01em; }
+
+/* Now */
+.now { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: .9rem; margin-bottom: 1.4rem; }
+.now-clock { grid-column: span 5; display: flex; flex-direction: column; justify-content: space-between; gap: .9rem; }
+.now-hero { grid-column: span 7; }
+.eyebrow { color: var(--ink-2); font-size: .94rem; font-weight: 520; }
+.big-time { font-size: clamp(2.1rem, 3.4vw, 3.1rem); font-weight: 650; letter-spacing: -.02em; line-height: 1.1; }
+.hero-num { font-size: clamp(2.6rem, 4.6vw, 4.2rem); font-weight: 680; letter-spacing: -.025em; line-height: 1.08; margin: .15rem 0 .35rem; }
+.hero-num .unit { font-size: .38em; letter-spacing: 0; }
+.tiles { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .9rem; }
+.tile { display: flex; flex-direction: column; gap: .18rem; }
+.tile-label { color: var(--ink-2); font-size: .9rem; font-weight: 520; }
+.tile-value { font-size: 1.72rem; font-weight: 640; letter-spacing: -.015em; line-height: 1.2; }
+.tile-cap { color: var(--ink-2); font-size: .86rem; line-height: 1.35; }
+.progress { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.progress > i { display: block; height: 100%; background: var(--ink-2); border-radius: 999px; }
+
+/* status */
+.status { display: inline-flex; align-items: center; gap: .32rem; border-radius: 999px; padding: .1rem .55rem .1rem .42rem; font-size: .84rem; font-weight: 560; white-space: nowrap; }
+.status svg { width: .95em; height: .95em; flex: none; }
+.status.good { background: var(--good-wash); color: var(--good-ink); }
+.status.warning { background: var(--warning-wash); color: var(--warning-ink); }
+.status.serious { background: var(--serious-wash); color: var(--serious-ink); }
+.status.critical { background: var(--critical-wash); color: var(--critical-ink); }
+.status.neutral { background: var(--surface-2); color: var(--ink-2); }
+
+/* charts */
+.chart { width: 100%; position: relative; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart text { font-family: inherit; }
+.legend { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin: 0 0 .55rem; font-size: .9rem; color: var(--ink-2); }
+.legend > span { display: inline-flex; align-items: center; gap: .38rem; }
+.swatch { width: .78em; height: .78em; border-radius: 3px; display: inline-block; flex: none; }
+.swatch.ghost { opacity: .4; }
+.hit { fill: transparent; cursor: pointer; outline: none; }
+.hit:focus-visible { stroke: var(--ink); stroke-width: 1.5; }
+g.slot:hover .band { fill: var(--surface-2); }
+
+/* tables */
+.toggle { background: none; border: 0; padding: 0; color: var(--link); cursor: pointer; font-size: .9rem; }
+.toggle:hover { text-decoration: underline; }
+.scroll-x { overflow-x: auto; margin: .6rem -1.2rem -.2rem; padding: 0 1.2rem; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; font-variant-numeric: tabular-nums; }
+th { text-align: right; font-weight: 540; color: var(--ink-2); padding: .32rem .55rem; border-bottom: 1px solid var(--axis); white-space: nowrap; vertical-align: bottom; }
+td { text-align: right; padding: .34rem .55rem; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; padding-left: 0; }
+th:last-child, td:last-child { padding-right: 0; }
+tr.sel td { background: var(--surface-2); }
+tr.sel td:first-child { font-weight: 620; }
+td.left, th.left { text-align: left; }
+
+/* sellers */
+.grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .9rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .9rem; }
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .9rem; }
+.who { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.who h3 { font-size: 1.1rem; }
+.dot { width: .72rem; height: .72rem; border-radius: 3px; flex: none; }
+.who .side { margin-left: auto; font-size: .84rem; color: var(--ink-2); }
+dl.rows { display: grid; grid-template-columns: 1fr auto; gap: .18rem .8rem; margin: .55rem 0 0; font-size: .94rem; }
+dl.rows dt { color: var(--ink-2); }
+dl.rows dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; font-weight: 540; white-space: nowrap; }
+dl.rows dd.total { font-weight: 680; }
+dl.rows dt.total { color: var(--ink); font-weight: 600; }
+dl.rows .rule { grid-column: 1 / -1; border-top: 1px solid var(--grid); margin: .22rem 0; }
+.share { margin-top: .75rem; display: grid; gap: .32rem; }
+.share-row { display: grid; grid-template-columns: 5.2rem 1fr 3.6rem; align-items: center; gap: .45rem; font-size: .88rem; }
+.share-row .lab { color: var(--ink-2); }
+.share-row .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 560; }
+.track { height: 10px; border-radius: 999px; background: var(--surface-2); overflow: hidden; display: flex; }
+.track > i { display: block; height: 100%; }
+.track.thin { height: 7px; }
+.delta { font-size: .88rem; color: var(--ink-2); margin-top: .35rem; }
+.seller-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(13.5rem, 1fr)); gap: .2rem 1.6rem; align-items: start; }
+.delta b { color: var(--ink); font-weight: 620; }
+.explain { background: var(--surface-2); border-radius: 10px; padding: .8rem 1rem; font-size: .96rem; }
+.explain p + p { margin-top: .4rem; }
+.formula { font-variant-numeric: tabular-nums; font-weight: 560; display: block; margin: .3rem 0; }
+
+/* buyers */
+.buyer-top { display: grid; grid-template-columns: 1fr 1fr; gap: .2rem .8rem; margin-top: .5rem; }
+.figure { display: flex; flex-direction: column; }
+.figure .lab { font-size: .84rem; color: var(--ink-2); }
+.figure .val { font-size: 1.22rem; font-weight: 630; letter-spacing: -.01em; }
+.budget { margin-top: .55rem; font-size: .9rem; }
+.budget .row { display: flex; justify-content: space-between; gap: .6rem; align-items: baseline; }
+.budget .row .name { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.budget .row .amt { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.note { margin-top: .55rem; padding-top: .5rem; border-top: 1px solid var(--grid); font-size: .88rem; color: var(--ink-2); }
+.note + .note { border-top: 0; margin-top: .25rem; padding-top: 0; }
+.note b { color: var(--ink); font-weight: 600; }
+.chip { display: inline-flex; align-items: center; gap: .3rem; border-radius: 6px; padding: 0 .42rem; font-size: .8rem; font-weight: 550; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+
+/* services */
+.service { display: grid; gap: .55rem; }
+.stats { display: flex; flex-wrap: wrap; gap: .5rem 1.8rem; }
+
+/* feed */
+.feed-box { position: sticky; top: 4rem; }
+.feed-card { padding: 0; display: flex; flex-direction: column; max-height: calc(100vh - 5rem); }
+.feed-top { padding: .9rem 1rem .55rem; border-bottom: 1px solid var(--border); }
+.feed-top h2 { font-size: 1.2rem; font-weight: 650; }
+.chips { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .45rem; }
+.chips button { border: 1px solid var(--border); background: none; border-radius: 999px; padding: .05rem .55rem; cursor: pointer; font-size: .82rem; color: var(--ink-2); }
+.chips button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.feed-list { overflow-y: auto; overscroll-behavior: contain; list-style: none; margin: 0; padding: 0; }
+.feed-row { padding: .55rem 1rem; border-bottom: 1px solid var(--grid); font-size: .92rem; }
+.feed-row.partial { background: var(--warning-wash); }
+.feed-row.refused { background: var(--critical-wash); }
+.feed-line { display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; }
+.feed-line .when { color: var(--ink-2); font-size: .82rem; margin-left: auto; white-space: nowrap; }
+.tag { display: inline-block; font-size: .76rem; font-weight: 600; letter-spacing: .01em; color: var(--ink-2); }
+.feed-main { margin-top: .08rem; }
+.feed-sub { color: var(--ink-2); font-size: .86rem; display: flex; justify-content: space-between; gap: .6rem; flex-wrap: wrap; }
+.feed-counted { font-variant-numeric: tabular-nums; }
+.feed-counted b { font-weight: 640; color: var(--ink); }
+.txlink { font-size: .82rem; white-space: nowrap; }
+.feed-groups { margin-top: .12rem; font-size: .84rem; color: var(--ink-2); }
+.feed-groups summary { cursor: pointer; }
+.feed-group { display: flex; justify-content: space-between; gap: .6rem; font-size: .84rem; color: var(--ink-2); }
+.feed-group .name { min-width: 0; overflow-wrap: anywhere; }
+.feed-group .amt { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.feed-group.partial { color: var(--ink); font-weight: 540; }
+.more { padding: .6rem 1rem; text-align: center; }
+
+/* scheduled events */
+.sched { display: grid; gap: 0; }
+.sched-row { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: .3rem 1.4rem; padding: .75rem 0; border-top: 1px solid var(--grid); }
+.sched-row:first-child { border-top: 0; padding-top: .1rem; }
+.sched-when { font-size: .86rem; color: var(--ink-2); }
+.sched-what { font-weight: 620; margin: .05rem 0; }
+.sched-note { font-size: .9rem; color: var(--ink-2); }
+.sched-chain { font-size: .94rem; }
+.sched-chain .status { margin-bottom: .2rem; }
+
+.empty { color: var(--ink-2); padding: 1.1rem 0; }
+.wait-list { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--ink-2); }
+.banner { background: var(--warning-wash); color: var(--ink); border-radius: 10px; padding: .55rem .9rem; margin-bottom: 1rem; }
+.banner.critical { background: var(--critical-wash); }
+.foot { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.2rem 2rem; font-size: .9rem; color: var(--ink-2); }
+.foot ul { margin: .25rem 0 0; padding-left: 1.1rem; }
+.foot h3 { color: var(--ink); }
+.addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+
+#tip { position: fixed; z-index: 50; max-width: min(24rem, 92vw); background: var(--ink); color: var(--surface); border-radius: 8px; padding: .4rem .6rem; font-size: .86rem; pointer-events: none; box-shadow: 0 4px 18px rgba(0, 0, 0, .25); overflow-wrap: anywhere; }
+#tip .tip-title { font-weight: 640; margin-bottom: .15rem; }
+#tip table { font-size: .84rem; width: auto; }
+#tip td { color: inherit; border: 0; padding: .02rem 0 .02rem .9rem; }
+#tip td:first-child { padding-left: 0; opacity: .85; text-align: left; }
+#tip td:last-child { font-weight: 620; text-align: right; }
+
+@media (max-width: 1800px) {
+  .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 1500px) {
+  .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tiles { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  .tile { grid-column: span 2; }
+  .tile:nth-child(n+4) { grid-column: span 3; }
+}
+@media (max-width: 1180px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  .feed-box { position: static; }
+  .feed-card { max-height: 34rem; }
+}
+@media (max-width: 760px) {
+  html { scroll-padding-top: 4.5rem; }
+  .now-clock, .now-hero { grid-column: 1 / -1; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile, .tile:nth-child(n+4) { grid-column: span 1; }
+  .tile:last-child { grid-column: 1 / -1; }
+  .grid-4, .grid-3, .grid-2 { grid-template-columns: minmax(0, 1fr); }
+  .sched-row { grid-template-columns: minmax(0, 1fr); }
+  .foot { grid-template-columns: minmax(0, 1fr); }
+  .nav { display: none; }
+  .tile-value { font-size: 1.45rem; }
+  .card { padding: .9rem 1rem; }
+  .scroll-x { margin-left: -1rem; margin-right: -1rem; padding: 0 1rem; }
+  .masthead h1 { font-size: 1.4rem; }
+}
+@media print {
+  .bar { position: static; }
+  .feed-card { max-height: none; }
+}
+</style>
+</head>
+<body>
+<!--SNAPSHOT-->
+<div class="wrap">
+  <header class="masthead">
+    <div>
+      <h1>The marketplace, live on Base Sepolia</h1>
+      <div class="sub">OT-RFC-27: buyers fund subscriptions, sellers land receipts, and a pool pays the sellers' stakers.</div>
+    </div>
+  </header>
+  <div class="truth"><div><strong>Service calls here are simulated by scripts. Every transaction, proof, score and reward is real.</strong> This page reads only the chain, so it shows what the contracts recorded, not what the scripts meant to do.</div></div>
+  <div id="banner"></div>
+</div>
+<div class="bar"><div class="wrap bar-in" id="bar"></div></div>
+<div class="wrap" style="padding-top:1.1rem">
+  <section id="now" class="now" aria-label="Now"></section>
+  <div class="layout">
+    <main class="stack">
+      <section id="epochs"></section>
+      <section id="sellers"></section>
+      <section id="buyers"></section>
+      <section id="services"></section>
+      <section id="scenario"></section>
+      <section id="stakers"></section>
+      <section id="about"></section>
+    </main>
+    <aside><div class="feed-box" id="feed"></div></aside>
+  </div>
+</div>
+<div id="tip" role="tooltip" hidden></div>
+
+<script>
+'use strict';
+
+// ------------------------------------------------------------------ small tools
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const E18 = 10n ** 18n;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function setProps(el, props) {
+  for (const [k, v] of Object.entries(props ?? {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'tip') {
+      if (typeof v === 'function') { el._tip = v; el.classList.add('tipped'); }
+      else el.setAttribute('data-tip', v);
+    } else el.setAttribute(k, v === true ? '' : String(v));
+  }
+}
+function addKids(el, kids) {
+  for (const k of kids.flat(Infinity)) {
+    if (k === null || k === undefined || k === false) continue;
+    el.append(k.nodeType ? k : document.createTextNode(String(k)));
+  }
+}
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  setProps(el, props);
+  addKids(el, kids);
+  return el;
+}
+function s(tag, props, ...kids) {
+  const el = document.createElementNS(SVG_NS, tag);
+  setProps(el, props);
+  addKids(el, kids);
+  return el;
+}
+const big = (x) => BigInt(x ?? 0);
+const low = (x) => String(x ?? '').toLowerCase();
+const group = (digits) => digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const pad = (n) => String(n).padStart(2, '0');
+
+/** Every digit of a wei amount, as TRAC. */
+function tracExact(wei) {
+  const w = big(wei);
+  const a = w < 0n ? -w : w;
+  const frac = (a % E18).toString().padStart(18, '0').replace(/0+$/, '');
+  return `${w < 0n ? '−' : ''}${group((a / E18).toString())}${frac ? `.${frac}` : ''}`;
+}
+/** A wei amount rounded for reading: two decimals, or four below 1 TRAC. */
+function trac(wei, dp) {
+  const w = big(wei);
+  if (w === 0n) return '0';
+  const a = w < 0n ? -w : w;
+  const sign = w < 0n ? '−' : '';
+  const d = dp ?? (a >= E18 ? 2 : 4);
+  if (dp === undefined && a < 10n ** 14n) return `${sign}<0.0001`;
+  const scale = 10n ** BigInt(18 - d);
+  const r = (a + scale / 2n) / scale;
+  const base = 10n ** BigInt(d);
+  return `${sign}${group((r / base).toString())}${d ? `.${(r % base).toString().padStart(d, '0')}` : ''}`;
+}
+/** A TRAC amount: the rounded figure, every digit on hover. */
+function T(wei, opts = {}) {
+  return h('span', { class: `num ${opts.class ?? ''}`, tip: `${tracExact(wei)} TRAC`, 'aria-label': `${tracExact(wei)} TRAC` }, trac(wei, opts.dp), opts.unit ? h('span', { class: 'unit' }, 'TRAC') : null);
+}
+/** A small price: four significant digits, every digit on hover. */
+function price(wei) {
+  const w = big(wei);
+  const text = w === 0n ? '0' : Number(tracExact(w).replace(/,/g, '')).toPrecision(4).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  const plain = text.includes('e') ? Number(text).toFixed(12).replace(/0+$/, '') : text;
+  return h('span', { class: 'num', tip: `${tracExact(w)} TRAC` }, plain);
+}
+const toNum = (wei) => Number(big(wei) / 10n ** 12n) / 1e6;
+const pct = (x, digits = 1) => `${(x * 100).toFixed(digits)}%`;
+const factor = (f18) => (f18 === null || f18 === undefined ? '–' : (Number(big(f18) / 10n ** 12n) / 1e6).toFixed(3));
+function compact(n) {
+  const v = Number(n);
+  if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (v >= 10_000) return `${(v / 1e3).toFixed(1)}K`;
+  return v.toLocaleString('en-US');
+}
+function utc(ts, what = 'both') {
+  const d = new Date(ts * 1000);
+  const day = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  const time = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  if (what === 'day') return day;
+  if (what === 'time') return time;
+  if (what === 'full') return `${day}, ${time}:${pad(d.getUTCSeconds())} UTC`;
+  return `${day}, ${time}`;
+}
+function ago(seconds) {
+  const x = Math.max(0, Math.floor(seconds));
+  if (x < 60) return `${x}s ago`;
+  if (x < 3600) return `${Math.floor(x / 60)} min ago`;
+  if (x < 86400) return `${Math.floor(x / 3600)}h ${Math.floor((x % 3600) / 60)}m ago`;
+  return `${Math.floor(x / 86400)}d ${Math.floor((x % 86400) / 3600)}h ago`;
+}
+function span(seconds) {
+  const x = Math.max(0, Math.floor(seconds));
+  const hh = Math.floor(x / 3600);
+  const mm = Math.floor((x % 3600) / 60);
+  const ss = x % 60;
+  if (hh >= 48) return `${Math.floor(hh / 24)}d ${hh % 24}h`;
+  return hh ? `${hh}h ${pad(mm)}m ${pad(ss)}s` : `${mm}m ${pad(ss)}s`;
+}
+const shortHash = (x) => (x ? `${x.slice(0, 6)}…${x.slice(-4)}` : '');
+const plural = (unit) => (/y$/.test(unit) ? `${unit.slice(0, -1)}ies` : `${unit}s`);
+
+const ICONS = {
+  good: 'M3 8.5l3.2 3.2L13 5',
+  warning: 'M8 2.5v7M8 12.6v.4',
+  serious: 'M8 2.5v7M8 12.6v.4',
+  critical: 'M4 4l8 8M12 4l-8 8',
+  neutral: 'M4 8h8',
+};
+function status(kind, text, tip) {
+  const icon = s('svg', { viewBox: '0 0 16 16', 'aria-hidden': 'true' }, s('path', { d: ICONS[kind], fill: 'none', stroke: 'currentColor', 'stroke-width': 2.2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+  return h('span', { class: `status ${kind}`, tip }, icon, text);
+}
+
+// ------------------------------------------------------------------ state
+
+const snapshotTag = document.getElementById('snapshot');
+const SNAPSHOT = snapshotTag ? JSON.parse(snapshotTag.textContent) : null;
+const params = new URLSearchParams(location.search);
+const view = {
+  data: SNAPSHOT,
+  selected: params.has('epoch') ? Number(params.get('epoch')) : null,
+  fetchError: null,
+  feedFilter: 'all',
+  feedLimit: 50,
+  feedThisEpoch: false,
+  showEpochTable: window.innerWidth >= 900,
+  showSellerTable: false,
+  openBatches: new Set(),
+};
+const now = () => (SNAPSHOT ? SNAPSHOT.generatedAt : Date.now() / 1000);
+const chartJobs = [];
+const later = (box, draw) => chartJobs.push({ box, draw });
+
+// Theme: the system's unless chosen here or in the address (?theme=dark).
+function storedTheme() {
+  try { return localStorage.getItem('dashboard-theme'); } catch { return null; }
+}
+function applyTheme(t) {
+  if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+}
+let theme = params.get('theme') ?? storedTheme();
+applyTheme(theme);
+function cycleTheme() {
+  theme = theme === 'dark' ? 'light' : theme === 'light' ? null : 'dark';
+  applyTheme(theme);
+  try { if (theme) localStorage.setItem('dashboard-theme', theme); else localStorage.removeItem('dashboard-theme'); } catch { /* not kept */ }
+  renderBar();
+}
+
+// ------------------------------------------------------------------ what the data says
+
+const D = () => view.data;
+const currentEpoch = () => D().clock?.currentEpoch ?? null;
+const firstEpoch = () => D().clock?.firstEpoch ?? null;
+const epochRow = (e) => D().epochs.find((x) => x.epoch === e) ?? null;
+function wallEpoch() {
+  const c = D().clock;
+  return now() < c.startTime ? 1 : Math.floor((now() - c.startTime) / c.epochLength) + 1;
+}
+function selectedEpoch() {
+  const d = D();
+  if (view.selected !== null && d.epochs.some((x) => x.epoch === view.selected)) return view.selected;
+  const running = d.epochs.find((x) => x.state === 'current');
+  return running ? running.epoch : d.epochs[0]?.epoch ?? null;
+}
+const sellerIndex = (id) => D().sellers.findIndex((x) => x.id === Number(id));
+const sellerName = (id) => D().sellers.find((x) => x.id === Number(id))?.name ?? `node ${id}`;
+const sellerColor = (id) => `var(--s${(sellerIndex(id) % 8) + 1})`;
+const buyerOf = (addr) => D().buyers.find((x) => x.address === low(addr)) ?? null;
+const buyerName = (addr) => buyerOf(addr)?.name ?? shortHash(addr);
+const serviceOf = (id) => D().services.find((x) => x.id === low(id)) ?? null;
+const serviceLabel = (id) => serviceOf(id)?.label ?? shortHash(id);
+const explorer = () => D().network?.explorer ?? 'https://sepolia.basescan.org';
+const txLink = (tx) => h('a', { class: 'txlink', href: `${explorer()}/tx/${tx}`, target: '_blank', rel: 'noopener noreferrer', tip: `Open ${tx} on Basescan` }, `${tx.slice(0, 6)}…${tx.slice(-3)} ↗`);
+const addrLink = (a, text) => h('a', { href: `${explorer()}/address/${a}`, target: '_blank', rel: 'noopener noreferrer', class: 'addr', tip: a }, text ?? shortHash(a));
+
+function freshness() {
+  const d = D();
+  if (SNAPSHOT) return { kind: 'neutral', text: `Snapshot of ${utc(d.generatedAt)} UTC`, detail: 'A saved copy: it does not update.' };
+  const lastRead = d.status?.rpc?.lastOkAt ?? d.generatedAt;
+  const age = now() - lastRead;
+  if (view.fetchError) return { kind: 'critical', text: `Stale: this page can't reach its data, last read ${ago(age)}`, detail: view.fetchError };
+  if (d.status?.stale) return { kind: 'serious', text: `Stale: last good read ${ago(age)}`, detail: (d.status.errors ?? []).join(' · ') || 'The last read failed.' };
+  if (age > 12 * 60) return { kind: 'serious', text: `Stale: no new read for ${ago(age)}`, detail: 'The indexer reads every five minutes, and has not written since.' };
+  return { kind: 'good', text: `Fresh: read ${ago(age)}`, detail: `The indexer reads the chain every five minutes. Last read at block ${group(String(d.status?.rpc?.block ?? ''))}.` };
+}
+
+// ------------------------------------------------------------------ the bar
+
+function renderBar() {
+  const root = document.getElementById('bar');
+  const d = D();
+  if (!d?.clock) { root.replaceChildren(status(freshness().kind, freshness().text, freshness().detail)); return; }
+  const sel = selectedEpoch();
+  const pills = d.epochs.map((row) => h('button', {
+    class: 'pill',
+    'aria-pressed': row.epoch === sel ? 'true' : 'false',
+    onclick: () => pick(row.epoch),
+  }, row.epoch, row.state === 'current' ? h('span', { class: 'tag' }, 'now') : row.state === 'ahead' ? h('span', { class: 'tag' }, 'ahead') : row.state === 'upcoming' ? h('span', { class: 'tag' }, 'next') : null));
+  const fresh = freshness();
+  root.replaceChildren(
+    h('div', { class: 'picker', role: 'group', 'aria-label': 'Pick an epoch' }, h('span', { class: 'picker-label' }, 'Epoch'), pills),
+    h('span', { id: 'fresh-pill' }, status(fresh.kind, fresh.text, fresh.detail)),
+    h('nav', { class: 'nav' }, [['epochs', 'Epochs'], ['sellers', 'Sellers'], ['buyers', 'Buyers'], ['services', 'Services'], ['scenario', 'Schedule'], ['stakers', 'Stakers'], ['feed', 'Feed']].map(([id, label]) => h('a', { href: `#${id}` }, label))),
+    h('button', { class: 'theme', onclick: cycleTheme, tip: 'Switch between the system theme, dark and light' }, theme === 'dark' ? 'Dark' : theme === 'light' ? 'Light' : 'Auto'),
+  );
+  // Keep the chosen epoch in view inside the picker, without moving the page.
+  const active = root.querySelector('.pill[aria-pressed="true"]');
+  const picker = root.querySelector('.picker');
+  if (active && picker) {
+    const a = active.getBoundingClientRect();
+    const p = picker.getBoundingClientRect();
+    if (a.right > p.right) picker.scrollLeft += a.right - p.right + 8;
+    else if (a.left < p.left) picker.scrollLeft -= p.left - a.left + 8;
+  }
+}
+
+function pick(epoch) {
+  // The epoch in progress means "follow it": when it ends, the page moves on with it.
+  view.selected = epochRow(epoch)?.state === 'current' ? null : epoch;
+  if (!SNAPSHOT) {
+    const q = new URLSearchParams(location.search);
+    if (view.selected === null) q.delete('epoch'); else q.set('epoch', epoch);
+    history.replaceState(null, '', `${location.pathname}${q.size ? `?${q}` : ''}${location.hash}`);
+  }
+  renderAll();
+}
+
+// ------------------------------------------------------------------ 1. now
+
+function renderNow() {
+  const root = document.getElementById('now');
+  const d = D();
+  if (!d.clock) {
+    root.replaceChildren(h('div', { class: 'card', style: 'grid-column:1/-1' }, h('div', { class: 'eyebrow' }, 'Waiting'), h('p', null, 'The indexer has not read the chain yet.')));
+    return;
+  }
+  const c = d.clock;
+  const first = c.firstEpoch;
+  const startAt = c.startTime + (first - 1) * c.epochLength;
+  const notStarted = c.currentEpoch < first;
+
+  if (notStarted) {
+    const row = epochRow(first);
+    const hasWho = d.sellers.length || d.buyers.length;
+    const added = d.feed.filter((x) => x.t === 'buyer-added').length;
+    const optedIn = d.feed.filter((x) => x.t === 'spending' && x.enabled).length;
+    root.replaceChildren(
+      h('div', { class: 'card now-clock' },
+        h('div', null, h('div', { class: 'eyebrow' }, `Epoch ${first} begins in`), h('div', { class: 'big-time', 'data-countdown': startAt }, span(startAt - now()))),
+        h('div', null, h('div', { class: 'cap' }, `${utc(startAt)} UTC. Until then no subscription can be funded and no batch can land: the pool's activation epoch is ${c.activationEpoch ?? first}.`)),
+        dataBlock()),
+      h('div', { class: 'card now-hero' },
+        h('div', { class: 'eyebrow' }, 'Nothing has been funded or served yet'),
+        h('div', { class: 'hero-num' }, '0', h('span', { class: 'unit' }, 'TRAC')),
+        h('div', { class: 'cap' }, `The chain shows no money, no served value and no batches for epoch ${first}, because none of it has happened. This page fills in by itself from the first funding on.`),
+        h('ul', { class: 'wait-list' },
+          hasWho ? h('li', null, `Waiting to start: ${d.sellers.length} sellers, ${d.buyers.length} buyers and ${d.services.length} services, named in the scenario's public file.`) : h('li', null, 'The scenario\'s public file, which names sellers, buyers and services, is not out yet. The page shows whatever lands on-chain either way.'),
+          optedIn || added ? h('li', null, `Setup seen on-chain so far: ${optedIn} account${optedIn === 1 ? '' : 's'} opted in to service spending, ${added} buyer${added === 1 ? '' : 's'} added under a grant. See the feed.`) : null,
+          d.scenario.length ? h('li', null, `${d.scenario.length} scheduled events, listed under Schedule below.`) : null,
+          row && big(row.publishingPool) > 0n ? h('li', null, 'Stakers are already earning from publishing: ', T(row.publishingPool), ` TRAC is booked for epoch ${first}.`) : null)),
+    );
+    return;
+  }
+
+  const row = epochRow(c.currentEpoch) ?? {};
+  const ahead = epochRow(c.currentEpoch + 1);
+  const end = c.startTime + c.currentEpoch * c.epochLength;
+  const start = c.startTime + (c.currentEpoch - 1) * c.epochLength;
+  const rolledOver = wallEpoch() > c.currentEpoch;
+  const served = big(row.served);
+  const money = big(row.money);
+  const projected = served === 0n;
+  const pool = big(row.projectedPool);
+
+  const clock = h('div', { class: 'card now-clock' },
+    h('div', null,
+      h('div', { class: 'eyebrow' }, `Epoch ${c.currentEpoch} · in progress`),
+      rolledOver
+        ? h('div', { class: 'big-time' }, `Epoch ${wallEpoch()} has begun`)
+        : h('div', { class: 'big-time' }, h('span', { 'data-countdown': end }, span(end - now())), h('span', { class: 'unit' }, 'left'))),
+    h('div', null,
+      h('div', { class: 'progress', role: 'img', 'aria-label': 'How much of the epoch has passed' }, h('i', { 'data-progress-from': start, 'data-progress-to': end, style: `width:${Math.min(100, ((now() - start) / (end - start)) * 100).toFixed(2)}%` })),
+      h('div', { class: 'cap', style: 'margin-top:.35rem' }, rolledOver ? 'The next read of the chain will show it.' : `Ends ${utc(end)} UTC. That is the deadline: a batch that lands later never counts.`)));
+
+  const hero = h('div', { class: 'card now-hero' },
+    h('div', { class: 'eyebrow' }, projected ? 'Pool, if a seller lands value before the deadline' : 'Pool as it stands'),
+    h('div', { class: 'hero-num' }, T(pool), h('span', { class: 'unit' }, 'TRAC')),
+    h('div', { class: 'cap' },
+      projected
+        ? ['The chain reads this epoch\'s pool as 0 until its first served value counts. This figure is the money waiting for it: ', T(money), ' funded for this epoch', big(row.waitingBefore) > 0n ? [' plus ', T(row.waitingBefore), ' rolled forward from empty epochs'] : null, '. If nothing is served, it all rolls forward again.']
+        : ['What the sellers would share if the epoch ended now: ', T(money), ' funded for this epoch', big(row.rolledIn) > 0n ? [' plus ', T(row.rolledIn), ' rolled in from empty epochs'] : null, '. It is split by QIF share, so a seller earns from the whole pool, not only from what it served.']));
+
+  const parts = [{ color: 'var(--wallet)', value: toNum(row.wallet) }, { color: 'var(--account)', value: toNum(row.account) }];
+  const totalMoney = toNum(row.money);
+  const lastBatch = d.feed.find((x) => x.t === 'batch');
+  const tiles = h('div', { class: 'tiles' },
+    tile('Money funded so far', [T(money), h('span', { class: 'unit' }, 'TRAC')],
+      totalMoney > 0 ? h('div', { class: 'track thin', style: 'margin:.2rem 0 .1rem' }, parts.map((p) => h('i', { style: `width:${(p.value / totalMoney) * 100}%;background:${p.color}` }))) : null,
+      ['Wallet ', T(row.wallet), ', account ', T(row.account), '.', ahead && ahead.state === 'ahead' && big(ahead.money) > 0n ? [' Plus ', T(ahead.money), ` funded ahead for epoch ${ahead.epoch}.`] : null]),
+    tile('Served value', [T(served), h('span', { class: 'unit' }, 'TRAC')], null,
+      money > 0n ? [`${pct(1 - (row.unusedShare ?? 0))} of the money, counted from landed receipts after discounts.`] : ['Counted from landed receipts, after discounts.']),
+    tile('Batches landed', [group(String(row.batches ?? 0))], null,
+      [`${group(String(row.receipts ?? 0))} receipts. `, row.partials ? h('b', null, `${row.partials} partial count${row.partials === 1 ? '' : 's'}. `) : 'No partial counts. ', row.refused ? `${row.refused} refused.` : '']),
+    lastBatch
+      ? tile('Last batch', [h('span', { 'data-ago': lastBatch.at }, ago(now() - lastBatch.at))], null, [`${sellerName(lastBatch.seller)}, ${lastBatch.receipts} receipt${lastBatch.receipts === 1 ? '' : 's'}. `, txLink(lastBatch.tx)])
+      : tile('Last batch', ['None yet'], null, ['No batch has landed.']),
+    dataTile());
+  root.replaceChildren(clock, hero, tiles);
+}
+
+function tile(label, value, extra, caption) {
+  return h('div', { class: 'card tile' }, h('div', { class: 'tile-label' }, label), h('div', { class: 'tile-value' }, value), extra, caption ? h('div', { class: 'tile-cap' }, caption) : null);
+}
+
+function dataLines() {
+  const d = D();
+  const f = freshness();
+  const lag = d.status?.events?.lagBlocks;
+  return [
+    h('div', { style: 'margin:.25rem 0 .15rem' }, status(f.kind, f.kind === 'good' ? 'Fresh' : f.kind === 'neutral' ? 'Snapshot' : 'Stale', f.detail)),
+    h('div', { class: 'tile-cap' },
+      h('span', { 'data-read-age': d.status?.rpc?.lastOkAt ?? d.generatedAt }, `Read ${ago(now() - (d.status?.rpc?.lastOkAt ?? d.generatedAt))}`),
+      d.status?.rpc?.block ? ` at block ${group(String(d.status.rpc.block))}. ` : '. ',
+      lag ? `The events are ${group(String(lag))} block${lag === 1 ? '' : 's'} behind. ` : '',
+      SNAPSHOT ? '' : 'A new read every 5 minutes.'),
+  ];
+}
+function dataTile() {
+  return h('div', { class: 'card tile' }, h('div', { class: 'tile-label' }, 'This page\'s data'), dataLines());
+}
+function dataBlock() {
+  return h('div', { style: 'border-top:1px solid var(--grid);padding-top:.6rem' }, h('div', { class: 'tile-label' }, 'This page\'s data'), dataLines());
+}
+
+// ------------------------------------------------------------------ charts
+
+function niceStep(v) {
+  if (v <= 0) return 1;
+  const p = 10 ** Math.floor(Math.log10(v));
+  const m = v / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * p;
+}
+function scaleFor(maxV, n = 4) {
+  const step = niceStep((maxV || 1) / n);
+  const top = Math.ceil((maxV || 1) / step - 1e-9) * step;
+  const ticks = [];
+  for (let v = 0; v <= top + step / 1000; v += step) ticks.push(v);
+  return { top, ticks };
+}
+function tickLabel(v) {
+  if (v >= 10_000) return `${(v / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })}K`;
+  return v.toLocaleString('en-US', { maximumFractionDigits: v < 10 ? 2 : 0 });
+}
+function shortAmount(v) {
+  if (v >= 100_000) return `${Math.round(v / 1000).toLocaleString('en-US')}K`;
+  if (v >= 10_000) return `${(v / 1000).toFixed(1)}K`;
+  if (v >= 100) return Math.round(v).toLocaleString('en-US');
+  return v.toFixed(v >= 10 ? 1 : 2);
+}
+function barPath(x, y, w, hh, r = 4) {
+  const rr = Math.min(r, w / 2, hh);
+  return `M${x},${y + hh}V${y + rr}Q${x},${y} ${x + rr},${y}H${x + w - rr}Q${x + w},${y} ${x + w},${y + rr}V${y + hh}Z`;
+}
+function tipTable(title, rows, note) {
+  return h('div', null, title ? h('div', { class: 'tip-title' }, title) : null,
+    h('table', null, rows.map(([label, value]) => h('tr', null, h('td', null, label), h('td', null, value)))),
+    note ? h('div', { style: 'margin-top:.2rem;opacity:.9' }, note) : null);
+}
+
+/** The frame every by-epoch chart shares: gridlines, ticks, a slot per epoch with its label, hover and click. */
+function epochFrame(box, rows, opts) {
+  const W = Math.max(280, box.clientWidth || 600);
+  const compactView = W < 560;
+  const H = opts.height ?? (compactView ? 220 : 280);
+  const m = { l: compactView ? 38 : 50, r: 6, t: 22, b: compactView ? 24 : 40 };
+  const pw = W - m.l - m.r;
+  const ph = H - m.t - m.b;
+  const { top, ticks } = scaleFor(opts.max, compactView ? 3 : 4);
+  const y = (v) => m.t + ph - (v / top) * ph;
+  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img', 'aria-label': opts.label });
+  ticks.forEach((t) => {
+    svg.append(s('line', { x1: m.l, x2: W - m.r, y1: y(t), y2: y(t), style: `stroke:var(--${t === 0 ? 'axis' : 'grid'});stroke-width:1` }));
+    svg.append(s('text', { x: m.l - 6, y: y(t) + 4, 'text-anchor': 'end', style: `fill:var(--muted);font-size:${compactView ? 10.5 : 12}px;font-variant-numeric:tabular-nums` }, tickLabel(t)));
+  });
+  const slot = pw / rows.length;
+  const every = Math.ceil((compactView ? 26 : 44) / slot);
+  rows.forEach((row, i) => {
+    const x = m.l + slot * i;
+    const g = s('g', { class: 'slot' });
+    const selected = row.epoch === opts.selected;
+    g.append(s('rect', { class: 'band', x: x + 2, y: 2, width: Math.max(0, slot - 4), height: H - 4, rx: 8, style: `fill:${selected ? 'var(--surface-2)' : 'transparent'}` }));
+    opts.draw(g, row, { x, slot, y, base: y(0), top: m.t, compactView });
+    if (i % every === 0 || selected) {
+      const label = s('text', { x: x + slot / 2, y: H - m.b + (compactView ? 16 : 17), 'text-anchor': 'middle', style: `fill:var(--${selected ? 'ink' : 'ink-2'});font-size:${compactView ? 11 : 13}px;font-weight:${selected ? 650 : 500};font-variant-numeric:tabular-nums` }, row.epoch);
+      g.append(label);
+      if (!compactView) g.append(s('text', { x: x + slot / 2, y: H - m.b + 32, 'text-anchor': 'middle', style: 'fill:var(--muted);font-size:11.5px' }, row.state === 'current' ? 'now' : row.state === 'ahead' ? 'ahead' : utc(row.startsAt, 'day')));
+    }
+    const hit = s('rect', { class: 'hit', x, y: 0, width: slot, height: H, tabindex: 0, role: 'button', 'aria-label': `Epoch ${row.epoch}: ${opts.say(row)}`, tip: () => opts.tip(row), onclick: () => pick(row.epoch), onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(row.epoch); } } });
+    g.append(hit);
+    svg.append(g);
+  });
+  return svg;
+}
+
+function drawEpochChart(box, rows, selected) {
+  const stackOf = (r) => (r.state === 'ended' || r.state === 'current') && big(r.served) > 0n ? toNum(r.pool) : toNum(r.money) + toNum(r.waitingBefore);
+  const max = Math.max(1, ...rows.map(stackOf), ...rows.map((r) => toNum(r.served)));
+  const svg = epochFrame(box, rows, {
+    max, selected, label: 'Money, served value and pool per epoch',
+    say: (r) => `money ${trac(r.money)} TRAC, served value ${trac(r.served)} TRAC, pool ${trac(r.pool)} TRAC`,
+    tip: (r) => tipTable(`Epoch ${r.epoch} · ${r.state === 'current' ? 'in progress' : r.state === 'ahead' ? 'funded ahead' : r.state === 'upcoming' ? 'not started' : utc(r.startsAt, 'day')}`, [
+      ['Wallet value', trac(r.wallet)], ['Account cost', trac(r.account)], ['Rolled in', trac(r.rolledIn)], ['Pool', trac(r.pool)], ['Served value', trac(r.served)], ['Unused', big(r.money) > 0n ? pct(r.unusedShare) : '–'],
+    ], big(r.served) === 0n && big(r.money) > 0n && r.state === 'ended' ? 'No served value: this money rolled forward.' : 'Click to look at this epoch.'),
+    draw: (g, r, f) => {
+      const barW = Math.min(24, Math.max(7, f.slot * (f.compactView ? .3 : .24)));
+      const gap = 3;
+      const x0 = f.x + f.slot / 2 - barW - gap / 2;
+      const empty = big(r.served) === 0n && big(r.money) > 0n;
+      const ghost = empty || r.state === 'ahead';
+      let v = 0;
+      const segs = [['wallet', toNum(r.wallet)], ['account', toNum(r.account)]];
+      if (!ghost) segs.push(['rolled', toNum(r.rolledIn)]);
+      const present = segs.filter(([, a]) => a > 0);
+      present.forEach(([name, a], i) => {
+        const yTop = f.y(v + a);
+        const yBase = f.y(v);
+        const isTop = i === present.length - 1;
+        const hh = Math.max(1.5, yBase - yTop - (i > 0 ? 2 : 0));
+        const yy = i > 0 ? yBase - 2 - hh : yBase - hh;
+        const style = `fill:var(--${name});opacity:${ghost ? .38 : 1}`;
+        g.append(isTop ? s('path', { d: barPath(x0, yy, barW, hh), style }) : s('rect', { x: x0, y: yy, width: barW, height: hh, style }));
+        v += a;
+      });
+      const served = toNum(r.served);
+      if (served > 0) {
+        const hh = Math.max(1.5, f.base - f.y(served));
+        g.append(s('path', { d: barPath(x0 + barW + gap, f.base - hh, barW, hh), style: 'fill:var(--served)' }));
+      }
+      if (v > 0 && f.slot >= 50) {
+        g.append(s('text', { x: x0 + barW / 2, y: f.y(v) - 6, 'text-anchor': 'middle', style: `fill:var(--ink-2);font-size:${f.compactView ? 10 : 11.5}px;font-weight:560;font-variant-numeric:tabular-nums` }, shortAmount(v)));
+      }
+      if (empty && r.state === 'ended' && f.slot >= 34) {
+        // The money of an empty epoch goes to the next one: a small arrow says so.
+        const ay = f.y(v) - (f.slot >= 50 ? 20 : 8);
+        const ax = x0 + barW / 2;
+        g.append(s('path', { d: `M${ax},${ay}H${f.x + f.slot + 4}m-6,-4l6,4l-6,4`, style: 'fill:none;stroke:var(--ink-2);stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round' }));
+      }
+    },
+  });
+  box.replaceChildren(svg);
+}
+
+function drawSellerChart(box, rows, selected) {
+  const sellers = D().sellers;
+  const totals = rows.map((r) => r.sellers.reduce((a, x) => a + toNum(x.gross), 0));
+  const max = Math.max(1, ...totals);
+  const svg = epochFrame(box, rows, {
+    max, selected, height: 200, label: 'Gross from the pool by seller, per epoch',
+    say: (r) => r.sellers.map((x) => `${sellerName(x.id)} ${trac(x.gross)} TRAC`).join(', '),
+    tip: (r) => tipTable(`Epoch ${r.epoch}: gross from the pool`, r.sellers.map((x) => [`${sellerName(x.id)}`, `${trac(x.gross)} (${pct(x.qifShare)})`]), big(r.served) === 0n ? 'No served value, so no pool in this epoch.' : 'Click to look at this epoch.'),
+    draw: (g, r, f) => {
+      const barW = Math.min(24, Math.max(8, f.slot * .42));
+      const x0 = f.x + f.slot / 2 - barW / 2;
+      let v = 0;
+      const present = r.sellers.filter((x) => big(x.gross) > 0n);
+      present.forEach((x, i) => {
+        const a = toNum(x.gross);
+        const yBase = f.y(v);
+        const hh = Math.max(1.5, yBase - f.y(v + a) - (i > 0 ? 2 : 0));
+        const yy = i > 0 ? yBase - 2 - hh : yBase - hh;
+        const style = `fill:${sellerColor(x.id)}`;
+        g.append(i === present.length - 1 ? s('path', { d: barPath(x0, yy, barW, hh), style }) : s('rect', { x: x0, y: yy, width: barW, height: hh, style }));
+        v += a;
+      });
+      if (!present.length && r.state === 'ended') g.append(s('text', { x: f.x + f.slot / 2, y: f.base - 6, 'text-anchor': 'middle', style: 'fill:var(--muted);font-size:11px' }, 'no pool'));
+    },
+  });
+  void sellers;
+  box.replaceChildren(svg);
+}
+
+function drawSingleSeries(box, rows, selected, { value, color, label, tip }) {
+  const max = Math.max(1, ...rows.map((r) => toNum(value(r))));
+  const svg = epochFrame(box, rows, {
+    max, selected, height: 190, label,
+    say: (r) => `${trac(value(r))} TRAC`,
+    tip,
+    draw: (g, r, f) => {
+      const a = toNum(value(r));
+      if (a <= 0) return;
+      const barW = Math.min(24, Math.max(8, f.slot * .42));
+      const x0 = f.x + f.slot / 2 - barW / 2;
+      const hh = Math.max(1.5, f.base - f.y(a));
+      g.append(s('path', { d: barPath(x0, f.base - hh, barW, hh), style: `fill:${color}` }));
+      if (f.slot >= 50) g.append(s('text', { x: x0 + barW / 2, y: f.base - hh - 5, 'text-anchor': 'middle', style: 'fill:var(--ink-2);font-size:11px;font-weight:560;font-variant-numeric:tabular-nums' }, shortAmount(a)));
+    },
+  });
+  box.replaceChildren(svg);
+}
+
+function legend(items) {
+  return h('div', { class: 'legend' }, items.map(([color, label, ghost]) => h('span', null, h('i', { class: `swatch${ghost ? ' ghost' : ''}`, style: `background:${color}` }), label)));
+}
+
+// ------------------------------------------------------------------ 2. epochs
+
+function renderEpochs() {
+  const root = document.getElementById('epochs');
+  const d = D();
+  const rows = d.epochs;
+  const sel = selectedEpoch();
+  const nothingYet = rows.every((r) => big(r.money) === 0n && big(r.served) === 0n);
+  const box = h('div', { class: 'chart' });
+  const head = h('div', { class: 'head' }, h('h2', null, 'Epochs over time'),
+    h('p', null, 'Money is what buyers paid for an epoch\'s subscriptions. Served value is what landed receipts counted for, after discounts. What no receipt counted for stays unused: it isn\'t refunded, it still pays the sellers through the pool. An epoch with no served value has no pool, and its money rolls forward to the next epoch that has one.'));
+  if (nothingYet) {
+    root.replaceChildren(head, h('div', { class: 'card' }, h('div', { class: 'empty' }, `Nothing to draw yet. A bar appears here for each epoch from ${d.clock?.firstEpoch ?? 'the first'} on, as soon as its first subscription is funded.`)));
+    return;
+  }
+  later(box, (b) => drawEpochChart(b, rows, sel));
+  const table = view.showEpochTable ? h('div', { class: 'scroll-x' }, h('table', null,
+    h('thead', null, h('tr', null, ['Epoch', 'Wallet value', 'Account cost', 'Served value', 'Unused', 'Rolled in', 'Pool', 'Rolled forward', 'Batches'].map((x) => h('th', null, x)))),
+    h('tbody', null, rows.map((r) => {
+      const empty = big(r.served) === 0n;
+      const out = empty && r.state === 'ended' && big(r.waitingAfter) > 0n;
+      return h('tr', { class: r.epoch === sel ? 'sel' : null },
+        h('td', null, r.epoch, r.state === 'current' ? h('span', { class: 'muted small' }, ' now') : r.state === 'ahead' ? h('span', { class: 'muted small' }, ' ahead') : ''),
+        h('td', null, T(r.wallet)), h('td', null, T(r.account)), h('td', null, T(r.served)),
+        h('td', null, big(r.money) > 0n ? pct(r.unusedShare, 0) : '–'),
+        h('td', null, big(r.rolledIn) > 0n ? T(r.rolledIn) : '–'),
+        h('td', null, r.state === 'current' && empty ? h('span', { class: 'muted' }, '0 so far') : T(r.pool)),
+        h('td', null, out ? T(r.waitingAfter) : '–'),
+        h('td', null, group(String(r.batches))));
+    })),
+    h('tfoot', null, h('tr', null, h('td', { class: 'small muted', colspan: 9, style: 'white-space:normal;border:0;text-align:left' }, 'All amounts in TRAC. Hover over a figure for every digit.'))))) : null;
+  root.replaceChildren(head, h('div', { class: 'card' },
+    legend([['var(--wallet)', 'Wallet value'], ['var(--account)', 'Account cost'], ['var(--rolled)', 'Rolled in from empty epochs'], ['var(--served)', 'Served value'], ['var(--wallet)', 'Not in a pool yet: empty or funded ahead', true]]),
+    box,
+    h('div', { style: 'margin-top:.4rem' }, h('button', { class: 'toggle', onclick: () => { view.showEpochTable = !view.showEpochTable; renderAll(); } }, view.showEpochTable ? 'Hide the numbers' : 'Show the numbers')),
+    table));
+}
+
+// ------------------------------------------------------------------ 3. sellers
+
+function scopeLine(row) {
+  if (!row) return null;
+  if (row.state === 'current') return h('span', { class: 'scope' }, `Epoch ${row.epoch}, in progress: these numbers change until it ends`);
+  if (row.state === 'ahead') return h('span', { class: 'scope' }, `Epoch ${row.epoch}, funded ahead: it has not started`);
+  if (row.state === 'upcoming') return h('span', { class: 'scope' }, `Epoch ${row.epoch}: it has not started`);
+  return h('span', { class: 'scope' }, `Epoch ${row.epoch}, ${utc(row.startsAt, 'day')}: final, an ended epoch's numbers can't change`);
+}
+
+function renderSellers() {
+  const root = document.getElementById('sellers');
+  const d = D();
+  const e = selectedEpoch();
+  const row = epochRow(e);
+  if (!d.clock || !row) { root.replaceChildren(); return; }
+  const lambdaBps = row.lambdaBps ?? d.params?.lambdaBps ?? null;
+  const lambda = lambdaBps === null ? null : lambdaBps / 10000;
+  const maxStake = d.params?.maximumStake ? trac(d.params.maximumStake, 0) : '10,000,000';
+  const explain = h('div', { class: 'explain' },
+    h('p', null, h('strong', null, 'How the pool is shared. '), 'A seller\'s QIF share blends two things: its sales share, which is its share of all served value, and its weighted share, the same with each batch\'s served value multiplied by the seller\'s stake factor. λ sets the blend.'),
+    h('span', { class: 'formula' }, 'QIF share = (1 − λ) × sales share + λ × weighted share'),
+    h('p', null, lambda === null ? 'λ is set on-chain: an epoch fixes its own λ when its first value counts. ' : `Here λ = ${lambda}${row.lambdaBps === null ? ', what this epoch takes when its first value counts' : ', fixed when the epoch\'s first value counted'}: ${pct(1 - lambda, 0)} of the pool follows sales, and ${pct(lambda, 0)} follows sales weighted by stake. `, `The stake factor is √(stake ÷ ${maxStake} TRAC). A stake with no sales earns nothing from the pool; stake only tilts the share of a seller that serves.`));
+
+  const sellerCards = row.sellers.map((x) => {
+    const seller = d.sellers.find((y) => y.id === x.id);
+    const color = sellerColor(x.id);
+    const hasValue = big(x.served) > 0n;
+    const diff = (x.qifShare - x.salesShare) * 100;
+    return h('div', { class: 'card' },
+      h('div', { class: 'who' }, h('i', { class: 'dot', style: `background:${color}` }), h('h3', null, seller.name), h('span', { class: 'side', tip: x.proofs ? `${x.proofs} valid proofs in this epoch` : null }, `node ${x.id}${x.proofs ? ` · ${x.proofs} proofs` : ''}`)),
+      h('div', { class: 'seller-body' },
+        h('div', null,
+          h('dl', { class: 'rows' },
+            h('dt', null, 'Served value'), h('dd', null, T(x.served)),
+            h('dt', { tip: 'What this epoch\'s batches applied: weighted value ÷ served value' }, 'Stake factor'), h('dd', null, hasValue ? h('span', { tip: `${(Number(big(x.factor18)) / 1e18).toFixed(18)}` }, factor(x.factor18)) : row.state === 'current' && seller.factor18 ? h('span', { tip: 'Its factor now, read live from the settlement. Each batch keeps the factor it landed with.' }, `${factor(seller.factor18)} now`) : '–'),
+            h('dt', null, 'Weighted value'), h('dd', null, T(x.weighted))),
+          hasValue ? h('div', { class: 'share' },
+            h('div', { class: 'share-row' }, h('span', { class: 'lab' }, 'Sales share'), h('div', { class: 'track' }, h('i', { style: `width:${x.salesShare * 100}%;background:${color};opacity:.45` })), h('span', { class: 'val' }, pct(x.salesShare))),
+            h('div', { class: 'share-row' }, h('span', { class: 'lab' }, 'QIF share'), h('div', { class: 'track' }, h('i', { style: `width:${x.qifShare * 100}%;background:${color}` })), h('span', { class: 'val' }, pct(x.qifShare))),
+            h('div', { class: 'delta' }, h('b', null, `${diff >= 0 ? '+' : '−'}${Math.abs(diff).toFixed(1)} points`), ' from stake: ', big(x.stakePart) >= 0n ? '+' : '', T(x.stakePart), ' TRAC against a split by sales alone.'))
+            : h('p', { class: 'cap', style: 'margin-top:.6rem' }, row.state === 'upcoming' || row.state === 'ahead' ? 'The epoch has not started.' : 'No served value in this epoch, so no share of the pool.')),
+        h('dl', { class: 'rows' },
+          h('dt', null, 'Gross from the pool'), h('dd', null, T(x.gross)),
+          h('dt', { tip: `Its share of the epoch's publishing rewards, by node score (${pct(x.scoreShare)})` }, 'Publishing share'), h('dd', null, T(x.publishing)),
+          h('dt', { tip: 'The operator fee in force at the end of the epoch, on both of the above' }, `Operator fee (${(x.feeBps / 100).toFixed(x.feeBps % 100 ? 1 : 0)}%)`), h('dd', null, big(x.fee) > 0n ? ['−', T(x.fee)] : '0'),
+          h('div', { class: 'rule' }),
+          h('dt', { class: 'total' }, 'Net to its stakers'), h('dd', { class: 'total' }, T(x.net)))));
+  });
+
+  const multi = d.epochs.filter((r) => r.state === 'ended' || r.state === 'current');
+  const chartBox = h('div', { class: 'chart' });
+  if (multi.some((r) => big(r.pool) > 0n)) later(chartBox, (b) => drawSellerChart(b, multi, e));
+  const table = view.showSellerTable ? h('div', { class: 'scroll-x' }, h('table', null,
+    h('thead', null, h('tr', null, ['Seller', 'Served value', 'Stake factor', 'Weighted value', 'Sales share', 'QIF share', 'From stake', 'Gross from the pool', 'Publishing share', 'Operator fee', 'Net to its stakers'].map((x) => h('th', null, x)))),
+    h('tbody', null, row.sellers.map((x) => h('tr', null,
+      h('td', null, h('i', { class: 'swatch', style: `background:${sellerColor(x.id)};margin-right:.35rem` }), sellerName(x.id)),
+      h('td', null, T(x.served)), h('td', null, factor(x.factor18)), h('td', null, T(x.weighted)),
+      h('td', null, pct(x.salesShare)), h('td', null, pct(x.qifShare)),
+      h('td', null, big(x.served) > 0n ? `${x.qifShare >= x.salesShare ? '+' : '−'}${Math.abs((x.qifShare - x.salesShare) * 100).toFixed(1)} pts` : '–'),
+      h('td', null, T(x.gross)), h('td', null, T(x.publishing)), h('td', null, T(x.fee)), h('td', null, T(x.net))))))) : null;
+
+  root.replaceChildren(
+    h('div', { class: 'head' }, h('h2', null, 'Sellers', scopeLine(row))),
+    d.sellers.length === 0
+      ? h('div', { class: 'card' }, h('div', { class: 'empty' }, 'No sellers known yet. They appear when the public file is out, or when their first batch lands.'))
+      : h('div', { class: 'stack', style: 'gap:.9rem' },
+        h('div', { class: 'card' }, explain),
+        multi.some((r) => big(r.pool) > 0n) ? h('div', { class: 'card' }, h('h3', { style: 'margin-bottom:.35rem' }, 'Gross from the pool, epoch by epoch'), legend(d.sellers.map((x) => [sellerColor(x.id), x.name])), chartBox) : null,
+        h('div', { class: 'grid-4' }, sellerCards),
+        h('div', null, h('button', { class: 'toggle', onclick: () => { view.showSellerTable = !view.showSellerTable; renderAll(); } }, view.showSellerTable ? 'Hide the table' : 'Compare in a table')),
+        table ? h('div', { class: 'card' }, table) : null));
+}
+
+// ------------------------------------------------------------------ 4. buyers
+
+function renderBuyers() {
+  const root = document.getElementById('buyers');
+  const d = D();
+  const e = selectedEpoch();
+  const row = epochRow(e);
+  if (!d.clock || !row) { root.replaceChildren(); return; }
+  const cards = d.buyers.map((b) => {
+    const sub = row.subs.find((x) => x.buyer === b.address);
+    const discount = sub ? sub.discountBps : null;
+    const chipText = b.pays === 'account' ? `account${b.accountId ? ` ${b.accountId}` : ''}${discount ? ` · ${discount / 100}% discount` : ''}` : 'wallet';
+    const header = h('div', { class: 'who' }, h('h3', null, b.name), h('span', { class: 'chip', tip: b.pays === 'account' ? 'Pays from a Conviction Account\'s allowance, at its discount tier, under a grant from the account\'s owner.' : 'Pays from its wallet, at no discount.' }, chipText), b.listed ? null : h('span', { class: 'chip', tip: 'This buyer is not in the scenario\'s public file.' }, 'unlisted'));
+    const grant = b.grant;
+    const events = (row.buyerEvents ?? []).filter((x) => x.buyer === b.address).map((x) => h('div', { class: 'note' },
+      x.t === 'removed'
+        ? [status('serious', `Removed ${utc(x.at)} UTC`, 'The account\'s owner ended this grant. Requests issued before it still land until the epoch ends.'), ' ', txLink(x.tx)]
+        : [status('good', `Added ${utc(x.at)} UTC`, 'The account\'s owner and the buyer both consented to a new grant.'), ' ', txLink(x.tx)]));
+    const grantBlock = grant ? h('div', { class: 'note' },
+      h('div', { class: 'budget', style: 'margin-top:0' },
+        h('div', { class: 'row' }, h('span', { class: 'name', tip: 'The most one subscription may cost, top-ups included, as the grant stands now.' }, 'Grant limit'), h('span', { class: 'amt' }, sub ? [T(sub.cost), ' of '] : null, T(grant.maxCostPerEpoch))),
+        sub ? h('div', { class: 'track thin', style: 'margin-top:.15rem' }, h('i', { style: `width:${Math.min(100, (toNum(sub.cost) / Math.max(1e-9, toNum(grant.maxCostPerEpoch))) * 100)}%;background:var(--account)` })) : null),
+      h('div', { style: 'margin-top:.2rem' },
+        grant.revokedAt ? `Revoked ${utc(grant.revokedAt)} UTC` : `Expires ${utc(grant.expiresAt, 'day')}`,
+        b.buyersOnAccount ? ` · ${b.buyersOnAccount} buyer${b.buyersOnAccount === 1 ? '' : 's'} on the account` : '')) : b.pays === 'account' ? h('div', { class: 'note' }, 'No grant on-chain yet.') : null;
+    if (!sub) {
+      return h('div', { class: 'card' }, header, h('p', { class: 'cap', style: 'margin-top:.5rem' }, row.state === 'upcoming' ? 'The epoch has not started.' : 'No subscription for this epoch.'), events, grantBlock);
+    }
+    const usedShare = sub.usedShare;
+    return h('div', { class: 'card' }, header,
+      h('div', { class: 'buyer-top' },
+        h('div', { class: 'figure' }, h('span', { class: 'lab' }, 'Funded value'), h('span', { class: 'val' }, T(sub.value))),
+        h('div', { class: 'figure' }, h('span', { class: 'lab' }, 'Cost after discount'), h('span', { class: 'val' }, T(sub.cost)))),
+      h('div', { class: 'budget' },
+        h('div', { class: 'row' }, h('span', { class: 'name' }, 'Budgets used'), h('span', { class: 'amt' }, h('b', null, pct(usedShare, 0)))),
+        h('div', { class: 'track', style: 'margin-top:.15rem' }, h('i', { style: `width:${usedShare * 100}%;background:var(--ink-2)` }))),
+      sub.budgets.map((x) => h('div', { class: 'budget' },
+        h('div', { class: 'row' }, h('span', { class: 'name', tip: x.service }, serviceLabel(x.service)), h('span', { class: 'amt' }, T(x.used), ' of ', T(x.value))),
+        h('div', { class: 'track thin', style: 'margin-top:.12rem', tip: x.bySeller.length ? () => tipTable('Counted, by seller', x.bySeller.map((y) => [sellerName(y.id), trac(y.counted)])) : null },
+          x.bySeller.map((y) => h('i', { style: `width:${(toNum(y.counted) / Math.max(1e-9, toNum(x.value))) * 100}%;background:${sellerColor(y.id)}` }))))),
+      sub.topUps.length ? h('div', { class: 'note' }, h('b', null, `${sub.topUps.length} top-up${sub.topUps.length === 1 ? '' : 's'}: `), sub.topUps.map((t, i) => [i ? ', ' : '', '+', T(t.value), ` at ${utc(t.at, 'time')} `, txLink(t.tx)])) : h('div', { class: 'note' }, 'No top-ups'),
+      events,
+      grantBlock);
+  });
+  root.replaceChildren(
+    h('div', { class: 'head' }, h('h2', null, 'Buyers', scopeLine(row)), h('p', null, 'A buyer funds one subscription per epoch, with a service budget for each service it wants. Funded value is what the budgets hold; cost is what it paid after its discount. Used is the face value of receipts counted against the budgets. Bars inside a budget show which seller counted what.')),
+    d.buyers.length === 0
+      ? h('div', { class: 'card' }, h('div', { class: 'empty' }, 'No buyers known yet. They appear when the public file is out, or when their first subscription is funded.'))
+      : h('div', { class: 'grid-3' }, cards));
+}
+
+// ------------------------------------------------------------------ 5. services
+
+function renderServices() {
+  const root = document.getElementById('services');
+  const d = D();
+  const e = selectedEpoch();
+  const row = epochRow(e);
+  if (!d.clock || !row) { root.replaceChildren(); return; }
+  const services = row.services;
+  const body = services.length === 0
+    ? h('div', { class: 'card' }, h('div', { class: 'empty' }, d.services.length ? `No service budgets in epoch ${e}${row.state === 'upcoming' ? ' yet' : ''}.` : 'No services known yet.'))
+    : h('div', { class: 'stack', style: 'gap:.9rem' }, services.map((x) => {
+      const svc = serviceOf(x.service);
+      const unit = svc?.unit ?? 'unit';
+      const total = toNum(x.counted);
+      return h('div', { class: 'card service' },
+        h('div', { class: 'who' }, h('h3', null, svc?.label ?? shortHash(x.service)), h('span', { class: 'chip' }, svc?.cls === 1 ? `inference, per ${unit}` : svc?.cls === 2 ? `query, per ${unit}` : `per ${unit}`)),
+        h('div', { class: 'stats' },
+          stat('Counted value', [T(x.counted), h('span', { class: 'unit' }, 'TRAC')], 'at face value, against the budgets'),
+          stat('Served value', [T(x.served), h('span', { class: 'unit' }, 'TRAC')], 'after discounts'),
+          stat('Receipts', group(String(x.receipts)), `${compact(x.units)} ${x.units === '1' ? unit : plural(unit)}${x.unitsComplete ? '' : ' (of those decoded)'}`),
+          stat('Average price', x.avgPrice ? [price(x.avgPrice), h('span', { class: 'unit' }, 'TRAC')] : '–', `per ${unit}`)),
+        h('div', { class: 'budget', style: 'margin-top:0' },
+          h('div', { class: 'row' }, h('span', { class: 'name' }, 'Its budgets, all buyers'), h('span', { class: 'amt' }, T(x.used), ' of ', T(x.budget), ' used')),
+          h('div', { class: 'track', style: 'margin-top:.15rem' }, x.bySeller.map((y) => h('i', { style: `width:${(toNum(y.counted) / Math.max(1e-9, toNum(x.budget))) * 100}%;background:${sellerColor(y.id)}`, tip: `${sellerName(y.id)}: ${trac(y.counted)} TRAC` })))),
+        x.bySeller.length ? h('div', { class: 'scroll-x', style: 'margin-top:.1rem' }, h('table', null,
+          h('thead', null, h('tr', null, ['By seller', 'Receipts', `${unit[0].toUpperCase()}${plural(unit).slice(1)}`, 'Counted value', 'Share', 'Average price'].map((t) => h('th', null, t)))),
+          h('tbody', null, x.bySeller.map((y) => h('tr', null,
+            h('td', null, h('i', { class: 'swatch', style: `background:${sellerColor(y.id)};margin-right:.35rem` }), sellerName(y.id)),
+            h('td', null, group(String(y.receipts))),
+            h('td', null, group(y.units)),
+            h('td', null, T(y.counted)),
+            h('td', null, total > 0 ? pct(toNum(y.counted) / total, 0) : '–'),
+            h('td', null, y.avgPrice ? price(y.avgPrice) : '–')))))) : null);
+    }));
+  root.replaceChildren(
+    h('div', { class: 'head' }, h('h2', null, 'Services', scopeLine(row)), h('p', null, 'What was served, service by service, and by whom. Units and prices come from each batch\'s calldata, because the events carry only value. A price is what the buyer signed for that call.')),
+    body);
+}
+function stat(label, value, cap) {
+  return h('div', { class: 'figure' }, h('span', { class: 'lab' }, label), h('span', { class: 'val' }, value), cap ? h('span', { class: 'cap small' }, cap) : null);
+}
+
+// ------------------------------------------------------------------ 6. feed
+
+const FAULT_TEXT = {
+  OutsideEpoch: 'missed the deadline: the subscription\'s epoch had ended',
+  BelowMinCounted: 'the budget had less left than the batch\'s minimum',
+  InactiveGrant: 'issued after the grant ended',
+  DuplicateNonce: 'a receipt in it had already landed',
+  BadSignature: 'a request was not signed by the subscription\'s key',
+  OutsideTime: 'a receipt\'s times were outside the rules',
+  PriceOutOfRange: 'a price was above the budget\'s cap',
+  BadArithmetic: 'a receipt\'s value did not match units times price',
+  ZeroResultCommitment: 'a receipt had no result commitment',
+  UnknownSubscription: 'no such subscription',
+  UnknownBudget: 'no such budget',
+  EmptyGroup: 'an empty group',
+  NoNodeScore: 'the seller has no proof in this epoch yet',
+  NodeNotInShardingTable: 'the seller is not in the sharding table',
+  QueryInferencePaused: 'the pool is paused',
+  QueryInferenceNotActive: 'before the activation epoch',
+  GrantRevoked: 'the buyer\'s grant was revoked',
+  GrantExpired: 'the buyer\'s grant has ended',
+  LimitExceeded: 'above the grant\'s limit',
+  SubscriptionAlreadyFunded: 'this epoch is already funded',
+};
+const FILTERS = [
+  ['all', 'All', () => true],
+  ['batches', 'Batches', (x) => x.t === 'batch'],
+  ['partial', 'Partial counts', (x) => x.t === 'batch' && x.partial],
+  ['funding', 'Funding', (x) => x.t === 'funded' || x.t === 'top-up'],
+  ['grants', 'Grants', (x) => ['buyer-added', 'buyer-removed', 'limits', 'spending'].includes(x.t)],
+  ['claims', 'Claims', (x) => x.t === 'claim'],
+  ['refused', 'Refused', (x) => x.t === 'refused'],
+];
+function epochAt(ts) {
+  const c = D().clock;
+  return ts < c.startTime ? 1 : Math.floor((ts - c.startTime) / c.epochLength) + 1;
+}
+
+function feedRow(x) {
+  const when = h('span', { class: 'when', 'data-ago': x.at, tip: utc(x.at, 'full') }, ago(now() - x.at));
+  const line = (tag, extra) => h('div', { class: 'feed-line' }, h('span', { class: 'tag' }, tag), extra, when);
+  const tail = h('span', null, txLink(x.tx));
+  switch (x.t) {
+    case 'batch': {
+      const share = big(x.value) > 0n ? toNum(x.counted) / toNum(x.value) : 1;
+      const names = [...new Set(x.groups.map((g) => (g.buyer ? buyerName(g.buyer) : 'a buyer')))];
+      const groupLine = (g) => h('div', { class: `feed-group${g.partial ? ' partial' : ''}` },
+        h('span', { class: 'name' }, g.buyer ? buyerName(g.buyer) : 'a buyer', g.service ? ` · ${serviceLabel(g.service)}` : ''),
+        h('span', { class: 'amt' }, g.partial ? [T(g.counted), ' of ', T(g.value)] : T(g.value)));
+      const partials = x.groups.filter((g) => g.partial);
+      return h('li', { class: `feed-row${x.partial ? ' partial' : ''}` },
+        line('Batch', x.partial ? status('warning', 'Partial count') : null),
+        h('div', { class: 'feed-main' }, h('i', { class: 'swatch', style: `background:${sellerColor(x.seller)};margin-right:.35rem` }), sellerName(x.seller)),
+        h('div', { class: 'feed-sub' },
+          h('span', { class: 'feed-counted' }, 'Counted ', h('b', null, T(x.counted)), ' of ', T(x.value), x.partial ? ` (${pct(share, 0)})` : '', ` · ${x.receipts} receipt${x.receipts === 1 ? '' : 's'}`),
+          tail),
+        x.partial ? h('div', { class: 'track thin', style: 'margin:.2rem 0' }, h('i', { style: `width:${share * 100}%;background:var(--ink-2)` })) : null,
+        partials.map(groupLine),
+        x.groups.length > 1 || !x.partial ? h('details', { class: 'feed-groups', open: view.openBatches.has(x.tx), ontoggle: (e) => { if (e.target.open) view.openBatches.add(x.tx); else view.openBatches.delete(x.tx); } },
+          h('summary', null, `${x.groups.length} group${x.groups.length === 1 ? '' : 's'}: `, names.slice(0, 2).join(', '), names.length > 2 ? ` +${names.length - 2}` : ''),
+          x.groups.map(groupLine)) : null);
+    }
+    case 'funded':
+      return h('li', { class: 'feed-row' }, line('Subscription funded'),
+        h('div', { class: 'feed-main' }, buyerName(x.buyer), ` for epoch ${x.epoch}`, x.accountId !== '0' ? ` · account ${x.accountId}` : ' · wallet'),
+        h('div', { class: 'feed-sub' }, h('span', null, 'Value ', T(x.value), big(x.cost) !== big(x.value) ? [', cost ', T(x.cost)] : null, ` · ${x.budgets} budget${x.budgets === 1 ? '' : 's'}`), tail));
+    case 'top-up':
+      return h('li', { class: 'feed-row' }, line('Top-up'),
+        h('div', { class: 'feed-main' }, buyerName(x.buyer)),
+        h('div', { class: 'feed-sub' }, h('span', null, '+', T(x.value), big(x.cost) !== big(x.value) ? [', cost ', T(x.cost)] : null), tail));
+    case 'buyer-added':
+      return h('li', { class: 'feed-row' }, line('Buyer added'),
+        h('div', { class: 'feed-main' }, buyerName(x.buyer), ` to account ${x.accountId}`),
+        h('div', { class: 'feed-sub' }, h('span', null, 'Grant limit ', T(x.limit), `, expires ${utc(x.expiresAt, 'day')}`), tail));
+    case 'buyer-removed':
+      return h('li', { class: 'feed-row' }, line('Buyer removed', status('serious', 'Grant ended')),
+        h('div', { class: 'feed-main' }, buyerName(x.buyer), ` from account ${x.accountId}`),
+        h('div', { class: 'feed-sub' }, h('span', null, 'Requests issued from now on are refused'), tail));
+    case 'limits':
+      return h('li', { class: 'feed-row' }, line('Grant changed'),
+        h('div', { class: 'feed-main' }, buyerName(x.buyer), ` on account ${x.accountId}`),
+        h('div', { class: 'feed-sub' }, h('span', null, 'Limit ', T(x.limit), `, expires ${utc(x.expiresAt, 'day')}`), tail));
+    case 'spending':
+      return h('li', { class: 'feed-row' }, line(x.enabled ? 'Account opted in' : 'Account opted out'),
+        h('div', { class: 'feed-sub' }, h('span', null, `Account ${x.accountId}`), tail));
+    case 'claim':
+      return h('li', { class: 'feed-row' }, line('Claim'),
+        h('div', { class: 'feed-main' }, x.node ? `Staker on ${sellerName(x.node)}` : 'A staker', ` · position ${x.tokenId}`),
+        h('div', { class: 'feed-sub' }, h('span', null, 'Claimed ', T(x.amount)), tail));
+    case 'refused':
+      return h('li', { class: 'feed-row refused' }, line(x.fn === 'submitReceiptBatch' ? 'Batch' : 'Transaction', status('critical', 'Refused')),
+        h('div', { class: 'feed-main' }, x.seller ? sellerName(x.seller) : x.from ? shortHash(x.from) : 'A sender', x.groups?.[0]?.buyer ? ` for ${buyerName(x.groups[0].buyer)}` : ''),
+        h('div', { class: 'feed-sub' },
+          h('span', null, FAULT_TEXT[x.fault] ?? (x.fault ? x.fault : 'reverted; the chain keeps no reason'), x.lateBy !== undefined ? ` (${x.lateBy}s late)` : '', big(x.value) > 0n ? [' · worth ', T(x.value)] : null),
+          tail));
+    default:
+      return h('li', { class: 'feed-row' }, line(x.t));
+  }
+}
+
+function renderFeed() {
+  const root = document.getElementById('feed');
+  const d = D();
+  if (!d.clock) { root.replaceChildren(); return; }
+  const oldList = root.querySelector('.feed-list');
+  const scroll = oldList ? oldList.scrollTop : 0;
+  const rule = FILTERS.find((f) => f[0] === view.feedFilter)?.[2] ?? (() => true);
+  const sel = selectedEpoch();
+  const rows = d.feed.filter(rule).filter((x) => !view.feedThisEpoch || epochAt(x.at) === sel);
+  const list = rows.length
+    ? h('ul', { class: 'feed-list' }, rows.slice(0, view.feedLimit).map(feedRow),
+      rows.length > view.feedLimit ? h('li', { class: 'more' }, h('button', { class: 'toggle', onclick: () => { view.feedLimit += 100; renderFeed(); } }, `Show more (${rows.length - view.feedLimit} left)`)) : null)
+    : h('div', { class: 'empty', style: 'padding:1rem' }, d.feed.length ? 'Nothing of this kind.' : `Nothing on-chain yet. From epoch ${d.clock.firstEpoch} on, every funding, batch, removal and claim appears here, newest first, with its transaction.`);
+  root.replaceChildren(h('div', { class: 'card feed-card' },
+    h('div', { class: 'feed-top' },
+      h('h2', null, 'Live feed'),
+      h('div', { class: 'cap' }, 'Newest first. Each row links to its transaction. Partial counts and refusals stand out.'),
+      h('div', { class: 'chips' }, FILTERS.map(([id, label]) => h('button', { 'aria-pressed': view.feedFilter === id ? 'true' : 'false', onclick: () => { view.feedFilter = id; view.feedLimit = 50; renderFeed(); } }, label)),
+        h('button', { 'aria-pressed': view.feedThisEpoch ? 'true' : 'false', onclick: () => { view.feedThisEpoch = !view.feedThisEpoch; view.feedLimit = 50; renderFeed(); } }, `Epoch ${sel} only`))),
+    list));
+  const newList = root.querySelector('.feed-list');
+  if (newList) newList.scrollTop = scroll;
+}
+
+// ------------------------------------------------------------------ 7. schedule
+
+const KIND_TEXT = {
+  baseline: 'A normal day',
+  'top-up': 'A top-up',
+  'remove-buyer': 'A buyer removed mid-epoch',
+  'add-buyer': 'The buyer added again',
+  race: 'A race for a budget',
+  'held-batch': 'A batch that misses the deadline',
+  'funding-only': 'An epoch with only funding',
+};
+const STATUS_TEXT = {
+  seen: ['good', 'Seen on-chain'],
+  scheduled: ['neutral', 'Scheduled'],
+  waiting: ['warning', 'Its time has come, not seen yet'],
+  'not-seen': ['serious', 'Not seen on-chain'],
+  'no-trace': ['neutral', 'No on-chain trace'],
+  differs: ['serious', 'Differs from the schedule'],
+};
+function renderPart(part) {
+  if (typeof part === 'string') return part;
+  if (part.wei !== undefined) return h('span', null, T(part.wei), ' TRAC');
+  if (part.t !== undefined) return h('span', { tip: utc(part.t, 'full') }, `${utc(part.t)} UTC`);
+  if (part.tx !== undefined) return txLink(part.tx);
+  return '';
+}
+function renderScenario() {
+  const root = document.getElementById('scenario');
+  const d = D();
+  if (!d.clock) { root.replaceChildren(); return; }
+  const rows = d.scenario;
+  const body = rows.length === 0
+    ? h('div', { class: 'card' }, h('div', { class: 'empty' }, 'The schedule comes from the scenario\'s public file, which is not out yet.'))
+    : h('div', { class: 'card sched' }, rows.map((x) => {
+      const [kind, text] = STATUS_TEXT[x.status] ?? ['neutral', x.status];
+      return h('div', { class: 'sched-row' },
+        h('div', null,
+          h('div', { class: 'sched-when' }, `Epoch ${x.epoch} · ${x.hasTime ? `${utc(x.scheduledAt)} UTC` : utc(x.scheduledAt, 'day')}`),
+          h('div', { class: 'sched-what' }, KIND_TEXT[x.kind] ?? x.kind, x.who && x.who !== 'all' ? h('span', { class: 'chip', style: 'margin-left:.4rem' }, x.who) : null),
+          h('div', { class: 'sched-note' }, x.note)),
+        h('div', { class: 'sched-chain' },
+          h('div', null, status(kind, text), x.status === 'scheduled' && x.scheduledAt > now() ? h('span', { class: 'cap', style: 'margin-left:.5rem' }, 'in ', h('span', { 'data-countdown': x.scheduledAt }, span(x.scheduledAt - now()))) : null),
+          x.parts.length ? h('div', null, x.parts.map((p, i) => [i && !(typeof p === 'string' && /^[.,]/.test(p)) ? ' ' : '', renderPart(p)])) : null));
+    }));
+  root.replaceChildren(
+    h('div', { class: 'head' }, h('h2', null, 'Schedule against the chain'), h('p', null, 'On the left, what the scenario planned and when. On the right, what the contracts recorded. The right side is read from the chain alone, so it can disagree with the left.')),
+    body);
+}
+
+// ------------------------------------------------------------------ 8. stakers
+
+function renderStakers() {
+  const root = document.getElementById('stakers');
+  const d = D();
+  const e = selectedEpoch();
+  const row = epochRow(e);
+  if (!d.clock || !row) { root.replaceChildren(); return; }
+  const rows = d.epochs.filter((r) => r.state === 'ended' || r.state === 'current');
+  const head = h('div', { class: 'head' }, h('h2', null, 'Stakers', scopeLine(row)), h('p', null, 'What a seller\'s stakers earn: the node\'s share of the publishing rewards, by node score, plus its gross from the marketplace pool, less the operator fee. These are the numbers a claim pays; a claim compounds into the position\'s stake.'));
+  if (!rows.length) {
+    root.replaceChildren(head, h('div', { class: 'card' }, h('div', { class: 'empty' }, `Nothing yet. The pool joins staking rewards from epoch ${d.clock.firstEpoch} on.`)));
+    return;
+  }
+  const publishingOf = (r) => r.sellers.reduce((a, x) => a + big(x.publishing), 0n);
+  const poolOf = (r) => r.sellers.reduce((a, x) => a + big(x.gross), 0n);
+  const sumPublishing = rows.reduce((a, r) => a + publishingOf(r), 0n);
+  const sumPool = rows.reduce((a, r) => a + poolOf(r), 0n);
+  const addedShare = sumPublishing > 0n ? Number((sumPool * 100000n) / sumPublishing) / 100000 : null;
+  const left = h('div', { class: 'chart' });
+  const right = h('div', { class: 'chart' });
+  later(left, (b) => drawSingleSeries(b, rows, e, {
+    value: publishingOf, color: 'var(--publishing)', label: 'Publishing share per epoch',
+    tip: (r) => tipTable(`Epoch ${r.epoch}`, [['From publishing', trac(publishingOf(r))], ['From the pool', trac(poolOf(r))]], 'Click to look at this epoch.'),
+  }));
+  later(right, (b) => drawSingleSeries(b, rows, e, {
+    value: poolOf, color: 'var(--pool)', label: 'Pool share per epoch',
+    tip: (r) => tipTable(`Epoch ${r.epoch}`, [['From publishing', trac(publishingOf(r))], ['From the pool', trac(poolOf(r))]], 'Click to look at this epoch.'),
+  }));
+  const claims = d.claims ?? [];
+  root.replaceChildren(head,
+    h('div', { class: 'stack', style: 'gap:.9rem' },
+      h('div', { class: 'card' },
+        h('div', { class: 'stats' },
+          stat('From publishing, all epochs', [T(sumPublishing), h('span', { class: 'unit' }, 'TRAC')], 'before the operator fee'),
+          stat('Added by the pool', [T(sumPool), h('span', { class: 'unit' }, 'TRAC')], addedShare === null ? '' : `on top of that: +${(addedShare * 100).toFixed(addedShare < .01 ? 2 : 1)}%`))),
+      h('div', { class: 'grid-2' },
+        h('div', { class: 'card' }, h('h3', null, 'From publishing'), h('div', { class: 'cap', style: 'margin-bottom:.3rem' }, 'TRAC per epoch, the sum of the sellers\' publishing shares'), left),
+        h('div', { class: 'card' }, h('h3', null, 'Added by the pool'), h('div', { class: 'cap', style: 'margin-bottom:.3rem' }, 'TRAC per epoch, on its own scale'), right)),
+      h('div', { class: 'card' },
+        h('h3', { style: 'margin-bottom:.1rem' }, `Epoch ${e}, seller by seller`),
+        h('div', { class: 'scroll-x' }, h('table', null,
+          h('thead', null, h('tr', null, ['Seller', 'From publishing', 'From the pool', 'Pool\'s part', 'Operator fee', 'Net to its stakers', 'Split on-chain'].map((x) => h('th', null, x)))),
+          h('tbody', null, row.sellers.map((x) => {
+            const total = big(x.publishing) + big(x.gross);
+            return h('tr', null,
+              h('td', null, h('i', { class: 'swatch', style: `background:${sellerColor(x.id)};margin-right:.35rem` }), sellerName(x.id)),
+              h('td', null, T(x.publishing)), h('td', null, T(x.gross)),
+              h('td', null, total > 0n ? pct(Number((big(x.gross) * 100000n) / total) / 100000, big(x.gross) * 100n < total ? 2 : 1) : '–'),
+              h('td', null, T(x.fee)), h('td', null, T(x.net)),
+              h('td', { tip: 'The first claim on an ended epoch fixes its split between the operator fee and the stakers.' }, x.splitDone ? 'Yes, by a claim' : row.state === 'ended' ? 'Not claimed yet' : '–'));
+          }))))),
+      h('div', { class: 'card' },
+        h('h3', null, 'Claims made'),
+        h('div', { class: 'cap' }, 'A claim pays every epoch its position has not claimed yet, up to the last ended one, so one amount can\'t be split by epoch.'),
+        claims.length ? h('div', { class: 'scroll-x' }, h('table', null,
+          h('thead', null, h('tr', null, ['When', 'Position', 'On', 'Amount', 'Transaction'].map((x) => h('th', null, x)))),
+          h('tbody', null, claims.slice(0, 12).map((x) => h('tr', null,
+            h('td', { tip: utc(x.at, 'full') }, `${utc(x.at)} UTC`), h('td', null, x.tokenId), h('td', null, x.node ? sellerName(x.node) : '–'), h('td', null, T(x.amount)), h('td', null, txLink(x.tx))))))) : h('div', { class: 'empty', style: 'padding-bottom:.2rem' }, 'No claim since the first epoch yet.'),
+        d.claimsTotal > 12 ? h('div', { class: 'cap', style: 'margin-top:.3rem' }, `The newest 12 of ${d.claimsTotal}.`) : null)));
+}
+
+// ------------------------------------------------------------------ about
+
+function renderAbout() {
+  const root = document.getElementById('about');
+  const d = D();
+  const checks = d.checks ?? [];
+  const failed = checks.filter((c) => c.ok === false);
+  const pending = checks.filter((c) => c.ok === null);
+  const labels = { repository: 'the scenario\'s public file in the repository', file: 'a copy of the scenario\'s public file', 'last good copy': 'the last good copy of the scenario\'s public file', none: 'no public file yet: on-chain ids only' };
+  const contracts = Object.entries(d.contracts ?? {}).filter(([k]) => ['QueryInferenceSettlement', 'QueryInferenceStorage', 'ServiceSubscriptions', 'ServiceSubscriptionsWallet', 'ServiceSubscriptionsStorage', 'StakingKPI', 'StakingV10'].includes(k));
+  root.replaceChildren(
+    h('div', { class: 'head' }, h('h2', null, 'Where these numbers come from')),
+    h('div', { class: 'card foot' },
+      h('div', null,
+        h('h3', null, 'Read from the chain'),
+        h('ul', null,
+          h('li', null, 'Every figure comes from contract views on Base Sepolia, read together at one block, starting from the Hub ', d.network?.hub ? addrLink(d.network.hub) : null, '.'),
+          h('li', null, 'The events behind the feed come from Blockscout; units and prices from each batch\'s calldata.'),
+          h('li', null, 'An ended epoch\'s numbers are final, so they are read once.'),
+          h('li', null, 'Names come from ', labels[d.public?.source] ?? labels.none, '. Nothing else comes from the scripts.'))),
+      h('div', null,
+        h('h3', null, 'The numbers checked against each other'),
+        h('div', { style: 'margin:.3rem 0' }, checks.length === 0
+          ? status('neutral', 'Nothing to check yet')
+          : failed.length ? status('critical', `${failed.length} of ${checks.length} checks disagree`)
+          : pending.length ? status('warning', `${checks.length - pending.length} of ${checks.length} agree, ${pending.length} catching up`, 'The events are read a moment before the views, so at the head of the chain they can trail by a few blocks.')
+          : status('good', `All ${checks.length} checks agree`)),
+        failed.length ? h('ul', null, failed.slice(0, 6).map((c) => h('li', null, `Epoch ${c.epoch}: ${c.detail}`))) : h('div', null, 'For each epoch: the pool against the rollover rule, the sellers\' values against the totals, the events against the storage, and the gross against the pool.'),
+        contracts.length ? h('h3', { style: 'margin-top:.7rem' }, 'Contracts') : null,
+        contracts.length ? h('ul', null, contracts.map(([name, a]) => h('li', null, `${name}: `, addrLink(a)))) : null)));
+}
+
+// ------------------------------------------------------------------ everything
+
+function renderBanner() {
+  const root = document.getElementById('banner');
+  const d = D();
+  const items = [];
+  if (SNAPSHOT) items.push(h('div', { class: 'banner' }, `A snapshot of the chain at ${utc(d.generatedAt, 'full')}. It does not update.`));
+  else {
+    const f = freshness();
+    if (f.kind === 'critical' || f.kind === 'serious') items.push(h('div', { class: `banner ${f.kind === 'critical' ? 'critical' : ''}` }, h('strong', null, f.text, '. '), 'What you see is the last good data. ', f.detail));
+    if (d.params?.paused) items.push(h('div', { class: 'banner critical' }, h('strong', null, 'The pool is paused on-chain. '), 'No subscription is funded and no batch lands while it is.'));
+  }
+  root.replaceChildren(...items);
+}
+
+function renderAll() {
+  if (!D()) return;
+  chartJobs.length = 0;
+  renderBanner();
+  renderBar();
+  renderNow();
+  renderEpochs();
+  renderSellers();
+  renderBuyers();
+  renderServices();
+  renderScenario();
+  renderStakers();
+  renderAbout();
+  renderFeed();
+  for (const j of chartJobs) j.draw(j.box);
+  hideTip();
+  if (D().clock) document.title = `Epoch ${D().clock.currentEpoch} · Marketplace on Base Sepolia`;
+}
+
+// Seconds tick by themselves; everything else waits for new data.
+function tick() {
+  if (!D()?.clock) return;
+  const t = now();
+  document.querySelectorAll('[data-countdown]').forEach((el) => { el.textContent = span(Number(el.dataset.countdown) - t); });
+  document.querySelectorAll('[data-ago]').forEach((el) => { el.textContent = ago(t - Number(el.dataset.ago)); });
+  document.querySelectorAll('[data-read-age]').forEach((el) => { el.textContent = `Read ${ago(t - Number(el.dataset.readAge))}`; });
+  document.querySelectorAll('[data-progress-from]').forEach((el) => {
+    const a = Number(el.dataset.progressFrom);
+    const b = Number(el.dataset.progressTo);
+    el.style.width = `${Math.min(100, ((t - a) / (b - a)) * 100).toFixed(2)}%`;
+  });
+  const pill = document.getElementById('fresh-pill');
+  if (pill) {
+    const f = freshness();
+    if (pill.dataset.was !== f.text) { pill.dataset.was = f.text; pill.replaceChildren(status(f.kind, f.text, f.detail)); }
+  }
+}
+
+async function load() {
+  try {
+    const res = await fetch('data.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`data.json answered ${res.status}`);
+    const next = await res.json();
+    const changed = !view.data || next.generatedAt !== view.data.generatedAt;
+    const hadError = !!view.fetchError;
+    view.data = next;
+    view.fetchError = null;
+    if (changed || hadError) renderAll();
+  } catch (e) {
+    view.fetchError = e.message;
+    if (view.data) { renderBanner(); renderBar(); }
+    else document.getElementById('now').replaceChildren(h('div', { class: 'card', style: 'grid-column:1/-1' }, h('div', { class: 'eyebrow' }, 'No data yet'), h('p', null, 'This page could not read data.json. It tries again every minute.')));
+  }
+}
+
+// ------------------------------------------------------------------ the one tooltip
+
+const tipEl = document.getElementById('tip');
+function hideTip() { tipEl.hidden = true; tipEl.replaceChildren(); tipEl._for = null; }
+function placeTip(x, y) {
+  const r = tipEl.getBoundingClientRect();
+  const left = Math.min(Math.max(8, x + 14), window.innerWidth - r.width - 8);
+  const top = y + r.height + 26 > window.innerHeight ? Math.max(8, y - r.height - 12) : y + 18;
+  tipEl.style.left = `${left}px`;
+  tipEl.style.top = `${top}px`;
+}
+function tipTarget(node) {
+  return node?.closest?.('[data-tip], .tipped') ?? null;
+}
+function showTip(target, x, y) {
+  if (tipEl._for !== target) {
+    tipEl._for = target;
+    const content = target._tip ? target._tip() : target.getAttribute('data-tip');
+    tipEl.replaceChildren(content?.nodeType ? content : document.createTextNode(String(content ?? '')));
+    tipEl.hidden = false;
+  }
+  placeTip(x, y);
+}
+document.addEventListener('pointermove', (e) => {
+  if (e.pointerType === 'touch') return;
+  const t = tipTarget(e.target);
+  if (t) showTip(t, e.clientX, e.clientY);
+  else if (!tipEl.hidden) hideTip();
+});
+document.addEventListener('click', (e) => {
+  const t = tipTarget(e.target);
+  if (t && !t.closest('a, button, .hit')) { const b = t.getBoundingClientRect(); showTip(t, b.left, b.bottom); e.stopPropagation(); }
+  else hideTip();
+});
+document.addEventListener('focusin', (e) => {
+  const t = tipTarget(e.target);
+  if (t) { const b = t.getBoundingClientRect(); showTip(t, b.left, b.bottom); }
+});
+document.addEventListener('focusout', hideTip);
+document.addEventListener('scroll', hideTip, { passive: true, capture: true });
+
+// ------------------------------------------------------------------ start
+
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { for (const j of chartJobs) j.draw(j.box); }, 120);
+});
+if (SNAPSHOT) renderAll();
+else {
+  load();
+  setInterval(load, 60_000);
+}
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

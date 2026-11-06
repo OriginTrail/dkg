@@ -1,0 +1,17 @@
+[Unit]
+Description=OT-RFC-27 marketplace dashboard: read the chain once, write data.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.rfc27-dashboard
+Environment=DASHBOARD_DIR=%h/.rfc27-dashboard
+ExecStart=/usr/bin/flock -n -E 75 %h/.rfc27-dashboard/run/indexer.lock /usr/local/bin/node --max-old-space-size=160 %h/.rfc27-dashboard/indexer.cjs
+SuccessExitStatus=75
+TimeoutStartSec=270
+MemoryMax=256M
+CPUQuota=25%
+Nice=10
+NoNewPrivileges=true
+# The script keeps its own log, capped by size, in logs/indexer.log.
+StandardOutput=null
+StandardError=journal

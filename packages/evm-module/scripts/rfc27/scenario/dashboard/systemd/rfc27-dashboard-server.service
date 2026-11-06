@@ -1,0 +1,19 @@
+[Unit]
+Description=OT-RFC-27 marketplace dashboard: static server on the tailnet address
+
+[Service]
+Type=simple
+Environment=BIND=@BIND@
+Environment=PORT=8127
+Environment=WWW=%h/.rfc27-dashboard/www
+ExecStart=/usr/local/bin/node --max-old-space-size=48 %h/.rfc27-dashboard/server.mjs
+# A user unit can't be ordered after the tailnet: until the address exists, it retries.
+Restart=always
+RestartSec=5
+MemoryMax=64M
+CPUQuota=10%
+Nice=10
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
