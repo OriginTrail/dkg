@@ -117,7 +117,7 @@ export function validateCgName(input: string): string | null {
     return 'Name must contain at least one letter or digit.';
   }
   if (HTML_TAG_SHAPE_RE.test(input)) {
-    return 'HTML tags are not allowed in the name — they have been stripped automatically.';
+    return 'Remove the HTML tags from the name.';
   }
   // Any residual `<` or `>` in the raw input is also lossy: bare
   // brackets are dropped by `sanitiseCgName`, and an unclosed `<tag`
@@ -125,10 +125,10 @@ export function validateCgName(input: string): string | null {
   // Both produce a submitted name that differs from what the user
   // saw without any warning (codex #752 review). Surface it.
   if (/[<>]/.test(input)) {
-    return 'Angle brackets (< or >) are not allowed in the name — they and any text consumed by an unclosed tag have been stripped automatically.';
+    return 'Remove < and > from the name.';
   }
   if (input.length > CG_NAME_MAX_LENGTH) {
-    return `Name was trimmed to ${CG_NAME_MAX_LENGTH} characters (was ${input.length}).`;
+    return `Shorten the name to ${CG_NAME_MAX_LENGTH} characters or fewer.`;
   }
   return null;
 }
