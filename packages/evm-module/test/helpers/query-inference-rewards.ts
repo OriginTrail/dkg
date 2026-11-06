@@ -1,5 +1,5 @@
 // The development deploy the query/inference rewards suites (OT-RFC-27) run
-// on, and the helpers they share: the staking, account and plan-subscription
+// on, and the helpers they share: the staking, account and subscription
 // stacks, StakingV10 and StakingKPI wired to the settlement, the activation
 // epoch at the deployment epoch, λ 0.5. Each suite wraps the deploy in a
 // fixture function of its own, so loadFixture keeps a snapshot per suite, and

@@ -1,5 +1,5 @@
 // End to end (OT-RFC-27): one epoch of the marketplace, with exact numbers, on
-// the development deploy of the account, staking and plan-subscription stacks, with
+// the development deploy of the account, staking and subscription stacks, with
 // RandomSampling scoring the nodes. PublishingConviction 10.2.0,
 // ServiceSubscriptions 1.2.0, QueryInferenceSettlement and StakingV10 10.1.0.
 //

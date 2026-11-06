@@ -1,4 +1,4 @@
-// The development deploy of the plan-subscription contracts (OT-RFC-27), run through
+// The development deploy of the subscription contracts (OT-RFC-27), run through
 // the real deploy steps 052c, 052d, 052e and 052f on the in-process network:
 //   - every contract is registered in the Hub and wired, in an order that lets
 //     each initialize as it is deployed;
@@ -42,7 +42,7 @@ async function deployFixture() {
   };
 }
 
-describe('@integration The development deploy of the plan-subscription contracts', () => {
+describe('@integration The development deploy of the subscription contracts', () => {
   beforeEach(() => {
     hre.helpers.resetDeploymentsJson();
   });

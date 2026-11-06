@@ -495,7 +495,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         .withArgs(buyer.address);
     });
 
-    it('a publishing agent registration grants no service spending, and a grant grants no publishing', async () => {
+    it('a publishing agent registration allows no service spending, and a grant allows no publishing', async () => {
       await f.NFT.connect(owner).registerAgent(accountId, buyer2.address);
       await expect(f.SS.connect(buyer2).fundFromAccount(await h.inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(f.SS, 'NotABuyer')

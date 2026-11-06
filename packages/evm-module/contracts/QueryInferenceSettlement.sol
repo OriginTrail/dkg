@@ -58,10 +58,10 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * is the deadline, and a receipt that misses it never counts. A group counts in
  * the transaction that lands it:
  *   - `counted`, the lesser of the group's value and what the budget has left,
- *     is used of the budget at face value. Batches count in the order they
- *     land, and what has landed is never reduced. A group refuses to land for
- *     less than its `minCounted`, so a seller that sets one keeps its receipts
- *     for a later top-up rather than spending their nonces.
+ *     is added, at face value, to what the budget has used. Batches count in
+ *     the order they land, and what has landed is never reduced. A group
+ *     refuses to land for less than its `minCounted`, so a seller that sets one
+ *     keeps its receipts for a later top-up rather than spending their nonces.
  *   - R (`servedValue`), which is `counted` at the subscription's discount,
  *     floored, and QueryInferenceScore (`weightedValue`), which is R at the
  *     batch's stake factor, join the node's and the epoch's totals in the
@@ -72,9 +72,9 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *
  * The pool (`epochPool`). An epoch's money is what was funded for its
  * subscriptions: the wallet-funded value and the Conviction Account cost. If no
- * node counted value in an epoch, its pool is 0 and its money rolls forward.
+ * node has served value in an epoch, its pool is 0 and its money rolls forward.
  * Otherwise its pool is its money plus that of the unbroken run of epochs
- * before it in which no node counted value, back to the activation epoch. No
+ * before it in which no node has served value, back to the activation epoch. No
  * step runs when an epoch ends: nothing writes an epoch's money or totals once
  * it has ended, so from then on `epochPool` and `queryInferenceGross` read
  * final values, and a reward claim reads them straight away. The pool is paid
@@ -337,7 +337,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         fault reverts the whole batch.
      * @dev    The sender's node must have a profile, a place in the sharding
      *         table and a positive node score in the current epoch, so a node
-     *         with counted value always has a share of the epoch's rewards to
+     *         with served value always has a share of the epoch's rewards to
      *         pay it through. The batch has 1 to `maxGroupsPerBatch` groups and
      *         1 to `maxItemsPerBatch` items, and its stake factor is captured
      *         once, before the groups.
@@ -355,7 +355,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *              grant to the buyer does not move;
      *           3. its nonce is unused, earlier and in this batch;
      *           4. startsAt <= issuedAt <= completedAt <= min(expiry, the block
-     *              time): a batch claims only work already done, and the block
+     *              time): a batch lands only work already done, and the block
      *              time is within the subscription's epoch;
      *           5. 0 < pricePerUnit <= the budget's price cap;
      *           6. 0 < units <= maxUnits, valueWei == units × price in 256
@@ -365,7 +365,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         has left, which must be at least `minCounted`. Value above what
      *         the budget has left does not count, and its receipts' nonces stay
      *         used. So a `minCounted` of 0 never refuses, whoever used the
-     *         budget first: a seller uses it for a batch that must land, such
+     *         budget first: a seller passes 0 for a batch that must land, such
      *         as the last of an epoch.
      * @return batchDigest The hash of the batch's receipt digests, in order.
      */
@@ -411,14 +411,14 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     // ============================================================
 
     /**
-     * @notice The query/inference pool `epoch`'s nodes share: 0 if no node
-     *         counted value in it, otherwise its money plus that of the unbroken
-     *         run of epochs before it in which no node counted value, back to
-     *         the activation epoch. Final once `epoch` has ended; until then,
-     *         what it would be if the epoch ended now.
+     * @notice The query/inference pool `epoch`'s nodes share: 0 if no node has
+     *         served value in it, otherwise its money plus that of the unbroken
+     *         run of epochs before it in which no node has served value, back
+     *         to the activation epoch. Final once `epoch` has ended; until
+     *         then, what it would be if the epoch ended now.
      * @dev    It walks the run at about 10,000 gas per epoch, and only for an
-     *         epoch with value. Nobody can lengthen a run but by selling nothing
-     *         for as long, and any counted value ends it.
+     *         epoch with value. Nobody can lengthen a run but by selling
+     *         nothing for as long, and any served value ends it.
      */
     function epochPool(uint256 epoch) external view returns (uint256) {
         QueryInferenceStorage qis = queryInferenceStorage;
@@ -426,27 +426,32 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     }
 
     /**
-     * @notice Node `identityId`'s gross reward from the query/inference pool
-     *         of `epoch`: pool × QIF, as OT-RFC-27 defines it,
-     *         floor(pool × (1 − λ) × R / ΣR) + floor(pool × λ × QIS / ΣQIS),
-     *         with the λ the epoch took when its first value counted. If ΣQIS is
-     *         0 while ΣR is not, which needs every seller's stake factor to be
-     *         0, the second term takes the R share. 0 for a node with no counted
-     *         value, which walks no rollover run. Over all nodes it sums to at
-     *         most the pool, and to more than the pool less 2 wei per node with
-     *         value: each term is floored on its own, so a node's gross falls
-     *         short of its exact share by less than 1 wei per term (one term at
-     *         a λ of 0 or 1). That remainder is never paid out and stays in the
-     *         vault, as the floors of `StakingV10`'s split of a node's reward
-     *         between its operator fee and its delegators do. Each term is one
-     *         `mulDiv`, because one floor over both would divide by
-     *         BPS × ΣR × ΣQIS, which does not fit 256 bits. Final once `epoch`
-     *         has ended; until then, what it would be if the epoch ended now.
+     * @notice Node `identityId`'s gross reward from the query/inference pool of
+     *         `epoch`: pool × QIF, as OT-RFC-27 defines it:
+     *
+     *           floor(pool × (1 − λ) × R / ΣR) + floor(pool × λ × QIS / ΣQIS)
+     *
+     *         where R is `servedValue`, QIS is QueryInferenceScore
+     *         (`weightedValue`), and λ is what the epoch took when its first
+     *         value counted. If ΣQIS is 0 while ΣR is not, which needs every
+     *         seller's stake factor to be 0, the second term takes the R share.
+     *         0 for a node with no served value, which walks no rollover run.
+     *         Over all nodes it sums to at most the pool, and to more than the
+     *         pool less 2 wei per node with value: each term is floored on its
+     *         own, so a node's gross falls short of its exact share by less
+     *         than 1 wei per term (one term at a λ of 0 or 1). That remainder
+     *         is never paid out and stays in the vault, as the floors of
+     *         `StakingV10`'s split of a node's reward between its operator fee
+     *         and its delegators do. Each term is one `mulDiv`, because one
+     *         floor over both would divide by BPS × ΣR × ΣQIS, which does not
+     *         fit 256 bits. Final once `epoch` has ended; until then, what it
+     *         would be if the epoch ended now.
      */
     function queryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256 gross) {
         QueryInferenceStorage qis = queryInferenceStorage;
         QueryInferenceStorage.NodeEpoch memory n = qis.getNodeEpoch(identityId, epoch);
-        // A node's score never exceeds its value, so no value means no score.
+        // A node's `weightedValue` never exceeds its `servedValue`, so no
+        // served value means no weighted value.
         if (n.servedValue == 0) return 0;
         QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
         uint256 pool = _poolWithValue(qis, epoch);
@@ -548,7 +553,8 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     //                         Internal
     // ============================================================
 
-    /// @dev The pool of `epoch`, in which a node counted value; see `epochPool`.
+    /// @dev The pool of `epoch`, in which a node has served value; see
+    /// `epochPool`.
     function _poolWithValue(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint256 pool) {
         pool = _moneyOf(qis, epoch);
         uint256 activation = qis.activationEpoch();

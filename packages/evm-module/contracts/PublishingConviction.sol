@@ -405,9 +405,10 @@ contract PublishingConviction is
         uint96 dustSwept
     );
     /// @notice Emitted by `coverServiceCost` (10.1.0): a subscription funded by
-    ///         `buyer` spent `cost` of `accountId`'s allowance for a budget value of
-    ///         `value`, in billing `window` during chain `epoch`. `subscriptionId`
-    ///         identifies the subscription.
+    ///         `buyer` spent `cost` of `accountId`'s allowance for service
+    ///         budgets worth `value`, before the discount, in billing `window`
+    ///         during chain `epoch`. `subscriptionId` identifies the
+    ///         subscription.
     event ServiceCostCovered(
         uint256 indexed accountId,
         address indexed buyer,

@@ -233,7 +233,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
   });
 });
 
-describe('@integration Plan-subscription funding for the query/inference pool', function () {
+describe('@integration Subscription funding for the query/inference pool', function () {
   let f: Awaited<ReturnType<typeof deployFundingFixture>>;
   let h: FundingHelpers;
   let owner: SignerWithAddress;
