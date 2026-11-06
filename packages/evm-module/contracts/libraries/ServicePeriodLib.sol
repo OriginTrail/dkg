@@ -107,8 +107,7 @@ library ServicePeriodLib {
      * @dev A top-up of the recorded period `s` is open to `buyer`: the period
      *      exists, `buyer` is the key that funded it, it comes from the
      *      period's own source (`fromConviction` for an account's period, a
-     *      wallet for account 0), and the period has not ended. No claim of
-     *      the period is finalized before its epoch ends, so none is yet.
+     *      wallet for account 0), and the period has not ended.
      */
     function requireTopUpOpen(
         bytes32 subscriptionId,

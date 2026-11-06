@@ -116,14 +116,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await h.fund(await h.inference(accountId, 300n * TRAC));
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(400n * TRAC);
       const now = await h.epochNow();
-      expect(await f.QIS.convictionDue(now + 1n)).to.equal(300n * TRAC);
+      expect(await f.QIS.convictionFunding(now)).to.equal(300n * TRAC);
 
       await publish(200n * TRAC);
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(600n * TRAC);
 
       await h.fund(await h.inference(accountId, B - 600n * TRAC, { epoch: await h.epochNext() }));
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(B);
-      expect(await f.QIS.convictionDue(now + 2n)).to.equal(B - 600n * TRAC);
+      expect(await f.QIS.convictionFunding(now + 1n)).to.equal(B - 600n * TRAC);
 
       // The window is spent and there is no top-up buffer: the publish falls
       // through to direct spend from the agent's wallet, and a funding is refused.

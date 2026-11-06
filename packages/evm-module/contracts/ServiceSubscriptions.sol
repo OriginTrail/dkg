@@ -40,7 +40,7 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * the cost from the account's allowance exactly as a publish does (the
  * current billing window first, then the top-up buffer, at the account's
  * discount tier), and this contract books the whole cost in
- * `QueryInferenceStorage` as due in the epoch after the period, as
+ * `QueryInferenceStorage` under the period's epoch, as
  * `ServiceSubscriptionsWallet` books a wallet period's value: the epoch in
  * which the period's receipt value counts. The draw itself books nothing to
  * the staker pool, so the cost is counted once, in the query/inference pool.
@@ -85,9 +85,9 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     assignment never grants publishing.
  *   - Every funding and top-up is refused while `QueryInferenceStorage` is
  *     paused, before its activation epoch and while that is unset, as wallet
- *     fundings are: epochs close from activation on, so a cost due in an
- *     earlier epoch would never reach a pool. Every funding needs a non-zero
- *     session key.
+ *     fundings are: the pool counts money from activation on, so a cost booked
+ *     in an earlier epoch would never reach a pool. Every funding needs a
+ *     non-zero session key.
  *   - Service spending refuses to start, and funding refuses to run, while a
  *     protocol treasury is wired: a service draw carries no treasury fee. So
  *     `ParametersStorage.protocolTreasury` must stay 0 wherever this contract
@@ -126,8 +126,8 @@ contract ServiceSubscriptions is
     //           or top-up of a period whose assignment expires before the
     //           period starts.
     //   1.2.0 — a Conviction Account pays as a wallet does: each funding and
-    //           top-up books its cost as due in the epoch after the period
-    //           (`QueryInferenceStorage.addConvictionDue`), and both are
+    //           top-up books its cost under the period's epoch
+    //           (`QueryInferenceStorage.addConvictionFunding`), and both are
     //           refused before the activation epoch. The labels are gone
     //           (`_labelBase`, `_labelTopUp`, their basis and cursor, the
     //           `ServiceEmissionLabelled` event, `LabelCapacityExceeded`, and
@@ -397,9 +397,9 @@ contract ServiceSubscriptions is
      * @dev Immediate for new periods; funded periods are non-refundable and
      *      run to their end. A request issued under this assignment from the
      *      revocation on is refused, also after a new assignment of the same
-     *      key, while one served before it is settled as before: the
-     *      revocation moves no period's batch deadline, so it cannot withhold
-     *      a seller's receipt. It also consumes the account's nonce, so terms
+     *      key, while one served before it lands until the epoch ends, so
+     *      the revocation cannot withhold a seller's receipt. It also consumes
+     *      the account's nonce, so terms
      *      signed but not yet submitted no longer assign. A new assignment of
      *      the key afterwards serves it from its next period not yet funded:
      *      the periods funded under this one take no request issued after the
@@ -430,7 +430,7 @@ contract ServiceSubscriptions is
      *      limit below a period's cost so far is allowed, and refuses every
      *      top-up of that period. An earlier `expiresAt` refuses, from then
      *      on, the requests of the periods funded under this assignment, as a
-     *      revocation does, and moves no batch deadline. An expired
+     *      revocation does. An expired
      *      assignment is renewed only by a new `assign`, so a later
      *      `expiresAt` here never revives one. Terms
      *      signed at the current nonce stay valid; an owner who tightens the
@@ -482,8 +482,8 @@ contract ServiceSubscriptions is
      *      funds nothing, so only the expiry can be checked ahead. Then
      *      `coverServiceCost` draws the cost (window allowance first, then the
      *      top-up buffer); a period funded ahead draws from the window the
-     *      funding runs in. Last, the usage, the cost due in the epoch after
-     *      the period and the period record are written. The record names
+     *      funding runs in. Last, the usage, the cost under the period's
+     *      epoch and the period record are written. The record names
      *      the assignment by its nonce: the period accepts requests issued
      *      before that assignment ends, its expiry or its revocation,
      *      whatever later assignment the buyer key gets.
@@ -536,10 +536,10 @@ contract ServiceSubscriptions is
             _currentBillingWindow(acct, chronos.epochLength())
         );
 
-        // 7. The usage, and the cost due in the epoch after the period, as a
-        //    wallet funding books its value.
+        // 7. The usage, and the cost under the period's epoch, as a wallet
+        //    funding books its value.
         css.recordUsage(r.accountId, assignee);
-        qis.addConvictionDue(r.epoch + 1, d.cost);
+        qis.addConvictionFunding(r.epoch, d.cost);
 
         // 8. The record, which names the assignment it is funded under.
         css.createSubscription(
@@ -606,8 +606,8 @@ contract ServiceSubscriptions is
      *      requests and top-ups alike, until its own expiry
      *      (`ConvictionServiceStorage.assignmentEnd`).
      *
-     *      The draw and the cost due in the epoch after the period follow as
-     *      for a funding, at the account's own tier; a top-up funds no new
+     *      The draw and the cost under the period's epoch follow as for a
+     *      funding, at the account's own tier; a top-up funds no new
      *      period, so the usage is unchanged, and the period keeps the
      *      assignment it was funded under.
      * @return cost The cost drawn from the allowance.
@@ -659,8 +659,8 @@ contract ServiceSubscriptions is
             _currentBillingWindow(acct, chronos.epochLength())
         );
 
-        // 6. The cost due in the epoch after the period, and the record.
-        qis.addConvictionDue(uint256(s.epoch) + 1, d.cost);
+        // 6. The cost under the period's epoch, and the record.
+        qis.addConvictionFunding(s.epoch, d.cost);
         css.applyTopUp(
             subscriptionId,
             ConvictionServiceStorage.TopUpAmounts({

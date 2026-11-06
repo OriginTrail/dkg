@@ -2,14 +2,14 @@
 // ignores. Ids, epochs, addresses and transaction hashes, never a key, bound
 // to the network it ran on. Numeric fields are kept as decimal strings in the
 // file and decoded to bigint where it is loaded. What the chain and the journal
-// already tell is not kept: what became of a seller's claims is read from them.
+// already tell is not kept: what a seller's batches counted is read from them.
 
 import * as fs from 'fs';
 
 import { JsonObject, Redactor, toJson, writeJson } from '../report';
 import type { Journal, StepRecord, WithdrawalExpected } from './tx';
 
-export const PHASES = ['check', 'setup', 'serve', 'finalize', 'close-claim', 'withdraw'] as const;
+export const PHASES = ['check', 'setup', 'serve', 'claim', 'withdraw'] as const;
 export type PhaseName = (typeof PHASES)[number];
 
 export type Amounts = {

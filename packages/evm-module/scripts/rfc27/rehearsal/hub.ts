@@ -177,46 +177,27 @@ export async function phaseHub(ctx: Ctx): Promise<void> {
   check('StakingKPI reads the settlement from the Hub', (await pool.kpi.queryInferenceSettlement()) === qs);
   check('DKGStakingConvictionNFT re-read StakingV10', (await c.snft.stakingV10()) === (await pool.sv10.getAddress()));
   const params = {
-    receiptGraceSeconds: await qis.receiptGraceSeconds(),
     maxItemsPerBatch: await qis.maxItemsPerBatch(),
     maxGroupsPerBatch: await qis.maxGroupsPerBatch(),
-    maxCloseStepsPerClaim: await qis.maxCloseStepsPerClaim(),
     lambdaBps: await qis.lambdaBps(),
-    latestLambdaBps: await qis.latestLambdaBps(),
-    latestReceiptGraceSeconds: await qis.latestReceiptGraceSeconds(),
     activationEpoch: await qis.activationEpoch(),
-    closedThrough: await qis.closedThrough(),
     maxBucketsPerPeriod: await pool.cssvc.maxBucketsPerPeriod(),
     epochLength: await c.chronos.epochLength(),
   };
   report.say(`  ${JSON.stringify(toJson(params))}`);
-  // parameters.json "testnet", read as the deploy reads it: λ and the grace
-  // under `latestLambdaBps` and `latestReceiptGraceSeconds`, as
-  // `{ setter, setterArgs }`, or under the parameters' own keys as plain
-  // values, and compared with the latest getters, which the deploy compares.
+  // parameters.json "testnet", read as the deploy reads it, under the getters the deploy compares.
   const want = {
-    grace: requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds']),
     items: requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value,
     groups: requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value,
-    closeSteps: requireParameter('QueryInferenceStorage', ['maxCloseStepsPerClaim']).value,
-    lambda: requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps']),
+    lambda: requireParameter('QueryInferenceStorage', ['lambdaBps']).value,
     buckets: requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value,
   };
   check(
-    `QueryInferenceStorage holds parameters.json "testnet" (${want.grace.value}, ${want.items}, ${want.groups}, ${want.closeSteps}, ${want.lambda.value})`,
-    params.latestReceiptGraceSeconds === want.grace.value &&
-      params.maxItemsPerBatch === want.items &&
-      params.maxGroupsPerBatch === want.groups &&
-      params.maxCloseStepsPerClaim === want.closeSteps &&
-      params.latestLambdaBps === want.lambda.value,
-    `the grace read as ${want.grace.key}, λ as ${want.lambda.key}, against latestReceiptGraceSeconds and latestLambdaBps`,
+    `QueryInferenceStorage holds parameters.json "testnet" (${want.items}, ${want.groups}, λ ${want.lambda})`,
+    params.maxItemsPerBatch === want.items && params.maxGroupsPerBatch === want.groups && params.lambdaBps === want.lambda,
   );
   check(`ConvictionServiceStorage.maxBucketsPerPeriod is ${want.buckets}`, params.maxBucketsPerPeriod === want.buckets);
-  check(
-    `the receipt grace, ${params.receiptGraceSeconds} s, is at most half the ${params.epochLength} s epoch`,
-    params.receiptGraceSeconds * 2n <= params.epochLength,
-  );
-  check(`activation epoch ${activation} = current + 1, closedThrough ${E}`, params.activationEpoch === activation && params.closedThrough === E);
+  check(`activation epoch ${activation} = current + 1`, params.activationEpoch === activation);
   for (const n of ['PublishingConviction', 'StakingV10', 'StakingKPI']) {
     check(`the old ${n} ${replaced[n]} left the Hub's contract set`, !(await h['isContract(address)'](LIVE[n].evmAddress)));
   }

@@ -14,22 +14,22 @@ const TRAC = 10n ** 18n;
 
 export const LIVE_JSON = 'deployments/base_sepolia_v10_contracts.json';
 export const RESULTS_DIR = path.join('cache', 'rfc27-smoke');
-/** Setup and serve both land in E: setup starts with at least this much of E left. */
+/** Setup and serve both land in E, whose end is the deadline of every batch: setup starts with at least this much of E left. */
 export const MIN_EPOCH_LEFT = 3_600n;
 /** A withdrawal "in the middle of an epoch": not within 10 minutes of either end. */
 export const MID_EPOCH_MARGIN = 600n;
 
 /**
  * The gas each role's transactions are planned at, for the balance check, and
- * how many it sends: about twice what the fork run measured (owner 3.79M over 18
- * transactions, buyer key 0.76M over 2, edge buyer key 0.48M, seller 0.58M over
+ * how many it sends: about twice what the fork run measured (owner 3.27M over 16
+ * transactions, buyer key 0.75M over 2, edge buyer key 0.47M, seller 0.62M over
  * 2). The gas limits come from each transaction's own estimate.
  */
 export const PLANNED_GAS = {
-  owner: { gas: 7_600_000n, txs: 18n },
+  owner: { gas: 6_600_000n, txs: 16n },
   buyer: { gas: 1_550_000n, txs: 2n },
   edgeBuyer: { gas: 1_000_000n, txs: 1n },
-  seller: { gas: 1_200_000n, txs: 2n },
+  seller: { gas: 1_250_000n, txs: 2n },
 };
 /** Per transaction: Base adds an L1 data fee to the gas. */
 export const L1_FEE_ALLOWANCE = 10n ** 13n;

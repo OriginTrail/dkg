@@ -1,6 +1,7 @@
 // PHASE setup, in epoch E: a small position on the seller's node; a new
 // Conviction Account under PublishingConviction 10.2.0, opted in, the buyer
-// key assigned; a Conviction Account period and a wallet-paid period of E.
+// key assigned; a Conviction Account period and a wallet-paid period of E, each
+// booked in E.
 
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
@@ -185,7 +186,7 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     });
   }
 
-  // 5. The Conviction Account period of E: no TRAC moves, and its cost is due in E+1.
+  // 5. The Conviction Account period of E: no TRAC moves, and its cost is booked in E.
   const caPeriod = subscriptionIdOf(r.buyer.address, E);
   const funded = await market.fundFromConviction('setup.fund-account-period', 'buyer key', r.buyer, accountId, E, r.caSession.address, a.caValue, planDigest(ctx, 'account plan'), {
     needs: ['setup.assign-buyer', 'setup.eth-buyer'],
@@ -202,9 +203,9 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
     const moved = eventsIn(funded.receipt, c.token, c.token.getEvent('Transfer')).length;
     const credits = eventsIn(funded.receipt, c.es, c.es.getEvent('TokensAddedToEpochRange')).length;
     report.check('the account period moves no TRAC and books nothing to the staker pool', moved === 0 && credits === 0);
-    // No event says what a transaction adds to an epoch's due, and others fund periods too: the due holds it at least.
-    const due = (await c.qis.dueIn(E + 1n)).conviction;
-    report.check(`its cost is due in epoch ${E + 1n}`, due >= fundedEv.cost, `due ${fmt(due)} TRAC`);
+    // No event says what a transaction adds to an epoch's money, and others fund periods too: the money holds it at least.
+    const booked = (await c.qis.fundingIn(E)).conviction;
+    report.check(`its cost is booked in epoch ${E}`, booked >= fundedEv.cost, `booked ${fmt(booked)} TRAC`);
   }
 
   // 6. The wallet-paid period of E, paid by the owner into the vault.
@@ -226,11 +227,11 @@ export async function phaseSetup(ctx: PoolCtx): Promise<void> {
   const [walletEv] = eventsIn(walletFunded.receipt, c.ssw, c.ssw.getEvent('PeriodFunded'));
   if (shownBy(report, walletFunded, walletEv, 'the wallet period\'s PeriodFunded event') && walletFunded.receipt) {
     const moved = tracMoved(walletFunded.receipt, c.token, vault);
-    const due = (await c.qis.dueIn(E + 1n)).wallet;
+    const booked = (await c.qis.fundingIn(E)).wallet;
     report.check(
-      `the wallet period's ${fmt(a.walletValue)} TRAC moved into the vault and is due in epoch ${E + 1n}`,
-      moved === a.walletValue && due >= a.walletValue,
-      `${fmt(moved)} TRAC by its own Transfer logs; due ${fmt(due)} TRAC`,
+      `the wallet period's ${fmt(a.walletValue)} TRAC moved into the vault and is booked in epoch ${E}`,
+      moved === a.walletValue && booked >= a.walletValue,
+      `${fmt(moved)} TRAC by its own Transfer logs; booked ${fmt(booked)} TRAC`,
     );
   }
 

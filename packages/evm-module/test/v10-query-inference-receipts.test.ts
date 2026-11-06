@@ -4,16 +4,18 @@
 // that sign requests.
 //
 // Groups:
-//   - a happy batch of several groups: the claims per bucket and seller, the
-//     bucket totals, the nonce bits, the stake factor captured once, and the
+//   - a happy batch of several groups: what counts per node and epoch, the
+//     bucket fills, the nonce bits, the stake factor captured once, and the
 //     events with their receipt digests;
 //   - the Core Node gate: a profile with no place in the sharding table, an
-//     admin key, and an address that is no node's;
+//     admin key, an address that is no node's, and a node with no score in the
+//     current epoch;
 //   - the objective faults F1 to F8 of OT-RFC-27, one by one, each reverting
 //     the whole batch with its group, its item and its code, high s included;
-//   - the group checks: an unknown period or bucket, an empty group, the
-//     batch deadline, and a Conviction Account period's deadline, which no
-//     revocation or expiry moves;
+//   - the group checks: an unknown period or bucket, an empty group, a minimum
+//     above the group's value, and the batch deadline, the end of the period's
+//     epoch, which no revocation or expiry of a Conviction Account assignment
+//     moves;
 //   - the nonce bitmap's words, and the bounds of a batch, the pause and
 //     activation.
 //
@@ -57,6 +59,7 @@ import {
   queryInferenceDomain,
   receiptDigestOf,
   requestDigestOf,
+  scoreNode,
   signCompact,
   signedItems,
   stakeFactorOf,
@@ -165,41 +168,41 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       b = await walletFund(buyer2, now, [bucket(3, CLASS_INFERENCE, 8n * TRAC, CAP)], otherKey.address);
     });
 
-    it('claims several groups at once: per bucket and seller, the bucket totals, the nonce bits, and the events', async () => {
+    it('counts several groups at once: per node and epoch, the bucket fills, the nonce bits, and the events', async () => {
+      const epoch = await h.epochNow();
       const g0 = await items(a, 0, s1, 3, { units: 700n });
       const g1 = await items(a, 1, s1, 2, { firstNonce: 3n, units: 1_100n, ask: 2n * ASK });
       const g2 = await items(b, 0, s1, 4, { units: 5n, ask: CAP, wallet: otherKey });
       const groups: ReceiptGroup[] = [
-        { subscriptionId: a, bucketIndex: 0n, items: g0.items },
-        { subscriptionId: a, bucketIndex: 1n, items: g1.items },
-        { subscriptionId: b, bucketIndex: 0n, items: g2.items },
+        { subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g0.items },
+        { subscriptionId: a, bucketIndex: 1n, minCounted: 0n, items: g1.items },
+        { subscriptionId: b, bucketIndex: 0n, minCounted: 0n, items: g2.items },
       ];
       const s18 = await f.QS.stakeFactor(s1.identityId);
       expect(s18).to.equal(stakeFactorOf(SELLER_STAKE, await f.Params.maximumStake()));
 
+      await scoreNode(f.RSS, epoch, s1.identityId);
       const returned = await f.QS.connect(s1.operational).submitReceiptBatch.staticCall(groups);
       const receipt = await h.accept(s1, groups);
 
       const values = [3n * 700n * ASK, 2n * 1_100n * 2n * ASK, 4n * 5n * CAP];
-      const weighted = values.map((v) => (v * s18) / SCALE18);
-      expect(plain(await f.QIS.getSellerClaim(a, 0n, s1.identityId))).to.deep.equal({
-        claimed: values[0],
-        weighted: weighted[0],
-        finalized: false,
+      // Each group's score is floored on its own.
+      const scores = values.map((v) => (v * s18) / SCALE18);
+      const r = values[0] + values[1] + values[2];
+      const score = scores[0] + scores[1] + scores[2];
+      expect(plain(await f.QIS.getNodeEpoch(s1.identityId, epoch))).to.deep.equal({ r, score });
+      expect(plain(await f.QIS.getNodeEpoch(s2.identityId, epoch))).to.deep.equal({ r: 0n, score: 0n });
+      expect(plain(await f.QIS.getEpochTotals(epoch))).to.deep.equal({
+        sumR: r,
+        sumScore: score,
+        lambdaBps: await f.QIS.lambdaBps(),
       });
-      expect(plain(await f.QIS.getSellerClaim(a, 1n, s1.identityId))).to.deep.equal({
-        claimed: values[1],
-        weighted: weighted[1],
-        finalized: false,
-      });
-      expect(plain(await f.QIS.getSellerClaim(b, 0n, s1.identityId))).to.deep.equal({
-        claimed: values[2],
-        weighted: weighted[2],
-        finalized: false,
-      });
-      expect(await f.QIS.bucketClaimed(a, 0n)).to.equal(values[0]);
-      expect(await f.QIS.bucketClaimed(a, 1n)).to.equal(values[1]);
-      expect(await f.QIS.bucketClaimed(b, 0n)).to.equal(values[2]);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(values[0]);
+      expect(await f.QIS.bucketFilled(a, 1n)).to.equal(values[1]);
+      expect(await f.QIS.bucketFilled(b, 0n)).to.equal(values[2]);
+      expect(await f.QS.bucketLeft(a, 0n)).to.equal(10n * TRAC - values[0]);
+      expect(await f.QS.bucketLeft(a, 1n)).to.equal(5n * TRAC - values[1]);
+      expect(await f.QS.bucketLeft(b, 0n)).to.equal(8n * TRAC - values[2]);
 
       // One nonce space per period and seller, across its buckets: nonces 0 to 4 of a.
       expect(await f.QIS.nonceWord(a, s1.identityId, 0n)).to.equal(0b11111n);
@@ -212,20 +215,21 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       );
       const claimed = eventsOf(receipt, f.QS, 'ReceiptsClaimed');
       expect(
-        claimed.map((e) => [e.subscriptionId, e.bucketIndex, e.seller, e.itemCount, e.value, e.stakeFactor18, e.groupDigest]),
+        claimed.map((e) => [e.subscriptionId, e.bucketIndex, e.seller, e.itemCount, e.claimed, e.counted, e.stakeFactor18, e.groupDigest]),
       ).to.deep.equal([
-        [a, 0n, s1.identityId, 3n, values[0], s18, digestOfDigests(digests[0])],
-        [a, 1n, s1.identityId, 2n, values[1], s18, digestOfDigests(digests[1])],
-        [b, 0n, s1.identityId, 4n, values[2], s18, digestOfDigests(digests[2])],
+        [a, 0n, s1.identityId, 3n, values[0], values[0], s18, digestOfDigests(digests[0])],
+        [a, 1n, s1.identityId, 2n, values[1], values[1], s18, digestOfDigests(digests[1])],
+        [b, 0n, s1.identityId, 4n, values[2], values[2], s18, digestOfDigests(digests[2])],
       ]);
       const batchDigest = digestOfDigests(digests.flat());
       expect(returned).to.equal(batchDigest);
       const [accepted] = eventsOf(receipt, f.QS, 'ReceiptBatchAccepted');
-      expect([accepted.seller, accepted.batchDigest, accepted.itemCount, accepted.value, accepted.stakeFactor18]).to.deep.equal([
+      expect([accepted.seller, accepted.batchDigest, accepted.itemCount, accepted.claimed, accepted.counted, accepted.stakeFactor18]).to.deep.equal([
         s1.identityId,
         batchDigest,
         9n,
-        values[0] + values[1] + values[2],
+        r,
+        r,
         s18,
       ]);
 
@@ -274,66 +278,79 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         groups.push({
           subscriptionId: wide,
           bucketIndex: BigInt(bucketIndex),
+          minCounted: 0n,
           items: [itemOf(request, rec, signCompact(key, requestDigest))],
         });
       }
 
+      await scoreNode(f.RSS, now, s1.identityId);
       const returned = await f.QS.connect(s1.operational).submitReceiptBatch.staticCall(groups);
       const receipt = await h.accept(s1, groups);
-      expect(eventsOf(receipt, f.QS, 'ReceiptsClaimed').map((e) => e.groupDigest)).to.deep.equal(
-        expected.map((digest) => digestOfDigests([digest])),
-      );
+      const claimed = eventsOf(receipt, f.QS, 'ReceiptsClaimed');
+      expect(claimed.map((e) => e.groupDigest)).to.deep.equal(expected.map((digest) => digestOfDigests([digest])));
       expect(returned).to.equal(digestOfDigests(expected));
-      expect((await f.QIS.getSellerClaim(wide, 0n, s1.identityId)).claimed).to.equal(widest);
-      expect((await f.QIS.getSellerClaim(wide, 1n, s1.identityId)).claimed).to.equal(widestUnits);
+      // Each group claims its whole value and counts what its bucket holds.
+      expect(claimed.map((e) => [e.claimed, e.counted])).to.deep.equal([
+        [widest, TRAC],
+        [widestUnits, TRAC],
+      ]);
+      expect(await f.QIS.bucketFilled(wide, 0n)).to.equal(TRAC);
+      expect(await f.QIS.bucketFilled(wide, 1n)).to.equal(TRAC);
     });
 
-    it('later batches add to the totals, another seller claims the same bucket apart, and a claim above the funded value is accepted', async () => {
+    it('later batches add to the totals, another seller counts in the same bucket apart, and a group above what the bucket has left counts that much', async () => {
+      const epoch = await h.epochNow();
       const first = await items(a, 0, s1, 2, { units: 1_000n });
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: first.items }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: first.items }]);
       const second = await items(a, 0, s1, 3, { firstNonce: 2n, units: 1_000n });
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: second.items }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: second.items }]);
       const other = await items(a, 0, s2, 2, { units: 1_000n });
-      await h.accept(s2, [{ subscriptionId: a, bucketIndex: 0n, items: other.items }]);
+      await h.accept(s2, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: other.items }]);
 
-      expect((await f.QIS.getSellerClaim(a, 0n, s1.identityId)).claimed).to.equal(5n * 1_000n * ASK);
-      expect((await f.QIS.getSellerClaim(a, 0n, s2.identityId)).claimed).to.equal(2n * 1_000n * ASK);
-      expect(await f.QIS.bucketClaimed(a, 0n)).to.equal(7n * 1_000n * ASK);
+      expect((await f.QIS.getNodeEpoch(s1.identityId, epoch)).r).to.equal(5n * 1_000n * ASK);
+      expect((await f.QIS.getNodeEpoch(s2.identityId, epoch)).r).to.equal(2n * 1_000n * ASK);
+      expect((await f.QIS.getEpochTotals(epoch)).sumR).to.equal(7n * 1_000n * ASK);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(7n * 1_000n * ASK);
       expect(await f.QIS.nonceWord(a, s1.identityId, 0n)).to.equal(0b11111n);
       expect(await f.QIS.nonceWord(a, s2.identityId, 0n)).to.equal(0b11n);
 
-      // The bucket funded 10 TRAC; claims of 30 TRAC more are still accepted.
+      // The bucket funded 10 TRAC; a group of 30 TRAC more lands for what is
+      // left of it, and its nonces are all used.
       const big = await items(a, 0, s2, 3, { firstNonce: 2n, units: 10n ** 10n, ask: 10n ** 9n });
-      await h.accept(s2, [{ subscriptionId: a, bucketIndex: 0n, items: big.items }]);
-      expect(await f.QIS.bucketClaimed(a, 0n)).to.equal(7n * 1_000n * ASK + 30n * TRAC);
+      await h.accept(s2, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: big.items }]);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(10n * TRAC);
+      expect(await f.QS.bucketLeft(a, 0n)).to.equal(0n);
+      expect((await f.QIS.getNodeEpoch(s2.identityId, epoch)).r).to.equal(10n * TRAC - 5n * 1_000n * ASK);
+      expect((await f.QIS.getEpochTotals(epoch)).sumR).to.equal(10n * TRAC);
+      expect(await f.QIS.nonceWord(a, s2.identityId, 0n)).to.equal(0b11111n);
     });
 
     it('the stake factor is captured once per batch and never revised: a later stake change moves only later batches', async () => {
       const cap = await f.Params.maximumStake();
+      const epoch = await h.epochNow();
       const first = await items(a, 0, s1, 1);
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: first.items }]);
-      const before = await f.QIS.getSellerClaim(a, 0n, s1.identityId);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: first.items }]);
+      const before = await f.QIS.getNodeEpoch(s1.identityId, epoch);
       const v = 1_000n * ASK;
-      expect(before.weighted).to.equal((v * stakeFactorOf(SELLER_STAKE, cap)) / SCALE18);
+      expect(before.score).to.equal((v * stakeFactorOf(SELLER_STAKE, cap)) / SCALE18);
 
       await stakeOn({ ...f, operational: s1.operational }, s1.identityId, 2n * SELLER_STAKE);
-      expect((await f.QIS.getSellerClaim(a, 0n, s1.identityId)).weighted).to.equal(before.weighted);
+      expect((await f.QIS.getNodeEpoch(s1.identityId, epoch)).score).to.equal(before.score);
       const second = await items(a, 0, s1, 1, { firstNonce: 1n });
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: second.items }]);
-      expect((await f.QIS.getSellerClaim(a, 0n, s1.identityId)).weighted).to.equal(
-        before.weighted + (v * stakeFactorOf(3n * SELLER_STAKE, cap)) / SCALE18,
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: second.items }]);
+      expect((await f.QIS.getNodeEpoch(s1.identityId, epoch)).score).to.equal(
+        before.score + (v * stakeFactorOf(3n * SELLER_STAKE, cap)) / SCALE18,
       );
     });
 
-    it('a seller with a profile and a place in the table but no stake factor claims with a weight of 0', async () => {
+    it('a seller with a profile and a place in the table but no stake factor counts with a score of 0', async () => {
       // A challenge snapshot of 0 caps the factor at 0, as for proofs.
       await f.RSS.setNodeChallengeStakeSnapshot(s1.identityId, 0n);
       const g = await items(a, 0, s1, 2);
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }]);
-      expect(plain(await f.QIS.getSellerClaim(a, 0n, s1.identityId))).to.deep.equal({
-        claimed: 2n * 1_000n * ASK,
-        weighted: 0n,
-        finalized: false,
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]);
+      expect(plain(await f.QIS.getNodeEpoch(s1.identityId, await h.epochNow()))).to.deep.equal({
+        r: 2n * 1_000n * ASK,
+        score: 0n,
       });
     });
   });
@@ -354,7 +371,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const below = await h.seller(46, minimum - 1n);
       for (const s of [unstaked, below]) {
         const g = await items(a, 0, s, 1);
-        await expect(h.submit(s, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }]))
+        await expect(h.submit(s, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]))
           .to.be.revertedWithCustomError(f.QS, 'NodeNotInShardingTable')
           .withArgs(s.identityId);
       }
@@ -363,11 +380,37 @@ describe('@integration Receipt batches of the query/inference pool', function ()
     it("the node's admin key is refused, as an address that is no node's key", async () => {
       const g = await items(a, 0, s1, 1);
       for (const sender of [s1.admin, buyer, f.accounts[50]]) {
-        await expect(f.QS.connect(sender).submitReceiptBatch([{ subscriptionId: a, bucketIndex: 0n, items: g.items }]))
+        await expect(f.QS.connect(sender).submitReceiptBatch([{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]))
           .to.be.revertedWithCustomError(f.QS, 'ProfileDoesntExist')
           .withArgs(0n);
       }
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]);
+    });
+
+    it('a node with no node score in the current epoch is refused, whatever its score in another, and lands once it has one', async () => {
+      const epoch = await h.epochNow();
+      const g = await items(a, 0, s1, 1);
+      const groups = [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }];
+      await expect(f.QS.connect(s1.operational).submitReceiptBatch(groups))
+        .to.be.revertedWithCustomError(f.QS, 'NoNodeScore')
+        .withArgs(s1.identityId, epoch);
+
+      await scoreNode(f.RSS, epoch + 1n, s1.identityId);
+      await expect(f.QS.connect(s1.operational).submitReceiptBatch(groups))
+        .to.be.revertedWithCustomError(f.QS, 'NoNodeScore')
+        .withArgs(s1.identityId, epoch);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(0n);
+      expect(await f.QIS.nonceWord(a, s1.identityId, 0n)).to.equal(0n);
+
+      await scoreNode(f.RSS, epoch, s1.identityId);
+      await f.QS.connect(s1.operational).submitReceiptBatch(groups);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(g.items[0].valueWei);
+
+      // Nor does the score of an epoch that has ended open the one after it.
+      await time.increaseTo(await h.epochStart(epoch + 2n));
+      await expect(f.QS.connect(s1.operational).submitReceiptBatch(groups))
+        .to.be.revertedWithCustomError(f.QS, 'NoNodeScore')
+        .withArgs(s1.identityId, epoch + 2n);
     });
   });
 
@@ -396,21 +439,23 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const good0 = await items(a, 0, s1, 2);
       const good1 = await items(a, 1, s1, 2, { firstNonce: 2n });
       const groups: ReceiptGroup[] = [
-        { subscriptionId: a, bucketIndex: 0n, items: good0.items },
-        { subscriptionId: a, bucketIndex: 1n, items: [...good1.items, bad] },
+        { subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: good0.items },
+        { subscriptionId: a, bucketIndex: 1n, minCounted: 0n, items: [...good1.items, bad] },
       ];
       const before = [
         await f.QIS.nonceWord(a, s1.identityId, 0n),
-        await f.QIS.bucketClaimed(a, 0n),
-        await f.QIS.bucketClaimed(a, 1n),
-        plain(await f.QIS.getSellerClaim(a, 0n, s1.identityId)),
+        await f.QIS.bucketFilled(a, 0n),
+        await f.QIS.bucketFilled(a, 1n),
+        plain(await f.QIS.getNodeEpoch(s1.identityId, epoch)),
+        plain(await f.QIS.getEpochTotals(epoch)),
       ];
       await expect(h.submit(s1, groups)).to.be.revertedWithCustomError(f.QS, 'ReceiptFault').withArgs(1n, 2n, fault);
       expect([
         await f.QIS.nonceWord(a, s1.identityId, 0n),
-        await f.QIS.bucketClaimed(a, 0n),
-        await f.QIS.bucketClaimed(a, 1n),
-        plain(await f.QIS.getSellerClaim(a, 0n, s1.identityId)),
+        await f.QIS.bucketFilled(a, 0n),
+        await f.QIS.bucketFilled(a, 1n),
+        plain(await f.QIS.getNodeEpoch(s1.identityId, epoch)),
+        plain(await f.QIS.getEpochTotals(epoch)),
       ]).to.deep.equal(before);
     };
 
@@ -461,12 +506,12 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const high = itemOf(r, receipt, { sigR, sigVS: ethers.toBeHex(highS, 32) });
       const low = itemOf(r, receipt, { sigR, sigVS: ethers.toBeHex((1n << 255n) | (SECP256K1_N - highS), 32) });
 
-      await expect(h.submit(s1, [{ subscriptionId: r.subscriptionId, bucketIndex: 0n, items: [high] }]))
+      await expect(h.submit(s1, [{ subscriptionId: r.subscriptionId, bucketIndex: 0n, minCounted: 0n, items: [high] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.BadSignature);
       await time.setNextBlockTimestamp(r.issuedAt);
-      await h.accept(s1, [{ subscriptionId: r.subscriptionId, bucketIndex: 0n, items: [low] }]);
-      expect(await f.QIS.bucketClaimed(r.subscriptionId, 0n)).to.equal(10n * ASK);
+      await h.accept(s1, [{ subscriptionId: r.subscriptionId, bucketIndex: 0n, minCounted: 0n, items: [low] }]);
+      expect(await f.QIS.bucketFilled(r.subscriptionId, 0n)).to.equal(10n * ASK);
     });
 
     it('F2, the wrong seller, period or bucket: the contract fills them in, so the signature fails', async () => {
@@ -479,7 +524,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       expect((await f.CSS.getBucket(other, 0n)).bucketId).to.equal((await f.CSS.getBucket(a, 1n)).bucketId);
       await expectFault(h.itemFor(await h.requestFor(other, 0, s1)), Fault.BadSignature);
       // The same request, claimed where it was signed for, is accepted.
-      await h.accept(s1, [{ subscriptionId: other, bucketIndex: 0n, items: [h.itemFor(await h.requestFor(other, 0, s1))] }]);
+      await h.accept(s1, [{ subscriptionId: other, bucketIndex: 0n, minCounted: 0n, items: [h.itemFor(await h.requestFor(other, 0, s1))] }]);
     });
 
     it('F3, an inactive Conviction Account assignment: a request issued at or after its revocation, or its expiry', async () => {
@@ -499,10 +544,10 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       await f.SS.connect(owner).revoke(accountId, buyer2.address);
       const revokedAt = (await f.CSS.getAssignment(accountId, buyer2.address)).revokedAt;
       expect(before.issuedAt).to.be.lessThan(revokedAt);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [h.itemFor(before)] }]);
+      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [h.itemFor(before)] }]);
 
       const at = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 1n, issuedAt: revokedAt }));
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [at] }]))
+      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [at] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
 
@@ -522,35 +567,35 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       );
       const q = subscriptionIdOf(buyer3.address, epoch);
       const afterExpiry = h.itemFor(await h.requestFor(q, 0, s1, { nonce: 0n, issuedAt: expiresAt }));
-      await expect(h.submit(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [afterExpiry] }]))
+      await expect(h.submit(s1, [{ subscriptionId: q, bucketIndex: 0n, minCounted: 0n, items: [afterExpiry] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
       const justBefore = h.itemFor(await h.requestFor(q, 0, s1, { nonce: 1n, issuedAt: expiresAt - 1n }));
       await time.setNextBlockTimestamp(expiresAt - 1n);
-      await h.accept(s1, [{ subscriptionId: q, bucketIndex: 0n, items: [justBefore] }]);
+      await h.accept(s1, [{ subscriptionId: q, bucketIndex: 0n, minCounted: 0n, items: [justBefore] }]);
     });
 
     it('F4, a duplicate: a nonce from an earlier batch, twice in one group, or in two buckets of the period', async () => {
       const first = await items(a, 0, s1, 1, { firstNonce: 9n });
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: first.items }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: first.items }]);
       await expectFault(h.itemFor(await h.requestFor(a, 1, s1, { nonce: 9n })), Fault.DuplicateNonce);
       // Nonce 2 is the second group's first good item.
       await expectFault(h.itemFor(await h.requestFor(a, 1, s1, { nonce: 2n, maxUnits: 999n })), Fault.DuplicateNonce);
       // Nonce 0 is the first group's, in bucket 0.
       await expectFault(h.itemFor(await h.requestFor(a, 1, s1, { nonce: 0n, maxUnits: 999n })), Fault.DuplicateNonce);
       // Another seller's nonces are its own.
-      await h.accept(s2, [{ subscriptionId: a, bucketIndex: 1n, items: [h.itemFor(await h.requestFor(a, 1, s2, { nonce: 9n }))] }]);
+      await h.accept(s2, [{ subscriptionId: a, bucketIndex: 1n, minCounted: 0n, items: [h.itemFor(await h.requestFor(a, 1, s2, { nonce: 9n }))] }]);
     });
 
-    it('F5, an expired authorization: before the period, at its end, completed before issue, after expiry, after the period or after the batch', async () => {
+    it('F5, an expired authorization: before the period, completed before issue, after expiry or after the batch', async () => {
       const s = await f.CSS.getSubscription(a);
       const r = await h.requestFor(a, 1, s1);
+      // A minute on, so a receipt completed after its expiry is not also after the batch.
+      await time.increase(60n);
       const cases: Array<[Partial<ServiceRequest>, Partial<Receipt>]> = [
         [{ issuedAt: s.periodStart - 1n }, {}],
-        [{ issuedAt: s.periodEnd, expiry: s.periodEnd + 10n }, { completedAt: s.periodEnd }],
         [{}, { completedAt: r.issuedAt - 1n }],
         [{ expiry: r.issuedAt + 5n }, { completedAt: r.issuedAt + 6n }],
-        [{ expiry: s.periodEnd + 100n }, { completedAt: s.periodEnd + 1n }],
         // Inside the period and before expiry, but an hour after the batch.
         [{}, { completedAt: r.issuedAt + 3_600n }],
       ];
@@ -559,38 +604,34 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         await expectFault(h.itemFor(bad, { completedAt: bad.issuedAt, ...receipt }), Fault.OutsideTime);
       }
       // At the bounds it is accepted: issued at the period's start, completed
-      // at its end and at expiry, in a batch at that time, inside the grace.
-      const edge = { ...r, issuedAt: s.periodStart, expiry: s.periodEnd };
-      await time.setNextBlockTimestamp(s.periodEnd);
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 1n, items: [h.itemFor(edge, { completedAt: s.periodEnd })] }]);
+      // at expiry, in a batch at that time, the last second of the period.
+      const last = s.periodEnd - 1n;
+      const edge = { ...r, issuedAt: s.periodStart, expiry: last };
+      await h.acceptAt(last, s1, [{ subscriptionId: a, bucketIndex: 1n, minCounted: 0n, items: [h.itemFor(edge, { completedAt: last })] }]);
     });
 
-    it('F5: a receipt lands only once it is completed, so a period of the next epoch takes no batch, and no stake factor, ahead of its time', async () => {
+    it('F5: a period of the next epoch takes no batch, and no stake factor, ahead of its time, and a receipt lands only once it is completed', async () => {
       const p = await walletFund(buyer2, epoch + 1n, [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)]);
       const s = await f.CSS.getSubscription(p);
       expect(s.periodStart).to.equal(await h.epochStart(epoch + 1n));
       const r = await h.requestFor(p, 0, s1, { nonce: 0n, issuedAt: s.periodStart });
       const item = h.itemFor(r); // completed when issued, at the period's start
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [item] }]))
-        .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
-        .withArgs(0n, 0n, Fault.OutsideTime);
-      expect(plain(await f.QIS.getSellerClaim(p, 0n, s1.identityId))).to.deep.equal({
-        claimed: 0n,
-        weighted: 0n,
-        finalized: false,
-      });
+      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [item] }]))
+        .to.be.revertedWithCustomError(f.QS, 'GroupFault')
+        .withArgs(0n, Fault.OutsideEpoch);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(0n);
+      expect(plain(await f.QIS.getNodeEpoch(s1.identityId, epoch + 1n))).to.deep.equal({ r: 0n, score: 0n });
 
       // The seller's stake triples before the period starts; the batch, once
       // the request is served, captures the stake factor of its own time.
       await stakeOn({ ...f, operational: s1.operational }, s1.identityId, 2n * SELLER_STAKE);
-      await time.setNextBlockTimestamp(s.periodStart);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [item] }]);
+      await h.acceptAt(s.periodStart, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [item] }]);
       const v = 1_000n * ASK;
-      expect(plain(await f.QIS.getSellerClaim(p, 0n, s1.identityId))).to.deep.equal({
-        claimed: v,
-        weighted: (v * stakeFactorOf(3n * SELLER_STAKE, await f.Params.maximumStake())) / SCALE18,
-        finalized: false,
+      expect(plain(await f.QIS.getNodeEpoch(s1.identityId, epoch + 1n))).to.deep.equal({
+        r: v,
+        score: (v * stakeFactorOf(3n * SELLER_STAKE, await f.Params.maximumStake())) / SCALE18,
       });
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(v);
 
       // Within the running period too: completed one second after the batch
       // is refused, completed in the batch's own second is accepted.
@@ -598,11 +639,11 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const soon = await h.requestFor(p, 0, s1, { nonce: 50n, issuedAt: now });
       const done = h.itemFor(soon, { completedAt: now + 11n });
       await time.setNextBlockTimestamp(now + 10n);
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [done] }]))
+      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [done] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.OutsideTime);
       await time.setNextBlockTimestamp(now + 11n);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [done] }]);
+      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [done] }]);
     });
 
     it("F6, an ask or price-cap breach: a zero ask, or one above the bucket's cap", async () => {
@@ -615,6 +656,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
         {
           subscriptionId: a,
           bucketIndex: 1n,
+          minCounted: 0n,
           items: [h.itemFor(await h.requestFor(a, 1, s1, { acceptedAskWeiPerUnit: CAP, maxValueWei: 1_000n * CAP }))],
         },
       ]);
@@ -629,8 +671,8 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const capped = { ...r, maxValueWei: r.maxUnits * ASK - 1n };
       await expectFault(h.itemFor(capped), Fault.BadArithmetic);
       // Fewer units than the maximum, at exactly the signed ask, are accepted.
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 1n, items: [h.itemFor(r, { units: 10n, valueWei: 10n * ASK })] }]);
-      expect(await f.QIS.bucketClaimed(a, 1n)).to.equal(10n * ASK);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 1n, minCounted: 0n, items: [h.itemFor(r, { units: 10n, valueWei: 10n * ASK })] }]);
+      expect(await f.QIS.bucketFilled(a, 1n)).to.equal(10n * ASK);
     });
 
     it('F8, an inconsistent result commitment: zero', async () => {
@@ -651,33 +693,41 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       a = await walletFund(buyer, epoch, [bucket(0, CLASS_INFERENCE, 10n * TRAC, CAP)]);
     });
 
-    it('an unknown period, an unknown bucket and an empty group are refused, with the group index', async () => {
+    it("an unknown period, an unknown bucket, an empty group and a minimum above the group's value are refused, with the group index", async () => {
       const good = await items(a, 0, s1, 1);
+      const more = await items(a, 0, s1, 1, { firstNonce: 1n });
       const unknown = ethers.id('never-funded');
       for (const [group, fault] of [
-        [{ subscriptionId: unknown, bucketIndex: 0n, items: good.items }, Fault.UnknownPeriod],
-        [{ subscriptionId: a, bucketIndex: 1n, items: good.items }, Fault.UnknownBucket],
-        [{ subscriptionId: a, bucketIndex: 0n, items: [] }, Fault.EmptyGroup],
+        [{ subscriptionId: unknown, bucketIndex: 0n, minCounted: 0n, items: good.items }, Fault.UnknownPeriod],
+        [{ subscriptionId: a, bucketIndex: 1n, minCounted: 0n, items: good.items }, Fault.UnknownBucket],
+        [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: [] }, Fault.EmptyGroup],
+        [{ subscriptionId: a, bucketIndex: 0n, minCounted: more.items[0].valueWei + 1n, items: more.items }, Fault.BelowMinCounted],
       ] as Array<[ReceiptGroup, bigint]>) {
-        await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, items: good.items }, group]))
+        await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: good.items }, group]))
           .to.be.revertedWithCustomError(f.QS, 'GroupFault')
           .withArgs(1n, fault);
       }
+      // An unknown period or bucket has nothing left.
+      expect(await f.QS.bucketLeft(unknown, 0n)).to.equal(0n);
+      expect(await f.QS.bucketLeft(a, 1n)).to.equal(0n);
     });
 
-    it("a batch lands up to the epoch's end plus the grace, and not a second later", async () => {
+    it("a batch lands up to the last second of its period's epoch, and at the epoch's end is refused, though the seller has a score in the new epoch", async () => {
       const issuedAt = await h.latest();
       const first = await items(a, 0, s1, 1, { issuedAt });
       const second = await items(a, 0, s1, 1, { issuedAt, firstNonce: 1n });
-      const deadline = (await h.epochStart(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
-      expect(await f.QS.batchDeadline(a)).to.equal(deadline);
+      const deadline = await h.epochStart(epoch + 1n);
+      expect((await f.CSS.getSubscription(a)).periodEnd).to.equal(deadline);
+      expect(await f.Chronos.epochAtTimestamp(deadline - 1n)).to.equal(epoch);
       expect(await f.Chronos.epochAtTimestamp(deadline)).to.equal(epoch + 1n);
 
-      await time.setNextBlockTimestamp(deadline);
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: first.items }]);
-      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, items: second.items }]))
+      await scoreNode(f.RSS, epoch + 1n, s1.identityId);
+      await h.acceptAt(deadline - 1n, s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: first.items }]);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(first.items[0].valueWei);
+      await expect(h.submitAt(deadline, s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: second.items }]))
         .to.be.revertedWithCustomError(f.QS, 'GroupFault')
-        .withArgs(0n, Fault.PastDeadline);
+        .withArgs(0n, Fault.OutsideEpoch);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(first.items[0].valueWei);
     });
 
     /** An opted-in account whose buyer key, buyer2, funds a one-bucket period of `e`. */
@@ -695,57 +745,58 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       return { accountId, p: subscriptionIdOf(buyer2.address, e) };
     };
 
-    it("a revocation does not cut a funded period short: a request served before it lands until the period's deadline, one issued after it never does", async () => {
+    it('a revocation does not cut a funded period short: a request served before it lands until the epoch ends, one issued after it never does', async () => {
       const { accountId, p } = await convictionPeriod(epoch);
       const served = await items(p, 0, s1, 2);
       // Revoked ten minutes after the requests were served.
       await time.setNextBlockTimestamp(served.requests[0].issuedAt + 600n);
       await f.SS.connect(owner).revoke(accountId, buyer2.address);
       const revokedAt = (await f.CSS.getAssignment(accountId, buyer2.address)).revokedAt;
+      await scoreNode(f.RSS, epoch + 1n, s1.identityId);
 
-      // Two hours after the revocation, past it plus the grace, the seller's batch lands.
-      await time.setNextBlockTimestamp(revokedAt + 7_200n);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served.items[0]] }]);
-      expect(await f.QIS.bucketClaimed(p, 0n)).to.equal(served.items[0].valueWei);
-      // The period keeps the deadline of every period of its epoch.
-      const deadline = (await h.epochStart(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
-      expect(await f.QS.batchDeadline(p)).to.equal(deadline);
-      expect(await f.QS.batchDeadline(a)).to.equal(deadline);
+      // Two hours after the revocation, the seller's batch lands.
+      await h.acceptAt(revokedAt + 7_200n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [served.items[0]] }]);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(served.items[0].valueWei);
+      // The period keeps the deadline of every period of its epoch: the epoch's end.
+      const deadline = await h.epochStart(epoch + 1n);
+      expect((await f.CSS.getSubscription(p)).periodEnd).to.equal(deadline);
+      expect((await f.CSS.getSubscription(a)).periodEnd).to.equal(deadline);
       // A request issued at the revocation or later is refused, item by item.
       const after = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 9n, issuedAt: revokedAt }));
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [after] }]))
+      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [after] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
-      // The other served request lands at the period's deadline, and a second later nothing does.
+      // The other served request lands in the last second before the deadline, and at the deadline nothing does.
       const third = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 8n, issuedAt: served.requests[0].issuedAt }));
-      await time.setNextBlockTimestamp(deadline);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [served.items[1]] }]);
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [third] }]))
+      await h.acceptAt(deadline - 1n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [served.items[1]] }]);
+      await expect(h.submitAt(deadline, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [third] }]))
         .to.be.revertedWithCustomError(f.QS, 'GroupFault')
-        .withArgs(0n, Fault.PastDeadline);
+        .withArgs(0n, Fault.OutsideEpoch);
     });
 
     it('an expiry the owner brings forward does not cut the period short either', async () => {
       const { accountId, p } = await convictionPeriod(epoch);
-      const served = await items(p, 0, s1, 1);
+      const served = await items(p, 0, s1, 2);
       const expiresAt = served.requests[0].issuedAt + 600n;
       await f.SS.connect(owner).updateAssignmentCaps(accountId, buyer2.address, {
         maxCostPerPeriod: 1_000n * TRAC,
         expiresAt,
       });
 
-      await time.setNextBlockTimestamp(expiresAt + 7_200n);
-      await h.accept(s1, [{ subscriptionId: p, bucketIndex: 0n, items: served.items }]);
-      expect(await f.QIS.bucketClaimed(p, 0n)).to.equal(served.items[0].valueWei);
-      const deadline = (await h.epochStart(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
-      expect(await f.QS.batchDeadline(p)).to.equal(deadline);
+      await h.acceptAt(expiresAt + 7_200n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [served.items[0]] }]);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(served.items[0].valueWei);
       const after = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 9n, issuedAt: expiresAt }));
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [after] }]))
+      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [after] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
+      // The deadline is still the epoch's end: the other served request lands in its last second.
+      const deadline = await h.epochStart(epoch + 1n);
+      expect((await f.CSS.getSubscription(p)).periodEnd).to.equal(deadline);
+      await h.acceptAt(deadline - 1n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [served.items[1]] }]);
+      expect(await f.QIS.bucketFilled(p, 0n)).to.equal(served.items[0].valueWei + served.items[1].valueWei);
     });
 
-    it('a period funded ahead and revoked before it starts takes no request, keeps its deadline, and its epochs close', async () => {
+    it('a period funded ahead and revoked before it starts takes no request, and its cost rolls forward with the rest of the money', async () => {
       const next = epoch + 1n;
       const { accountId, p } = await convictionPeriod(next);
       await f.SS.connect(owner).revoke(accountId, buyer2.address);
@@ -756,28 +807,28 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       // A request in the period was issued once the assignment had ended; one
       // issued before the revocation lies before the period. Each is refused
       // item by item, the period's deadline still ahead.
-      await time.setNextBlockTimestamp(s.periodStart + 60n);
       const inPeriod = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 0n, issuedAt: s.periodStart }));
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [inPeriod] }]))
+      await expect(h.submitAt(s.periodStart + 60n, s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [inPeriod] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.InactiveAssignment);
       const early = h.itemFor(await h.requestFor(p, 0, s1, { nonce: 1n, issuedAt: revokedAt - 1n }));
-      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, items: [early] }]))
+      await expect(h.submit(s1, [{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items: [early] }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 0n, Fault.OutsideTime);
-      const deadline = s.periodEnd + (await f.QIS.receiptGraceSecondsAt(next));
-      expect(await f.QS.batchDeadline(p)).to.equal(deadline);
+      expect(s.periodEnd).to.equal(await h.epochStart(next + 1n));
 
-      // Nothing breaks: there is no claim to finalize, and the epochs close,
-      // the period's cost carried forward with the rest.
-      await time.increaseTo(deadline + 1n);
-      const receipt = (await (await f.QS.finalizeClaims([{ subscriptionId: p, bucketIndex: 0n, seller: s1.identityId }])).wait())!;
-      expect(eventsOf(receipt, f.QS, 'ClaimSkipped').map((e) => e.reason)).to.deep.equal([6n]); // NothingClaimed
-      await time.increaseTo(await h.epochStart(next + 2n));
-      await f.QS.closeEpochs(10n);
-      expect(await f.QIS.closedThrough()).to.equal(next + 1n);
-      expect(await f.QS.epochPool(next + 1n)).to.equal(0n);
-      expect(await f.QIS.carry()).to.equal((await f.QIS.walletDue(next)) + s.cost);
+      // Nothing breaks: the epochs end with no value in them, so their pools are
+      // 0 and their money, the period's cost with the rest, stays booked under
+      // them, for the first epoch in which value counts.
+      await time.increaseTo(s.periodEnd);
+      expect(await f.QS.epochPool(epoch)).to.equal(0n);
+      expect(await f.QS.epochPool(next)).to.equal(0n);
+      expect(await f.QIS.fundingIn(epoch)).to.deep.equal([10n * TRAC, 0n]);
+      expect(await f.QIS.fundingIn(next)).to.deep.equal([0n, s.cost]);
+      const later = await walletFund(owner, next + 1n, [bucket(0, CLASS_INFERENCE, TRAC, CAP)]);
+      const g = await items(later, 0, s1, 1);
+      await h.accept(s1, [{ subscriptionId: later, bucketIndex: 0n, minCounted: 0n, items: g.items }]);
+      expect(await f.QS.epochPool(next + 1n)).to.equal(TRAC + s.cost + 10n * TRAC);
     });
   });
 
@@ -796,7 +847,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const top = (1n << 64n) - 1n;
       const nonces = [0n, 255n, 256n, 511n, 512n, top];
       const group = await Promise.all(nonces.map(async (nonce) => h.itemFor(await h.requestFor(a, 0, s1, { nonce }))));
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: group }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: group }]);
       expect(await f.QIS.nonceWord(a, s1.identityId, 0n)).to.equal((1n << 255n) | 1n);
       expect(await f.QIS.nonceWord(a, s1.identityId, 1n)).to.equal((1n << 255n) | 1n);
       expect(await f.QIS.nonceWord(a, s1.identityId, 2n)).to.equal(1n);
@@ -808,13 +859,13 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const group = await Promise.all(
         [5n, 300n, 6n, 301n].map(async (nonce) => h.itemFor(await h.requestFor(a, 0, s1, { nonce }))),
       );
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: group }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: group }]);
       expect(await f.QIS.nonceWord(a, s1.identityId, 0n)).to.equal((1n << 5n) | (1n << 6n));
       expect(await f.QIS.nonceWord(a, s1.identityId, 1n)).to.equal((1n << 44n) | (1n << 45n));
       const again = await Promise.all(
         [7n, 302n, 5n].map(async (nonce) => h.itemFor(await h.requestFor(a, 0, s1, { nonce, maxUnits: 999n }))),
       );
-      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, items: again }]))
+      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: again }]))
         .to.be.revertedWithCustomError(f.QS, 'ReceiptFault')
         .withArgs(0n, 2n, Fault.DuplicateNonce);
     });
@@ -826,6 +877,7 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       const group = (from: number, to: number): ReceiptGroup => ({
         subscriptionId: a,
         bucketIndex: 0n,
+        minCounted: 0n,
         items: g.items.slice(from, to),
       });
       for (const [groups, groupCount, itemCount] of [
@@ -840,18 +892,18 @@ describe('@integration Receipt batches of the query/inference pool', function ()
           .withArgs(groupCount, itemCount);
       }
       await h.accept(s1, [group(0, 2), group(2, 4)]);
-      expect(await f.QIS.bucketClaimed(a, 0n)).to.equal(4n * 1_000n * ASK);
+      expect(await f.QIS.bucketFilled(a, 0n)).to.equal(4n * 1_000n * ASK);
     });
 
     it('is refused while QueryInferenceStorage is paused, and goes on once it is not', async () => {
       const g = await items(a, 0, s1, 1);
       await forward(f.QIS, 'setPaused', [true]);
-      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }])).to.be.revertedWithCustomError(
+      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }])).to.be.revertedWithCustomError(
         f.QS,
         'QueryInferencePaused',
       );
       await forward(f.QIS, 'setPaused', [false]);
-      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }]);
+      await h.accept(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]);
     });
 
     it('is refused before the activation epoch and while it is unset', async () => {
@@ -864,11 +916,11 @@ describe('@integration Receipt batches of the query/inference pool', function ()
       await forward(fresh, 'initialize');
       await forward(f.QS, 'initialize');
       const now = await h.epochNow();
-      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }]))
+      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]))
         .to.be.revertedWithCustomError(f.QS, 'QueryInferenceNotActive')
         .withArgs(0n, now);
       await forward(fresh, 'setActivationEpoch', [now + 1n]);
-      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, items: g.items }]))
+      await expect(h.submit(s1, [{ subscriptionId: a, bucketIndex: 0n, minCounted: 0n, items: g.items }]))
         .to.be.revertedWithCustomError(f.QS, 'QueryInferenceNotActive')
         .withArgs(now + 1n, now);
     });

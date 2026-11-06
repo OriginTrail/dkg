@@ -14,19 +14,18 @@
 //
 // The pool needs value to show anything, so the phase first runs two epochs
 // of it, from the activation epoch S: a wallet period of S that both sellers
-// serve, finalized in S + 1, so S + 1 pools it, and a wallet period of S + 1
-// that no one serves, so S + 2 closes into a carry. The switch goes off in
-// S + 3 and on again in S + 4. It runs right after the hub phase, before S
-// ends, and everything is reverted at the end, so the later phases find the
-// chain as the hub phase left it.
+// serve, so S has a pool, and a wallet period of S + 1 that no one serves, so its
+// money rolls forward. The switch goes off in S + 2, with a batch for that epoch
+// in hand, and on again in S + 3, once that batch has missed its epoch. It runs
+// right after the hub phase, before S ends, and everything is reverted at the end,
+// so the later phases find the chain as the hub phase left it.
 
 import { ethers } from 'ethers';
 
 import { subscriptionIdOf } from '../../../test/helpers/conviction-service';
-import type { QueryInferenceSettlement } from '../../../typechain';
 import { Contracts, eventsIn } from '../contracts';
 import { chainNow } from '../network';
-import { poolShareOf } from '../reads';
+import { groupFault, poolShareOf } from '../reads';
 import { fmt } from '../report';
 import { Ctx, HUB, expectRevert, saveResults, send, succeeds, withPool } from './context';
 import { accountRequest, approve, claimAll, fundTrac, openServiceAccount, requestDomain, signedGroup, submitBatch, walletRequest } from './operations';
@@ -39,7 +38,9 @@ import { CA_PERIOD_VALUE, COMMITTED, MAX_COST_PER_PERIOD, SELLERS, TRAC } from '
 const PLACEHOLDER_NAME = 'HubSetPlaceholder';
 const PLACEHOLDER = '0x000000000000000000000000000000000000dEaD';
 const SWITCH_SERVED_VALUE = 5n * TRAC; // a wallet period both sellers serve
-const SWITCH_UNSERVED_VALUE = 2n * TRAC; // a wallet period no one serves, so its due epoch carries it
+const SWITCH_UNSERVED_VALUE = 2n * TRAC; // a wallet period no one serves, so its money rolls forward
+const SWITCH_STRANDED_VALUE = 1n * TRAC; // a wallet period whose batch the outage stops
+const SWITCH_AFTER_VALUE = 1n * TRAC; // a wallet period served once the switch is on again
 
 export async function phaseSwitch(ctx: Ctx): Promise<void> {
   const { report, stack } = ctx;
@@ -48,20 +49,19 @@ export async function phaseSwitch(ctx: Ctx): Promise<void> {
   const qsDeployedAddr = await c.qs.getAddress();
   const S = await c.qis.activationEpoch();
   const C = await c.chronos.getCurrentEpoch();
-  const closed0 = await c.qis.closedThrough();
-  if (S === 0n || C > S || closed0 !== S - 1n) {
-    throw new Error(`run PHASE=switch right after PHASE=hub: activation ${S}, current epoch ${C}, closed through ${closed0}`);
-  }
+  if (S === 0n || C > S) throw new Error(`run PHASE=switch right after PHASE=hub: activation ${S}, current epoch ${C}`);
   const startBlock = await ctx.hre.ethers.provider.getBlockNumber();
   report.say(`\nin a snapshot from epoch ${C}, block ${startBlock}: the switch, then revert`);
   const out = await ctx.fork.inSnapshot(() => offAndOn(ctx, c, S, C));
+  const moneyLeft = await c.qis.fundingIn(S);
   report.check(
-    'the snapshot is reverted: the block, the epoch, the deployed settlement and the closes are as the hub phase left them',
+    'the snapshot is reverted: the block, the epoch, the deployed settlement and the money are as the hub phase left them',
     (await ctx.hre.ethers.provider.getBlockNumber()) === startBlock &&
       (await c.chronos.getCurrentEpoch()) === C &&
       (await h.getContractAddress('QueryInferenceSettlement')) === qsDeployedAddr &&
       !(await c.qis.paused()) &&
-      (await c.qis.closedThrough()) === closed0,
+      moneyLeft.wallet === 0n &&
+      moneyLeft.conviction === 0n,
   );
   saveResults(ctx, 'switch', out);
 }
@@ -79,7 +79,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   const snftAddr = await c.snft.getAddress();
   const ownerAddr = await h.owner();
   const owner = await impersonate(ctx, ownerAddr);
-  const [deployer, walletBuyer, caOwner, buyerKey, caSession, , keeper, walletSession] = await ctx.hre.ethers.getSigners();
+  const [deployer, walletBuyer, caOwner, buyerKey, caSession, , , walletSession] = await ctx.hre.ethers.getSigners();
 
   const [nOn, nOff] = SELLERS; // nOff is claimed while the switch is off, nOn once it is on again
   const ops = await operationalKeys(ctx);
@@ -117,6 +117,8 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
     account: await succeeds(ctx, buyerKey.address, ssAddr, fundAccount(epoch)),
   });
 
+  // FORK-ONLY: both sellers score in S, as each scored in the last full epoch before the fork.
+  for (const n of SELLERS) await ctx.fork.proof(c, n, mirror[String(n)], `node ${n} scores in epoch ${S} what it scored in ${C - 1n}`);
   const qiDomain = await requestDomain(c);
   const issuedAt = await chainNow(ctx.hre);
   const servedBy: Record<string, bigint[]> = { [String(nOn)]: [2n * TRAC], [String(nOff)]: [1n * TRAC] };
@@ -126,20 +128,9 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
     await submitBatch(ctx, qsDeployed, opSigner, `node ${seller} operational key: submitReceiptBatch`, [group]);
   }
 
-  // ---- epoch S + 1: finalization; a period no one serves ----
-  const deadline = (await c.chronos.timestampForEpoch(S + 1n)) + (await c.qis.receiptGraceSecondsAt(S));
-  await ctx.fork.warpTo(deadline + 1n);
-  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: finalization`);
-  // FORK-ONLY: both sellers score in S + 1, as each scored in the last full epoch before the fork.
-  for (const n of SELLERS) await ctx.fork.proof(c, n, mirror[String(n)], `node ${n} scores in epoch ${S + 1n} what it scored in ${C - 1n}`);
-  const fin = await send(
-    ctx,
-    'keeper: finalizeClaims (2 claims)',
-    keeper,
-    qsDeployedAddr,
-    qsDeployed.interface.encodeFunctionData('finalizeClaims', [SELLERS.map((seller) => ({ subscriptionId: servedPeriod, bucketIndex: 0n, seller }))]),
-  );
-  check('both sellers\' claims are finalized', eventsIn(fin.receipt, qsDeployed, qsDeployed.getEvent('ClaimsFinalized')).length === 2);
+  // ---- epoch S + 1: a period no one serves ----
+  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 1n)) + 120n);
+  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: a period no one serves`);
   await send(
     ctx,
     `wallet buyer: fundFromWallet(epoch ${S + 1n}, ${fmt(SWITCH_UNSERVED_VALUE)} TRAC), which no one serves`,
@@ -148,40 +139,54 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
     fundWallet(S + 1n, SWITCH_UNSERVED_VALUE, 'switch rehearsal: unserved'),
   );
 
-  // ---- epoch S + 3: the closes, then the switch goes off ----
-  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 3n)) + 120n);
-  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: the closes, then the switch goes off`);
-  const closeEpochs = (qs: QueryInferenceSettlement) => qs.interface.encodeFunctionData('closeEpochs', [64n]);
-  await send(ctx, 'keeper: closeEpochs(64)', keeper, qsDeployedAddr, closeEpochs(qsDeployed));
+  // ---- epoch S + 2: a batch in hand, then the switch goes off ----
+  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 2n)) + 120n);
+  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: a period funded and served, whose batch has not landed, then the switch goes off`);
+  await send(ctx, `wallet buyer: fundFromWallet(epoch ${S + 2n}, ${fmt(SWITCH_STRANDED_VALUE)} TRAC)`, walletBuyer, sswAddr, fundWallet(S + 2n, SWITCH_STRANDED_VALUE, 'switch rehearsal: the batch the outage stops'));
+  await ctx.fork.proof(c, nOn, mirror[String(nOn)], `node ${nOn} scores in epoch ${S + 2n} what it scored in ${C - 1n}`);
+  const strandedBatch = c.qs.interface.encodeFunctionData('submitReceiptBatch', [
+    [
+      await signedGroup({
+        domain: qiDomain,
+        session: walletSession,
+        subscriptionId: subscriptionIdOf(walletBuyer.address, S + 2n),
+        seller: nOn,
+        firstNonce: 0n,
+        values: [SWITCH_STRANDED_VALUE],
+        issuedAt: await chainNow(ctx.hre),
+      }),
+    ],
+  ]);
+  const opOn = ops[String(nOn)];
   const before = {
-    closedThrough: await c.qis.closedThrough(),
-    carry: await c.qis.carry(),
-    pool: await qsDeployed.epochPool(S + 1n),
+    pool: await qsDeployed.epochPool(S),
     gross: {} as Record<string, bigint>,
+    rolled: (await c.qis.fundingIn(S + 1n)).wallet,
+    rolledEpochPool: await qsDeployed.epochPool(S + 1n),
   };
-  for (const n of SELLERS) before.gross[String(n)] = await qsDeployed.queryInferenceGross(S + 1n, n);
+  for (const n of SELLERS) before.gross[String(n)] = await qsDeployed.queryInferenceGross(S, n);
   check(
-    `epoch ${S + 1n} pools the served ${fmt(SWITCH_SERVED_VALUE)} TRAC; ${S + 2n} closes into a carry of the unserved ${fmt(SWITCH_UNSERVED_VALUE)}`,
-    before.pool === SWITCH_SERVED_VALUE && before.carry === SWITCH_UNSERVED_VALUE && before.closedThrough === S + 2n,
-    `closedThrough ${before.closedThrough}, carry ${fmt(before.carry)}, gross ${SELLERS.map((n) => `node ${n} ${fmt(before.gross[String(n)])}`).join(', ')}`,
+    `epoch ${S} pools the served ${fmt(SWITCH_SERVED_VALUE)} TRAC; ${S + 1n}, with no value, has no pool, and its ${fmt(SWITCH_UNSERVED_VALUE)} TRAC rolls forward`,
+    before.pool === SWITCH_SERVED_VALUE && before.rolledEpochPool === 0n && before.rolled === SWITCH_UNSERVED_VALUE,
+    `gross ${SELLERS.map((n) => `node ${n} ${fmt(before.gross[String(n)])}`).join(', ')}`,
   );
 
-  // Each seller's net of S + 1 with the pool, as StakingKPI previews it, and
+  // Each seller's net of S with the pool, as StakingKPI previews it, and
   // without it: the publishing share less the operator fee (the shared pool
   // share of a position, here of none).
   const netWith: Record<string, bigint> = {};
   const netWithout: Record<string, bigint> = {};
   for (const n of SELLERS) {
-    netWith[String(n)] = await c.kpi.getNetNodeRewards(n, S + 1n);
-    netWithout[String(n)] = (await poolShareOf(c, n, S + 1n, 0n, netWith[String(n)])).netWithoutPool;
+    netWith[String(n)] = await c.kpi.getNetNodeRewards(n, S);
+    netWithout[String(n)] = (await poolShareOf(c, n, S, 0n, netWith[String(n)])).netWithoutPool;
   }
   const pos = await positions(c);
   const pOff = smallestOn(pos, nOff);
   const pOn = smallestOn(pos, nOn);
   if (!pOff || !pOn) throw new Error(`no position on node ${pOff ? nOn : nOff}`);
-  const keyOff = `${nOff}:${S + 1n}`;
-  const shareWith = (await expectedReward(c, pOff, S + 1n, S + 1n, { [keyOff]: netWith[String(nOff)] })).total;
-  const shareWithout = (await expectedReward(c, pOff, S + 1n, S + 1n, { [keyOff]: netWithout[String(nOff)] })).total;
+  const keyOff = `${nOff}:${S}`;
+  const shareWith = (await expectedReward(c, pOff, S, S, { [keyOff]: netWith[String(nOff)] })).total;
+  const shareWithout = (await expectedReward(c, pOff, S, S, { [keyOff]: netWithout[String(nOff)] })).total;
 
   // The counterfactual: token pOff's claim with the switch on, reverted at once.
   const [claimOn] = await ctx.fork.inSnapshot(() => claimAll(ctx, [pOff], 'counterfactual, switch on:'));
@@ -199,6 +204,8 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
       (await c.kpi.queryInferenceSettlement()) === ethers.ZeroAddress,
   );
   const openRemoved = await fundingOpen(S + 3n);
+  const batchRemoved = await expectRevert(ctx, `switch off: node ${nOn}'s batch, with the settlement removed`, opOn, qsDeployedAddr, strandedBatch);
+  check('switch off: a batch reverts, since the storage refuses a contract the Hub no longer holds', batchRemoved.startsWith('UnauthorizedAccess'), batchRemoved);
   check(
     'with the settlement removed, wallet and Conviction Account funding both stay open, so the pause belongs with the removal',
     openRemoved.wallet && openRemoved.account,
@@ -206,35 +213,39 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
   await send(ctx, 'Hub owner: Hub.forwardCall(QueryInferenceStorage, setPaused(true))', owner, HUB, setPaused(true));
   const pausedWallet = await expectRevert(ctx, 'switch off: fundFromWallet', walletBuyer.address, sswAddr, fundWallet(S + 3n, TRAC, 'switch rehearsal: probe'));
   const pausedAccount = await expectRevert(ctx, 'switch off: fundFromConviction', buyerKey.address, ssAddr, fundAccount(S + 3n));
+  const pausedBatch = await expectRevert(ctx, `switch off: node ${nOn}'s batch, with the storage paused too`, opOn, qsDeployedAddr, strandedBatch);
   check(
     'switch off: the pause refuses both kinds of funding',
     pausedWallet.startsWith('QueryInferencePaused') && pausedAccount.startsWith('QueryInferencePaused'),
     `${pausedWallet}, ${pausedAccount}`,
   );
-  const kpiOff = await c.kpi.getNetNodeRewards(nOff, S + 1n);
+  check('switch off: the pause refuses a batch first', pausedBatch.startsWith('QueryInferencePaused'), pausedBatch);
   check(
-    `switch off: StakingKPI's net of node ${nOff} in ${S + 1n} is the publishing share alone`,
+    `switch off: a claim reads epoch ${S}, which has ended, without the settlement: nothing else has to run`,
+    await succeeds(ctx, pOff.owner, snftAddr, c.snft.interface.encodeFunctionData('claim', [pOff.tokenId])),
+  );
+  const kpiOff = await c.kpi.getNetNodeRewards(nOff, S);
+  check(
+    `switch off: StakingKPI's net of node ${nOff} in ${S} is the publishing share alone`,
     kpiOff === netWithout[String(nOff)] && kpiOff < netWith[String(nOff)],
     `${fmt(netWith[String(nOff)])} → ${fmt(kpiOff)} TRAC`,
   );
   const [claimOff] = await claimAll(ctx, [pOff], 'switch off:');
   const lost = claimOn.reward - claimOff.reward;
   check(
-    `switch off: token ${pOff.tokenId}'s claim pays the publishing pool alone, ${fmt(lost)} TRAC less than with the switch on: its share of node ${nOff}'s pool gross in ${S + 1n}`,
+    `switch off: token ${pOff.tokenId}'s claim pays the publishing pool alone, ${fmt(lost)} TRAC less than with the switch on: its share of node ${nOff}'s pool gross in ${S}`,
     lost > 0n && lost === shareWith - shareWithout,
     `${fmt(claimOff.reward)} TRAC (switch on: ${fmt(claimOn.reward)})`,
   );
   check(
-    `switch off: the claim split node ${nOff}'s ${S + 1n} without the pool`,
-    (await c.css.isOperatorFeeClaimedForEpoch(nOff, S + 1n)) && (await c.css.getNetNodeEpochRewards(nOff, S + 1n)) === netWithout[String(nOff)],
+    `switch off: the claim split node ${nOff}'s ${S} without the pool`,
+    (await c.css.isOperatorFeeClaimedForEpoch(nOff, S)) && (await c.css.getNetNodeEpochRewards(nOff, S)) === netWithout[String(nOff)],
   );
 
-  // ---- epoch S + 4: still off across the epoch boundary ----
-  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 4n)) + 120n);
+  // ---- epoch S + 3: still off across the epoch boundary ----
+  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(S + 3n)) + 120n);
   report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: the outage spans an epoch boundary, then the switch goes on again`);
-  const closeOff = await expectRevert(ctx, `switch off: closeEpochs, with epoch ${S + 3n} ended`, keeper.address, qsDeployedAddr, closeEpochs(qsDeployed));
-  check('switch off: no epoch closes, since the storage refuses a contract the Hub no longer holds', closeOff.startsWith('UnauthorizedAccess'), closeOff);
-  const during = { closedThrough: await c.qis.closedThrough(), carry: await c.qis.carry() };
+  const during = { pool: await qsDeployed.epochPool(S), rolled: (await c.qis.fundingIn(S + 1n)).wallet, stranded: (await c.qis.fundingIn(S + 2n)).wallet };
 
   // ---- on: a fresh settlement, registered, initialized and unpaused in one Hub transaction ----
   const onTxs = ctx.txs.length;
@@ -265,35 +276,42 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
       !(await c.qis.paused()),
   );
   check(`switch on: the registration appended the settlement as the Hub's last entry (${orderOn.length - 1})`, orderOn[orderOn.length - 1].addr === fresh);
-  const grossSame = (await Promise.all(SELLERS.map(async (n) => (await qsFresh.queryInferenceGross(S + 1n, n)) === before.gross[String(n)]))).every(Boolean);
+  const grossSame = (await Promise.all(SELLERS.map(async (n) => (await qsFresh.queryInferenceGross(S, n)) === before.gross[String(n)]))).every(Boolean);
   check(
-    `switch on: the pool's state is kept: closed through ${before.closedThrough}, a carry of ${fmt(before.carry)} TRAC, ${S + 1n}'s pool and each seller's gross`,
-    during.closedThrough === before.closedThrough &&
-      during.carry === before.carry &&
-      (await c.qis.closedThrough()) === before.closedThrough &&
-      (await c.qis.carry()) === before.carry &&
-      (await qsFresh.epochPool(S + 1n)) === before.pool &&
+    `switch on: the pool's state is kept: ${S}'s pool, each seller's gross, and the money waiting since ${S + 1n}`,
+    during.pool === before.pool &&
+      during.rolled === before.rolled &&
+      during.stranded === SWITCH_STRANDED_VALUE &&
+      (await qsFresh.epochPool(S)) === before.pool &&
+      (await c.qis.fundingIn(S + 1n)).wallet === before.rolled &&
       grossSame,
   );
   const openOn = await fundingOpen(S + 4n);
   check('switch on: both kinds of funding are open again', openOn.wallet && openOn.account);
-  const reclosed = await send(ctx, 'keeper: closeEpochs(64), on the fresh settlement', keeper, fresh, closeEpochs(qsFresh));
-  const closedOn = eventsIn(reclosed.receipt, qsFresh, qsFresh.getEvent('EpochClosed'));
+  await ctx.fork.proof(c, nOn, mirror[String(nOn)], `node ${nOn} scores in epoch ${S + 3n} what it scored in ${C - 1n}`);
+  const missed = await expectRevert(ctx, `switch on: node ${nOn}'s batch for the period of ${S + 2n}, in ${S + 3n}`, opOn, fresh, strandedBatch);
+  check(`switch on: a batch that missed its epoch during the outage never counts, so its work has lost its R`, missed === groupFault(0, 'OutsideEpoch'), missed);
+  // The money of the epochs with no value rolls through the outage, to the next batch.
+  await send(ctx, `wallet buyer: fundFromWallet(epoch ${S + 3n}, ${fmt(SWITCH_AFTER_VALUE)} TRAC)`, walletBuyer, sswAddr, fundWallet(S + 3n, SWITCH_AFTER_VALUE, 'switch rehearsal: after the outage'));
+  const afterPeriod = subscriptionIdOf(walletBuyer.address, S + 3n);
+  const afterGroup = await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: afterPeriod, seller: nOn, firstNonce: 0n, values: [SWITCH_AFTER_VALUE], issuedAt: await chainNow(ctx.hre) });
+  await submitBatch(ctx, qsFresh, await impersonate(ctx, opOn), `node ${nOn} operational key: submitReceiptBatch, on the fresh settlement`, [afterGroup]);
+  const poolAfter = await qsFresh.epochPool(S + 3n);
   check(
-    `switch on: closeEpochs closes ${S + 3n}, which ended during the outage, with the kept carry carried in`,
-    closedOn.length === 1 && closedOn[0].epoch === S + 3n && closedOn[0].carryIn === before.carry && (await c.qis.closedThrough()) === S + 3n,
-    `carry in ${fmt(closedOn[0]?.carryIn ?? 0n)} TRAC`,
+    `switch on: the fresh settlement counts a batch, and epoch ${S + 3n}'s pool takes the money that rolled through the outage: ${fmt(SWITCH_UNSERVED_VALUE)} + ${fmt(SWITCH_STRANDED_VALUE)} + ${fmt(SWITCH_AFTER_VALUE)} TRAC`,
+    poolAfter === SWITCH_UNSERVED_VALUE + SWITCH_STRANDED_VALUE + SWITCH_AFTER_VALUE,
+    `${fmt(poolAfter)} TRAC`,
   );
   const [claimAfter] = await claimAll(ctx, [pOn], 'switch on again:');
   check(
-    `switch on: token ${pOn.tokenId}'s claim splits node ${nOn}'s ${S + 1n} with the pool, as StakingKPI previewed before the switch`,
-    claimAfter.reward > 0n && (await c.css.getNetNodeEpochRewards(nOn, S + 1n)) === netWith[String(nOn)],
+    `switch on: token ${pOn.tokenId}'s claim splits node ${nOn}'s ${S} with the pool, as StakingKPI previewed before the switch`,
+    claimAfter.reward > 0n && (await c.css.getNetNodeEpochRewards(nOn, S)) === netWith[String(nOn)],
     `${fmt(claimAfter.reward)} TRAC; net ${fmt(netWith[String(nOn)])} TRAC`,
   );
   const stranded = netWith[String(nOff)] - netWithout[String(nOff)];
   check(
-    `switch on: node ${nOff}'s ${S + 1n}, split while the switch was off, stays without the pool: ${fmt(stranded)} TRAC of its net is paid to no one`,
-    (await c.css.getNetNodeEpochRewards(nOff, S + 1n)) === netWithout[String(nOff)] && (await qsFresh.queryInferenceGross(S + 1n, nOff)) > 0n,
+    `switch on: node ${nOff}'s ${S}, split while the switch was off, stays without the pool: ${fmt(stranded)} TRAC of its net is paid to no one`,
+    (await c.css.getNetNodeEpochRewards(nOff, S)) === netWithout[String(nOff)] && (await qsFresh.queryInferenceGross(S, nOff)) > 0n,
   );
 
   // ---- a removal by address of the Hub's last entry, the fresh settlement ----
@@ -338,7 +356,7 @@ async function offAndOn(ctx: Ctx, c: Contracts, S: bigint, C: bigint): Promise<{
     funding: { removedOnly: openRemoved, paused: { wallet: pausedWallet, account: pausedAccount }, onAgain: openOn },
     nets: { with: netWith, without: netWithout },
     claims: { counterfactualOn: claimOn, off: claimOff, onAgain: claimAfter, lostByOffClaim: lost, strandedNet: stranded },
-    closeWhileOff: closeOff,
+    batches: { removed: batchRemoved, paused: pausedBatch, missed, poolAfter },
     fresh,
     byAddress: { lookup, claim: claimPanics, reRegister, placeholder: { name: PLACEHOLDER_NAME, addr: PLACEHOLDER } },
     byNameLastEntry: { claims: byNameClaims, sameAddress, addressLookup },

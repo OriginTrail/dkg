@@ -11,6 +11,10 @@ export const LATE_COMMITTED = 12_000n * TRAC;
 /** A 7 TRAC cost at the 30 % tier. */
 export const CA_PERIOD_VALUE = 10n * TRAC;
 export const WALLET_PERIOD_VALUE = 5n * TRAC;
+/** What the wallet buyer tops its period up by, once its bucket is too low for a seller's batch. */
+export const WALLET_TOP_UP = 3n * TRAC;
+/** A wallet period no one serves, whose money rolls into the next epoch with value. */
+export const ROLLED_VALUE = 1n * TRAC;
 export const PUBLISH_BASE_COST = 20n * TRAC;
 export const PUBLISH_KA_EPOCHS = 2n;
 /** The buyer key's assignment limit. */

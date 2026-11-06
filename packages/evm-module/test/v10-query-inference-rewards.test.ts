@@ -6,24 +6,27 @@
 //     publishing pool plus its gross from the query/inference pool; the
 //     operator fee comes off the sum and the delegators split the rest by
 //     score, across tiers;
-//   - rollover: epochs with no finalized value pay nothing from the pool,
-//     and the epoch that has value pays the carry;
-//   - a claim closes the pool through its window, within
-//     maxCloseStepsPerClaim, and reverts QueryInferenceCloseBehind beyond it,
-//     withdraw included, until closeEpochs clears it;
+//   - rollover: epochs with no counted value pay nothing from the pool, and
+//     the next epoch with value pays their money with its own, to a node's
+//     first claim of it;
+//   - a claim reads ended epochs and calls nothing first: it pays an epoch from
+//     the first second of the next, and the pool holds back no claim,
+//     withdrawal, relock or redelegation;
 //   - conservation: the vault StakingV10 pays from, ConvictionStakingStorage,
 //     receives every wallet payment and holds every TRAC a claim credits;
-//   - StakingKPI.getNetNodeRewards equals what the claims pay, previewed for
-//     an ended epoch before its close;
+//   - StakingKPI.getNetNodeRewards reads queryInferenceGross and equals what the
+//     claims pay, before an epoch's split and once it is recorded;
 //   - a position that left a node by a redelegation, or its token by a relock,
 //     in an epoch with both pools takes its share of that node's reward at its
 //     next claim, through the reward carry, once, with the operator fee split
 //     once;
 //   - with the pool's activation epoch unset, claims read nothing from it;
+//   - with the settlement out of the Hub, the emergency switch, a batch reverts
+//     and a claim pays without the pool, for good;
 //   - a Conviction Account's money (PublishingConviction 10.2.0,
 //     ServiceSubscriptions 1.2.0) through claims over its whole lock: a plan
-//     period's cost due beside a wallet period, a period's cost alone rolled
-//     over, a publishing draw and the closed windows' unused budget in the
+//     period's cost in its epoch beside a wallet period, a period's cost alone
+//     rolled over, a publishing draw and the closed windows' unused budget in the
 //     publishing pool; the commitment is booked exactly once, and the vault
 //     keeps only the floors once everything is withdrawn.
 //
@@ -101,7 +104,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
   });
 
   it('pays a wallet-funded pool with the publishing pool, through the operator fee, to every delegator by score', async () => {
-    const a = await h.epochNow();
+    const e = await h.epochNow();
     const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n); // 10% fee
     const n2 = await h.createSeller(2_000_000n * TRAC, 2_000n); // 20% fee
     const d1 = f.accounts[10];
@@ -109,19 +112,15 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const t1 = await h.delegate(d1, n1.identityId, 200_000n * TRAC);
     const t2 = await h.delegate(d2, n1.identityId, 100_000n * TRAC, TIER_12);
 
-    const p = await h.walletFund(f.accounts[20], a, 100n * TRAC); // due a + 1
+    const p = await h.walletFund(f.accounts[20], e, 100n * TRAC);
+    await h.scoreEpoch(e, n1, 300n * TRAC);
+    await h.scoreEpoch(e, n2, 100n * TRAC);
     await h.claimReceipts(n1, p, 30n * TRAC);
     await h.claimReceipts(n2, p, 50n * TRAC);
-    await h.finalizeIn(a, [p], [
-      [n1, 300n * TRAC],
-      [n2, 100n * TRAC],
-    ]);
-    const e = a + 1n;
     await h.publishingPool(e, 1_000n * TRAC);
     await h.toEpoch(e + 1n);
 
-    // Ended, not yet closed: the KPI previews the close.
-    expect((await f.QIS.getEpochClose(e)).closed).to.equal(false);
+    // Ended, and split by no claim yet: the KPI reads what the claims then pay.
     const previewed = [await f.KPI.getNetNodeRewards(n1.identityId, e), await f.KPI.getNetNodeRewards(n2.identityId, e)];
 
     const feeBefore = [await f.Vault.getOperatorFeeBalance(n1.identityId), await f.Vault.getOperatorFeeBalance(n2.identityId)];
@@ -130,8 +129,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const score2 = await h.positionScore(t2, n1, e);
     const scoreOperator1 = await h.positionScore(n1.tokenId, n1, e);
     const scoreOperator2 = await h.positionScore(n2.tokenId, n2, e);
-    const paid1 = await h.claim(d1, t1); // closes a and e on its way
-    expect(await f.QIS.closedThrough()).to.equal(e);
+    const paid1 = await h.claim(d1, t1);
     expect(await f.QS.epochPool(e)).to.equal(100n * TRAC);
 
     const s1 = await h.split(n1, e);
@@ -167,31 +165,31 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     expect(s1.net - delegated < 10n ** 9n).to.equal(true);
   });
 
-  it('rollover: epochs with no finalized value pay nothing from the pool, and the epoch with value pays the carry', async () => {
+  it('rollover: an epoch with no counted value pays nothing from the pool, and the next epoch with value pays its money too', async () => {
     const a = await h.epochNow();
     const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
     const d1 = f.accounts[10];
     const t1 = await h.delegate(d1, n1.identityId, 250_000n * TRAC);
 
-    await h.walletFund(f.accounts[20], a, 10n * TRAC); // due a + 1, never claimed
+    await h.walletFund(f.accounts[20], a, 10n * TRAC); // a's money, which no receipt counts for
+    await h.scoreEpoch(a, n1, 100n * TRAC); // the node proves, but sells nothing in a
     await h.toEpoch(a + 1n);
-    await h.scoreEpoch(a + 1n, n1, 100n * TRAC); // the node proves, but sells nothing in a + 1
-    const p1 = await h.walletFund(f.accounts[21], a + 1n, 20n * TRAC); // due a + 2
+    await h.scoreEpoch(a + 1n, n1, 100n * TRAC);
+    const p1 = await h.walletFund(f.accounts[21], a + 1n, 20n * TRAC);
     await h.claimReceipts(n1, p1, 5n * TRAC);
-    await h.finalizeIn(a + 1n, [p1], [[n1, 100n * TRAC]]);
-    await h.toEpoch(a + 3n);
+    await h.toEpoch(a + 2n);
 
-    expect(await f.KPI.getNetNodeRewards(n1.identityId, a + 1n)).to.equal(0n);
-    const previewed = await f.KPI.getNetNodeRewards(n1.identityId, a + 2n);
-    const score = await h.positionScore(t1, n1, a + 2n);
-    const paid = await h.claim(d1, t1); // one claim over a, a + 1 and a + 2
+    expect(await f.KPI.getNetNodeRewards(n1.identityId, a)).to.equal(0n);
+    const previewed = await f.KPI.getNetNodeRewards(n1.identityId, a + 1n);
+    const score = await h.positionScore(t1, n1, a + 1n);
+    const paid = await h.claim(d1, t1); // one claim over a and a + 1
 
-    expect(await f.QS.epochPool(a + 1n)).to.equal(0n);
-    expect(await f.QS.epochPool(a + 2n)).to.equal(30n * TRAC);
-    const rolled = await h.split(n1, a + 1n);
-    const s = await h.split(n1, a + 2n);
+    expect(await f.QS.epochPool(a)).to.equal(0n);
+    expect(await f.QS.epochPool(a + 1n)).to.equal(30n * TRAC);
+    const rolled = await h.split(n1, a);
+    const s = await h.split(n1, a + 1n);
     expect([rolled.gross, rolled.net]).to.deep.equal([0n, 0n]);
-    // The only node with value takes the whole pool, carry included.
+    // The only node with value takes the whole pool, the rolled money included.
     expect(s.queryInference).to.equal(30n * TRAC);
     expect(s.net).to.equal(27n * TRAC);
     expect(previewed).to.equal(s.net);
@@ -199,60 +197,142 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(3n * TRAC);
   });
 
-  it('a claim closes the pool within maxCloseStepsPerClaim, reverts QueryInferenceCloseBehind beyond it, withdraw included, until closeEpochs clears it', async () => {
-    await h.forward(f.QIS, 'setMaxCloseStepsPerClaim', [2n]);
+  it("a node's first claim of an epoch after a rollover run pays the rolled money, which no later epoch pays again", async () => {
+    const a = await h.epochNow();
+    // Equal stakes, and so equal stake factors, so the shares come out exact.
+    const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
+    const n2 = await h.createSeller(1_250_000n * TRAC, 1_000n);
+    const score = 100n * TRAC;
+
+    // Three epochs of money in which n1 proves and no receipt counts.
+    for (const [i, money] of [10n, 20n, 30n].entries()) {
+      const epoch = a + BigInt(i);
+      if (i > 0) await h.toEpoch(epoch);
+      await h.walletFund(f.accounts[20], epoch, money * TRAC);
+      await h.scoreEpoch(epoch, n1, score);
+    }
+
+    // The run ends in e, in which both nodes count value: 3 to 1.
+    const e = a + 3n;
+    await h.toEpoch(e);
+    const p = await h.walletFund(f.accounts[21], e, 40n * TRAC);
+    await h.scoreEpoch(e, n1, score);
+    await h.scoreEpoch(e, n2, score);
+    await h.claimReceipts(n1, p, 30n * TRAC);
+    await h.claimReceipts(n2, p, 10n * TRAC);
+
+    // The epoch after it pays only its own money.
+    await h.toEpoch(e + 1n);
+    const q = await h.walletFund(f.accounts[21], e + 1n, 5n * TRAC);
+    await h.scoreEpoch(e + 1n, n1, score);
+    await h.claimReceipts(n1, q, 1n * TRAC);
+    await h.toEpoch(e + 2n);
+
+    // Nothing has run since: each pool is a plain read, and no split is recorded.
+    for (let x = a; x < e; x++) {
+      expect(await f.QS.epochPool(x), `epoch ${x}`).to.equal(0n);
+      expect(await f.QS.queryInferenceGross(x, n1.identityId), `epoch ${x}`).to.equal(0n);
+    }
+    expect(await f.QS.epochPool(e)).to.equal(100n * TRAC);
+    expect(await f.QS.epochPool(e + 1n)).to.equal(5n * TRAC);
+    expect(await f.Vault.isOperatorFeeClaimedForEpoch(n1.identityId, e)).to.equal(false);
+    expect(await f.Vault.isOperatorFeeClaimedForEpoch(n2.identityId, e)).to.equal(false);
+
+    // n1 takes 3/4 of the 100 and all of the 5, so 80, and n2 1/4 of the 100, so
+    // 25, each less its 10% fee, and that is all 105 of the money.
+    const owedBefore = await h.owed([n1, n2]);
+    expect(await h.claim(n1.operational, n1.tokenId)).to.equal(72n * TRAC);
+    expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal((135n * TRAC) / 2n);
+    expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(8n * TRAC);
+    expect(await h.claim(n2.operational, n2.tokenId)).to.equal((45n * TRAC) / 2n);
+    expect(await f.Vault.getNetNodeEpochRewards(n2.identityId, e)).to.equal((45n * TRAC) / 2n);
+    expect(await f.Vault.getOperatorFeeBalance(n2.identityId)).to.equal((5n * TRAC) / 2n);
+    expect((await h.owed([n1, n2])) - owedBefore).to.equal(105n * TRAC);
+    // A node with no value in an epoch takes nothing from its pool.
+    expect(await f.QS.queryInferenceGross(e + 1n, n2.identityId)).to.equal(0n);
+  });
+
+  it('a claim in the very first second of the next epoch pays the epoch, and one in its last second does not yet', async () => {
     const a = await h.epochNow();
     const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
     const d1 = f.accounts[10];
-    const d2 = f.accounts[11];
     const t1 = await h.delegate(d1, n1.identityId, 250_000n * TRAC);
-    const t2 = await h.delegate(d2, n1.identityId, 250_000n * TRAC);
+    const e = await h.valueIn(a + 1n, [[n1, 30n * TRAC, 300n * TRAC]], 1_000n * TRAC);
+    const boundary = await f.Chronos.timestampForEpoch(e + 1n);
+    const score = await h.positionScore(t1, n1, e);
+
+    await time.setNextBlockTimestamp(boundary - 1n);
+    expect(await h.claim(d1, t1)).to.equal(0n);
+    expect(await h.epochNow()).to.equal(e);
+    expect(await f.Vault.isOperatorFeeClaimedForEpoch(n1.identityId, e)).to.equal(false);
+
+    await time.setNextBlockTimestamp(boundary);
+    const paid = await h.claim(d1, t1);
+    expect(BigInt(await time.latest())).to.equal(boundary);
+    expect(await h.epochNow()).to.equal(e + 1n);
+    const s = await h.split(n1, e);
+    expect([s.publishing, s.queryInference]).to.deep.equal([1_000n * TRAC, 100n * TRAC]);
+    expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(s.net);
+    expect(paid).to.be.greaterThan(0n);
+    expect(paid).to.equal((score * s.net) / s.nodeScore);
+  });
+
+  it('a claim calls nothing first and the pool holds nothing back: with many epochs ended, nothing run and the pool paused, claims and a withdrawal pay, and a relock and a redelegation need only the claim', async () => {
+    const a = await h.epochNow();
+    const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
+    const d = [f.accounts[10], f.accounts[11], f.accounts[12]];
+    const t = [
+      await h.delegate(d[0], n1.identityId, 250_000n * TRAC),
+      await h.delegate(d[1], n1.identityId, 250_000n * TRAC),
+      await h.delegate(d[2], n1.identityId, 250_000n * TRAC),
+    ];
     const p = await h.walletFund(f.accounts[20], a, 40n * TRAC);
+    await h.scoreEpoch(a, n1, 100n * TRAC);
     await h.claimReceipts(n1, p, 8n * TRAC);
-    await h.finalizeIn(a, [p], [[n1, 100n * TRAC]]);
 
-    // Two epochs to close is within the bound: the claim closes them.
-    await h.toEpoch(a + 2n);
-    const paid2 = await h.claim(d2, t2);
-    expect(await f.QIS.closedThrough()).to.equal(a + 1n);
-    expect(paid2).to.be.greaterThan(0n);
+    // The settlement has no step to run first: a claim only reads its views, and
+    // all it can write is its wiring and the batches.
+    const writes: string[] = [];
+    f.QS.interface.forEachFunction((fn) => {
+      if (!fn.constant) writes.push(fn.name);
+    });
+    expect(writes.sort()).to.deep.equal(['initialize', 'setStatus', 'submitReceiptBatch']);
 
-    // Four more epochs end with no close: the next claim would need four steps.
-    await h.toEpoch(a + 6n);
+    await h.forward(f.QIS, 'setPaused', [true]);
+    await h.toEpoch(a + 48n);
     const n2 = await h.createSeller(1_250_000n * TRAC, 0n);
-    await expect(f.StakingNFT.connect(d1).claim(t1))
-      .to.be.revertedWithCustomError(f.StakingV10, 'QueryInferenceCloseBehind')
-      .withArgs(a + 3n, a + 5n);
-    await expect(f.StakingV10.claimFor(t1))
-      .to.be.revertedWithCustomError(f.StakingV10, 'QueryInferenceCloseBehind')
-      .withArgs(a + 3n, a + 5n);
-    // Withdraw claims first, so it is blocked too, and nothing moves.
-    await expect(f.StakingNFT.connect(d1).withdraw(t1))
-      .to.be.revertedWithCustomError(f.StakingV10, 'QueryInferenceCloseBehind')
-      .withArgs(a + 3n, a + 5n);
-    // Redelegate and relock need the claim before them.
-    await expect(f.StakingNFT.connect(d1).redelegate(t1, n2.identityId)).to.be.revertedWithCustomError(
+    const s = await h.split(n1, a);
+    expect(s.queryInference).to.equal(40n * TRAC);
+    const scores = [
+      await h.positionScore(t[0], n1, a),
+      await h.positionScore(t[1], n1, a),
+      await h.positionScore(t[2], n1, a),
+    ];
+    const rewards = scores.map((score) => (score * s.net) / s.nodeScore);
+    expect(rewards.every((reward) => reward > 0n)).to.equal(true);
+
+    // A redelegation needs the claim before it, as ever, and nothing else.
+    await expect(f.StakingNFT.connect(d[0]).redelegate(t[0], n2.identityId)).to.be.revertedWithCustomError(
       f.StakingV10,
       'UnclaimedEpochs',
     );
-    expect(await f.QIS.closedThrough()).to.equal(a + 1n);
+    expect(await h.claim(d[0], t[0])).to.equal(rewards[0]);
+    await f.StakingNFT.connect(d[0]).redelegate(t[0], n2.identityId);
+    expect((await f.Vault.getPosition(t[0])).identityId).to.equal(n2.identityId);
 
-    // Anyone clears it.
-    await f.QS.connect(f.accounts[25]).closeEpochs(10n);
-    expect(await f.QIS.closedThrough()).to.equal(a + 5n);
-    const s = await h.split(n1, a + 1n);
-    const score1 = await h.positionScore(t1, n1, a + 1n);
-    const paid1 = await h.claim(d1, t1);
-    expect(paid1).to.equal((score1 * s.net) / s.nodeScore);
-
-    // Claimed, the position withdraws its stake with the reward compounded in.
-    const raw = (await f.Vault.getPosition(t1)).raw;
-    expect(raw).to.equal(250_000n * TRAC + paid1);
-    await expect(f.StakingNFT.connect(d1).withdraw(t1)).to.changeTokenBalances(
+    // A withdrawal claims first, and pays the stake with the reward compounded in.
+    const paidOut = 250_000n * TRAC + rewards[1];
+    await expect(f.StakingNFT.connect(d[1]).withdraw(t[1])).to.changeTokenBalances(
       f.Token,
-      [d1.address, await h.vault()],
-      [raw, -raw],
+      [d[1].address, await h.vault()],
+      [paidOut, -paidOut],
     );
+
+    // So does a relock need only a claim, which anyone can make.
+    await f.StakingV10.connect(f.accounts[25]).claimFor(t[2]);
+    expect((await f.Vault.getPosition(t[2])).raw).to.equal(250_000n * TRAC + rewards[2]);
+    await f.StakingNFT.connect(d[2]).relock(t[2], 0n);
+    expect((await f.Vault.getPosition(await f.StakingNFT.nextTokenId())).raw).to.equal(250_000n * TRAC + rewards[2]);
   });
 
   it('conservation: the vault receives every wallet payment and holds every TRAC the claims credit', async () => {
@@ -277,6 +357,10 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const slack = async () => (await h.balanceOf(await h.vault())) - (await h.owed(nodes));
     const start = await slack();
 
+    // Both nodes prove in a, as a batch needs.
+    await h.scoreEpoch(a, n1, 200n * TRAC);
+    await h.scoreEpoch(a, n2, 100n * TRAC);
+
     // Wallet payments over three periods move into the vault, and nowhere else.
     let funded = 0n;
     const periods: string[][] = [[], []];
@@ -299,21 +383,16 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     // The wallet money is not owed to anyone yet: it is the vault's slack.
     expect((await slack()) - start).to.equal(funded);
 
-    // a's periods count in a + 1 (finalized there); a + 1's period is claimed and counts in a + 2.
-    await h.finalizeIn(a, periods[0], [
-      [n1, 200n * TRAC],
-      [n2, 100n * TRAC],
-    ]);
+    // a's periods counted in a; n1 proves in a + 1, and a + 1's period counts there.
+    await h.scoreEpoch(a + 1n, n1, 150n * TRAC);
     await h.claimReceipts(n1, periods[1][0], 9n * TRAC);
-    await h.finalizeIn(a + 1n, periods[1], [[n1, 150n * TRAC]]);
-    await h.toEpoch(a + 3n);
+    await h.toEpoch(a + 2n);
 
     // Claims credit TRAC without moving any: what they credit comes out of the slack.
     const vaultBefore = await h.balanceOf(await h.vault());
     for (const [owner, tokenId] of positions) await h.claim(owner, tokenId);
     expect(await h.balanceOf(await h.vault())).to.equal(vaultBefore);
-    expect(await f.QIS.closedThrough()).to.equal(a + 2n);
-    const pools = (await f.QS.epochPool(a + 1n)) + (await f.QS.epochPool(a + 2n));
+    const pools = (await f.QS.epochPool(a)) + (await f.QS.epochPool(a + 1n));
     expect(pools).to.equal(funded);
     const credited = funded - ((await slack()) - start);
     expect(credited <= pools).to.equal(true);
@@ -333,28 +412,28 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     for (const c of bystanders) expect(await h.balanceOf(c), await c.getAddress()).to.equal(0n);
   });
 
-  it('StakingKPI equals what the claims pay: previewed while open, frozen once closed, recorded once split', async () => {
+  it('StakingKPI reads queryInferenceGross and equals what the claims pay: while the epoch runs, once it has ended, and once its split is recorded', async () => {
     const a = await h.epochNow();
     const n1 = await h.createSeller(1_250_000n * TRAC, 1_500n);
     const d1 = f.accounts[10];
     const t1 = await h.delegate(d1, n1.identityId, 400_000n * TRAC, TIER_12);
     const p = await h.walletFund(f.accounts[20], a, 25n * TRAC);
+    await h.scoreEpoch(a, n1, 80n * TRAC);
     await h.claimReceipts(n1, p, 7n * TRAC);
-    await h.finalizeIn(a, [p], [[n1, 80n * TRAC]]);
-    await h.publishingPool(a + 1n, 300n * TRAC);
-    await h.toEpoch(a + 2n);
+    await h.publishingPool(a, 300n * TRAC);
 
-    const open = await f.KPI.getNetNodeRewards(n1.identityId, a + 1n);
-    await f.QS.closeEpochs(10n);
-    const closed = await f.KPI.getNetNodeRewards(n1.identityId, a + 1n);
-    const score = await h.positionScore(t1, n1, a + 1n);
+    const running = await f.KPI.getNetNodeRewards(n1.identityId, a);
+    await h.toEpoch(a + 1n);
+    const ended = await f.KPI.getNetNodeRewards(n1.identityId, a);
+    const score = await h.positionScore(t1, n1, a);
     const paid = await h.claim(d1, t1);
-    const recorded = await f.KPI.getNetNodeRewards(n1.identityId, a + 1n);
-    const s = await h.split(n1, a + 1n);
+    const recorded = await f.KPI.getNetNodeRewards(n1.identityId, a);
+    const s = await h.split(n1, a);
 
-    expect([open, closed, recorded]).to.deep.equal([s.net, s.net, s.net]);
+    expect([running, ended, recorded]).to.deep.equal([s.net, s.net, s.net]);
     expect(s.queryInference).to.equal(25n * TRAC);
     expect(s.publishing).to.equal(300n * TRAC);
+    expect(s.net).to.equal((325n * TRAC * 85n) / 100n);
     expect(paid).to.equal((score * s.net) / s.nodeScore);
   });
 
@@ -506,7 +585,7 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     });
   });
 
-  it('with the activation epoch unset, a claim reads nothing from the pool and needs no close', async () => {
+  it('with the activation epoch unset, a claim reads nothing from the pool', async () => {
     const fresh = (await (
       await hre.ethers.getContractFactory('QueryInferenceStorage')
     ).deploy(await f.Hub.getAddress())) as unknown as QueryInferenceStorage;
@@ -530,7 +609,73 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const score = await h.positionScore(t1, n1, a);
     const paid = await h.claim(d1, t1);
     expect(paid).to.equal((score * s.net) / s.nodeScore);
-    expect(await fresh.closedThrough()).to.equal(0n);
+    expect(paid).to.be.greaterThan(0n);
+    expect(await fresh.activationEpoch()).to.equal(0n);
+  });
+
+  it('with the settlement out of the Hub, a batch reverts and a claim pays without the pool, for good, while a node-epoch no claim has split keeps its share', async () => {
+    const a = await h.epochNow();
+    const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
+    const n2 = await h.createSeller(1_250_000n * TRAC, 1_000n);
+    const [d1, d2] = [f.accounts[10], f.accounts[11]];
+    const t1 = await h.delegate(d1, n1.identityId, 250_000n * TRAC);
+    const t2 = await h.delegate(d2, n1.identityId, 250_000n * TRAC);
+    const e = await h.valueIn(
+      a,
+      [
+        [n1, 30n * TRAC, 300n * TRAC],
+        [n2, 10n * TRAC, 100n * TRAC],
+      ],
+      1_000n * TRAC,
+    );
+    await h.toEpoch(e + 1n);
+    const withPool = await h.split(n1, e);
+    expect(withPool.queryInference).to.be.greaterThan(0n);
+    // The node's reward with the publishing pool alone, 10% off.
+    const publishingNet = (withPool.publishing * 9n) / 10n;
+    const publishingFee = withPool.publishing - publishingNet;
+
+    // The switch: StakingV10 and StakingKPI read the Hub at each use.
+    await f.Hub.removeContractByName('QueryInferenceSettlement');
+    expect(await f.StakingV10.queryInferenceSettlement()).to.equal(hre.ethers.ZeroAddress);
+    expect(await f.KPI.queryInferenceSettlement()).to.equal(hre.ethers.ZeroAddress);
+
+    // Funding goes on until the pause, but no batch lands: the storage takes
+    // writes only from Hub contracts.
+    const p = await h.walletFund(f.accounts[21], e + 1n, 10n * TRAC);
+    await h.scoreEpoch(e + 1n, n1, 100n * TRAC);
+    await expect(h.claimReceipts(n1, p, 1n * TRAC))
+      .to.be.revertedWithCustomError(f.QIS, 'UnauthorizedAccess')
+      .withArgs('Only Contracts in Hub');
+
+    // A claim pays without the pool, and fixes the node's split of the epoch.
+    expect(await f.KPI.getNetNodeRewards(n1.identityId, e)).to.equal(publishingNet);
+    const score1 = await h.positionScore(t1, n1, e);
+    expect(await h.claim(d1, t1)).to.equal((score1 * publishingNet) / withPool.nodeScore);
+    expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(publishingNet);
+    expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(publishingFee);
+
+    // Registered again, batches land again.
+    await f.Hub.setContractAddress('QueryInferenceSettlement', await f.QS.getAddress());
+    await h.forward(f.QS, 'initialize');
+    expect(await f.StakingV10.queryInferenceSettlement()).to.equal(await f.QS.getAddress());
+    await h.claimReceipts(n1, p, 1n * TRAC);
+
+    // That split stays, for good: the node's other position takes its share of
+    // it, and the pool's share is never paid.
+    expect(await f.QS.queryInferenceGross(e, n1.identityId)).to.equal(withPool.queryInference);
+    expect(await f.KPI.getNetNodeRewards(n1.identityId, e)).to.equal(publishingNet);
+    const score2 = await h.positionScore(t2, n1, e);
+    expect(await h.claim(d2, t2)).to.equal((score2 * publishingNet) / withPool.nodeScore);
+    expect(await f.Vault.getNetNodeEpochRewards(n1.identityId, e)).to.equal(publishingNet);
+    expect(await f.Vault.getOperatorFeeBalance(n1.identityId)).to.equal(publishingFee);
+
+    // The node no claim split while the settlement was out takes the pool.
+    const s2 = await h.split(n2, e);
+    expect(s2.queryInference).to.be.greaterThan(0n);
+    const operatorScore = await h.positionScore(n2.tokenId, n2, e);
+    expect(await h.claim(n2.operational, n2.tokenId)).to.equal((operatorScore * s2.net) / s2.nodeScore);
+    expect(await f.Vault.getNetNodeEpochRewards(n2.identityId, e)).to.equal(s2.net);
   });
 
   it('the pool activates only once StakingV10 reads it: refused under a StakingV10 without that view, as 10.0.4 is, accepted under 10.1.0', async () => {
@@ -568,11 +713,12 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     await f.Hub.setContractAddress('QueryInferenceSettlement', await fresh.getAddress());
     await h.forward(fresh, 'initialize');
 
-    const a = await h.epochNow();
+    const e = await h.epochNow();
     const n1 = await h.createSeller(1_250_000n * TRAC, 1_000n);
     const d1 = f.accounts[10];
     const t1 = await h.delegate(d1, n1.identityId, 200_000n * TRAC);
-    const p = await h.walletFund(f.accounts[20], a, 100n * TRAC);
+    const p = await h.walletFund(f.accounts[20], e, 100n * TRAC);
+    await h.scoreEpoch(e, n1, 300n * TRAC);
     const { items } = signedItems({
       domain,
       wallet: key,
@@ -584,28 +730,23 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       ask: UNIT_ASK,
       issuedAt: await h.latest(),
     });
-    await fresh.connect(n1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, items }]);
-    await time.increaseTo((await f.Chronos.timestampForEpoch(a + 1n)) + (await f.QIS.receiptGraceSecondsAt(a)) + 1n);
-    await h.scoreEpoch(a + 1n, n1, 300n * TRAC);
-    await fresh.finalizeClaims([{ subscriptionId: p, bucketIndex: 0n, seller: n1.identityId }]);
-    const e = a + 1n;
+    await fresh.connect(n1.operational).submitReceiptBatch([{ subscriptionId: p, bucketIndex: 0n, minCounted: 0n, items }]);
     await h.publishingPool(e, 1_000n * TRAC);
     await h.toEpoch(e + 1n);
 
-    // The claim closes the pool through the new settlement and pays both pools.
+    // The claim reads the new settlement and pays both pools.
     const previewed = await f.KPI.getNetNodeRewards(n1.identityId, e);
     const score = await h.positionScore(t1, n1, e);
     const paid = await h.claim(d1, t1);
-    expect(await f.QIS.closedThrough()).to.equal(e);
     const s = await h.split(n1, e);
     expect(s.queryInference).to.equal(100n * TRAC);
+    expect(await fresh.queryInferenceGross(e, n1.identityId)).to.equal(100n * TRAC);
     expect(previewed).to.equal(s.net);
     expect(paid).to.equal((score * s.net) / s.nodeScore);
 
-    // A withdrawal an epoch later closes the next epoch through it too.
+    // A withdrawal an epoch later goes through it too.
     await h.toEpoch(e + 2n);
     await f.StakingNFT.connect(d1).withdraw(t1);
-    expect(await f.QIS.closedThrough()).to.equal(e + 1n);
     expect([await f.StakingV10.queryInferenceSettlement(), await f.KPI.queryInferenceSettlement()]).to.deep.equal([
       await fresh.getAddress(),
       await fresh.getAddress(),
@@ -643,15 +784,6 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
       scored.add(epoch);
       await h.scoreEpoch(epoch, n1, 200n * TRAC);
       await h.scoreEpoch(epoch, n2, 100n * TRAC);
-    };
-    /** Into `epoch + 1` past the batch deadline of `epoch`'s periods; both nodes prove there, and `sellers`' claims on `periods` are finalized. */
-    const finalizeAfter = async (epoch: bigint, periods: string[], sellers: Seller[]) => {
-      const deadline = (await f.Chronos.timestampForEpoch(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
-      if ((await h.latest()) <= deadline) await time.increaseTo(deadline + 1n);
-      await scoreAll(epoch + 1n);
-      await f.QS.finalizeClaims(
-        periods.flatMap((p) => sellers.map((s) => ({ subscriptionId: p, bucketIndex: 0n, seller: s.identityId }))),
-      );
     };
 
     // Every transaction of the account, and what each booked in EpochStorage.
@@ -713,39 +845,40 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
 
     // Epoch a, the account's first window: a plan period from the account, a
     // wallet period beside it, and a publish over 2 epochs. The period's cost
-    // is due in a + 1 and moves no TRAC; the publish books its draw into the
-    // publishing pool.
+    // is booked in a and moves no TRAC; the publish books its draw into the
+    // publishing pool. Both nodes prove, and their receipts land.
     const vaultNow = await h.balanceOf(await h.vault());
     const pA = await accountPeriod(a, 20n * TRAC);
     const costA = costOf(20n * TRAC, bps);
-    expect(await f.QIS.convictionDue(a + 1n)).to.equal(costA);
+    expect(await f.QIS.convictionFunding(a)).to.equal(costA);
     expect(await h.balanceOf(await h.vault())).to.equal(vaultNow);
     expect(booked(accountTxs.slice(-1))).to.equal(0n);
     const pW = await h.walletFund(walletBuyer, a, 5n * TRAC);
     const publishCost = costOf(900n * TRAC, bps);
     const published = await send(f.NFT.connect(kal).coverPublishingCost(agent.address, 900n * TRAC, a, 2n));
     expect(booked([published])).to.equal(publishCost);
-    expect(await f.QIS.convictionDue(a + 1n)).to.equal(costA);
+    expect(await f.QIS.convictionFunding(a)).to.equal(costA);
+    await scoreAll(a);
     await h.claimReceipts(n1, pA, 6n * TRAC);
     await h.claimReceipts(n2, pA, 3n * TRAC);
     await h.claimReceipts(n2, pW, 5n * TRAC);
-    await scoreAll(a);
 
-    // Epoch a + 1: a's claims are finalized. Window 0 has closed: what it did
-    // not spend reaches the publishing pool. The account funds a period of
-    // a + 1 that sells nothing, so its cost rolls over alone.
-    await finalizeAfter(a, [pA, pW], [n1, n2]);
-    expect(BigInt(await time.latest())).to.be.greaterThan(account.createdAtTimestamp + (await f.Chronos.epochLength()));
+    // Epoch a + 1, in which window 0 closes: what it did not spend reaches the
+    // publishing pool. The account funds a period of a + 1 that sells nothing,
+    // so its cost rolls over alone.
+    await h.toEpoch(a + 1n);
+    await scoreAll(a + 1n);
+    await notBefore(account.createdAtTimestamp + (await f.Chronos.epochLength()) + 1n);
     const window0 = await settle();
     expect(booked([window0])).to.equal(B - costA - publishCost);
     expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(costA + publishCost);
     const pB = await accountPeriod(a + 1n, 8n * TRAC);
     const costB = costOf(8n * TRAC, bps);
     expect(pB).to.equal(subscriptionIdOf(buyer.address, a + 1n));
-    expect(await f.QIS.convictionDue(a + 2n)).to.equal(costB);
+    expect(await f.QIS.convictionFunding(a + 1n)).to.equal(costB);
 
     // Epoch a + 2: window 1 closes with only the period's cost spent; a wallet
-    // period of a + 2 sells, so a + 3 pays the rolled-over account cost too.
+    // period of a + 2 sells, so a + 2 pays the rolled-over account cost too.
     await h.toEpoch(a + 2n);
     await scoreAll(a + 2n);
     const pW2 = await h.walletFund(walletBuyer, a + 2n, 4n * TRAC);
@@ -754,20 +887,21 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     const window1 = await settle();
     expect(booked([window1])).to.equal(B - costB);
 
-    // Epoch a + 3: the claims of a + 2 are finalized, the lock ends, and its
-    // last window, which carries the dust, is booked with the final sweep.
-    await finalizeAfter(a + 2n, [pW2], [n1]);
+    // Epoch a + 3: the lock ends, and its last window, which carries the dust,
+    // is booked with the final sweep.
     await notBefore(account.expiresAtTimestamp + 1n);
+    await scoreAll(await h.epochNow());
     const window2 = await settle();
     expect(booked([window2])).to.equal(committed - 2n * B);
     expect((await f.PCS.getAccount(accountId)).fullySwept).to.equal(true);
 
-    // The commitment is booked exactly once: as query/inference cost due, into
-    // the publishing pool, or to the treasury (nothing, with none wired).
-    const due = (await f.QIS.convictionDue(a + 1n)) + (await f.QIS.convictionDue(a + 2n));
-    expect(due).to.equal(costA + costB);
+    // The commitment is booked exactly once: as query/inference cost in the
+    // period's epoch, into the publishing pool, or to the treasury (nothing, with
+    // none wired).
+    const costs = (await f.QIS.convictionFunding(a)) + (await f.QIS.convictionFunding(a + 1n));
+    expect(costs).to.equal(costA + costB);
     expect(booked(accountTxs, TREASURY_SHARD_ID)).to.equal(0n);
-    expect(booked(accountTxs) + due).to.equal(committed);
+    expect(booked(accountTxs) + costs).to.equal(committed);
 
     // Both nodes prove in every epoch the bookings reach, then every position claims.
     const lastEpoch = credits(accountTxs, STAKER_SHARD_ID).reduce((m, c) => (c.end > m ? c.end : m), a);
@@ -779,26 +913,24 @@ describe('@integration Query/inference rewards through StakingV10 claims', funct
     await scoreAll(await h.epochNow());
     await h.toEpoch(lastEpoch + 1n);
 
-    // The KPI previews what the claims then pay: the account cost beside a
-    // wallet's in a + 1, the rolled-over account cost in a + 3, and the
-    // windows' budget in the publishing pool after the lock.
+    // The KPI reads what the claims then pay: the account cost beside a
+    // wallet's in a, the rolled-over account cost in a + 2, and the windows'
+    // budget in the publishing pool after the lock.
     const kpiCases: Array<[Seller, bigint]> = [
-      [n1, a + 1n],
-      [n2, a + 1n],
-      [n1, a + 3n],
+      [n1, a],
+      [n2, a],
+      [n1, a + 2n],
       [n2, lastEpoch],
     ];
     const previewed: bigint[] = [];
     for (const [n, e] of kpiCases) previewed.push(await f.KPI.getNetNodeRewards(n.identityId, e));
-    expect((await f.QIS.getEpochClose(a + 1n)).closed).to.equal(false);
 
     const vaultBeforeClaims = await h.balanceOf(await h.vault());
     for (const [owner_, tokenId] of positions) await h.claim(owner_, tokenId);
     expect(await h.balanceOf(await h.vault())).to.equal(vaultBeforeClaims);
-    expect(await f.QIS.closedThrough()).to.equal(lastEpoch);
-    expect(await f.QS.epochPool(a + 1n)).to.equal(costA + 5n * TRAC);
-    expect(await f.QS.epochPool(a + 2n)).to.equal(0n);
-    expect(await f.QS.epochPool(a + 3n)).to.equal(costB + 4n * TRAC);
+    expect(await f.QS.epochPool(a)).to.equal(costA + 5n * TRAC);
+    expect(await f.QS.epochPool(a + 1n)).to.equal(0n);
+    expect(await f.QS.epochPool(a + 2n)).to.equal(costB + 4n * TRAC);
     for (const [i, [n, e]] of kpiCases.entries()) {
       expect(await f.Vault.getNetNodeEpochRewards(n.identityId, e), `node ${n.identityId}, epoch ${e}`).to.equal(previewed[i]);
       expect((await h.split(n, e)).net, `node ${n.identityId}, epoch ${e}`).to.equal(previewed[i]);

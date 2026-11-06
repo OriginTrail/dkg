@@ -1,29 +1,36 @@
 // PHASE cycle: one full marketplace cycle on the upgraded contracts, from the
-// activation epoch A. In A: an operator fee for the first seller, a
-// wallet-funded period, a new Conviction Account opened for services and a
-// period funded from it, a second account left untouched, a publish, and the
-// sellers' receipt batches. In A + 1: the finalization, first while the sellers
-// have not proved in A + 1 (every claim skipped NoScore), then once they have;
-// and a withdrawal in the middle of the epoch. In A + 2 (cycle-pay.ts): the
-// close, the claims, the withdrawn epoch, the operator fee, the window booking.
+// activation epoch A. In A: an operator fee for the first seller, a wallet period
+// of A that no one serves, a wallet period of A + 1 funded ahead, a new Conviction
+// Account opened for services and a period of A + 1 funded from it, a second
+// account left untouched, and a publish. In A + 1, the pool epoch: batches refused
+// until their sellers have proved; then the sellers' batches over one bucket's
+// funding, where the first to land counts whole and a later one counts what is
+// left, and over another, where a minimum refuses less and a top-up lifts it; and a
+// withdrawal in the middle of the epoch. In A + 2 (cycle-pay.ts): the claims, with
+// nothing run first, the withdrawn epoch, the operator fee, the window booking.
 
 import { ethers } from 'ethers';
 import type { Signer } from 'ethers';
 
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
+import type { ReceiptGroup } from '../../../test/helpers/query-inference';
 import { Contracts, eventsIn } from '../contracts';
 import type { NodeSigner } from '../fork';
 import { chainNow } from '../network';
-import { ClaimRef, claimPreview, delegatorKey, positionScore, skipReasonOf } from '../reads';
+import { inference } from '../plans';
+import { claimPreview, delegatorKey, groupFault, positionScore, receiptFault } from '../reads';
 import { fmt, sum, toJson } from '../report';
 import { Ctx, expectRevert, send, withPool } from './context';
-import { closeAndPay } from './cycle-pay';
+import { payOut } from './cycle-pay';
 import { accountRequest, approve, createAccount, fundTrac, openServiceAccount, publishAs, requestDomain, signedGroup, submitBatch, walletRequest } from './operations';
 import { impersonate } from './plumbing';
 import { positions, smallestOn, stakerCredits } from './reads';
 import type { Position, PublishResult } from './results';
 import { loadHub, loadPre } from './results';
-import { CA_PERIOD_VALUE, COMMITTED, LATE_COMMITTED, MAX_COST_PER_PERIOD, PUBLISH_BASE_COST, PUBLISH_KA_EPOCHS, SELLERS, TRAC, WALLET_PERIOD_VALUE } from './scenario';
+import { CA_PERIOD_VALUE, COMMITTED, LATE_COMMITTED, MAX_COST_PER_PERIOD, PUBLISH_BASE_COST, PUBLISH_KA_EPOCHS, ROLLED_VALUE, SELLERS, TRAC, WALLET_PERIOD_VALUE, WALLET_TOP_UP } from './scenario';
+
+const SCALE18 = 10n ** 18n;
+const BPS = 10_000n;
 
 /** What the cycle's epochs A and A + 1 leave for A + 2. */
 export type CycleRun = {
@@ -32,7 +39,7 @@ export type CycleRun = {
   out: { [key: string]: unknown };
   A: bigint;
   E0: bigint;
-  actors: { hubOwner: NodeSigner; walletBuyer: Signer; walletSession: Signer & { address: string }; keeper: Signer & { address: string }; nodeAdmin: Signer & { address: string } };
+  actors: { hubOwner: NodeSigner; walletBuyer: Signer & { address: string }; walletSession: Signer & { address: string }; keeper: Signer & { address: string }; nodeAdmin: Signer & { address: string } };
   feeNode: bigint;
   feeBalance0: bigint;
   vault: string;
@@ -42,6 +49,10 @@ export type CycleRun = {
   B: bigint;
   cost: bigint;
   publish: PublishResult;
+  /** The wallet period of the pool epoch, which a batch can no longer reach once its epoch has ended. */
+  walletPeriod: string;
+  /** The operational keys of the sellers, by node id. */
+  operational: Record<string, string>;
   /** The withdrawn position, what its withdrawal paid, and its recorded score of A + 1. */
   withdrawn: { position: Position; paidOut: bigint; recordedScore: bigint };
   walletFundGas: bigint;
@@ -70,7 +81,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   out.mirroredScores = mirror;
   const prove = (n: bigint, why: string) => ctx.fork.proof(c, n, mirror[String(n)], why);
 
-  // ---- epoch A: an operator fee, funding, publishing, serving ----
+  // ---- epoch A: an operator fee, funding, publishing ----
   await ctx.fork.warpTo((await c.chronos.timestampForEpoch(A)) + 120n);
   report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()} (activation ${A}): the first seller's operator fee`);
   // Every testnet node charges 0 %, so the first seller's admin sets 10 % for
@@ -107,18 +118,26 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   const vault = await c.css.getAddress();
   const vault0 = await c.token.balanceOf(vault);
 
-  // A wallet-funded period.
-  await approve(ctx, 'wallet buyer: approve ServiceSubscriptionsWallet', walletBuyer, sswAddr, WALLET_PERIOD_VALUE);
-  const walletFund = await send(
+  // A wallet period of A that no one serves, so no value counts in A and its
+  // money rolls forward; and a wallet period of A + 1, funded ahead.
+  await approve(ctx, 'wallet buyer: approve ServiceSubscriptionsWallet', walletBuyer, sswAddr, ROLLED_VALUE + WALLET_PERIOD_VALUE + WALLET_TOP_UP);
+  await send(
     ctx,
-    `wallet buyer: fundFromWallet(epoch ${A}, ${fmt(WALLET_PERIOD_VALUE)} TRAC)`,
+    `wallet buyer: fundFromWallet(epoch ${A}, ${fmt(ROLLED_VALUE)} TRAC), which no one serves`,
     walletBuyer,
     sswAddr,
-    c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequest(A, walletSession.address, WALLET_PERIOD_VALUE, 'rehearsal wallet plan')]),
+    c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequest(A, walletSession.address, ROLLED_VALUE, 'rehearsal plan no one serves')]),
   );
-  const walletPeriod = subscriptionIdOf(walletBuyer.address, A);
+  const walletFund = await send(
+    ctx,
+    `wallet buyer: fundFromWallet(epoch ${A + 1n}, ${fmt(WALLET_PERIOD_VALUE)} TRAC), funded ahead`,
+    walletBuyer,
+    sswAddr,
+    c.ssw.interface.encodeFunctionData('fundFromWallet', [walletRequest(A + 1n, walletSession.address, WALLET_PERIOD_VALUE, 'rehearsal wallet plan')]),
+  );
+  const walletPeriod = subscriptionIdOf(walletBuyer.address, A + 1n);
 
-  // A new 10.2.0 Conviction Account: create, opt in, assign a buyer key, fund a period from it.
+  // A new 10.2.0 Conviction Account: create, opt in, assign a buyer key, fund a period of A + 1 from it.
   const opened = await openServiceAccount(ctx, c, {
     owner: caOwner,
     committed: COMMITTED,
@@ -132,12 +151,12 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   check('createAccount books nothing to the staker pool (10.2.0)', stakerCredits(opened.created.receipt, c).length === 0);
   const caFund = await send(
     ctx,
-    `buyer key: fundFromConviction(account ${accountId}, epoch ${A}, ${fmt(CA_PERIOD_VALUE)} TRAC value)`,
+    `buyer key: fundFromConviction(account ${accountId}, epoch ${A + 1n}, ${fmt(CA_PERIOD_VALUE)} TRAC value), funded ahead`,
     buyerKey,
     ssAddr,
-    c.ss.interface.encodeFunctionData('fundFromConviction', [accountRequest(accountId, A, caSession.address, CA_PERIOD_VALUE, 'rehearsal account plan')]),
+    c.ss.interface.encodeFunctionData('fundFromConviction', [accountRequest(accountId, A + 1n, caSession.address, CA_PERIOD_VALUE, 'rehearsal account plan')]),
   );
-  const caPeriod = subscriptionIdOf(buyerKey.address, A);
+  const caPeriod = subscriptionIdOf(buyerKey.address, A + 1n);
   const [periodFunded] = eventsIn(caFund.receipt, c.ss, c.ss.getEvent('PeriodFunded'));
   if (!periodFunded) throw new Error('fundFromConviction emitted no PeriodFunded');
   const cost = periodFunded.cost;
@@ -159,85 +178,144 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     sum(publish.stakerCredits.map((x) => x.amount)) === publish.discountedCost && publish.stakerCredits.every((x) => x.start >= A && x.end <= A + PUBLISH_KA_EPOCHS),
     `${fmt(publish.discountedCost)} TRAC over ${JSON.stringify(toJson(publish.stakerCredits))}`,
   );
-  out.funding = { walletPeriod, caPeriod, walletValue: WALLET_PERIOD_VALUE, caValue: CA_PERIOD_VALUE, cost, publish };
-  const due = await c.qis.dueIn(A + 1n);
-  check(`due in epoch ${A + 1n}: wallet ${fmt(WALLET_PERIOD_VALUE)} and account cost ${fmt(cost)}`, due.wallet === WALLET_PERIOD_VALUE && due.conviction === cost);
-
-  // Serving: requests signed by each period's session key, receipts submitted by real Core Nodes.
-  const qiDomain = await requestDomain(c);
-  const issuedAt = await chainNow(ctx.hre);
-  const plan: Record<string, { ca: bigint[]; wallet: bigint[] }> = {
-    // The account bucket is claimed above its cap (8 of 7), the wallet bucket
-    // below it (3 of 5): the epoch's money is 12, its served value 10.
-    [String(SELLERS[0])]: { ca: [2n * TRAC, 2n * TRAC], wallet: [2n * TRAC] },
-    [String(SELLERS[1])]: { ca: [4n * TRAC], wallet: [1n * TRAC] },
-  };
-  const batches: { seller: bigint; items: bigint; value: bigint; stakeFactor18: bigint; gasUsed: bigint }[] = [];
-  for (const seller of SELLERS) {
-    const op = operational[String(seller)];
-    if (!op) throw new Error(`no operational key seen for node ${seller}`);
-    const groups = [
-      await signedGroup({ domain: qiDomain, session: caSession, subscriptionId: caPeriod, seller, firstNonce: 0n, values: plan[String(seller)].ca, issuedAt }),
-      await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: walletPeriod, seller, firstNonce: 0n, values: plan[String(seller)].wallet, issuedAt }),
-    ];
-    const opSigner = await impersonate(ctx, op);
-    const b = await submitBatch(ctx, c.qs, opSigner, `node ${seller} operational key: submitReceiptBatch (2 groups)`, groups);
-    const [acc] = eventsIn(b.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
-    if (!acc) throw new Error(`node ${seller}'s batch emitted no ReceiptBatchAccepted`);
-    batches.push({ seller, items: acc.itemCount, value: acc.value, stakeFactor18: acc.stakeFactor18, gasUsed: b.gasUsed });
-  }
-  out.batches = batches;
-  const fundedCap = { ca: await c.qs.fundedCap(caPeriod, 0), wallet: await c.qs.fundedCap(walletPeriod, 0) };
-  out.fundedCap = fundedCap;
+  const bookedInA = await c.qis.fundingIn(A);
+  const bookedAhead = await c.qis.fundingIn(A + 1n);
+  check(
+    `each period's money is booked under its own epoch: wallet ${fmt(ROLLED_VALUE)} in ${A}; wallet ${fmt(WALLET_PERIOD_VALUE)} and account cost ${fmt(cost)} in ${A + 1n}`,
+    bookedInA.wallet === ROLLED_VALUE && bookedInA.conviction === 0n && bookedAhead.wallet === WALLET_PERIOD_VALUE && bookedAhead.conviction === cost,
+  );
 
   // FORK-ONLY: the active nodes keep scoring in epoch A, as they scored before the fork.
   for (const n of activeNodes) await prove(n, `node ${n} keeps scoring in epoch ${A} what it scored in ${E0 - 1n}`);
 
-  // ---- epoch A + 1: finalization after the deadline ----
-  const deadline = (await c.chronos.timestampForEpoch(A + 1n)) + (await c.qis.receiptGraceSecondsAt(A));
-  await ctx.fork.warpTo(deadline + 1n);
-  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: finalization (deadline ${deadline})`);
-  const refs: ClaimRef[] = SELLERS.flatMap((seller) => [
-    { subscriptionId: caPeriod, bucketIndex: 0n, seller },
-    { subscriptionId: walletPeriod, bucketIndex: 0n, seller },
-  ]);
-  const finalizeData = c.qs.interface.encodeFunctionData('finalizeClaims', [refs]);
-  const skipsIn = (r: Awaited<ReturnType<typeof send>>) =>
-    eventsIn(r.receipt, c.qs, c.qs.getEvent('ClaimSkipped')).map((e) => ({ subscriptionId: e.subscriptionId, bucketIndex: e.bucketIndex, seller: e.seller, reason: skipReasonOf(e.reason) }));
-  // A keeper that runs at the deadline, before the sellers' first proof in
-  // A + 1: finalizeClaims skips a claim while its seller has no node score in
-  // the current epoch, with ClaimSkipped(NoScore), and the transaction goes
-  // through. The claims stay as they were, to be finalized by a retry once
-  // the sellers have proved, before A + 1 ends.
-  const early = await send(ctx, `keeper: finalizeClaims (4 claims), before the sellers prove in epoch ${A + 1n}`, keeper, qsAddr, finalizeData);
-  const noScore = skipsIn(early);
-  const finalizedEarly = eventsIn(early.receipt, c.qs, c.qs.getEvent('ClaimsFinalized')).length;
-  const untouched = (await Promise.all(refs.map(async (r) => !(await c.qis.getSellerClaim(r.subscriptionId, r.bucketIndex, r.seller)).finalized))).every(Boolean);
-  check(
-    `before the sellers prove in epoch ${A + 1n}, finalizeClaims goes through and skips each claim NoScore, leaving it unfinalized`,
-    early.receipt.status === 1 && finalizedEarly === 0 && noScore.length === refs.length && noScore.every((s) => s.reason === 'NoScore') && untouched,
-    noScore.map((s) => `${s.subscriptionId === caPeriod ? 'account' : 'wallet'} claim of node ${s.seller}: ${s.reason}`).join(', '),
-  );
+  const [first, second] = SELLERS;
+  const opOf = (seller: bigint): string => {
+    const op = operational[String(seller)];
+    if (!op) throw new Error(`no operational key seen for node ${seller}`);
+    return op;
+  };
+  const batchData = (groups: ReceiptGroup[]) => c.qs.interface.encodeFunctionData('submitReceiptBatch', [groups]);
+  const qiDomain = await requestDomain(c);
+  const ahead = await signedGroup({ domain: qiDomain, session: walletSession, subscriptionId: walletPeriod, seller: first, firstNonce: 900n, values: [TRAC], issuedAt: await chainNow(ctx.hre) });
+  const aheadWhy = await expectRevert(ctx, `node ${first}: a batch for the period of ${A + 1n}, in ${A}`, opOf(first), qsAddr, batchData([ahead]));
+  check(`a period funded ahead takes no batch before its epoch, even from a seller with a score`, aheadWhy === groupFault(0, 'OutsideEpoch'), aheadWhy);
+
+  // ---- epoch A + 1, the pool epoch: serving, as batches count when they land ----
+  await ctx.fork.warpTo((await c.chronos.timestampForEpoch(A + 1n)) + 120n);
+  report.say(`\nEpoch ${await c.chronos.getCurrentEpoch()}: the sellers serve, and each batch counts as it lands`);
+  const issuedAt = await chainNow(ctx.hre);
+  const group = (session: Signer, subscriptionId: string, seller: bigint, firstNonce: bigint, values: bigint[], minCounted?: bigint) =>
+    signedGroup({ domain: qiDomain, session, subscriptionId, seller, firstNonce, values, issuedAt, minCounted });
+
+  // The first seller's work: 8 of the account bucket's 10 at face value, 4 of the wallet bucket's 5.
+  const firstGroups = [
+    await group(caSession, caPeriod, first, 0n, [2n * TRAC, 2n * TRAC, 4n * TRAC]),
+    await group(walletSession, walletPeriod, first, 0n, [2n * TRAC, 2n * TRAC]),
+  ];
+  // The second seller's: 4 on the account bucket, where only 2 will be left; 3 on
+  // the wallet bucket, which it takes in full or not at all.
+  const secondGroups = [
+    await group(caSession, caPeriod, second, 0n, [4n * TRAC]),
+    await group(walletSession, walletPeriod, second, 0n, [3n * TRAC], 3n * TRAC),
+  ];
+
+  const noScore = await expectRevert(ctx, `node ${first}: a batch before its first proof of epoch ${A + 1n}`, opOf(first), qsAddr, batchData(firstGroups));
+  check(`before its seller proves in epoch ${A + 1n}, a batch is refused`, noScore === `NoNodeScore(${first}, ${A + 1n})`, noScore);
   for (const n of activeNodes) await prove(n, `node ${n} scores in epoch ${A + 1n} what it scored in ${E0 - 1n}`);
-  const fin = await send(ctx, 'keeper: finalizeClaims (4 claims)', keeper, qsAddr, finalizeData);
-  const finalized = eventsIn(fin.receipt, c.qs, c.qs.getEvent('ClaimsFinalized')).map((e) => ({
-    sub: e.subscriptionId === caPeriod ? 'account' : 'wallet',
-    seller: e.seller,
-    claimed: e.claimed,
-    value: e.value,
-    score: e.score,
-  }));
-  const skipped = skipsIn(fin);
-  out.finalized = finalized;
-  out.skipped = skipped;
-  check('all four claims finalized', finalized.length === 4 && skipped.length === 0);
-  check(
-    'the retry after the sellers\' proofs finalizes every claim the first call skipped NoScore',
-    noScore.every((s) => finalized.some((f) => f.seller === s.seller && (f.sub === 'account') === (s.subscriptionId === caPeriod))),
+
+  const batches: { seller: bigint; items: bigint; claimed: bigint; counted: bigint; stakeFactor18: bigint; gasUsed: bigint }[] = [];
+  const land = async (seller: bigint, groups: ReceiptGroup[], label: string) => {
+    const b = await submitBatch(ctx, c.qs, await impersonate(ctx, opOf(seller)), label, groups);
+    const [acc] = eventsIn(b.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
+    if (!acc) throw new Error(`node ${seller}'s batch emitted no ReceiptBatchAccepted`);
+    batches.push({ seller, items: acc.itemCount, claimed: acc.claimed, counted: acc.counted, stakeFactor18: acc.stakeFactor18, gasUsed: b.gasUsed });
+    return { accepted: acc, groups: eventsIn(b.receipt, c.qs, c.qs.getEvent('ReceiptsClaimed')) };
+  };
+
+  const firstLanded = await land(first, firstGroups, `node ${first} operational key: submitReceiptBatch (2 groups)`);
+  check(`node ${first}, landing first, counts all it claimed`, firstLanded.accepted.claimed === 12n * TRAC && firstLanded.accepted.counted === 12n * TRAC, `${fmt(firstLanded.accepted.counted)} of ${fmt(firstLanded.accepted.claimed)} TRAC`);
+
+  // minCounted: the wallet bucket has 1 left, the group asks for at least 3, and the whole batch is refused.
+  const walletLeft = await c.qs.bucketLeft(walletPeriod, 0);
+  const refused = await expectRevert(ctx, `node ${second}: a batch whose wallet group wants 3 TRAC with ${fmt(walletLeft)} left`, opOf(second), qsAddr, batchData(secondGroups));
+  check(`a group whose minimum is above what the bucket has left refuses the whole batch`, walletLeft === 1n * TRAC && refused === groupFault(1, 'BelowMinCounted'), refused);
+
+  // A top-up lifts it: the same receipts land, their nonces unspent by the refusal.
+  const topUp = await send(
+    ctx,
+    `wallet buyer: topUpFromWallet(${fmt(WALLET_TOP_UP)} TRAC)`,
+    walletBuyer,
+    sswAddr,
+    c.ssw.interface.encodeFunctionData('topUpFromWallet', [walletPeriod, inference(WALLET_TOP_UP), ethers.id('rehearsal wallet plan')]),
   );
-  out.noScoreRetry = { skipped: noScore, gasUsed: early.gasUsed };
-  const caFinal = sum(finalized.filter((f) => f.sub === 'account').map((f) => f.value));
-  check(`the account bucket's claims shrank to its funded cap ${fmt(fundedCap.ca)}`, caFinal <= fundedCap.ca && caFinal >= fundedCap.ca - 2n);
+  check(`the top-up joins the wallet bucket and the money of epoch ${A + 1n}`, (await c.qs.bucketLeft(walletPeriod, 0)) === 1n * TRAC + WALLET_TOP_UP && (await c.qis.fundingIn(A + 1n)).wallet === WALLET_PERIOD_VALUE + WALLET_TOP_UP);
+  const secondLanded = await land(second, secondGroups, `node ${second} operational key: submitReceiptBatch (2 groups), after the top-up`);
+  const [secondCa, secondWallet] = secondLanded.groups;
+  check(
+    `first landed, first counted: node ${first}'s 8 count whole, and node ${second}'s 4, landing later, count the 2 left`,
+    !!secondCa && secondCa.subscriptionId === caPeriod && secondCa.claimed === 4n * TRAC && secondCa.counted === 2n * TRAC,
+    `account bucket: ${fmt(secondCa?.counted ?? 0n)} of ${fmt(secondCa?.claimed ?? 0n)} TRAC`,
+  );
+  check(
+    `the top-up lets the same receipts land: node ${second}'s minimum of 3 is met, with the nonces the refusal left unspent`,
+    !!secondWallet && secondWallet.subscriptionId === walletPeriod && secondWallet.counted === 3n * TRAC,
+    `wallet bucket: ${fmt(secondWallet?.counted ?? 0n)} of ${fmt(secondWallet?.claimed ?? 0n)} TRAC`,
+  );
+  const caLeft = await c.qs.bucketLeft(caPeriod, 0);
+  const walletLeftAfter = await c.qs.bucketLeft(walletPeriod, 0);
+  check(
+    'the buckets read full at face value: the account bucket has nothing left, and the wallet bucket 1',
+    caLeft === 0n && walletLeftAfter === 1n * TRAC && (await c.qis.bucketFilled(caPeriod, 0)) === CA_PERIOD_VALUE && (await c.qis.bucketFilled(walletPeriod, 0)) === 7n * TRAC,
+  );
+  const again = await expectRevert(ctx, `node ${second}: the same account receipts again`, opOf(second), qsAddr, batchData(secondGroups.slice(0, 1)));
+  check('what did not count stays spent: the same receipts cannot land again', again === receiptFault(0, 0, 'DuplicateNonce'), again);
+  const onFull = await group(caSession, caPeriod, second, 100n, [TRAC], TRAC);
+  const fullWhy = await expectRevert(ctx, `node ${second}: a fresh receipt on the full account bucket, with a minimum`, opOf(second), qsAddr, batchData([onFull]));
+  check('on a full bucket, a group with a minimum is refused, and spends no nonce', fullWhy === groupFault(0, 'BelowMinCounted'), fullWhy);
+  // With no minimum, the same receipt lands for nothing, and is spent. In a reverted snapshot, so the epoch's numbers below hold what the rest did.
+  const noMinimum = await group(caSession, caPeriod, second, 101n, [TRAC]);
+  const sumRBefore = (await c.qis.getEpochTotals(A + 1n)).sumR;
+  const forNothing = await ctx.fork.inSnapshot(async () => {
+    const sent = await submitBatch(ctx, c.qs, await impersonate(ctx, opOf(second)), `node ${second}: a fresh receipt on the full account bucket, with no minimum (in a snapshot)`, [noMinimum]);
+    const [ev] = eventsIn(sent.receipt, c.qs, c.qs.getEvent('ReceiptsClaimed'));
+    const spent = await expectRevert(ctx, `node ${second}: the same receipt again (in the snapshot)`, opOf(second), qsAddr, batchData([noMinimum]));
+    return { claimed: ev?.claimed, counted: ev?.counted, spent, sumR: (await c.qis.getEpochTotals(A + 1n)).sumR };
+  });
+  check(
+    'on a full bucket, a group with no minimum lands for nothing, adds to no total, and its nonce stays spent',
+    forNothing.claimed === TRAC && forNothing.counted === 0n && forNothing.sumR === sumRBefore && forNothing.spent === receiptFault(0, 0, 'DuplicateNonce'),
+    `${fmt(forNothing.counted ?? 0n)} of ${fmt(forNothing.claimed ?? 0n)} TRAC; again: ${forNothing.spent}`,
+  );
+  out.batches = batches;
+
+  // What counted, worked out without the contract: at the account's discount,
+  // and each seller's at the stake factor its batch captured.
+  const discounted = (x: bigint) => (x * (BPS - acct.discountBps)) / BPS;
+  const scoreAt = (r: bigint, factor: bigint) => (r * factor) / SCALE18;
+  const f1 = firstLanded.accepted.stakeFactor18;
+  const f2 = secondLanded.accepted.stakeFactor18;
+  const r1 = { ca: discounted(8n * TRAC), wallet: 4n * TRAC };
+  const r2 = { ca: discounted(2n * TRAC), wallet: 3n * TRAC };
+  const n1 = await c.qis.getNodeEpoch(first, A + 1n);
+  const n2 = await c.qis.getNodeEpoch(second, A + 1n);
+  const totals = await c.qis.getEpochTotals(A + 1n);
+  check(
+    `node ${first}'s R is the account's 8 at the discount and the wallet's 4; node ${second}'s the account's 2 at the discount and the wallet's 3`,
+    n1.r === r1.ca + r1.wallet && n2.r === r2.ca + r2.wallet,
+    `${fmt(n1.r)} and ${fmt(n2.r)} TRAC`,
+  );
+  check(
+    'each node\'s score is its R at the stake factor its batch captured',
+    n1.score === scoreAt(r1.ca, f1) + scoreAt(r1.wallet, f1) && n2.score === scoreAt(r2.ca, f2) + scoreAt(r2.wallet, f2),
+    `factors ${f1}, ${f2}`,
+  );
+  check(`the full account bucket's R is what was paid for it, its cost, ${fmt(cost)}`, r1.ca + r2.ca === cost);
+  check(
+    `the epoch's totals are the nodes', and it took λ ${await c.qis.lambdaBps()} when its first value counted`,
+    totals.sumR === n1.r + n2.r && totals.sumScore === n1.score + n2.score && totals.lambdaBps === (await c.qis.lambdaBps()),
+    `ΣR ${fmt(totals.sumR)}`,
+  );
+  out.funding = { walletPeriod, caPeriod, rolled: ROLLED_VALUE, walletValue: WALLET_PERIOD_VALUE, topUp: WALLET_TOP_UP, topUpGas: topUp.gasUsed, caValue: CA_PERIOD_VALUE, cost, publish };
 
   // A withdrawal in the middle of A + 1: the smallest position of the first
   // seller, a real delegator of a real node. It pays the stake and every
@@ -316,7 +394,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     expected: { raw: rawBefore, rewards: pending.total, fromEpoch: claimFrom, toEpoch: A, total: expectedPayout },
   };
 
-  await closeAndPay({
+  await payOut({
     ctx,
     c,
     out,
@@ -331,6 +409,8 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
     B,
     cost,
     publish,
+    walletPeriod,
+    operational,
     withdrawn: { position: w, paidOut, recordedScore },
     walletFundGas: walletFund.gasUsed,
   });

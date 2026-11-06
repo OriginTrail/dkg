@@ -52,13 +52,13 @@ export async function firstBlockAt(provider: Pick<Provider, 'getBlock'>, ts: big
 /**
  * A node's net of epoch `e`, as `StakingV10._nodeEpochReward` splits it, from what no
  * claim writes: its share of the publishing pool by score, its query/inference gross,
- * frozen at the epoch's close, and the operator fee in force at the epoch's end. Once a
- * claim has split an epoch, StakingKPI gives back the net that claim stored, so it
+ * final once the epoch has ended, and the operator fee in force at the epoch's end. Once
+ * a claim has split an epoch, StakingKPI gives back the net that claim stored, so it
  * cannot be what that claim is checked against.
  */
 export async function netFromInputs(c: Contracts, node: bigint, e: bigint): Promise<bigint> {
   const { publishingShare, feeBps } = await poolShareOf(c, node, e, 0n, 0n);
-  const gross = publishingShare + (await c.qs.previewQueryInferenceGross(e, node));
+  const gross = publishingShare + (await c.qs.queryInferenceGross(e, node));
   return gross - (gross * feeBps) / (await c.params.maxOperatorFee());
 }
 

@@ -4,8 +4,8 @@ import { DeployFunction } from 'hardhat-deploy/types';
 /**
  * V10 — deploys `QueryInferenceSettlement`, the stateless settlement of the
  * query/inference pool (OT-RFC-27): receipt batches from Core Node sellers,
- * checked against the buyers' signed requests, which become claims on the
- * funded buckets.
+ * checked against the buyers' signed requests, which count as they land, up
+ * to what the funded buckets have left.
  *
  * It is registered in the Hub's contract set, so the `onlyContracts` mutators
  * of `QueryInferenceStorage` admit it. `initialize()` wires
@@ -19,7 +19,7 @@ import { DeployFunction } from 'hardhat-deploy/types';
  * Requests are signed under an EIP-712 domain whose verifying contract is
  * `QueryInferenceStorage`, so redeploying this contract keeps every signature
  * and the replay bitmap. It has no parameters of its own: the batch bounds and
- * the receipt grace live in `QueryInferenceStorage`.
+ * λ live in `QueryInferenceStorage`.
  *
  * Replacing it. A fixed settlement is registered under the same name and
  * initialized; `StakingV10` and `StakingKPI` read it from the Hub at their
@@ -34,19 +34,16 @@ import { DeployFunction } from 'hardhat-deploy/types';
  *     Conviction Account funding go on;
  *   - stop your own keepers and auto-claims first: any claim while it is out,
  *     `claimFor` and `claimWithdrawnEpoch` included, splits its node-epochs
- *     without the pool for good, closed ones included;
- *   - keep the outage short: batches, finalization and closes revert, and
- *     sellers lose the R of work whose batch deadline passes meanwhile;
+ *     without the pool for good;
+ *   - keep the outage short: batches revert, and sellers lose the R of work
+ *     whose epoch ends meanwhile;
  *   - remove it with `Hub.removeContractByName` only, never
  *     `removeContractByAddress`, which on the Hub's last entry makes every
  *     claim and withdrawal revert until a contract under another name is
  *     added;
  *   - switch back on with a fresh deployment of this contract and its
  *     `initialize()`, not the removed address, which can revert
- *     `AddressAlreadyInSet`;
- *   - after more than `maxCloseStepsPerClaim` epochs out, call `closeEpochs`
- *     until the closes have caught up, or claims revert
- *     `QueryInferenceCloseBehind`.
+ *     `AddressAlreadyInSet`.
  *
  * On a mainnet network the step is skipped, as are 052c, 052d and 052e.
  */

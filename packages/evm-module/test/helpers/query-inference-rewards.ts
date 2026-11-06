@@ -6,15 +6,20 @@
 // its beforeEach builds the helpers from that fixture.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
-import { time } from '@nomicfoundation/hardhat-network-helpers';
+import { mine, time } from '@nomicfoundation/hardhat-network-helpers';
 import { BaseContract, ethers } from 'ethers';
 import hre from 'hardhat';
 
 import {
+  CGWeightTreeStorage,
+  ContextGraphStorage,
+  ContextGraphValueStorage,
   ConvictionServiceStorage,
   ConvictionWithdrawalStorage,
+  DKGKnowledgeAssets,
   QueryInferenceSettlement,
   QueryInferenceStorage,
+  RandomSampling,
   ServiceSubscriptions,
   ServiceSubscriptionsWallet,
   StakingKPI,
@@ -81,8 +86,8 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
     return f.StakingNFT.nextTokenId();
   };
 
-  /** A Core Node with an operator fee of `feeBps`, its operational key staking `stake` at tier 0, which puts it in the sharding table. */
-  const createSeller = async (stake: bigint, feeBps: bigint): Promise<Seller> => {
+  /** A Core Node with an operator fee of `feeBps`, `staker` (by default its operational key) staking `stake` at tier 0, which puts it in the sharding table. */
+  const createSeller = async (stake: bigint, feeBps: bigint, staker?: SignerWithAddress): Promise<Seller> => {
     const operational = f.accounts[nextAccount++];
     const admin = f.accounts[nextAccount++];
     const label = `query/inference seller ${nextAccount}`;
@@ -96,7 +101,7 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
       )
     ).wait();
     const identityId = BigInt(receipt!.logs[0].topics[1]);
-    const tokenId = await delegate(operational, identityId, stake);
+    const tokenId = await delegate(staker ?? operational, identityId, stake);
     return { identityId, operational, admin, feeBps, tokenId };
   };
 
@@ -110,7 +115,7 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
     return subscriptionIdOf(who.address, epoch);
   };
 
-  /** A receipt batch from `by` claiming `amount` of the period's bucket. */
+  /** A receipt batch from `by` claiming `amount` of the period's bucket. `by` has a node score in the epoch already. */
   const claimReceipts = async (by: Seller, subscriptionId: string, amount: bigint) => {
     const { items } = signedItems({
       domain: domain,
@@ -123,7 +128,7 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
       ask: UNIT_ASK,
       issuedAt: await latest(),
     });
-    await f.QS.connect(by.operational).submitReceiptBatch([{ subscriptionId, bucketIndex: 0n, items }]);
+    await f.QS.connect(by.operational).submitReceiptBatch([{ subscriptionId, bucketIndex: 0n, minCounted: 0n, items }]);
   };
 
   /**
@@ -138,14 +143,79 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
     await f.RSS.setNodeEpochScorePerStake(epoch, node.identityId, (score * SCALE18) / effective);
   };
 
-  /** Into `epoch + 1` past the batch deadline of `epoch`'s periods: score `sellers` there and finalize their claims on `periods`. */
-  const finalizeIn = async (epoch: bigint, periods: string[], sellers: Array<[Seller, bigint]>) => {
-    const deadline = (await f.Chronos.timestampForEpoch(epoch + 1n)) + (await f.QIS.receiptGraceSecondsAt(epoch));
-    if ((await latest()) <= deadline) await time.increaseTo(deadline + 1n);
-    for (const [s, score] of sellers) await scoreEpoch(epoch + 1n, s, score);
-    await f.QS.finalizeClaims(
-      periods.flatMap((p) => sellers.map(([s]) => ({ subscriptionId: p, bucketIndex: 0n, seller: s.identityId }))),
+  /**
+   * RandomSampling registered and initialized on the Hub, as the development
+   * deploy does, and one public knowledge asset of a single leaf in a context
+   * graph valued from the current epoch, the only one the value-weighted draw
+   * can pick. Returns a proof of it by `node`: a challenge and its proof in the
+   * next proof period, which RandomSampling scores over the node's effective
+   * stake at that time.
+   */
+  const realProofs = async () => {
+    const noPrivateData = hre.ethers.keccak256(hre.ethers.toUtf8Bytes('DKG_NO_PRIVATE_DATA_V10'));
+    const content = hre.ethers.toUtf8Bytes('the one leaf a challenge can draw');
+    const root = hre.ethers.keccak256(hre.ethers.concat([hre.ethers.keccak256(content), noPrivateData]));
+    const owner = f.accounts[0];
+    const rs = (await (
+      await hre.ethers.getContractFactory('RandomSampling')
+    ).deploy(await f.Hub.getAddress())) as unknown as RandomSampling;
+    await rs.waitForDeployment();
+    await f.Hub.setContractAddress('RandomSampling', await rs.getAddress());
+    await forward(rs, 'initialize');
+    const tree = (await hre.ethers.getContractAt(
+      'CGWeightTreeStorage',
+      await f.Hub.getContractAddress('CGWeightTreeStorage'),
+    )) as unknown as CGWeightTreeStorage;
+    const graphs = (await hre.ethers.getContractAt(
+      'ContextGraphStorage',
+      await f.Hub.getAssetStorageAddress('ContextGraphStorage'),
+    )) as unknown as ContextGraphStorage;
+    const assets = (await hre.ethers.getContractAt(
+      'DKGKnowledgeAssets',
+      await f.Hub.getAssetStorageAddress('DKGKnowledgeAssets'),
+    )) as unknown as DKGKnowledgeAssets;
+    const values = (await hre.ethers.getContractAt(
+      'ContextGraphValueStorage',
+      await f.Hub.getContractAddress('ContextGraphValueStorage'),
+    )) as unknown as ContextGraphValueStorage;
+    await tree.finishBackfill();
+    const [publicAccess, openPublishing] = [0, 1];
+    await graphs.createContextGraph(
+      owner.address,
+      [],
+      0n,
+      publicAccess,
+      openPublishing,
+      hre.ethers.ZeroAddress,
+      0n,
+      hre.ethers.ZeroHash,
     );
+    const graph = await graphs.getLatestContextGraphId();
+    const now = await epochNow();
+    const asset = (BigInt(owner.address) << 96n) | 1n;
+    await assets.createKnowledgeAsset(
+      owner.address,
+      owner.address,
+      asset,
+      'proved',
+      root,
+      1n,
+      128n,
+      now,
+      now + 5n,
+      0n,
+      false,
+      1n,
+    );
+    await graphs.registerKnowledgeAssetToContextGraph(graph, asset);
+    await values.addCGValueForEpochRange(graph, now, 5n, 1_000n);
+    await tree.settle(graph);
+    return async (node: Seller) => {
+      await mine(await rs.getActiveProofingPeriodDurationInBlocks());
+      await rs.updateAndGetActiveProofPeriodStartBlock();
+      await rs.connect(node.operational).createChallenge();
+      await rs.connect(node.operational).submitProof(content, [noPrivateData]);
+    };
   };
 
   /** The epoch's publishing pool, backed by TRAC in the vault as publishing leaves it. */
@@ -155,24 +225,22 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
   };
 
   /**
-   * Value for the nodes of `values` in the epoch after `a`: one wallet period
-   * of `a`, whose receipts each node claims and finalizes there at its score,
-   * and a publishing pool of `pool` there. Ends inside that epoch, which it
-   * returns.
+   * Value for the nodes of `values` in epoch `a`: one wallet period of it, each
+   * node scored at its score and landing its receipts, and a publishing pool of
+   * `pool`. Ends inside `a`, which it returns.
    */
   const valueIn = async (a: bigint, values: Array<[Seller, bigint, bigint]>, pool: bigint) => {
     const p = await walletFund(f.accounts[20], a, 100n * TRAC);
-    for (const [s, value] of values) await claimReceipts(s, p, value);
-    await finalizeIn(
-      a,
-      [p],
-      values.map(([s, , score]) => [s, score] as [Seller, bigint]),
-    );
-    await publishingPool(a + 1n, pool);
-    return a + 1n;
+    if ((await epochNow()) < a) await toEpoch(a);
+    for (const [s, value, score] of values) {
+      await scoreEpoch(a, s, score);
+      await claimReceipts(s, p, value);
+    }
+    await publishingPool(a, pool);
+    return a;
   };
 
-  /** What StakingV10 splits for `node` in a closed `epoch`: the gross, the operator fee and the delegators' net. */
+  /** What StakingV10 splits for `node` in an ended `epoch`: the gross, the operator fee and the delegators' net. */
   const split = async (node: Seller, epoch: bigint) => {
     const nodeScore = await f.RSS.getNodeEpochScore(epoch, node.identityId);
     const allScore = await f.RSS.getAllNodesEpochScore(epoch);
@@ -219,7 +287,7 @@ export function rewardsHelpers({ f, domain, firstAccount, key }: RewardsContext)
     walletFund,
     claimReceipts,
     scoreEpoch,
-    finalizeIn,
+    realProofs,
     publishingPool,
     valueIn,
     split,

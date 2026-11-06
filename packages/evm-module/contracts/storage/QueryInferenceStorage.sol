@@ -7,39 +7,31 @@ import {IVersioned} from "../interfaces/IVersioned.sol";
 import {IInitializable} from "../interfaces/IInitializable.sol";
 import {HubDependent} from "../abstract/HubDependent.sol";
 import {Chronos} from "./Chronos.sol";
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 /**
  * @title QueryInferenceStorage
  * @notice State store of the query/inference reward pool of OT-RFC-27
  *         ("NeuroSymbolic Marketplace"): the subscription-funded pool that
- *         finalized receipt value and stake-weighted receipt value (QIF)
+ *         counted receipt value and stake-weighted receipt value (QIF)
  *         distribute among Core Nodes, kept apart from the publishing-funded
  *         staker pool in `EpochStorage`.
  *
  * What it holds:
- *   - The money due per epoch. A plan period is one epoch, and its money
- *     joins the pool of its due epoch, the epoch after it. That epoch holds
- *     the period's batch deadline, `periodEnd` plus the receipt grace of the
- *     period's epoch, in its first half, because the grace is at most half
- *     an epoch, and its claims are finalized in its second half, so it is the
- *     epoch in which the period's receipt value counts. `walletDue(e)` is the value of
- *     wallet-funded periods and their top-ups due in `e`, and
- *     `convictionDue(e)` the cost that Conviction Account periods and their
- *     top-ups drew from the accounts' allowances, due in `e`. Both are booked
- *     when the period is paid for: a Conviction Account pays as a wallet does.
- *   - The pool carried forward from epochs with no finalized value
- *     (`carry`), and `closedThrough`, the last epoch whose inputs are frozen.
- *   - Each closed epoch's frozen inputs, the QIF inputs per epoch and per
- *     node, the claims per bucket and per seller, and the request replay
- *     bitmap.
- *   - The parameters: the activation epoch, the receipt grace schedule, the
- *     batch and close bounds, the pause switch and the λ schedule.
+ *   - The money funded per epoch. A plan period is one epoch, and its money
+ *     joins the pool of that epoch. `walletFunding(e)` is the value of the
+ *     wallet-funded periods of `e` and their top-ups, and `convictionFunding(e)`
+ *     the cost that the Conviction Account periods of `e` and their top-ups drew
+ *     from the accounts' allowances. Both are booked when the period is paid
+ *     for: a Conviction Account pays as a wallet does.
+ *   - The QIF inputs per epoch and per node, each epoch's λ, how much of each
+ *     bucket is filled, and the request replay bitmap.
+ *   - The parameters: the activation epoch, the batch bounds, the pause switch
+ *     and λ.
  *
- * The settlement logic (`QueryInferenceSettlement`) writes the claims, the
- * replay bitmap, the QIF inputs and the closes, and the requests it verifies
- * are signed under an EIP-712 domain whose verifying contract is this
- * storage, so a logic upgrade keeps both the signatures and the bitmap.
+ * The settlement logic (`QueryInferenceSettlement`) writes the counts and the
+ * replay bitmap, and the requests it verifies are signed under an EIP-712
+ * domain whose verifying contract is this storage, so a logic upgrade keeps
+ * both the signatures and the bitmap.
  *
  * Architecture (the pattern of `ConvictionServiceStorage`):
  *   - It never holds or moves TRAC. Every subscription token sits in the vault
@@ -47,26 +39,23 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *     accounts for it.
  *   - It is policy-free. Every mutator is `onlyContracts` (any Hub-registered
  *     contract, and the Hub owner), and the logic contracts enforce every
- *     business rule before they write. The one rule it keeps itself is that
- *     money is never booked into an epoch that has closed, whose inputs are
- *     frozen. Business events come from the logic contracts; this contract
- *     emits events only for its parameters.
- *   - Every field has a view, and every field the logic contracts write has
- *     a narrow setter that writes that field alone, beside the writes they
- *     make today (`addClaim`, `finalizeClaim` and `closeEpoch` write several
- *     fields at once), so a later logic version reads and writes all of this
- *     state without a new storage, which would start empty. The setters keep
- *     the storage's own rules: a closed epoch's totals take no write, a
- *     finalized claim never moves, and a nonce bit, once set, is never
- *     cleared. The close record and the cursor `closedThrough` are written
- *     only by `closeEpoch`, one epoch at a time and in order, with whatever
- *     pool, λ and carry the logic passes, so a close never moves once made.
- *     The writes of several fields remain the normal path: a writer that
- *     calls a narrow setter keeps in step the fields its NatSpec names.
+ *     business rule before they write. The one rule it keeps itself is that an
+ *     epoch that has ended takes no write to its money or its QIF inputs, so
+ *     everything a reward claim reads from an ended epoch is final. Business
+ *     events come from the logic contracts; this contract emits events only
+ *     for its parameters.
+ *   - Every field has a view, and every field the logic contracts write has a
+ *     narrow setter that writes that field alone, beside `countReceipts`, which
+ *     writes several at once, so a later logic version reads and writes all of
+ *     this state without a new storage, which would start empty. The setters
+ *     keep the storage's own rules: an ended epoch takes no write, and a nonce
+ *     bit, once set, is never cleared. `countReceipts` remains the normal path:
+ *     a writer that calls a narrow setter keeps in step the fields its NatSpec
+ *     names.
  *   - The parameter setters are `onlyHub`, so governance reaches them through
- *     `Hub.forwardCall` (the Hub owner may also call them directly). The
- *     setters that need the current epoch or the epoch length read them from
- *     the Hub's `Chronos` at the call, so no reference is stored.
+ *     `Hub.forwardCall` (the Hub owner may also call them directly). The current
+ *     epoch is read from the Hub's `Chronos` at the call, so no reference is
+ *     stored.
  *
  * Activation: `activationEpoch` is the first epoch whose rewards include this
  * pool, and the first in which periods can be funded from a wallet. It is set
@@ -74,22 +63,17 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  * already ended, and only once the Hub's `QueryInferenceSettlement` and
  * `StakingV10` both read this storage, so every claim from activation on pays
  * the pool. Until it is set and reached, the logic contracts refuse every
- * wallet funding and top-up, every receipt batch and every finalization, so no
- * epoch that may already have been claimed changes. Epochs close from it on,
- * in order.
+ * wallet funding and top-up and every receipt batch, so no epoch that may
+ * already have been claimed changes.
  *
  * Fresh state: the contract ships empty and is never upgraded in place. A
  * replacement starts empty, under its own address, so the storage layout
- * matters to audits and indexers rather than to migrations, and requests
- * signed against this address stay bound to it. The declaration order of the
- * state below IS the layout:
- *   - slot 0 packs the inherited `hub` with the activation epoch, the receipt
- *     grace, the pause switch and the group and close bounds (32 of 32 bytes);
- *   - slot 1 the item bound, the λ schedule and the scheduled receipt grace
- *     (20 of 32 bytes);
- *   - slot 2 `closedThrough`, slot 3 `carry`;
- *   - slots 4 to 11 the mappings, in order; `convictionDue` came last, so
- *     that no earlier slot moved.
+ * matters to indexers rather than to migrations, and requests signed against
+ * this address stay bound to it. The declaration order of the state below IS
+ * the layout:
+ *   - slot 0 packs the inherited `hub` with the activation epoch, the pause
+ *     switch, the batch bounds and λ (31 of 32 bytes);
+ *   - slots 1 to 6 the mappings, in order.
  *
  * Replacing it needs a migration, which no deploy step runs. A replacement
  * starts empty, and `StakingV10` takes the activation epoch from the storage
@@ -97,12 +81,13 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *   - every node-epoch before the replacement's activation that no claim has
  *     split yet is split without its share of this pool, which stays in the
  *     vault for good;
- *   - the carry, and the money due in epochs still open, stay here, unpaid;
+ *   - money funded for epochs in which no node has counted value yet, whether
+ *     they have ended or not, stays here, unpaid;
  *   - requests signed for this address do not verify against another.
  * A migration claims every position first (`StakingV10.claimFor`), swaps at
- * an epoch boundary, and books the carry and the money due into the
- * replacement (`setCarry`, `addWalletDue`, `addConvictionDue`). The pause is
- * no substitute: closes and claims go on while paused.
+ * an epoch boundary, and books that money into the replacement
+ * (`addWalletFunding`, `addConvictionFunding`). The pause is no substitute:
+ * claims go on while paused.
  */
 contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializable {
     string private constant _NAME = "QueryInferenceStorage";
@@ -111,10 +96,8 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /// @notice The denominator of `lambdaBps`: 10,000 is λ = 1.
     uint16 public constant BPS_DENOMINATOR = 10_000;
 
-    uint32 internal constant _DEFAULT_RECEIPT_GRACE_SECONDS = 1 hours;
     uint16 internal constant _DEFAULT_MAX_ITEMS_PER_BATCH = 256;
     uint8 internal constant _DEFAULT_MAX_GROUPS_PER_BATCH = 32;
-    uint8 internal constant _DEFAULT_MAX_CLOSE_STEPS_PER_CLAIM = 32;
 
     uint16 internal constant _ITEMS_PER_BATCH_UPPER_BOUND = 1024;
 
@@ -122,35 +105,20 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     //                          Records
     // ============================================================
 
-    /// @notice The inputs of an epoch, frozen when it closes, beside its
-    ///         totals (`getEpochTotals`), which no write reaches once it has
-    ///         closed.
-    struct EpochClose {
-        uint96 pool; // the query/inference pool the epoch's nodes share
-        uint16 lambdaBps; // λ in force in the epoch
-        bool closed;
-    }
-
-    /// @notice An epoch's totals over all nodes: ΣR and ΣQueryInferenceScore.
+    /// @notice An epoch's totals over all nodes, ΣR and ΣQueryInferenceScore,
+    ///         and the epoch's λ, taken from `lambdaBps` when its first value
+    ///         counts and fixed from then on.
     struct EpochTotals {
-        uint128 sumR;
-        uint128 sumScore;
+        uint120 sumR;
+        uint120 sumScore;
+        uint16 lambdaBps;
     }
 
-    /// @notice A node's finalized receipt value R and its stake-weighted value
-    ///         QueryInferenceScore, counted in one epoch.
+    /// @notice A node's counted receipt value R and its stake-weighted value
+    ///         QueryInferenceScore in one epoch.
     struct NodeEpoch {
         uint128 r;
         uint128 score;
-    }
-
-    /// @notice One seller's claims in one bucket: claimed value, the same
-    ///         weighted by the stake factor captured at each batch, and
-    ///         whether it has been finalized.
-    struct SellerClaim {
-        uint96 claimed;
-        uint96 weighted;
-        bool finalized;
     }
 
     // ============================================================
@@ -158,15 +126,10 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     // ============================================================
 
     event ActivationEpochSet(uint40 epoch);
-    /// @notice The receipt grace becomes `value` for the periods of
-    ///         `fromEpoch` on.
-    event ReceiptGraceSecondsSet(uint32 value, uint256 fromEpoch);
     event MaxItemsPerBatchSet(uint16 oldValue, uint16 newValue);
     event MaxGroupsPerBatchSet(uint8 oldValue, uint8 newValue);
-    event MaxCloseStepsPerClaimSet(uint8 oldValue, uint8 newValue);
     event PausedSet(bool paused);
-    /// @notice λ becomes `value` from `fromEpoch` on.
-    event LambdaBpsSet(uint16 value, uint256 fromEpoch);
+    event LambdaBpsSet(uint16 oldValue, uint16 newValue);
 
     // ============================================================
     //                          Errors
@@ -182,23 +145,8 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     ///         splits each epoch without it, and that share stays in the vault
     ///         for good.
     error PoolNotWired(string reader);
-    /// @notice `epoch` is closed: its inputs are frozen and take no booking.
-    error EpochClosed(uint256 epoch, uint256 closedThrough);
-    /// @notice The λ scheduled from `fromEpoch` is in force, but an epoch
-    ///         before it from activation on is still open. Folding the value
-    ///         in now would change that epoch's λ, so the epochs up to
-    ///         `fromEpoch − 1` are to be closed first.
-    error LambdaScheduleAheadOfCloses(uint256 closedThrough, uint256 fromEpoch);
-    /// @notice The receipt grace scheduled from `fromEpoch` took effect in the
-    ///         current epoch, while the periods of the epoch before it, whose
-    ///         claims are finalized now, still take the grace before it. A
-    ///         change waits for the next epoch.
-    error ReceiptGraceScheduleInUse(uint256 fromEpoch);
-    /// @notice The claim is finalized: it takes no more value, and is not
-    ///         finalized again.
-    error ClaimFinalized(bytes32 subscriptionId, uint8 bucketIndex, uint72 seller);
-    /// @notice Epochs close one at a time, in order, from activation on.
-    error CloseOutOfOrder(uint256 epoch, uint256 closedThrough);
+    /// @notice `epoch` has ended: its money and its QIF inputs are final.
+    error EpochEnded(uint256 epoch, uint256 currentEpoch);
 
     // ============================================================
     //          State (the declaration order is the layout)
@@ -208,89 +156,46 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /// @notice The first epoch whose rewards include this pool, and the first
     ///         in which periods can be funded. Set once; 0 means unset.
     uint40 public activationEpoch;
-    /// @notice The time after a period's end within which receipt batches
-    ///         still land, for the periods of epochs before
-    ///         `nextReceiptGraceFromEpoch` (all epochs while that is 0). At
-    ///         most half the epoch length.
-    uint32 public receiptGraceSeconds;
     /// @notice While true, no period is funded or topped up, and no receipt is
-    ///         batched or finalized. Closes and claims go on.
+    ///         batched. Claims go on.
     bool public paused;
     /// @notice The most receipt groups one batch may carry.
     uint8 public maxGroupsPerBatch;
-    /// @notice The most epochs one reward claim closes on its way.
-    uint8 public maxCloseStepsPerClaim;
-
-    // Slot 1.
     /// @notice The most receipt items one batch may carry.
     uint16 public maxItemsPerBatch;
-    /// @notice λ, in basis points, for epochs before `nextLambdaFromEpoch`
-    ///         (all epochs while that is 0).
+    /// @notice λ, in basis points, for every epoch in which no value has
+    ///         counted yet. An epoch's own λ is in its totals.
     uint16 public lambdaBps;
-    /// @notice λ, in basis points, from `nextLambdaFromEpoch` on.
-    uint16 public nextLambdaBps;
-    /// @notice The epoch from which `nextLambdaBps` is in force; 0 = none.
-    uint40 public nextLambdaFromEpoch;
-    /// @notice The receipt grace of the periods of epochs from
-    ///         `nextReceiptGraceFromEpoch` on.
-    uint32 public nextReceiptGraceSeconds;
-    /// @notice The first epoch whose periods take `nextReceiptGraceSeconds`;
-    ///         0 = none.
-    uint40 public nextReceiptGraceFromEpoch;
 
-    // Slots 2 and 3.
-    /// @notice The last epoch whose inputs are frozen. It starts at
-    ///         `activationEpoch − 1`: epochs before activation never close.
-    uint256 public closedThrough;
-    /// @notice The pool carried forward from closed epochs in which no node
-    ///         finalized receipt value.
-    uint96 public carry;
-
-    // Slots 4 to 11.
-    /// @notice epoch => wallet-funded value due in that epoch.
-    mapping(uint256 => uint96) public walletDue;
-    /// @dev epoch => the inputs frozen at its close.
-    mapping(uint256 => EpochClose) internal _epochClose;
-    /// @dev epoch => ΣR and ΣQueryInferenceScore.
+    // Slots 1 to 6.
+    /// @notice epoch => the wallet-funded value of that epoch's periods.
+    mapping(uint256 => uint96) public walletFunding;
+    /// @notice epoch => the Conviction Account cost of that epoch's periods:
+    ///         what they and their top-ups drew from the accounts' allowances.
+    ///         `ServiceSubscriptions` books it; no other contract does.
+    mapping(uint256 => uint96) public convictionFunding;
+    /// @dev epoch => ΣR, ΣQueryInferenceScore and λ.
     mapping(uint256 => EpochTotals) internal _epochTotals;
     /// @dev identityId => epoch => R and QueryInferenceScore.
     mapping(uint72 => mapping(uint256 => NodeEpoch)) internal _nodeEpoch;
-    /// @dev subscriptionId => bucketIndex => the value claimed in the bucket,
-    ///      over all sellers. A bucket needs no close time: every period of an
-    ///      epoch shares one batch deadline, and its claims are finalized only
-    ///      in the epoch after it.
-    mapping(bytes32 => mapping(uint8 => uint128)) internal _bucketClaimed;
-    /// @dev subscriptionId => bucketIndex => seller identityId => its claim.
-    mapping(bytes32 => mapping(uint8 => mapping(uint72 => SellerClaim))) internal _sellerClaim;
+    /// @dev subscriptionId => bucketIndex => the face value of the receipts
+    ///      counted in the bucket, over all sellers.
+    mapping(bytes32 => mapping(uint8 => uint96)) internal _bucketFilled;
     /// @dev subscriptionId => seller identityId => nonce >> 8 => 256 used-nonce bits.
     mapping(bytes32 => mapping(uint72 => mapping(uint64 => uint256))) internal _nonceBitmap;
-    /// @notice epoch => Conviction Account cost due in that epoch: what plan
-    ///         periods and their top-ups drew from the accounts' allowances.
-    ///         `ServiceSubscriptions` books it; no other contract does.
-    mapping(uint256 => uint96) public convictionDue;
 
     constructor(address hubAddress) HubDependent(hubAddress) {}
 
     /// @dev Idempotent across redeploys: seeds each bound's default only while
     ///      it is unset, so a value governance has tuned survives a
-    ///      re-initialization. The default grace is 1 hour, or half an epoch
-    ///      where epochs are shorter than 2 hours, so it keeps to the bound
-    ///      `setReceiptGraceSeconds` enforces on every network. λ has no
-    ///      default: 0 is a valid value, and the deployment sets it.
+    ///      re-initialization. λ has no default: 0 is a valid value, and the
+    ///      deployment sets it.
     function initialize() external onlyHub {
-        if (receiptGraceSeconds == 0) {
-            uint256 grace = _maxReceiptGrace(_chronos());
-            if (grace > _DEFAULT_RECEIPT_GRACE_SECONDS) grace = _DEFAULT_RECEIPT_GRACE_SECONDS;
-            receiptGraceSeconds = uint32(grace);
-        }
         if (maxItemsPerBatch == 0) {
             maxItemsPerBatch = _DEFAULT_MAX_ITEMS_PER_BATCH;
         }
         if (maxGroupsPerBatch == 0) {
             maxGroupsPerBatch = _DEFAULT_MAX_GROUPS_PER_BATCH;
-        }
-        if (maxCloseStepsPerClaim == 0) {
-            maxCloseStepsPerClaim = _DEFAULT_MAX_CLOSE_STEPS_PER_CLAIM;
         }
     }
 
@@ -309,8 +214,7 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     /**
      * @notice Set the activation epoch, once, to the current epoch or a later
      *         one, never to an epoch that has already ended: no epoch at or
-     *         after it can have been claimed. `closedThrough` starts at the
-     *         epoch before it.
+     *         after it can have been claimed.
      * @dev    Refused (`PoolNotWired`) until every contract that pays the pool
      *         reads this storage: the Hub holds a `QueryInferenceSettlement`
      *         over it, and a `StakingV10` whose `queryInferenceStorage()`,
@@ -320,60 +224,11 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     function setActivationEpoch(uint40 epoch) external onlyHub {
         uint40 current = activationEpoch;
         if (current != 0) revert ActivationEpochAlreadySet(current);
-        if (epoch == 0 || epoch < _chronos().getCurrentEpoch()) revert InvalidParameter("activationEpoch");
+        if (epoch == 0 || epoch < _currentEpoch()) revert InvalidParameter("activationEpoch");
         if (!_readsThisPool("QueryInferenceSettlement")) revert PoolNotWired("QueryInferenceSettlement");
         if (!_readsThisPool("StakingV10")) revert PoolNotWired("StakingV10");
         activationEpoch = epoch;
-        closedThrough = epoch - 1;
         emit ActivationEpochSet(epoch);
-    }
-
-    /**
-     * @notice Set the receipt grace, from 1 second to half an epoch, so a
-     *         period's batch deadline falls in the first half of the epoch
-     *         after it, its due epoch, and at least the second half of that
-     *         epoch, less a second, is left to finalize the period's claims
-     *         in: a claim is finalized only after the deadline and before the
-     *         due epoch ends, so a grace of nearly an epoch would leave no
-     *         time at all. A change moves no money already booked.
-     * @dev    A period of epoch e takes the grace of e
-     *         (`receiptGraceSecondsAt(e)`). A change made during epoch c
-     *         applies to the periods of c + 1 on, as a change to λ applies
-     *         from the next epoch, so a period's deadline is settled before
-     *         it starts, and no change moves the deadline of a period whose
-     *         claims are being finalized: its batches could otherwise land
-     *         again after some of its claims were finalized. While no epoch
-     *         from activation on has started (activation unset, or still
-     *         ahead), no batch lands yet, and the change applies at once.
-     *
-     *         Two values are kept, as for λ: `receiptGraceSeconds` before
-     *         `nextReceiptGraceFromEpoch`, and `nextReceiptGraceSeconds` from
-     *         it on. A change made once the scheduled value is in force first
-     *         folds it into `receiptGraceSeconds`. In the epoch where it took
-     *         effect, the periods of the epoch before still take the older
-     *         value while their claims are finalized, so a change then is
-     *         refused (`ReceiptGraceScheduleInUse`) and goes through from the
-     *         next epoch on.
-     */
-    function setReceiptGraceSeconds(uint32 value) external onlyHub {
-        Chronos chronos = _chronos();
-        if (value == 0 || value > _maxReceiptGrace(chronos)) revert InvalidParameter("receiptGraceSeconds");
-        uint256 current = chronos.getCurrentEpoch();
-        uint256 activation = activationEpoch;
-        if (activation == 0 || current < activation) {
-            receiptGraceSeconds = value;
-            emit ReceiptGraceSecondsSet(value, current);
-            return;
-        }
-
-        uint256 from = nextReceiptGraceFromEpoch;
-        if (from != 0 && current >= from) {
-            if (current == from) revert ReceiptGraceScheduleInUse(from);
-            receiptGraceSeconds = nextReceiptGraceSeconds;
-        }
-        nextReceiptGraceSeconds = value;
-        nextReceiptGraceFromEpoch = SafeCast.toUint40(current + 1);
-        emit ReceiptGraceSecondsSet(value, current + 1);
     }
 
     /// @notice Set the most items per batch, from 1 to 1,024.
@@ -392,20 +247,12 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         emit MaxGroupsPerBatchSet(old, value);
     }
 
-    /// @notice Set the most epochs one claim closes, from 1 to 255.
-    function setMaxCloseStepsPerClaim(uint8 value) external onlyHub {
-        if (value == 0) revert InvalidParameter("maxCloseStepsPerClaim");
-        uint8 old = maxCloseStepsPerClaim;
-        maxCloseStepsPerClaim = value;
-        emit MaxCloseStepsPerClaimSet(old, value);
-    }
-
     /// @notice Switch the pause on or off. While it is on, no period is funded
     ///         or topped up, from a wallet or from a Conviction Account alike,
-    ///         and no receipt is batched or finalized; closes and claims go
-    ///         on. With the settlement removed from the Hub, the emergency
-    ///         switch (`StakingV10.queryInferenceSettlement`), only the pause
-    ///         stops the funding.
+    ///         and no receipt is batched; claims go on. With the settlement
+    ///         removed from the Hub, the emergency switch
+    ///         (`StakingV10.queryInferenceSettlement`), only the pause stops the
+    ///         funding.
     function setPaused(bool value) external onlyHub {
         paused = value;
         emit PausedSet(value);
@@ -413,55 +260,34 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
 
     /**
      * @notice Set λ, from 0 to 10,000 basis points.
-     * @dev    A change made during epoch c applies from c + 1, so the λ of an
-     *         epoch is settled before it starts. While no epoch from activation
-     *         on has started (activation unset, or still ahead), no epoch uses
-     *         λ yet, and the change applies at once.
-     *
-     *         Only two values are kept: `lambdaBps` before
-     *         `nextLambdaFromEpoch`, and `nextLambdaBps` from it on. A change
-     *         made once the scheduled value is in force first folds it into
-     *         `lambdaBps`. That would hand every epoch before
-     *         `nextLambdaFromEpoch` the new base value, so it is refused while
-     *         any of them, from activation on, is still open
-     *         (`LambdaScheduleAheadOfCloses`); closing them first clears it.
+     * @dev    An epoch takes λ once, when its first value counts
+     *         (`countReceipts`), and keeps it. So a change applies to every
+     *         epoch in which no value has counted yet, the current one
+     *         included, and moves no epoch that is being paid or still to be.
      */
     function setLambdaBps(uint16 value) external onlyHub {
         if (value > BPS_DENOMINATOR) revert InvalidParameter("lambdaBps");
-        uint256 current = _chronos().getCurrentEpoch();
-        uint256 activation = activationEpoch;
-        if (activation == 0 || current < activation) {
-            lambdaBps = value;
-            emit LambdaBpsSet(value, current);
-            return;
-        }
-
-        uint256 from = nextLambdaFromEpoch;
-        if (from != 0 && current >= from) {
-            uint256 closed = closedThrough;
-            if (closed + 1 < from) revert LambdaScheduleAheadOfCloses(closed, from);
-            lambdaBps = nextLambdaBps;
-        }
-        nextLambdaBps = value;
-        nextLambdaFromEpoch = SafeCast.toUint40(current + 1);
-        emit LambdaBpsSet(value, current + 1);
+        uint16 old = lambdaBps;
+        lambdaBps = value;
+        emit LambdaBpsSet(old, value);
     }
 
     // ============================================================
     //                   Mutators (onlyContracts)
     // ============================================================
 
-    /// @notice Book `amount` of wallet-funded value as due in `epoch`.
-    function addWalletDue(uint256 epoch, uint96 amount) external onlyContracts {
-        _requireOpen(epoch);
-        walletDue[epoch] += amount;
+    /// @notice Book `amount` of wallet-funded value in `epoch`. It refuses an
+    ///         epoch that has ended (`EpochEnded`).
+    function addWalletFunding(uint256 epoch, uint96 amount) external onlyContracts {
+        _requireNotEnded(epoch);
+        walletFunding[epoch] += amount;
     }
 
-    /// @notice Book `amount` of Conviction Account cost as due in `epoch`, as
-    ///         `addWalletDue` books wallet-funded value.
-    function addConvictionDue(uint256 epoch, uint96 amount) external onlyContracts {
-        _requireOpen(epoch);
-        convictionDue[epoch] += amount;
+    /// @notice Book `amount` of Conviction Account cost in `epoch`, as
+    ///         `addWalletFunding` books wallet-funded value.
+    function addConvictionFunding(uint256 epoch, uint96 amount) external onlyContracts {
+        _requireNotEnded(epoch);
+        convictionFunding[epoch] += amount;
     }
 
     /// @notice Mark the nonces of `bits` used, in word `word` of `seller`'s
@@ -471,150 +297,85 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         _nonceBitmap[subscriptionId][seller][word] |= bits;
     }
 
-    /// @notice Add `value` of claimed receipt value, `weighted` of it weighted
-    ///         by the stake factor, to `seller`'s claim in a bucket, and
-    ///         `value` to the bucket's total over all sellers.
-    /// @dev    A finalized claim takes no more (`ClaimFinalized`), so a
-    ///         finalized value never moves. The sums are checked, so an
-    ///         overflow reverts.
-    function addClaim(
-        bytes32 subscriptionId,
-        uint8 bucketIndex,
-        uint72 seller,
-        uint96 value,
-        uint96 weighted
-    ) external onlyContracts {
-        SellerClaim storage c = _sellerClaim[subscriptionId][bucketIndex][seller];
-        if (c.finalized) revert ClaimFinalized(subscriptionId, bucketIndex, seller);
-        c.claimed += value;
-        c.weighted += weighted;
-        _bucketClaimed[subscriptionId][bucketIndex] += value;
-    }
-
-    /// @notice Finalize `seller`'s claim in a bucket, once, counting `value`
-    ///         of finalized receipt value (R) and `score` of stake-weighted
-    ///         value (QueryInferenceScore) in `epoch`, for the node and in the
-    ///         epoch's totals.
-    /// @dev    It refuses a closed epoch, whose inputs are frozen, and a claim
-    ///         already finalized (`ClaimFinalized`). The sums are checked.
-    function finalizeClaim(
+    /// @notice Count a group of receipts: `counted` of face value fills the
+    ///         bucket, and `r` of receipt value and `score` of stake-weighted
+    ///         value join the node's and the epoch's totals in `epoch`. The
+    ///         first value to count in an epoch fixes its λ.
+    /// @dev    It refuses an epoch that has ended (`EpochEnded`). The sums are
+    ///         checked.
+    function countReceipts(
         bytes32 subscriptionId,
         uint8 bucketIndex,
         uint72 seller,
         uint256 epoch,
-        uint96 value,
+        uint96 counted,
+        uint96 r,
         uint96 score
     ) external onlyContracts {
-        _requireOpen(epoch);
-        SellerClaim storage c = _sellerClaim[subscriptionId][bucketIndex][seller];
-        if (c.finalized) revert ClaimFinalized(subscriptionId, bucketIndex, seller);
-        c.finalized = true;
+        _requireNotEnded(epoch);
+        _bucketFilled[subscriptionId][bucketIndex] += counted;
 
         NodeEpoch storage n = _nodeEpoch[seller][epoch];
-        n.r += value;
+        n.r += r;
         n.score += score;
-        EpochTotals storage t = _epochTotals[epoch];
-        t.sumR += value;
-        t.sumScore += score;
-    }
 
-    /// @notice Close `epoch`: freeze its pool and its λ, make it the last
-    ///         closed epoch, and set the carry to `carryOut`.
-    /// @dev    Epochs close one at a time, in order from the activation epoch,
-    ///         so `epoch` is the one after `closedThrough`, and nothing closes
-    ///         while the activation epoch is unset (`CloseOutOfOrder`).
-    function closeEpoch(uint256 epoch, uint96 pool, uint16 lambda, uint96 carryOut) external onlyContracts {
-        uint256 closed = closedThrough;
-        if (activationEpoch == 0 || epoch != closed + 1) revert CloseOutOfOrder(epoch, closed);
-        _epochClose[epoch] = EpochClose({pool: pool, lambdaBps: lambda, closed: true});
-        closedThrough = epoch;
-        carry = carryOut;
+        EpochTotals storage t = _epochTotals[epoch];
+        if (t.sumR == 0) t.lambdaBps = lambdaBps;
+        t.sumR += r;
+        t.sumScore += score;
     }
 
     // ============================================================
     //            Narrow setters (onlyContracts), one field each
     //
-    // `addClaim`, `finalizeClaim` and `closeEpoch` remain the normal path:
-    // they keep related fields in step. A setter here writes its own field and
-    // leaves the others, so a later logic version can ship without a new
-    // storage, and its caller keeps in step the fields its NatSpec names.
+    // `countReceipts` remains the normal path: it keeps related fields in step.
+    // A setter here writes its own field and leaves the others, so a later logic
+    // version can ship without a new storage, and its caller keeps in step the
+    // fields its NatSpec names.
     // ============================================================
 
-    /// @notice Set `seller`'s claim in a bucket, which `addClaim` adds to and
-    ///         `finalizeClaim` finalizes, and nothing else: the bucket's
-    ///         total, the node's and the epoch's are left as they are.
-    /// @dev    A finalized claim never moves, so one is refused
-    ///         (`ClaimFinalized`). The caller keeps in step the bucket's total
-    ///         (`setBucketClaimed`), the sum of its sellers' `claimed`, and,
-    ///         for a claim set as finalized, the node's and the epoch's values
-    ///         (`setNodeEpoch`, `setEpochTotals`), to which `finalizeClaim`
-    ///         adds its value. `addClaim` and `finalizeClaim` remain the normal
-    ///         path.
-    function setSellerClaim(
-        bytes32 subscriptionId,
-        uint8 bucketIndex,
-        uint72 seller,
-        SellerClaim calldata c
-    ) external onlyContracts {
-        SellerClaim storage stored = _sellerClaim[subscriptionId][bucketIndex][seller];
-        if (stored.finalized) revert ClaimFinalized(subscriptionId, bucketIndex, seller);
-        _sellerClaim[subscriptionId][bucketIndex][seller] = c;
-    }
-
-    /// @notice Set the value claimed in a bucket over all sellers, which
-    ///         `addClaim` adds to.
-    /// @dev    The caller keeps it the sum of the sellers' `claimed` in the
-    ///         bucket (`setSellerClaim`): a claim over the funded cap finalizes
-    ///         as `claimed × cap / total`, so a total below the sum finalizes
-    ///         more than the cap. `addClaim` remains the normal path.
-    function setBucketClaimed(bytes32 subscriptionId, uint8 bucketIndex, uint128 value) external onlyContracts {
-        _bucketClaimed[subscriptionId][bucketIndex] = value;
+    /// @notice Set the face value counted in a bucket over all sellers, which
+    ///         `countReceipts` adds to.
+    /// @dev    The caller keeps it at most the bucket's value: a batch reads
+    ///         what the bucket has left as the value less this.
+    function setBucketFilled(bytes32 subscriptionId, uint8 bucketIndex, uint96 value) external onlyContracts {
+        _bucketFilled[subscriptionId][bucketIndex] = value;
     }
 
     /// @notice Set a node's R and QueryInferenceScore in `epoch`, which
-    ///         `finalizeClaim` adds to. It refuses a closed epoch, whose
-    ///         inputs are frozen (`EpochClosed`).
+    ///         `countReceipts` adds to. It refuses an epoch that has ended
+    ///         (`EpochEnded`).
     /// @dev    The caller keeps in step the epoch's totals (`setEpochTotals`),
     ///         the sums of its nodes' `r` and `score`, and a node's `score` at
     ///         most its `r`, as the stake factor leaves it. The node's gross is
     ///         a share of the pool by these over the totals, so totals below
-    ///         the sums pay out more than the pool. `finalizeClaim` remains the
-    ///         normal path.
+    ///         the sums pay out more than the pool.
     function setNodeEpoch(uint72 identityId, uint256 epoch, NodeEpoch calldata n) external onlyContracts {
-        _requireOpen(epoch);
+        _requireNotEnded(epoch);
         _nodeEpoch[identityId][epoch] = n;
     }
 
-    /// @notice Set `epoch`'s ΣR and ΣQueryInferenceScore, which
-    ///         `finalizeClaim` adds to. It refuses a closed epoch, whose
-    ///         inputs are frozen (`EpochClosed`).
+    /// @notice Set `epoch`'s ΣR, ΣQueryInferenceScore and λ, which
+    ///         `countReceipts` writes. It refuses an epoch that has ended
+    ///         (`EpochEnded`), and a λ above 10,000 basis points, at which no
+    ///         gross of the epoch could be read.
     /// @dev    The caller keeps them the sums of the epoch's nodes' `r` and
-    ///         `score` (`setNodeEpoch`), and the close reads `sumR`: 0 carries
-    ///         the epoch's money, anything else makes it the pool.
-    ///         `finalizeClaim` remains the normal path.
+    ///         `score` (`setNodeEpoch`), and the pool reads `sumR`: 0 rolls the
+    ///         epoch's money forward, anything else makes it part of the pool.
     function setEpochTotals(uint256 epoch, EpochTotals calldata t) external onlyContracts {
-        _requireOpen(epoch);
+        _requireNotEnded(epoch);
+        if (t.lambdaBps > BPS_DENOMINATOR) revert InvalidParameter("lambdaBps");
         _epochTotals[epoch] = t;
-    }
-
-    /// @notice Set the pool carried into the next epoch to close, which
-    ///         `closeEpoch` sets to its carry out.
-    /// @dev    The next close adds it to that epoch's money, so the caller keeps
-    ///         it in step with the money due and the closes before it: the
-    ///         money due in closed epochs stays their pools plus the carry.
-    ///         `closeEpoch` remains the normal path.
-    function setCarry(uint96 value) external onlyContracts {
-        carry = value;
     }
 
     // ============================================================
     //                           Views
     // ============================================================
 
-    /// @notice The money due in `epoch`: the wallet-funded value and the
-    ///         Conviction Account cost, which its close adds to the carry.
-    function dueIn(uint256 epoch) external view returns (uint96 wallet, uint96 conviction) {
-        return (walletDue[epoch], convictionDue[epoch]);
+    /// @notice The money funded for `epoch`: the wallet-funded value and the
+    ///         Conviction Account cost.
+    function fundingIn(uint256 epoch) external view returns (uint96 wallet, uint96 conviction) {
+        return (walletFunding[epoch], convictionFunding[epoch]);
     }
 
     /// @notice What a funding or a top-up checks, in one call: the activation
@@ -633,52 +394,6 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         return (activationEpoch, paused, maxGroupsPerBatch, maxItemsPerBatch);
     }
 
-    /// @notice What a close reads, in one call: the activation epoch, the last
-    ///         closed epoch, the carry and the close bound of a claim.
-    function closeState()
-        external
-        view
-        returns (uint40 activation, uint256 closed, uint96 carried, uint8 maxSteps)
-    {
-        return (activationEpoch, closedThrough, carry, maxCloseStepsPerClaim);
-    }
-
-    /// @notice The latest λ accepted: the scheduled value while one is
-    ///         scheduled, in force or not, and `lambdaBps` otherwise. A deploy
-    ///         run compares the configured λ with it, so it never forwards the
-    ///         value already accepted, which a schedule in force could refuse.
-    function latestLambdaBps() external view returns (uint16) {
-        return nextLambdaFromEpoch != 0 ? nextLambdaBps : lambdaBps;
-    }
-
-    /// @notice The latest receipt grace accepted, as `latestLambdaBps` is for
-    ///         λ: the scheduled value while one is scheduled, in force or not,
-    ///         and `receiptGraceSeconds` otherwise.
-    function latestReceiptGraceSeconds() external view returns (uint32) {
-        return nextReceiptGraceFromEpoch != 0 ? nextReceiptGraceSeconds : receiptGraceSeconds;
-    }
-
-    /// @notice λ in basis points for `epoch`, by the schedule. Exact for every
-    ///         epoch that is still to close.
-    function lambdaBpsAt(uint256 epoch) external view returns (uint16) {
-        uint256 from = nextLambdaFromEpoch;
-        return from != 0 && epoch >= from ? nextLambdaBps : lambdaBps;
-    }
-
-    /// @notice The receipt grace of the periods of `epoch`, by the schedule:
-    ///         their batch deadline is the epoch's end plus this grace. Exact
-    ///         for the periods of the previous epoch, the current one and
-    ///         every later one; the batches and claims of older periods are
-    ///         past.
-    function receiptGraceSecondsAt(uint256 epoch) external view returns (uint32) {
-        uint256 from = nextReceiptGraceFromEpoch;
-        return from != 0 && epoch >= from ? nextReceiptGraceSeconds : receiptGraceSeconds;
-    }
-
-    function getEpochClose(uint256 epoch) external view returns (EpochClose memory) {
-        return _epochClose[epoch];
-    }
-
     function getEpochTotals(uint256 epoch) external view returns (EpochTotals memory) {
         return _epochTotals[epoch];
     }
@@ -687,17 +402,9 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
         return _nodeEpoch[identityId][epoch];
     }
 
-    /// @notice The value claimed in a bucket, over all sellers.
-    function bucketClaimed(bytes32 subscriptionId, uint8 bucketIndex) external view returns (uint128) {
-        return _bucketClaimed[subscriptionId][bucketIndex];
-    }
-
-    function getSellerClaim(
-        bytes32 subscriptionId,
-        uint8 bucketIndex,
-        uint72 identityId
-    ) external view returns (SellerClaim memory) {
-        return _sellerClaim[subscriptionId][bucketIndex][identityId];
+    /// @notice The face value counted in a bucket, over all sellers.
+    function bucketFilled(bytes32 subscriptionId, uint8 bucketIndex) external view returns (uint96) {
+        return _bucketFilled[subscriptionId][bucketIndex];
     }
 
     /// @notice The used-nonce bits of nonces `word × 256` to `word × 256 + 255`
@@ -710,19 +417,13 @@ contract QueryInferenceStorage is INamed, IVersioned, HubDependent, IInitializab
     //                         Internal
     // ============================================================
 
-    function _requireOpen(uint256 epoch) internal view {
-        uint256 closed = closedThrough;
-        if (epoch <= closed) revert EpochClosed(epoch, closed);
+    function _requireNotEnded(uint256 epoch) internal view {
+        uint256 current = _currentEpoch();
+        if (epoch < current) revert EpochEnded(epoch, current);
     }
 
-    function _chronos() internal view returns (Chronos) {
-        return Chronos(hub.getContractAddress("Chronos"));
-    }
-
-    /// @dev The longest receipt grace: half an epoch, the most that leaves the
-    ///      due epoch's other half for finalization.
-    function _maxReceiptGrace(Chronos chronos) internal view returns (uint256) {
-        return chronos.epochLength() / 2;
+    function _currentEpoch() internal view returns (uint256) {
+        return Chronos(hub.getContractAddress("Chronos")).getCurrentEpoch();
     }
 
     /// @dev Whether the contract the Hub holds as `contractName` reads this

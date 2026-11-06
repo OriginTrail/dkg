@@ -1,4 +1,4 @@
-// PHASE withdraw, optional, after close-claim, in two runs: the position is
+// PHASE withdraw, optional, after claim, in two runs: the position is
 // withdrawn in the middle of an epoch, which records that epoch's share for
 // the owner; once that epoch has ended, claimWithdrawnEpoch pays it, against
 // the amount the views give (the position's recorded score × the epoch's net /
@@ -25,7 +25,7 @@ const CLAIM = 'withdraw.claim-withdrawn-epoch';
 export async function phaseWithdraw(ctx: PoolCtx): Promise<{ part: string }> {
   const { report, c, file } = ctx;
   const r = need(ctx.roles, ['owner', 'ownerAddr']);
-  const s = await runState(ctx, 'close-claim');
+  const s = await runState(ctx, 'claim');
   if (doneEarlier(ctx, 'the withdrawn epoch is claimed: the run is complete')) return { part: 'claim' };
   const { tokenId } = s;
   const sv10 = await c.sv10.getAddress();

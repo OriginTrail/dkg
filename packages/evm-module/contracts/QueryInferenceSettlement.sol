@@ -17,7 +17,6 @@ import {RandomSamplingStorage} from "./storage/RandomSamplingStorage.sol";
 import {ShardingTableStorage} from "./storage/ShardingTableStorage.sol";
 import {ProfileLib} from "./libraries/ProfileLib.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import {ECDSA} from "solady/src/utils/ECDSA.sol";
 
@@ -25,9 +24,9 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * @title QueryInferenceSettlement
  * @notice Settlement of the query/inference pool of OT-RFC-27 ("NeuroSymbolic
  *         Marketplace"): Core Node sellers submit batches of buyer-signed
- *         requests with their receipts, which become claims on the buyers'
- *         funded buckets; the claims are finalized against each bucket's
- *         funded cap into the QIF inputs of the epoch after the period.
+ *         requests with their receipts, and each batch counts as it lands, up
+ *         to what the buyer's bucket has left, towards the QIF inputs of the
+ *         period's epoch.
  *
  * The formats. Requests and receipts are EIP-712 typed data under the domain
  * `{name: "DKGQueryInference", version: "1", chainId, verifyingContract:
@@ -46,44 +45,42 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  *     signature is checked.
  *
  * A batch (`submitReceiptBatch`) is accepted only from an operational key of a
- * node that has a profile and a place in the sharding table, the checks
- * `RandomSampling.submitProof` makes, and that node is the seller of every
- * receipt in it. The contract fills in the period, the bucket and the seller
- * of each request itself, so a request signed for another seller, period or
- * bucket recovers to another address and fails as a bad signature. Every
- * objective fault OT-RFC-27 lists is checked, and any fault reverts the whole
- * batch (`ReceiptFault`), so sellers simulate first. Nothing is stored per
- * receipt: a nonce bit per request, and per bucket and seller the claimed
- * value and the same weighted by the seller's stake factor, which is
- * captured once per batch and never revised.
+ * node that has a profile, a place in the sharding table and a positive node
+ * score in the current epoch, and that node is the seller of every receipt in
+ * it. The contract fills in the period, the bucket and the seller of each
+ * request itself, so a request signed for another seller, period or bucket
+ * recovers to another address and fails as a bad signature. Every objective
+ * fault OT-RFC-27 lists is checked, and any fault reverts the whole batch
+ * (`ReceiptFault`), so sellers simulate first. Nothing is stored per receipt:
+ * only a nonce bit per request, and what counts.
  *
- * Finalization (`finalizeClaims`). An epoch e has one batch deadline, its end
- * plus the receipt grace of e, which falls in the first half of e + 1, the
- * due epoch of its periods, since the grace is at most half an epoch. It is
- * the deadline of every period of e: a Conviction Account assignment that
- * ends sooner moves none. A seller's claims in a bucket are finalized in
- * e + 1 and only there, after the epoch's deadline, so in at least the
- * second half of e + 1 less a second, and are void once e + 1 has ended. Anyone may finalize, and the value goes to the seller the claim
- * names, who must have a positive node score in e + 1. A bucket's claims
- * above its funded cap all shrink by the same ratio, so the order of batches
- * gives no priority, and the result counts as R and QueryInferenceScore in
- * e + 1.
+ * Counting. A batch lands only during its period's epoch: the epoch's end is
+ * the deadline, and a receipt that misses it never counts. A group counts in
+ * the transaction that lands it:
+ *   - `counted`, the lesser of the group's value and what the bucket has left,
+ *     fills the bucket at face value. Batches count in the order they land, and
+ *     what has landed is never reduced. A group refuses to land for less than
+ *     its `minCounted`, so a seller that sets one keeps its receipts for a later
+ *     top-up rather than spending their nonces.
+ *   - R, which is `counted` at the period's discount, floored, and
+ *     QueryInferenceScore, which is R at the batch's stake factor, join the
+ *     node's and the epoch's totals in the period's epoch. A Conviction Account
+ *     period's cost is its value at the same discount, floored per funding and
+ *     per top-up, so a bucket's R exceeds what was paid for it by less than 1
+ *     wei per top-up. Nothing is overpaid: a node's gross is a share of the
+ *     money.
  *
- * The close (`closeEpochs`, `ensureClosed`). Epochs close in order, from the
- * activation epoch, once they have ended. An epoch's money B is what is due in
- * it (the wallet-funded value and the Conviction Account cost of the periods
- * of the epoch before) plus the carry. If no node finalized value in it, the
- * carry becomes B and its pool is 0 (rollover); otherwise its pool is B and
- * the carry 0. The pool is paid out as the nodes' gross rewards, each of its
- * two terms floored, so less than 2 wei per node with value stays in the
- * vault and is never carried: the same kind of remainder as the floors of
- * `StakingV10`'s split of a node's reward. The close freezes the
- * pool and λ beside the epoch's totals ΣR and ΣQueryInferenceScore, which
- * nothing writes once it has ended, so `queryInferenceGross`, a node's gross
- * reward from the pool, reads only frozen values. `previewEpochClose` and
- * `previewQueryInferenceGross` replay, in a view, the closes an open epoch is
- * still to have, so an ended epoch's pool and gross read the same before its
- * close as after it.
+ * The pool (`epochPool`). An epoch's money is what was funded for its periods:
+ * the wallet-funded value and the Conviction Account cost. If no node counted
+ * value in an epoch, its pool is 0 and its money rolls forward. Otherwise its
+ * pool is its money plus that of the unbroken run of epochs before it in which
+ * no node counted value, back to the activation epoch. No step runs when an
+ * epoch ends: nothing writes an epoch's money or totals once it has ended, so
+ * from then on `epochPool` and `queryInferenceGross` read final values, and a
+ * reward claim reads them straight away. The pool is paid out as the nodes'
+ * gross rewards, each of its two terms floored, so less than 2 wei per node
+ * with value stays in the vault: the same kind of remainder as the floors of
+ * `StakingV10`'s split of a node's reward.
  *
  * Architecture: stateless logic, as `ServiceSubscriptions`. Every byte of
  * settlement state lives in `QueryInferenceStorage`, and the periods in
@@ -91,22 +88,19 @@ import {ECDSA} from "solady/src/utils/ECDSA.sol";
  * are wired at `initialize()`. It never calls the Token, moves no TRAC, and
  * accepts no ETH: no TRAC is ever sent to a seller.
  *
- * Gates: every batch and finalization is refused while
- * `QueryInferenceStorage` is paused, before its activation epoch and while that
- * is unset.
+ * Gates: every batch is refused while `QueryInferenceStorage` is paused, before
+ * its activation epoch and while that is unset.
  *
  * Out of the Hub. `QueryInferenceStorage` takes writes only from Hub
  * contracts, so while this contract is out of the Hub, which is the emergency
- * switch (`StakingV10.queryInferenceSettlement`), every batch, finalization
- * and close reverts. A fresh deployment, registered and initialized, takes
- * over the same storage, its closes, claims and carry.
+ * switch (`StakingV10.queryInferenceSettlement`), every batch reverts. A fresh
+ * deployment, registered and initialized, takes over the same storage.
  */
 contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitializable {
     string private constant _NAME = "QueryInferenceSettlement";
     // Version history:
-    //   1.0.0 — receipt batches, their finalization against the funded cap,
-    //           the epoch close of the query/inference pool, and a preview of
-    //           an open epoch's close (OT-RFC-27).
+    //   1.0.0 — receipt batches that count as they land, up to what the bucket
+    //           has left, and the read of an epoch's pool (OT-RFC-27).
     string private constant _VERSION = "1.0.0";
 
     uint256 internal constant _SCALE18 = 1e18;
@@ -132,7 +126,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     /// @dev The low 255 bits of an EIP-2098 `vs`: its `s`.
     uint256 private constant _S_MASK = (uint256(1) << 255) - 1;
     /// @dev Nothing is cached yet: no nonce word, whose index is at most
-    ///      2^56 − 1, and no epoch.
+    ///      2^56 − 1.
     uint256 private constant _NONE = type(uint256).max;
 
     // ============================================================
@@ -189,26 +183,8 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     struct ReceiptGroup {
         bytes32 subscriptionId;
         uint8 bucketIndex; // the bucket's index in the period, its funding order
+        uint96 minCounted; // the least face value the group lands for; less reverts the batch
         ReceiptItem[] items;
-    }
-
-    /// @notice A seller's claim in one bucket of one period.
-    struct ClaimRef {
-        bytes32 subscriptionId;
-        uint8 bucketIndex;
-        uint72 seller; // the seller's identity id
-    }
-
-    /// @notice Why a claim was not finalized. A skipped claim is untouched.
-    enum Skip {
-        None, // finalized
-        UnknownPeriod, // no period is recorded under the id
-        UnknownBucket, // the period has no bucket at the index
-        AlreadyFinalized,
-        TooEarly, // before the batch deadline of the period's epoch
-        Void, // the epoch after the period has ended: the claim never counts
-        NothingClaimed,
-        NoScore // the seller has no node score in the current epoch, yet
     }
 
     /// @notice Why a batch is refused: a group's fault, or an item's.
@@ -217,13 +193,14 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         // A group's.
         UnknownPeriod, // no period is recorded under the id
         UnknownBucket, // the period has no bucket at the index
-        PastDeadline, // after the period's batch deadline
+        OutsideEpoch, // the current epoch is not the period's
         EmptyGroup, // no items
+        BelowMinCounted, // the bucket has less left than the group's minimum
         // An item's: the faults OT-RFC-27 lists.
         BadSignature, // not signed by the session key, or for another seller, period or bucket
         InactiveAssignment, // issued once the assignment the period was funded under had ended
         DuplicateNonce, // the nonce is used, earlier or in this batch
-        OutsideTime, // outside the period, completed before issue, after expiry, or after the batch
+        OutsideTime, // issued before the period, completed before issue, after expiry, or after the batch
         AskOutOfRange, // a zero ask, or one above the bucket's price cap
         BadArithmetic, // zero or too many units, a value other than units × ask, or above the maximum
         ZeroResultCommitment // no result commitment
@@ -247,16 +224,18 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     //                          Events
     // ============================================================
 
-    /// @notice A group of `itemCount` receipts was claimed: `value` of receipt
-    ///         value on the bucket, by `seller`, at the batch's stake factor.
-    ///         `groupDigest` is the hash of the group's receipt digests, in
-    ///         order, so a buyer finds its receipts.
+    /// @notice A group of `itemCount` receipts landed: of the `claimed` receipt
+    ///         value on the bucket, `counted` fit what the bucket had left, for
+    ///         `seller`, at the batch's stake factor. `groupDigest` is the hash
+    ///         of the group's receipt digests, in order, so a buyer finds its
+    ///         receipts.
     event ReceiptsClaimed(
         bytes32 indexed subscriptionId,
         uint8 indexed bucketIndex,
         uint72 indexed seller,
         uint256 itemCount,
-        uint96 value,
+        uint256 claimed,
+        uint256 counted,
         uint256 stakeFactor18,
         bytes32 groupDigest
     );
@@ -266,52 +245,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         uint72 indexed seller,
         bytes32 batchDigest,
         uint256 itemCount,
-        uint256 value,
+        uint256 claimed,
+        uint256 counted,
         uint256 stakeFactor18
-    );
-
-    /// @notice A seller's claim in a bucket was finalized: of `claimed`,
-    ///         `value` counts as its R and `score` as its QueryInferenceScore
-    ///         in `epoch`, the epoch after the period.
-    event ClaimsFinalized(
-        bytes32 indexed subscriptionId,
-        uint8 indexed bucketIndex,
-        uint72 indexed seller,
-        uint256 epoch,
-        uint96 claimed,
-        uint96 value,
-        uint96 score
-    );
-    /// @notice A claim named in `finalizeClaims` was not finalized, for
-    ///         `reason`.
-    event ClaimSkipped(bytes32 indexed subscriptionId, uint8 indexed bucketIndex, uint72 indexed seller, Skip reason);
-    /// @notice Epoch `epoch` closed: `walletDue` and `convictionDue` were due
-    ///         in it and `carryIn` carried into it; `pool` is what its nodes
-    ///         share, by ΣR `sumR`, ΣQueryInferenceScore `sumScore` and λ
-    ///         `lambdaBps`. The carry out is
-    ///         `walletDue + convictionDue + carryIn − pool`.
-    ///
-    ///         The unused share of the epoch's money, the allowance OT-RFC-27
-    ///         shares out as margin, reads off the event:
-    ///           - money  = `walletDue + convictionDue + carryIn`;
-    ///           - served = `sumR`, the finalized receipt value, in TRAC wei
-    ///             as the pool is;
-    ///           - unused = money − `sumR`.
-    ///         With `sumR` non-zero all of the money is the pool, the unused
-    ///         share included; with `sumR` 0 all of it carries. The unused
-    ///         share falls below 0 by at most 1 wei per top-up of a
-    ///         Conviction Account period of the epoch before, and otherwise
-    ///         never: a bucket's funded cap is floored once over all its
-    ///         value, and each draw's cost apart.
-    event EpochClosed(
-        uint256 indexed epoch,
-        uint96 walletDue,
-        uint96 convictionDue,
-        uint96 carryIn,
-        uint96 pool,
-        uint128 sumR,
-        uint128 sumScore,
-        uint16 lambdaBps
     );
 
     // ============================================================
@@ -333,12 +269,9 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     /// @notice The current epoch is before the activation epoch, or that is
     ///         still unset (0).
     error QueryInferenceNotActive(uint40 activationEpoch, uint256 currentEpoch);
-    /// @notice `epoch` is still open after a bounded close, which reached
-    ///         `closedThrough`. Anyone clears it with `closeEpochs`, and an
-    ///         epoch that has not ended yet cannot be closed. Wallets and
-    ///         staking UIs should recognise it and offer `closeEpochs`, then
-    ///         the claim or withdrawal again.
-    error QueryInferenceCloseBehind(uint256 closedThrough, uint256 epoch);
+    /// @notice The seller has no node score in `epoch`, the current one, yet: it
+    ///         lands batches once it has proved in the epoch.
+    error NoNodeScore(uint72 identityId, uint256 epoch);
 
     // ============================================================
     //                    Working records
@@ -347,23 +280,24 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     /// @dev What a batch keeps across its groups.
     struct Batch {
         uint72 seller;
+        uint256 epoch; // the current epoch, the only one a batch lands in
         uint256 stakeFactor18;
         bytes32 domain;
         bytes32[] digests; // every receipt digest, in order
         uint256 next; // the next free index in `digests`
-        uint256 value;
-        uint256 graceEpoch; // the epoch whose grace `grace` is, or _NONE
-        uint256 grace;
+        uint256 claimed;
+        uint256 counted;
     }
 
-    /// @dev What every item of a group is checked against.
+    /// @dev What a group is checked against and counts by.
     struct Terms {
         address sessionKey;
         uint256 periodStart;
-        uint256 periodEnd;
         uint256 assignmentEnd; // when the period's own assignment ended or ends; max for a wallet period
         bytes32 bucketId;
         uint256 maxAsk;
+        uint256 bucketValue;
+        uint256 discountBps;
     }
 
     // solhint-disable-next-line no-empty-blocks
@@ -396,20 +330,20 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
     // ============================================================
 
     /**
-     * @notice Claim the receipts of `groups` as the seller, the node whose
+     * @notice Count the receipts of `groups` for the seller, the node whose
      *         operational key sends the transaction. All or nothing: any
      *         fault reverts the whole batch.
-     * @dev    The sender's node must have a profile and a place in the
-     *         sharding table. The batch has 1 to `maxGroupsPerBatch` groups
-     *         and 1 to `maxItemsPerBatch` items, and its stake factor is
-     *         captured once, before the groups.
+     * @dev    The sender's node must have a profile, a place in the sharding
+     *         table and a positive node score in the current epoch, so a node
+     *         with counted value always has a share of the epoch's rewards to
+     *         pay it through. The batch has 1 to `maxGroupsPerBatch` groups and
+     *         1 to `maxItemsPerBatch` items, and its stake factor is captured
+     *         once, before the groups.
      *
-     *         A group names a recorded period and one of its buckets, has
-     *         items, and lands by the period's batch deadline: the period's
-     *         end plus the receipt grace of the period's epoch, whatever
-     *         becomes of a Conviction Account assignment, so a request served
-     *         before the assignment ends is settled however soon it ends.
-     *         Each item then passes, in order:
+     *         A group names a recorded period of the current epoch and one of
+     *         its buckets, and has items. Whatever becomes of a Conviction
+     *         Account assignment, a request served before it ended lands until
+     *         the epoch ends. Each item then passes, in order:
      *           1. its request, rebuilt with the group's period and bucket and
      *              the sender's identity, recovers with a low `s` to the
      *              period's session key;
@@ -418,26 +352,27 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *              or its revocation if sooner), an end that a later
      *              assignment of the buyer key does not move;
      *           3. its nonce is unused, earlier and in this batch;
-     *           4. periodStart <= issuedAt < periodEnd, and
-     *              issuedAt <= completedAt <= min(expiry, periodEnd, the
-     *              block time): a batch claims only work already done, so
-     *              a request for a later time, as for a period of the next
-     *              epoch, lands once it is served, at that time's stake
-     *              factor, and a revocation before it is issued still
-     *              refuses it;
+     *           4. periodStart <= issuedAt <= completedAt <= min(expiry, the
+     *              block time): a batch claims only work already done, and the
+     *              block time is within the period's epoch;
      *           5. 0 < acceptedAskWeiPerUnit <= the bucket's price cap;
      *           6. 0 < units <= maxUnits, valueWei == units × ask in 256 bits,
      *              and valueWei <= maxValueWei;
      *           7. a non-zero result commitment.
-     *         A claim above the bucket's funded value is accepted: the cap
-     *         applies at finalization, to every seller of the bucket alike.
+     *         The group then counts the lesser of its value and what the bucket
+     *         has left, which must be at least `minCounted`. Value above what
+     *         the bucket has left does not count, and its receipts' nonces stay
+     *         used. So a `minCounted` of 0 never refuses, whoever filled the
+     *         bucket first: a seller uses it for a batch that must land, such as
+     *         the last of an epoch.
      * @return batchDigest The hash of the batch's receipt digests, in order.
      */
     function submitReceiptBatch(ReceiptGroup[] calldata groups) external returns (bytes32 batchDigest) {
         QueryInferenceStorage qis = queryInferenceStorage;
         (uint40 activation, bool isPaused, uint8 maxGroups, uint16 maxItems) = qis.batchState();
-        _requireLive(activation, isPaused);
+        uint256 current = _requireLive(activation, isPaused);
         uint72 seller = _coreNodeOf(msg.sender);
+        if (randomSamplingStorage.getNodeEpochScore(current, seller) == 0) revert NoNodeScore(seller, current);
 
         uint256 groupCount = groups.length;
         uint256 itemCount;
@@ -450,13 +385,13 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
 
         Batch memory b = Batch({
             seller: seller,
+            epoch: current,
             stakeFactor18: stakeFactor(seller),
             domain: domainSeparator(),
             digests: new bytes32[](itemCount),
             next: 0,
-            value: 0,
-            graceEpoch: _NONE,
-            grace: 0
+            claimed: 0,
+            counted: 0
         });
         for (uint256 g; g < groupCount; g++) {
             _acceptGroup(qis, b, g, groups[g]);
@@ -466,174 +401,61 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         assembly ("memory-safe") {
             batchDigest := keccak256(add(digests, 0x20), shl(5, mload(digests)))
         }
-        emit ReceiptBatchAccepted(seller, batchDigest, itemCount, b.value, b.stakeFactor18);
-    }
-
-    // ============================================================
-    //                        Finalization
-    // ============================================================
-
-    /**
-     * @notice Finalize the claims of `refs`, each a seller's claim in one
-     *         bucket. Anyone may call; the value goes to the seller a ref
-     *         names.
-     * @dev    The call reverts only for what holds for every ref: the pause
-     *         and activation. A ref that cannot be finalized now is skipped,
-     *         untouched, with a `ClaimSkipped` event naming why, so a keeper
-     *         can finalize for many sellers in one call. In order of the
-     *         checks: the period and the bucket exist; the claim is not
-     *         finalized; for a period of epoch e, the current epoch is e + 1
-     *         and the time is after the batch deadline of e, the epoch's end
-     *         plus the grace of e (before it, `TooEarly`; from e + 2 on,
-     *         `Void`); something was claimed; and the seller has a positive
-     *         node score in the current epoch.
-     *
-     *         The window opens at the epoch's batch deadline, which is the
-     *         deadline of every period of the epoch: the expiry, revocation or
-     *         replacement of a Conviction Account assignment moves no period's
-     *         deadline, and only decides which of its requests count, those
-     *         issued before the assignment the period was funded under ended.
-     *         So no batch lands once the window is open, and a bucket needs no
-     *         close time.
-     *
-     *         With F the bucket's funded cap and C its claims over all
-     *         sellers, the seller's claim c and weighted claim w count as
-     *         c × min(1, F / C) and w × min(1, F / C), floored, in the current
-     *         epoch.
-     *
-     *         C counts every seller's claim in the bucket, a claim that is
-     *         never finalized included: one whose seller has no node score in
-     *         the due epoch, or that goes void. It still shrinks the others
-     *         by F / C, and what it would have taken counts as no one's R.
-     *         That moves R shares only: the pool is the epoch's money all the
-     *         same.
-     * @return finalized How many refs were finalized.
-     */
-    function finalizeClaims(ClaimRef[] calldata refs) external returns (uint256 finalized) {
-        QueryInferenceStorage qis = queryInferenceStorage;
-        (uint40 activation, bool isPaused) = qis.fundingState();
-        uint256 current = _requireLive(activation, isPaused);
-        uint256 graceEpoch = _NONE;
-        uint256 grace;
-        for (uint256 i; i < refs.length; i++) {
-            ClaimRef calldata ref = refs[i];
-            ConvictionServiceStorage.Subscription memory s = convictionServiceStorage.getSubscription(
-                ref.subscriptionId
-            );
-            uint256 epoch = s.epoch;
-            if (s.periodStart != 0 && epoch != graceEpoch) {
-                grace = qis.receiptGraceSecondsAt(epoch);
-                graceEpoch = epoch;
-            }
-            Skip reason = _finalize(qis, ref, s, current, grace);
-            if (reason == Skip.None) {
-                finalized++;
-            } else {
-                emit ClaimSkipped(ref.subscriptionId, ref.bucketIndex, ref.seller, reason);
-            }
-        }
-    }
-
-    // ============================================================
-    //                           Close
-    // ============================================================
-
-    /**
-     * @notice Close ended epochs in order, from the one after `closedThrough`,
-     *         at most `maxSteps` of them. Permissionless.
-     * @dev    Nothing closes while the activation epoch is unset, and no epoch
-     *         closes before it has ended. The close itself never divides, so
-     *         it reverts only if an epoch's money exceeded a uint96, beyond
-     *         every TRAC there is.
-     * @return closed The last closed epoch after the call.
-     */
-    function closeEpochs(uint256 maxSteps) external returns (uint256 closed) {
-        (closed, ) = _closeThrough(type(uint256).max, maxSteps, false);
-    }
-
-    /**
-     * @notice Make sure `epoch` is closed, closing the epochs up to it in
-     *         order, at most `maxCloseStepsPerClaim` of them. A reward claim
-     *         calls it before it reads an epoch.
-     * @dev    An epoch before the activation epoch, or any while that is
-     *         unset, never closes, and returns at once. If `epoch` is still
-     *         open after the bounded close, because the closes are further
-     *         behind or because it has not ended, it reverts
-     *         `QueryInferenceCloseBehind`; `closeEpochs` clears the first.
-     * @return closed The last closed epoch after the call.
-     */
-    function ensureClosed(uint256 epoch) external returns (uint256 closed) {
-        uint256 activation;
-        (closed, activation) = _closeThrough(epoch, 0, true);
-        if (activation == 0 || epoch < activation) return closed;
-        if (closed < epoch) revert QueryInferenceCloseBehind(closed, epoch);
+        emit ReceiptBatchAccepted(seller, batchDigest, itemCount, b.claimed, b.counted, b.stakeFactor18);
     }
 
     // ============================================================
     //                           Views
     // ============================================================
 
-    /// @notice The query/inference pool epoch `epoch`'s nodes share, frozen at
-    ///         its close; 0 while it is open.
-    function epochPool(uint256 epoch) external view returns (uint96) {
-        QueryInferenceStorage.EpochClose memory c = queryInferenceStorage.getEpochClose(epoch);
-        return c.closed ? c.pool : 0;
+    /**
+     * @notice The query/inference pool `epoch`'s nodes share: 0 if no node
+     *         counted value in it, otherwise its money plus that of the unbroken
+     *         run of epochs before it in which no node counted value, back to
+     *         the activation epoch. Final once `epoch` has ended; until then,
+     *         what it would be if the epoch ended now.
+     * @dev    It walks the run at about 10,000 gas per epoch, and only for an
+     *         epoch with value. Nobody can lengthen a run but by selling nothing
+     *         for as long, and any counted value ends it.
+     */
+    function epochPool(uint256 epoch) external view returns (uint256) {
+        QueryInferenceStorage qis = queryInferenceStorage;
+        return qis.getEpochTotals(epoch).sumR == 0 ? 0 : _poolWithValue(qis, epoch);
     }
 
     /**
      * @notice Node `identityId`'s gross reward from the query/inference pool
      *         of `epoch`: pool × QIF, as OT-RFC-27 defines it,
      *         floor(pool × (1 − λ) × R / ΣR) + floor(pool × λ × QIS / ΣQIS),
-     *         over the values frozen at the close. If ΣQIS is 0 while ΣR is
-     *         not, which needs every seller's stake factor to be 0, the second
-     *         term takes the R share. 0 for an epoch still open, an empty pool
-     *         or a node with no finalized value. Over all nodes it sums to at
-     *         most the pool, and to more than the pool less 2 wei per node
-     *         with value: each term is floored on its own, so a node's gross
-     *         falls short of its exact share by less than 1 wei per term
-     *         (one term at a λ of 0 or 1). That remainder is never paid out:
-     *         the close of an epoch with value carries nothing, so it stays in
-     *         the vault, as the floors of `StakingV10`'s split of a node's
-     *         reward between its operator fee and its delegators do.
+     *         with the λ the epoch took when its first value counted. If ΣQIS is
+     *         0 while ΣR is not, which needs every seller's stake factor to be
+     *         0, the second term takes the R share. 0 for a node with no counted
+     *         value, which walks no rollover run. Over all nodes it sums to at
+     *         most the pool, and to more than the pool less 2 wei per node with
+     *         value: each term is floored on its own, so a node's gross falls
+     *         short of its exact share by less than 1 wei per term (one term at
+     *         a λ of 0 or 1). That remainder is never paid out and stays in the
+     *         vault, as the floors of `StakingV10`'s split of a node's reward
+     *         between its operator fee and its delegators do. Each term is one
+     *         `mulDiv`, because one floor over both would divide by
+     *         BPS × ΣR × ΣQIS, which does not fit 256 bits. Final once `epoch`
+     *         has ended; until then, what it would be if the epoch ended now.
      */
     function queryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256 gross) {
         QueryInferenceStorage qis = queryInferenceStorage;
-        QueryInferenceStorage.EpochClose memory c = qis.getEpochClose(epoch);
-        if (c.closed) gross = _gross(qis, epoch, identityId, c.pool, c.lambdaBps);
-    }
+        QueryInferenceStorage.NodeEpoch memory n = qis.getNodeEpoch(identityId, epoch);
+        // A node's score never exceeds its value, so no value means no score.
+        if (n.r == 0) return 0;
+        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
+        uint256 pool = _poolWithValue(qis, epoch);
+        uint256 lambda = t.lambdaBps;
 
-    /**
-     * @notice The pool epoch `epoch`'s nodes share and its λ, as its close
-     *         freezes them: the frozen values once it has closed and, while
-     *         it is open, its close previewed by replaying the closes from the
-     *         one after `closedThrough` through `epoch`, over the money due
-     *         and the carry as they stand, by the rule of the close. Exact for
-     *         an epoch that has ended, in which no money is booked and no
-     *         claim is finalized any more; for one that has not, the close as
-     *         if it ended now. (0, 0) for an epoch before the activation
-     *         epoch, or any while that is unset: those never close.
-     */
-    function previewEpochClose(uint256 epoch) public view returns (uint96 pool, uint16 lambdaBps) {
-        QueryInferenceStorage qis = queryInferenceStorage;
-        QueryInferenceStorage.EpochClose memory c = qis.getEpochClose(epoch);
-        if (c.closed) return (c.pool, c.lambdaBps);
-        (uint40 activation, uint256 closed, uint96 carryIn, ) = qis.closeState();
-        // Epochs up to `closedThrough` that are not closed precede activation.
-        if (activation == 0 || epoch <= closed) return (0, 0);
-        for (uint256 e = closed + 1; e <= epoch; e++) {
-            (uint96 wallet, uint96 conviction) = _incoming(qis, e);
-            (pool, carryIn) = _closeRule(wallet, conviction, carryIn, qis.getEpochTotals(e).sumR);
+        gross = Math.mulDiv(pool * (_BPS - lambda), n.r, _BPS * uint256(t.sumR));
+        if (lambda != 0) {
+            gross += t.sumScore == 0
+                ? Math.mulDiv(pool * lambda, n.r, _BPS * uint256(t.sumR))
+                : Math.mulDiv(pool * lambda, n.score, _BPS * uint256(t.sumScore));
         }
-        lambdaBps = qis.lambdaBpsAt(epoch);
-    }
-
-    /// @notice `queryInferenceGross` over `previewEpochClose`: node
-    ///         `identityId`'s gross reward from the pool of `epoch`, frozen
-    ///         once it has closed and previewed while it is open. For an epoch
-    ///         that has ended, what `queryInferenceGross` reads once it closes.
-    function previewQueryInferenceGross(uint256 epoch, uint72 identityId) external view returns (uint256) {
-        (uint96 pool, uint16 lambdaBps) = previewEpochClose(epoch);
-        return _gross(queryInferenceStorage, epoch, identityId, pool, lambdaBps);
     }
 
     /// @notice The EIP-712 domain separator of requests and receipts: name
@@ -693,9 +515,10 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
      *         factor of the node score, computed as `RandomSampling` computes
      *         it.
      * @dev    The stake is the lower of the node's live effective stake and the
-     *         snapshot its current proof challenge took, so stake added for one
-     *         block lifts no factor, as for proofs. With no snapshot, the live
-     *         stake is used.
+     *         snapshot its current proof challenge took, so stake added since
+     *         that challenge lifts no factor. `RandomSampling.createChallenge`
+     *         retakes the snapshot, so stake added before a new challenge does.
+     *         With no snapshot, the live stake is used.
      */
     function stakeFactor(uint72 identityId) public view returns (uint256) {
         uint256 stake = convictionStakingStorage.getNodeEffectiveStake(identityId);
@@ -709,181 +532,40 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         return Math.sqrt(((stake * _SCALE18) / cap) * _SCALE18);
     }
 
-    /**
-     * @notice The batch deadline of a period: the last time a batch for it
-     *         lands, the period's end plus the receipt grace of its epoch,
-     *         the same for every period of the epoch. A Conviction Account
-     *         assignment that ends sooner, by its expiry or a revocation,
-     *         moves no deadline: a request issued once it has ended is
-     *         refused item by item, and a request served before lands until
-     *         the deadline, so ending an assignment cannot withhold a
-     *         seller's receipt. 0 for an unknown period.
-     */
-    function batchDeadline(bytes32 subscriptionId) external view returns (uint256) {
-        ConvictionServiceStorage.Subscription memory s = convictionServiceStorage.getSubscription(subscriptionId);
-        if (s.periodStart == 0) return 0;
-        return uint256(s.periodEnd) + queryInferenceStorage.receiptGraceSecondsAt(s.epoch);
-    }
-
-    /**
-     * @notice A bucket's funded cap: the most receipt value its claims
-     *         finalize to. The bucket's value, top-ups included, for a wallet
-     *         period; for a Conviction Account period, that value at the
-     *         account's discount, floored, so sellers absorb the discount. 0
-     *         for an unknown period or bucket.
-     */
-    function fundedCap(bytes32 subscriptionId, uint8 bucketIndex) external view returns (uint256) {
+    /// @notice What a bucket has left: the most face value further receipts can
+    ///         count for, until a top-up adds to it. A seller reads it before it
+    ///         serves. 0 for an unknown period or bucket.
+    function bucketLeft(bytes32 subscriptionId, uint8 bucketIndex) external view returns (uint256) {
         ConvictionServiceStorage css = convictionServiceStorage;
-        ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
-        if (s.periodStart == 0 || bucketIndex >= s.bucketCount) return 0;
-        return _fundedCap(s, css.getBucket(subscriptionId, bucketIndex).value);
+        if (bucketIndex >= css.getSubscription(subscriptionId).bucketCount) return 0;
+        uint256 value = css.getBucket(subscriptionId, bucketIndex).value;
+        return value - queryInferenceStorage.bucketFilled(subscriptionId, bucketIndex);
     }
 
     // ============================================================
     //                         Internal
     // ============================================================
 
-    /// @dev Finalize one claim, or say why not; see `finalizeClaims`. `s` is
-    ///      the ref's period record and `grace` the receipt grace of its epoch.
-    function _finalize(
-        QueryInferenceStorage qis,
-        ClaimRef calldata ref,
-        ConvictionServiceStorage.Subscription memory s,
-        uint256 current,
-        uint256 grace
-    ) internal returns (Skip) {
-        if (s.periodStart == 0) return Skip.UnknownPeriod;
-        if (ref.bucketIndex >= s.bucketCount) return Skip.UnknownBucket;
-        QueryInferenceStorage.SellerClaim memory c = qis.getSellerClaim(
-            ref.subscriptionId,
-            ref.bucketIndex,
-            ref.seller
-        );
-        if (c.finalized) return Skip.AlreadyFinalized;
-        uint256 epoch = s.epoch;
-        if (current > epoch + 1) return Skip.Void;
-        if (current <= epoch || block.timestamp <= uint256(s.periodEnd) + grace) return Skip.TooEarly;
-        if (c.claimed == 0) return Skip.NothingClaimed;
-        if (randomSamplingStorage.getNodeEpochScore(current, ref.seller) == 0) return Skip.NoScore;
-
-        uint256 cap = _fundedCap(s, convictionServiceStorage.getBucket(ref.subscriptionId, ref.bucketIndex).value);
-        uint256 total = qis.bucketClaimed(ref.subscriptionId, ref.bucketIndex);
-        uint96 value = c.claimed;
-        uint96 score = c.weighted;
-        if (total > cap) {
-            value = uint96(Math.mulDiv(value, cap, total));
-            score = uint96(Math.mulDiv(score, cap, total));
+    /// @dev The pool of `epoch`, in which a node counted value; see `epochPool`.
+    function _poolWithValue(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint256 pool) {
+        pool = _moneyOf(qis, epoch);
+        uint256 activation = qis.activationEpoch();
+        for (uint256 e = epoch; e > activation; ) {
+            e--;
+            if (qis.getEpochTotals(e).sumR != 0) break;
+            pool += _moneyOf(qis, e);
         }
-        qis.finalizeClaim(ref.subscriptionId, ref.bucketIndex, ref.seller, current, value, score);
-        emit ClaimsFinalized(ref.subscriptionId, ref.bucketIndex, ref.seller, current, c.claimed, value, score);
-        return Skip.None;
+    }
+
+    /// @dev The money funded for `epoch`. Every source of an epoch's money is
+    ///      read here, and only here.
+    function _moneyOf(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint256) {
+        (uint96 wallet, uint96 conviction) = qis.fundingIn(epoch);
+        return uint256(wallet) + conviction;
     }
 
     /**
-     * @dev Close epochs in order up to `through`, or the last ended epoch if
-     *      sooner, at most `maxSteps` of them, or `maxCloseStepsPerClaim` when
-     *      `bounded`. Returns the last closed epoch, and the activation epoch.
-     */
-    function _closeThrough(
-        uint256 through,
-        uint256 maxSteps,
-        bool bounded
-    ) internal returns (uint256 closed, uint256 activation) {
-        QueryInferenceStorage qis = queryInferenceStorage;
-        uint96 carried;
-        uint8 claimSteps;
-        (activation, closed, carried, claimSteps) = qis.closeState();
-        if (activation == 0 || through <= closed) return (closed, activation);
-        if (bounded) maxSteps = claimSteps;
-
-        // An epoch has ended once the current epoch is after it.
-        uint256 last = chronos.getCurrentEpoch() - 1;
-        if (through < last) last = through;
-        for (uint256 steps; steps < maxSteps && closed < last; ) {
-            // Neither overflows: the loop's own condition bounds both.
-            unchecked {
-                closed++;
-                steps++;
-            }
-            carried = _closeEpoch(qis, closed, carried);
-        }
-    }
-
-    /// @dev Close `epoch` by `_closeRule`. A pool is paid out as its nodes'
-    ///      gross rewards, each term floored (`queryInferenceGross`), so less
-    ///      than 2 wei per node with value is never claimed, and with a carry
-    ///      out of 0 it stays in the vault.
-    function _closeEpoch(QueryInferenceStorage qis, uint256 epoch, uint96 carryIn) internal returns (uint96 carryOut) {
-        (uint96 wallet, uint96 conviction) = _incoming(qis, epoch);
-        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
-        uint16 lambda = qis.lambdaBpsAt(epoch);
-        uint96 pool;
-        (pool, carryOut) = _closeRule(wallet, conviction, carryIn, t.sumR);
-        qis.closeEpoch(epoch, pool, lambda, carryOut);
-        emit EpochClosed(epoch, wallet, conviction, carryIn, pool, t.sumR, t.sumScore, lambda);
-    }
-
-    /// @dev The rule of an epoch's close, which `_closeEpoch` applies and
-    ///      `previewEpochClose` replays: its money is the wallet value and the
-    ///      Conviction Account cost due in it and the carry into it, all of it
-    ///      its pool if a node finalized value in it (`sumR`), and all of it
-    ///      the carry out otherwise.
-    function _closeRule(
-        uint96 wallet,
-        uint96 conviction,
-        uint96 carryIn,
-        uint128 sumR
-    ) internal pure returns (uint96 pool, uint96 carryOut) {
-        uint96 money = SafeCast.toUint96(uint256(wallet) + conviction + carryIn);
-        if (sumR == 0) {
-            carryOut = money;
-        } else {
-            pool = money;
-        }
-    }
-
-    /// @dev The money that joins `epoch`'s pool at its close, beside the
-    ///      carry: the wallet-funded value and the Conviction Account cost due
-    ///      in it. Every source of an epoch's money is read here, and only here.
-    function _incoming(QueryInferenceStorage qis, uint256 epoch) internal view returns (uint96 wallet, uint96 conviction) {
-        return qis.dueIn(epoch);
-    }
-
-    /// @dev Node `identityId`'s pool × QIF in `epoch`, for a pool `pool` and λ
-    ///      `lambda`, over the epoch's totals; see `queryInferenceGross`. Each
-    ///      term is one `mulDiv`, floored on its own, which leaves its dust
-    ///      bound: one floor over both terms would divide by
-    ///      BPS × ΣR × ΣQueryInferenceScore, two uint128 totals and λ's
-    ///      denominator, which does not fit 256 bits.
-    function _gross(
-        QueryInferenceStorage qis,
-        uint256 epoch,
-        uint72 identityId,
-        uint256 pool,
-        uint256 lambda
-    ) internal view returns (uint256 gross) {
-        if (pool == 0) return 0;
-        QueryInferenceStorage.NodeEpoch memory n = qis.getNodeEpoch(identityId, epoch);
-        // A node's score never exceeds its value, so no value means no score.
-        if (n.r == 0) return 0;
-        QueryInferenceStorage.EpochTotals memory t = qis.getEpochTotals(epoch);
-
-        gross = Math.mulDiv(pool * (_BPS - lambda), n.r, _BPS * uint256(t.sumR));
-        if (lambda != 0) {
-            gross += t.sumScore == 0
-                ? Math.mulDiv(pool * lambda, n.r, _BPS * uint256(t.sumR))
-                : Math.mulDiv(pool * lambda, n.score, _BPS * uint256(t.sumScore));
-        }
-    }
-
-    /// @dev The funded cap of a bucket of value `value` in period `s`.
-    function _fundedCap(ConvictionServiceStorage.Subscription memory s, uint256 value) internal pure returns (uint256) {
-        if (s.accountId == 0) return value;
-        return (value * (_BPS - uint256(s.discountBps))) / _BPS;
-    }
-
-    /**
-     * @dev Check one group and claim its value. Used nonces are kept per
+     * @dev Check one group and count its value. Used nonces are kept per
      *      group in one cached word of the seller's bitmap, read from the
      *      storage when the word changes and written back, with this group's
      *      bits, before another is read and at the end, so a later group of
@@ -893,7 +575,7 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         uint256 n = group.items.length;
         if (n == 0) revert GroupFault(g, Fault.EmptyGroup);
         bytes32 subscriptionId = group.subscriptionId;
-        Terms memory t = _termsOf(qis, b, g, subscriptionId, group.bucketIndex);
+        Terms memory t = _termsOf(b, g, subscriptionId, group.bucketIndex);
 
         uint256 first = b.next;
         uint256 value;
@@ -920,15 +602,13 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
             uint256 bit = uint256(1) << (nonce & 0xff);
             if ((stored | used) & bit != 0) _fault(g, j, Fault.DuplicateNonce);
             used |= bit;
-            // 4. Within the period, and completed between issue and expiry,
-            //    by the time of the batch.
+            // 4. Issued within the period, and completed between issue and
+            //    expiry, by the time of the batch.
             uint256 completedAt = it.completedAt;
             if (
                 issuedAt < t.periodStart ||
-                issuedAt >= t.periodEnd ||
                 completedAt < issuedAt ||
                 completedAt > it.expiry ||
-                completedAt > t.periodEnd ||
                 completedAt > block.timestamp
             ) _fault(g, j, Fault.OutsideTime);
             // 5. An ask within the bucket's price cap.
@@ -948,24 +628,48 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         }
         if (used != 0) qis.useNonces(subscriptionId, b.seller, uint64(word), used);
 
-        uint96 claimed = SafeCast.toUint96(value);
-        qis.addClaim(subscriptionId, group.bucketIndex, b.seller, claimed, uint96((value * b.stakeFactor18) / _SCALE18));
-        b.value += value;
+        // What the bucket has left counts, in the order batches land. Its value
+        // only grows, so the fill never exceeds it, and each cast below is of at
+        // most that uint96: the discount and the stake factor, at most 1, only
+        // lower it.
+        uint256 left = t.bucketValue - qis.bucketFilled(subscriptionId, group.bucketIndex);
+        uint256 counted = value < left ? value : left;
+        if (counted < group.minCounted) revert GroupFault(g, Fault.BelowMinCounted);
+        uint256 r = (counted * (_BPS - t.discountBps)) / _BPS;
+        qis.countReceipts(
+            subscriptionId,
+            group.bucketIndex,
+            b.seller,
+            b.epoch,
+            uint96(counted),
+            uint96(r),
+            uint96((r * b.stakeFactor18) / _SCALE18)
+        );
+        b.claimed += value;
+        b.counted += counted;
 
         bytes32 groupDigest;
         bytes32[] memory digests = b.digests;
         assembly ("memory-safe") {
             groupDigest := keccak256(add(add(digests, 0x20), shl(5, first)), shl(5, n))
         }
-        emit ReceiptsClaimed(subscriptionId, group.bucketIndex, b.seller, n, claimed, b.stakeFactor18, groupDigest);
+        emit ReceiptsClaimed(
+            subscriptionId,
+            group.bucketIndex,
+            b.seller,
+            n,
+            value,
+            counted,
+            b.stakeFactor18,
+            groupDigest
+        );
     }
 
-    /// @dev A group's period and bucket exist, and the batch lands by the
-    ///      period's batch deadline, its end plus the grace of its epoch.
-    ///      Returns what its items are checked against: for a Conviction
-    ///      Account period, the end of the assignment it was funded under.
+    /// @dev A group's period and bucket exist, and the period is of the current
+    ///      epoch. Returns what its items are checked against and it counts by:
+    ///      for a Conviction Account period, the end of the assignment it was
+    ///      funded under.
     function _termsOf(
-        QueryInferenceStorage qis,
         Batch memory b,
         uint256 g,
         bytes32 subscriptionId,
@@ -975,23 +679,18 @@ contract QueryInferenceSettlement is INamed, IVersioned, ContractStatus, IInitia
         ConvictionServiceStorage.Subscription memory s = css.getSubscription(subscriptionId);
         if (s.periodStart == 0) revert GroupFault(g, Fault.UnknownPeriod);
         if (bucketIndex >= s.bucketCount) revert GroupFault(g, Fault.UnknownBucket);
+        if (s.epoch != b.epoch) revert GroupFault(g, Fault.OutsideEpoch);
 
         t.sessionKey = s.sessionKey;
         t.periodStart = s.periodStart;
-        t.periodEnd = s.periodEnd;
+        t.discountBps = s.discountBps;
         t.assignmentEnd = type(uint256).max;
         if (s.accountId != 0) t.assignmentEnd = css.assignmentEnd(s.accountId, s.assignee, s.assignmentNonce);
-
-        uint256 epoch = s.epoch;
-        if (epoch != b.graceEpoch) {
-            b.grace = qis.receiptGraceSecondsAt(epoch);
-            b.graceEpoch = epoch;
-        }
-        if (block.timestamp > t.periodEnd + b.grace) revert GroupFault(g, Fault.PastDeadline);
 
         ConvictionServiceStorage.Bucket memory bucket = css.getBucket(subscriptionId, bucketIndex);
         t.bucketId = bucket.bucketId;
         t.maxAsk = bucket.maxAskWeiPerUnit;
+        t.bucketValue = bucket.value;
     }
 
     /// @dev The EIP-712 digest of the request an item answers, hashed in

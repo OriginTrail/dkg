@@ -1,13 +1,13 @@
 // Conviction Account service spending (OT-RFC-27) end to end: funding a plan
 // period, on ServiceSubscriptions and ConvictionServiceStorage registered in the
 // Hub, drawing through the real PublishingConviction 10.2.0 on the real account
-// stack. A funding pays as a wallet does: its whole cost is booked as due in
-// QueryInferenceStorage, in the epoch after the period, and nothing reaches the
+// stack. A funding pays as a wallet does: its whole cost is booked in
+// QueryInferenceStorage, under the period's epoch, and nothing reaches the
 // staker pool.
 //
 // Groups:
 //   - fund, happy path: every discount tier, the 1-wei floor, the top-up branch,
-//     each with its cost due after the period;
+//     each with its cost under the period's epoch;
 //   - fund, refusals: the period limit, the period's epoch, the buckets, the
 //     assignment, the allowance, an expired account, a wired treasury, the gate
 //     on coverServiceCost, a mismatched draw and an account scheduled in full,
@@ -177,12 +177,12 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
         expect(h.plain(await f.CSS.getUsage(accountId, buyer.address))).to.deep.equal({ periods: 1n });
         expect(await f.PCS.windowSpent(accountId, window)).to.equal(cost);
 
-        // The whole cost is due in the epoch after the period, as a wallet
+        // The whole cost is booked under the period's epoch, as a wallet
         // period's value is, and nothing in any other epoch or ledger.
-        expect(await f.QIS.convictionDue(epoch + 1n)).to.equal(cost);
-        expect(await f.QIS.convictionDue(epoch)).to.equal(0n);
-        expect(await f.QIS.convictionDue(epoch + 2n)).to.equal(0n);
-        expect(await f.QIS.walletDue(epoch + 1n)).to.equal(0n);
+        expect(await f.QIS.convictionFunding(epoch)).to.equal(cost);
+        expect(await f.QIS.convictionFunding(epoch - 1n)).to.equal(0n);
+        expect(await f.QIS.convictionFunding(epoch + 1n)).to.equal(0n);
+        expect(await f.QIS.walletFunding(epoch)).to.equal(0n);
         expect(await h.creditedRanges(receipt)).to.have.length(0);
       });
     }
@@ -193,11 +193,11 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(cost).to.equal(1n);
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
       expect([covered.value, covered.cost, covered.drawnFromWindow]).to.deep.equal([3n, 1n, 1n]);
-      expect(await f.QIS.convictionDue((await h.epochNow()) + 1n)).to.equal(1n);
+      expect(await f.QIS.convictionFunding(await h.epochNow())).to.equal(1n);
       expect((await f.CSS.getSubscription(await f.SS.subscriptionIdOf(buyer.address, await h.epochNow()))).cost).to.equal(1n);
     });
 
-    it('once the window is spent, the cost comes from the top-up buffer, is due after the period, and reaches no staker pool', async () => {
+    it("once the window is spent, the cost comes from the top-up buffer, is booked under the period's epoch, and reaches no staker pool", async () => {
       const { accountId, createdAt } = await h.openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
       const spend = await h.fund(await h.inference(accountId, valueFor(B, 3_000n)));
@@ -216,15 +216,15 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await h.creditedRanges(receipt)).to.have.length(0);
       expect(await h.poolSnapshot(first - 1n, last + 1n)).to.deep.equal(pool);
 
-      // The period funded ahead is due after its own epoch; the first one after the current.
-      expect(await f.QIS.convictionDue(next + 1n)).to.equal(cost);
-      expect(await f.QIS.convictionDue(next)).to.equal(B);
+      // The period funded ahead is booked under its own epoch; the first one under the current.
+      expect(await f.QIS.convictionFunding(next)).to.equal(cost);
+      expect(await f.QIS.convictionFunding(next - 1n)).to.equal(B);
       expect(await f.PCS.topUpBalance(accountId)).to.equal(2_000n * TRAC - cost);
       const s = await f.CSS.getSubscription(subscriptionId);
       expect([s.drawnFromWindow, s.drawnFromTopUp]).to.deep.equal([0n, cost]);
     });
 
-    it('a draw split between the window and the top-up buffer is due in full after the period', async () => {
+    it("a draw split between the window and the top-up buffer is booked in full under the period's epoch", async () => {
       const { accountId } = await h.openAccount({ caps: WIDE });
       const B = COMMITTED / lock;
       await h.fund(await h.inference(accountId, valueFor(B - 100n * TRAC, 3_000n)));
@@ -235,8 +235,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       const [covered] = await eventsOf(receipt, f.PC, 'ServiceCostCovered');
       expect([covered.drawnFromWindow, covered.drawnFromTopUp]).to.deep.equal([100n * TRAC, 200n * TRAC]);
       expect(await h.creditedRanges(receipt)).to.have.length(0);
-      expect(await f.QIS.convictionDue(next + 1n)).to.equal(300n * TRAC);
-      expect(await f.QIS.convictionDue(next)).to.equal(B - 100n * TRAC);
+      expect(await f.QIS.convictionFunding(next)).to.equal(300n * TRAC);
+      expect(await f.QIS.convictionFunding(next - 1n)).to.equal(B - 100n * TRAC);
     });
   });
 

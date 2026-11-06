@@ -29,7 +29,7 @@ export async function deployed(ctx: Ctx): Promise<boolean> {
 }
 
 /** Versions, wiring, activation, pause and parameters; whether funding is live. */
-export async function checkDeployment(ctx: PoolCtx, current: bigint): Promise<{ live: boolean; grace: bigint }> {
+export async function checkDeployment(ctx: PoolCtx, current: bigint): Promise<{ live: boolean }> {
   const { report, c, stack } = ctx;
   report.set('deployed', true);
   report.say('\nVersions:');
@@ -67,42 +67,28 @@ export async function checkDeployment(ctx: PoolCtx, current: bigint): Promise<{ 
   const activation = await c.qis.activationEpoch();
   const paused = await c.qis.paused();
   const treasury = await c.params.protocolTreasury();
-  const epochLength = await c.chronos.epochLength();
   report.check(
     `the activation epoch is set and reached: ${activation === 0n ? 'unset' : `epoch ${activation}`}, current ${current}`,
     activation !== 0n && activation <= current,
-    activation > current ? `funding opens at ${iso(await epochStart(ctx, activation))}` : `closed through ${await c.qis.closedThrough()}, carry ${fmt(await c.qis.carry())} TRAC`,
+    activation > current ? `funding opens at ${iso(await epochStart(ctx, activation))}` : undefined,
   );
   report.check('QueryInferenceStorage is not paused', !paused);
   report.check('no protocol treasury is wired, so Conviction Account funding is open', treasury === ethers.ZeroAddress, treasury);
-  // λ and the grace, read under either key parameters.json gives them, against the scheduled value and the value in force.
-  const lambda = requireParameter('QueryInferenceStorage', ['latestLambdaBps', 'lambdaBps']);
-  const [lambdaLatest, lambdaNow] = [await c.qis.latestLambdaBps(), await c.qis.lambdaBpsAt(current)];
-  report.check(
-    `λ is parameters.json "testnet"'s ${lambda.value} bps (${lambda.key}), as scheduled and in force`,
-    lambdaLatest === lambda.value && lambdaNow === lambda.value,
-    `latestLambdaBps ${lambdaLatest}, in epoch ${current} ${lambdaNow}`,
-  );
-  const grace = requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds']);
-  const [graceLatest, graceNow] = [await c.qis.latestReceiptGraceSeconds(), await c.qis.receiptGraceSecondsAt(current)];
-  report.check(
-    `the receipt grace is parameters.json "testnet"'s ${grace.value} s (${grace.key}), as scheduled and in force, at most half the ${epochLength} s epoch`,
-    graceLatest === grace.value && graceNow === grace.value && graceNow * 2n <= epochLength,
-    `latestReceiptGraceSeconds ${graceLatest}, in epoch ${current} ${graceNow}`,
-  );
+  const lambda = requireParameter('QueryInferenceStorage', ['lambdaBps']);
+  const lambdaNow = await c.qis.lambdaBps();
+  report.check(`λ is parameters.json "testnet"'s ${lambda.value} bps`, lambdaNow === lambda.value, `lambdaBps ${lambdaNow}`);
   const bounds = {
     maxItemsPerBatch: [await c.qis.maxItemsPerBatch(), requireParameter('QueryInferenceStorage', ['maxItemsPerBatch']).value],
     maxGroupsPerBatch: [await c.qis.maxGroupsPerBatch(), requireParameter('QueryInferenceStorage', ['maxGroupsPerBatch']).value],
-    maxCloseStepsPerClaim: [await c.qis.maxCloseStepsPerClaim(), requireParameter('QueryInferenceStorage', ['maxCloseStepsPerClaim']).value],
     maxBucketsPerPeriod: [await c.cssvc.maxBucketsPerPeriod(), requireParameter('ConvictionServiceStorage', ['maxBucketsPerPeriod']).value],
   };
   report.check(
-    'the batch, close and bucket bounds are parameters.json "testnet"\'s',
+    'the batch and bucket bounds are parameters.json "testnet"\'s',
     Object.values(bounds).every(([onChain, want]) => onChain === want),
     Object.entries(bounds).map(([k, [onChain]]) => `${k} ${onChain}`).join(', '),
   );
-  report.set('parameters', { activation, paused, treasury, lambdaLatest, lambdaNow, graceLatest, graceNow, epochLength, bounds });
-  return { live: activation !== 0n && activation <= current && !paused && treasury === ethers.ZeroAddress, grace: graceNow };
+  report.set('parameters', { activation, paused, treasury, lambdaNow, bounds });
+  return { live: activation !== 0n && activation <= current && !paused && treasury === ethers.ZeroAddress };
 }
 
 export type Seller = { id: bigint; ok: boolean };
@@ -195,7 +181,7 @@ export async function checkBalances(ctx: Ctx, a: Amounts): Promise<void> {
   );
 }
 
-export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint, grace: bigint, activation: bigint): Promise<void> {
+export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint, activation: bigint): Promise<void> {
   const s = ctx.file.state;
   const E = s?.E ?? (activation > current ? activation : current);
   const ts = (e: bigint) => epochStart(ctx, e);
@@ -211,13 +197,12 @@ export async function printPlan(ctx: Ctx, r: Roles, a: Amounts, current: bigint,
       `opt-in; buyer key assigned; account period ${fmt(a.caValue)} TRAC; wallet period ${fmt(a.walletValue)} TRAC; ${fmt(a.keyEth)} ETH to each buyer key`,
   );
   say(
-    `  serve     epoch E: ${p.caFirst.count + p.caAfterTopUp.count + p.wallet.count} requests in two batches (account ${fmt(planValue(p.caFirst))} + ` +
+    `  serve     epoch E, once the seller has proved in it, and before E ends: ${p.caFirst.count + p.caAfterTopUp.count + p.wallet.count} requests in two batches (account ${fmt(planValue(p.caFirst))} + ` +
       `${fmt(planValue(p.caAfterTopUp))} after its top-up of ${fmt(a.caTopUp)}, wallet ${fmt(planValue(p.wallet))} TRAC); ` +
       `edge: a ${fmt(a.edgeValue)} TRAC period of the edge buyer key, revoked, assigned again, its top-up refused AssignmentExpired`,
   );
-  say(`  finalize  epoch E+1, from end(E) + ${grace} s = ${iso((await ts(E + 1n)) + grace)} to ${iso(await ts(E + 2n))}, once the seller has proved in E+1`);
-  say(`  close-claim from the start of E+2, ${iso(await ts(E + 2n))}: closeEpochs, then claimFor against the epochs' nets`);
-  say(`  withdraw  optional: in the middle of an epoch after close-claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 3n))})`);
+  say(`  claim     from the start of E+1, ${iso(await ts(E + 1n))}: E's numbers against the chain's events, then claimFor against the epochs' nets`);
+  say(`  withdraw  optional: in the middle of an epoch after claim; claimWithdrawnEpoch once that epoch has ended (from ${iso(await ts(E + 2n))})`);
   if (s) {
     const done = PHASES.filter((p) => ctx.file.done(p)).join(', ') || 'nothing yet';
     say(`  progress  done: ${done}${s.withdrawal ? `; withdrawn in epoch ${s.withdrawal.epoch}${ctx.file.done('withdraw') ? ', its epoch claimed' : ''}` : ''}`);
@@ -228,11 +213,10 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
   const current = await ctx.base.chronos.getCurrentEpoch();
   const s = ctx.file.load();
   const isDeployed = await deployed(ctx);
-  let grace = requireParameter('QueryInferenceStorage', ['latestReceiptGraceSeconds', 'receiptGraceSeconds']).value;
   let activation = 0n;
   const pctx = isDeployed ? await withPool(ctx) : undefined;
   if (pctx) {
-    grace = (await checkDeployment(pctx, current)).grace;
+    await checkDeployment(pctx, current);
     activation = await pctx.c.qis.activationEpoch();
   } else {
     ctx.report.say('  The seller, the balances and the plan do not need the deploy:');
@@ -256,5 +240,5 @@ export async function phaseCheck(ctx: Ctx): Promise<void> {
     if (failed) ctx.report.check(`PHASE=${p} of this run has no failed check`, false, `${failed} failed when it last ran: run it again`);
   }
   ctx.report.set('amounts', a);
-  await printPlan(ctx, ctx.roles, a, current, grace, activation);
+  await printPlan(ctx, ctx.roles, a, current, activation);
 }

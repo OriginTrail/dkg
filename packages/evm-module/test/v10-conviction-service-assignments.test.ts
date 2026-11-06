@@ -236,7 +236,7 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await expect(receipt).to.emit(f.PC, 'EmissionScheduled').withArgs(synthId, 0n, 1n, B - spent0, 0n);
       expect((await f.PCS.getAccount(synthId)).lastSettledWindow).to.equal(1n);
       expect(await f.PCS.windowSpent(synthId, 1n)).to.equal(cost);
-      expect(await f.QIS.convictionDue((await h.epochNow()) + 1n)).to.equal(cost);
+      expect(await f.QIS.convictionFunding(await h.epochNow())).to.equal(cost);
     });
   });
 
