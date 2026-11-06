@@ -197,7 +197,8 @@ export class Marketplace {
   /**
    * `count` requests of bucket 0 of `subscriptionId`, `units` units each at
    * UNIT_ASK, signed by the period's session key, as the receipts of one
-   * group of a batch, completed when issued.
+   * group of a batch, completed when issued. The group lands whole or not at
+   * all: a seller keeps its receipts rather than spend their nonces for less.
    */
   async group(session: HDNodeWallet, subscriptionId: string, seller: bigint, firstNonce: bigint, count: number, units: bigint, issuedAt: bigint): Promise<ReceiptGroup> {
     this.qiDomain ??= await queryInferenceDomain(this.c.qis);
@@ -213,7 +214,12 @@ export class Marketplace {
       ask: UNIT_ASK,
       issuedAt,
     });
-    return { subscriptionId, bucketIndex: 0n, items };
+    return { subscriptionId, bucketIndex: 0n, minCounted: BigInt(count) * units * UNIT_ASK, items };
+  }
+
+  /** The submitReceiptBatch call of `groups`, as calldata. */
+  batchData(groups: ReceiptGroup[]): string {
+    return this.c.qs.interface.encodeFunctionData('submitReceiptBatch', [groups]);
   }
 
   async batch(key: string, label: string, seller: Signer, groups: ReceiptGroup[], opts: StepOpts = {}): Promise<StepResult> {
@@ -223,7 +229,7 @@ export class Marketplace {
       role: 'seller',
       signer: seller,
       to: await this.c.qs.getAddress(),
-      data: this.c.qs.interface.encodeFunctionData('submitReceiptBatch', [groups]),
+      data: this.batchData(groups),
       ...opts,
     });
   }

@@ -96,8 +96,8 @@ export async function bindState(ctx: PoolCtx): Promise<SmokeState | undefined> {
  * it. It is the same object as the file's, so what a phase writes to it is saved.
  */
 export async function runState(ctx: PoolCtx, after: 'setup'): Promise<SetupState>;
-export async function runState(ctx: PoolCtx, after: 'serve' | 'close-claim'): Promise<ServedState>;
-export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'close-claim'): Promise<SetupState> {
+export async function runState(ctx: PoolCtx, after: 'serve' | 'claim'): Promise<ServedState>;
+export async function runState(ctx: PoolCtx, after: 'setup' | 'serve' | 'claim'): Promise<SetupState> {
   const s = await bindState(ctx);
   if (!s) throw new Error(`${ctx.file.file} is missing: run PHASE=setup SEND=1 first`);
   const failed = ctx.file.failedChecks(after);

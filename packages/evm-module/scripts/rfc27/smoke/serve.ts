@@ -1,12 +1,14 @@
-// PHASE serve, still in E: the session keys sign five requests, the seller
-// submits them in two receipt batches, and the Conviction Account period is
-// topped up between them. The edge, on a period of its own buyer key, so the
-// main flow's assignment stays as it is: fund, revoke, assign the same key
-// again, and a top-up of the old period is refused with AssignmentExpired.
+// PHASE serve, still in E, once the seller has proved in E: the session keys sign
+// five requests, the seller submits them in two receipt batches, each counted as it
+// lands, and the Conviction Account period is topped up between them, which is what
+// lets the second batch land. The edge, on a period of its own buyer key, so the
+// main flow's assignment stays as it is: fund, revoke, assign the same key again,
+// and a top-up of the old period is refused with AssignmentExpired.
 
 import { costOf, subscriptionIdOf } from '../../../test/helpers/conviction-service';
 
 import { eventsIn } from '../contracts';
+import { groupFault } from '../reads';
 import { fmt, iso, sum } from '../report';
 import { planValue, requestPlan } from './config';
 import { PoolCtx, complete, doneEarlier, epochStart, now, planDigest, runState, standInProof } from './context';
@@ -17,15 +19,25 @@ import { shownBy } from './tx';
 
 export async function phaseServe(ctx: PoolCtx): Promise<void> {
   const { report, c, market, file } = ctx;
-  const r = need(ctx.roles, ['owner', 'buyer', 'edgeBuyer', 'caSession', 'walletSession', 'edgeSession', 'seller']);
+  const r = need(ctx.roles, ['owner', 'buyer', 'edgeBuyer', 'caSession', 'walletSession', 'edgeSession', 'seller', 'sellerAddr']);
   const s = await runState(ctx, 'setup');
   if (doneEarlier(ctx, '')) return;
   const { amounts: a, E, accountId, accountExpiresAt: expiresAt, buyerNonce } = s;
   const { ca, wallet } = s.periods;
   const current = await c.chronos.getCurrentEpoch();
-  if (current !== E) throw new Error(`serve runs in epoch ${E}, the epoch of the periods; it is ${current}: start a new run`);
+  if (current !== E) throw new Error(`serve runs in epoch ${E}, the epoch of the periods, and a batch lands only there; it is ${current}: start a new run`);
   await fundOnFork(ctx, 0n);
   const plan = requestPlan(a);
+  const end = await epochStart(ctx, E + 1n);
+
+  // A batch needs the seller's node score in E. A real node proves through E; on the fork, with FORK_PROOFS=1, a stand-in does.
+  if ((await c.rss.getNodeEpochScore(E, s.sellerId)) === 0n) await standInProof(ctx, 'the seller\'s first in E, which a batch needs, and after the stake, so the position holds score in E');
+  const nodeScore = await c.rss.getNodeEpochScore(E, s.sellerId);
+  if (nodeScore === 0n) {
+    report.wait(`on the seller's proof: node ${s.sellerId} has no node score in epoch ${E} yet, so a batch would revert NoNodeScore. Run PHASE=serve again after the node's next proof, before ${iso(end)}, when the periods end.`);
+    return;
+  }
+  report.check(`the seller has a node score in epoch ${E}, the current one, which a batch needs`, true, `node ${s.sellerId}, score ${nodeScore}`);
   report.say(`\nServe in epoch ${E}, ${ctx.env.send ? 'sending' : 'dry run'}:`);
 
   // The requests are issued now by the chain's clock, inside both periods.
@@ -34,10 +46,12 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
     const starts = [(await c.cssvc.getSubscription(ca)).periodStart, (await c.cssvc.getSubscription(wallet)).periodStart];
     return starts.reduce((m, x) => (x > m ? x : m), t);
   };
-  const claimed = async (id: string) => (await c.qis.getSellerClaim(id, 0, s.sellerId)).claimed;
+  /** Whether the seller has spent `nonce` of the period: its receipt landed. */
+  const landed = async (id: string, nonce: bigint) => ((await c.qis.nonceWord(id, s.sellerId, nonce >> 8n)) >> (nonce & 0xffn)) % 2n === 1n;
 
   // 1. The first batch: two account requests, up to the period's value before the top-up, and two wallet requests.
   let t = await issuedAt();
+  const firstTotal = planValue(plan.caFirst) + planValue(plan.wallet);
   const b1 = await market.batch(
     'serve.batch-1',
     `${plan.caFirst.count + plan.wallet.count} requests: account ${fmt(planValue(plan.caFirst))}, wallet ${fmt(planValue(plan.wallet))} TRAC`,
@@ -46,18 +60,25 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
       await market.group(r.caSession, ca, s.sellerId, 0n, plan.caFirst.count, plan.caFirst.units, t),
       await market.group(r.walletSession, wallet, s.sellerId, 0n, plan.wallet.count, plan.wallet.units, t),
     ],
-    { done: (await claimed(wallet)) > 0n ? 'the seller has claimed on both periods' : undefined },
+    { done: (await landed(wallet, 0n)) ? 'the seller has landed on both periods' : undefined },
   );
   const [accepted] = eventsIn(b1.receipt, c.qs, c.qs.getEvent('ReceiptBatchAccepted'));
   if (shownBy(report, b1, accepted, 'the first batch\'s ReceiptBatchAccepted event')) {
     report.check(
-      'the first batch is accepted for the seller: four requests, signed by the two session keys',
-      accepted.seller === s.sellerId && accepted.itemCount === 4n && accepted.value === planValue(plan.caFirst) + planValue(plan.wallet),
-      `stake factor ${fmt(accepted.stakeFactor18)}`,
+      'the first batch counts in whole for the seller as it lands: four requests, signed by the two session keys',
+      accepted.seller === s.sellerId && accepted.itemCount === 4n && accepted.claimed === firstTotal && accepted.counted === firstTotal,
+      `${fmt(accepted.counted)} of ${fmt(accepted.claimed)} TRAC, stake factor ${fmt(accepted.stakeFactor18)}`,
     );
   }
 
-  // 2. The top-up of the account period: accepted, its cost due in E+1, the bucket's funded cap raised.
+  // 2. The next batch, with what is left of the account bucket too little for it, is refused and spends nothing; the top-up lifts it.
+  const afterTopUpValue = planValue(plan.caAfterTopUp);
+  t = await issuedAt();
+  const secondGroups = [await market.group(r.caSession, ca, s.sellerId, BigInt(plan.caFirst.count), plan.caAfterTopUp.count, plan.caAfterTopUp.units, t)];
+  if (b1.receipt && (await c.qs.bucketLeft(ca, 0)) < afterTopUpValue) {
+    const why = await ctx.tx.refusal(r.sellerAddr, await c.qs.getAddress(), market.batchData(secondGroups));
+    report.check('with the account bucket too low for it, the next batch is refused until the top-up', why === groupFault(0, 'BelowMinCounted'), why);
+  }
   const topUp = await market.topUp('serve.top-up', 'buyer key', r.buyer, ca, a.caTopUp, planDigest(ctx, 'account plan, topped up'), {
     done: (await c.cssvc.getSubscription(ca)).value >= a.caValue + a.caTopUp ? 'the period holds the topped-up value' : undefined,
   });
@@ -67,32 +88,31 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   }
   const [toppedUp] = eventsIn(topUp.receipt, c.ss, c.ss.getEvent('PeriodToppedUp'));
   if (shownBy(report, topUp, toppedUp, 'the top-up\'s PeriodToppedUp event')) {
-    // No event says what a transaction adds to an epoch's due, and others fund periods too: the due holds it at least.
-    const due = (await c.qis.dueIn(E + 1n)).conviction;
+    // No event says what a transaction adds to an epoch's money, and others fund periods too: the money holds it at least.
+    const booked = (await c.qis.fundingIn(E)).conviction;
     report.check(
-      `the top-up is accepted at ${fmt(toppedUp.cost)} TRAC, due in epoch ${E + 1n}`,
-      toppedUp.cost === costOf(a.caTopUp, a.discountBps) && due >= s.costs.ca + toppedUp.cost,
-      `due ${fmt(due)} TRAC`,
+      `the top-up is accepted at ${fmt(toppedUp.cost)} TRAC, booked in epoch ${E}`,
+      toppedUp.cost === costOf(a.caTopUp, a.discountBps) && booked >= s.costs.ca + toppedUp.cost,
+      `booked ${fmt(booked)} TRAC`,
     );
-    const capAfter = await c.qs.fundedCap(ca, 0);
-    report.check(`the account bucket's funded cap rises to ${fmt(capAfter)} TRAC`, capAfter === ((a.caValue + a.caTopUp) * (10_000n - a.discountBps)) / 10_000n);
+    const value = (await c.cssvc.getBucket(ca, 0)).value;
+    report.check(`the account bucket's value rises to ${fmt(value)} TRAC`, value === a.caValue + a.caTopUp);
   }
 
-  // 3. The second batch: one more account request, above the cap before the top-up.
-  t = await issuedAt();
-  const caTotal = planValue(plan.caFirst) + planValue(plan.caAfterTopUp);
+  // 3. The second batch: one more account request, above what the bucket held before the top-up.
+  const caTotal = planValue(plan.caFirst) + afterTopUpValue;
   const b2 = await market.batch(
     'serve.batch-2',
-    `${plan.caAfterTopUp.count} request: account ${fmt(planValue(plan.caAfterTopUp))} TRAC`,
+    `${plan.caAfterTopUp.count} request: account ${fmt(afterTopUpValue)} TRAC`,
     r.seller,
-    [await market.group(r.caSession, ca, s.sellerId, BigInt(plan.caFirst.count), plan.caAfterTopUp.count, plan.caAfterTopUp.units, t)],
-    { done: (await claimed(ca)) >= caTotal ? 'the seller has claimed the request after the top-up' : undefined },
+    secondGroups,
+    { done: (await landed(ca, BigInt(plan.caFirst.count))) ? 'the seller has landed the request after the top-up' : undefined },
   );
   if (b2.receipt || b2.skipped) {
-    const [caClaimed, walletClaimed] = [await c.qis.bucketClaimed(ca, 0), await c.qis.bucketClaimed(wallet, 0)];
+    const [caFilled, walletFilled] = [await c.qis.bucketFilled(ca, 0), await c.qis.bucketFilled(wallet, 0)];
     report.check(
-      `the seller's claims: ${fmt(caClaimed)} TRAC on the account bucket, within its cap of ${fmt(await c.qs.fundedCap(ca, 0))}, and ${fmt(walletClaimed)} on the wallet bucket`,
-      caClaimed === caTotal && walletClaimed === planValue(plan.wallet),
+      `the seller's batches fill ${fmt(caFilled)} TRAC of the account bucket, which has ${fmt(await c.qs.bucketLeft(ca, 0))} left, and ${fmt(walletFilled)} of the wallet bucket`,
+      caFilled === caTotal && walletFilled === planValue(plan.wallet),
     );
   }
 
@@ -159,18 +179,16 @@ export async function phaseServe(ctx: PoolCtx): Promise<void> {
   }
 
   if (ctx.env.send) {
-    const due = await c.qis.dueIn(E + 1n);
+    const booked = await c.qis.fundingIn(E);
     const ours = { wallet: a.walletValue, conviction: sum([s.costs.ca, s.costs.topUp ?? 0n, s.costs.edge ?? 0n]) };
     report.check(
-      `epoch ${E + 1n} has our money due: ${fmt(ours.wallet)} TRAC of wallet value and ${fmt(ours.conviction)} TRAC of account cost`,
-      due.wallet >= ours.wallet && due.conviction >= ours.conviction,
-      `due ${fmt(due.wallet)} wallet, ${fmt(due.conviction)} account${due.wallet === ours.wallet && due.conviction === ours.conviction ? ': ours alone' : ''}`,
+      `epoch ${E} has our money booked: ${fmt(ours.wallet)} TRAC of wallet value and ${fmt(ours.conviction)} TRAC of account cost`,
+      booked.wallet >= ours.wallet && booked.conviction >= ours.conviction,
+      `booked ${fmt(booked.wallet)} wallet, ${fmt(booked.conviction)} account${booked.wallet === ours.wallet && booked.conviction === ours.conviction ? ': ours alone' : ''}`,
     );
     const missing = serveMissing(s);
     if (missing.length) report.check('the state holds what serve records', false, `no ${missing.join(', ')}`);
     complete(ctx);
-    report.say(
-      `\nNext: PHASE=finalize SEND=1 in epoch ${E + 1n}, after the batch deadline ${iso(await c.qs.batchDeadline(ca))} and before ${iso(await epochStart(ctx, E + 2n))}.`,
-    );
+    report.say(`\nNext: PHASE=claim SEND=1 from ${iso(end)}, once epoch ${E} has ended, with nothing run first.`);
   }
 }

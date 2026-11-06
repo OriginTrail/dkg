@@ -406,7 +406,7 @@ The roles:
 - **The owner**: a hot testnet wallet. It opens a new Conviction Account
   under PublishingConviction 10.2.0, opts it in, and assigns a buyer key. It
   funds a wallet-paid period, and stakes a small tier-0 position on the
-  seller's node. It also makes the upkeep calls.
+  seller's node. It also claims that position.
 - **The buyer keys and the session keys**: derived from the owner key and
   the run label, so no key is stored. The owner sends each buyer key a little
   ETH.
@@ -430,28 +430,30 @@ The amounts are configurable: `RFC27_SMOKE_STAKE`, `RFC27_SMOKE_CA_VALUE`,
 `RFC27_SMOKE_CA_TOPUP`, `RFC27_SMOKE_EDGE_VALUE`, `RFC27_SMOKE_WALLET_VALUE`,
 `RFC27_SMOKE_COMMITTED` and `RFC27_SMOKE_KEY_ETH`.
 
-The phases, with `SEND=1`, about two days apart in all:
+The phases, with `SEND=1`, across one epoch boundary:
 
 | Phase | When |
 |---|---|
-| `setup`, then `serve` | epoch E, with at least an hour of it left |
-| `finalize` | E+1, after end(E) + 3,600 s, once the seller has proved in E+1 |
-| `close-claim` | from the start of E+2 |
-| `withdraw`, optional | in the middle of an epoch, then again once it has ended: a third day |
+| `setup`, then `serve` | epoch E, with at least an hour of it left; `serve` once the seller has proved in E |
+| `claim` | from the start of E+1, with nothing run first |
+| `withdraw`, optional | in the middle of an epoch, then again once it has ended: another day |
 
 - A phase run too early stops, deferred, and prints when it opens.
-- `finalize` reads each claim's outcome from the chain. While the seller has no
-  node score in E+1, it waits and says so (`NoScore`). Run it again after the
-  node's next proof, before E+1 ends; after that the claims still unfinalized
-  are void, and it fails. Claims another caller finalized count, whenever
-  `finalize` first runs. Each claim must have finalized at what it was due, by
-  its own `ClaimsFinalized` event, and the node's and the epoch's sums must be
-  what all the epoch's finalizations add up to.
-- `close-claim` requires both claims finalized at what they were due, by the run
-  or by the upkeep cron, and the money due in E+1 to be exactly what the periods
-  of E were funded and topped up with. It checks this before it sends anything,
-  and reads up to three epochs of logs to do it, which can take a few minutes on
-  a public endpoint. With a claim void the run goes no further: start a new one.
+- `serve` checks that the seller has a node score in the current epoch, which a
+  batch needs (`NoNodeScore`). Until it has, `serve` waits and says so. Run it
+  again after the node's next proof, before E ends: a batch lands only during its
+  period's epoch, so once E has ended `serve` stops, and the run goes no further.
+  Start a new one.
+- `serve` also shows a batch refused for what its bucket has left, with its nonces
+  unspent, and the same batch landing after a top-up.
+- `claim` needs nothing to run first: an epoch's numbers are final when it ends. It
+  requires each of the run's buckets to have counted all the seller claimed on it,
+  by its own `ReceiptsClaimed` events; the node's and the epoch's sums to be what
+  all the groups counted in E add up to; the money booked in E to be exactly what
+  the periods of E were funded and topped up with; and every ended epoch's pool to
+  be what the rollover rule gives. It checks this before it sends anything, and
+  reads up to two epochs of logs to do it, which can take a few minutes on a public
+  endpoint.
 - These sums read the logs of the contracts registered now. An endpoint that
   serves incomplete logs fails a correct run: run the phase again. A settlement
   or service contract replaced during the run fails it too: start a new one.
@@ -468,9 +470,9 @@ The phases, with `SEND=1`, about two days apart in all:
   `cache/rfc27-smoke/<run>.<phase>.json`. The run resumes from
   `cache/rfc27-smoke/<run>.json`.
 
-The upkeep cron may run `closeEpochs`, `finalizeClaims`, `claimFor` or
-`claimWithdrawnEpoch` first. The phase then checks what the cron did, from the
-chain, and does not fail because another caller went first.
+The upkeep cron may run `claimFor` or `claimWithdrawnEpoch` first. The phase then
+checks what the cron did, from the chain, and does not fail because another caller
+went first.
 
 The smoke test also runs on the fork, before the deploy reaches testnet, with
 `--config scripts/rfc27-testnet-fork.config.ts`. Its header lists the fork-only

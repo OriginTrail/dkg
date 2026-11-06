@@ -3,7 +3,7 @@
 // Sepolia, after the deploy, with real signers and real time
 // =============================================================================
 //
-// One marketplace cycle on the live contracts, in phases about a day apart,
+// One marketplace cycle on the live contracts, across one epoch boundary,
 // playing every role:
 //   - the owner, a hot testnet wallet with Base Sepolia ETH and test TRAC,
 //     opens a new Conviction Account under PublishingConviction 10.2.0 (an
@@ -31,16 +31,15 @@
 //   PHASE=check $SMOKE                  # read-only, then the plan; also shows a run's progress
 //   PHASE=setup $SMOKE                  # without SEND=1 every phase is a dry run
 //   PHASE=setup SEND=1 $SMOKE           # epoch E, with at least an hour of it left
-//   PHASE=serve SEND=1 $SMOKE           # still in epoch E
-//   PHASE=finalize SEND=1 $SMOKE        # in E+1, after end(E) + the receipt grace, once the seller has proved in E+1
-//   PHASE=close-claim SEND=1 $SMOKE     # from the start of E+2
-//   PHASE=withdraw SEND=1 $SMOKE        # optional: in the middle of an epoch after close-claim,
+//   PHASE=serve SEND=1 $SMOKE           # still in epoch E, once the seller has proved in E: a batch lands only then
+//   PHASE=claim SEND=1 $SMOKE           # from the start of E+1, with nothing run first
+//   PHASE=withdraw SEND=1 $SMOKE        # optional: in the middle of an epoch after claim,
 //   PHASE=withdraw SEND=1 $SMOKE        #   then again once that epoch has ended
 //
 // What each phase does and checks is in its module, scripts/rfc27/smoke/. A
-// phase that opens later is deferred with the time it opens; finalize waits,
-// and says so, while the seller has not proved in E+1 (its claims are skipped
-// NoScore until it has), and is run again after the node's next proof; withdraw
+// phase that opens later is deferred with the time it opens; serve waits, and
+// says so, while the seller has not proved in E (a batch reverts NoNodeScore until
+// it has), and is run again after the node's next proof, before E ends; withdraw
 // waits likewise until the position holds score in the epoch, as a withdrawal
 // without it would burn the position and record nothing to claim.
 //
@@ -53,9 +52,9 @@
 // or what its gas needs at the current fee if more). Setup records them; later
 // phases read them from the state file.
 //
-// The upkeep cron may call closeEpochs, finalizeClaims, claimFor or
-// claimWithdrawnEpoch first. Each phase detects that, and checks what the
-// other caller did, from storage and recorded events, instead of failing.
+// The upkeep cron may call claimFor or claimWithdrawnEpoch first. Each phase
+// detects that, and checks what the other caller did, from storage and recorded
+// events, instead of failing.
 //
 // Output: every check as PASS or FAIL, and the results in
 // cache/rfc27-smoke/<run>.<phase>.json (.dry-run.json for a dry run). A run
@@ -111,10 +110,9 @@ import { Fork } from './rfc27/fork';
 import { guardNetwork } from './rfc27/network';
 import { Redactor, Report, iso, span } from './rfc27/report';
 import { deployed, phaseCheck } from './rfc27/smoke/check';
-import { phaseCloseClaim } from './rfc27/smoke/close-claim';
+import { phaseClaim } from './rfc27/smoke/claim';
 import { LIVE_JSON, RESULTS_DIR, SmokeEnv, readEnv } from './rfc27/smoke/config';
 import { Ctx, withPool } from './rfc27/smoke/context';
-import { phaseFinalize } from './rfc27/smoke/finalize';
 import { roles } from './rfc27/smoke/roles';
 import { phaseServe } from './rfc27/smoke/serve';
 import { phaseSetup } from './rfc27/smoke/setup';
@@ -160,8 +158,7 @@ async function main(): Promise<void> {
   const pool = await withPool(ctx);
   if (env.phase === 'setup') return phaseSetup(pool);
   if (env.phase === 'serve') return phaseServe(pool);
-  if (env.phase === 'finalize') return phaseFinalize(pool);
-  if (env.phase === 'close-claim') return phaseCloseClaim(pool);
+  if (env.phase === 'claim') return phaseClaim(pool);
   part = (await phaseWithdraw(pool)).part === 'claim' ? '-claim' : '';
 }
 

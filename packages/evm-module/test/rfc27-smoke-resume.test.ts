@@ -22,13 +22,11 @@ import { hardhatWallet, queryInferenceDomain } from './helpers/query-inference';
 import { deployRewardsStack, rewardsHelpers } from './helpers/query-inference-rewards';
 import { Contracts, Stack } from '../scripts/rfc27/contracts';
 import { Fork } from '../scripts/rfc27/fork';
-import { closeFromStorage } from '../scripts/rfc27/reads';
 import { Redactor, Report, fmt } from '../scripts/rfc27/report';
 import { phaseCheck } from '../scripts/rfc27/smoke/check';
-import { phaseCloseClaim } from '../scripts/rfc27/smoke/close-claim';
+import { phaseClaim } from '../scripts/rfc27/smoke/claim';
 import { NOTHING_YET, needsOf, plannedAmounts } from '../scripts/rfc27/smoke/config';
 import { PoolCtx, withPool } from '../scripts/rfc27/smoke/context';
-import { expectedClaims, phaseFinalize } from '../scripts/rfc27/smoke/finalize';
 import { firstBlockAt, rewardClaims } from '../scripts/rfc27/smoke/reward-claims';
 import type { Roles } from '../scripts/rfc27/smoke/roles';
 import { phaseServe } from '../scripts/rfc27/smoke/serve';
@@ -229,39 +227,8 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     expect((await hre.ethers.provider.getTransactionReceipt(other.hash))?.blockNumber).to.equal(block);
     return block ?? 0;
   };
-  const claimOf = (subscriptionId: string) => fx.f.QIS.getSellerClaim(subscriptionId, 0n, fx.seller.identityId);
   const scoreIn = (epoch: bigint) => fx.helpers.scoreEpoch(epoch, fx.seller, 10n ** 18n);
-  /** Past the batch deadline of the run's periods, in E+1. */
-  const toDeadline = async () => time.increaseTo((await fx.f.QS.batchDeadline(stateNow().periods.ca)) + 1n);
   const toEpoch = async (e: bigint, plus = 60n) => time.increaseTo((await fx.f.Chronos.timestampForEpoch(e)) + plus);
-  /** The upkeep cron's finalizeClaims on the run's claims, `only` if named. */
-  const upkeepFinalizes = async (only?: 'account' | 'wallet') => {
-    const refs = expectedClaims(stateNow()).filter((x) => !only || x.period === only);
-    const tx = await fx.f.QS.connect(fx.f.accounts[20]).finalizeClaims(refs.map(({ subscriptionId, bucketIndex, seller }) => ({ subscriptionId, bucketIndex, seller })));
-    return tx.wait();
-  };
-
-  /**
-   * The upkeep cron's finalization, run while each bucket's funded cap is half of what is claimed of it:
-   * each claim finalizes to half of what it is due, in its event and in R, and the caps are then as they were.
-   */
-  const upkeepFinalizesTooLittle = async () => {
-    const writer = fx.f.accounts[46];
-    await fx.f.Hub.setContractAddress('BucketWriter', writer.address);
-    const claims = expectedClaims(stateNow());
-    const kept = await Promise.all(claims.map((x) => fx.f.CSS.getBucket(x.subscriptionId, x.bucketIndex)));
-    const write = (i: number, value: bigint) => {
-      const { bucketId, serviceClass, maxAskWeiPerUnit } = kept[i];
-      return fx.f.CSS.connect(writer).setBucket(claims[i].subscriptionId, claims[i].bucketIndex, { bucketId, serviceClass, value, maxAskWeiPerUnit });
-    };
-    for (const [i, x] of claims.entries()) {
-      const total = await fx.f.QIS.bucketClaimed(x.subscriptionId, x.bucketIndex);
-      const cap = await fx.f.QS.fundedCap(x.subscriptionId, x.bucketIndex);
-      await write(i, (kept[i].value * total) / (2n * cap));
-    }
-    await upkeepFinalizes();
-    for (const [i] of claims.entries()) await write(i, kept[i].value);
-  };
 
   /** The fixture a test runs from: its chain, its bindings, and the state file it left. */
   const use = (from: Fixture) => {
@@ -284,27 +251,24 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     passes(ctx);
     return { ...fx, state: fs.readFileSync(stateFile, 'utf8') };
   }
-  async function afterServe() {
+  /** Setup done, and the seller proved in E, which a batch needs. */
+  async function afterProof() {
     use(await loadFixture(afterSetup));
+    await scoreIn(stateNow().E);
+    return { ...fx, state: fs.readFileSync(stateFile, 'utf8') };
+  }
+  async function afterServe() {
+    use(await loadFixture(afterProof));
     const ctx = await ctxOf('serve');
     await phaseServe(ctx);
     passes(ctx);
     return { ...fx, state: fs.readFileSync(stateFile, 'utf8') };
   }
-  async function afterFinalize() {
+  async function afterClaim() {
     use(await loadFixture(afterServe));
-    await toDeadline();
-    await scoreIn(stateNow().E + 1n);
-    const ctx = await ctxOf('finalize');
-    await phaseFinalize(ctx);
-    passes(ctx);
-    return { ...fx, state: fs.readFileSync(stateFile, 'utf8') };
-  }
-  async function afterCloseClaim() {
-    use(await loadFixture(afterFinalize));
-    await toEpoch(stateNow().E + 2n);
-    const ctx = await ctxOf('close-claim');
-    await phaseCloseClaim(ctx);
+    await toEpoch(stateNow().E + 1n);
+    const ctx = await ctxOf('claim');
+    await phaseClaim(ctx);
     passes(ctx);
     return { ...fx, state: fs.readFileSync(stateFile, 'utf8') };
   }
@@ -536,7 +500,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(ctx.file.done('setup')).to.equal(true);
     });
 
-    it('a stranger\'s wallet period funded beside ours moves the vault and the due more, and fails nothing', async () => {
+    it('a stranger\'s wallet period funded beside ours moves the vault and the epoch\'s money more, and fails nothing', async () => {
       use(await loadFixture(deployFixture));
       const { a } = await fundExactly();
       const value = 5n * TRAC;
@@ -549,16 +513,16 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       });
       await stops(phaseSetup(await ctxOf('setup', { owner, stopAt: 'setup.fund-wallet-period' })));
       await inTheBlockOf('setup.fund-wallet-period', funding);
-      expect((await fx.f.QIS.dueIn(epoch + 1n)).wallet).to.equal(a.walletValue + value);
+      expect((await fx.f.QIS.fundingIn(epoch)).wallet).to.equal(a.walletValue + value);
 
       const resumed = await ctxOf('setup');
       await phaseSetup(resumed);
       passes(resumed);
-      expect(checkOf(resumed, 'moved into the vault and is due').detail).to.contain(`${fmt(a.walletValue)} TRAC by its own Transfer logs; due ${fmt(a.walletValue + value)} TRAC`);
+      expect(checkOf(resumed, 'moved into the vault and is booked').detail).to.contain(`${fmt(a.walletValue)} TRAC by its own Transfer logs; booked ${fmt(a.walletValue + value)} TRAC`);
     });
 
     it('TRAC sent to the owner beside its withdrawal fails neither the phase nor its resume', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const owner = ownerWallet().address;
       const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
       await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
@@ -599,9 +563,9 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         new Proxy(await receipt(hash), { get: (t, k) => (k === 'logs' ? t.logs.filter((l: { address: string }) => l.address.toLowerCase() !== token) : Reflect.get(t, k)) });
       return ctx;
     };
-    /** A position withdrawn in the middle of the epoch after close-claim, with something to claim of that epoch, and the clock in the next. */
+    /** A position withdrawn in the middle of the epoch after claim, with something to claim of that epoch, and the clock in the next. */
     const withdrawnWithClaim = async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
       await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
       await fx.helpers.publishingPool(e, 10n * TRAC);
@@ -614,7 +578,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       for (const [stopAt, label] of [
         ['setup.stake', 'the stake moved into the vault'],
         ['setup.create-account', 'the commitment moved into the vault'],
-        ['setup.fund-wallet-period', 'moved into the vault and is due'],
+        ['setup.fund-wallet-period', 'moved into the vault and is booked'],
       ]) {
         use(await loadFixture(deployFixture));
         await fundExactly();
@@ -626,7 +590,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('fails the withdrawal, which stays on its part, when its event is there and its receipt shows no Transfer', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
       await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
       await scoreIn(e);
@@ -710,7 +674,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       });
       const ctx = await ctxOf('setup');
       await phaseSetup(ctx);
-      failsAndIsNotDone(ctx, 'setup', 'moved into the vault and is due');
+      failsAndIsNotDone(ctx, 'setup', 'moved into the vault and is booked');
     });
 
     it('nets what a receipt moved in and out of an account, and reads none from a receipt with no Transfer in it', async () => {
@@ -728,7 +692,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('fails serve, which is not done, at the top-up', async () => {
-      use(await loadFixture(afterSetup));
+      use(await loadFixture(afterProof));
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.top-up' })));
       pointedElsewhere('serve.top-up', 'setup.opt-in');
       const ctx = await ctxOf('serve');
@@ -737,7 +701,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('fails the withdrawal, which stays on its part', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
       await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
       await scoreIn(e);
@@ -752,12 +716,12 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
 
   describe('a run stopped and resumed in serve', () => {
     it('after the top-up is mined: its movement stands, and no second top-up is sent', async () => {
-      use(await loadFixture(afterSetup));
+      use(await loadFixture(afterProof));
       const s = stateNow();
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.top-up' })));
       const record = rawState().steps['serve.top-up'];
       const period = await fx.f.CSS.getSubscription(s.periods.ca);
-      const due = await fx.f.QIS.dueIn(s.E + 1n);
+      const booked = await fx.f.QIS.fundingIn(s.E);
 
       const resumed = await ctxOf('serve');
       await phaseServe(resumed);
@@ -766,13 +730,13 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(checkOf(resumed, 'the top-up is accepted').ok).to.equal(true);
       expect(rawState().steps['serve.top-up'].hash).to.equal(record.hash);
       expect((await fx.f.CSS.getSubscription(s.periods.ca)).value).to.equal(period.value);
-      // The edge period, funded after the stop, is all that adds to the due.
-      expect((await fx.f.QIS.dueIn(s.E + 1n)).conviction - due.conviction).to.equal(s.amounts.edgeValue);
+      // The edge period, funded after the stop, is all that adds to the epoch's money.
+      expect((await fx.f.QIS.fundingIn(s.E)).conviction - booked.conviction).to.equal(s.amounts.edgeValue);
     });
 
     it('at every other step: every check passes, the edge\'s refusal included, and nothing is sent twice', async () => {
       for (const stopAt of ['serve.batch-1', 'serve.batch-2', 'serve.edge-assign', 'serve.edge-fund', 'serve.edge-revoke', 'serve.edge-reassign']) {
-        use(await loadFixture(afterSetup));
+        use(await loadFixture(afterProof));
         await stops(phaseServe(await ctxOf('serve', { stopAt })));
         const before = rawState().steps;
         const resumed = await ctxOf('serve');
@@ -787,7 +751,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
   describe('a phase with a failed check', () => {
     /** A run stopped at serve's last step, its state then saying the wallet period was worth more than it was. */
     const failingServe = async () => {
-      use(await loadFixture(afterSetup));
+      use(await loadFixture(afterProof));
       await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.edge-reassign' })));
       const walletValue = rawState().amounts.walletValue;
       editState((raw) => {
@@ -811,9 +775,9 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(again.report.failed).to.equal(first.report.failed);
       expect(await head()).to.equal(blocks);
 
-      await toDeadline();
-      const later = await ctxOf('finalize');
-      expect(await errorOf(phaseFinalize(later))).to.match(/^PHASE=serve ended with \d+ failed checks?: run it again first/);
+      await toEpoch(stateNow().E + 1n);
+      const later = await ctxOf('claim');
+      expect(await errorOf(phaseClaim(later))).to.match(/^PHASE=serve ended with \d+ failed checks?: run it again first/);
 
       const check = await ctxOf('check', { send: false });
       await phaseCheck(check);
@@ -860,239 +824,59 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     const toEpochOfServe = async () => expect(await fx.f.Chronos.getCurrentEpoch()).to.equal(stateNow().E);
   });
 
-  describe('finalize', () => {
-    const setupAndServe = async () => {
-      use(await loadFixture(afterServe));
-      await toDeadline();
-    };
-
-    it('fails when the serve batches\' receipts show neither claim, however little R holds, and sends nothing', async () => {
-      await setupAndServe();
-      await scoreIn(stateNow().E + 1n);
-      editState((raw) => {
-        raw.steps['serve.batch-1'].hash = raw.steps['setup.opt-in'].hash;
-        raw.steps['serve.batch-2'].hash = raw.steps['setup.opt-in'].hash;
-      });
-      const blocks = await head();
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'the serve batches claimed').ok).to.equal(false);
-      expect(ctx.file.done('finalize')).to.equal(false);
-      expect(await head()).to.equal(blocks);
-    });
-
-    it('fails when they show only one of the two claims', async () => {
-      await setupAndServe();
-      await scoreIn(stateNow().E + 1n);
-      editState((raw) => {
-        raw.steps['serve.batch-1'].hash = raw.steps['setup.opt-in'].hash; // batch 2 claims on the account period alone
-      });
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'the serve batches claimed').detail).to.equal('their receipts show no wallet claim');
-      expect(ctx.file.done('finalize')).to.equal(false);
-    });
-
-    it('waits while the seller has no score, then finalizes after its proof, with a skipped attempt in its journal', async () => {
-      await setupAndServe();
+  describe('serve, and what a batch needs', () => {
+    it('waits while the seller has no node score in E, sending nothing, then lands after its proof', async () => {
+      use(await loadFixture(afterSetup));
       const s = stateNow();
-      // The first run sends nothing: both would be skipped NoScore.
       const blocks = await head();
-      const waiting = await ctxOf('finalize');
-      await phaseFinalize(waiting);
+      const waiting = await ctxOf('serve');
+      await phaseServe(waiting);
       expect(waiting.report.status).to.equal('waiting');
-      expect(waiting.report.why).to.contain('NoScore');
-      expect(waiting.file.done('finalize')).to.equal(false);
+      expect(waiting.report.why).to.contain('NoNodeScore');
+      expect(waiting.file.done('serve')).to.equal(false);
       expect(await head()).to.equal(blocks);
 
-      // An attempt that did go out before the proof, as a slow run's might: its skips are history, not outcomes.
-      const early = await upkeepFinalizes();
-      editState((raw) => {
-        raw.steps['finalize.finalize-claims.1'] = { status: 'mined', label: 'an attempt', role: 'owner', hash: early?.hash, estimate: '1', gasLimit: '1' };
-      });
-      const stillWaiting = await ctxOf('finalize');
-      await phaseFinalize(stillWaiting);
-      expect(stillWaiting.report.status).to.equal('waiting');
-      expect(failedLabels(stillWaiting)).to.deep.equal([]);
-      expect(rawState().refs).to.equal(undefined);
-
-      await scoreIn(s.E + 1n);
-      const proved = await ctxOf('finalize');
-      await phaseFinalize(proved);
+      await scoreIn(s.E);
+      const proved = await ctxOf('serve');
+      await phaseServe(proved);
       passes(proved);
-      expect(proved.file.done('finalize')).to.equal(true);
-      expect(rawState().steps['finalize.finalize-claims.2'].status).to.equal('mined');
-      expect(checkOf(proved, 'every claim is finalized').detail).to.equal('account finalized, wallet finalized');
-      expect((await claimOf(s.periods.ca)).finalized).to.equal(true);
-      expect((await claimOf(s.periods.wallet)).finalized).to.equal(true);
+      expect(proved.file.done('serve')).to.equal(true);
+      expect(checkOf(proved, 'the seller has a node score in epoch').detail).to.contain(`node ${s.sellerId}`);
     });
 
-    it('resumed after its attempt is sent: attributes the claims to this run, and sends nothing again', async () => {
-      await setupAndServe();
-      await scoreIn(stateNow().E + 1n);
-      await stops(phaseFinalize(await ctxOf('finalize', { stopAt: 'finalize.finalize-claims.1:sent' })));
-      const blocks = await head();
-      const resumed = await ctxOf('finalize');
-      await phaseFinalize(resumed);
-      passes(resumed);
-      expect(checkOf(resumed, 'every claim is finalized').detail).to.equal('account finalized, wallet finalized');
-      expect(await head()).to.equal(blocks);
-      expect(Object.keys(rawState().steps).filter((k) => k.startsWith('finalize.'))).to.deep.equal(['finalize.finalize-claims.1']);
-    });
-
-    it('takes claims the upkeep cron finalized in E+1, and says who did, when first run in E+1', async () => {
-      await setupAndServe();
-      await scoreIn(stateNow().E + 1n);
-      await upkeepFinalizes();
-      const blocks = await head();
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
+    it('sees the next batch refused while the account bucket is too low for it, and lands it after the top-up, on nonces the refusal did not spend', async () => {
+      use(await loadFixture(afterProof));
+      const s = stateNow();
+      const ctx = await ctxOf('serve');
+      await phaseServe(ctx);
       passes(ctx);
-      expect(await head()).to.equal(blocks);
-      expect(checkOf(ctx, 'every claim is finalized').label).to.contain('some by another caller (the upkeep cron)');
-      expect(checkOf(ctx, 'every claim is finalized').detail).to.equal('account finalized by another caller, wallet finalized by another caller');
+      expect(checkOf(ctx, 'the next batch is refused until the top-up').ok).to.equal(true);
+      expect(checkOf(ctx, 'the first batch counts in whole').ok).to.equal(true);
+      expect(await fx.f.QIS.bucketFilled(s.periods.ca, 0)).to.be.greaterThan(s.amounts.caValue);
     });
 
-    it('takes them too when first run in E+2: they are finalized, not void', async () => {
-      await setupAndServe();
+    it('counts each batch as it lands, and the epoch takes λ with its first value', async () => {
+      use(await loadFixture(afterProof));
       const s = stateNow();
-      await scoreIn(s.E + 1n);
-      await upkeepFinalizes();
-      await toEpoch(s.E + 2n);
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
-      passes(ctx);
-      expect(ctx.file.done('finalize')).to.equal(true);
-      expect(checkOf(ctx, 'every claim is finalized').detail).to.equal('account finalized by another caller, wallet finalized by another caller');
-      expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
+      expect((await fx.f.QIS.getEpochTotals(s.E)).sumR).to.equal(0n);
+      await stops(phaseServe(await ctxOf('serve', { stopAt: 'serve.batch-1' })));
+      const totals = await fx.f.QIS.getEpochTotals(s.E);
+      expect(totals.sumR).to.be.greaterThan(0n);
+      expect(totals.lambdaBps).to.equal(await fx.f.QIS.lambdaBps());
+      expect((await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E)).r).to.equal(totals.sumR);
     });
 
-    describe('with other value in the seller\'s R and in the epoch\'s', () => {
-      /** The seller and another claim on another buyer's period of E, and are finalized on it past the deadline. */
-      const otherValue = async () => {
-        use(await loadFixture(afterServe));
-        const s = stateNow();
-        const period = await fx.helpers.walletFund(fx.f.accounts[21], s.E, 50n * TRAC);
-        const other = await fx.helpers.createSeller(100_000n * TRAC, 0n);
-        await fx.helpers.claimReceipts(fx.seller, period, 10n * TRAC);
-        await fx.helpers.claimReceipts(other, period, 5n * TRAC);
-        await toDeadline();
-        await scoreIn(s.E + 1n);
-        await fx.helpers.scoreEpoch(s.E + 1n, other, 10n ** 18n);
-        await fx.f.QS.connect(fx.f.accounts[20]).finalizeClaims([fx.seller, other].map((x) => ({ subscriptionId: period, bucketIndex: 0n, seller: x.identityId })));
-        return s;
-      };
-
-      it('takes what the upkeep cron finalized at what it was due: each claim, R and ΣR hold', async () => {
-        await otherValue();
-        await upkeepFinalizes();
-        const ctx = await ctxOf('finalize');
-        await phaseFinalize(ctx);
-        passes(ctx);
-        expect(ctx.file.done('finalize')).to.equal(true);
-        expect(checkOf(ctx, 'R and score in epoch').detail).to.contain('3 finalizations');
-        expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').detail).to.contain('4 finalizations');
-      });
-
-      it('fails claims the upkeep cron finalized at too little, though the other value lifts R past all they were due', async () => {
-        const s = await otherValue();
-        await upkeepFinalizesTooLittle();
-        const finalized = (await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E + 1n)).r;
-        const claims = expectedClaims(s);
-        const due = (await Promise.all(claims.map(async (x) => (await fx.f.QIS.getSellerClaim(x.subscriptionId, x.bucketIndex, x.seller)).claimed))).reduce((a, b) => a + b, 0n);
-        expect(finalized).to.be.greaterThan(due); // what a lower bound on R would have taken
-
-        const blocks = await head();
-        const ctx = await ctxOf('finalize');
-        await phaseFinalize(ctx);
-        expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(false);
-        expect(checkOf(ctx, 'the wallet claim is finalized in epoch').ok).to.equal(false);
-        expect(checkOf(ctx, 'every claim is finalized').ok).to.equal(true);
-        expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
-        expect(ctx.file.done('finalize')).to.equal(false);
-        expect(ctx.file.failedChecks('finalize')).to.equal(2);
-        expect(await head()).to.equal(blocks);
-        expect(await errorOf(phaseCloseClaim(await ctxOf('close-claim')))).to.match(/^PHASE=finalize ended with 2 failed checks/);
-      });
-    });
-
-    it('fails a claim storage holds finalized with no event of it, and an R that holds what no finalization shows', async () => {
-      await setupAndServe();
+    it('stops once E has ended, sending nothing: a batch lands only in its period\'s epoch', async () => {
+      use(await loadFixture(afterProof));
       const s = stateNow();
-      const [account, wallet] = expectedClaims(s);
-      await scoreIn(s.E + 1n);
-      await fx.f.QS.connect(fx.f.accounts[20]).finalizeClaims([{ subscriptionId: account.subscriptionId, bucketIndex: account.bucketIndex, seller: account.seller }]);
-      const writer = fx.f.accounts[46];
-      await fx.f.Hub.setContractAddress('ClaimWriter', writer.address);
-      const { claimed, weighted } = await fx.f.QIS.getSellerClaim(wallet.subscriptionId, wallet.bucketIndex, wallet.seller);
-      await fx.f.QIS.connect(writer).finalizeClaim(wallet.subscriptionId, wallet.bucketIndex, wallet.seller, s.E + 1n, claimed, weighted);
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
-      expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(true);
-      expect(checkOf(ctx, 'the wallet claim is finalized in epoch').ok).to.equal(false);
-      expect(checkOf(ctx, 'the wallet claim is finalized in epoch').detail).to.equal('no ClaimsFinalized of it on chain');
-      expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(false);
-      expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').ok).to.equal(false);
-      expect(ctx.file.done('finalize')).to.equal(false);
-    });
-
-    it('fails a claim finalized at the value it was due and another score, and at the score it was due and another value', async () => {
-      for (const field of ['weighted', 'claimed']) {
-        await setupAndServe();
-        const s = stateNow();
-        await scoreIn(s.E + 1n);
-        await upkeepFinalizes();
-        const ctx = await ctxOf('finalize');
-        // What the claim holds says it was due another amount than it finalized to, in that one field.
-        ctx.c = {
-          ...ctx.c,
-          qis: new Proxy(ctx.c.qis, {
-            get: (t, k) =>
-              k === 'getSellerClaim'
-                ? async (...args: Parameters<typeof t.getSellerClaim>) => {
-                    const claim = await t.getSellerClaim(...args);
-                    return new Proxy(claim, { get: (x, f) => (f === field ? Reflect.get(x, f) + 1n : Reflect.get(x, f)) });
-                  }
-                : Reflect.get(t, k),
-          }),
-        };
-        await phaseFinalize(ctx);
-        expect(checkOf(ctx, 'the account claim is finalized in epoch').ok, field).to.equal(false);
-        expect(ctx.file.done('finalize'), field).to.equal(false);
-      }
-    });
-
-    it('calls a claim void, and fails, only if it is still unfinalized once E+1 has ended', async () => {
-      await setupAndServe();
-      const s = stateNow();
-      await toEpoch(s.E + 2n);
+      await toEpoch(s.E + 1n);
       const blocks = await head();
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(failedLabels(ctx)).to.have.length(2);
-      expect(failedLabels(ctx).join()).to.contain('the account claim is finalized').and.to.contain('the wallet claim is finalized').and.to.contain('the claim is void');
-      expect(ctx.file.done('finalize')).to.equal(false);
+      expect(await errorOf(phaseServe(await ctxOf('serve')))).to.match(new RegExp(`^serve runs in epoch ${s.E}, the epoch of the periods, and a batch lands only there`));
       expect(await head()).to.equal(blocks);
-    });
-
-    it('calls void only the claim that is unfinalized, when the upkeep cron finalized the other', async () => {
-      await setupAndServe();
-      const s = stateNow();
-      await scoreIn(s.E + 1n);
-      await upkeepFinalizes('wallet');
-      await toEpoch(s.E + 2n);
-      const ctx = await ctxOf('finalize');
-      await phaseFinalize(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(failedLabels(ctx)).to.have.length(1);
-      expect(failedLabels(ctx)[0]).to.contain('the account claim is finalized');
     });
 
     it('in a dry run, with the fork\'s switches on and no score, sends nothing and moves nothing', async () => {
-      await setupAndServe();
+      use(await loadFixture(afterSetup));
       const s = stateNow();
       editState((raw) => {
         raw.network = 'fork';
@@ -1102,32 +886,15 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const clock = await time.latest();
       let ctx: PoolCtx | undefined;
       const calls = await rpcCalls(async () => {
-        ctx = await ctxOf('finalize', { send: false, local: true, warp: true, proofs: true });
-        await phaseFinalize(ctx);
+        ctx = await ctxOf('serve', { send: false, local: true, warp: true, proofs: true });
+        await phaseServe(ctx);
       });
       expect(calls.filter((m) => MUTATING.test(m))).to.deep.equal([]);
       expect(calls).to.include('eth_call');
       expect(await head()).to.equal(blocks);
       expect(await time.latest()).to.equal(clock);
-      expect(await fx.f.RSS.getNodeEpochScore(s.E + 1n, fx.seller.identityId)).to.equal(0n);
+      expect(await fx.f.RSS.getNodeEpochScore(s.E, fx.seller.identityId)).to.equal(0n);
       expect(ctx?.report.status).to.equal('waiting');
-    });
-
-    it('in a dry run before it opens, with FORK_WARP, defers and leaves the clock', async () => {
-      use(await loadFixture(afterServe));
-      editState((raw) => {
-        raw.network = 'fork';
-        raw.forkBlock = '1';
-      });
-      const clock = await time.latest();
-      let ctx: PoolCtx | undefined;
-      const calls = await rpcCalls(async () => {
-        ctx = await ctxOf('finalize', { send: false, local: true, warp: true, proofs: true });
-        await phaseFinalize(ctx);
-      });
-      expect(calls.filter((m) => MUTATING.test(m))).to.deep.equal([]);
-      expect(await time.latest()).to.equal(clock);
-      expect(ctx?.report.status).to.equal('deferred');
     });
   });
 
@@ -1142,7 +909,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('sends nothing in serve', async () => {
-      use(await loadFixture(afterSetup));
+      use(await loadFixture(afterProof));
       editState((raw) => {
         raw.network = 'fork';
         raw.forkBlock = '1';
@@ -1153,8 +920,25 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       expect(fs.readFileSync(stateFile, 'utf8')).to.equal(before);
     });
 
+    it('in claim before it opens, with FORK_WARP, defers and leaves the clock', async () => {
+      use(await loadFixture(afterServe));
+      editState((raw) => {
+        raw.network = 'fork';
+        raw.forkBlock = '1';
+      });
+      const clock = await time.latest();
+      let ctx: PoolCtx | undefined;
+      const calls = await rpcCalls(async () => {
+        ctx = await ctxOf('claim', { send: false, local: true, warp: true, proofs: true });
+        await phaseClaim(ctx);
+      });
+      expect(calls.filter((m) => MUTATING.test(m))).to.deep.equal([]);
+      expect(await time.latest()).to.equal(clock);
+      expect(ctx?.report.status).to.equal('deferred');
+    });
+
     it('sends nothing in withdraw, and leaves the position', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       editState((raw) => {
         raw.network = 'fork';
         raw.forkBlock = '1';
@@ -1174,7 +958,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     };
 
     it('defers the second run before it spends anything, and the first goes on', async () => {
-      use(await loadFixture(afterSetup));
+      use(await loadFixture(afterProof));
       const needed = await fundOwner();
       const owner = ownerWallet().address;
       const tokens = await fx.f.StakingNFT.nextTokenId();
@@ -1203,6 +987,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const second = await ctxOf('setup', { run: 'b' });
       await phaseSetup(second);
       passes(second);
+      await scoreIn(E + 1n);
       const serve = await ctxOf('serve', { run: 'b' });
       await phaseServe(serve);
       passes(serve);
@@ -1260,77 +1045,138 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
   });
 
-  describe('close-claim, after the finalization', () => {
+  describe('claim, against what the chain holds', () => {
     const served = async () => {
       use(await loadFixture(afterServe));
-      await toDeadline();
-      const s = stateNow();
-      await scoreIn(s.E + 1n);
-      return s;
+      return stateNow();
+    };
+    /** Fails on what the chain holds, sends nothing, and the run goes no further. */
+    const failsAndGoesNoFurther = async (ctx: PoolCtx, label: string) => {
+      const blocks = await head();
+      await phaseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, label).ok, label).to.equal(false);
+      expect(ctx.file.done('claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=claim SEND=1 first');
+    };
+    /** A writer of the storage's narrow setters, as a later logic version would be. */
+    const writer = async () => {
+      const account = fx.f.accounts[46];
+      await fx.f.Hub.setContractAddress('PoolWriter', account.address);
+      return fx.f.QIS.connect(account);
     };
 
-    it('refuses a run with one claim finalized and one void, sends nothing, and the run goes no further', async () => {
+    it('pays right after E ends, with no upkeep call of any kind before it', async () => {
       const s = await served();
-      await upkeepFinalizes('wallet');
-      await toEpoch(s.E + 2n);
-      const finalize = await ctxOf('finalize');
-      await phaseFinalize(finalize);
-      expect(finalize.report.status).to.equal('failed');
-      expect(finalize.file.done('finalize')).to.equal(false);
-
-      const blocks = await head();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(false);
-      expect(checkOf(ctx, 'both of the run\'s claims are finalized').detail).to.contain('the account claim is not');
-      expect(ctx.file.done('close-claim')).to.equal(false);
-      expect(await head()).to.equal(blocks);
-      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
-    });
-
-    it('refuses a run with neither finalized', async () => {
-      const s = await served();
-      await toEpoch(s.E + 2n);
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'both of the run\'s claims are finalized').detail).to.contain('the account and wallet claim is not');
-      expect(ctx.file.done('close-claim')).to.equal(false);
-    });
-
-    it('takes both claims finalized by the upkeep cron, with PHASE=finalize never run', async () => {
-      const s = await served();
-      await upkeepFinalizes();
-      await toEpoch(s.E + 2n);
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
+      await toEpoch(s.E + 1n);
+      expect((await fx.f.Vault.getPosition(s.tokenId)).lastClaimedEpoch).to.be.lessThan(s.E);
+      const ctx = await ctxOf('claim');
+      await phaseClaim(ctx);
       passes(ctx);
-      expect(ctx.file.done('close-claim')).to.equal(true);
-      expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(true);
+      expect(ctx.file.done('claim')).to.equal(true);
+      expect(checkOf(ctx, 'claimFor pays what the epochs\' nets give').ok).to.equal(true);
+      expect(checkOf(ctx, 'the position is paid a share of epoch').ok).to.equal(true);
+      expect(Object.keys(rawState().steps).filter((k) => k.startsWith('claim.'))).to.deep.equal(['claim.claim']);
     });
 
-    it('refuses claims the upkeep cron finalized at too little, with PHASE=finalize never run: it sends nothing, and the run goes no further', async () => {
+    it('defers before E has ended, failing nothing', async () => {
+      await served();
+      const ctx = await ctxOf('claim');
+      await phaseClaim(ctx);
+      expect(ctx.report.status).to.equal('deferred');
+      expect(ctx.report.failed).to.equal(0);
+    });
+
+    it('fails a bucket that counted other than the run landed, by its events', async () => {
       const s = await served();
-      await upkeepFinalizesTooLittle();
-      await toEpoch(s.E + 2n);
-      const blocks = await head();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'both of the run\'s claims are finalized').ok).to.equal(true);
-      expect(checkOf(ctx, 'the account claim is finalized in epoch').ok).to.equal(false);
-      expect(checkOf(ctx, 'the wallet claim is finalized in epoch').ok).to.equal(false);
-      expect(ctx.file.done('close-claim')).to.equal(false);
-      expect(await head()).to.equal(blocks);
-      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+      await toEpoch(s.E + 1n);
+      editState((raw) => {
+        raw.amounts.walletValue = String(BigInt(raw.amounts.walletValue) + TRAC);
+      });
+      await failsAndGoesNoFurther(await ctxOf('claim'), 'the wallet bucket counted all the seller claimed');
     });
 
-    describe('with what is due in E+1 against what the periods of E were funded with', () => {
-      /** The wallet money due in `epoch`, `less` short of what was booked, as a booking that fell short leaves it. */
-      const dueShort = async (epoch: bigint, less: bigint) => {
+    it('fails a fill the batches do not show', async () => {
+      const s = await served();
+      const qis = await writer();
+      await qis.setBucketFilled(s.periods.wallet, 0, (await fx.f.QIS.bucketFilled(s.periods.wallet, 0)) - 1n);
+      await toEpoch(s.E + 1n);
+      await failsAndGoesNoFurther(await ctxOf('claim'), 'the wallet bucket counted all the seller claimed');
+    });
+
+    describe('with other value in the seller\'s R and in the epoch\'s', () => {
+      /** The seller and another land on another buyer's period of E. */
+      const otherValue = async () => {
+        const s = await served();
+        const period = await fx.helpers.walletFund(fx.f.accounts[21], s.E, 50n * TRAC);
+        const other = await fx.helpers.createSeller(100_000n * TRAC, 0n);
+        await fx.helpers.scoreEpoch(s.E, other, 10n ** 18n);
+        await fx.helpers.claimReceipts(fx.seller, period, 10n * TRAC);
+        await fx.helpers.claimReceipts(other, period, 5n * TRAC);
+        return { s, other };
+      };
+
+      it('takes what they counted: each bucket, R and ΣR hold', async () => {
+        const { s } = await otherValue();
+        await toEpoch(s.E + 1n);
+        const ctx = await ctxOf('claim');
+        await phaseClaim(ctx);
+        passes(ctx);
+        expect(ctx.file.done('claim')).to.equal(true);
+        expect(checkOf(ctx, 'R and score in epoch').detail).to.contain('4 groups');
+        expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').detail).to.contain('5 groups');
+      });
+
+      it('fails an R that holds what no batch shows, though the epoch\'s sum holds', async () => {
+        const { s } = await otherValue();
+        const qis = await writer();
+        const node = await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E);
+        await qis.setNodeEpoch(fx.seller.identityId, s.E, { r: node.r + 1n, score: node.score });
+        await toEpoch(s.E + 1n);
+        const ctx = await ctxOf('claim');
+        await failsAndGoesNoFurther(ctx, 'R and score in epoch');
+        expect(checkOf(ctx, 'ΣR and ΣQueryInferenceScore').ok).to.equal(true);
+      });
+
+      it('fails a score that holds what no batch shows, at the R it was due', async () => {
+        const { s } = await otherValue();
+        const qis = await writer();
+        const node = await fx.f.QIS.getNodeEpoch(fx.seller.identityId, s.E);
+        await qis.setNodeEpoch(fx.seller.identityId, s.E, { r: node.r, score: node.score + 1n });
+        await toEpoch(s.E + 1n);
+        await failsAndGoesNoFurther(await ctxOf('claim'), 'R and score in epoch');
+      });
+
+      it('fails a ΣR that holds what no batch shows, though the seller\'s R holds', async () => {
+        const { s } = await otherValue();
+        const qis = await writer();
+        const totals = await fx.f.QIS.getEpochTotals(s.E);
+        await qis.setEpochTotals(s.E, { sumR: totals.sumR + 1n, sumScore: totals.sumScore, lambdaBps: totals.lambdaBps });
+        await toEpoch(s.E + 1n);
+        const ctx = await ctxOf('claim');
+        await failsAndGoesNoFurther(ctx, 'ΣR and ΣQueryInferenceScore');
+        expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
+      });
+
+      it('fails a group of ours counted at too little, though the other value lifts R past all ours were due', async () => {
+        const { s } = await otherValue();
+        await toEpoch(s.E + 1n);
+        // What the run planned for the bucket is more than its events show.
+        editState((raw) => {
+          raw.amounts.caValue = String(BigInt(raw.amounts.caValue) + 2n * TRAC);
+        });
+        const ctx = await ctxOf('claim');
+        await failsAndGoesNoFurther(ctx, 'the account bucket counted all the seller claimed');
+        expect(checkOf(ctx, 'R and score in epoch').ok).to.equal(true);
+      });
+    });
+
+    describe('with what is booked in E against what the periods of E were funded with', () => {
+      /** The wallet money booked in `epoch`, `less` short of what was funded, as a booking that fell short leaves it. */
+      const bookedShort = async (epoch: bigint, less: bigint) => {
         const qis = await fx.f.QIS.getAddress();
-        const { wallet } = await fx.f.QIS.dueIn(epoch);
+        const { wallet } = await fx.f.QIS.fundingIn(epoch);
         for (let at = 0; at < 200; at++) {
           const slot = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(['uint256', 'uint256'], [epoch, at]));
           if (BigInt(await getStorageAt(qis, slot)) === wallet) {
@@ -1338,43 +1184,29 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
             return;
           }
         }
-        throw new Error('no slot holds the wallet money due');
+        throw new Error('no slot holds the wallet money booked');
       };
-      /** A run past its finalization, in E+2, with another buyer's funding of E beside its own. */
-      const finalizedBesideAnother = async () => {
-        use(await loadFixture(afterServe));
-        const s = stateNow();
+      /** A run past its serve, with another buyer's funding of E beside its own. */
+      const servedBesideAnother = async () => {
+        const s = await served();
         await fx.helpers.walletFund(fx.f.accounts[21], s.E, 5n * TRAC);
-        await toDeadline();
-        await scoreIn(s.E + 1n);
-        await upkeepFinalizes();
-        await toEpoch(s.E + 2n);
         return s;
       };
 
-      it('refuses a booking of ours that fell short, though another buyer\'s funding lifts the due past ours: it sends nothing', async () => {
-        const s = await finalizedBesideAnother();
-        await dueShort(s.E + 1n, TRAC);
-        expect((await fx.f.QIS.dueIn(s.E + 1n)).wallet).to.be.greaterThan(s.amounts.walletValue); // what a lower bound would have taken
-        const blocks = await head();
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
-        expect(ctx.report.status).to.equal('failed');
-        expect(checkOf(ctx, 'what is due in epoch').ok).to.equal(false);
-        expect(ctx.file.done('close-claim')).to.equal(false);
-        expect(await head()).to.equal(blocks);
-        expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+      it('refuses a booking of ours that fell short, though another buyer\'s funding lifts the money past ours: it sends nothing', async () => {
+        const s = await servedBesideAnother();
+        await toEpoch(s.E + 1n);
+        await bookedShort(s.E, TRAC);
+        expect((await fx.f.QIS.fundingIn(s.E)).wallet).to.be.greaterThan(s.amounts.walletValue); // what a lower bound would have taken
+        await failsAndGoesNoFurther(await ctxOf('claim'), 'what is booked in epoch');
       });
 
-      it('refuses a due that holds what no funding shows', async () => {
-        const s = await finalizedBesideAnother();
-        const writer = fx.f.accounts[46];
-        await fx.f.Hub.setContractAddress('DueWriter', writer.address);
-        await fx.f.QIS.connect(writer).addWalletDue(s.E + 1n, 1n);
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
-        expect(checkOf(ctx, 'what is due in epoch').ok).to.equal(false);
-        expect(ctx.file.done('close-claim')).to.equal(false);
+      it('refuses a booking that holds what no funding shows', async () => {
+        const s = await servedBesideAnother();
+        const qis = await writer();
+        await qis.addWalletFunding(s.E, 1n);
+        await toEpoch(s.E + 1n);
+        await failsAndGoesNoFurther(await ctxOf('claim'), 'what is booked in epoch');
       });
 
       it('takes another buyer\'s period of E funded in the epoch before, and top-ups, to the wei, and leaves out periods of other epochs', async () => {
@@ -1385,65 +1217,40 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         await toEpoch(before + 1n);
         await fundExactly();
         await phaseSetup(await ctxOf('setup'));
+        await scoreIn(before + 1n);
         await phaseServe(await ctxOf('serve'));
         const s = stateNow();
         await fx.helpers.walletFund(fx.f.accounts[23], s.E + 1n, 4n * TRAC);
-        await toDeadline();
-        await scoreIn(s.E + 1n);
-        await upkeepFinalizes();
-        await toEpoch(s.E + 2n);
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
+        await toEpoch(s.E + 1n);
+        const ctx = await ctxOf('claim');
+        await phaseClaim(ctx);
         passes(ctx);
         const raw = rawState();
-        expect(BigInt(raw.amounts.walletValue) + 5n * TRAC).to.equal((await fx.f.QIS.dueIn(s.E + 1n)).wallet);
-        expect(checkOf(ctx, 'what is due in epoch').detail).to.contain(`wallet ${fmt(BigInt(raw.amounts.walletValue) + 5n * TRAC)} of`);
+        expect(BigInt(raw.amounts.walletValue) + 5n * TRAC).to.equal((await fx.f.QIS.fundingIn(s.E)).wallet);
+        expect(checkOf(ctx, 'what is booked in epoch').detail).to.contain(`wallet ${fmt(BigInt(raw.amounts.walletValue) + 5n * TRAC)} of`);
       });
-    });
-
-    it('refuses while PHASE=finalize stands failed, though both claims are finalized', async () => {
-      const s = await served();
-      await upkeepFinalizes();
-      await toEpoch(s.E + 2n);
-      editState((raw) => {
-        raw.phases.finalize = { status: 'failed', failedChecks: 1 };
-      });
-      expect(await errorOf(phaseCloseClaim(await ctxOf('close-claim')))).to.match(/^PHASE=finalize ended with 1 failed check/);
-    });
-
-    it('defers before E+1 has ended, without calling a claim void', async () => {
-      await served();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('deferred');
-      expect(ctx.report.failed).to.equal(0);
     });
   });
 
-  describe('close-claim', () => {
+  describe('claim', () => {
     /** A claim of the position outside the phase, as the upkeep cron's would be. */
     const upkeepClaims = async (tokenId: bigint) => (await fx.f.StakingV10.connect(fx.f.accounts[20]).claimFor(tokenId)).wait();
 
-    it('resumed after its close and after its claim: nothing is sent again, also an epoch later', async () => {
-      for (const stopAt of ['close-claim.close-epochs', 'close-claim.claim']) {
-        use(await loadFixture(afterFinalize));
-        const s = stateNow();
-        await toEpoch(s.E + 2n);
-        await stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt })));
-        const before = await fx.f.Vault.getPosition(s.tokenId);
-        const later = stopAt === 'close-claim.claim';
-        if (later) await toEpoch(s.E + 3n);
-        const resumed = await ctxOf('close-claim');
-        await phaseCloseClaim(resumed);
-        passes(resumed);
-        expect(resumed.file.done('close-claim'), stopAt).to.equal(true);
-        const after = await fx.f.Vault.getPosition(s.tokenId);
-        if (later) {
-          expect(after.raw).to.equal(before.raw);
-          expect(after.lastClaimedEpoch).to.equal(before.lastClaimedEpoch);
-          expect(checkOf(resumed, 'the position was claimed for epochs').label).to.contain('by this phase before it was interrupted');
-        }
-      }
+    it('resumed after its claim: nothing is sent again, also an epoch later', async () => {
+      use(await loadFixture(afterServe));
+      const s = stateNow();
+      await toEpoch(s.E + 1n);
+      await stops(phaseClaim(await ctxOf('claim', { stopAt: 'claim.claim' })));
+      const before = await fx.f.Vault.getPosition(s.tokenId);
+      await toEpoch(s.E + 2n);
+      const resumed = await ctxOf('claim');
+      await phaseClaim(resumed);
+      passes(resumed);
+      expect(resumed.file.done('claim')).to.equal(true);
+      const after = await fx.f.Vault.getPosition(s.tokenId);
+      expect(after.raw).to.equal(before.raw);
+      expect(after.lastClaimedEpoch).to.equal(before.lastClaimedEpoch);
+      expect(checkOf(resumed, 'the position was claimed for epochs').label).to.contain('by this phase before it was interrupted');
     });
 
     /** The position's raw stake a wei short of what its claims paid: their receipts and the cumulative rewards stay as they are. */
@@ -1455,26 +1262,26 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     const failsOnTheRawStake = async (s: SetupState) => {
       await uncredited(s.tokenId);
       const blocks = await head();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
+      const ctx = await ctxOf('claim');
+      await phaseClaim(ctx);
       expect(checkOf(ctx, 'the position was claimed for epochs').ok).to.equal(true);
       expect(checkOf(ctx, 'compounded into the position\'s raw stake').ok).to.equal(false);
-      expect(ctx.file.done('close-claim')).to.equal(false);
+      expect(ctx.file.done('claim')).to.equal(false);
       expect(await head()).to.equal(blocks);
     };
 
     it('fails a replayed claim that did not reach the raw stake, though its receipts and the cumulative rewards are right', async () => {
-      use(await loadFixture(afterFinalize));
+      use(await loadFixture(afterServe));
       const s = stateNow();
-      await toEpoch(s.E + 2n);
-      await stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' })));
+      await toEpoch(s.E + 1n);
+      await stops(phaseClaim(await ctxOf('claim', { stopAt: 'claim.claim' })));
       await failsOnTheRawStake(s);
     });
 
     it('fails the upkeep cron\'s claim that did not reach the raw stake, the same way', async () => {
-      use(await loadFixture(afterFinalize));
+      use(await loadFixture(afterServe));
       const s = stateNow();
-      await toEpoch(s.E + 2n);
+      await toEpoch(s.E + 1n);
       await upkeepClaims(s.tokenId);
       await failsOnTheRawStake(s);
     });
@@ -1485,71 +1292,71 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
         expect(checkOf(ctx, label).ok, label).to.equal(false);
         expect(checkOf(ctx, 'StakingKPI gives each epoch the net').ok).to.equal(false);
         expect(checkOf(ctx, 'compounded into the position\'s raw stake').ok).to.equal(true);
-        expect(ctx.file.done('close-claim')).to.equal(false);
+        expect(ctx.file.done('claim')).to.equal(false);
       };
 
       it('fails the upkeep cron\'s, sending nothing', async () => {
-        use(await loadFixture(afterFinalize));
+        use(await loadFixture(afterServe));
         const s = stateNow();
-        await toEpoch(s.E + 2n);
+        await toEpoch(s.E + 1n);
         await tooSmall(() => upkeepClaims(s.tokenId));
         const blocks = await head();
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
+        const ctx = await ctxOf('claim');
+        await phaseClaim(ctx);
         await failsOnTheNets(ctx, 'the position was claimed for epochs');
         expect(await head()).to.equal(blocks);
       });
 
       it('fails this run\'s, interrupted, sending nothing', async () => {
-        use(await loadFixture(afterFinalize));
+        use(await loadFixture(afterServe));
         const s = stateNow();
-        await toEpoch(s.E + 2n);
-        await tooSmall(async () => stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' }))));
+        await toEpoch(s.E + 1n);
+        await tooSmall(async () => stops(phaseClaim(await ctxOf('claim', { stopAt: 'claim.claim' }))));
         const blocks = await head();
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
+        const ctx = await ctxOf('claim');
+        await phaseClaim(ctx);
         await failsOnTheNets(ctx, 'the position was claimed for epochs');
         expect(await head()).to.equal(blocks);
       });
 
       it('fails this run\'s own, on a net another position\'s claim stored too small', async () => {
-        use(await loadFixture(afterFinalize));
+        use(await loadFixture(afterServe));
         const s = stateNow();
-        await toEpoch(s.E + 2n);
+        await toEpoch(s.E + 1n);
         await tooSmall(() => upkeepClaims(fx.seller.tokenId));
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
+        const ctx = await ctxOf('claim');
+        await phaseClaim(ctx);
         expect(checkOf(ctx, 'claimFor pays what the epochs\' nets give').ok).to.equal(false);
         expect(checkOf(ctx, 'StakingKPI gives each epoch the net').ok).to.equal(false);
-        expect(ctx.file.done('close-claim')).to.equal(false);
+        expect(ctx.file.done('claim')).to.equal(false);
       });
     });
 
     it('passes a correct claim to the wei, with a fee and a pool that floor, on the upkeep cron\'s and on one resumed', async () => {
       for (const resumed of [false, true]) {
-        use(await loadFixture(afterFinalize));
+        use(await loadFixture(afterServe));
         const s = stateNow();
         await feeIs(1_237n);
-        await fx.helpers.publishingPool(s.E + 1n, 7n * TRAC + 1n);
-        await toEpoch(s.E + 2n);
-        if (resumed) await stops(phaseCloseClaim(await ctxOf('close-claim', { stopAt: 'close-claim.claim' })));
+        await fx.helpers.publishingPool(s.E, 7n * TRAC + 1n);
+        await toEpoch(s.E + 1n);
+        if (resumed) await stops(phaseClaim(await ctxOf('claim', { stopAt: 'claim.claim' })));
         else await upkeepClaims(s.tokenId);
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
+        const ctx = await ctxOf('claim');
+        await phaseClaim(ctx);
         passes(ctx);
-        expect(ctx.file.done('close-claim')).to.equal(true);
+        expect(ctx.file.done('claim')).to.equal(true);
         expect(checkOf(ctx, 'the position was claimed for epochs').ok).to.equal(true);
       }
     });
 
     it('checks what the upkeep cron claimed, from the claims the chain recorded, and claims the rest itself', async () => {
-      use(await loadFixture(afterFinalize));
+      use(await loadFixture(afterServe));
       const s = stateNow();
-      await toEpoch(s.E + 2n);
+      await toEpoch(s.E + 1n);
       await upkeepClaims(s.tokenId);
-      await toEpoch(s.E + 3n);
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
+      await toEpoch(s.E + 2n);
+      const ctx = await ctxOf('claim');
+      await phaseClaim(ctx);
       passes(ctx);
       const by = checkOf(ctx, 'the position was claimed for epochs');
       expect(by.label).to.contain('another caller (the upkeep cron)');
@@ -1559,152 +1366,59 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
   });
 
-  describe('every close so far, against the close rule', () => {
+  describe('every ended epoch\'s pool, against the rollover rule', () => {
     const MONEY = 5n * TRAC;
-    /** Another buyer's period of this epoch, due in the next, which ends with nothing finalized in it, and the clock in the one after: the empty epoch. */
+    /** Another buyer's period of this epoch, which ends with no value counted in it, and the clock in the next: the empty epoch. */
     const anEmptyEpochWithMoney = async () => {
       use(await loadFixture(deployFixture));
-      const before = await fx.f.Chronos.getCurrentEpoch();
-      await fx.helpers.walletFund(fx.f.accounts[21], before, MONEY);
-      await toEpoch(before + 2n);
-      return before + 1n;
+      const empty = await fx.f.Chronos.getCurrentEpoch();
+      await fx.helpers.walletFund(fx.f.accounts[21], empty, MONEY);
+      await toEpoch(empty + 1n);
+      return empty;
     };
-    /** That epoch's close as it should not be: its pool took its money, and carried nothing on. The epochs before it are closed as they should be. */
-    const closeWrongly = async (empty: bigint) => {
-      const writer = fx.f.accounts[45];
-      await fx.f.Hub.setContractAddress('CloseWriter', writer.address);
-      const steps = empty - 1n - (await fx.f.QIS.closedThrough());
-      if (steps > 0n) await fx.f.QS.closeEpochs(steps);
-      return fx.f.QIS.connect(writer).closeEpoch(empty, MONEY, await fx.f.QIS.lambdaBpsAt(empty), 0n);
-    };
-    /** A whole run from here, past its finalization by the upkeep cron, and the clock in E+2. */
+    /** A whole run from here, and the clock in E+1. */
     const aRun = async () => {
       await fundExactly();
       await phaseSetup(await ctxOf('setup'));
+      await scoreIn(stateNow().E);
       await phaseServe(await ctxOf('serve'));
       const s = stateNow();
-      await toDeadline();
-      await scoreIn(s.E + 1n);
-      await upkeepFinalizes();
-      await toEpoch(s.E + 2n);
+      await toEpoch(s.E + 1n);
       return s;
     };
-    const upkeepCloses = () => fx.f.QS.connect(fx.f.accounts[20]).closeEpochs(64n);
 
-    it('takes a real carry across an empty epoch to the wei, closed by this run or by the upkeep cron', async () => {
-      for (const byCron of [false, true]) {
-        const empty = await anEmptyEpochWithMoney();
-        const s = await aRun();
-        if (byCron) await upkeepCloses();
-        const ctx = await ctxOf('close-claim');
-        await phaseCloseClaim(ctx);
-        passes(ctx);
-        expect(ctx.file.done('close-claim')).to.equal(true);
-        const P = s.E + 1n;
-        const due = await fx.f.QIS.dueIn(P);
-        expect((await fx.f.QIS.getEpochClose(empty)).pool).to.equal(0n);
-        expect((await fx.f.QIS.getEpochClose(P)).pool).to.equal(due.wallet + due.conviction + MONEY);
-        expect((await closeFromStorage(ctx.c, P)).carryIn).to.equal(MONEY);
-      }
-    });
-
-    it('fails an empty epoch whose stored pool took its money, closed through by the upkeep cron, naming it: the phase sends nothing and stays incomplete', async () => {
+    it('takes real money rolled across an empty epoch to the wei', async () => {
       const empty = await anEmptyEpochWithMoney();
-      await closeWrongly(empty);
       const s = await aRun();
-      await upkeepCloses();
-      const P = s.E + 1n;
-      const due = await fx.f.QIS.dueIn(P);
-      expect((await fx.f.QIS.getEpochClose(P)).pool).to.equal(due.wallet + due.conviction); // the later pool, missing that money
-      const blocks = await head();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'every close from').ok).to.equal(false);
-      expect(checkOf(ctx, 'every close from').detail).to.equal(`epoch ${empty} pools ${fmt(MONEY)} TRAC, and the rule gives 0.0 TRAC`);
-      expect(ctx.report.why).to.contain(`epoch ${empty} pools`);
-      expect(ctx.file.done('close-claim')).to.equal(false);
-      expect(await head()).to.equal(blocks);
-      expect((await closeFromStorage(ctx.c, P)).carryIn).to.equal(MONEY); // no stored pool lowers it
-      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=close-claim SEND=1 first');
+      const ctx = await ctxOf('claim');
+      await phaseClaim(ctx);
+      passes(ctx);
+      expect(ctx.file.done('claim')).to.equal(true);
+      const booked = await fx.f.QIS.fundingIn(s.E);
+      expect(await fx.f.QS.epochPool(empty)).to.equal(0n);
+      expect(await fx.f.QS.epochPool(s.E)).to.equal(booked.wallet + booked.conviction + MONEY);
+      expect(checkOf(ctx, 'every ended epoch from').detail).to.equal('0.0 TRAC waiting for the next epoch with value');
     });
 
-    it('fails the same on this run\'s path, before it closes anything', async () => {
+    it('fails a pool the rule does not give, naming the epoch: the phase sends nothing and stays incomplete', async () => {
       const empty = await anEmptyEpochWithMoney();
-      await closeWrongly(empty);
       await aRun();
-      const closed = await fx.f.QIS.closedThrough();
       const blocks = await head();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(checkOf(ctx, 'every close from').detail).to.contain(`epoch ${empty} pools`);
-      expect(ctx.file.done('close-claim')).to.equal(false);
-      expect(await head()).to.equal(blocks);
-      expect(await fx.f.QIS.closedThrough()).to.equal(closed);
-    });
-
-    it('fails a close that lands wrong beside this run\'s own, and claims nothing', async () => {
-      const empty = await anEmptyEpochWithMoney();
-      await fx.f.QS.closeEpochs(empty - 1n - (await fx.f.QIS.closedThrough()));
-      await aRun();
-      const writer = fx.f.accounts[45];
-      await fx.f.Hub.setContractAddress('CloseWriter', writer.address);
-      const lambda = await fx.f.QIS.lambdaBpsAt(empty);
-      const owner = ownerBeside(fx.f.QS.interface.getFunction('closeEpochs').selector, () =>
-        fx.f.QIS.connect(writer).closeEpoch(empty, MONEY, lambda, 0n, { maxPriorityFeePerGas: 10n ** 11n, maxFeePerGas: 10n ** 12n }),
-      );
-      const ctx = await ctxOf('close-claim', { owner });
-      await phaseCloseClaim(ctx);
-      expect(ctx.report.status).to.equal('failed');
-      expect(failedLabels(ctx).join(' | ')).to.contain(`epoch ${empty} pools`);
-      expect(rawState().steps['close-claim.close-epochs']).to.not.equal(undefined);
-      expect(rawState().steps['close-claim.claim']).to.equal(undefined);
-      expect(ctx.file.done('close-claim')).to.equal(false);
-    });
-
-    it('fails a carry the closes do not leave, though every pool holds', async () => {
-      await anEmptyEpochWithMoney();
-      await aRun();
-      await upkeepCloses();
-      const writer = fx.f.accounts[45];
-      await fx.f.Hub.setContractAddress('CarryWriter', writer.address);
-      await fx.f.QIS.connect(writer).setCarry(1n);
-      const closed = await fx.f.QIS.closedThrough();
-      const ctx = await ctxOf('close-claim');
-      await phaseCloseClaim(ctx);
-      expect(checkOf(ctx, 'every close from').detail).to.contain(`the carry after epoch ${closed} is`);
-      expect(ctx.file.done('close-claim')).to.equal(false);
-    });
-
-    it('reads it all as of one block: a close landing meanwhile fails nothing', async () => {
-      use(await loadFixture(afterFinalize));
-      const s = stateNow();
-      await fx.helpers.walletFund(fx.f.accounts[21], s.E + 1n, MONEY); // due in E+2, which ends empty: its close moves the carry
-      await toEpoch(s.E + 3n);
-      await fx.f.QS.closeEpochs(s.E + 1n - (await fx.f.QIS.closedThrough()));
-      const ctx = await ctxOf('close-claim');
-      let landed = false;
+      const ctx = await ctxOf('claim');
       ctx.c = {
         ...ctx.c,
-        qis: new Proxy(ctx.c.qis, {
-          get: (t, k) =>
-            k === 'closedThrough'
-              ? async (...args: Parameters<typeof t.closedThrough>) => {
-                  const through = await t.closedThrough(...args);
-                  if (!landed) {
-                    landed = true;
-                    await fx.f.QS.connect(fx.f.accounts[20]).closeEpochs(1n);
-                  }
-                  return through;
-                }
-              : Reflect.get(t, k),
+        qs: new Proxy(ctx.c.qs, {
+          get: (t, k) => (k === 'epochPool' ? async (e: bigint) => (e === empty ? MONEY : t.epochPool(e)) : Reflect.get(t, k)),
         }),
       };
-      await phaseCloseClaim(ctx);
-      expect(landed).to.equal(true);
-      expect(checkOf(ctx, 'every close from').ok).to.equal(true);
-      expect(await fx.f.QIS.carry()).to.equal(MONEY);
+      await phaseClaim(ctx);
+      expect(ctx.report.status).to.equal('failed');
+      expect(checkOf(ctx, 'every ended epoch from').ok).to.equal(false);
+      expect(checkOf(ctx, 'every ended epoch from').detail).to.equal(`epoch ${empty} pools ${fmt(MONEY)} TRAC, and the rule gives 0.0 TRAC`);
+      expect(ctx.report.why).to.contain(`epoch ${empty} pools`);
+      expect(ctx.file.done('claim')).to.equal(false);
+      expect(await head()).to.equal(blocks);
+      expect(await errorOf(phaseWithdraw(await ctxOf('withdraw')))).to.equal('run PHASE=claim SEND=1 first');
     });
   });
 
@@ -1782,7 +1496,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
   });
 
   describe('withdraw', () => {
-    /** The middle of the epoch after the run's close-claim, before any proof in it, with something for it to pay. */
+    /** The middle of the epoch after the run's claim, before any proof in it, with something for it to pay. */
     const toMiddle = async () => {
       const e = await fx.f.Chronos.getCurrentEpoch();
       await toEpoch(e + 1n, (await fx.f.Chronos.epochLength()) / 2n);
@@ -1791,7 +1505,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     };
 
     it('waits, burning nothing, until the position holds score in the epoch, then goes through', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const s = stateNow();
       const e = await toMiddle();
       const blocks = await head();
@@ -1824,7 +1538,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('resumed after the withdrawal is mined: its result stands though the position is gone, also an epoch later, and the claim goes on', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const s = stateNow();
       const e = await toMiddle();
       await scoreIn(e);
@@ -1856,7 +1570,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('reads a claim of the withdrawn epoch by another caller from its own transaction, whatever else the owner received', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const s = stateNow();
       const e = await toMiddle();
       await scoreIn(e);
@@ -1873,7 +1587,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
 
     it('fails the claim of a withdrawn epoch whose stored net and payment are consistently too small, by the run or by another caller', async () => {
       for (const byAnother of [false, true]) {
-        use(await loadFixture(afterCloseClaim));
+        use(await loadFixture(afterClaim));
         const { tokenId } = stateNow();
         const e = await toMiddle();
         await scoreIn(e);
@@ -1892,7 +1606,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('fails a withdrawal whose automatic claim reads a net another position\'s claim stored too small', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const e = await toMiddle();
       await scoreIn(e);
       await toEpoch(e + 1n, (await fx.f.Chronos.epochLength()) / 2n);
@@ -1908,7 +1622,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const CLAIM = 'withdraw.claim-withdrawn-epoch';
       /** The position withdrawn in an epoch with a score and no reward, and the clock in the next. */
       const withdrawn = async () => {
-        use(await loadFixture(afterCloseClaim));
+        use(await loadFixture(afterClaim));
         const e = (await fx.f.Chronos.getCurrentEpoch()) + 1n;
         await toEpoch(e, (await fx.f.Chronos.epochLength()) / 2n);
         await scoreIn(e);
@@ -1948,7 +1662,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
           else await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: CLAIM })));
           const ctx = await ctxOf('withdraw');
           // The views give the position a share, which the claim did not pay.
-          ctx.c = { ...ctx.c, qs: new Proxy(ctx.c.qs, { get: (t, k) => (k === 'previewQueryInferenceGross' ? async () => 10n * TRAC : Reflect.get(t, k)) }) };
+          ctx.c = { ...ctx.c, qs: new Proxy(ctx.c.qs, { get: (t, k) => (k === 'queryInferenceGross' ? async () => 10n * TRAC : Reflect.get(t, k)) }) };
           await phaseWithdraw(ctx);
           expect(failedLabels(ctx).join(' | ')).to.contain(byAnother ? 'claimed by another caller' : 'claimWithdrawnEpoch pays the owner');
           expect(ctx.file.done('withdraw')).to.equal(false);
@@ -1971,7 +1685,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
       const CLAIM = 'withdraw.claim-withdrawn-epoch';
       /** The position withdrawn, with something to claim of that epoch, and the clock in the next: the claim is what is left. */
       const withdrawn = async () => {
-        use(await loadFixture(afterCloseClaim));
+        use(await loadFixture(afterClaim));
         const e = await toMiddle();
         await scoreIn(e);
         await phaseWithdraw(await ctxOf('withdraw'));
@@ -2025,7 +1739,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('refuses a journaled withdrawal that does not hold all it is expected to do, and reads one that does as it was written', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       await scoreIn(await toMiddle());
       await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.withdraw' })));
       const { expected } = rawState().steps['withdraw.withdraw'];
@@ -2038,7 +1752,7 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('stays on its part while a check fails, and runs again sending nothing', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const e = await toMiddle();
       await scoreIn(e);
       await stops(phaseWithdraw(await ctxOf('withdraw', { stopAt: 'withdraw.withdraw' })));
@@ -2082,11 +1796,10 @@ describe('@integration the OT-RFC-27 smoke test, interrupted and resumed, on the
     });
 
     it('keeps no claim state, and carries a whole run to its end', async () => {
-      use(await loadFixture(afterCloseClaim));
+      use(await loadFixture(afterClaim));
       const raw = rawState();
       expect(raw.refs).to.equal(undefined);
-      expect(raw.finalizedValue).to.equal(undefined);
-      for (const p of ['setup', 'serve', 'finalize', 'close-claim']) expect(raw.phases[p], p).to.deep.equal({ status: 'done', failedChecks: 0 });
+      for (const p of ['setup', 'serve', 'claim']) expect(raw.phases[p], p).to.deep.equal({ status: 'done', failedChecks: 0 });
       const check = await ctxOf('check', { send: false });
       await phaseCheck(check);
       expect(failedLabels(check)).to.deep.equal([]);
