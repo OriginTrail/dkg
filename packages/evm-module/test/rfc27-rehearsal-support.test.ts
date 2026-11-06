@@ -11,7 +11,7 @@ import { Fork } from '../scripts/rfc27/fork';
 import { expectedParameterIn, requireParameter } from '../scripts/rfc27/parameters';
 import { capturedFactorHolds, groupFault, grossOf, poolsFromMoney, receiptFault, stakeFactorFrom } from '../scripts/rfc27/reads';
 import { Report, Redactor } from '../scripts/rfc27/report';
-import { TxReverted, TxRunner } from '../scripts/rfc27/tx';
+import { TX_GAS_CAP, TxOverGasCap, TxReverted, TxRunner, gasLimitFor } from '../scripts/rfc27/tx';
 import { Ctx, send } from '../scripts/rfc27/rehearsal/context';
 import { bookedBy1020, checkClaims, checkSettleMany } from '../scripts/rfc27/rehearsal/existing';
 import { checkLateBooking } from '../scripts/rfc27/rehearsal/late-booking';
@@ -81,6 +81,55 @@ describe('@unit the OT-RFC-27 rehearsal support', () => {
       expect(ctx.txs).to.have.length(1);
       expect(ctx.txs[0].status).to.equal('reverted before inclusion');
       expect(ctx.txs[0].hash).to.equal(undefined);
+    });
+  });
+
+  describe("Base's 2^24 gas cap, which anvil does not enforce", () => {
+    /** A runner over a chain that estimates `estimate`, and a signer that keeps what it is asked to send. */
+    const over = (estimate: bigint) => {
+      const report = new QuietReport();
+      const hre = {
+        ethers: { provider: { estimateGas: async () => estimate, getTransactionReceipt: async () => ({ hash: HASH, status: 1, gasUsed: 7n, blockNumber: 1 }) } },
+      };
+      const sent: { gasLimit?: bigint }[] = [];
+      const signer = {
+        getAddress: async () => '0x00000000000000000000000000000000000000bb',
+        sendTransaction: async (t: { gasLimit?: bigint }) => {
+          sent.push(t);
+          return { hash: HASH };
+        },
+      };
+      const tx = { label: 'someone: something', signer: signer as unknown as Parameters<TxRunner['run']>[0]['signer'], to: '0x00000000000000000000000000000000000000aa', data: '0x' };
+      return { report, sent, tx, runner: new TxRunner(hre as unknown as Ctx['hre'], report) };
+    };
+
+    for (const estimate of [TX_GAS_CAP, TX_GAS_CAP + 1n]) {
+      it(`sends nothing with an estimate of ${estimate}, fails the check, and says why`, async () => {
+        const { report, sent, tx, runner } = over(estimate);
+        let thrown: unknown;
+        await runner.run(tx).catch((e: unknown) => {
+          thrown = e;
+        });
+        expect(thrown).to.be.instanceOf(TxOverGasCap);
+        expect((thrown as TxOverGasCap).estimate).to.equal(estimate);
+        expect(sent).to.deep.equal([]);
+        expect(report.checks.filter((c) => !c.ok).map((c) => c.label)).to.deep.equal(['someone: something fits the 2^24 gas cap']);
+      });
+    }
+
+    it('sends an estimate just under the cap, with a gas limit still under it', async () => {
+      const { report, sent, tx, runner } = over(TX_GAS_CAP - 1n);
+      const mined = await runner.run(tx);
+      expect(mined.gasLimit).to.equal(TX_GAS_CAP - 1n);
+      expect(sent.map((s) => s.gasLimit)).to.deep.equal([TX_GAS_CAP - 1n]);
+      expect(report.checks.filter((c) => !c.ok)).to.deep.equal([]);
+    });
+
+    it('pads an estimate by a quarter and 50,000, and never above the cap', () => {
+      expect(gasLimitFor(1_000_000n)).to.equal(1_300_000n);
+      const paddedToTheCap = ((TX_GAS_CAP - 50_000n) * 4n) / 5n;
+      expect(gasLimitFor(paddedToTheCap - 1n)).to.be.lessThan(TX_GAS_CAP);
+      expect(gasLimitFor(paddedToTheCap + 1n)).to.equal(TX_GAS_CAP - 1n);
     });
   });
 
