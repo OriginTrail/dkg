@@ -174,7 +174,7 @@ export async function phaseCycle(ctx: Ctx): Promise<void> {
   await send(ctx, 'account owner: registerAgent', caOwner, await c.nft.getAddress(), c.nft.interface.encodeFunctionData('registerAgent', [accountId, agent.address]));
   const publish = await publishAs(ctx, c.pc, accountId, agent.address, PUBLISH_BASE_COST, PUBLISH_KA_EPOCHS, 'fork-only (KnowledgeAssetsLifecycle impersonated):');
   check(
-    'a use-time publish books its whole draw to the staker pool over the Knowledge Asset epochs',
+    'a use-time publish books its whole spend to the staker pool over the Knowledge Asset epochs',
     sum(publish.stakerCredits.map((x) => x.amount)) === publish.discountedCost && publish.stakerCredits.every((x) => x.start >= A && x.end <= A + PUBLISH_KA_EPOCHS),
     `${fmt(publish.discountedCost)} TRAC over ${JSON.stringify(toJson(publish.stakerCredits))}`,
   );

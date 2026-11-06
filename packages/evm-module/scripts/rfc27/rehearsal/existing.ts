@@ -88,7 +88,7 @@ export async function phaseExisting(ctx: Ctx): Promise<void> {
   const publish = await publishAs(ctx, c.pc, SCHEDULED_ACCOUNT, agent, 10n * TRAC, 2n, '10.2.0');
   const old = pre.old.publish;
   check(
-    'a scheduled account publishes as before: same discounted cost, same window and top-up draws, same staker credits',
+    'a scheduled account publishes as before: same discounted cost, same window and top-up spends, same staker credits',
     publish.discountedCost === old.discountedCost &&
       publish.windowSpentDelta === old.windowSpentDelta &&
       publish.topUpDelta === old.topUpDelta &&

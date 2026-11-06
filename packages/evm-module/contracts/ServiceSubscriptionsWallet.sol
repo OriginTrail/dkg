@@ -120,7 +120,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
      *      rules, and one period per buyer key and epoch. Then the value is
      *      booked under the period's epoch, the record is written
      *      under account 0 with a cost equal to the value and no discount,
-     *      window or draw, and last the payment is pulled. The buyer key
+     *      window or spend, and last the payment is pulled. The buyer key
      *      approves this contract for the value beforehand.
      * @return subscriptionId `ServiceSubscriptions.subscriptionIdOf(msg.sender, r.epoch)`.
      */
@@ -163,8 +163,8 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
                 bucketCount: uint8(r.buckets.length),
                 value: value,
                 cost: value,
-                drawnFromWindow: 0,
-                drawnFromTopUp: 0
+                spentFromWindow: 0,
+                spentFromTopUp: 0
             }),
             r.buckets
         );
@@ -226,7 +226,7 @@ contract ServiceSubscriptionsWallet is INamed, IVersioned, ContractStatus, IInit
         qis.addWalletFunding(s.epoch, value);
         css.applyTopUp(
             subscriptionId,
-            ConvictionServiceStorage.TopUpAmounts({value: value, cost: value, drawnFromWindow: 0, drawnFromTopUp: 0}),
+            ConvictionServiceStorage.TopUpAmounts({value: value, cost: value, spentFromWindow: 0, spentFromTopUp: 0}),
             planDigest,
             t.added,
             t.appended
