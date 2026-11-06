@@ -7,7 +7,14 @@ import {
   DAEMON_LONG_TIMEOUT_MS,
   DAEMON_READ_TIMEOUT_ENV,
   DAEMON_READ_TIMEOUT_MS,
+  DAEMON_AUTHORITY_RETRY_DELAYS_MS,
+  DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS,
+  DAEMON_AUTHORITY_UNAVAILABLE_CODE,
+  DAEMON_READ_AUTHORITY_UNAVAILABLE_CODE,
   classifyDaemonRequestDeadline,
+  daemonAuthorityRetryDelayMs,
+  isRetryableDaemonAuthorityAnswer,
+  parseDaemonRetryAfterMs,
   resolveDaemonRequestDeadlines,
 } from '../src/daemon-request-deadlines.js';
 
@@ -137,5 +144,51 @@ describe('resolved daemon request deadlines', () => {
       .toThrow(/^DKG_API_LONG_TIMEOUT_MS/u);
     expect(deadlinesOf(resolveDaemonRequestDeadlines({ readTimeoutMs: 20, longTimeoutMs: 1_000 }, invalid)))
       .toEqual([60_000, 20, 1_000]);
+  });
+});
+
+describe('the retryable authority answer', () => {
+  const READ = { error: 'x', code: DAEMON_READ_AUTHORITY_UNAVAILABLE_CODE, retryable: true };
+  const OWN = { error: 'x', code: DAEMON_AUTHORITY_UNAVAILABLE_CODE, retryable: true };
+
+  it('is the 503 that carries a retryable authority code, and nothing else', () => {
+    expect(isRetryableDaemonAuthorityAnswer(503, READ)).toBe(true);
+    expect(isRetryableDaemonAuthorityAnswer(503, OWN)).toBe(true);
+    for (const [status, body] of [
+      [500, READ], [200, READ], [503, { ...READ, retryable: 'true' }], [503, { code: READ.code }],
+      [503, { code: 'STORE_SCHEDULER_BUSY', retryable: true }], [503, { code: 7, retryable: true }],
+      [503, null], [503, 'text'], [503, undefined],
+    ] as Array<[number, unknown]>) {
+      expect(isRetryableDaemonAuthorityAnswer(status, body), JSON.stringify([status, body])).toBe(false);
+    }
+  });
+
+  it('can be narrowed to the codes a request repeats on', () => {
+    expect(isRetryableDaemonAuthorityAnswer(503, READ, [DAEMON_AUTHORITY_UNAVAILABLE_CODE])).toBe(false);
+    expect(isRetryableDaemonAuthorityAnswer(503, OWN, [DAEMON_AUTHORITY_UNAVAILABLE_CODE])).toBe(true);
+    expect(isRetryableDaemonAuthorityAnswer(503, OWN, [])).toBe(false);
+  });
+
+  it('reads Retry-After as delta-seconds or an HTTP-date, and anything else as absent', () => {
+    expect(parseDaemonRetryAfterMs('3')).toBe(3_000);
+    expect(parseDaemonRetryAfterMs(' 0 ')).toBe(0);
+    const now = Date.parse('Fri, 30 Oct 2026 09:00:00 GMT');
+    expect(parseDaemonRetryAfterMs('Fri, 30 Oct 2026 09:00:07 GMT', now)).toBe(7_000);
+    expect(parseDaemonRetryAfterMs('Fri, 30 Oct 2026 08:59:00 GMT', now)).toBe(0);
+    expect(parseDaemonRetryAfterMs('Mon, 99 Foo 2026 09:00:07 GMT', now)).toBeUndefined();
+    for (const value of [null, undefined, '', '-1', '3.5', 'soon', '1e3', 'Fri, 30 Oct 2026']) {
+      expect(parseDaemonRetryAfterMs(value, now), String(value)).toBeUndefined();
+    }
+  });
+
+  it('waits its back-off, or Retry-After when that is longer, and stops at its bound', () => {
+    expect(DAEMON_AUTHORITY_RETRY_DELAYS_MS.map((_, retry) => daemonAuthorityRetryDelayMs(retry, null)))
+      .toEqual([1_000, 2_000, 4_000, 8_000]);
+    expect([0, 1, 2, 3].map(retry => daemonAuthorityRetryDelayMs(retry, '3'))).toEqual([3_000, 3_000, 4_000, 8_000]);
+    expect(daemonAuthorityRetryDelayMs(DAEMON_AUTHORITY_RETRY_DELAYS_MS.length, '1')).toBeNull();
+    const longest = String(DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS / 1_000);
+    expect(daemonAuthorityRetryDelayMs(0, longest)).toBe(DAEMON_AUTHORITY_RETRY_MAX_DELAY_MS);
+    expect(daemonAuthorityRetryDelayMs(0, `${longest}1`)).toBeNull();
+    expect(daemonAuthorityRetryDelayMs(0, '9'.repeat(400))).toBeNull();
   });
 });

@@ -3,13 +3,23 @@
 # for the poll form only (devnet_query_api_settling).
 # The capture always writes a frame; it never substitutes a transport failure
 # with a successful body. Consumers MUST check the parser's status explicitly.
+# With DEVNET_CAPTURE_HEADERS set, the response headers also go to that file.
 devnet_capture() {
   local tmp http ec
   tmp=$(mktemp "${TMPDIR:-/tmp}/dkg-observation.XXXXXX") || return 2
-  if http=$(curl -sS --max-time "${DKG_OBSERVATION_MAXTIME:-30}" --connect-timeout 5 -o "$tmp" -w '%{http_code}' "$@"); then ec=0; else ec=$?; fi
+  if http=$(curl -sS --max-time "${DKG_OBSERVATION_MAXTIME:-30}" --connect-timeout 5 ${DEVNET_CAPTURE_HEADERS:+-D "$DEVNET_CAPTURE_HEADERS"} -o "$tmp" -w '%{http_code}' "$@"); then ec=0; else ec=$?; fi
   printf '%s\n%s\n' "$ec" "$http"
   cat "$tmp"
   rm -f "$tmp"
+}
+
+# The wait in seconds before a retry of the retryable authority 503: the retry
+# (from 0), the file the answer's headers went to. Status 1: the client stops
+# here, its retries spent or the wait the node asks for longer than it takes.
+devnet_authority_retry_wait() {
+  local helper_dir
+  helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  node "$helper_dir/lib/qa/authority-retry-cli.mjs" "$1" "$2"
 }
 
 devnet_observe() {
