@@ -1,9 +1,9 @@
 // Conviction Account service spending (OT-RFC-27) end to end: the allowance a
-// plan period shares with publishing through the real KnowledgeAssetsLifecycle,
-// on ServiceSubscriptions and ConvictionServiceStorage registered in the Hub, on
+// subscription shares with publishing through the real KnowledgeAssetsLifecycle,
+// on ServiceSubscriptions and ServiceSubscriptionsStorage registered in the Hub, on
 // the real account stack, with a staked node to publish to.
 //
-// The opt-in and the assignments are in v10-conviction-service-assignments.test.ts,
+// The opt-in and the grants are in v10-conviction-service-grants.test.ts,
 // and funding in v10-conviction-service-funding.test.ts.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
@@ -22,8 +22,8 @@ import { DEFAULT_CHAIN_ID, buildPublishParams, packReservedKaId } from './helper
 const MIN_STAKE = ethers.parseEther('50000');
 // No discount, so a cost equals its value; the window allowance is 1,000 TRAC.
 const SMALL = 12_000n * TRAC + 5n;
-// A limit that no test of the draw itself reaches.
-const WIDE: Partial<Terms> = { maxCostPerPeriod: 50_000n * TRAC };
+// A limit that no test of the spend itself reaches.
+const WIDE: Partial<Terms> = { maxCostPerEpoch: 50_000n * TRAC };
 
 /** This suite's own fixture, so loadFixture keeps a snapshot for it alone. */
 async function deployFixture() {
@@ -75,10 +75,10 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       return { receivingNodes, publisherIdentityId, receiverIdentityIds };
     };
 
-    it('publishing and services draw one window allowance, first come first served; a publish that finds it spent pays directly', async () => {
+    it('publishing and services spend one window allowance, first come first served; a publish that finds it spent pays directly', async () => {
       const nodes = await standUpNodes();
       const agent = getDefaultKACreator(f.accounts);
-      const { accountId } = await h.openAccount({ committed: SMALL, caps: WIDE });
+      const { accountId } = await h.openAccount({ committed: SMALL, limits: WIDE });
       await f.NFT.connect(owner).registerAgent(accountId, agent.address);
       await f.ContextGraphs.connect(agent).createContextGraph([], 0, 0, 1, ethers.ZeroAddress, 0, ethers.ZeroHash);
       const cgId = await f.ContextGraphStorage.getLatestContextGraphId();
@@ -116,14 +116,14 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       await h.fund(await h.inference(accountId, 300n * TRAC));
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(400n * TRAC);
       const now = await h.epochNow();
-      expect(await f.QIS.convictionFunding(now)).to.equal(300n * TRAC);
+      expect(await f.QIS.accountFunding(now)).to.equal(300n * TRAC);
 
       await publish(200n * TRAC);
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(600n * TRAC);
 
       await h.fund(await h.inference(accountId, B - 600n * TRAC, { epoch: await h.epochNext() }));
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(B);
-      expect(await f.QIS.convictionFunding(now + 1n)).to.equal(B - 600n * TRAC);
+      expect(await f.QIS.accountFunding(now + 1n)).to.equal(B - 600n * TRAC);
 
       // The window is spent and there is no top-up buffer: the publish falls
       // through to direct spend from the agent's wallet, and a funding is refused.
@@ -132,8 +132,8 @@ describe('@integration Conviction Account service spending (ServiceSubscriptions
       expect(await eventsOf(p3, f.PC, 'CostCovered')).to.have.length(0);
       expect(balance + 50n * TRAC - (await f.Token.balanceOf(agent.address))).to.equal(50n * TRAC);
       expect(await f.PCS.windowSpent(accountId, 0n)).to.equal(B);
-      await h.assignAs(await h.termsFor(accountId, buyer2.address, WIDE), buyer2);
-      await expect(f.SS.connect(buyer2).fundFromConviction(await h.inference(accountId, TRAC)))
+      await h.addBuyerAs(await h.termsFor(accountId, buyer2.address, WIDE), buyer2);
+      await expect(f.SS.connect(buyer2).fundFromAccount(await h.inference(accountId, TRAC)))
         .to.be.revertedWithCustomError(f.SS, 'InsufficientAllowance')
         .withArgs(accountId, await f.Chronos.getCurrentEpoch(), TRAC, 0n);
     });

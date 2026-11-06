@@ -13,7 +13,7 @@
       },
       {
         "internalType": "address",
-        "name": "assignee",
+        "name": "buyer",
         "type": "address"
       },
       {
@@ -63,7 +63,7 @@
           }
         ],
         "internalType": "struct PublishingConviction.ServiceSpend",
-        "name": "d",
+        "name": "spend",
         "type": "tuple"
       }
     ],

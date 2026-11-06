@@ -17,11 +17,11 @@ contract QueryInferenceDigestHarness is QueryInferenceSettlement {
     function batchRequestDigest(
         bytes32 domain,
         bytes32 subscriptionId,
-        bytes32 bucketId,
+        bytes32 serviceId,
         uint72 seller,
         ReceiptItem calldata it
     ) external pure returns (bytes32) {
-        return _requestDigest(domain, subscriptionId, bucketId, seller, it);
+        return _requestDigest(domain, subscriptionId, serviceId, seller, it);
     }
 
     function batchReceiptDigest(

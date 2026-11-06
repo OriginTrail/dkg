@@ -6,7 +6,7 @@ import {INamed} from "./interfaces/INamed.sol";
 import {IVersioned} from "./interfaces/IVersioned.sol";
 import {IInitializable} from "./interfaces/IInitializable.sol";
 import {IPublishingConvictionErrors} from "./interfaces/IPublishingConvictionErrors.sol";
-import {IConvictionServiceErrors} from "./interfaces/IConvictionServiceErrors.sol";
+import {IServiceSpendingErrors} from "./interfaces/IServiceSpendingErrors.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {ContractStatus} from "./abstract/ContractStatus.sol";
 import {Chronos} from "./storage/Chronos.sol";
@@ -47,7 +47,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *     `Account.createdAtTimestamp`. Per-window base budget is
  *     `B = committedTRAC / lockDurationEpochs`; `windowSpent[id][w]` is what
  *     window w has spent of it.
- *   - A publish (`coverPublishingCost`) and a service plan period
+ *   - A publish (`coverPublishingCost`) and a subscription
  *     (`coverServiceCost`) spend their discounted cost from the current
  *     window's budget first, then from the `topUpBalance` buffer.
  *   - A publish books the whole spend into the staker pool over the Knowledge
@@ -94,7 +94,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *   (a) the staker reward pool, credited via
  *       `EpochStorage.addTokensToEpochRange(STAKER_SHARD_ID, ...)`;
  *   (b) the query/inference pool, as the service spends that
- *       `ServiceSubscriptions` books as due there;
+ *       `ServiceSubscriptions` books there;
  *   (c) the protocol treasury — as the treasury EMISSION pool
  *       (`TREASURY_SHARD_ID`, written alongside (a) by `_bookWindows` and
  *       paid out per elapsed epoch via `collectTreasuryEmission`) plus the
@@ -129,7 +129,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  *   - `coverServiceCost` (10.1.0, Conviction Account service spending,
  *     OT-RFC-27) is `onlyServiceSubscriptions` — only the contract the Hub
  *     names `ServiceSubscriptions`, resolved on every call. That contract
- *     checks the owner's opt-in and the buyer key's assignment and caps
+ *     checks the owner's opt-in and the buyer's grant and limits
  *     before it calls; this one only spends the allowance.
  */
 contract PublishingConviction is
@@ -138,7 +138,7 @@ contract PublishingConviction is
     ContractStatus,
     IInitializable,
     IPublishingConvictionErrors,
-    IConvictionServiceErrors
+    IServiceSpendingErrors
 {
     string private constant _NAME = "PublishingConviction";
     // Version history:
@@ -269,7 +269,7 @@ contract PublishingConviction is
 
     /// @notice The result of a `coverServiceCost` spend (10.1.0), returned to
     ///         `ServiceSubscriptions`, which books `cost` in the
-    ///         query/inference pool (10.2.0) and records the period.
+    ///         query/inference pool (10.2.0) and records the subscription.
     struct ServiceSpend {
         uint96 cost; // value × (10000 − discountBps) / 10000, at least 1 wei: the whole spend
         uint96 spentFromWindow; // from the current billing window's base allowance
@@ -404,13 +404,13 @@ contract PublishingConviction is
         uint96 topUpSwept,
         uint96 dustSwept
     );
-    /// @notice Emitted by `coverServiceCost` (10.1.0): a service plan period
-    ///         funded by the buyer key `assignee` drew `cost` of `accountId`'s
-    ///         allowance for a bucket value of `value`, in billing `window`
-    ///         during chain `epoch`. `subscriptionId` identifies the period.
+    /// @notice Emitted by `coverServiceCost` (10.1.0): a subscription funded by
+    ///         `buyer` spent `cost` of `accountId`'s allowance for a budget value of
+    ///         `value`, in billing `window` during chain `epoch`. `subscriptionId`
+    ///         identifies the subscription.
     event ServiceCostCovered(
         uint256 indexed accountId,
-        address indexed assignee,
+        address indexed buyer,
         bytes32 indexed subscriptionId,
         uint96 value,
         uint96 cost,
@@ -430,7 +430,7 @@ contract PublishingConviction is
     ///         the Hub names `ServiceSubscriptions`.
     error OnlyServiceSubscriptions(address caller);
     // `ServiceFundingPausedTreasuryWired` / `ZeroServiceValue` are declared in
-    // {IConvictionServiceErrors}, shared with `ServiceSubscriptions`.
+    // {IServiceSpendingErrors}, shared with `ServiceSubscriptions`.
     error NoConvictionAccount(address publishingAgent);
     // `InsufficientAllowance` / `AccountExpired` are declared in
     // {IPublishingConvictionErrors} (shared with KnowledgeAssetsLifecycle's
@@ -960,13 +960,13 @@ contract PublishingConviction is
     // ============================================================
 
     /**
-     * @notice Spend `accountId`'s allowance for a service plan period that the
-     *         buyer key `assignee` funds, exactly as a publish spends it, and
+     * @notice Spend `accountId`'s allowance for a subscription that `buyer`
+     *         funds, exactly as a publish spends it, and
      *         return the spend for the caller to book (10.1.0, OT-RFC-27).
      *
      * @dev Caller gate: `onlyServiceSubscriptions`. That contract checks the
-     *      owner's opt-in, the assignment and its caps before it calls, and
-     *      books `d.cost` in the query/inference pool after it; this
+     *      owner's opt-in, the grant and its limits before it calls, and
+     *      books `spend.cost` in the query/inference pool after it; this
      *      function checks neither and adds only the spend.
      *
      *      Behaviour — `coverPublishingCost` without the agent lookup, the
@@ -985,17 +985,17 @@ contract PublishingConviction is
      *           first, then the `topUpBalance` buffer. Short of both reverts
      *           `InsufficientAllowance`; nothing is spent partially.
      *        7. Book nothing to the staker pool (10.2.0): the whole spend,
-     *           window part and top-up part alike, is `d.cost`, which the
+     *           window part and top-up part alike, is `spend.cost`, which the
      *           caller books.
      *
      *      Does NOT move TRAC: the escrow is already in the vault.
      */
     function coverServiceCost(
         uint256 accountId,
-        address assignee,
+        address buyer,
         bytes32 subscriptionId,
         uint96 value
-    ) external onlyServiceSubscriptions returns (ServiceSpend memory d) {
+    ) external onlyServiceSubscriptions returns (ServiceSpend memory spend) {
         if (value == 0) revert ZeroServiceValue();
         address treasury = parametersStorage.protocolTreasury();
         if (treasury != address(0)) revert ServiceFundingPausedTreasuryWired(treasury);
@@ -1007,22 +1007,22 @@ contract PublishingConviction is
         }
         if (acct.lastSettledWindow >= acct.lockDurationEpochs) revert EmissionAlreadyScheduled(accountId);
 
-        d.window = _sweepClosedWindows(acct, accountId);
-        d.epoch = uint40(chronos.getCurrentEpoch());
-        d.discountBps = acct.discountBps;
-        d.cost = _discounted(value, acct.discountBps);
-        (d.spentFromWindow, d.spentFromTopUp) = _spend(acct, accountId, d.cost, d.window, d.epoch);
+        spend.window = _sweepClosedWindows(acct, accountId);
+        spend.epoch = uint40(chronos.getCurrentEpoch());
+        spend.discountBps = acct.discountBps;
+        spend.cost = _discounted(value, acct.discountBps);
+        (spend.spentFromWindow, spend.spentFromTopUp) = _spend(acct, accountId, spend.cost, spend.window, spend.epoch);
 
         emit ServiceCostCovered(
             accountId,
-            assignee,
+            buyer,
             subscriptionId,
             value,
-            d.cost,
-            d.epoch,
-            d.window,
-            d.spentFromWindow,
-            d.spentFromTopUp
+            spend.cost,
+            spend.epoch,
+            spend.window,
+            spend.spentFromWindow,
+            spend.spentFromTopUp
         );
     }
 

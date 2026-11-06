@@ -1,14 +1,14 @@
 // Shared set-up for the receipt settlement tests of the query/inference pool
 // (OT-RFC-27): the EIP-712 request and receipt formats, session keys that sign
 // locally, compact signatures, receipt items, Core Node sellers, Conviction
-// Account periods, and node scores.
+// Account subscriptions, and node scores.
 
 import { SignerWithAddress } from '@nomicfoundation/hardhat-ethers/signers';
 import { ethers } from 'ethers';
 import hre from 'hardhat';
 
 import {
-  ConvictionServiceStorage,
+  ServiceSubscriptionsStorage,
   DKGPublishingConvictionNFT,
   DKGStakingConvictionNFT,
   Profile,
@@ -23,7 +23,7 @@ import { DAY, Domain, Terms, registerServiceContracts, signTerms } from './convi
 import { createProfile } from './profile-helpers';
 
 /**
- * The account and staking stacks with every plan-period and settlement
+ * The account and staking stacks with every plan-subscription and settlement
  * contract registered and the activation epoch set to the current epoch, as
  * the development deploy leaves them. Each suite wraps it in a fixture of its
  * own for `loadFixture`, which keeps one snapshot per fixture function: one
@@ -32,8 +32,8 @@ import { createProfile } from './profile-helpers';
  */
 export async function deploySettlementStack() {
   const stack = await deployAccountStack();
-  const { QIS, CSS, SS, SSW, QS } = await registerServiceContracts(stack.Hub, { wallet: true, settlement: true });
-  return { ...stack, QIS, CSS, SS, SSW: SSW!, QS: QS! };
+  const { QIS, SSS, SS, SSW, QS } = await registerServiceContracts(stack.Hub, { wallet: true, settlement: true });
+  return { ...stack, QIS, SSS, SS, SSW: SSW!, QS: QS! };
 }
 
 export type SettlementStack = Awaited<ReturnType<typeof deploySettlementStack>>;
@@ -45,16 +45,16 @@ export const SECP256K1_HALF_N = SECP256K1_N / 2n;
 /** Fault codes of `QueryInferenceSettlement.Fault`, in declaration order. */
 export const Fault = {
   None: 0n,
-  UnknownPeriod: 1n,
-  UnknownBucket: 2n,
+  UnknownSubscription: 1n,
+  UnknownBudget: 2n,
   OutsideEpoch: 3n,
   EmptyGroup: 4n,
   BelowMinCounted: 5n,
   BadSignature: 6n,
-  InactiveAssignment: 7n,
+  InactiveGrant: 7n,
   DuplicateNonce: 8n,
   OutsideTime: 9n,
-  AskOutOfRange: 10n,
+  PriceOutOfRange: 10n,
   BadArithmetic: 11n,
   ZeroResultCommitment: 12n,
 } as const;
@@ -66,10 +66,10 @@ export const Fault = {
 export const REQUEST_TYPES = {
   ServiceRequest: [
     { name: 'subscriptionId', type: 'bytes32' },
-    { name: 'bucketId', type: 'bytes32' },
+    { name: 'serviceId', type: 'bytes32' },
     { name: 'seller', type: 'uint72' },
     { name: 'nonce', type: 'uint64' },
-    { name: 'acceptedAskWeiPerUnit', type: 'uint96' },
+    { name: 'pricePerUnit', type: 'uint96' },
     { name: 'maxUnits', type: 'uint64' },
     { name: 'maxValueWei', type: 'uint96' },
     { name: 'issuedAt', type: 'uint40' },
@@ -89,10 +89,10 @@ export const RECEIPT_TYPES = {
 
 export type ServiceRequest = {
   subscriptionId: string;
-  bucketId: string;
+  serviceId: string;
   seller: bigint;
   nonce: bigint;
-  acceptedAskWeiPerUnit: bigint;
+  pricePerUnit: bigint;
   maxUnits: bigint;
   maxValueWei: bigint;
   issuedAt: bigint;
@@ -108,7 +108,7 @@ export type Receipt = {
 
 export type ReceiptItem = {
   nonce: bigint;
-  acceptedAskWeiPerUnit: bigint;
+  pricePerUnit: bigint;
   maxUnits: bigint;
   maxValueWei: bigint;
   issuedAt: bigint;
@@ -121,7 +121,7 @@ export type ReceiptItem = {
   sigVS: string;
 };
 
-export type ReceiptGroup = { subscriptionId: string; bucketIndex: bigint; minCounted: bigint; items: ReceiptItem[] };
+export type ReceiptGroup = { subscriptionId: string; budgetIndex: bigint; minCounted: bigint; items: ReceiptItem[] };
 
 /** The signing domain of requests and receipts: the verifying contract is QueryInferenceStorage. */
 export async function queryInferenceDomain(qis: QueryInferenceStorage): Promise<Domain> {
@@ -154,11 +154,11 @@ export function signCompact(wallet: ethers.HDNodeWallet, digest: string): { sigR
   return { sigR: sig.r, sigVS: sig.yParityAndS };
 }
 
-/** The receipt of a request served in full: maxUnits at the accepted ask, completed when issued. */
+/** The receipt of a request served in full: maxUnits at the accepted price, completed when issued. */
 export const fullReceipt = (r: ServiceRequest, overrides: Partial<Receipt> = {}): Receipt => ({
   resultCommitment: ethers.keccak256(ethers.toBeHex(r.nonce + 1n, 32)),
   units: r.maxUnits,
-  valueWei: r.maxUnits * r.acceptedAskWeiPerUnit,
+  valueWei: r.maxUnits * r.pricePerUnit,
   completedAt: r.issuedAt,
   ...overrides,
 });
@@ -166,7 +166,7 @@ export const fullReceipt = (r: ServiceRequest, overrides: Partial<Receipt> = {})
 /** A batch item: the request's own fields, the receipt's, and the signature. */
 export const itemOf = (r: ServiceRequest, receipt: Receipt, sig: { sigR: string; sigVS: string }): ReceiptItem => ({
   nonce: r.nonce,
-  acceptedAskWeiPerUnit: r.acceptedAskWeiPerUnit,
+  pricePerUnit: r.pricePerUnit,
   maxUnits: r.maxUnits,
   maxValueWei: r.maxValueWei,
   issuedAt: r.issuedAt,
@@ -179,20 +179,20 @@ export const itemOf = (r: ServiceRequest, receipt: Receipt, sig: { sigR: string;
 });
 
 /**
- * Requests of one bucket of one period, signed by its session key, and the
+ * Requests of one budget of one subscription, signed by its session key, and the
  * items that claim them: `count` requests with nonces from `firstNonce`, each
- * of `units` units at `ask`, issued at `issuedAt` and valid for a day.
+ * of `units` units at `price`, issued at `issuedAt` and valid for a day.
  */
 export function signedItems(opts: {
   domain: Domain;
   wallet: ethers.HDNodeWallet;
   subscriptionId: string;
-  bucketId: string;
+  serviceId: string;
   seller: bigint;
   firstNonce?: bigint;
   count: number;
   units?: bigint;
-  ask?: bigint;
+  price?: bigint;
   issuedAt: bigint;
   expiry?: bigint;
 }): { requests: ServiceRequest[]; receipts: Receipt[]; items: ReceiptItem[] } {
@@ -201,15 +201,15 @@ export function signedItems(opts: {
   const items: ReceiptItem[] = [];
   for (let i = 0; i < opts.count; i++) {
     const units = opts.units ?? 1_000n;
-    const ask = opts.ask ?? 10n ** 9n;
+    const price = opts.price ?? 10n ** 9n;
     const r: ServiceRequest = {
       subscriptionId: opts.subscriptionId,
-      bucketId: opts.bucketId,
+      serviceId: opts.serviceId,
       seller: opts.seller,
       nonce: (opts.firstNonce ?? 0n) + BigInt(i),
-      acceptedAskWeiPerUnit: ask,
+      pricePerUnit: price,
       maxUnits: units,
-      maxValueWei: units * ask,
+      maxValueWei: units * price,
       issuedAt: opts.issuedAt,
       expiry: opts.expiry ?? opts.issuedAt + DAY,
     };
@@ -291,21 +291,21 @@ export async function scoreNode(rss: RandomSamplingStorage, epoch: bigint, ident
 }
 
 // ---------------------------------------------------------------------------
-// Conviction Account periods
+// Conviction Account subscriptions
 // ---------------------------------------------------------------------------
 
 /**
  * An opted-in Conviction Account of `owner`, committing `committed` TRAC (its
- * tier follows), with `assignee` assigned under a per-period limit until
+ * tier follows), with `buyer` added under a per-subscription limit until
  * `expiresAt`.
  */
 export async function openConvictionAccount(opts: {
   Token: Token;
   NFT: DKGPublishingConvictionNFT;
   SS: ServiceSubscriptions;
-  CSS: ConvictionServiceStorage;
+  SSS: ServiceSubscriptionsStorage;
   owner: SignerWithAddress;
-  assignee: SignerWithAddress;
+  buyer: SignerWithAddress;
   committed: bigint;
   limit: bigint;
   expiresAt?: bigint;
@@ -318,11 +318,11 @@ export async function openConvictionAccount(opts: {
   const latest = BigInt((await hre.ethers.provider.getBlock('latest'))!.timestamp);
   const terms: Terms = {
     accountId,
-    assignee: opts.assignee.address,
-    maxCostPerPeriod: opts.limit,
+    buyer: opts.buyer.address,
+    maxCostPerEpoch: opts.limit,
     expiresAt: opts.expiresAt ?? latest + 400n * DAY,
-    nonce: await opts.CSS.assignmentNonce(accountId),
+    nonce: await opts.SSS.grantNonce(accountId),
   };
-  await opts.SS.connect(opts.owner).assign(terms, '0x', await signTerms(opts.assignee, opts.SS, terms));
+  await opts.SS.connect(opts.owner).addBuyer(terms, '0x', await signTerms(opts.buyer, opts.SS, terms));
   return { accountId, terms };
 }
