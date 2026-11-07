@@ -827,6 +827,9 @@ importers:
       '@origintrail-official/dkg-local-llm':
         specifier: workspace:*
         version: link:../local-llm
+      '@origintrail-official/dkg-marketplace':
+        specifier: workspace:*
+        version: link:../marketplace
       '@origintrail-official/dkg-mcp':
         specifier: workspace:*
         version: link:../mcp-dkg
