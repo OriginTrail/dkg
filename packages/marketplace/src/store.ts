@@ -3,25 +3,31 @@
 /**
  * What the buyer keeps on disk, under the node's data directory:
  *   - `plan.json`, the standing plan the user confirmed;
- *   - `session-keys.json`, one session key per subscription, each encrypted
- *     with AES-256-GCM under `session-keys.secret`, 32 random bytes made on
- *     first use, as the operational wallets' keys are kept (`wallets.key`).
+ *   - `session-keys.json`, one session key per subscription, sealed as the
+ *     node seals its operational wallets' keys (core's node key store: the
+ *     node's `wallets.key`, and `DKG_WALLETS_PASSPHRASE` when it is set).
  *
  * A session key is written before the funding that names it is sent, so a
  * crash never leaves a funded subscription whose key is lost. Each file is
  * replaced whole (written aside, then renamed), with mode 0600.
  */
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
+import {
+  NODE_KEY_PASSPHRASE_ENV,
+  nodeKeySecret,
+  openNodeKey,
+  sealNodeKey,
+  type NodeKeystore,
+} from '@origintrail-official/dkg-core';
 import { parsePlan, planToWire, type StandingPlan } from './plan.js';
 
-interface SealedKey {
+/** A stored session key: its address in the clear, its key sealed, as a `wallets.json` entry is. */
+interface StoredSessionKey {
   address: string;
-  iv: string;
-  ct: string;
-  tag: string;
+  keystore: NodeKeystore;
 }
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -40,9 +46,11 @@ async function writeAtomically(file: string, text: string): Promise<void> {
 }
 
 export class BuyerStore {
-  private secret: Buffer | undefined;
-
-  constructor(readonly dir: string) {}
+  /**
+   * @param dir where the buyer's files go
+   * @param keyDir the node's data directory, whose `wallets.key` seals the session keys; `dir` by default
+   */
+  constructor(readonly dir: string, readonly keyDir: string = dir) {}
 
   async readPlan(): Promise<StandingPlan | null> {
     const raw = await readJson<unknown>(join(this.dir, 'plan.json'));
@@ -58,51 +66,22 @@ export class BuyerStore {
   async sessionKeyFor(subscriptionId: string): Promise<ethers.Wallet> {
     const id = subscriptionId.toLowerCase();
     const keys = await this.readKeys();
-    const sealed = keys[id];
-    if (sealed) return new ethers.Wallet(await this.open(sealed));
+    const secret = await nodeKeySecret(this.keyDir);
+    const stored = keys[id];
+    if (stored) return new ethers.Wallet(openNodeKey(stored.keystore, secret));
     const wallet = new ethers.Wallet(ethers.hexlify(randomBytes(32)));
-    keys[id] = await this.seal(wallet);
+    keys[id] = { address: wallet.address, keystore: sealNodeKey(wallet.privateKey, secret, process.env[NODE_KEY_PASSPHRASE_ENV]) };
+    await mkdir(this.dir, { recursive: true });
     await writeAtomically(join(this.dir, 'session-keys.json'), `${JSON.stringify(keys, null, 2)}\n`);
     return wallet;
   }
 
-  /** The stored session key's address, without decrypting it; `null` when none is stored. */
+  /** The stored session key's address, without opening it; `null` when none is stored. */
   async sessionKeyAddress(subscriptionId: string): Promise<string | null> {
     return (await this.readKeys())[subscriptionId.toLowerCase()]?.address ?? null;
   }
 
-  private async readKeys(): Promise<Record<string, SealedKey>> {
-    return (await readJson<Record<string, SealedKey>>(join(this.dir, 'session-keys.json'))) ?? {};
-  }
-
-  private async key(): Promise<Buffer> {
-    if (this.secret) return this.secret;
-    const file = join(this.dir, 'session-keys.secret');
-    const stored = await readFile(file, 'utf8').catch((err: { code?: string }) => {
-      if (err.code === 'ENOENT') return null;
-      throw err;
-    });
-    if (stored !== null) {
-      const secret = Buffer.from(stored.trim(), 'base64');
-      if (secret.length !== 32) throw new Error(`${file} is malformed: expected 32 bytes in base64`);
-      return (this.secret = secret);
-    }
-    await mkdir(this.dir, { recursive: true });
-    const secret = randomBytes(32);
-    await writeFile(file, `${secret.toString('base64')}\n`, { mode: 0o600, flag: 'wx' });
-    return (this.secret = secret);
-  }
-
-  private async seal(wallet: ethers.Wallet): Promise<SealedKey> {
-    const iv = randomBytes(12);
-    const cipher = createCipheriv('aes-256-gcm', await this.key(), iv);
-    const ct = Buffer.concat([cipher.update(wallet.privateKey, 'utf8'), cipher.final()]);
-    return { address: wallet.address, iv: iv.toString('base64'), ct: ct.toString('base64'), tag: cipher.getAuthTag().toString('base64') };
-  }
-
-  private async open(sealed: SealedKey): Promise<string> {
-    const decipher = createDecipheriv('aes-256-gcm', await this.key(), Buffer.from(sealed.iv, 'base64'));
-    decipher.setAuthTag(Buffer.from(sealed.tag, 'base64'));
-    return Buffer.concat([decipher.update(Buffer.from(sealed.ct, 'base64')), decipher.final()]).toString('utf8');
+  private async readKeys(): Promise<Record<string, StoredSessionKey>> {
+    return (await readJson<Record<string, StoredSessionKey>>(join(this.dir, 'session-keys.json'))) ?? {};
   }
 }

@@ -55,7 +55,8 @@ export function startMarketplaceBuyer(options: MarketplaceBuyerOptions): Buyer |
   };
   const buyer = new Buyer({
     chain,
-    store: new BuyerStore(join(dataDir, 'marketplace')),
+    // Session keys are sealed under the node's wallets.key, as its operational wallets' keys are.
+    store: new BuyerStore(join(dataDir, 'marketplace'), dataDir),
     config: resolved,
     nodeWallets: wallets,
     onAlert,

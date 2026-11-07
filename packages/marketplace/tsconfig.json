@@ -6,5 +6,5 @@
     "composite": true
   },
   "include": ["src"],
-  "references": [{ "path": "../chain" }]
+  "references": [{ "path": "../core" }, { "path": "../chain" }]
 }

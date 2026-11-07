@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@origintrail-official/dkg-chain": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
     "ethers": "^6"
   },
   "devDependencies": {
