@@ -234,6 +234,11 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['kosava_supporting'],
     evmScopes: [],
   },
+  'packages/marketplace': {
+    // The daemon runs the buyer: the CLI's lanes that boot it, as for local-llm.
+    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/evm-module': {
     forceFull: true,
     lanes: [],
@@ -274,6 +279,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],
   'packages/kafka-source': ['kosava_supporting'],
+  'packages/marketplace': ['kosava_supporting'],
   'packages/evm-module': ['contracts'],
   demo: ['kosava_supporting'],
 });

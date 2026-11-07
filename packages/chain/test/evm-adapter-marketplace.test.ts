@@ -101,8 +101,7 @@ describe('the marketplace mixin on Hardhat', () => {
     expect(state).toMatchObject({ paused: false, maxGroups: 32, maxItems: 256 });
     expect(await seller.maxBudgetsPerSubscription()).toBe(16);
     // A wired treasury would refuse every opt-in and account funding.
-    const parameters = contractAt('ParametersStorage', await hub.getContractAddress('ParametersStorage'));
-    expect(await parameters.protocolTreasury()).toBe(ethers.ZeroAddress);
+    expect(await seller.getProtocolTreasury()).toBe(ethers.ZeroAddress);
   });
 
   it('the TypeScript digests equal hashRequest, hashReceipt and hashGrant, and the type strings the typehashes', async () => {
@@ -151,7 +150,10 @@ describe('the marketplace mixin on Hardhat', () => {
 
   it('funds the current epoch from a wallet, under the allowance it approves, and tops up', async () => {
     const buyer = walletBuyer.getSignerAddress();
+    const before = await walletBuyer.getWalletBalances(buyer);
     await mintTokens(createProvider(), getSharedContext().hubAddress, HARDHAT_KEYS.DEPLOYER, buyer, 1_000n * TRAC);
+    expect((await walletBuyer.getWalletBalances(buyer)).trac).toBe(before.trac + 1_000n * TRAC);
+    expect(before.eth).toBeGreaterThan(0n);
     const { epoch } = await walletBuyer.getEpochTimes();
     const request = { epoch, sessionKey: Wallet.createRandom().address, planDigest: PLAN, budgets: [budget(FIRST, 100n * TRAC)] };
 
@@ -203,6 +205,9 @@ describe('the marketplace mixin on Hardhat', () => {
     expect(await revertName(node.addBuyer(terms, '0x', '0x'))).toBe('ConsentMissing');
     await node.addBuyer(terms, '0x', consent.signature);
     expect(await node.grantNonce(accountId)).toBe(1n);
+    expect(await node.getAccountBuyers(accountId)).toEqual([buyer]);
+    expect(await node.listBuyerAccounts(buyer)).toEqual([accountId]);
+    expect(await node.listBuyerAccounts(owner)).toEqual([]);
     expect(await node.getGrant(accountId, buyer)).toMatchObject({ maxCostPerEpoch: 1_000n * TRAC, expiresAt: terms.expiresAt, revokedAt: 0, nonce: 0n, owner });
 
     // Fifty thousand TRAC committed: the 20% tier.

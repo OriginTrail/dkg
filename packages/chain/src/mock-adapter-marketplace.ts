@@ -19,6 +19,8 @@
  *   - Receipt batches are checked as `QueryInferenceSettlement` checks them,
  *     signatures included, but every registered node is a Core Node with a
  *     node score, and every stake factor is 1.
+ *   - Every wallet holds a million TRAC and a hundred ETH, and no protocol
+ *     treasury is wired.
  */
 import { ethers } from 'ethers';
 import type { IdentityReadOptions, TxResult, V10PublishingConvictionAccountInfo } from './chain-adapter.js';
@@ -64,6 +66,7 @@ const MOCK_EPOCH_SECONDS = 30 * 86_400;
 const MAX_BUDGETS = 16;
 const BATCH_STATE: BatchState = { activationEpoch: 1, paused: false, maxGroups: 32, maxItems: 256 };
 const LAMBDA_BPS = 5_000;
+const WALLET_BALANCES = { eth: 100n * 10n ** 18n, trac: 1_000_000n * 10n ** 18n };
 const BPS = 10_000n;
 const SCALE18 = 10n ** 18n;
 const UINT96_MAX = (1n << 96n) - 1n;
@@ -132,6 +135,8 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     spending: new Map<bigint, ServiceSpending>(),
     grantNonces: new Map<bigint, bigint>(),
     grants: new Map<string, BuyerGrant>(),
+    /** accountId => every buyer ever granted on it, in grant order, each once. */
+    buyers: new Map<bigint, string[]>(),
     replacedGrantEnds: new Map<string, number>(),
     subscriptions: new Map<string, Subscription>(),
     budgets: new Map<string, ServiceBudget[]>(),
@@ -189,6 +194,7 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     requireConsent(sender, buyer, digest, buyerSignature);
     const replaced = this.marketplace.grants.get(key(terms.accountId, buyer));
     if (replaced) this.marketplace.replacedGrantEnds.set(key(terms.accountId, buyer, replaced.nonce), endOf(replaced));
+    else this.marketplace.buyers.set(terms.accountId, [...(this.marketplace.buyers.get(terms.accountId) ?? []), buyer]);
     this.marketplace.grants.set(key(terms.accountId, buyer), {
       maxCostPerEpoch: terms.maxCostPerEpoch, grantedAt: now, expiresAt: terms.expiresAt, revokedAt: 0, nonce: expected, owner,
     });
@@ -312,6 +318,17 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
 
   async maxBudgetsPerSubscription(): Promise<number> {
     return MAX_BUDGETS;
+  }
+
+  async getAccountBuyers(accountId: bigint): Promise<string[]> {
+    return [...(this.marketplace.buyers.get(accountId) ?? [])];
+  }
+
+  async listBuyerAccounts(buyer: string): Promise<bigint[]> {
+    const accounts = [...this.marketplace.buyers]
+      .filter(([, buyers]) => buyers.some((b) => b.toLowerCase() === buyer.toLowerCase()))
+      .map(([accountId]) => accountId);
+    return accounts.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   }
 
   // --------------------------------------------- QueryInferenceSettlement
@@ -464,6 +481,16 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
 
   async getNodeEpochScore(_epoch: number, identityId: bigint): Promise<bigint> {
     return identityId > 0n ? SCALE18 : 0n;
+  }
+
+  // ------------------------------------------ ParametersStorage, the Token
+
+  async getProtocolTreasury(): Promise<string> {
+    return ethers.ZeroAddress;
+  }
+
+  async getWalletBalances(_address: string): Promise<{ eth: bigint; trac: bigint }> {
+    return { ...WALLET_BALANCES };
   }
 
   // -------------------------------------------------------------- the model

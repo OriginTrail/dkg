@@ -21,7 +21,7 @@
  * - A revert is thrown with its custom error decoded (`err.revert`).
  */
 
-import { ethers, type Contract } from 'ethers';
+import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
@@ -55,6 +55,9 @@ import {
 } from './marketplace.js';
 
 type Log = { address: string; topics: ReadonlyArray<string>; data: string };
+
+/** Blocks per `eth_getLogs` page of the `BuyerAdded` scan; the reader fits a page to each RPC's span cap. */
+const BUYER_SCAN_PAGE_BLOCKS = 10_000;
 
 const interfaces = new Map<string, ethers.Interface>();
 
@@ -379,6 +382,38 @@ export class MarketplaceMethods extends RandomSamplingMethods {
     return Number(await this.readContract(sss, 'serviceSubscriptionsStorage.maxBudgetsPerSubscription', 'maxBudgetsPerSubscription'));
   }
 
+  async getAccountBuyers(accountId: bigint): Promise<string[]> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    const count = Number(await this.readContract(sss, 'serviceSubscriptionsStorage.buyerCount', 'buyerCount', accountId));
+    const buyers: string[] = [];
+    for (let i = 0; i < count; i++) {
+      buyers.push(ethers.getAddress(await this.readContract(sss, 'serviceSubscriptionsStorage.buyerAt', 'buyerAt', accountId, i)));
+    }
+    return buyers;
+  }
+
+  /** Read in pages from the deployment of the Hub's `ServiceSubscriptions` to the head; nothing is cached. */
+  async listBuyerAccounts(buyer: string): Promise<bigint[]> {
+    await this.init();
+    const ss = await this.resolveContract('ServiceSubscriptions');
+    const label = 'listBuyerAccounts';
+    const { fromBlock, head, scanProviders } = await this.resolveContractDeployBlock(await ss.getAddress(), label, 'ServiceSubscriptions');
+    const filter = ss.filters.BuyerAdded(null, buyer);
+    const connected = new Map<JsonRpcProvider, Contract>();
+    const accounts = new Set<bigint>();
+    let preferred: JsonRpcProvider | undefined;
+    for (let lo = fromBlock; lo <= head; lo += BUYER_SCAN_PAGE_BLOCKS) {
+      const page = await this.queryEventLogsPage(
+        ss, filter, lo, Math.min(lo + BUYER_SCAN_PAGE_BLOCKS - 1, head), scanProviders, connected, `${label} BuyerAdded`, preferred,
+      );
+      preferred = page.provider;
+      // topics: the event, the indexed accountId, the indexed buyer.
+      for (const log of page.logs) accounts.add(BigInt(log.topics[1]!));
+    }
+    return [...accounts].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  }
+
   // --------------------------------------------- QueryInferenceSettlement
 
   async submitReceiptBatch(groups: ReceiptGroup[]): Promise<ReceiptBatch> {
@@ -477,6 +512,23 @@ export class MarketplaceMethods extends RandomSamplingMethods {
     await this.init();
     const rss = await this.resolveContract('RandomSamplingStorage');
     return BigInt(await this.readContract(rss, 'randomSamplingStorage.getNodeEpochScore', 'getNodeEpochScore', epoch, identityId));
+  }
+
+  // ------------------------------------------ ParametersStorage, the Token
+
+  async getProtocolTreasury(): Promise<string> {
+    await this.init();
+    const parameters = await this.resolveContract('ParametersStorage');
+    return ethers.getAddress(await this.readContract(parameters, 'parametersStorage.protocolTreasury', 'protocolTreasury'));
+  }
+
+  async getWalletBalances(address: string): Promise<{ eth: bigint; trac: bigint }> {
+    await this.init();
+    const [eth, trac] = await Promise.all([
+      this.readProvider('marketplace wallet balance', (p) => p.getBalance(address)),
+      this.readContract(requireToken(this.contracts.token), 'token.balanceOf', 'balanceOf', address),
+    ]);
+    return { eth: BigInt(eth), trac: BigInt(trac) };
   }
 
   /**

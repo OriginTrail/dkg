@@ -19,7 +19,7 @@
  * signatures are 0x-prefixed hex.
  */
 import { ethers } from 'ethers';
-import type { TxResult } from './chain-adapter.js';
+import type { ChainAdapter, TxResult } from './chain-adapter.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 
 /** `ServiceSubscriptionsStorage.CLASS_INFERENCE`: units are tokens. */
@@ -328,6 +328,10 @@ export interface MarketplaceChain {
   grantNonce?(accountId: bigint): Promise<bigint>;
   getServiceSpending?(accountId: bigint): Promise<ServiceSpending>;
   maxBudgetsPerSubscription?(): Promise<number>;
+  /** Every buyer ever granted on the account (`buyerCount`, `buyerAt`), in grant order. */
+  getAccountBuyers?(accountId: bigint): Promise<string[]>;
+  /** The accounts whose `BuyerAdded` events name `buyer`, ascending: those that granted it, revoked or not. */
+  listBuyerAccounts?(buyer: string): Promise<bigint[]>;
   // QueryInferenceSettlement.
   /** Sent from a registered operational wallet, as a random-sampling proof is. */
   submitReceiptBatch?(groups: ReceiptGroup[]): Promise<ReceiptBatch>;
@@ -350,6 +354,27 @@ export interface MarketplaceChain {
    */
   getShardingTableNodeId?(identityId: bigint): Promise<string | null>;
   getNodeEpochScore?(epoch: number, identityId: bigint): Promise<bigint>;
+  // ParametersStorage and the Token.
+  /** `ParametersStorage.protocolTreasury()`: while it is wired, accounts cannot pay for services. */
+  getProtocolTreasury?(): Promise<string>;
+  /** A wallet's ETH and TRAC. */
+  getWalletBalances?(address: string): Promise<{ eth: bigint; trac: bigint }>;
+}
+
+/** A chain adapter with the whole marketplace, and the Conviction Account reads it uses. */
+export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick<ChainAdapter,
+  | 'getPublishingConvictionAccountInfo'
+  | 'getConvictionAccountLockDurationEpochs'
+  | 'getPublishingConvictionAgents'
+  | 'listNodePublishingConvictionAccounts'
+>>;
+
+/** `chain` as a `MarketplaceChainAdapter`, or `null` when it has no marketplace (no chain). */
+export function marketplaceChainOf(chain: ChainAdapter): MarketplaceChainAdapter | null {
+  return typeof chain.getMarketplaceContracts === 'function'
+    && typeof chain.getPublishingConvictionAccountInfo === 'function'
+    ? chain as MarketplaceChainAdapter
+    : null;
 }
 
 // ---------------------------------------------------------------------------

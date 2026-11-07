@@ -142,6 +142,11 @@ describe('mock marketplace: Conviction Account subscriptions', () => {
     ] }, terms);
     await chain.addBuyer(terms, '0x', consent);
     expect((await chain.getGrant(accountId, buyer.address))!.owner).toBe(SIGNER.address);
+    expect(await chain.getAccountBuyers(accountId)).toEqual([buyer.address]);
+    expect(await chain.listBuyerAccounts(buyer.address)).toEqual([accountId]);
+    expect(await chain.listBuyerAccounts(SIGNER.address)).toEqual([]);
+    expect(await chain.getProtocolTreasury()).toBe(ethers.ZeroAddress);
+    expect((await chain.getWalletBalances(buyer.address)).trac).toBeGreaterThan(0n);
   });
 
   it('signBuyerGrant signs as the buyer, 64 bytes over the grant digest', async () => {

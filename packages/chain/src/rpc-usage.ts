@@ -469,11 +469,13 @@ const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
   'serviceSubscriptionsStorage.subscriptionExists', 'serviceSubscriptionsStorage.getGrant',
   'serviceSubscriptionsStorage.grantEnd', 'serviceSubscriptionsStorage.grantNonce',
   'serviceSubscriptionsStorage.getServiceSpending', 'serviceSubscriptionsStorage.maxBudgetsPerSubscription',
+  'serviceSubscriptionsStorage.buyerCount', 'serviceSubscriptionsStorage.buyerAt',
   'queryInferenceSettlement.budgetLeft', 'queryInferenceSettlement.stakeFactor',
   'queryInferenceSettlement.epochPool', 'queryInferenceSettlement.queryInferenceGross',
   'queryInferenceStorage.batchState', 'queryInferenceStorage.nonceWord', 'queryInferenceStorage.budgetUsed',
   'queryInferenceStorage.fundingIn', 'queryInferenceStorage.getEpochTotals', 'queryInferenceStorage.getNodeEpoch',
   'shardingTableStorage.getNode', 'randomSamplingStorage.getNodeEpochScore',
+  'parametersStorage.protocolTreasury', 'marketplace wallet balance',
 
   // Background views coalesced into one request, and the bytecode check before it.
   'multicall3.aggregate3',
