@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Instrument+Sans:wght@400;500;600;700&display=swap');
+@import '@fontsource-variable/geist/wght.css';
 @import './styles/00-theme.css';
 @import './styles/01-base.css';
 @import './styles/02-shell-header.css';
