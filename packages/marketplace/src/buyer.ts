@@ -40,6 +40,7 @@ import {
   type Subscription,
   type SubscriptionFunding,
   type SubscriptionTopUp,
+  type V10PublishingConvictionAccountInfo,
 } from '@origintrail-official/dkg-chain';
 import type { ResolvedMarketplaceConfig } from './config.js';
 import { budgetsOf, planDigestOf, valueOf, type FundingSource, type PlannedService, type StandingPlan } from './plan.js';
@@ -90,6 +91,8 @@ export interface BuyerDeps {
   chain: MarketplaceChainAdapter;
   store: BuyerStore;
   config: ResolvedMarketplaceConfig;
+  /** The node's operational wallets, which it can send from; by default the buyer wallet alone. */
+  nodeWallets?: readonly string[];
   /** Told of each renewal that fails, once per epoch and refusal code. */
   onAlert?: (alert: BuyerAlert) => void;
   log?: (message: string) => void;
@@ -99,6 +102,7 @@ export class Buyer {
   readonly chain: MarketplaceChainAdapter;
   readonly store: BuyerStore;
   readonly config: ResolvedMarketplaceConfig;
+  readonly nodeWallets: readonly string[];
   /** The last renewal outcome per epoch: `null` for success. */
   readonly renewals = new Map<number, { at: number; refusal: { code: string; args: string[] } | null }>();
   private queue: Promise<unknown> = Promise.resolve();
@@ -109,6 +113,7 @@ export class Buyer {
     this.chain = deps.chain;
     this.store = deps.store;
     this.config = deps.config;
+    this.nodeWallets = (deps.nodeWallets ?? [deps.config.buyerWallet]).map((w) => ethers.getAddress(w));
   }
 
   get buyerWallet(): string {
@@ -149,7 +154,9 @@ export class Buyer {
       const times = await this.chain.getEpochTimes();
       const subscription = await this.chain.getSubscription(subscriptionId);
       if (!subscription) throw new MarketplaceRefusal('SubscriptionNotFound', [subscriptionId]);
-      if (subscription.buyer !== this.buyerWallet) throw new MarketplaceRefusal('NotSubscriptionBuyer', [subscriptionId, this.buyerWallet]);
+      if (ethers.getAddress(subscription.buyer) !== this.buyerWallet) {
+        throw new MarketplaceRefusal('NotSubscriptionBuyer', [subscriptionId, this.buyerWallet]);
+      }
       const stored = await this.chain.getBudgets(subscriptionId);
       const additions = budgetsOf(services).map((b) => {
         const same = stored.find((s) => s.serviceId.toLowerCase() === b.serviceId.toLowerCase());
@@ -283,16 +290,11 @@ export class Buyer {
     const account = await this.chain.getPublishingConvictionAccountInfo(accountId);
     if (!account) return refuse('ERC721NonexistentToken', accountId);
     ({ cost: result.cost, discountBps: result.discountBps } = await this.chain.previewCost(accountId, value));
-    const lock = await this.chain.getConvictionAccountLockDurationEpochs(accountId);
-    // As the contracts tell an account PublishingConviction 10.0.8 or 10.1.0 scheduled in full.
-    if (account.lastSettledWindow >= lock) return refuse('EmissionAlreadyScheduled', accountId);
-    const treasury = await this.chain.getProtocolTreasury();
-    if (treasury !== ethers.ZeroAddress) return refuse('ServiceFundingPausedTreasuryWired', treasury);
-    const spending = await this.chain.getServiceSpending(accountId);
-    if (spending.enabledAt === 0 || spending.owner !== account.owner) return refuse('ServiceSpendingDisabled', accountId);
+    const unable = await accountRefusal(this.chain, accountId, account);
+    if (unable) return { ...result, refusal: unable };
     const grant = await this.chain.getGrant(accountId, this.buyerWallet);
     if (!grant) return refuse('NotABuyer', accountId, this.buyerWallet);
-    if (grant.owner !== account.owner) return refuse('GrantedByFormerOwner', accountId, this.buyerWallet);
+    if (ethers.getAddress(grant.owner) !== ethers.getAddress(account.owner)) return refuse('GrantedByFormerOwner', accountId, this.buyerWallet);
     if (grant.revokedAt !== 0) return refuse('GrantRevoked', accountId, this.buyerWallet);
     if (times.now >= grant.expiresAt) return refuse('GrantExpired', accountId, this.buyerWallet);
     if (grant.expiresAt <= startsAt) return refuse('GrantEndsBeforeSubscription', accountId, this.buyerWallet, grant.expiresAt, startsAt);
@@ -317,6 +319,29 @@ export class Buyer {
     this.queue = run.catch(() => undefined);
     return run;
   }
+}
+
+/**
+ * Why the account cannot pay for services, as the contracts refuse it, before
+ * any grant is looked at: scheduled in full, a treasury wired, or service
+ * spending off; `null` when none holds.
+ */
+export async function accountRefusal(
+  chain: MarketplaceChainAdapter,
+  accountId: bigint,
+  account: V10PublishingConvictionAccountInfo,
+): Promise<{ code: string; args: string[] } | null> {
+  // As the contracts tell an account PublishingConviction 10.0.8 or 10.1.0 scheduled in full.
+  if (account.lastSettledWindow >= (await chain.getConvictionAccountLockDurationEpochs(accountId))) {
+    return { code: 'EmissionAlreadyScheduled', args: [String(accountId)] };
+  }
+  const treasury = await chain.getProtocolTreasury();
+  if (treasury !== ethers.ZeroAddress) return { code: 'ServiceFundingPausedTreasuryWired', args: [treasury] };
+  const spending = await chain.getServiceSpending(accountId);
+  if (spending.enabledAt === 0 || spending.owner !== ethers.getAddress(account.owner)) {
+    return { code: 'ServiceSpendingDisabled', args: [String(accountId)] };
+  }
+  return null;
 }
 
 /** The budgets after a top-up: each stored one with its addition, then the new ones. */

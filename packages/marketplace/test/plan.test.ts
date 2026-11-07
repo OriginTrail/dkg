@@ -5,7 +5,9 @@ import {
   DEFAULT_PREFUND_LEAD_MINUTES,
   PlanError,
   budgetsOf,
+  parseEpoch,
   parsePlan,
+  parseWei,
   planDigestOf,
   planToWire,
   resolveMarketplaceConfig,
@@ -68,6 +70,14 @@ describe('the standing plan', () => {
   ])('refuses %j', (raw, message) => {
     expect(() => parsePlan(raw)).toThrow(PlanError);
     expect(() => parsePlan(raw)).toThrow(message);
+  });
+
+  it('reads an epoch as current, next or a number', () => {
+    expect([parseEpoch('current', 663), parseEpoch('next', 663), parseEpoch(670, 663), parseEpoch('670', 663)]).toEqual([663, 664, 670, 670]);
+    for (const bad of [0, -1, 1.5, '0', 'later', undefined]) expect(() => parseEpoch(bad, 663)).toThrow(PlanError);
+    expect(parseWei('5', 'value')).toBe(5n);
+    expect(() => parseWei(5, 'value')).toThrow(/decimal string of wei/);
+    expect(() => parseWei(String(1n << 96n), 'value')).toThrow(/fit 96 bits/);
   });
 
   it('a plan that does not renew needs no last epoch', () => {

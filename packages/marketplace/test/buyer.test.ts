@@ -195,6 +195,9 @@ describe('topping up', () => {
     expect(await chain.getBudgets(subscriptionId)).toEqual([service(A, 110n * TRAC), service(B, 20n * TRAC, 2)]);
     expect(await refusal(buyer.topUp(subscriptionIdOf(SIGNER.address, epoch + 1), [service(A, TRAC)])))
       .toEqual({ code: 'SubscriptionNotFound', args: [subscriptionIdOf(SIGNER.address, epoch + 1)] });
+    // Another buyer's subscription is not this node's to top up.
+    const other = buyerWith({ buyerWallet: ethers.getAddress(`0x${'0c'.repeat(20)}`) });
+    expect((await refusal(other.topUp(subscriptionId, [service(A, TRAC)])))?.code).toBe('NotSubscriptionBuyer');
   });
 
   it('counts the subscription cost against the grant limit for an account', async () => {

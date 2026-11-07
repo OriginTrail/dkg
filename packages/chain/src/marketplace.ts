@@ -367,6 +367,7 @@ export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick
   | 'getConvictionAccountLockDurationEpochs'
   | 'getPublishingConvictionAgents'
   | 'listNodePublishingConvictionAccounts'
+  | 'getPublishingConvictionContracts'
 >>;
 
 /** `chain` as a `MarketplaceChainAdapter`, or `null` when it has no marketplace (no chain). */

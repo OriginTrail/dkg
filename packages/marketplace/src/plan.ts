@@ -60,7 +60,8 @@ export class PlanError extends Error {
 
 const UINT96_MAX = (1n << 96n) - 1n;
 
-function weiOf(value: unknown, field: string): bigint {
+/** A wei amount from the wire: a decimal string, above 0 and within 96 bits. */
+export function parseWei(value: unknown, field: string): bigint {
   if (typeof value !== 'string' || !/^\d+$/.test(value)) throw new PlanError(`${field} must be a decimal string of wei`);
   const wei = BigInt(value);
   if (wei === 0n || wei > UINT96_MAX) throw new PlanError(`${field} must be above 0 and fit 96 bits`);
@@ -93,8 +94,8 @@ export function parseServices(raw: unknown): PlannedService[] {
     return {
       serviceId: entry.serviceId.toLowerCase(),
       serviceClass: entry.serviceClass === 'inference' ? SERVICE_CLASS_INFERENCE : SERVICE_CLASS_QUERY,
-      value: weiOf(entry.value, `services[${i}].value`),
-      maxPricePerUnit: weiOf(entry.maxPricePerUnit, `services[${i}].maxPricePerUnit`),
+      value: parseWei(entry.value, `services[${i}].value`),
+      maxPricePerUnit: parseWei(entry.maxPricePerUnit, `services[${i}].maxPricePerUnit`),
       ...(pinned !== undefined ? { pinnedSeller: BigInt(pinned) } : {}),
     };
   });
@@ -119,6 +120,15 @@ export function parsePlan(raw: unknown): StandingPlan {
     renew: plan.renew,
     ...(until !== undefined ? { renewUntilEpoch: until } : {}),
   };
+}
+
+/** `current`, `next` or an epoch's number, against the chain's current epoch. */
+export function parseEpoch(raw: unknown, current: number): number {
+  if (raw === 'current') return current;
+  if (raw === 'next') return current + 1;
+  const epoch = typeof raw === 'string' && /^[1-9]\d*$/.test(raw) ? Number(raw) : raw;
+  if (typeof epoch === 'number' && Number.isSafeInteger(epoch) && epoch > 0) return epoch;
+  throw new PlanError('epoch must be current, next or an epoch number');
 }
 
 export function sourceToWire(source: FundingSource): FundingSourceWire {

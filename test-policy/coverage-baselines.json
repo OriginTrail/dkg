@@ -11,15 +11,15 @@
       "node": "22.23.1",
       "platform": "darwin-arm64",
       "measured": {
-        "lines": 98.37,
-        "functions": 98.41,
-        "branches": 91.7,
-        "statements": 96.39
+        "lines": 98.76,
+        "functions": 98.94,
+        "branches": 92.2,
+        "statements": 96.76
       },
       "thresholds": {
         "lines": 97,
         "functions": 97,
-        "branches": 90,
+        "branches": 91,
         "statements": 95
       }
     },
