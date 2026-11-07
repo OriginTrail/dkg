@@ -1884,6 +1884,7 @@ async function runDaemonInnerWithStartupOwnership(
     // network supplies one of them; the agent expects rpcUrl + hubAddress.
     chainConfig: runtimeEvmChainConfig ? { ...runtimeEvmChainConfig, ...evmSigning.chainSigning } : undefined,
     authorSigners: evmSigning.authorSigners,
+    nodeHeldAuthor: evmSigning.nodeHeldAuthor,
     sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
     metadataProvenanceEvents: config.metadata?.provenanceEvents,

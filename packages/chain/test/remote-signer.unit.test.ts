@@ -721,6 +721,25 @@ describe('chain.signer configuration', () => {
     }
   });
 
+  it('takes authors held on the node with payer accounts only, and never beside author keys of the signer', () => {
+    expect(resolveChainSignerConfig({ type: 'remote', socketPath: '/run/signer.sock', authTokenFile: '/etc/token', nodeHeldAuthor: true })).toEqual({
+      type: 'remote', socketPath: '/run/signer.sock', authTokenFile: '/etc/token', nodeHeldAuthor: true,
+    });
+    // Off is the same block as without the setting.
+    expect(resolveChainSignerConfig({ type: 'remote', url: 'http://x', nodeHeldAuthor: false })).toEqual({ type: 'remote', url: 'http://x' });
+    expect(resolveChainSignerConfig({ type: 'remote', url: 'http://x', author: { address: WALLET_B.address }, nodeHeldAuthor: false }))
+      .toEqual({ type: 'remote', url: 'http://x', author: { address: WALLET_B.address } });
+    const bad: Array<[unknown, RegExp]> = [
+      [{ type: 'remote', url: 'http://x', nodeHeldAuthor: 'true' }, /nodeHeldAuthor must be true or false/],
+      [{ type: 'remote', url: 'http://x', nodeHeldAuthor: 1 }, /nodeHeldAuthor must be true or false/],
+      [{ type: 'remote', url: 'http://x', nodeHeldAuthor: true, author: { authTokenFile: '/a' } }, /cannot be combined with author/],
+      [{ type: 'local', nodeHeldAuthor: true }, /local signing takes no other settings/],
+    ];
+    for (const [raw, message] of bad) {
+      expect(() => resolveChainSignerConfig(raw), JSON.stringify(raw)).toThrow(message);
+    }
+  });
+
   it('keeps every optional setting, and connects an author block with its own credential', async () => {
     expect(resolveChainSignerConfig({
       type: 'remote',

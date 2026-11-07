@@ -133,6 +133,7 @@ import {
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
+import { nodeHeldAuthorEnabled, nodeHeldDefaultAuthor, nodeHeldRosterSender } from './node-held-author.js';
 import  {
   DKGPublisher,
   PublishHandler,
@@ -1906,7 +1907,7 @@ export class PublishMethods extends DKGAgentBase {
 
     const fallbackAuthor = opts?.preSignedAuthorAttestation === undefined
       && opts?.authorAgentAddress === undefined
-      ? await this.publisher.publisherFallbackAuthorAddress()
+      ? nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress) ?? await this.publisher.publisherFallbackAuthorAddress()
       : undefined;
     const lifecycleAgentAddress = ethers.getAddress(
       opts?.preSignedAuthorAttestation?.authorAddress
@@ -3473,6 +3474,7 @@ export class PublishMethods extends DKGAgentBase {
 
     // 7. Resolve author. preSigned > custodial agent > publisher fallback.
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+    const nodeHeldAuthor = nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
     let authorAddress: string;
     let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
@@ -3489,6 +3491,10 @@ export class PublishMethods extends DKGAgentBase {
         this, this.config?.authorSigners, opts.authorAgentAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE,
       );
       authorAddress = opts.authorAgentAddress;
+    } else if (nodeHeldAuthor !== undefined) {
+      // Authors held on the node (nodeHeldAuthor): the default agent signs with its key on the node.
+      authorAddress = nodeHeldAuthor;
+      authorSigner = await registeredAgentAuthorSigner(this, this.config?.authorSigners, authorAddress, 'assertionFinalize', SEAL_CAPABILITY_GAP_CODE);
     } else {
       // Publisher-wallet fallback: use the daemon's own publisher EOA
       // as the author. This preserves Phase 4 mode (a) — node admin
@@ -3969,6 +3975,7 @@ export class PublishMethods extends DKGAgentBase {
     // into is resolved separately at publish time (targetOnChainCgId/v10CgId).
 
     const schemeVersion = opts?.schemeVersion ?? AUTHOR_SCHEME_VERSION_V1;
+    const nodeHeldAuthor = nodeHeldDefaultAuthor(this.config, this.chain, this.localAgents, this.defaultAgentAddress);
     let authorAddress: string;
     let authorSigner: AuthorSigner | undefined;
     let preSigned: PreSignedAuthorAttestation | undefined;
@@ -3980,6 +3987,9 @@ export class PublishMethods extends DKGAgentBase {
         this, this.config?.authorSigners, opts.authorAgentAddress, 'Selection-based VM publish',
       );
       authorAddress = opts.authorAgentAddress;
+    } else if (nodeHeldAuthor !== undefined) {
+      authorAddress = nodeHeldAuthor;
+      authorSigner = await registeredAgentAuthorSigner(this, this.config?.authorSigners, authorAddress, 'Selection-based VM publish');
     } else {
       const fallbackAddress = await this.publisher.publisherFallbackAuthorAddress();
       if (!fallbackAddress) {
@@ -4237,7 +4247,16 @@ export class PublishMethods extends DKGAgentBase {
     }
     if (!targetIsCurated) return undefined;
 
-    const senderAddress = authorAgentAddress
+    // The bounded repeat of the share's recipient read (#3044): an authority
+    // that moved while the keys resolved is read again before the publish fails.
+    const resolveRecipients = () => resolvePromoteRecipientsWithinBound(() => withRpcUsageSite(
+      CG_AUTH_RPC_SITES.curatedKeyContext,
+      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
+    ));
+    // Authors held on the node (nodeHeldAuthor): a key of the graph's roster sends, as a share signs its gossip.
+    const rosterFirst = nodeHeldAuthorEnabled(this.config, this.chain) ? await resolveRecipients() : undefined;
+    const senderAddress = (rosterFirst && nodeHeldRosterSender(this.localAgents.values(), authorAgentAddress ?? this.defaultAgentAddress, rosterFirst.recipients)?.agentAddress)
+      ?? authorAgentAddress
       ?? this.defaultAgentAddress
       ?? this.peerId;
 
@@ -4250,13 +4269,7 @@ export class PublishMethods extends DKGAgentBase {
         `Refusing to publish curated CG payload via the plaintext-inline fallback.`,
       );
     }
-    // The bounded repeat of the share's recipient read (#3044): an authority
-    // that moved while the keys resolved is read again before the publish fails.
-    const resolveRecipients = () => resolvePromoteRecipientsWithinBound(() => withRpcUsageSite(
-      CG_AUTH_RPC_SITES.curatedKeyContext,
-      () => this.resolveWorkspaceAgentRecipientsForCurrentAuthority({ contextGraphId }),
-    ));
-    const resolution = await resolveRecipients();
+    const resolution = rosterFirst ?? await resolveRecipients();
     if (!resolution.requiresEncryption) {
       throw new Error(
         `${logPrefix}: curated CG ${contextGraphId}: access-policy says curated but recipient resolver ` +
