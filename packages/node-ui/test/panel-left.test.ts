@@ -449,11 +449,13 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(useProjectsStore.getState().activeProjectId).toBeNull();
 
     await act(async () => { subscribeButton!.click(); });
-    expect(container.querySelector('[role="dialog"]')).toBeTruthy();
+    // The sidebar's modals render on document.body, outside the panel.
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeTruthy();
     expect(
-      (container.querySelector('#dkg-cg-invite') as HTMLTextAreaElement).value,
+      (document.body.querySelector('#dkg-cg-invite') as HTMLTextAreaElement).value,
     ).toBe('public-passive');
-    expect(container.querySelector('.v10-modal-btn.primary')?.textContent).toBe('Subscribe');
+    expect(document.body.querySelector('.v10-modal-btn.primary')?.textContent).toBe('Subscribe');
   });
 
   it('section headers point at their body containers via aria-controls', async () => {

@@ -1,4 +1,5 @@
 import React, { useCallback, useId, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Activity,
   ChevronRight,
@@ -509,12 +510,19 @@ export function PanelLeft() {
         </div>
       )}
 
-      <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
-      <JoinProjectModal
-        open={showJoinModal}
-        onClose={closeJoinModal}
-        initialContextGraphId={joinContextGraphId}
-      />
+      {/* The panel's glass chrome (backdrop-filter) would make it the containing
+          block for the modals' fixed overlay, so they render on document.body. */}
+      {createPortal(
+        <>
+          <CreateProjectModal open={showCreateModal} onClose={() => setShowCreateModal(false)} />
+          <JoinProjectModal
+            open={showJoinModal}
+            onClose={closeJoinModal}
+            initialContextGraphId={joinContextGraphId}
+          />
+        </>,
+        document.body,
+      )}
     </div>
   );
 }
