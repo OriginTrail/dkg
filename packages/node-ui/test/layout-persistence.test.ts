@@ -34,6 +34,9 @@ describe('useLayoutStore (dkg-layout localStorage persistence)', () => {
     expect(state.leftCollapsed).toBe(false);
     expect(state.rightCollapsed).toBe(false);
     expect(state.bottomCollapsed).toBe(true);
+    expect(state.leftSectionMyProjectsOpen).toBe(true);
+    expect(state.leftSectionContextOracleOpen).toBe(false);
+    expect(state.leftSectionIntegrationsOpen).toBe(false);
   });
 
   it('reads persisted widths from the dkg-layout key on initial load', async () => {

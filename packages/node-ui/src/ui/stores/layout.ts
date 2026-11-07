@@ -6,6 +6,7 @@ interface LayoutState {
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
   leftSectionMyProjectsOpen: boolean;
+  leftSectionContextOracleOpen: boolean;
   leftSectionIntegrationsOpen: boolean;
   theme: 'dark' | 'light';
   leftWidth: number;
@@ -17,6 +18,7 @@ interface LayoutState {
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
   toggleLeftSectionMyProjects: () => void;
+  toggleLeftSectionContextOracle: () => void;
   toggleLeftSectionIntegrations: () => void;
   setTheme: (t: 'dark' | 'light') => void;
   setLeftWidth: (w: number) => void;
@@ -31,6 +33,7 @@ interface PersistedLayout {
   rightCollapsed?: boolean;
   bottomCollapsed?: boolean;
   leftSectionMyProjectsOpen?: boolean;
+  leftSectionContextOracleOpen?: boolean;
   leftSectionIntegrationsOpen?: boolean;
   leftWidth?: number;
   rightWidth?: number;
@@ -43,11 +46,11 @@ const DEFAULTS = {
   leftCollapsed: false,
   rightCollapsed: false,
   bottomCollapsed: true,
-  // Sidebar sections: My Context Graphs is the primary navigation surface
-  // so it stays open by default; Integrations is an escape-hatch surface
-  // (status check, no day-to-day click target) so it stays closed and
-  // doesn't run its 30s polling loop until the user opens it.
+  // Sidebar sections: My Context Graphs is the primary navigation surface,
+  // while Public Graphs and Integrations stay collapsed until the user
+  // needs them (Integrations runs its 30s poll only while open).
   leftSectionMyProjectsOpen: true,
+  leftSectionContextOracleOpen: false,
   leftSectionIntegrationsOpen: false,
   leftWidth: 240,
   rightWidth: 360,
@@ -118,6 +121,9 @@ function loadPersisted(): Required<PersistedLayout> {
       leftSectionMyProjectsOpen: typeof parsed.leftSectionMyProjectsOpen === 'boolean'
         ? parsed.leftSectionMyProjectsOpen
         : DEFAULTS.leftSectionMyProjectsOpen,
+      leftSectionContextOracleOpen: typeof parsed.leftSectionContextOracleOpen === 'boolean'
+        ? parsed.leftSectionContextOracleOpen
+        : DEFAULTS.leftSectionContextOracleOpen,
       leftSectionIntegrationsOpen: typeof parsed.leftSectionIntegrationsOpen === 'boolean'
         ? parsed.leftSectionIntegrationsOpen
         : DEFAULTS.leftSectionIntegrationsOpen,
@@ -152,6 +158,7 @@ function snapshot(state: LayoutState): PersistedLayout {
     rightCollapsed: state.rightCollapsed,
     bottomCollapsed: state.bottomCollapsed,
     leftSectionMyProjectsOpen: state.leftSectionMyProjectsOpen,
+    leftSectionContextOracleOpen: state.leftSectionContextOracleOpen,
     leftSectionIntegrationsOpen: state.leftSectionIntegrationsOpen,
     leftWidth: state.leftWidth,
     rightWidth: state.rightWidth,
@@ -167,6 +174,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
+  leftSectionContextOracleOpen: initial.leftSectionContextOracleOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
   theme: (localStorage.getItem('dkg-theme') as 'dark' | 'light') || 'dark',
   leftWidth: initial.leftWidth,
@@ -191,6 +199,10 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   },
   toggleLeftSectionMyProjects: () => {
     set((s) => ({ leftSectionMyProjectsOpen: !s.leftSectionMyProjectsOpen }));
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionContextOracle: () => {
+    set((s) => ({ leftSectionContextOracleOpen: !s.leftSectionContextOracleOpen }));
     persist(snapshot(get()));
   },
   toggleLeftSectionIntegrations: () => {

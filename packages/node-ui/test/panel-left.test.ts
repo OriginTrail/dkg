@@ -40,6 +40,14 @@ async function flush(): Promise<void> {
   });
 }
 
+function sectionHeader(container: HTMLElement, label: string): HTMLButtonElement {
+  const header = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('.v10-peer-group-header'),
+  ).find((candidate) => candidate.textContent?.includes(label));
+  if (!header) throw new Error(`Sidebar section not found: ${label}`);
+  return header;
+}
+
 // Cross-test cleanup registry. PanelLeft spins up a 60s polling interval
 // (`loadCGs`) and subscribes to `useNodeEvents` on mount — without an
 // explicit unmount, those listeners + timers leak into the next test and
@@ -124,6 +132,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
       useLayoutStore.setState({
         leftSectionMyProjectsOpen: true,
+        leftSectionContextOracleOpen: false,
         leftSectionIntegrationsOpen: false,
       });
     });
@@ -197,11 +206,10 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const { container } = await renderPanel({ graphs: [], stage: 1 });
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
     expect(container.textContent).not.toContain('No context graphs yet');
-    expect(container.textContent).not.toContain('No context graphs in this view yet.');
-    const modes = container.querySelectorAll<HTMLButtonElement>('.v10-tree-mode-btn');
-    await act(async () => { modes[1].click(); });
-    expect(container.textContent).not.toContain('No discovered public Context Graphs yet');
-    await act(async () => { modes[0].click(); });
+    expect(container.textContent).not.toContain('No context graphs in this section yet.');
+    await act(async () => { sectionHeader(container, 'Public Graphs').click(); });
+    expect(container.textContent).not.toContain('Discovered public graphs will appear here');
+    await act(async () => { sectionHeader(container, 'Public Graphs').click(); });
     const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry');
     expect(retry).toBeTruthy();
     await act(async () => { retry!.click(); });
@@ -241,20 +249,21 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(container.textContent).toContain('My First CG');
   });
 
-  it('renders both section chevron headers with the v10-peer-group pattern', async () => {
+  it('renders the graph and integration section headers with the v10-peer-group pattern', async () => {
     const { container } = await renderPanel();
     const headers = container.querySelectorAll('.v10-peer-group-header');
-    expect(headers.length).toBe(2);
+    expect(headers.length).toBe(3);
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
-    expect(labels).toEqual(['My Context Graphs', 'Integrations']);
+    expect(labels).toEqual(['My Context Graphs', 'Public Graphs', 'Integrations']);
   });
 
-  it('expands "My Context Graphs" by default and keeps "Integrations" collapsed', async () => {
+  it('expands "My Context Graphs" by default and keeps secondary groups collapsed', async () => {
     const { container } = await renderPanel();
-    const headers = container.querySelectorAll('.v10-peer-group-header');
-    const myCgHeader = headers[0] as HTMLButtonElement;
-    const integrationsHeader = headers[1] as HTMLButtonElement;
+    const myCgHeader = sectionHeader(container, 'My Context Graphs');
+    const publicHeader = sectionHeader(container, 'Public Graphs');
+    const integrationsHeader = sectionHeader(container, 'Integrations');
     expect(myCgHeader.getAttribute('aria-expanded')).toBe('true');
+    expect(publicHeader.getAttribute('aria-expanded')).toBe('false');
     expect(integrationsHeader.getAttribute('aria-expanded')).toBe('false');
     // My CG body should be in the DOM (chevron expanded class + a row).
     expect(container.querySelector('.v10-peer-group-chevron.expanded')).toBeTruthy();
@@ -270,9 +279,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(useLayoutStore.getState().leftSectionMyProjectsOpen).toBe(true);
     expect(useLayoutStore.getState().leftSectionIntegrationsOpen).toBe(false);
 
-    const headers = container.querySelectorAll('.v10-peer-group-header');
     await act(async () => {
-      (headers[1] as HTMLButtonElement).click();
+      sectionHeader(container, 'Integrations').click();
     });
     expect(useLayoutStore.getState().leftSectionIntegrationsOpen).toBe(true);
     // The persist() helper debounces with a 150ms setTimeout; wait it out
@@ -308,6 +316,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
       useLayoutStore.setState({
         leftSectionMyProjectsOpen: true,
+        leftSectionContextOracleOpen: false,
         leftSectionIntegrationsOpen: false,
       });
     });
@@ -324,20 +333,19 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
     const labels = Array.from(container.querySelectorAll('.v10-peer-group-label')).map((el) => el.textContent);
     expect(labels).toContain('My Context Graphs');
-    expect(container.textContent).toContain('No context graphs in this view yet.');
+    expect(container.textContent).toContain('No context graphs in this section yet.');
     // The catalog-only CG should NOT render as a row in this section.
     expect(container.textContent).not.toContain('Catalog Only CG');
   });
 
   it('explains that discovered public graphs are browseable before subscription', async () => {
     const { container } = await renderPanel();
-    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
 
     await act(async () => {
-      (modeButtons[1] as HTMLButtonElement).click();
+      sectionHeader(container, 'Public Graphs').click();
     });
 
-    expect(container.textContent).toContain('Public graphs appear here as soon as your node discovers them');
+    expect(container.textContent).toContain('Discovered public graphs will appear here');
     expect(container.textContent).toContain('subscribe by ID');
   });
 
@@ -359,9 +367,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
     });
 
-    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
     await act(async () => {
-      (modeButtons[1] as HTMLButtonElement).click();
+      sectionHeader(container, 'Public Graphs').click();
     });
 
     expect(container.textContent).toContain('Public Ready Graph');
@@ -399,9 +406,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       });
     });
 
-    const modeButtons = container.querySelectorAll('.v10-tree-mode-btn');
     await act(async () => {
-      (modeButtons[1] as HTMLButtonElement).click();
+      sectionHeader(container, 'Public Graphs').click();
     });
 
     const browseButton = container.querySelector(
@@ -427,21 +433,23 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
 
   it('section headers point at their body containers via aria-controls', async () => {
     const { container } = await renderPanel();
-    const headers = container.querySelectorAll('.v10-peer-group-header');
-    const myCgHeader = headers[0] as HTMLButtonElement;
-    const integrationsHeader = headers[1] as HTMLButtonElement;
+    const myCgHeader = sectionHeader(container, 'My Context Graphs');
+    const publicHeader = sectionHeader(container, 'Public Graphs');
+    const integrationsHeader = sectionHeader(container, 'Integrations');
     const myCgControls = myCgHeader.getAttribute('aria-controls');
+    const publicControls = publicHeader.getAttribute('aria-controls');
     const integrationsControls = integrationsHeader.getAttribute('aria-controls');
     expect(myCgControls).toBeTruthy();
+    expect(publicControls).toBeTruthy();
     expect(integrationsControls).toBeTruthy();
     // The id pointed at by aria-controls of the (open) My CG header
     // must exist in the DOM. `useId()` returns ids shaped like ":r0:"
     // which aren't valid CSS selectors — use getElementById, not
     // querySelector (Codex).
     expect(document.getElementById(myCgControls!)).toBeTruthy();
-    // Integrations is collapsed by default → its body is unmounted, so
-    // the id is currently absent (aria-controls is still allowed to
-    // reference a not-yet-rendered region per WAI-ARIA).
+    // Public Graphs and Integrations are collapsed by default, so their
+    // bodies are unmounted. aria-controls may still reference them.
+    expect(document.getElementById(publicControls!)).toBeNull();
     expect(document.getElementById(integrationsControls!)).toBeNull();
   });
 
@@ -456,8 +464,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const { container } = await renderPanel();
-      const headers = container.querySelectorAll('.v10-peer-group-header');
-      const integrationsHeader = headers[1] as HTMLButtonElement;
+      const integrationsHeader = sectionHeader(container, 'Integrations');
 
       // Open Integrations — the body mounts and fires its first fetch.
       await act(async () => {
@@ -497,9 +504,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
   it('hydrates section open-state defaults when a pre-existing dkg-layout blob lacks the new fields', async () => {
     // Simulates an upgrade from before PR7: the user already has a
     // `dkg-layout` blob with the original fields but no
-    // leftSectionMyProjectsOpen / leftSectionIntegrationsOpen. The
-    // layout store's loadPersisted should backfill both with their
-    // defaults (My CG open, Integrations closed) so the user doesn't
+    // sidebar-section fields. The layout store's loadPersisted should
+    // backfill them with their defaults so the user doesn't
     // boot into a broken state.
     vi.resetModules();
     localStorage.setItem('dkg-layout', JSON.stringify({
@@ -509,10 +515,11 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       leftWidth: 240,
       rightWidth: 360,
       bottomHeight: 200,
-      // Intentionally NO leftSectionMyProjectsOpen / leftSectionIntegrationsOpen.
+      // Intentionally no sidebar-section state fields.
     }));
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
     expect(useLayoutStore.getState().leftSectionMyProjectsOpen).toBe(true);
+    expect(useLayoutStore.getState().leftSectionContextOracleOpen).toBe(false);
     expect(useLayoutStore.getState().leftSectionIntegrationsOpen).toBe(false);
   });
 });
