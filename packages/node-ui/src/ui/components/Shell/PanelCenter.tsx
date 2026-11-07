@@ -51,6 +51,10 @@ const MarketplaceView = createRecoverableLazyView(() =>
   import('../../marketplace/views/MarketplaceView.js').then((m) => m.MarketplaceView)
 , 'marketplace');
 
+const MarketplacePlansView = createRecoverableLazyView(() =>
+  import('../../marketplace/views/PlansView.js').then((m) => m.PlansView)
+, 'marketplace plans');
+
 const MemoryStackView = createRecoverableLazyView(() =>
   import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
 , 'memory stack');
@@ -296,6 +300,8 @@ function ViewContainer() {
   if (activeTabId === 'dashboard') return <DashboardView />;
 
   if (activeTabId === MARKETPLACE_TABS.browse.id) return <MarketplaceView />;
+
+  if (activeTabId === MARKETPLACE_TABS.plans.id) return <MarketplacePlansView />;
 
   if (activeTabId === 'operations') {
     return <OperationsView />;
