@@ -326,6 +326,18 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Updated OT-RFC-51: storage surface for the above — primaryNode field on the
   // widened Account tuple + the seeded per-epoch publishing allocation getters.
   PublishingConvictionStorage:  '7eeae71f0efd9183fce232ccc669227dfd70fe4f93b4663392a0a52c1ccba859',
+
+  // The NeuroSymbolic Marketplace (OT-RFC-27):
+  // ServiceSubscriptions 1.2.0 (account grants, fundings and top-ups),
+  // ServiceSubscriptionsWallet 1.0.0 (wallet fundings and top-ups),
+  // ServiceSubscriptionsStorage 1.2.0, QueryInferenceSettlement 1.0.0 (receipt
+  // batches, the pool) and QueryInferenceStorage 1.0.0. The marketplace mixin
+  // (evm-adapter-marketplace.ts) calls all five.
+  ServiceSubscriptions:         'd5fe1b788d129d8e696a5d5d9173d901dc3bdb292ba73ff8b43c020aad872e6a',
+  ServiceSubscriptionsWallet:   '05305a5de9f76efbdabb5ef541d1e2d609ae42f647629c8e291dadcb0548edb6',
+  ServiceSubscriptionsStorage:  '559977bda39ee3a14e4f85c11aadc1035c7b879c412d2c18374f15e30e15024f',
+  QueryInferenceSettlement:     'e41753c87b56d297b2fd79470b8844da32e25313a2148e8e2967aaf557154a4b',
+  QueryInferenceStorage:        'c367dfd37f72a07a49a17a88fe4bf7fabd65a9660dd08fa8e8137e88e7747fe5',
 };
 
 describe('ABI pin digest — detects silent contract surface drift [CH-5]', () => {
