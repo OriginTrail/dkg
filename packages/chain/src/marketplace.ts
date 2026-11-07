@@ -361,13 +361,21 @@ export interface MarketplaceChain {
   getWalletBalances?(address: string): Promise<{ eth: bigint; trac: bigint }>;
 }
 
-/** A chain adapter with the whole marketplace, and the Conviction Account reads it uses. */
+/**
+ * A chain adapter with the whole marketplace, the Conviction Account reads it
+ * uses, and the node's identity: its id, the sharding table, which keys are an
+ * identity's operational keys, and typed-data signing with its wallets.
+ */
 export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick<ChainAdapter,
   | 'getPublishingConvictionAccountInfo'
   | 'getConvictionAccountLockDurationEpochs'
   | 'getPublishingConvictionAgents'
   | 'listNodePublishingConvictionAccounts'
   | 'getPublishingConvictionContracts'
+  | 'getIdentityId'
+  | 'isShardingTableMember'
+  | 'verifyACKIdentityDetailed'
+  | 'signTypedDataAs'
 >>;
 
 /** `chain` as a `MarketplaceChainAdapter`, or `null` when it has no marketplace (no chain). */

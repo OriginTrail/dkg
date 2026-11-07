@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * Serving end to end on the evm-module's Hardhat chain: a seller node and a
+ * buyer node over libp2p on loopback, the seller started as the daemon starts
+ * it, and a stub OpenAI-compatible model on loopback (no model download).
+ *   - the seller shares its offers into the Marketplace Context Graph, and the
+ *     buyer node reads them from its shared memory;
+ *   - a quote, and a call served with a receipt the seller's operational
+ *     wallet signed, which the chain shows is a key of a Core Node;
+ *   - crafted requests from the buyer node: an exact repeat
+ *     (the stored receipt), the wrong seller, an expired request, a price over
+ *     the budget's cap, an unknown subscription, a replayed nonce, and a call
+ *     within the stop-serving window.
+ */
+import { createServer, type Server } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Wallet, ethers } from 'ethers';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  EVMChainAdapter,
+  SERVICE_CLASS_INFERENCE,
+  hashServiceRequest,
+  signServiceRequest,
+  type MarketplaceChainAdapter,
+  type MarketplaceDomain,
+  type ServiceRequest,
+} from '@origintrail-official/dkg-chain';
+import {
+  PEER_LIMITS,
+  decodeMessage,
+  encodeMessage,
+  offersFromBindings,
+  offersQuery,
+  receiptFromWire,
+  receiptSignerOf,
+  requestToWire,
+  resultCommitmentOf,
+  serviceIdOf,
+  type QuoteResponse,
+  type ServeAnswer,
+  type ServeResponse,
+} from '@origintrail-official/dkg-marketplace';
+import { createProvider, getSharedContext, revertSnapshot, takeSnapshot } from '../../chain/test/evm-test-context.js';
+import { HARDHAT_KEYS, makeAdapterConfig, mintTokens } from '../../chain/test/hardhat-harness.js';
+import { startMarketplaceSeller, type MarketplaceSellerRuntime } from '../src/daemon/marketplace-seller.js';
+
+const CONTEXT_GRAPH = 'marketplace-serving-e2e';
+const MODEL_A = 'urn:test:model:serving-a';
+const MODEL_B = 'urn:test:model:serving-b';
+const A = serviceIdOf(MODEL_A);
+const B = serviceIdOf(MODEL_B);
+const PRICE = 1_000n;
+const BODY = { messages: [{ role: 'user', content: 'synthetic question' }], max_tokens: 16 };
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+let snapshot: string;
+let dirs: string[] = [];
+let upstream: Server;
+let upstreamCalls = 0;
+let sellerAgent: DKGAgent;
+let buyerAgent: DKGAgent;
+let selling: MarketplaceSellerRuntime;
+let buyerChain: MarketplaceChainAdapter;
+let domain: MarketplaceDomain;
+let sellerIdentity: bigint;
+let subscriptionId: string;
+const session = Wallet.createRandom();
+
+/** Send a crafted `serve`; `attempt` makes a new message of the same request, as a retry after a lost answer does. */
+async function serve(request: ServiceRequest, key: ethers.Wallet | ethers.HDNodeWallet = session, attempt = 0): Promise<ServeResponse> {
+  const payload = encodeMessage({ request: requestToWire(request), signature: signServiceRequest(key.privateKey, domain, request), body: BODY });
+  const answer = await buyerAgent.sendMarketplaceMessage(sellerAgent.peerId, 'serve', payload, {
+    timeoutMs: PEER_LIMITS.serveTimeoutMs, maxReadBytes: PEER_LIMITS.serveResponseBytes, messageId: `${hashServiceRequest(domain, request)}:${attempt}`,
+  });
+  return decodeMessage(answer) as ServeResponse;
+}
+
+async function request(over: Partial<ServiceRequest> = {}): Promise<ServiceRequest> {
+  await createProvider().send('evm_mine', []);
+  const { now } = await buyerChain.getEpochTimes();
+  return {
+    subscriptionId, serviceId: A, seller: sellerIdentity, nonce: 0n, pricePerUnit: PRICE,
+    maxUnits: 1_000n, maxValueWei: 1_000n * PRICE, issuedAt: now, expiry: now + 600, ...over,
+  };
+}
+
+const codeOf = (r: ServeResponse) => (r.ok ? 'ok' : r.code);
+
+describe('serving between two nodes on Hardhat', () => {
+  beforeAll(async () => {
+    snapshot = await takeSnapshot();
+    upstream = createServer((req, res) => {
+      upstreamCalls++;
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'synthetic answer' } }], usage: { prompt_tokens: 9, completion_tokens: 6 },
+        }));
+      });
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    const baseUrl = `http://127.0.0.1:${(upstream.address() as { port: number }).port}/v1`;
+
+    const { rpcUrl, hubAddress } = getSharedContext();
+    const [sellerDir, buyerDir] = [await mkdtemp(join(tmpdir(), 'mkt-seller-')), await mkdtemp(join(tmpdir(), 'mkt-buyer-'))];
+    dirs = [sellerDir, buyerDir];
+    sellerAgent = await DKGAgent.create({
+      name: 'MarketplaceSeller', dataDir: sellerDir, listenPort: 0, nodeRole: 'core',
+      chainAdapter: new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP)),
+      rfc64CatalogActivation: { enabled: false },
+    });
+    buyerAgent = await DKGAgent.create({
+      name: 'MarketplaceBuyer', dataDir: buyerDir, listenPort: 0, nodeRole: 'edge',
+      chainAdapter: new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.EXTRA1)),
+      rfc64CatalogActivation: { enabled: false },
+    });
+    await sellerAgent.start();
+    await buyerAgent.start();
+    await buyerAgent.connectTo(sellerAgent.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    await sellerAgent.createContextGraph({ id: CONTEXT_GRAPH, name: 'Marketplace', description: 'Offers' });
+    buyerAgent.subscribeToContextGraph(CONTEXT_GRAPH);
+    await sleep(2_000);
+
+    const runtime = await startMarketplaceSeller({
+      config: {
+        marketplace: {
+          contextGraphId: CONTEXT_GRAPH,
+          seller: {
+            enabled: true,
+            services: [MODEL_A, MODEL_B].map((model) => ({ model, pricePerUnit: String(PRICE), capacity: 2, backend: { kind: 'llamacpp', baseUrl, model: 'stub' } })),
+          },
+        },
+      },
+      agent: sellerAgent,
+      signer: new Wallet(HARDHAT_KEYS.CORE_OP).address,
+      dataDir: sellerDir,
+      log: () => undefined,
+    });
+    selling = runtime!;
+    await selling.seller.tick();
+    sellerIdentity = selling.seller.gate.identityId;
+
+    // The buyer funds this epoch with its own session key: A under a cap the price meets, B under one it does not.
+    buyerChain = buyerAgent.marketplaceChain()!;
+    domain = (await buyerChain.getMarketplaceContracts()).requestDomain;
+    const buyer = new Wallet(HARDHAT_KEYS.EXTRA1).address;
+    await mintTokens(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, buyer, 10n ** 21n);
+    await buyerChain.approveServiceSubscriptionsWallet(10n ** 21n);
+    const { epoch } = await buyerChain.getEpochTimes();
+    const budgets = [
+      { serviceId: A, serviceClass: SERVICE_CLASS_INFERENCE, value: 10n ** 15n, maxPricePerUnit: 10n ** 12n },
+      { serviceId: B, serviceClass: SERVICE_CLASS_INFERENCE, value: 10n ** 15n, maxPricePerUnit: 1n },
+    ].sort((x, y) => (BigInt(x.serviceId) < BigInt(y.serviceId) ? -1 : 1));
+    ({ subscriptionId } = await buyerChain.fundFromWallet({ epoch, sessionKey: session.address, planDigest: ethers.ZeroHash, budgets }));
+  }, 180_000);
+
+  afterAll(async () => {
+    await selling?.stop();
+    await buyerAgent?.stop().catch(() => undefined);
+    await sellerAgent?.stop().catch(() => undefined);
+    await new Promise((resolve) => upstream?.close(resolve));
+    await revertSnapshot(snapshot);
+    for (const dir of dirs) await rm(dir, { recursive: true, force: true });
+  }, 60_000);
+
+  it('is a Core Node, and its offers reach the buyer through the Marketplace Context Graph', async () => {
+    expect(selling.seller.gate.open).toBe(true);
+    const { epoch } = await buyerChain.getEpochTimes();
+    let offers: ReturnType<typeof offersFromBindings> = [];
+    for (let i = 0; i < 40 && offers.length < 4; i++) {
+      const result = await buyerAgent.query(offersQuery([epoch, epoch + 1]), { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' });
+      offers = offersFromBindings(result.bindings as Record<string, unknown>[]);
+      if (offers.length < 4) await sleep(250);
+    }
+    expect(offers.map((o) => `${o.serviceId}:${o.epoch}`).sort()).toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
+    expect(offers.every((o) => o.seller === sellerIdentity && o.pricePerUnit === PRICE && o.provenance === 'weights-pinned')).toBe(true);
+  });
+
+  it('quotes over the messenger, and serves a call with a receipt a Core Node key signed', async () => {
+    const quoted = decodeMessage(await buyerAgent.sendMarketplaceMessage(sellerAgent.peerId, 'quote', encodeMessage({ services: [A, B] }), {
+      timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
+    })) as QuoteResponse;
+    expect(quoted).toMatchObject({ seller: String(sellerIdentity), offers: [{ serviceId: A, pricePerUnit: String(PRICE), available: true, capacity: 2 }, { serviceId: B }] });
+
+    const call = await request();
+    const answer = await serve(call) as ServeAnswer;
+    expect(answer).toMatchObject({ ok: true, result: { content: 'synthetic answer' } });
+    const receipt = receiptFromWire(answer.receipt);
+    expect(receipt).toMatchObject({ requestDigest: hashServiceRequest(domain, call), resultCommitment: resultCommitmentOf('synthetic answer'), units: 15n, valueWei: 15n * PRICE });
+    const signer = receiptSignerOf(domain, receipt, answer.receiptSignature)!;
+    expect(await buyerChain.verifyACKIdentityDetailed(signer, sellerIdentity)).toEqual({ valid: true });
+
+    // An exact repeat, as a new message, gets the stored answer; the model ran once.
+    const before = upstreamCalls;
+    expect(await serve(call, session, 1)).toEqual(answer);
+    expect(upstreamCalls).toBe(before);
+    expect(codeOf(await serve({ ...call, maxUnits: 999n }))).toBe('NonceUsed');
+  });
+
+  it('refuses crafted requests: the wrong seller, an expired request, a price over the cap, an unknown subscription', async () => {
+    const before = upstreamCalls;
+    expect(codeOf(await serve(await request({ nonce: 10n, seller: sellerIdentity + 1n })))).toBe('BadSignature');
+    expect(codeOf(await serve(await request({ nonce: 11n }), Wallet.createRandom()))).toBe('BadSignature');
+    const expired = await request({ nonce: 12n });
+    expect(codeOf(await serve({ ...expired, expiry: expired.issuedAt }))).toBe('Expired');
+    expect(codeOf(await serve(await request({ nonce: 13n, serviceId: B })))).toBe('PriceOverCap');
+    expect(codeOf(await serve(await request({ nonce: 14n, subscriptionId: `0x${'ab'.repeat(32)}` })))).toBe('SubscriptionNotFound');
+    expect(codeOf(await serve(await request({ nonce: 15n, pricePerUnit: PRICE + 1n })))).toBe('WrongPrice');
+    expect(upstreamCalls).toBe(before);
+  });
+
+  it('refuses new calls within the stop-serving window, and quotes itself unavailable', async () => {
+    const call = await request({ nonce: 20n });
+    const { endsAt } = await buyerChain.getEpochTimes();
+    const provider = createProvider();
+    const latest = (await provider.getBlock('latest'))!.timestamp;
+    await provider.send('evm_increaseTime', [endsAt - 120 - latest]);
+    await provider.send('evm_mine', []);
+    expect(await serve(call)).toEqual({ ok: false, code: 'EpochEnding', retry: true });
+    const quoted = decodeMessage(await buyerAgent.sendMarketplaceMessage(sellerAgent.peerId, 'quote', encodeMessage({ services: [A] }), {
+      timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
+    })) as QuoteResponse;
+    expect(quoted.offers[0]!.available).toBe(false);
+  });
+});

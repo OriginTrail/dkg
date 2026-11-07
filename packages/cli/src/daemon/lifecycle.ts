@@ -191,6 +191,7 @@ export {
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { startMarketplaceBuyer } from './marketplace-buyer.js';
+import { startMarketplaceSeller } from './marketplace-seller.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
   createTelemetrySettings,
@@ -2300,6 +2301,9 @@ async function runDaemonInnerWithStartupOwnership(
   const marketplace = startMarketplaceBuyer({
     config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
   });
+  const marketplaceSeller = await startMarketplaceSeller({
+    config, agent, signer: evmSigning.addresses.wallets[0]?.address, dataDir: dkgDir(), log,
+  });
 
   // Classify configured graphs before migrating legacy readiness. Explicit
   // local-bootstrap targets receive current provenance here; configured
@@ -3745,6 +3749,7 @@ async function runDaemonInnerWithStartupOwnership(
         });
         logVolumePruner.stop();
         void marketplace?.stop();
+        void marketplaceSeller?.stop();
         backpressureMonitor.stop();
         eventLoopDelayMonitor.stop();
         rateLimiter.destroy();

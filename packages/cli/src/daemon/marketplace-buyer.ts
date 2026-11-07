@@ -9,7 +9,7 @@
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { Buyer, BuyerStore, resolveMarketplaceConfig, type BuyerAlert } from '@origintrail-official/dkg-marketplace';
+import { Buyer, BuyerStore, resolveMarketplaceConfig, type BuyerAlert, type MarketplaceConfig } from '@origintrail-official/dkg-marketplace';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
 
@@ -34,7 +34,8 @@ export function startMarketplaceBuyer(options: MarketplaceBuyerOptions): Buyer |
   }
   let resolved;
   try {
-    resolved = resolveMarketplaceConfig(config.marketplace, wallets);
+    // The block is the node config's, as read from its file: the resolver checks every setting.
+    resolved = resolveMarketplaceConfig(config.marketplace as MarketplaceConfig, wallets);
   } catch (err) {
     log(`[marketplace] ${err instanceof Error ? err.message : String(err)}: the marketplace stays off`);
     return undefined;
