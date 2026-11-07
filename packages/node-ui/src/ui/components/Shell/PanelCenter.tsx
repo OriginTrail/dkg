@@ -7,6 +7,7 @@ import { authHeaders, fileUrl } from '../../api.js';
 import { DOC_TAB_PREFIX, decodeDocTabId } from '../../lib/doc-tab-id.js';
 import { CONTEXT_GRAPH_PRIMER_TAB_ID } from '../../lib/contextGraphPrimer.js';
 import { MarkdownMessage } from '../chat/MarkdownMessage.js';
+import { MARKETPLACE_TABS } from '../../marketplace/tabs.js';
 
 const CLOSE_ICON = (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -45,6 +46,10 @@ const ProjectView = createRecoverableLazyView(() =>
 const MemoryLayerView = createRecoverableLazyView(() =>
   import('../../views/MemoryLayerView.js').then((m) => m.MemoryLayerView)
 , ({ layer }) => ({ wm: 'working memory', swm: 'shared memory', vm: 'verifiable memory' })[layer]);
+
+const MarketplaceView = createRecoverableLazyView(() =>
+  import('../../marketplace/views/MarketplaceView.js').then((m) => m.MarketplaceView)
+, 'marketplace');
 
 const MemoryStackView = createRecoverableLazyView(() =>
   import('../../views/MemoryStackView.js').then((m) => m.MemoryStackView)
@@ -289,6 +294,8 @@ function ViewContainer() {
   const activeTabId = useTabsStore((s) => s.activeTabId);
 
   if (activeTabId === 'dashboard') return <DashboardView />;
+
+  if (activeTabId === MARKETPLACE_TABS.browse.id) return <MarketplaceView />;
 
   if (activeTabId === 'operations') {
     return <OperationsView />;

@@ -131,6 +131,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
         activeProjectId: null,
       });
       useLayoutStore.setState({
+        leftSectionMarketplaceOpen: true,
         leftSectionMyProjectsOpen: true,
         leftSectionContextOracleOpen: false,
         leftSectionIntegrationsOpen: false,
@@ -257,6 +258,28 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     expect(labels).toEqual(['My Context Graphs', 'Public Graphs', 'Integrations']);
   });
 
+  it('hides Marketplace until the feature flag is set', async () => {
+    const { container } = await renderPanel();
+    expect(container.textContent).not.toContain('Marketplace');
+  });
+
+  it('renders Marketplace as an expandable icon tree when the feature is enabled', async () => {
+    localStorage.setItem('dkg-marketplace-enabled', '1');
+    const { container } = await renderPanel();
+    const marketplaceHeader = sectionHeader(container, 'Marketplace');
+    expect(marketplaceHeader.getAttribute('aria-expanded')).toBe('true');
+
+    const items = container.querySelector('.v10-sidebar-marketplace-items');
+    expect(items?.textContent).toContain('Browse');
+    expect(items?.textContent).toContain('Plans');
+    expect(items?.textContent).toContain('Access');
+    expect(items?.textContent).toContain('Operate');
+    expect(items?.querySelector('.lucide-store')).toBeTruthy();
+    expect(items?.querySelector('.lucide-clipboard-list')).toBeTruthy();
+    expect(items?.querySelector('.lucide-key-round')).toBeTruthy();
+    expect(items?.querySelector('.lucide-activity')).toBeTruthy();
+  });
+
   it('expands "My Context Graphs" by default and keeps secondary groups collapsed', async () => {
     const { container } = await renderPanel();
     const myCgHeader = sectionHeader(container, 'My Context Graphs');
@@ -276,6 +299,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
     const { container } = await renderPanel();
     // Sanity: initial store state matches DOM.
+    expect(useLayoutStore.getState().leftSectionMarketplaceOpen).toBe(true);
     expect(useLayoutStore.getState().leftSectionMyProjectsOpen).toBe(true);
     expect(useLayoutStore.getState().leftSectionIntegrationsOpen).toBe(false);
 
@@ -315,6 +339,7 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
         activeProjectId: null,
       });
       useLayoutStore.setState({
+        leftSectionMarketplaceOpen: true,
         leftSectionMyProjectsOpen: true,
         leftSectionContextOracleOpen: false,
         leftSectionIntegrationsOpen: false,

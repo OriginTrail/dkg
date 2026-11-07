@@ -5,6 +5,7 @@ interface LayoutState {
   rightCollapsed: boolean;
   bottomCollapsed: boolean;
   bottomMaximised: boolean;
+  leftSectionMarketplaceOpen: boolean;
   leftSectionMyProjectsOpen: boolean;
   leftSectionContextOracleOpen: boolean;
   leftSectionIntegrationsOpen: boolean;
@@ -17,6 +18,7 @@ interface LayoutState {
   toggleRight: () => void;
   toggleBottom: () => void;
   toggleBottomMaximised: () => void;
+  toggleLeftSectionMarketplace: () => void;
   toggleLeftSectionMyProjects: () => void;
   toggleLeftSectionContextOracle: () => void;
   toggleLeftSectionIntegrations: () => void;
@@ -32,6 +34,7 @@ interface PersistedLayout {
   leftCollapsed?: boolean;
   rightCollapsed?: boolean;
   bottomCollapsed?: boolean;
+  leftSectionMarketplaceOpen?: boolean;
   leftSectionMyProjectsOpen?: boolean;
   leftSectionContextOracleOpen?: boolean;
   leftSectionIntegrationsOpen?: boolean;
@@ -46,9 +49,10 @@ const DEFAULTS = {
   leftCollapsed: false,
   rightCollapsed: false,
   bottomCollapsed: true,
-  // Sidebar sections: My Context Graphs is the primary navigation surface,
-  // while Public Graphs and Integrations stay collapsed until the user
-  // needs them (Integrations runs its 30s poll only while open).
+  // Sidebar sections: Marketplace and My Context Graphs are primary
+  // navigation surfaces, while Public Graphs and Integrations stay
+  // collapsed until the user needs them.
+  leftSectionMarketplaceOpen: true,
   leftSectionMyProjectsOpen: true,
   leftSectionContextOracleOpen: false,
   leftSectionIntegrationsOpen: false,
@@ -118,6 +122,9 @@ function loadPersisted(): Required<PersistedLayout> {
       leftCollapsed: typeof parsed.leftCollapsed === 'boolean' ? parsed.leftCollapsed : DEFAULTS.leftCollapsed,
       rightCollapsed: typeof parsed.rightCollapsed === 'boolean' ? parsed.rightCollapsed : DEFAULTS.rightCollapsed,
       bottomCollapsed: typeof parsed.bottomCollapsed === 'boolean' ? parsed.bottomCollapsed : DEFAULTS.bottomCollapsed,
+      leftSectionMarketplaceOpen: typeof parsed.leftSectionMarketplaceOpen === 'boolean'
+        ? parsed.leftSectionMarketplaceOpen
+        : DEFAULTS.leftSectionMarketplaceOpen,
       leftSectionMyProjectsOpen: typeof parsed.leftSectionMyProjectsOpen === 'boolean'
         ? parsed.leftSectionMyProjectsOpen
         : DEFAULTS.leftSectionMyProjectsOpen,
@@ -157,6 +164,7 @@ function snapshot(state: LayoutState): PersistedLayout {
     leftCollapsed: state.leftCollapsed,
     rightCollapsed: state.rightCollapsed,
     bottomCollapsed: state.bottomCollapsed,
+    leftSectionMarketplaceOpen: state.leftSectionMarketplaceOpen,
     leftSectionMyProjectsOpen: state.leftSectionMyProjectsOpen,
     leftSectionContextOracleOpen: state.leftSectionContextOracleOpen,
     leftSectionIntegrationsOpen: state.leftSectionIntegrationsOpen,
@@ -173,6 +181,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   rightCollapsed: initial.rightCollapsed,
   bottomCollapsed: initial.bottomCollapsed,
   bottomMaximised: false,
+  leftSectionMarketplaceOpen: initial.leftSectionMarketplaceOpen,
   leftSectionMyProjectsOpen: initial.leftSectionMyProjectsOpen,
   leftSectionContextOracleOpen: initial.leftSectionContextOracleOpen,
   leftSectionIntegrationsOpen: initial.leftSectionIntegrationsOpen,
@@ -195,6 +204,10 @@ export const useLayoutStore = create<LayoutState>((set, get) => ({
   },
   toggleBottomMaximised: () => {
     set((s) => ({ bottomMaximised: !s.bottomMaximised, bottomCollapsed: false }));
+    persist(snapshot(get()));
+  },
+  toggleLeftSectionMarketplace: () => {
+    set((s) => ({ leftSectionMarketplaceOpen: !s.leftSectionMarketplaceOpen }));
     persist(snapshot(get()));
   },
   toggleLeftSectionMyProjects: () => {

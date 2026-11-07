@@ -1,11 +1,16 @@
 import React, { useCallback, useId, useState } from 'react';
 import {
+  Activity,
   ChevronRight,
+  ClipboardList,
   Compass,
+  KeyRound,
   LayoutDashboard,
   LogIn,
   Plus,
   ServerCog,
+  ShoppingBag,
+  Store,
 } from 'lucide-react';
 import { useLayoutStore } from '../../stores/layout.js';
 import { useTabsStore } from '../../stores/tabs.js';
@@ -28,6 +33,7 @@ import {
   toSidebarIdentity,
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
+import { MARKETPLACE_TABS, MARKETPLACE_TAB_IDS, marketplaceEnabled } from '../../marketplace/tabs.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -203,6 +209,8 @@ function IntegrationsSectionBody() {
 }
 
 export function PanelLeft() {
+  const leftSectionMarketplaceOpen = useLayoutStore((s) => s.leftSectionMarketplaceOpen);
+  const toggleLeftSectionMarketplace = useLayoutStore((s) => s.toggleLeftSectionMarketplace);
   const leftSectionMyProjectsOpen = useLayoutStore((s) => s.leftSectionMyProjectsOpen);
   const leftSectionContextOracleOpen = useLayoutStore((s) => s.leftSectionContextOracleOpen);
   const leftSectionIntegrationsOpen = useLayoutStore((s) => s.leftSectionIntegrationsOpen);
@@ -212,6 +220,7 @@ export function PanelLeft() {
   // Stable per-render ids for the section bodies so the chevron buttons
   // can use `aria-controls` to point at the disclosed region (screen
   // readers can then programmatically associate trigger ↔ content).
+  const marketplaceBodyId = useId();
   const myProjectsBodyId = useId();
   const contextOracleBodyId = useId();
   const integrationsBodyId = useId();
@@ -230,6 +239,21 @@ export function PanelLeft() {
   const contextOracleProjects = visibleContextGraphs.filter((cg) =>
     belongsInContextOracleSidebar(cg, agentIdentity));
   const hiddenCount = contextGraphs.length - visibleContextGraphs.length;
+
+  // The marketplace section is still flagged: `?marketplace` once turns it on.
+  const showMarketplace = marketplaceEnabled();
+  const marketplaceActive = MARKETPLACE_TAB_IDS.includes(activeTabId);
+  const openMarketplaceTab = (tab: { id: string; label: string }) => {
+    openTab({ id: tab.id, label: tab.label, closable: true });
+    setActiveTab(tab.id);
+    setActiveProject(null);
+  };
+  const marketplaceRows = [
+    { tab: MARKETPLACE_TABS.browse, label: 'Browse', icon: <Store size={15} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.plans, label: 'Plans', icon: <ClipboardList size={15} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.access, label: 'Access', icon: <KeyRound size={15} aria-hidden="true" /> },
+    { tab: MARKETPLACE_TABS.operate, label: 'Operate', icon: <Activity size={15} aria-hidden="true" /> },
+  ];
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showJoinModal, setShowJoinModal] = useState(false);
@@ -263,6 +287,45 @@ export function PanelLeft() {
           <LayoutDashboard size={18} aria-hidden="true" />
           <span>Dashboard</span>
         </button>
+
+        {showMarketplace && (
+          <div className="v10-peer-group v10-sidebar-group v10-sidebar-marketplace">
+            <button
+              type="button"
+              className={`v10-peer-group-header v10-sidebar-group-header v10-sidebar-product-header ${marketplaceActive ? 'active' : ''}`}
+              aria-expanded={leftSectionMarketplaceOpen}
+              aria-controls={marketplaceBodyId}
+              onClick={toggleLeftSectionMarketplace}
+            >
+              <ShoppingBag size={18} aria-hidden="true" />
+              <span className="v10-peer-group-label">Marketplace</span>
+              <ChevronRight
+                size={14}
+                className={`v10-peer-group-chevron ${leftSectionMarketplaceOpen ? 'expanded' : ''}`}
+                aria-hidden="true"
+              />
+            </button>
+            {leftSectionMarketplaceOpen && (
+              <div
+                id={marketplaceBodyId}
+                className="v10-peer-group-body v10-sidebar-group-body v10-sidebar-marketplace-items"
+              >
+                {marketplaceRows.map(({ tab, label, icon }) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className={`v10-sidebar-nav-row v10-sidebar-sub-row ${activeTabId === tab.id ? 'active' : ''}`}
+                    aria-current={activeTabId === tab.id ? 'page' : undefined}
+                    onClick={() => openMarketplaceTab(tab)}
+                  >
+                    {icon}
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {inventoryError && (
           <div className="v10-journey-empty-card" role="alert">
