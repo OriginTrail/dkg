@@ -1,0 +1,504 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The NeuroSymbolic Marketplace (OT-RFC-27) on the EVM adapter: the methods of
+ * `MarketplaceChain` (marketplace.ts) against `ServiceSubscriptions`,
+ * `ServiceSubscriptionsWallet`, `ServiceSubscriptionsStorage`,
+ * `QueryInferenceSettlement` and `QueryInferenceStorage`.
+ *
+ * Mixin holder in the pattern of `evm-adapter-conviction.ts`, mixed into
+ * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). It extends
+ * `RandomSamplingMethods` for one method, `sendRandomSamplingTx`: a receipt
+ * batch is sent as a proof is, from any registered operational wallet,
+ * preferring an idle one, and again from the primary wallet on
+ * `ProfileDoesntExist`.
+ *
+ * - Every address comes from the Hub by name on each call, through
+ *   `resolveContract`'s address memo, which a Hub rotation clears.
+ * - Every other write is sent by the wallet `opts.from`, one of this node's
+ *   operational wallets, or else the primary one, under the Hub self-heal
+ *   retry, as the Publishing Conviction writes are (`pcaWrite`).
+ * - A revert is thrown with its custom error decoded (`err.revert`).
+ */
+
+import { ethers, type Contract } from 'ethers';
+import type { TxResult } from './chain-adapter.js';
+import { loadAbi } from './evm-adapter-abi.js';
+import { enrichEvmError } from './evm-adapter-errors.js';
+import { RandomSamplingMethods } from './evm-adapter-random-sampling.js';
+import {
+  BUYER_GRANT_TYPES,
+  compactSignature,
+  grantDomain,
+  hashBuyerGrant,
+  requestDomain,
+  type AccountFundingRequest,
+  type BatchState,
+  type BuyerGrant,
+  type BuyerGrantTerms,
+  type BuyerLimits,
+  type EpochFunding,
+  type EpochTimes,
+  type EpochTotals,
+  type MarketplaceContracts,
+  type MarketplaceWriteOptions,
+  type NodeEpoch,
+  type ReceiptBatch,
+  type ReceiptGroup,
+  type ServiceBudget,
+  type ServiceSpending,
+  type Subscription,
+  type SubscriptionFunding,
+  type SubscriptionTopUp,
+  type WalletFundingRequest,
+  type WindowAllowance,
+} from './marketplace.js';
+
+type Log = { address: string; topics: ReadonlyArray<string>; data: string };
+
+const interfaces = new Map<string, ethers.Interface>();
+
+/** The events `name` of `abiName` that `emitter` logged, decoded. */
+function eventsOf(logs: ReadonlyArray<Log>, abiName: string, emitter: string, name: string): ethers.Result[] {
+  let iface = interfaces.get(abiName);
+  if (!iface) interfaces.set(abiName, iface = new ethers.Interface(loadAbi(abiName)));
+  const topic = iface.getEvent(name)!.topicHash;
+  return logs
+    .filter((log) => log.topics[0] === topic && log.address.toLowerCase() === emitter.toLowerCase())
+    .map((log) => iface.parseLog({ topics: [...log.topics], data: log.data })!.args);
+}
+
+function txResultOf(receipt: ethers.TransactionReceipt): TxResult {
+  return { hash: receipt.hash, blockNumber: receipt.blockNumber, txIndex: receipt.index, success: receipt.status === 1 };
+}
+
+/** A funding's `SubscriptionFunded` event. Both funding contracts log it, under one signature. */
+function subscriptionFundingOf(receipt: ethers.TransactionReceipt): SubscriptionFunding {
+  const [funded] = eventsOf(receipt.logs, 'ServiceSubscriptions', receipt.to ?? '', 'SubscriptionFunded');
+  if (!funded) throw new Error(`Funding ${receipt.hash} succeeded but logged no SubscriptionFunded`);
+  return { ...txResultOf(receipt), subscriptionId: String(funded.subscriptionId), value: BigInt(funded.value), cost: BigInt(funded.cost) };
+}
+
+/** A top-up's `SubscriptionToppedUp` event. */
+function subscriptionTopUpOf(receipt: ethers.TransactionReceipt): SubscriptionTopUp {
+  const [toppedUp] = eventsOf(receipt.logs, 'ServiceSubscriptions', receipt.to ?? '', 'SubscriptionToppedUp');
+  if (!toppedUp) throw new Error(`Top-up ${receipt.hash} succeeded but logged no SubscriptionToppedUp`);
+  return { ...txResultOf(receipt), value: BigInt(toppedUp.value), cost: BigInt(toppedUp.cost) };
+}
+
+/**
+ * The batch a `submitReceiptBatch` receipt records: the `ReceiptBatchAccepted`
+ * and `ReceiptsLanded` events that `settlement` logged. `null` when no batch
+ * was accepted.
+ */
+export function decodeReceiptBatch(logs: ReadonlyArray<Log>, settlement: string): Omit<ReceiptBatch, keyof TxResult> | null {
+  const [accepted] = eventsOf(logs, 'QueryInferenceSettlement', settlement, 'ReceiptBatchAccepted');
+  if (!accepted) return null;
+  return {
+    seller: BigInt(accepted.seller),
+    batchDigest: String(accepted.batchDigest),
+    itemCount: Number(accepted.itemCount),
+    value: BigInt(accepted.value),
+    counted: BigInt(accepted.counted),
+    stakeFactor18: BigInt(accepted.stakeFactor18),
+    groups: eventsOf(logs, 'QueryInferenceSettlement', settlement, 'ReceiptsLanded').map((g) => ({
+      subscriptionId: String(g.subscriptionId),
+      budgetIndex: Number(g.budgetIndex),
+      seller: BigInt(g.seller),
+      itemCount: Number(g.itemCount),
+      value: BigInt(g.value),
+      counted: BigInt(g.counted),
+      stakeFactor18: BigInt(g.stakeFactor18),
+      groupDigest: String(g.groupDigest),
+    })),
+  };
+}
+
+function budgetArgs(budgets: readonly ServiceBudget[]): ServiceBudget[] {
+  return budgets.map(({ serviceId, serviceClass, value, maxPricePerUnit }) => ({ serviceId, serviceClass, value, maxPricePerUnit }));
+}
+
+function requireToken(token: Contract | undefined): Contract {
+  if (!token) throw new Error('Token contract not available on this chain');
+  return token;
+}
+
+export class MarketplaceMethods extends RandomSamplingMethods {
+  async getMarketplaceContracts(): Promise<MarketplaceContracts> {
+    await this.init();
+    const contracts = await Promise.all([
+      this.resolveContract('ServiceSubscriptions'),
+      this.resolveContract('ServiceSubscriptionsWallet'),
+      this.resolveContract('ServiceSubscriptionsStorage'),
+      this.resolveContract('QueryInferenceSettlement'),
+      this.resolveContract('QueryInferenceStorage'),
+    ]);
+    const [ss, ssw, sss, qs, qis] = await Promise.all(contracts.map(async (c) => ethers.getAddress(await c.getAddress())));
+    const chainId = await this.getEvmChainId();
+    return {
+      chainId: Number(chainId),
+      serviceSubscriptions: ss!,
+      serviceSubscriptionsWallet: ssw!,
+      serviceSubscriptionsStorage: sss!,
+      queryInferenceSettlement: qs!,
+      queryInferenceStorage: qis!,
+      requestDomain: requestDomain(chainId, qis!),
+      grantDomain: grantDomain(chainId, ss!),
+    };
+  }
+
+  async getEpochTimes(): Promise<EpochTimes> {
+    await this.init();
+    const chronos = await this.resolveContract('Chronos');
+    const block = await this.readTipProvider('marketplace epoch times', (p) => p.getBlock('latest'));
+    if (!block) throw new Error('No latest block from any RPC endpoint');
+    const now = Number(block.timestamp);
+    const epoch = Number(await this.readContract(chronos, 'chronos.epochAtTimestamp', 'epochAtTimestamp', now));
+    const [startsAt, endsAt] = await Promise.all([
+      this.readContract(chronos, 'chronos.timestampForEpoch', 'timestampForEpoch', epoch),
+      this.readContract(chronos, 'chronos.timestampForEpoch', 'timestampForEpoch', epoch + 1),
+    ]);
+    return { epoch, startsAt: Number(startsAt), endsAt: Number(endsAt), now };
+  }
+
+  // ------------------------------------------------- ServiceSubscriptions
+
+  async setServiceSpending(accountId: bigint, enabled: boolean, opts?: MarketplaceWriteOptions): Promise<TxResult> {
+    return txResultOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'setServiceSpending', [accountId, enabled], opts,
+    ));
+  }
+
+  async addBuyer(
+    terms: BuyerGrantTerms,
+    ownerSignature: string,
+    buyerSignature: string,
+    opts?: MarketplaceWriteOptions,
+  ): Promise<TxResult> {
+    const t = { accountId: terms.accountId, buyer: terms.buyer, maxCostPerEpoch: terms.maxCostPerEpoch, expiresAt: terms.expiresAt, nonce: terms.nonce };
+    return txResultOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'addBuyer', [t, ownerSignature, buyerSignature], opts,
+    ));
+  }
+
+  async removeBuyer(accountId: bigint, buyer: string, opts?: MarketplaceWriteOptions): Promise<TxResult> {
+    return txResultOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'removeBuyer', [accountId, buyer], opts,
+    ));
+  }
+
+  async setBuyerLimits(accountId: bigint, buyer: string, limits: BuyerLimits, opts?: MarketplaceWriteOptions): Promise<TxResult> {
+    const l = { maxCostPerEpoch: limits.maxCostPerEpoch, expiresAt: limits.expiresAt };
+    return txResultOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'setBuyerLimits', [accountId, buyer, l], opts,
+    ));
+  }
+
+  async advanceGrantNonce(accountId: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult> {
+    return txResultOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'advanceGrantNonce', [accountId], opts,
+    ));
+  }
+
+  async signBuyerGrant(terms: BuyerGrantTerms): Promise<{ digest: string; signature: string }> {
+    const signer = this.findSignerByAddress(terms.buyer);
+    if (!signer) throw new Error(`Cannot consent as ${terms.buyer}: it is not one of this node's operational wallets`);
+    await this.init();
+    const ss = await this.resolveContract('ServiceSubscriptions');
+    const domain = grantDomain(await this.getEvmChainId(), await ss.getAddress());
+    const t = { accountId: terms.accountId, buyer: terms.buyer, maxCostPerEpoch: terms.maxCostPerEpoch, expiresAt: terms.expiresAt, nonce: terms.nonce };
+    const signature = compactSignature(await signer.signTypedData(domain, BUYER_GRANT_TYPES, t));
+    return { digest: hashBuyerGrant(domain, t), signature };
+  }
+
+  async fundFromAccount(request: AccountFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding> {
+    const r = {
+      accountId: request.accountId,
+      epoch: request.epoch,
+      sessionKey: request.sessionKey,
+      planDigest: request.planDigest,
+      budgets: budgetArgs(request.budgets),
+    };
+    return subscriptionFundingOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'fundFromAccount', [r], opts,
+    ));
+  }
+
+  async topUpFromAccount(
+    subscriptionId: string,
+    additions: ServiceBudget[],
+    planDigest: string,
+    opts?: MarketplaceWriteOptions,
+  ): Promise<SubscriptionTopUp> {
+    return subscriptionTopUpOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptions'), 'topUpFromAccount', [subscriptionId, budgetArgs(additions), planDigest], opts,
+    ));
+  }
+
+  async previewCost(accountId: bigint, value: bigint): Promise<{ cost: bigint; discountBps: number }> {
+    await this.init();
+    const ss = await this.resolveContract('ServiceSubscriptions');
+    const raw = await this.readContract(ss, 'serviceSubscriptions.previewCost', 'previewCost', accountId, value);
+    return { cost: BigInt(raw.cost), discountBps: Number(raw.discountBps) };
+  }
+
+  async currentWindowAllowance(accountId: bigint): Promise<WindowAllowance> {
+    await this.init();
+    const ss = await this.resolveContract('ServiceSubscriptions');
+    const raw = await this.readContract(ss, 'serviceSubscriptions.currentWindowAllowance', 'currentWindowAllowance', accountId);
+    return {
+      window: Number(raw.window),
+      baseRemaining: BigInt(raw.baseRemaining),
+      topUpBuffer: BigInt(raw.topUpBuffer),
+      expired: Boolean(raw.expired),
+    };
+  }
+
+  // ------------------------------------------- ServiceSubscriptionsWallet
+
+  async fundFromWallet(request: WalletFundingRequest, opts?: MarketplaceWriteOptions): Promise<SubscriptionFunding> {
+    const r = {
+      epoch: request.epoch,
+      sessionKey: request.sessionKey,
+      planDigest: request.planDigest,
+      budgets: budgetArgs(request.budgets),
+    };
+    return subscriptionFundingOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptionsWallet'), 'fundFromWallet', [r], opts,
+    ));
+  }
+
+  async topUpFromWallet(
+    subscriptionId: string,
+    additions: ServiceBudget[],
+    planDigest: string,
+    opts?: MarketplaceWriteOptions,
+  ): Promise<SubscriptionTopUp> {
+    return subscriptionTopUpOf(await this.marketplaceSend(
+      () => this.resolveContract('ServiceSubscriptionsWallet'), 'topUpFromWallet', [subscriptionId, budgetArgs(additions), planDigest], opts,
+    ));
+  }
+
+  async approveServiceSubscriptionsWallet(amount: bigint, opts?: MarketplaceWriteOptions): Promise<TxResult> {
+    await this.init();
+    const spender = await (await this.resolveContract('ServiceSubscriptionsWallet')).getAddress();
+    return txResultOf(await this.marketplaceSend(
+      async () => requireToken(this.contracts.token), 'approve', [spender, amount], opts,
+    ));
+  }
+
+  async getServiceSubscriptionsWalletAllowance(owner: string): Promise<bigint> {
+    await this.init();
+    const spender = await (await this.resolveContract('ServiceSubscriptionsWallet')).getAddress();
+    return BigInt(await this.readContract(requireToken(this.contracts.token), 'token.allowance', 'allowance', owner, spender));
+  }
+
+  // ------------------------------------------ ServiceSubscriptionsStorage
+
+  async getSubscription(subscriptionId: string): Promise<Subscription | null> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    const s = await this.readContract(sss, 'serviceSubscriptionsStorage.getSubscription', 'getSubscription', subscriptionId);
+    if (Number(s.startsAt) === 0) return null;
+    return {
+      subscriptionId,
+      accountId: BigInt(s.accountId),
+      buyer: ethers.getAddress(s.buyer),
+      grantNonce: BigInt(s.grantNonce),
+      sessionKey: ethers.getAddress(s.sessionKey),
+      epoch: Number(s.epoch),
+      planDigest: String(s.planDigest),
+      startsAt: Number(s.startsAt),
+      endsAt: Number(s.endsAt),
+      fundedEpoch: Number(s.fundedEpoch),
+      fundedWindow: Number(s.fundedWindow),
+      discountBps: Number(s.discountBps),
+      budgetCount: Number(s.budgetCount),
+      value: BigInt(s.value),
+      cost: BigInt(s.cost),
+      spentFromWindow: BigInt(s.spentFromWindow),
+      spentFromTopUp: BigInt(s.spentFromTopUp),
+    };
+  }
+
+  async getBudgets(subscriptionId: string): Promise<ServiceBudget[]> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    const raw = await this.readContract(sss, 'serviceSubscriptionsStorage.getBudgets', 'getBudgets', subscriptionId);
+    return Array.from(raw as ArrayLike<ethers.Result>, (b) => ({
+      serviceId: String(b.serviceId),
+      serviceClass: Number(b.serviceClass),
+      value: BigInt(b.value),
+      maxPricePerUnit: BigInt(b.maxPricePerUnit),
+    }));
+  }
+
+  async subscriptionExists(subscriptionId: string): Promise<boolean> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    return Boolean(await this.readContract(sss, 'serviceSubscriptionsStorage.subscriptionExists', 'subscriptionExists', subscriptionId));
+  }
+
+  async getGrant(accountId: bigint, buyer: string): Promise<BuyerGrant | null> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    const g = await this.readContract(sss, 'serviceSubscriptionsStorage.getGrant', 'getGrant', accountId, buyer);
+    if (Number(g.grantedAt) === 0) return null;
+    return {
+      maxCostPerEpoch: BigInt(g.maxCostPerEpoch),
+      grantedAt: Number(g.grantedAt),
+      expiresAt: Number(g.expiresAt),
+      revokedAt: Number(g.revokedAt),
+      nonce: BigInt(g.nonce),
+      owner: ethers.getAddress(g.owner),
+    };
+  }
+
+  async grantEnd(accountId: bigint, buyer: string, nonce: bigint): Promise<number> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    return Number(await this.readContract(sss, 'serviceSubscriptionsStorage.grantEnd', 'grantEnd', accountId, buyer, nonce));
+  }
+
+  async grantNonce(accountId: bigint): Promise<bigint> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    return BigInt(await this.readContract(sss, 'serviceSubscriptionsStorage.grantNonce', 'grantNonce', accountId));
+  }
+
+  async getServiceSpending(accountId: bigint): Promise<ServiceSpending> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    const s = await this.readContract(sss, 'serviceSubscriptionsStorage.getServiceSpending', 'getServiceSpending', accountId);
+    return { enabledAt: Number(s.enabledAt), owner: ethers.getAddress(s.owner) };
+  }
+
+  async maxBudgetsPerSubscription(): Promise<number> {
+    await this.init();
+    const sss = await this.resolveContract('ServiceSubscriptionsStorage');
+    return Number(await this.readContract(sss, 'serviceSubscriptionsStorage.maxBudgetsPerSubscription', 'maxBudgetsPerSubscription'));
+  }
+
+  // --------------------------------------------- QueryInferenceSettlement
+
+  async submitReceiptBatch(groups: ReceiptGroup[]): Promise<ReceiptBatch> {
+    await this.init();
+    const arg = groups.map(({ subscriptionId, budgetIndex, minCounted, items }) => ({ subscriptionId, budgetIndex, minCounted, items }));
+    const receipt = await this.withHubStaleRetryAny(async () => {
+      try {
+        const qs = await this.resolveContract('QueryInferenceSettlement');
+        return await this.sendRandomSamplingTx(qs, 'submitReceiptBatch', [arg], 'marketplace submitReceiptBatch');
+      } catch (err) {
+        enrichEvmError(err);
+        throw err;
+      }
+    });
+    const batch = decodeReceiptBatch(receipt.logs, receipt.to ?? '');
+    if (!batch) throw new Error(`Receipt batch ${receipt.hash} succeeded but logged no ReceiptBatchAccepted`);
+    return { ...txResultOf(receipt), ...batch };
+  }
+
+  async budgetLeft(subscriptionId: string, budgetIndex: number): Promise<bigint> {
+    await this.init();
+    const qs = await this.resolveContract('QueryInferenceSettlement');
+    return BigInt(await this.readContract(qs, 'queryInferenceSettlement.budgetLeft', 'budgetLeft', subscriptionId, budgetIndex));
+  }
+
+  async stakeFactor(identityId: bigint): Promise<bigint> {
+    await this.init();
+    const qs = await this.resolveContract('QueryInferenceSettlement');
+    return BigInt(await this.readContract(qs, 'queryInferenceSettlement.stakeFactor', 'stakeFactor', identityId));
+  }
+
+  async epochPool(epoch: number): Promise<bigint> {
+    await this.init();
+    const qs = await this.resolveContract('QueryInferenceSettlement');
+    return BigInt(await this.readContract(qs, 'queryInferenceSettlement.epochPool', 'epochPool', epoch));
+  }
+
+  async queryInferenceGross(epoch: number, identityId: bigint): Promise<bigint> {
+    await this.init();
+    const qs = await this.resolveContract('QueryInferenceSettlement');
+    return BigInt(await this.readContract(qs, 'queryInferenceSettlement.queryInferenceGross', 'queryInferenceGross', epoch, identityId));
+  }
+
+  // ------------------------------------------------ QueryInferenceStorage
+
+  async batchState(): Promise<BatchState> {
+    await this.init();
+    const qis = await this.resolveContract('QueryInferenceStorage');
+    const s = await this.readContract(qis, 'queryInferenceStorage.batchState', 'batchState');
+    return { activationEpoch: Number(s.activation), paused: Boolean(s.isPaused), maxGroups: Number(s.maxGroups), maxItems: Number(s.maxItems) };
+  }
+
+  async nonceWord(subscriptionId: string, identityId: bigint, word: bigint): Promise<bigint> {
+    await this.init();
+    const qis = await this.resolveContract('QueryInferenceStorage');
+    return BigInt(await this.readContract(qis, 'queryInferenceStorage.nonceWord', 'nonceWord', subscriptionId, identityId, word));
+  }
+
+  async budgetUsed(subscriptionId: string, budgetIndex: number): Promise<bigint> {
+    await this.init();
+    const qis = await this.resolveContract('QueryInferenceStorage');
+    return BigInt(await this.readContract(qis, 'queryInferenceStorage.budgetUsed', 'budgetUsed', subscriptionId, budgetIndex));
+  }
+
+  async fundingIn(epoch: number): Promise<EpochFunding> {
+    await this.init();
+    const qis = await this.resolveContract('QueryInferenceStorage');
+    const f = await this.readContract(qis, 'queryInferenceStorage.fundingIn', 'fundingIn', epoch);
+    return { wallet: BigInt(f.wallet), account: BigInt(f.account) };
+  }
+
+  async getEpochTotals(epoch: number): Promise<EpochTotals> {
+    await this.init();
+    const qis = await this.resolveContract('QueryInferenceStorage');
+    const t = await this.readContract(qis, 'queryInferenceStorage.getEpochTotals', 'getEpochTotals', epoch);
+    return { totalServed: BigInt(t.totalServed), totalWeighted: BigInt(t.totalWeighted), lambdaBps: Number(t.lambdaBps) };
+  }
+
+  async getNodeEpoch(identityId: bigint, epoch: number): Promise<NodeEpoch> {
+    await this.init();
+    const qis = await this.resolveContract('QueryInferenceStorage');
+    const n = await this.readContract(qis, 'queryInferenceStorage.getNodeEpoch', 'getNodeEpoch', identityId, epoch);
+    return { servedValue: BigInt(n.servedValue), weightedValue: BigInt(n.weightedValue) };
+  }
+
+  // ------------------------- ShardingTableStorage, RandomSamplingStorage
+
+  async getShardingTableNodeId(identityId: bigint): Promise<string | null> {
+    await this.init();
+    const sts = await this.resolveContract('ShardingTableStorage');
+    const node = await this.readContract(sts, 'shardingTableStorage.getNode', 'getNode', identityId);
+    return BigInt(node.identityId) === 0n ? null : ethers.hexlify(node.nodeId);
+  }
+
+  async getNodeEpochScore(epoch: number, identityId: bigint): Promise<bigint> {
+    await this.init();
+    const rss = await this.resolveContract('RandomSamplingStorage');
+    return BigInt(await this.readContract(rss, 'randomSamplingStorage.getNodeEpochScore', 'getNodeEpochScore', epoch, identityId));
+  }
+
+  /**
+   * Send `method` from `opts.from`, or the primary wallet, under the Hub
+   * self-heal retry; `contract` resolves the contract again for the retry.
+   */
+  protected async marketplaceSend(
+    contract: () => Promise<Contract>,
+    method: string,
+    args: readonly unknown[],
+    opts: MarketplaceWriteOptions | undefined,
+  ): Promise<ethers.TransactionReceipt> {
+    await this.init();
+    const signer = opts?.from === undefined ? this.signer : this.findSignerByAddress(opts.from);
+    if (!signer) throw new Error(`Cannot send from ${opts?.from}: it is not one of this node's operational wallets`);
+    return this.withHubStaleRetryAny(async () => {
+      try {
+        return await this.sendContractTransaction(await contract(), method, args, signer, `marketplace ${method}`);
+      } catch (err) {
+        enrichEvmError(err);
+        throw err;
+      }
+    });
+  }
+}
