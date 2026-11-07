@@ -1,6 +1,6 @@
 /**
- * Render the multiline tooltip surfaced on the global header status
- * pill (BUG-020). Operators previously had no way to see the
+ * Render the multiline tooltip surfaced on the global header peer
+ * count (BUG-020). Operators previously had no way to see the
  * direct/relayed connection breakdown or the node uptime without
  * jumping to Settings; the tooltip puts both one hover away.
  *
@@ -14,14 +14,12 @@
  * `<br>`, so the choice of separator is part of the contract.
  */
 export function formatPeerStatusTooltip(
-  synced: boolean,
   peers: number,
   direct: number,
   relayed: number,
   uptimeMs: number,
 ): string {
   const lines = [
-    synced ? 'Synced with the network' : 'Syncing with the network',
     `${peers} peer${peers === 1 ? '' : 's'} (${direct} direct, ${relayed} relayed)`,
   ];
   if (uptimeMs > 0) lines.push(`Uptime ${formatUptimeShort(uptimeMs)}`);
