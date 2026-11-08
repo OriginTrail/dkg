@@ -275,6 +275,11 @@ describe('the marketplace mixin on Hardhat', () => {
     expect(await seller.getNodeEpochScore(epoch, sellerId)).toBe(10n ** 18n);
     expect(await seller.getShardingTableNodeId(sellerId)).toMatch(/^0x[0-9a-f]+$/);
     expect(await seller.getShardingTableNodeId(9_999n)).toBeNull();
+    // Its gate: a profile, and a stake at least the minimum, which put it in the table.
+    expect(await seller.profileExists(sellerId)).toBe(true);
+    expect(await seller.profileExists(9_999n)).toBe(false);
+    expect(await seller.getNodeStake(sellerId)).toBeGreaterThanOrEqual(await seller.getMinimumStake());
+    expect(await seller.getNodeStake(9_999n)).toBe(0n);
 
     const domain = contracts.requestDomain;
     const requestOf = (serviceId: string, nonce: bigint, units: bigint): ServiceRequest => ({

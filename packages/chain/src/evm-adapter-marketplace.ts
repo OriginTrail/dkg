@@ -598,6 +598,24 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return BigInt(await this.readContract(rss, 'randomSamplingStorage.getNodeEpochScore', 'getNodeEpochScore', epoch, identityId));
   }
 
+  async profileExists(identityId: bigint): Promise<boolean> {
+    await this.init();
+    const profiles = await this.resolveContract('ProfileStorage');
+    return Boolean(await this.readContract(profiles, 'profileStorage.profileExists', 'profileExists', identityId));
+  }
+
+  async getNodeStake(identityId: bigint): Promise<bigint> {
+    await this.init();
+    const stakes = await this.resolveContract('ConvictionStakingStorage');
+    return BigInt(await this.readContract(stakes, 'convictionStakingStorage.getNodeStakeV10', 'getNodeStakeV10', identityId));
+  }
+
+  async getMinimumStake(): Promise<bigint> {
+    await this.init();
+    const parameters = await this.resolveContract('ParametersStorage');
+    return BigInt(await this.readContract(parameters, 'parametersStorage.minimumStake', 'minimumStake'));
+  }
+
   // ------------------------------------------ ParametersStorage, the Token
 
   async getProtocolTreasury(): Promise<string> {

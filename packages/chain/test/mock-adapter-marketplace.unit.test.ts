@@ -262,6 +262,10 @@ describe('mock marketplace: receipt batches', () => {
     chain.seedIdentity(SIGNER.address, 7n);
     expect(await revertName(chain.submitReceiptBatch([]))).toBe('BatchOutOfBounds');
     expect(await chain.batchState()).toEqual({ activationEpoch: 1, paused: false, maxGroups: 32, maxItems: 256 });
+    // The gate: a node with an identity has a profile and the minimum stake.
+    expect([await chain.profileExists(7n), await chain.profileExists(0n)]).toEqual([true, false]);
+    expect(await chain.getNodeStake(7n)).toBe(await chain.getMinimumStake());
+    expect(await chain.getNodeStake(0n)).toBe(0n);
     expect(await chain.maxBudgetsPerSubscription()).toBe(16);
   });
 });

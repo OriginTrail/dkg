@@ -69,6 +69,8 @@ const MOCK_EPOCH_SECONDS = 30 * 86_400;
 const MAX_BUDGETS = 16;
 const BATCH_STATE: BatchState = { activationEpoch: 1, paused: false, maxGroups: 32, maxItems: 256 };
 const LAMBDA_BPS = 5_000;
+/** The stake the mock gives every node with an identity, and the minimum it asks: the same. */
+const MOCK_NODE_STAKE = 50_000n * 10n ** 18n;
 const WALLET_BALANCES = { eth: 100n * 10n ** 18n, trac: 1_000_000n * 10n ** 18n };
 const BPS = 10_000n;
 const SCALE18 = 10n ** 18n;
@@ -521,6 +523,18 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
 
   async getNodeEpochScore(_epoch: number, identityId: bigint): Promise<bigint> {
     return identityId > 0n ? SCALE18 : 0n;
+  }
+
+  async profileExists(identityId: bigint): Promise<boolean> {
+    return identityId > 0n;
+  }
+
+  async getNodeStake(identityId: bigint): Promise<bigint> {
+    return identityId > 0n ? MOCK_NODE_STAKE : 0n;
+  }
+
+  async getMinimumStake(): Promise<bigint> {
+    return MOCK_NODE_STAKE;
   }
 
   // ------------------------------------------ ParametersStorage, the Token

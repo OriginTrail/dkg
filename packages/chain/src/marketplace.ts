@@ -387,6 +387,12 @@ export interface MarketplaceChain {
    */
   getShardingTableNodeId?(identityId: bigint): Promise<string | null>;
   getNodeEpochScore?(epoch: number, identityId: bigint): Promise<bigint>;
+  // A node's Core Node gate: ProfileStorage, ConvictionStakingStorage and ParametersStorage.
+  profileExists?(identityId: bigint): Promise<boolean>;
+  /** The node's V10 stake, the one the sharding table admits it by. */
+  getNodeStake?(identityId: bigint): Promise<bigint>;
+  /** The stake a node needs for a place in the sharding table. */
+  getMinimumStake?(): Promise<bigint>;
   // ParametersStorage and the Token.
   /** `ParametersStorage.protocolTreasury()`: while it is wired, accounts cannot pay for services. */
   getProtocolTreasury?(): Promise<string>;
