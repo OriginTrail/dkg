@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The seller's Operate views against MockChainAdapter's marketplace, on a
- * clock the tests set: its gate, score and wallets, its offerings with their
- * backends' state and prices, the next epoch's price set ahead while this
- * one's stays frozen and refused once that epoch has started, landing now,
- * the epoch's ledger and next landing, its batches, and its ended epochs' pool
- * and gross.
+ * clock the tests set: its epoch, gate, score and wallets, its offerings with
+ * their backends' state and prices, the next epoch's price set ahead while
+ * this one's stays frozen and refused once that epoch has started, landing
+ * now, the epoch's ledger and next landing, its batches, and its ended epochs'
+ * pool and gross.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -115,12 +115,15 @@ afterEach(async () => {
 });
 
 describe('Operate', () => {
-  it('shows the gate, the score, the wallets and the offerings, and sets the next epoch\'s price while this one\'s stays frozen', async () => {
+  it('shows the epoch, the gate, the score, the wallets and the offerings, and sets the next epoch\'s price while this one\'s stays frozen', async () => {
     const seller = await started();
     const status = await sellerStatusView(seller);
-    const { epoch } = await chain.getEpochTimes();
+    const { epoch, startsAt, endsAt } = await chain.getEpochTimes();
     expect(status).toMatchObject({
       identityId: Number(seller.gate.identityId),
+      epoch,
+      startsAt,
+      endsAt,
       gate: { profile: true, shardingTable: true, stakeTrac: '50000.0', minimumStakeTrac: '50000.0' },
       scoredThisEpoch: true,
       wallets: [{ address: SELLER.address, ethEther: '100.0' }],

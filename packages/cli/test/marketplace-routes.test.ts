@@ -233,9 +233,13 @@ describe('the seller routes', () => {
   });
 
   it('show Operate to any reader, and land or set the next price for the node admin only', async () => {
+    const { epoch, startsAt, endsAt } = await chain.getEpochTimes();
     expect(await api('GET', '/api/marketplace/seller', undefined, agent)).toMatchObject({
       status: 200,
-      body: { gate: { profile: true, shardingTable: true }, scoredThisEpoch: true, offerings: [{ serviceId: SERVICE, connector: 'up', price: '10', nextPrice: '10' }], batches: [] },
+      body: {
+        epoch, startsAt, endsAt, gate: { profile: true, shardingTable: true }, scoredThisEpoch: true,
+        offerings: [{ serviceId: SERVICE, connector: 'up', price: '10', nextPrice: '10' }], batches: [],
+      },
     });
     expect(await api('POST', '/api/marketplace/seller/land', {}, agent)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
     expect(await api('POST', '/api/marketplace/seller/land', {})).toMatchObject({ status: 200, body: { batches: [], stopped: 'nothing-ready' } });

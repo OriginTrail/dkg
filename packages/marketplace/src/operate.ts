@@ -2,14 +2,14 @@
 
 /**
  * What the node API's seller routes return, in the shapes of the UI data
- * contract (`SellerStatus`, `Offering`, `Batch`): the Core Node gate, whether
- * the node has proved this epoch, its operational wallets' ETH, its offerings
- * with their backends' state and this and the next epoch's prices, this
- * epoch's ledger and next landing, its recent batches, its served value and
- * the pool so far, and each ended epoch's pool and gross. Beside the shape,
- * `lastLanding` says what the last landing tick did. Amounts are decimal
- * strings of wei with `…Trac` siblings (`…Ether` for ETH); times are chain
- * seconds.
+ * contract (`SellerStatus`, `Offering`, `Batch`): the epoch and its times, the
+ * Core Node gate, whether the node has proved this epoch, its operational
+ * wallets' ETH, its offerings with their backends' state and this and the next
+ * epoch's prices, this epoch's ledger and next landing, its recent batches,
+ * its served value and the pool so far, and each ended epoch's pool and gross.
+ * Beside the shape, `lastLanding` says what the last landing tick did. Amounts
+ * are decimal strings of wei with `…Trac` siblings (`…Ether` for ETH); times
+ * are chain seconds.
  */
 import type { MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
 import { MarketplaceRefusal } from './buyer.js';
@@ -84,6 +84,9 @@ export async function sellerStatusView(seller: Seller) {
   })));
   return {
     identityId: Number(identityId),
+    epoch: times.epoch,
+    startsAt: times.startsAt,
+    endsAt: times.endsAt,
     gate,
     scoredThisEpoch: score > 0n,
     wallets,
