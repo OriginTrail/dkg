@@ -30,10 +30,11 @@
  *      broadcast. One that lands marks its receipts `landed`, with what each
  *      group counted; one that reverts puts them back to `served`; one whose
  *      fate is not known yet stays `sent`, and the tick sends no more.
- * A `sent` batch is resolved by its transactions (the first, or a speed-up);
- * when none is mined but its wallet's nonce has passed it, by the nonce bits
- * of its receipts: set, they landed; clear, they go back to `served`.
- * Otherwise it waits. Ticks take turns, so two never send the same receipts.
+ * A `sent` batch is resolved by its transactions (the first, or a speed-up).
+ * When none is mined but its wallet's nonce has passed it, they are read once
+ * more, since one may have been mined in between; if none is, the batch is
+ * resolved by the nonce bits of its receipts: set, they landed; clear, they go
+ * back to `served`. Otherwise it waits. Ticks take turns, so two never send the same receipts.
  */
 import { ethers } from 'ethers';
 import {
@@ -43,6 +44,7 @@ import {
   type EpochTimes,
   type MarketplaceChainAdapter,
   type ReceiptBatch,
+  type ReceiptBatchOutcome,
   type ReceiptGroup,
   type ReceiptItem,
 } from '@origintrail-official/dkg-chain';
@@ -106,12 +108,29 @@ export function receiptItemOfCall(call: ServedCall): ReceiptItem {
   return receiptItemOf(requestFromWire(call.request), receiptFromWire(call.receipt), call.signature);
 }
 
+/** A tick that failed is tried again this many seconds on, or after `tickSeconds` if that is sooner. */
+export const TICK_RETRY_SECONDS = 30;
+
 /** Seconds from `times.now` to the next tick: the next multiple of `tickSeconds` from the epoch's start, or the final tick if that is sooner. */
 export function secondsToNextTick(times: EpochTimes, tickSeconds: number, finalLandingSeconds: number): number {
   let next = times.startsAt + (Math.floor((times.now - times.startsAt) / tickSeconds) + 1) * tickSeconds;
   const final = times.endsAt - finalLandingSeconds;
   if (finalLandingSeconds > 0 && times.now < final && final < next) next = final;
   return Math.max(1, next - times.now);
+}
+
+/**
+ * Seconds to wait after a tick that failed: `TICK_RETRY_SECONDS`, or
+ * `tickSeconds` if that is sooner, and never past the final tick, as the last
+ * chain time read, `elapsed` seconds ago, places it.
+ */
+export function secondsToRetry(last: EpochTimes | undefined, elapsed: number, tickSeconds: number, finalLandingSeconds: number): number {
+  let wait = Math.min(TICK_RETRY_SECONDS, tickSeconds);
+  if (last && finalLandingSeconds > 0) {
+    const toFinal = last.endsAt - finalLandingSeconds - (last.now + elapsed);
+    if (toFinal >= 0) wait = Math.min(wait, toFinal);
+  }
+  return Math.max(1, wait);
 }
 
 export class Lander {
@@ -193,15 +212,28 @@ export class Lander {
   private async resolveNow(): Promise<void> {
     const { chain, ledger } = this.deps;
     for (const batch of ledger.pendingBatches()) {
-      let outcome = null;
-      for (const hash of batch.hashes) {
-        outcome = await chain.getReceiptBatchOutcome(hash);
-        if (outcome) break;
+      let outcome = await this.outcomeOf(batch);
+      if (!outcome) {
+        if (batch.nonce === null || (await chain.getMinedNonce(batch.wallet)) <= batch.nonce) continue;
+        // The nonce has passed it: mined since the read above, or never to be.
+        outcome = await this.outcomeOf(batch);
+        if (!outcome) {
+          await this.resolveByNonces(batch);
+          continue;
+        }
       }
-      if (outcome && 'landed' in outcome) await this.landed(batch, outcome.landed);
-      else if (outcome) await ledger.recordReverted(batch.batchId);
-      else if (batch.nonce !== null && (await chain.getMinedNonce(batch.wallet)) > batch.nonce) await this.resolveByNonces(batch);
+      if ('landed' in outcome) await this.landed(batch, outcome.landed);
+      else await ledger.recordReverted(batch.batchId);
     }
+  }
+
+  /** What became of the first of the batch's transactions to be mined: its first, or a speed-up; `null` while none is. */
+  private async outcomeOf(batch: BatchRecord): Promise<ReceiptBatchOutcome> {
+    for (const hash of batch.hashes) {
+      const outcome = await this.deps.chain.getReceiptBatchOutcome(hash);
+      if (outcome) return outcome;
+    }
+    return null;
   }
 
   private async readyGroups(epoch: number, completedBy: number, identity: bigint): Promise<Group[]> {

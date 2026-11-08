@@ -7,7 +7,8 @@
  *
  * - **The gate.** It serves only while it is a Core Node: it has a profile and
  *   a place in the sharding table, which takes the minimum stake. Read at every
- *   tick; until the first tick it serves nothing.
+ *   tick; until the first tick it serves nothing. A tick whose reads of it fail
+ *   keeps what the last one read.
  * - **Prices.** A service's price per unit, in wei, is set per epoch. The
  *   current epoch's is frozen the first time it is used and kept on disk; the
  *   settings' price applies to epochs not frozen yet.
@@ -24,7 +25,8 @@
  *   refused: their receipts could not land in time.
  * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
  *   more `finalLandingSeconds` before its end: the gate, the offers, then
- *   landing, each on its own, so one failing leaves the others.
+ *   landing, each on its own, so one failing leaves the others. A tick that
+ *   fails as a whole is tried again soon, and never past the final tick.
  */
 import { join } from 'node:path';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -43,7 +45,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { UpstreamError, type Connector } from './connector.js';
 import { KeyedLock } from './journal.js';
-import { DEFAULT_LANDING, Lander, secondsToNextTick, type LandingReport, type LandingSettings } from './landing.js';
+import { DEFAULT_LANDING, Lander, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, type OfferQuad } from './offers.js';
 import {
@@ -105,6 +107,8 @@ export class Seller {
   private identityId = 0n;
   private open = false;
   private domain: MarketplaceDomain | undefined;
+  /** The chain's time as the last tick read it, and when, by this host's clock. */
+  private lastTimes: { times: EpochTimes; at: number } | undefined;
   private shared = new Set<string>();
   private running = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
@@ -135,11 +139,9 @@ export class Seller {
   /** The gate, the offers of the current and the next epoch, then landing. Returns the seconds to the next tick. */
   async tick(): Promise<number> {
     const started = Date.now();
-    const chain = this.deps.chain;
-    this.identityId = await chain.getIdentityId();
-    this.open = this.identityId > 0n && await chain.isShardingTableMember(this.identityId);
-    this.domain ??= (await chain.getMarketplaceContracts()).requestDomain;
-    const times = await chain.getEpochTimes();
+    await this.readGate();
+    const times = await this.deps.chain.getEpochTimes();
+    this.lastTimes = { times, at: Date.now() };
     if (this.open && this.deps.shareOffers) {
       await this.shareNewOffers(times).catch((err: unknown) => this.deps.log?.(`[marketplace] the offers were not shared: ${messageOf(err)}`));
     }
@@ -157,8 +159,10 @@ export class Seller {
     const run = (): void => {
       this.ticking = this.tick()
         .catch((err: unknown) => {
-          this.deps.log?.(`[marketplace] seller tick failed: ${messageOf(err)}`);
-          return this.deps.tickSeconds;
+          const elapsed = this.lastTimes ? Math.floor((Date.now() - this.lastTimes.at) / 1_000) : 0;
+          const seconds = secondsToRetry(this.lastTimes?.times, elapsed, this.deps.tickSeconds, this.landing.finalLandingSeconds);
+          this.deps.log?.(`[marketplace] seller tick failed, tried again in ${seconds} s: ${messageOf(err)}`);
+          return seconds;
         })
         .then((seconds) => {
           this.ticking = undefined;
@@ -175,6 +179,20 @@ export class Seller {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.ticking;
+  }
+
+  /** The gate: this node's identity and its place in the sharding table. Reads that fail keep the last ones' answer. */
+  private async readGate(): Promise<void> {
+    const chain = this.deps.chain;
+    try {
+      const identityId = await chain.getIdentityId();
+      const open = identityId > 0n && await chain.isShardingTableMember(identityId);
+      this.domain ??= (await chain.getMarketplaceContracts()).requestDomain;
+      this.identityId = identityId;
+      this.open = open;
+    } catch (err) {
+      this.deps.log?.(`[marketplace] the Core Node gate was not read; it stays ${this.open ? 'open' : 'closed'}: ${messageOf(err)}`);
+    }
   }
 
   // -------------------------------------------------------------- quote

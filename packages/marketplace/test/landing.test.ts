@@ -29,6 +29,7 @@ import {
   requestFromWire,
   requestToWire,
   secondsToNextTick,
+  secondsToRetry,
   serviceIdOf,
   type Connector,
   type LandingReport,
@@ -189,6 +190,61 @@ describe('when a tick lands', () => {
     expect(secondsToNextTick({ ...times, now: times.endsAt - 100 }, 300, 60)).toBe(40);
     expect(secondsToNextTick({ ...times, now: times.endsAt - 100 }, 300, 0)).toBe(100);
     expect(secondsToNextTick({ ...times, now: times.endsAt - 60 }, 300, 60)).toBe(60);
+    // After a tick that failed: 30 seconds, or a shorter tick, and never past the final tick.
+    const late = { ...times, now: times.endsAt - 300 };
+    expect(secondsToRetry(undefined, 0, 300, 60)).toBe(30);
+    expect(secondsToRetry(undefined, 0, 10, 60)).toBe(10);
+    expect(secondsToRetry(late, 0, 300, 60)).toBe(30);
+    expect(secondsToRetry(late, 225, 300, 60)).toBe(15);
+    expect(secondsToRetry(late, 240, 300, 60)).toBe(1);
+    expect(secondsToRetry(late, 300, 300, 60)).toBe(30);
+    expect(secondsToRetry(late, 225, 300, 0)).toBe(30);
+  });
+
+  it('lands on a tick whose gate reads fail, by the gate the last tick read', async () => {
+    const seller = await started();
+    await serve(seller, 1);
+    later(31);
+    vi.spyOn(chain, 'getIdentityId').mockRejectedValueOnce(new Error('the endpoint is away'));
+    seller.lander.landNow();
+    await seller.tick();
+    expect(seller.gate.open).toBe(true);
+    expect(seller.lastLanding).toMatchObject({ sent: [{ items: 1 }] });
+    expect(logs).toEqual([expect.stringMatching(/gate was not read; it stays open: the endpoint is away/)]);
+  });
+
+  it('tries a tick that fails 300 seconds before the end again every 30 seconds, and the final tick lands', async () => {
+    at(EPOCH - 600);
+    const seller = await started();
+    await serve(seller, 1);
+    // The chain's reads fail from 300 seconds before the end until the final tick.
+    const base = await chain.getEpochTimes();
+    vi.mocked(chain.getEpochTimes).mockImplementation(async () => {
+      const now = base.startsAt + clock;
+      if (now >= base.endsAt - 300 && now < base.endsAt - 60) throw new Error('the endpoint is away');
+      return { ...base, now };
+    });
+    vi.useFakeTimers();
+    try {
+      const step = async (seconds: number) => {
+        later(seconds);
+        await vi.advanceTimersByTimeAsync(seconds * 1_000);
+        await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
+      };
+      seller.start();
+      await vi.waitFor(() => expect(vi.getTimerCount()).toBe(1));
+      // The aligned tick 300 seconds before the end fails, and so does each try until the final tick's time.
+      await step(300);
+      for (let i = 0; i < 7; i++) await step(30);
+      const failed = logs.filter((m) => m.includes('seller tick failed'));
+      expect(failed).toHaveLength(8);
+      expect(failed.every((m) => /tried again in 30 s: the endpoint is away/.test(m))).toBe(true);
+      await step(30);
+      expect(seller.lastLanding).toMatchObject({ sent: [{ items: 1 }] });
+      await seller.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -356,6 +412,27 @@ describe('a batch', () => {
     vi.spyOn(chain, 'getReceiptBatchOutcome').mockResolvedValueOnce({ reverted: true });
     await seller.lander.resolve();
     expect(await counts(seller)).toMatchObject({ served: 1, landed: 2 });
+  });
+
+  it('reads a pending batch once more when its wallet nonce has passed it, so one mined in between lands with what it counted', async () => {
+    const seller = await started();
+    await serve(seller, 2);
+    later(31);
+    const real = chain.submitReceiptBatch.bind(chain);
+    vi.spyOn(chain, 'submitReceiptBatch').mockImplementationOnce(async (groups, opts) => {
+      await real(groups, opts);
+      throw new Error('timed out');
+    });
+    seller.lander.landNow();
+    expect(await seller.lander.tick()).toMatchObject({ waiting: true });
+    // Not mined by the first read; mined by the time the wallet's nonce is read.
+    vi.spyOn(chain, 'getReceiptBatchOutcome').mockResolvedValueOnce(null);
+    await seller.lander.resolve();
+    const { epoch } = await chain.getEpochTimes();
+    expect(seller.ledger.epochReport(epoch)).toMatchObject({
+      summary: { counts: { landed: 2, sent: 0 }, counted: '400' },
+      batches: [{ state: 'landed', counted: '400' }],
+    });
   });
 
   it('is resolved by a speed-up that landed', async () => {

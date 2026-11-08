@@ -184,10 +184,10 @@ describe('the job', () => {
     expect(logs).toEqual([expect.stringMatching(/offers were not shared: the graph is away/), expect.stringMatching(/landing failed: no chain/)]);
     expect(landing).toHaveBeenCalledWith(true);
 
-    // The job: a tick that throws is logged and the next is set; one that runs sets the next too.
-    vi.spyOn(chain, 'getIdentityId').mockRejectedValueOnce(new Error('socket hang up'));
+    // The job: a tick that fails as a whole is logged and tried again soon; one that runs sets the next too.
+    vi.spyOn(chain, 'getEpochTimes').mockRejectedValueOnce(new Error('socket hang up'));
     seller.start();
-    await vi.waitFor(() => expect(logs.at(-1)).toMatch(/seller tick failed: socket hang up/));
+    await vi.waitFor(() => expect(logs.at(-1)).toMatch(/seller tick failed, tried again in 30 s: socket hang up/));
     await seller.stop();
     seller.start();
     await vi.waitFor(() => expect(seller.lastLanding).toEqual({ stopped: 'not-due' }));
