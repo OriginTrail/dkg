@@ -233,7 +233,7 @@ export const COPY: Record<string, string> = {
   "composer.renew.invalid": "The last epoch to renew can't be before this one",
   "composer.note": "Funding sends one transaction from this node's buyer wallet, or from the account you pick. Sellers are never paid directly: they are paid from the epoch's pool for the receipts that land.",
   "composer.note.plan": "This saves the plan: the next renewal funds it. This epoch's subscription stays as it is.",
-  "composer.preview.admin": "What a plan costs takes the node-admin token to ask",
+  "composer.preview.admin": "Asking the node what this costs takes the node-admin token",
   "composer.cost": "Costs {cost} TRAC from {source} for epoch {epoch}",
   "composer.cost.discount": "Costs {cost} TRAC from {source} for epoch {epoch}: {value} TRAC of service, {pct}% off",
   "composer.refused": "The node would refuse this funding — see why above",
