@@ -207,7 +207,7 @@ describe('why a tick stops', () => {
     mock.mockBaseFee = 10n ** 12n;
     // The retry makes the next tick due.
     expect(await seller.lander.tick()).toEqual({ stopped: 'base-fee' });
-    // 0.5 gwei: over the ceiling until the last stretch, whose is 1 gwei.
+    // 0.5 gwei: over the ceiling until the last stretch, whose ceiling is 1 gwei.
     mock.mockBaseFee = 5n * 10n ** 8n;
     expect(await seller.lander.tick()).toEqual({ stopped: 'base-fee' });
     at(EPOCH - 10 * 60);
