@@ -407,7 +407,9 @@ export interface MarketplaceChain {
 /**
  * A chain adapter with the whole marketplace, the Conviction Account reads it
  * uses, and the node's identity: its id, the sharding table, which keys are an
- * identity's operational keys, and typed-data signing with its wallets.
+ * identity's operational keys, the identity a wallet is an operational key of
+ * (`IdentityStorage.getIdentityId`, the settlement's read of a batch's
+ * sender), and typed-data signing with its wallets.
  */
 export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick<ChainAdapter,
   | 'getPublishingConvictionAccountInfo'
@@ -416,6 +418,7 @@ export type MarketplaceChainAdapter = Required<MarketplaceChain> & Required<Pick
   | 'listNodePublishingConvictionAccounts'
   | 'getPublishingConvictionContracts'
   | 'getIdentityId'
+  | 'getIdentityIdForAddress'
   | 'isShardingTableMember'
   | 'verifyACKIdentityDetailed'
   | 'signTypedDataAs'

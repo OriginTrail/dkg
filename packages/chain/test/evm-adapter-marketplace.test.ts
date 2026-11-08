@@ -273,6 +273,9 @@ describe('the marketplace mixin on Hardhat', () => {
     await (await rss.addToNodeEpochScore(epoch, sellerId, 10n ** 18n)).wait();
     await (await rss.addToAllNodesEpochScore(epoch, 10n ** 18n)).wait();
     expect(await seller.getNodeEpochScore(epoch, sellerId)).toBe(10n ** 18n);
+    // The sender's identity, as the settlement reads it: an operational wallet maps to its node, any other address to 0.
+    expect(await walletBuyer.getIdentityIdForAddress(seller.getSignerAddress())).toBe(sellerId);
+    expect(await walletBuyer.getIdentityIdForAddress(session.address)).toBe(0n);
     expect(await seller.getShardingTableNodeId(sellerId)).toMatch(/^0x[0-9a-f]+$/);
     expect(await seller.getShardingTableNodeId(9_999n)).toBeNull();
     // Its gate: a profile, and a stake at least the minimum, which put it in the table.

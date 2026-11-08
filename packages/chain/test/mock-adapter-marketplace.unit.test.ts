@@ -261,6 +261,9 @@ describe('mock marketplace: receipt batches', () => {
     expect(await revertName(chain.submitReceiptBatch([]))).toBe('ProfileDoesntExist');
     chain.seedIdentity(SIGNER.address, 7n);
     expect(await revertName(chain.submitReceiptBatch([]))).toBe('BatchOutOfBounds');
+    // The sender's identity, as the settlement reads it: an operational wallet maps to its node, any other address to 0.
+    expect(await chain.getIdentityIdForAddress(SIGNER.address)).toBe(7n);
+    expect(await chain.getIdentityIdForAddress(ethers.Wallet.createRandom().address)).toBe(0n);
     expect(await chain.batchState()).toEqual({ activationEpoch: 1, paused: false, maxGroups: 32, maxItems: 256 });
     // The gate: a node with an identity has a profile and the minimum stake.
     expect([await chain.profileExists(7n), await chain.profileExists(0n)]).toEqual([true, false]);
