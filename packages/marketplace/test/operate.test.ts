@@ -3,8 +3,9 @@
  * The seller's Operate views against MockChainAdapter's marketplace, on a
  * clock the tests set: its gate, score and wallets, its offerings with their
  * backends' state and prices, the next epoch's price set ahead while this
- * one's stays frozen, landing now, the epoch's ledger and next landing, its
- * batches, and its ended epochs' pool and gross.
+ * one's stays frozen and refused once that epoch has started, landing now,
+ * the epoch's ledger and next landing, its batches, and its ended epochs' pool
+ * and gross.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -140,6 +141,20 @@ describe('Operate', () => {
     mock.__advanceEpoch();
     expect(await seller.pricesOf(A)).toEqual({ price: 25n, nextPrice: 10n });
     expect((await chain.getEpochTimes()).epoch).toBe(epoch + 1);
+  });
+
+  it('refuses the next price once its epoch has started, and keeps the price that epoch froze', async () => {
+    const seller = await started();
+    const stale = await chain.getEpochTimes();
+    mock.__advanceEpoch();
+    expect(await seller.pricesOf(A)).toEqual({ price: PRICE, nextPrice: PRICE });
+    // The setting's first read is from before the epoch turned; the read under the prices lock is not.
+    vi.mocked(chain.getEpochTimes).mockResolvedValueOnce(stale);
+    await expect(seller.setNextPrice(A, 25n)).rejects.toMatchObject({ code: 'EpochStarted', args: [A, String(stale.epoch + 1)] });
+    expect(await seller.pricesOf(A)).toEqual({ price: PRICE, nextPrice: PRICE });
+    // Set again, it is the new next epoch's.
+    await seller.setNextPrice(A, 25n);
+    expect(await seller.pricesOf(A)).toEqual({ price: PRICE, nextPrice: 25n });
   });
 
   it('lands now, lists the batch with its gas, counts it in the ledger and the served value, and shows a failing backend', async () => {

@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The marketplace routes' request handling against MockChainAdapter: who may
- * write, how a refusal maps to its status, input that is refused before the
- * chain is asked, the daemon's buyer at boot, and the `dkg marketplace`
- * commands. The routes, the buyer and the contracts together are tested on
- * Hardhat in marketplace-buyer.evm.test.ts.
+ * write, and who may read the access keys and their calls, how a refusal maps
+ * to its status, input that is refused before the chain is asked, the daemon's
+ * buyer at boot, and the `dkg marketplace` commands. The routes, the buyer and
+ * the contracts together are tested on Hardhat in
+ * marketplace-buyer.evm.test.ts.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -165,7 +166,7 @@ describe('the catalog routes', () => {
     await gateway.load();
   });
 
-  it('answer the catalog, a service, a storefront and the activity to any reader', async () => {
+  it('answer the catalog, a service and a storefront to any reader, and the activity to the node admin only', async () => {
     const { epoch } = await chain.getEpochTimes();
     expect(await api('GET', '/api/marketplace/catalog', undefined, agent)).toMatchObject({
       status: 200, body: { epoch, fx: { tracUsd: null, source: 'none' }, services: [{ serviceId: A, label: 'urn:test:model:a', priceMin: '10', offers: [{ seller: Number(own), available: null }] }] },
@@ -176,7 +177,12 @@ describe('the catalog routes', () => {
     expect(await api('GET', `/api/marketplace/sellers/${own}`, undefined, agent)).toMatchObject({ status: 200, body: { identityId: Number(own), gate: { profile: true }, offers: [{ serviceId: A }] } });
     vi.spyOn(chain, 'profileExists').mockResolvedValue(false);
     expect(await api('GET', '/api/marketplace/sellers/77')).toMatchObject({ status: 404, body: { code: 'SellerNotFound' } });
-    expect(await api('GET', '/api/marketplace/activity', undefined, agent)).toMatchObject({ status: 200, body: { calls: [] } });
+    // Each access key's calls are the node admin's business, as the keys are: refused before the chain is asked.
+    const reads = vi.spyOn(chain, 'getEpochTimes');
+    expect(await api('GET', '/api/marketplace/activity', undefined, agent)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    expect(await api('GET', '/api/marketplace/activity?epoch=soon', undefined, agent)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    expect(reads).not.toHaveBeenCalled();
+    expect(await api('GET', '/api/marketplace/activity')).toMatchObject({ status: 200, body: { calls: [] } });
     expect(await api('GET', '/api/marketplace/activity?key=dkgmk_none&epoch=current')).toMatchObject({ status: 200, body: { calls: [] } });
     expect(await api('GET', '/api/marketplace/activity?epoch=soon')).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
     gateway = undefined;
@@ -239,6 +245,20 @@ describe('the seller routes', () => {
     for (const bad of [{ price: '0' }, { price: 25 }, {}]) expect(await api('PUT', price, bad)).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
     expect(await api('PUT', `/api/marketplace/seller/offerings/0x${'99'.repeat(32)}/price`, { price: '5' })).toMatchObject({ status: 404, body: { code: 'ServiceNotFound' } });
     expect((await api('GET', '/api/marketplace/seller/elsewhere')).status).toBe(404);
+  });
+
+  it('refuse a next price with 409 once its epoch has started, and keep the price that epoch froze', async () => {
+    const stale = await chain.getEpochTimes();
+    mock.__advanceEpoch();
+    expect((await api('GET', '/api/marketplace/seller')).body.offerings).toMatchObject([{ price: '10', nextPrice: '10' }]);
+    // The setting's first read is from before the epoch turned.
+    vi.spyOn(chain, 'getEpochTimes').mockResolvedValueOnce(stale);
+    const price = `/api/marketplace/seller/offerings/${SERVICE}/price`;
+    expect(await api('PUT', price, { price: '25' })).toMatchObject({
+      status: 409, body: { code: 'EpochStarted', args: [SERVICE, String(stale.epoch + 1)], retryable: false },
+    });
+    expect((await api('GET', '/api/marketplace/seller')).body.offerings).toMatchObject([{ price: '10', nextPrice: '10' }]);
+    expect(await api('PUT', price, { price: '25' })).toMatchObject({ status: 200, body: { price: '10', nextPrice: '25' } });
   });
 
   it('answer for a node that sells without buying, and 503 while selling is off', async () => {

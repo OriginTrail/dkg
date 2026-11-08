@@ -9,10 +9,10 @@
 // `packages/marketplace` builds each answer; this module reads the request and
 // maps refusals.
 //
-// Reads need any valid token; writes need the node-admin token. Amounts are
-// decimal strings of wei with `…Trac` siblings, times are chain seconds, and a
-// refusal is { error, code, args?, retryable }, with the contract error's name
-// as `code`.
+// Writes, the access keys and their calls need the node-admin token; other
+// reads need any valid token. Amounts are decimal strings of wei with `…Trac`
+// siblings, times are chain seconds, and a refusal is
+// { error, code, args?, retryable }, with the contract error's name as `code`.
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ethers } from 'ethers';
@@ -60,8 +60,9 @@ import { isMarketplaceGatewayRoute } from './marketplace-gateway-paths.js';
 
 const PREFIX = '/api/marketplace';
 
-// The status of a refusal by its kind. Any other refusal the contracts make
-// is a conflict with the chain's state as it is now: 409.
+// The status of a refusal by its kind. Any other refusal, the contracts' and
+// the seller's `EpochStarted` among them, is a conflict with the chain's state
+// as it is now: 409.
 const REFUSAL_STATUS: Readonly<Record<string, number>> = {
   InvalidRequest: 400,
   InvalidFundingRequest: 400,
@@ -209,7 +210,9 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   if (method === 'GET' && service) return serviceDetailView(gatewayOf(ctx), service[1]!);
   const storefront = /^\/sellers\/([1-9]\d{0,20})$/.exec(route);
   if (method === 'GET' && storefront) return sellerView(gatewayOf(ctx), BigInt(storefront[1]!));
+  // Each access key's calls: the node admin's alone, as the keys are.
   if (method === 'GET' && route === '/activity') {
+    if (!canAdministerNode(ctx.actor.authentication)) throw new MarketplaceRefusal('NodeAdminRequired');
     const { epoch } = await buyer.chain.getEpochTimes();
     const asked = url.searchParams.get('epoch');
     return gatewayOf(ctx).activity(asked === null ? epoch : parseEpoch(asked, epoch), url.searchParams.get('key') ?? undefined);

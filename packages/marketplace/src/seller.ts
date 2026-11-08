@@ -11,8 +11,8 @@
  *   keeps what the last one read.
  * - **Prices.** A service's price per unit, in wei, is set per epoch. The
  *   current epoch's is frozen the first time it is used and kept on disk. The
- *   next epoch's can be set ahead of it; the settings' price applies to epochs
- *   neither frozen nor set.
+ *   next epoch's can be set ahead of it, until that epoch starts; the settings'
+ *   price applies to epochs neither frozen nor set.
  * - **Offers.** At every tick it shares an offer for each service, for the
  *   current and the next epoch, into the Marketplace Context Graph.
  * - **Each call** is checked, cheapest check first, then
@@ -44,6 +44,7 @@ import {
   type QueryInferenceReceipt,
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
+import { MarketplaceRefusal } from './buyer.js';
 import { UpstreamError, type Connector } from './connector.js';
 import { KeyedLock } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
@@ -164,11 +165,19 @@ export class Seller {
     return { price: await this.priceFor(service, epoch, epoch), nextPrice: await this.priceFor(service, epoch + 1, epoch) };
   }
 
-  /** Set a service's price for the next epoch; this epoch's stays as it is frozen. */
+  /**
+   * Set a service's price for the next epoch; this epoch's stays as it is
+   * frozen. Refused with `EpochStarted` when that epoch starts before the
+   * price is kept: its price may be frozen by then.
+   */
   async setNextPrice(serviceId: string, price: bigint): Promise<void> {
     const service = this.serviceOf(serviceId);
-    const { epoch } = await this.deps.chain.getEpochTimes();
-    await this.lock.run('prices', () => this.storePrice(service.serviceId, epoch + 1, price));
+    const next = (await this.deps.chain.getEpochTimes()).epoch + 1;
+    await this.lock.run('prices', async () => {
+      // Read again under the lock: the epoch may have turned while this waited for it.
+      if ((await this.deps.chain.getEpochTimes()).epoch >= next) throw new MarketplaceRefusal('EpochStarted', [service.serviceId, String(next)]);
+      await this.storePrice(service.serviceId, next, price);
+    });
   }
 
   /** Read the ledger and the frozen prices. Call once before serving. */
