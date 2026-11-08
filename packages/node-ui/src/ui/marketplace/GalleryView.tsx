@@ -1,16 +1,19 @@
-// /dev/gallery: every marketplace component in every state, driven by
-// gallery-fixtures.json. Always fixture-fed and labeled as such.
+// /dev/gallery: the marketplace's building blocks in their states, fed by the
+// fixture node's answers (api/fixtures.ts), never by a live node, and
+// labeled as such. Nothing on this page sends a request.
 import React, { useState } from 'react';
-import fixtures from './gallery-fixtures.json';
-import { copy, COPY } from './copy.generated.js';
-import { fmtMicro, fmtTrac, fmtUsd, DEFAULT_TRAC_USD } from './format.js';
-import {
-  StateChip, ProvBadge, ModelLogo, RadialGauge, LinearGauge, MiniBar,
-  ReceiptDrawer, CostChip, WithholdBody, ModelCard, ProviderRow,
-  ConservationLine, useCountdown, type LegState, type CatalogModel, type ReceiptLeg,
-} from './components.js';
-
-const FX = fixtures.fx.tracUsd ?? DEFAULT_TRAC_USD;
+import { copy } from './copy.generated.js';
+import { MarketplaceError } from './api/client.js';
+import { FIXTURE_IDS, FIXTURE_SECRET, fixtureWorld } from './api/fixtures.js';
+import type { MadeKey, Preview, ServiceRequest } from './api/types.js';
+import { fmtCount, fmtTrac, modelName } from './amounts.js';
+import { AdminCard, ErrorCard, OffCard, refusalKey, sellerName } from './shared.js';
+import { PriceLine, ProvBadge, SellerChip } from './views/MarketplaceView.js';
+import { Meters } from './purchase/Meters.js';
+import { Activity } from './purchase/Ledger.js';
+import { ConfirmGate } from './purchase/ConfirmGate.js';
+import { KeyOnce } from './purchase/KeyStep.js';
+import { ProgressSteps } from './purchase/ProgressSteps.js';
 
 function Sect({ title, children }: { title: string; children: React.ReactNode }): React.ReactElement {
   return (
@@ -21,29 +24,26 @@ function Sect({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
-const verifiedLeg: ReceiptLeg = {
-  legId: fixtures.legs.verified.legId, state: 'verified',
-  costMicro: fixtures.legs.verified.costMicro,
-  counts: fixtures.legs.verified.counts,
-  priceIn: 2, priceOut: 6,
-  bytesDigest: fixtures.legs.verified.bytesDigest,
-  sellerSig: fixtures.legs.verified.sellerSig,
-  countersig: fixtures.legs.verified.countersig,
-  closeDigest: fixtures.legs.verified.closeDigest,
-  chainUrl: `${fixtures.chain.explorer}/tx/${fixtures.tab.openTx}`,
-};
-
-const blockedLeg: ReceiptLeg = {
-  legId: fixtures.legs.blocked.legId, state: 'blocked',
-  costMicro: fixtures.legs.blocked.recountMicro,
-  counts: fixtures.legs.blocked.counts,
-  withholdCode: fixtures.legs.blocked.code,
-  claimedMicro: fixtures.legs.blocked.claimedMicro,
-};
+const REFUSALS: Array<[number, unknown, string | null]> = [
+  [503, { error: 'The marketplace is off on this node', code: 'MarketplaceOff', retryable: true }, null],
+  [403, { error: 'A node-admin token is required', code: 'NodeAdminRequired', retryable: false }, null],
+  [409, { error: 'InsufficientAllowance(7, 664, 5, 2)', code: 'InsufficientAllowance', args: ['7', '664', '5', '2'], retryable: false }, null],
+  [503, { error: { code: 'epoch_ending', message: 'the epoch is ending; calls resume when the next one starts', type: 'marketplace' }, nextEpochAt: 0 }, '120'],
+  [402, { error: { code: 'soft_ceiling', message: 'the budget is at its soft ceiling', type: 'marketplace' }, left: '0', leftTrac: '0.0', fork: { topUp: true } }, null],
+  [502, { error: { code: 'bad_receipt', message: "the seller's receipt failed a check: value_mismatch", type: 'marketplace' }, problem: 'value_mismatch' }, null],
+];
 
 export function MarketplaceGalleryView(): React.ReactElement {
-  const [pendingDeadline] = useState(() => Date.now() + 4 * 60_000 + 12_000);
-  const countdown = useCountdown(pendingDeadline);
+  const [world] = useState(() => fixtureWorld());
+  const [keyShown, setKeyShown] = useState(true);
+  const catalog = world.catalog(true);
+  const noFx = { ...catalog.fx, tracUsd: null, source: 'none', asOf: null };
+  const qwen = catalog.services.find((s) => s.serviceId === FIXTURE_IDS.qwen14b)!;
+  const services: ServiceRequest[] = world.current.budgets.map((b) => ({ serviceId: b.serviceId, serviceClass: 'inference', value: b.value, maxPricePerUnit: b.maxPricePerUnit }));
+  const preview: Preview = { epoch: world.epoch, source: { kind: 'account', accountId: '7', discountBps: 1_000 }, value: world.current.value, valueTrac: world.current.valueTrac, cost: '4500000000000000000', costTrac: '4.5', discountBps: 1_000 };
+  const made: MadeKey = { ...world.keys[0], keyId: FIXTURE_SECRET.slice(0, 14), label: 'my-agent', spent: '0', lastUsedAt: null, secret: FIXTURE_SECRET };
+  const served = world.chat(world.labels[FIXTURE_IDS.qwen14b], FIXTURE_IDS.qwen14b).marketplace;
+  const noop = () => undefined;
 
   return (
     <div className="mktx mktx--page">
@@ -55,183 +55,77 @@ export function MarketplaceGalleryView(): React.ReactElement {
         letterSpacing: '0.06em', textTransform: 'uppercase',
         padding: 'var(--sp-2) var(--sp-4)',
       }}>
-        Component gallery · fixture data · not live
+        {copy('gallery.banner')}
       </div>
-      <div className="frame">
-        <h1>Marketplace component gallery</h1>
+      <div className="frame mkt-frame">
+        <h1>{copy('gallery.title')}</h1>
 
-        <Sect title="lifecycle chips — all five states">
-          <div className="row" style={{ flexWrap: 'wrap' }}>
-            {(['checking', 'verified', 'pending', 'blocked', 'voided'] as LegState[]).map((s) => <StateChip key={s} state={s} />)}
-            <StateChip state="verified" short={false} />
-          </div>
-        </Sect>
-
-        <Sect title="provenance badges">
-          <div className="row"><ProvBadge cls="weights-pinned" withText /><ProvBadge cls="upstream-claimed" withText /></div>
-        </Sect>
-
-        <Sect title="logos — known families + unknown-family fallback">
-          <div className="row">
-            <ModelLogo family="qwen" displayName="Qwen2.5" size="lg" />
-            <ModelLogo family="openai" displayName="GPT-5.4" size="md" />
-            <ModelLogo family="deepseek" displayName="DeepSeek" size="md" />
-            <ModelLogo family="unknown-fam" displayName="Custom Net" size="md" />
-            <ModelLogo family="qwen" displayName="Qwen2.5" size="sm" />
-          </div>
-        </Sect>
-
-        <Sect title={`radial gauge — the honest 0.03% (${fixtures.threshold.earnedMicro} / ${fixtures.threshold.thresholdMicro}) · 52% · 106% · zero`}>
-          <div className="row" style={{ flexWrap: 'wrap', gap: 'var(--sp-6)' }}>
-            <RadialGauge pct={fixtures.threshold.pct} mode="low"
-              title={copy('gauge.threshold.tip', { earned: `${fmtMicro(fixtures.threshold.earnedMicro)}`, threshold: `${fmtMicro(fixtures.threshold.thresholdMicro)}` })}>
-              <div><div className="mono" style={{ fontSize: 'var(--fs-lg)', fontWeight: 600 }}>0.03%</div><div className="xs muted">{copy('operate.gauge.sub')}</div></div>
-            </RadialGauge>
-            <RadialGauge pct={52} mode="mid"><div className="mono" style={{ fontSize: 'var(--fs-lg)', fontWeight: 600 }}>52%</div></RadialGauge>
-            <RadialGauge pct={106} mode="ready"><div className="mono" style={{ fontSize: 'var(--fs-lg)', fontWeight: 600 }}>106%</div></RadialGauge>
-            <RadialGauge pct={0} mode="low"><div className="mono" style={{ fontSize: 'var(--fs-lg)', fontWeight: 600 }}>0%</div></RadialGauge>
-          </div>
-        </Sect>
-
-        <Sect title="linear gauges — 61% · exhausted (cap) · revoked-low · ready">
-          <div className="stack" style={{ maxWidth: 'var(--card-min-w)' }}>
-            <LinearGauge pct={61} />
-            <LinearGauge pct={100} mode="over" />
-            <LinearGauge pct={12} mode="low" />
-            <LinearGauge pct={100} mode="ready" />
-          </div>
-        </Sect>
-
-        <Sect title="tab mini-bar — 761 µ billed of 1,000,000 µ">
-          <div style={{ maxWidth: 'var(--card-min-w)' }}>
-            <MiniBar billedMicro={fixtures.tab.billedMicro} totalMicro={fixtures.tab.fundedMicro} />
-          </div>
-        </Sect>
-
-        <Sect title="cost chips — normal · voided (struck)">
-          <div className="row">
-            <CostChip micro={258} fxRate={FX} />
-            <CostChip micro={258} fxRate={FX} voided />
-          </div>
-        </Sect>
-
-        <Sect title="pending-delivery with LIVE countdown (state.pending.deadline)">
-          <div className="msg-footer">
-            <CostChip micro={fixtures.legs.pending.costMicro} fxRate={FX} />
-            <StateChip state="pending" />
-            <span className="xs muted countdown">{copy('state.pending.deadline', { t: countdown ?? '—' })}</span>
-          </div>
-        </Sect>
-
-        <Sect title="withhold — plain words per code (all five), code one reveal deeper">
-          <div className="stack">
-            {(fixtures.withholdCodes as string[]).map((code) => (
-              <div key={code}><WithholdBody code={code} /></div>
+        <Sect title={copy('gallery.sect.calls')}>
+          <div className="mkt-fchips mkt-wrap" data-testid="mkt-gallery-calls">
+            {(['held', 'landed', 'missed'] as const).map((s) => (
+              <span key={s} className={s === 'missed' ? 'mkt-chipblock' : s === 'held' ? 'mkt-chipwarn' : 'mkt-chipleft'}>{copy(`activity.state.${s}`)}</span>
             ))}
           </div>
         </Sect>
 
-        <Sect title="receipt drawer — verified leg (leg_e1552c0a, 258 µ, counts 42/29)">
-          <div style={{ maxWidth: 'calc(var(--card-min-w) * 1.4)' }}><ReceiptDrawer leg={verifiedLeg} fxRate={FX} /></div>
-        </Sect>
-
-        <Sect title="receipt drawer — blocked leg (E_OVERBILL: claimed 310 µ, recount 258 µ)">
-          <div style={{ maxWidth: 'calc(var(--card-min-w) * 1.4)' }}><ReceiptDrawer leg={blockedLeg} fxRate={FX} /></div>
-        </Sect>
-
-        <Sect title="model cards — 2-provider ⛓ group · 1-provider ☁ · loading skeleton">
-          <div className="grid-cards" style={{ maxWidth: 'calc(var(--card-min-w) * 3)' }}>
-            {(fixtures.models as CatalogModel[]).map((m) => <ModelCard key={m.modelRef} model={m} fxRate={FX} />)}
-            <div className="card mcard" aria-hidden>
-              <div className="name"><span className="logo-monogram logo--md skel">··</span> <span className="skel">Model name</span></div>
-              <div className="fam skel" style={{ width: '60%' }}>family</div>
-              <div className="provline skel" style={{ width: '40%' }}>providers</div>
-              <div className="price skel" style={{ width: '50%' }}>price</div>
-            </div>
+        <Sect title={copy('gallery.sect.sellers')}>
+          <div className="mkt-fchips mkt-wrap">
+            <SellerChip available /><SellerChip available={false} /><SellerChip available={null} />
+            <ProvBadge offers={world.offers[FIXTURE_IDS.qwen14b]} /><ProvBadge offers={world.offers[FIXTURE_IDS.llama8b]} />
           </div>
         </Sect>
 
-        <Sect title="provider rows — live ok · quote-unverifiable (disabled) · unreachable + no telemetry · loading">
-          <div className="card scroll-x">
-            <table className="table">
-              <thead><tr><th>Provider</th><th className="num">Price / 1M</th><th>Class</th><th className="num">TTFT</th><th className="num">tok/s</th><th>Via</th><th>Up</th><th /></tr></thead>
-              <tbody>
-                <ProviderRow p={fixtures.models[0].providers[0]} fxRate={FX} quoteStatus="live" />
-                <ProviderRow p={fixtures.models[0].providers[1]} fxRate={FX} quoteStatus="unverifiable" />
-                <ProviderRow p={{ ...fixtures.models[0].providers[0], ttftMs: null, tokS: null, up: false }} fxRate={FX} quoteStatus="unreachable" />
-                <tr aria-hidden>
-                  <td><span className="skel">provider line</span></td>
-                  <td className="num"><span className="skel">$0.00</span></td>
-                  <td><span className="skel">⛓</span></td>
-                  <td className="num"><span className="skel">000ms</span></td>
-                  <td className="num"><span className="skel">00</span></td>
-                  <td><span className="skel">via</span></td>
-                  <td><span className="skel">●</span></td>
-                  <td />
-                </tr>
-              </tbody>
-            </table>
+        <Sect title={copy('gallery.sect.prices')}>
+          <div className="mkt-card">
+            <div><strong>{modelName(qwen.label)}</strong>{' '}<PriceLine min={qwen.priceMin} max={qwen.priceMax} fx={catalog.fx} /></div>
+            <div><strong>{modelName(qwen.label)}</strong>{' '}<PriceLine min={qwen.priceMin} max={qwen.priceMax} fx={noFx} /></div>
+            <span className="mkt-chipleft">{copy('catalog.covered', { trac: fmtTrac(qwen.covered!.left) })}</span>
           </div>
         </Sect>
 
-        <Sect title="conservation line — intact and broken (fixture break)">
-          <div className="stack">
-            <ConservationLine lhsMicro={fixtures.conservation.lhs} billedMicro={fixtures.conservation.billed} refundableMicro={fixtures.conservation.refundable} />
-            <ConservationLine lhsMicro={fixtures.conservationBroken.lhs} billedMicro={fixtures.conservationBroken.billed} refundableMicro={fixtures.conservationBroken.refundable} />
+        <Sect title={copy('gallery.sect.budgets')}>
+          <Meters subscription={world.current} catalog={catalog} plan={world.plan(true)} calls={world.activity.calls} onTopUp={noop} />
+        </Sect>
+
+        <Sect title={copy('gallery.sect.served')}>
+          <div className="mkt-card mkt-chat">
+            <div className="mkt-bubble assistant">{world.chat('', FIXTURE_IDS.qwen14b).choices[0].message.content}</div>
+            <div className="mkt-muted mkt-xs">{copy('play.servedby', { seller: sellerName(served.seller), units: fmtCount(served.units), trac: fmtTrac(served.value), left: fmtTrac(served.budgetLeft) })}</div>
+            <div className="mkt-bubble assistant error" role="alert">{copy('play.error.bubble', { reason: copy(refusalKey('soft_ceiling')) })}</div>
           </div>
         </Sect>
 
-        <Sect title="key-mint plaintext-once (mint modal state) — unrecoverable after dismiss">
-          <MintOnceDemo />
+        <Sect title={copy('gallery.sect.steps')}>
+          <ProgressSteps step={1} /><ProgressSteps step={2} sub="confirm" /><ProgressSteps step={3} />
         </Sect>
 
-        <Sect title="toasts — KPI · rerouted">
-          <div className="row" style={{ flexWrap: 'wrap' }}>
-            <div className="toast"><span className="chip chip--verified">✓</span> {copy('onboard.kpi', { 'mm:ss': fixtures.kpi.firstVerifiedMmss })}</div>
-            <div className="toast"><span className="chip chip--checking">↷</span> {copy('state.rerouted', { provider: '0x11111111…' })}</div>
-          </div>
+        <Sect title={copy('gallery.sect.gate')}>
+          <ConfirmGate catalog={catalog} funding={world.funding} preview={preview} services={services} fundsEpoch renew renewUntil={world.epoch + 6} busy={false} err={null} onConfirm={noop} onCancel={noop} />
         </Sect>
 
-        <Sect title="empty states — all four">
-          <div className="stack">
-            {(['empty.catalog', 'empty.tabs', 'empty.keys', 'empty.activity'] as const).map((k) => (
-              <div key={k} className="card card--pad" style={{ textAlign: 'center' }}><span className="sec">{copy(k)}</span></div>
-            ))}
-          </div>
+        <Sect title={copy('gallery.sect.key')}>
+          {keyShown ? <KeyOnce made={made} onDone={() => setKeyShown(false)} /> : <div className="mkt-muted mkt-xs" data-testid="mkt-gallery-key-gone">{copy('gallery.key.gone', { key: made.keyId })}</div>}
         </Sect>
 
-        <Sect title="errors — normalized set">
-          <div className="stack">
-            {(['err.401', 'err.402.budget', 'err.402.unfunded', 'err.429', 'err.5xx', 'err.offline'] as const).map((k) => (
-              <div key={k} className="card" style={{ padding: 'var(--sp-3) var(--sp-4)' }}><span className="sec sm">{copy(k)}</span></div>
-            ))}
-          </div>
+        <Sect title={copy('gallery.sect.activity')}>
+          <Activity catalog={catalog} calls={world.activity.calls} err={null} />
         </Sect>
 
-        <div className="footnote">strings: {Object.keys(COPY).length} keys in the string table · balance sample {fmtTrac(fixtures.treasury.ringTrac)} TRAC ({fmtUsd(fixtures.treasury.ringUsd)})</div>
+        <Sect title={copy('gallery.sect.refusals')}>
+          {REFUSALS.map(([status, body, retryAfter], i) => {
+            const err = body as { error: unknown };
+            const code = typeof err.error === 'string' ? (body as { code: string }).code : (err.error as { code: string }).code;
+            return <ErrorCard key={i} err={new MarketplaceError({ status, code, message: code, retryable: status === 503, retryAfter: retryAfter ? Number(retryAfter) : null, body })} />;
+          })}
+        </Sect>
+
+        <Sect title={copy('gallery.sect.states')}>
+          <OffCard /><OffCard selling /><AdminCard what="admin.access" />
+          {['empty.activity', 'empty.keys', 'recon.none', 'catalog.empty.offers'].map((k) => (
+            <div key={k} className="mkt-card mkt-muted" style={{ textAlign: 'center' }}>{copy(k)}</div>
+          ))}
+        </Sect>
       </div>
-    </div>
-  );
-}
-
-/** Gallery proof for spec-01 acceptance: plaintext rendered once, then
- *  unrecoverable — the component holds no copy of it after dismiss. */
-function MintOnceDemo(): React.ReactElement {
-  const [plain, setPlain] = useState<string | null>(fixtures.mintedKeyPlaintextOnce);
-  return (
-    <div className="stack" style={{ maxWidth: 'calc(var(--card-min-w) * 1.6)' }}>
-      {plain ? (
-        <div className="drawer">
-          <div className="sm" style={{ marginBottom: 'var(--sp-2)' }}>{copy('key.mint.title')}</div>
-          <div className="mono xs" style={{ background: 'var(--surface-0)', border: '1px solid var(--border-strong)', borderRadius: 'var(--r-sm)', padding: 'var(--sp-3)', overflowWrap: 'anywhere' }}>{plain}</div>
-          <div className="warn-once" style={{ marginTop: 'var(--sp-2)' }}>⚠ {copy('onboard.key.once')}</div>
-          <div className="row" style={{ justifyContent: 'flex-end', marginTop: 'var(--sp-3)' }}>
-            <button className="btn btn--primary btn--sm" onClick={() => setPlain(null)}>{copy('ctl.done')}</button>
-          </div>
-        </div>
-      ) : (
-        <div className="row"><span className="mono">mk_9f…</span><span className="xs muted">plaintext dismissed — only the prefix remains anywhere in the DOM</span></div>
-      )}
     </div>
   );
 }

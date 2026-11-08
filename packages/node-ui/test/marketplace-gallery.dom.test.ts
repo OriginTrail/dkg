@@ -1,29 +1,32 @@
 // @vitest-environment happy-dom
 import React from 'react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MarketplaceGalleryView } from '../src/ui/marketplace/GalleryView.js';
-import { MISSING_COPY, render, unmountAll } from './helpers/marketplace-render.js';
+import { MISSING_COPY, byTestId, click, render, unmountAll } from './helpers/marketplace-render.js';
 
 describe('marketplace component gallery', () => {
   afterEach(unmountAll);
 
-  it('renders every component state on fixture data, labeled as fixtures', async () => {
+  it('renders the building blocks on fixture answers, labeled as fixtures, with no request', async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
     const c = await render(React.createElement(MarketplaceGalleryView));
     expect(c.textContent).toContain('Component gallery · fixture data · not live');
-    expect(c.textContent).toContain('Marketplace component gallery');
-    for (const text of ['Verified ✓', 'Waiting for delivery', 'Payment blocked', 'Weights verified', 'Qwen2.5 14B Instruct', 'E_OVERBILL']) {
+    for (const text of ['held', 'landed', 'missed', 'Weights verified', 'Seller-reported model', '2.16 TRAC left this epoch',
+      'Epoch 664: 27% of its value landed, 3% held', 'One confirmation — this epoch\'s funding', 'Try again in 120 s',
+      'The seller\'s receipt failed this node\'s check', 'Selling is off on this node']) {
       expect(c.textContent).toContain(text);
     }
-    expect(c.querySelectorAll('.mktx .gauge-radial').length).toBe(4);
+    expect(c.querySelectorAll('.mkt-bar').length).toBe(3);
     expect(c.textContent).not.toContain(MISSING_COPY);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('shows the minted key once, then only its prefix', async () => {
+  it('shows the new key\'s secret once, then only its prefix', async () => {
     const c = await render(React.createElement(MarketplaceGalleryView));
-    expect(c.textContent).toContain('mk_9f3ab6e01d5c47f2b8a9');
-    const done = Array.from(c.querySelectorAll('button')).find((b) => b.textContent === 'Done');
-    done!.click();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(c.textContent).not.toContain('mk_9f3ab6e01d5c47f2b8a9');
+    expect(byTestId(c, 'mkt-key-plaintext')?.textContent).toContain('dkgmk_0123456789abcdef');
+    await click(byTestId(c, 'mkt-key-done'));
+    expect(byTestId(c, 'mkt-key-plaintext')).toBeNull();
+    expect(byTestId(c, 'mkt-gallery-key-gone')?.textContent).toBe('Secret dismissed — only the prefix dkgmk_01234567 remains');
   });
 });

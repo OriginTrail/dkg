@@ -11,7 +11,7 @@ import { relAt, sellerName } from '../shared.js';
 
 const freeOf = (b: Budget): bigint => { const f = BigInt(b.left) - BigInt(b.held); return f > 0n ? f : 0n; };
 /** Calls stop once landed and held value reach the soft ceiling. */
-export const atCeiling = (b: Budget): boolean => BigInt(b.used) + BigInt(b.held) >= BigInt(b.softCeiling);
+const atCeiling = (b: Budget): boolean => BigInt(b.used) + BigInt(b.held) >= BigInt(b.softCeiling);
 
 function Spark({ series }: { series: number[] }): React.ReactElement {
   const max = Math.max(...series, 1);

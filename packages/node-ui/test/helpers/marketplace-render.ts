@@ -4,9 +4,7 @@
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { vi } from 'vitest';
-import { FIXTURE_SCENARIO_KEY } from '../../src/ui/marketplace/data.js';
-import type { FixtureScenario } from '../../src/ui/marketplace/fixtures.js';
-import { fixtureFetch, type FixtureScenario as NodeScenario } from '../../src/ui/marketplace/api/fixtures.js';
+import { fixtureFetch, type FixtureScenario } from '../../src/ui/marketplace/api/fixtures.js';
 import { forgetPlaygroundKey } from '../../src/ui/marketplace/views/Playground.js';
 
 /** What `copy()` prints for a key the string table lacks. */
@@ -14,12 +12,8 @@ export const MISSING_COPY = '⟦missing copy';
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
-export function useFixtureState(scenario: FixtureScenario): void {
-  localStorage.setItem(FIXTURE_SCENARIO_KEY, scenario);
-}
-
 /** Answer the section's API calls from the fixture node in `scenario`. */
-export function useFixtureNode(scenario: NodeScenario): void {
+export function useFixtureNode(scenario: FixtureScenario): void {
   vi.stubGlobal('fetch', fixtureFetch(scenario));
 }
 

@@ -33,7 +33,7 @@ function tokens(wei: bigint): string {
 }
 
 /** `{ [name]: wei, [name + 'Trac']: tokens }`, as the node's views build every amount. */
-export function amount<N extends string>(name: N, wei: bigint): Record<N | `${N}Trac`, string> {
+function amount<N extends string>(name: N, wei: bigint): Record<N | `${N}Trac`, string> {
   return { [name]: wei.toString(), [`${name}Trac`]: tokens(wei) } as Record<N | `${N}Trac`, string>;
 }
 
@@ -252,7 +252,7 @@ export function fixtureWorld(nowMs = Date.now()) {
   };
 }
 
-export type FixtureWorld = ReturnType<typeof fixtureWorld>;
+type FixtureWorld = ReturnType<typeof fixtureWorld>;
 
 // ── the fixture node ────────────────────────────────────────────────────────
 

@@ -128,9 +128,9 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
     <div className="mkt-card" data-testid="mkt-playground" data-mode="chat">
       <div className="mkt-mhead">
         <span className="mkt-sec mkt-sm" data-copy="play.epoch">{copy('play.epoch', { n: current.epoch, t: relAt(current.endsAt) })}</span>
-        <span className="mkt-muted mkt-xs" data-copy="play.offering">{copy('play.offering')}</span>
+        <span className="mkt-muted mkt-xs" data-copy="play.service">{copy('play.service')}</span>
       </div>
-      <div className="mkt-fchips mkt-wrap" role="radiogroup" aria-label={copy('play.offering')} data-testid="mkt-offering-chips">
+      <div className="mkt-fchips mkt-wrap" role="radiogroup" aria-label={copy('play.service')} data-testid="mkt-offering-chips">
         {budgets.map((b) => {
           const on = selected?.serviceId === b.serviceId;
           return (

@@ -69,11 +69,11 @@ export function OperateView(): React.ReactElement {
     <div className="mkt-frame" data-testid="mkt-operate" data-state="active">
       {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
       <div className="mkt-card">
-        <h2 data-copy="op.ask.editor">{copy('op.ask.editor')}</h2>
-        <div className="mkt-muted mkt-xs" data-copy={epoch == null ? 'operate.ask.cycle.unknown' : 'operate.ask.cycle'} data-testid="mkt-ask-cycle">
-          {epoch == null ? copy('operate.ask.cycle.unknown') : copy('operate.ask.cycle', { n: epoch, next: epoch + 1 })}
+        <h2 data-copy="operate.price.title">{copy('operate.price.title')}</h2>
+        <div className="mkt-muted mkt-xs" data-copy={epoch == null ? 'operate.price.epoch.unknown' : 'operate.price.epoch'} data-testid="mkt-ask-cycle">
+          {epoch == null ? copy('operate.price.epoch.unknown') : copy('operate.price.epoch', { n: epoch, next: epoch + 1 })}
         </div>
-        {s.offerings.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.offerings.none">{copy('operate.offerings.none')}</div>}
+        {s.offerings.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.services.none">{copy('operate.services.none')}</div>}
         {s.offerings.map((o0) => {
           const o = updated[o0.serviceId] ?? o0;
           const wei = weiOfMicro(edits[o.serviceId] ?? '');
@@ -85,23 +85,23 @@ export function OperateView(): React.ReactElement {
                 {o.connector === 'up'
                   ? <span className="mkt-yours" data-copy="operate.connector.up">{copy('operate.connector.up')}</span>
                   : <span className="mkt-chipblock" data-copy="operate.connector.down">{copy('operate.connector.down')}</span>}
-                <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.ask.queued' : 'operate.ask.none'}>
-                  {changed ? copy('operate.ask.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.ask.none')}
+                <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.price.queued' : 'operate.price.none'}>
+                  {changed ? copy('operate.price.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.price.none')}
                 </div>
-                {priceErr?.id === o.serviceId ? <ErrorCard err={priceErr.err} onRetry={() => setPrice(o.serviceId)}><span className="mkt-muted mkt-xs" data-copy="operate.ask.error">{copy('operate.ask.error')}</span></ErrorCard> : null}
+                {priceErr?.id === o.serviceId ? <ErrorCard err={priceErr.err} onRetry={() => setPrice(o.serviceId)}><span className="mkt-muted mkt-xs" data-copy="operate.price.error">{copy('operate.price.error')}</span></ErrorCard> : null}
               </span>
               <span className="mkt-mono mkt-sec mkt-askedit">
                 <span data-copy="catalog.price.micro">{copy('catalog.price.micro', { micro: fmtMicro(o.price), unit: 'tok' })}</span>
                 {' → '}
                 <input className="mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.serviceId}`} value={edits[o.serviceId] ?? ''} placeholder={fmtMicro(o.nextPrice)}
-                  aria-label={copy('operate.ask.cta')} onChange={(e) => setEdits((x) => ({ ...x, [o.serviceId]: e.target.value }))} />
-                <button type="button" className="mkt-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.ask.cta" onClick={() => setPrice(o.serviceId)}
-                  disabled={!wei || busy === o.serviceId} title={!wei ? copy('operate.ask.invalid') : undefined}>{busy === o.serviceId ? copy('state.working') : copy('operate.ask.cta')}</button>
+                  aria-label={copy('operate.price.cta')} onChange={(e) => setEdits((x) => ({ ...x, [o.serviceId]: e.target.value }))} />
+                <button type="button" className="mkt-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.price.cta" onClick={() => setPrice(o.serviceId)}
+                  disabled={!wei || busy === o.serviceId} title={!wei ? copy('operate.price.invalid') : undefined}>{busy === o.serviceId ? copy('state.working') : copy('operate.price.cta')}</button>
               </span>
             </div>
           );
         })}
-        <p className="mkt-muted mkt-xs" data-copy="operate.ask.frozen.note">{copy('operate.ask.frozen.note')}</p>
+        <p className="mkt-muted mkt-xs" data-copy="operate.price.note">{copy('operate.price.note')}</p>
       </div>
 
       <div className="mkt-card" data-testid="mkt-ledger">

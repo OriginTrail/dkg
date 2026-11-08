@@ -3,7 +3,7 @@
 // epoch's budget for a service. One-shot and session-only; no amounts.
 import { create } from 'zustand';
 
-export type PlanAsk = { kind: 'compose'; serviceId?: string } | { kind: 'top-up'; serviceId: string };
+type PlanAsk = { kind: 'compose'; serviceId?: string } | { kind: 'top-up'; serviceId: string };
 
 interface MarketplaceDraftState {
   /** One-shot, consumed by Plans. */

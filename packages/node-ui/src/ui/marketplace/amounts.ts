@@ -12,7 +12,7 @@ const big = (v: string | bigint): bigint => {
 };
 
 /** `wei / 10^decimals` as a decimal string, cut to `dp` places, trailing zeros dropped. */
-export function decimalOf(value: string | bigint, decimals: number, dp: number): string {
+function decimalOf(value: string | bigint, decimals: number, dp: number): string {
   const v = big(value);
   const neg = v < 0n;
   const abs = neg ? -v : v;
@@ -38,7 +38,7 @@ export function fmtMicro(weiPerUnit: string | bigint): string {
 }
 
 /** `$0.56` / `$0.00007`: more places for a sub-cent value. */
-export function fmtUsd(usd: number): string {
+function fmtUsd(usd: number): string {
   if (usd === 0) return '$0.00';
   if (Math.abs(usd) < 0.01) return `$${usd.toFixed(Math.min(7, Math.max(4, -Math.floor(Math.log10(Math.abs(usd))) + 1)))}`;
   return `$${usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

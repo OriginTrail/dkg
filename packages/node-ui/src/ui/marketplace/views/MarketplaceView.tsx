@@ -152,7 +152,7 @@ function ServicePage({ service, catalog, onBack, onSeller }: { service: Service;
             </div>
           );
         })}
-        <p className="mkt-muted mkt-xs" data-copy="model.provider.note">{copy('model.provider.note')}</p>
+        <p className="mkt-muted mkt-xs" data-copy="model.route.note">{copy('model.route.note')}</p>
       </div>
     </div>
   );

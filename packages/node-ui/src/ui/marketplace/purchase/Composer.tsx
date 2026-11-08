@@ -22,7 +22,7 @@ export interface Draft {
 }
 
 /** The prices that hold in the epoch being funded: the next one's where a seller has set it. */
-export function priceIn(o: Offer, epoch: 'current' | 'next'): bigint {
+function priceIn(o: Offer, epoch: 'current' | 'next'): bigint {
   return BigInt(epoch === 'next' ? o.nextPricePerUnit ?? o.pricePerUnit : o.pricePerUnit);
 }
 

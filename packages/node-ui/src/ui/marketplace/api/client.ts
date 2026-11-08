@@ -11,7 +11,7 @@ import type {
   Storefront, SubscriptionsAnswer, Tx,
 } from './types.js';
 
-export const MARKETPLACE_BASE = '/api/marketplace';
+const MARKETPLACE_BASE = '/api/marketplace';
 export const GATEWAY_BASE = `${MARKETPLACE_BASE}/v1`;
 
 /** An access key's secret, as `POST /keys` makes it. */
@@ -147,8 +147,6 @@ export const marketplaceApi = {
   landNow: () => call<LandNowAnswer>('POST', '/seller/land', {}),
   setNextPrice: (serviceId: string, price: string) => call<Offering>('PUT', `/seller/offerings/${serviceId}/price`, { price }),
 };
-
-export type MarketplaceApi = typeof marketplaceApi;
 
 export interface ChatRequest { model: string; messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>; max_tokens?: number }
 
