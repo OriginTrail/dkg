@@ -14,7 +14,7 @@ describe('marketplace Operate', () => {
     useFixtureNode('active');
     const c = await render(operate());
     await waitForText(c, 'Your prices — the next epoch\'s takes effect when it starts');
-    await waitForText(c, 'Epoch 664 · a new price takes effect from epoch 665');
+    await waitForText(c, 'Epoch 664, ends in 15 h · a new price takes effect from epoch 665');
     expect(byTestId(c, `mkt-ask-${FIXTURE_IDS.qwen7b}`)?.textContent).toContain('next epoch: 0.32 µTRAC');
     expect(byTestId(c, `mkt-ask-${FIXTURE_IDS.mistral24b}`)?.getAttribute('data-connector')).toBe('down');
     expect(byTestId(c, 'mkt-ledger-counts')?.textContent).toBe('412 served · 380 sent · 360 landed · 2 refused · 0 missed');

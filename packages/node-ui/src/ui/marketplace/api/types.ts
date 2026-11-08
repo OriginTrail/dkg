@@ -304,6 +304,10 @@ export type LandingReport =
 
 /** Operate. */
 export interface SellerStatus {
+  /** The epoch the status is for, and its start and end in chain seconds. */
+  epoch: number;
+  startsAt: number;
+  endsAt: number;
   identityId: number;
   gate: Gate;
   scoredThisEpoch: boolean;

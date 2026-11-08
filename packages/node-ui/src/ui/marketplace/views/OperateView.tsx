@@ -27,7 +27,6 @@ export function OperateView(): React.ReactElement {
   const [landed, setLanded] = useState<LandNowAnswer | null>(null);
   const [landErr, setLandErr] = useState<unknown>(null);
   const label = (id: string) => modelName(cat.data?.services.find((s) => s.serviceId === id)?.label ?? fmtHex(id));
-  const epoch = cat.data?.epoch ?? null;
 
   const setPrice = (serviceId: string) => {
     const wei = weiOfMicro(edits[serviceId] ?? '');
@@ -60,6 +59,7 @@ export function OperateView(): React.ReactElement {
   }
   if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
   const s = st.data;
+  const epoch = s.epoch;
   const g = s.gate;
   const l = s.ledger;
   const report = landed ?? (s.lastLanding ? ('stopped' in s.lastLanding ? { batches: [], stopped: s.lastLanding.stopped } : { batches: s.lastLanding.sent.map((b) => ({ ...b, tx: b.txHash, at: 0, gasUsed: 0 })), refused: s.lastLanding.refused, waiting: s.lastLanding.waiting }) : null);
@@ -70,8 +70,8 @@ export function OperateView(): React.ReactElement {
       {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
       <div className="mkt-card">
         <h2 data-copy="operate.price.title">{copy('operate.price.title')}</h2>
-        <div className="mkt-muted mkt-xs" data-copy={epoch == null ? 'operate.price.epoch.unknown' : 'operate.price.epoch'} data-testid="mkt-ask-cycle">
-          {epoch == null ? copy('operate.price.epoch.unknown') : copy('operate.price.epoch', { n: epoch, next: epoch + 1 })}
+        <div className="mkt-muted mkt-xs" data-copy="operate.price.epoch" data-testid="mkt-ask-cycle">
+          {copy('operate.price.epoch', { n: epoch, next: epoch + 1, t: relAt(s.endsAt) })}
         </div>
         {s.offerings.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.services.none">{copy('operate.services.none')}</div>}
         {s.offerings.map((o0) => {

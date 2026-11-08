@@ -118,6 +118,8 @@ export const marketplaceApi = {
   subscriptions: (epoch?: number) => call<SubscriptionsAnswer>('GET', `/subscriptions${queryOf({ epoch })}`),
   preview: (request: FundingRequest) => call<Preview>('POST', '/subscriptions/preview', request),
   fund: (request: FundingRequest) => call<FundedAnswer>('POST', '/subscriptions', request),
+  /** A dry run of a top-up: what it would cost from the subscription's source, and the refusal it would meet. Sends nothing. */
+  topUpPreview: (subscriptionId: string, services: ServiceRequest[]) => call<Preview>('POST', `/subscriptions/${subscriptionId}/top-up/preview`, { services }),
   topUp: (subscriptionId: string, services: ServiceRequest[]) => call<FundedAnswer>('POST', `/subscriptions/${subscriptionId}/top-up`, { services }),
   /** The standing plan; null while there is none. */
   plan: async (): Promise<Plan | null> => {

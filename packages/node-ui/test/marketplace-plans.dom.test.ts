@@ -42,19 +42,27 @@ describe('marketplace Plans', () => {
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
-  it('tops up a budget from the subscription\'s own source', async () => {
+  it('tops up a budget from the subscription\'s own source after the node\'s dry run', async () => {
     const writes = recordWrites('active');
     const c = await render(plans());
     await waitForText(c, 'This budget is at its soft ceiling');
     await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
     expect(byTestId(c, 'mkt-topup')?.textContent).toContain('Top up llama-3.1-8b-instruct for epoch 664');
+    await type(byTestId(c, 'mkt-topup-amount'), '50');
+    await flush(300);
+    await waitForText(c, 'The buyer wallet does not hold enough TRAC');
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(true);
     await type(byTestId(c, 'mkt-topup-amount'), '0.5');
+    await flush(300);
+    await waitForText(c, 'Costs 0.5 TRAC from the buyer wallet for epoch 664');
     await click(byTestId(c, 'mkt-topup-confirm'));
     await waitForText(c, 'llama-3.1-8b-instruct topped up');
-    expect(writes).toEqual([{
-      method: 'POST', url: `/api/marketplace/subscriptions/${'0x' + '98'.repeat(32)}/top-up`,
-      body: { services: [{ serviceId: FIXTURE_IDS.llama8b, serviceClass: 'inference', value: '500000000000000000', maxPricePerUnit: '1200000000000' }] },
-    }]);
+    const subscription = `/api/marketplace/subscriptions/${'0x' + '98'.repeat(32)}`;
+    const services = [{ serviceId: FIXTURE_IDS.llama8b, serviceClass: 'inference', value: '500000000000000000', maxPricePerUnit: '1200000000000' }];
+    expect(writes.filter((w) => w.url === `${subscription}/top-up`)).toEqual([{ method: 'POST', url: `${subscription}/top-up`, body: { services } }]);
+    const dryRuns = writes.filter((w) => w.url === `${subscription}/top-up/preview`);
+    expect(dryRuns.at(-1)).toEqual({ method: 'POST', url: `${subscription}/top-up/preview`, body: { services } });
+    expect(writes.findIndex((w) => w.url === `${subscription}/top-up`)).toBeGreaterThan(writes.lastIndexOf(dryRuns.at(-1)!));
   });
 
   it('walks a node that never subscribed through compose, one confirmation and a key', async () => {

@@ -215,6 +215,7 @@ export function fixtureWorld(nowMs = Date.now()) {
     serviceId, connector, ...amount('price', microWei(price)), ...amount('nextPrice', microWei(nextPrice)),
   });
   const sellerStatus: SellerStatus = {
+    epoch, startsAt, endsAt,
     identityId: I.sellerA, gate, scoredThisEpoch: true,
     wallets: [{ address: I.sellerWallet, eth: '42000000000000000', ethEther: '0.042' }],
     offerings: [offering(I.qwen14b, 'up', '0.6', '0.6'), offering(I.qwen7b, 'up', '0.3', '0.32'), offering(I.mistral24b, 'down', '3.3', '3.0')],
@@ -370,6 +371,13 @@ export function fixtureAnswer(scenario: FixtureScenario, req: FixtureRequest, no
     if (p.refusal) return flat(409, p.refusal.code, `${p.refusal.code}(${p.refusal.args.join(', ')})`, p.refusal.args);
     const s: Subscription = { ...(p.epoch === world.epoch ? world.current : world.next), source: p.source, ...amount('value', BigInt(p.value)), ...amount('cost', BigInt(p.cost)), budgets: budgetsOf(r.services) };
     return { status: 200, body: { txHash: txHash(0xc1), blockNumber: 18_204_331, subscription: s } satisfies FundedAnswer };
+  }
+  const topUpPreview = /^\/subscriptions\/(0x[0-9a-f]{64})\/top-up\/preview$/.exec(route);
+  if (method === 'POST' && topUpPreview) {
+    const s = topUpPreview[1] === world.next.subscriptionId ? world.next : world.current;
+    const services = (body.services ?? []) as ServiceRequest[];
+    const source: SourceRequest = s.source.kind === 'account' ? { kind: 'account', accountId: s.source.accountId } : { kind: 'wallet' };
+    return { status: 200, body: { ...previewOf(world, { epoch: s.epoch, source, services }), epoch: s.epoch } satisfies Preview };
   }
   const topUp = /^\/subscriptions\/(0x[0-9a-f]{64})\/top-up$/.exec(route);
   if (method === 'POST' && topUp) {
