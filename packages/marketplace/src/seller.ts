@@ -134,6 +134,7 @@ export class Seller {
 
   /** The gate, the offers of the current and the next epoch, then landing. Returns the seconds to the next tick. */
   async tick(): Promise<number> {
+    const started = Date.now();
     const chain = this.deps.chain;
     this.identityId = await chain.getIdentityId();
     this.open = this.identityId > 0n && await chain.isShardingTableMember(this.identityId);
@@ -146,7 +147,8 @@ export class Seller {
       this.deps.log?.(`[marketplace] landing failed: ${messageOf(err)}`);
       return undefined;
     });
-    return secondsToNextTick(times, this.deps.tickSeconds, this.landing.finalLandingSeconds);
+    const took = Math.floor((Date.now() - started) / 1_000);
+    return Math.max(1, secondsToNextTick(times, this.deps.tickSeconds, this.landing.finalLandingSeconds) - took);
   }
 
   start(): void {

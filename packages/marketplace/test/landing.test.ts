@@ -173,6 +173,16 @@ describe('when a tick lands', () => {
     expect(await seller.lander.tick()).toEqual({ stopped: 'not-due' });
   });
 
+  it('takes turns: a tick asked for while another runs waits for it, and sends nothing twice', async () => {
+    const seller = await started();
+    await serve(seller, 2);
+    later(31);
+    seller.lander.landNow();
+    const [first, second] = await Promise.all([seller.lander.tick(), seller.lander.tick()]);
+    expect(sent(first)).toEqual([2]);
+    expect(second).toEqual({ stopped: 'not-due' });
+  });
+
   it('ticks from the epoch start, and once more just before its end', () => {
     const times = { epoch: 1, startsAt: 1_000, endsAt: 1_000 + EPOCH, now: 1_000 + 601 };
     expect(secondsToNextTick(times, 300, 60)).toBe(299);
@@ -204,6 +214,20 @@ describe('why a tick stops', () => {
     expect(sent(await seller.lander.tick())).toEqual([1]);
     at(EPOCH - 30);
     expect(await seller.lander.tick()).toEqual({ stopped: 'end-margin' });
+  });
+
+  it('waits while the settlement is paused or not active yet', async () => {
+    const seller = await started();
+    await serve(seller, 1);
+    later(31);
+    const state = vi.spyOn(chain, 'batchState').mockResolvedValueOnce({ activationEpoch: 1, paused: true, maxGroups: 32, maxItems: 256 });
+    seller.lander.landNow();
+    expect(await seller.lander.tick()).toEqual({ stopped: 'not-active' });
+    const { epoch } = await chain.getEpochTimes();
+    state.mockResolvedValueOnce({ activationEpoch: epoch + 1, paused: false, maxGroups: 32, maxItems: 256 });
+    expect(await seller.lander.tick()).toEqual({ stopped: 'not-active' });
+    // The retry each left: the next tick lands.
+    expect(sent(await seller.lander.tick())).toEqual([1]);
   });
 
   it('skips a budget with nothing left', async () => {

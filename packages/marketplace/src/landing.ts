@@ -7,21 +7,22 @@
  * Each tick:
  *   1. The `sent` batches are resolved (below). Receipts of an ended epoch
  *      still `served` become `missed`, and ended epochs are pruned.
- *   2. The chain's time: in the epoch's last `endMarginSeconds`, nothing is
- *      sent.
+ *   2. While the node does not serve, and in the epoch's last
+ *      `endMarginSeconds` by the chain's time, nothing is sent.
  *   3. Due? A landing time (every `landingIntervalMinutes` from the epoch's
  *      start), any tick of the last `lastStretchMinutes`, the final tick
  *      `finalLandingSeconds` before the end, a budget whose unlanded value
  *      reached `nearLimitShare` of what it has left, a retry the last tick
  *      left, or `landNow()`. Otherwise stop.
- *   4. The node's score in the epoch: none yet, and a batch would revert
- *      `NoNodeScore`, so a retry is left for the next tick. So it is when the
- *      base fee is over its ceiling.
+ *   4. The node's score in the epoch, and the base fee: with no score yet a
+ *      batch would revert `NoNodeScore`, so a retry is left for the next
+ *      tick, as it is while the base fee is over its ceiling.
  *   5. Ready: the epoch's receipts `served`, completed at least
  *      `completedMarginSeconds` ago. One whose nonce the chain shows used is
  *      marked `landed`; a budget with nothing left is skipped.
  *   6. Batches: a group per subscription and budget, oldest receipts first,
- *      within the bounds of `batchState()`.
+ *      within the bounds of `batchState()`; none while the settlement is
+ *      paused or not active yet, and a retry is left.
  *   7. Each batch is simulated as it is prepared: a `ReceiptFault` drops its
  *      item and a `GroupFault` its group, at most `maxFaultDrops` times, the
  *      dropped receipts `refused`. Any other refusal leaves a retry.
@@ -32,7 +33,7 @@
  * A `sent` batch is resolved by its transactions (the first, or a speed-up);
  * when none is mined but its wallet's nonce has passed it, by the nonce bits
  * of its receipts: set, they landed; clear, they go back to `served`.
- * Otherwise it waits.
+ * Otherwise it waits. Ticks take turns, so two never send the same receipts.
  */
 import { ethers } from 'ethers';
 import {
@@ -45,6 +46,7 @@ import {
   type ReceiptGroup,
   type ReceiptItem,
 } from '@origintrail-official/dkg-chain';
+import { KeyedLock } from './journal.js';
 import { receiptFromWire, requestFromWire } from './wire.js';
 import type { BatchRecord, SellerLedger, ServedCall } from './ledger.js';
 
@@ -87,7 +89,7 @@ export interface LandedBatch {
 
 /** What a tick did: why it stopped, or the batches it landed. */
 export type LandingReport =
-  | { stopped: 'not-serving' | 'end-margin' | 'not-due' | 'no-node-score' | 'base-fee' | 'nothing-ready' }
+  | { stopped: 'not-serving' | 'end-margin' | 'not-due' | 'no-node-score' | 'base-fee' | 'nothing-ready' | 'not-active' }
   | { sent: LandedBatch[]; refused: number; waiting: boolean };
 
 type Group = { subscriptionId: string; budgetIndex: number; calls: ServedCall[] };
@@ -118,6 +120,7 @@ export class Lander {
   /** epoch => the last landing time a tick landed at. */
   private readonly slots = new Map<number, number>();
   private readonly finalDone = new Set<number>();
+  private readonly turns = new KeyedLock();
 
   constructor(private readonly deps: {
     chain: MarketplaceChainAdapter;
@@ -131,10 +134,21 @@ export class Lander {
     this.now = true;
   }
 
-  /** One tick. While the node is not `open` to serve, it sends nothing. */
-  async tick(open = true): Promise<LandingReport> {
+  /** One tick, once any before it is done. While the node is not `open` to serve, it sends nothing. */
+  tick(open = true): Promise<LandingReport> {
+    return this.turns.run('tick', () => this.tickNow(open));
+  }
+
+  /** Resolve each `sent` batch from the chain: mined, or past its wallet's nonce; otherwise it waits. */
+  resolve(): Promise<void> {
+    return this.turns.run('tick', () => this.resolveNow());
+  }
+
+  // ----------------------------------------------------------- internal
+
+  private async tickNow(open: boolean): Promise<LandingReport> {
     const { chain, ledger, settings: s } = this.deps;
-    await this.resolve();
+    await this.resolveNow();
     const times = await chain.getEpochTimes();
     await ledger.recordMissed(ledger.inState('served').filter((c) => c.epoch < times.epoch).map((c) => c.requestDigest));
     await ledger.prune(times.epoch);
@@ -165,6 +179,10 @@ export class Lander {
     const groups = await this.readyGroups(times.epoch, times.now - s.completedMarginSeconds, identity);
     if (groups.length === 0) return { stopped: 'nothing-ready' };
     const bounds = await chain.batchState();
+    if (bounds.paused || bounds.activationEpoch === 0 || times.epoch < bounds.activationEpoch) {
+      this.retry = true;
+      return { stopped: 'not-active' };
+    }
     const report: Extract<LandingReport, { sent: unknown }> = { sent: [], refused: 0, waiting: false };
     for (const batch of batchesOf(groups, bounds.maxGroups, bounds.maxItems).slice(0, s.maxBatchesPerTick)) {
       if (!(await this.send(times, batch, report))) break;
@@ -172,8 +190,7 @@ export class Lander {
     return report;
   }
 
-  /** Resolve each `sent` batch from the chain: mined, or past its wallet's nonce; otherwise it waits. */
-  async resolve(): Promise<void> {
+  private async resolveNow(): Promise<void> {
     const { chain, ledger } = this.deps;
     for (const batch of ledger.pendingBatches()) {
       let outcome = null;
@@ -187,15 +204,15 @@ export class Lander {
     }
   }
 
-  // ----------------------------------------------------------- internal
-
   private async readyGroups(epoch: number, completedBy: number, identity: bigint): Promise<Group[]> {
     const { chain, ledger } = this.deps;
     const ready = ledger.inState('served', epoch).filter((c) => c.receipt.completedAt <= completedBy).sort(byLandingOrder);
     const byBudget = new Map<string, ServedCall[]>();
     for (const c of await this.withoutUsedNonces(ready, identity)) {
       const key = `${c.subscriptionId}:${c.budgetIndex}`;
-      byBudget.set(key, [...(byBudget.get(key) ?? []), c]);
+      const calls = byBudget.get(key) ?? [];
+      calls.push(c);
+      byBudget.set(key, calls);
     }
     const groups: Group[] = [];
     for (const calls of byBudget.values()) {

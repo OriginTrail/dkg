@@ -68,7 +68,7 @@ export async function subscriptionView(chain: MarketplaceChainAdapter, s: Subscr
         ...amount('value', b.value),
         ...amount('maxPricePerUnit', b.maxPricePerUnit),
         ...amount('used', used),
-        // Receipts held and not landed yet: none while the node makes no calls.
+        // Receipts held and not landed yet: the gateway counts them; this view does not read them yet.
         ...amount('held', 0n),
         ...amount('left', left),
         ...amount('softCeiling', (b.value * SOFT_CEILING_PERCENT) / 100n),

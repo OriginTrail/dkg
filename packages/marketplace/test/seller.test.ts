@@ -194,6 +194,16 @@ describe('the job', () => {
     await seller.stop();
   });
 
+  it('keeps its ticks on time however long one takes', async () => {
+    const seller = sellerWith();
+    await seller.load();
+    const times = await chain.getEpochTimes();
+    vi.spyOn(chain, 'getEpochTimes').mockResolvedValue({ ...times, now: times.startsAt + 100 });
+    // The tick took 40 seconds: the next one, 200 seconds from its start, is 160 from its end.
+    vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(40_000);
+    expect(await seller.tick()).toBe(160);
+  });
+
   it('refuses to start on a price file it cannot read', async () => {
     await mkdir(join(dir, 'seller-prices.json'));
     await expect(sellerWith().load()).rejects.toThrow();

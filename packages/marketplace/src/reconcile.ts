@@ -46,8 +46,8 @@ export interface ReconciledRow {
 type Row = {
   key: { subscriptionId: string; budgetIndex: number; seller: string };
   receipts: HeldReceiptRef[];
-  /** The receipts whose nonces are used and no landed group matched yet, in landing order, with their digests. */
-  open: Array<{ receipt: HeldReceiptRef; digest: string }>;
+  /** The receipts whose nonces are used and no landed group matched yet, in landing order, with their digests and values. */
+  open: Array<{ receipt: HeldReceiptRef; digest: string; value: bigint }>;
   landed: { count: number; matched: number; value: bigint; counted: bigint; txs: string[] };
 };
 
@@ -76,11 +76,13 @@ export function reconcileSubscription(
   for (const r of receipts) rowOf(r.subscriptionId, r.budgetIndex, r.seller).receipts.push(r);
   for (const row of rows.values()) {
     row.receipts.sort(byLandingOrder);
-    row.open = row.receipts.filter(used).map((r) => ({ receipt: r, digest: hashQueryInferenceReceipt(domain, receiptFromWire(r.receipt)) }));
+    row.open = row.receipts.filter(used).map((r) => ({
+      receipt: r, digest: hashQueryInferenceReceipt(domain, receiptFromWire(r.receipt)), value: BigInt(r.receipt.valueWei),
+    }));
   }
   for (const group of landed) {
     const row = rowOf(group.subscriptionId, group.budgetIndex, group.seller.toString());
-    const start = runOf(row.open.map((o) => o.digest), group);
+    const start = runOf(row.open, group);
     if (start !== null) {
       row.open.splice(start, group.itemCount);
       row.landed.matched += group.itemCount;
@@ -102,10 +104,13 @@ export function reconcileSubscription(
   }).sort((a, b) => a.budgetIndex - b.budgetIndex || a.seller - b.seller);
 }
 
-/** Where the run of `digests` that hashes to the group's digest starts; `null` when none does. */
-function runOf(digests: readonly string[], group: LandedGroup): number | null {
-  for (let start = 0; start + group.itemCount <= digests.length; start++) {
-    if (receiptsDigest(digests.slice(start, start + group.itemCount)) === group.groupDigest) return start;
+/** Where the run of receipts that hashes to the group's digest starts; `null` when none does. Only runs of the group's value are hashed. */
+function runOf(open: ReadonlyArray<{ digest: string; value: bigint }>, group: LandedGroup): number | null {
+  const n = group.itemCount;
+  let value = open.slice(0, n).reduce((v, o) => v + o.value, 0n);
+  for (let start = 0; start + n <= open.length; start++) {
+    if (start > 0) value += open[start + n - 1]!.value - open[start - 1]!.value;
+    if (value === group.value && receiptsDigest(open.slice(start, start + n).map((o) => o.digest)) === group.groupDigest) return start;
   }
   return null;
 }

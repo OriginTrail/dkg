@@ -412,7 +412,9 @@ export class Gateway {
 
   /** A receipt kept: in its epoch's, and, held, in the held value until it is seen landed. */
   private remember(r: HeldReceipt): void {
-    this.byEpoch.set(r.epoch, [...(this.byEpoch.get(r.epoch) ?? []), r]);
+    const kept = this.byEpoch.get(r.epoch) ?? [];
+    kept.push(r);
+    this.byEpoch.set(r.epoch, kept);
     this.epochs.add(r.epoch);
     if (r.state !== 'held') return;
     this.unlanded.set(r.callId, r);

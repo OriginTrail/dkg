@@ -12,12 +12,12 @@ import { reconcileSubscription, type HeldReceiptRef } from '../src/index.js';
 const DOMAIN: MarketplaceDomain = { name: 'DKGQueryInference', version: '1', chainId: 31337, verifyingContract: ethers.getAddress(`0x${'55'.repeat(20)}`) };
 const SUB = ethers.id('subscription');
 
-function held(seller: string, nonce: number, budgetIndex = 0, completedAt = 100 + nonce): HeldReceiptRef {
+function held(seller: string, nonce: number, budgetIndex = 0, completedAt = 100 + nonce, valueWei = '200'): HeldReceiptRef {
   const callId = ethers.id(`call ${seller} ${nonce} ${budgetIndex}`);
   return {
     callId, subscriptionId: SUB, budgetIndex, seller,
     request: { subscriptionId: SUB, serviceId: ethers.id('service'), seller, nonce: String(nonce), pricePerUnit: '10', maxUnits: '100', maxValueWei: '1000', issuedAt: 1, expiry: 601 },
-    receipt: { requestDigest: callId, resultCommitment: ethers.id('synthetic answer'), units: '20', valueWei: '200', completedAt },
+    receipt: { requestDigest: callId, resultCommitment: ethers.id('synthetic answer'), units: '20', valueWei, completedAt },
   };
 }
 
@@ -37,7 +37,8 @@ function group(receipts: HeldReceiptRef[], txHash: string, blockNumber: number, 
 describe('reconciliation', () => {
   it('matches the runs of receipts that landed, per seller and budget, and holds the rest', () => {
     const one = [0, 1, 2, 3].map((n) => held('7', n));
-    const other = held('9', 0);
+    // Of another value than the group's: never hashed against it.
+    const other = held('9', 0, 0, 100, '300');
     const elsewhere = held('7', 0, 1);
     // Seller 7 lands its first two in one group, then the third in a second group of the same batch; the fourth is not landed yet.
     // Seller 9 lands a receipt this node never took; this node's own one from it is used too.
