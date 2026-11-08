@@ -1,23 +1,21 @@
-// The three-step indicator (Subscribe · Confirm · Copy your key), with the confirm step's sub-steps (sign · pay · confirmations ·
-// enroll) named under it so a resumed purchase says exactly where it is.
+// The three steps to a first answer (fund the buyer wallet or add it to an
+// account, compose a plan, mint a key), with the compose step's one
+// confirmation named under it while it is open.
 import React from 'react';
 import { copy } from '../copy.generated.js';
 
-export type ConfirmSub = 'confirm' | 'sign' | 'pay' | 'confirming' | 'enroll' | null;
+export type StepSub = 'confirm' | 'sending' | null;
 
-const SUB_KEY: Record<Exclude<ConfirmSub, null>, string> = {
-  confirm: 'onboard.consent.title',
-  sign: 'purchase.step.sign',
-  pay: 'purchase.step.pay',
-  confirming: 'purchase.step.confirming',
-  enroll: 'purchase.step.enroll',
+const SUB_KEY: Record<Exclude<StepSub, null>, string> = {
+  confirm: 'steps.sub.confirm',
+  sending: 'steps.sub.sending',
 };
 
-export function ProgressSteps({ step, sub = null }: { step: 1 | 2 | 3; sub?: ConfirmSub }): React.ReactElement {
+export function ProgressSteps({ step, sub = null }: { step: 1 | 2 | 3; sub?: StepSub }): React.ReactElement {
   const steps: Array<{ n: 1 | 2 | 3; key: string }> = [
-    { n: 1, key: 'purchase.step.subscribe' },
-    { n: 2, key: 'purchase.step.confirm' },
-    { n: 3, key: 'purchase.step.key' },
+    { n: 1, key: 'steps.fund' },
+    { n: 2, key: 'steps.compose' },
+    { n: 3, key: 'steps.key' },
   ];
   return (
     <ol className="mkt-steps" data-testid="mkt-progress-steps" data-step={step}>

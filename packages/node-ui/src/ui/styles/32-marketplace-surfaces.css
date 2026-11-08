@@ -12,8 +12,10 @@
 .mkt-mrow { display: grid; gap: var(--sp-2); padding: var(--sp-4) 0; border-top: 1px solid var(--border-subtle); }
 .mkt-mhead { display: flex; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; font-size: var(--fs-sm); align-items: baseline; }
 .mkt-mhead h2 { font-size: var(--fs-lg); margin: 0; }
-.mkt-bar { height: var(--sp-3); border-radius: var(--r-full); background: var(--gauge-track); overflow: hidden; }
+.mkt-bar { position: relative; display: flex; height: var(--sp-3); border-radius: var(--r-full); background: var(--gauge-track); overflow: hidden; }
 .mkt-bar i { display: block; height: 100%; background: var(--interactive); }
+.mkt-bar i.held { opacity: .45; }
+.mkt-bar b.mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text-muted); }
 .mkt-bar.warn i { background: var(--gauge-mid); }
 .mkt-bar.hit i { background: var(--gauge-over); }
 .mkt-sparkrow { display: flex; align-items: center; gap: var(--sp-3); }
