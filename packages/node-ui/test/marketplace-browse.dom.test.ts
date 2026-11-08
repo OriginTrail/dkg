@@ -2,54 +2,95 @@
 import React from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MarketplaceView } from '../src/ui/marketplace/views/MarketplaceView.js';
-import { MISSING_COPY, byTestId, click, render, unmountAll, useFixtureState, waitForText } from './helpers/marketplace-render.js';
+import { FIXTURE_IDS } from '../src/ui/marketplace/api/fixtures.js';
+import { MISSING_COPY, byTestId, click, render, type, unmountAll, useFixtureNode, waitForText } from './helpers/marketplace-render.js';
 
-describe('marketplace Browse: catalog, model page, playground', () => {
+const browse = () => React.createElement(MarketplaceView);
+const playgroundTab = (c: HTMLElement) => Array.from(c.querySelectorAll('[role="tab"]')).find((t) => t.textContent === 'Playground');
+
+describe('marketplace Browse: catalog, service page, storefront, playground', () => {
   afterEach(unmountAll);
 
-  it('lists one card per offering with live prices and the buyer\'s meters', async () => {
-    useFixtureState('plan-active');
-    const c = await render(React.createElement(MarketplaceView));
-    await waitForText(c, 'Qwen2.5 14B Instruct');
-    const cards = c.querySelectorAll('[data-testid^="mkt-card-"]');
-    expect(cards.length).toBe(5);
-    expect(byTestId(c, 'mkt-card-qwen25-14b')?.textContent).toContain('76% left');
-    expect(byTestId(c, 'mkt-card-qwen25-7b')?.textContent).toContain('0.3 µTRAC/tok');
-    expect(byTestId(c, 'mkt-card-gpt-6-astra')?.textContent).toContain('Add to this period');
-    expect(byTestId(c, 'mkt-seller-strip')?.textContent).toContain('online');
+  it('lists a card per service with this epoch\'s prices and what the subscription has left', async () => {
+    useFixtureNode('active');
+    const c = await render(browse());
+    await waitForText(c, 'qwen2.5-14b-instruct');
+    expect(c.querySelectorAll('[data-testid^="mkt-card-"]').length).toBe(4);
+    expect(byTestId(c, `mkt-card-${FIXTURE_IDS.qwen14b}`)?.textContent).toContain('0.6–0.7 µTRAC/tok');
+    expect(byTestId(c, `mkt-card-${FIXTURE_IDS.qwen14b}`)?.textContent).toContain('2.16 TRAC left this epoch');
+    expect(byTestId(c, `mkt-card-${FIXTURE_IDS.qwen14b}`)?.textContent).toContain('~$0.17–0.20/1M · reference rate');
+    expect(byTestId(c, `mkt-add-${FIXTURE_IDS.mistral24b}`)?.textContent).toBe('Add to plan');
+    expect(byTestId(c, 'mkt-seller-strip')?.textContent).toContain('seller 12');
+    expect(byTestId(c, 'mkt-seller-strip')?.textContent).toContain('Epoch 664');
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
-  it('opens a model page with a row per provider', async () => {
-    useFixtureState('plan-active');
-    const c = await render(React.createElement(MarketplaceView));
-    await waitForText(c, 'Qwen2.5 7B Instruct');
-    await click(byTestId(c, 'mkt-card-qwen25-7b'));
-    expect(byTestId(c, 'mkt-model-page')).toBeTruthy();
+  it('opens a service\'s page with a row per seller, then a seller\'s storefront', async () => {
+    useFixtureNode('active');
+    const c = await render(browse());
+    await waitForText(c, 'qwen2.5-7b-instruct');
+    await click(byTestId(c, `mkt-card-${FIXTURE_IDS.qwen7b}`));
+    await waitForText(c, 'next epoch 0.32 µTRAC');
     expect(c.querySelectorAll('[data-testid^="mkt-provider-"]').length).toBe(2);
-    expect(c.textContent).toContain('your provider ✓');
-    expect(c.textContent).toContain('Switch next period');
+    expect(byTestId(c, 'mkt-provider-12')?.textContent).toContain('205 ms from this node');
+    expect(byTestId(c, 'mkt-provider-31')?.textContent).toContain('latency: no data yet');
+    expect(c.textContent).toContain('your subscription covers this ✓');
+    await click(byTestId(c, 'mkt-open-seller-31'));
+    await waitForText(c, 'Served value by epoch');
+    expect(byTestId(c, 'mkt-storefront')?.textContent).toContain('stake factor 1.25');
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
-  it('offers the plan\'s meters in the playground', async () => {
-    useFixtureState('plan-active');
-    const c = await render(React.createElement(MarketplaceView));
+  it('chats through the gateway with a key of its own and shows what each answer cost', async () => {
+    useFixtureNode('active');
+    const c = await render(browse());
     await waitForText(c, 'Playground');
-    const tab = Array.from(c.querySelectorAll('[role="tab"]')).find((t) => t.textContent === 'Playground');
-    await click(tab);
-    expect(byTestId(c, 'mkt-playground')?.getAttribute('data-mode')).toBe('chat');
-    expect(byTestId(c, 'mkt-chip-qwen25-14b')?.textContent).toBe('qwen25-14b · 76% left');
-    expect(c.textContent).toContain('Send a message to the chosen model');
+    await click(playgroundTab(c));
+    await waitForText(c, 'qwen2.5-14b-instruct · 72% left');
+    await type(byTestId(c, 'mkt-play-input') as HTMLInputElement, 'What is a knowledge graph?');
+    await click(byTestId(c, 'mkt-play-send'));
+    await waitForText(c, 'A knowledge graph links facts');
+    expect(byTestId(c, 'mkt-served')?.textContent).toBe('via seller 12 · 412 tokens · 0.0002 TRAC · 2.1597 TRAC left in this budget');
+    expect(byTestId(c, 'mkt-play-key')?.textContent).toContain('dkgmk_01234567');
+    expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
-  it('asks for a new period when there is no plan', async () => {
-    useFixtureState('plan-none');
-    const c = await render(React.createElement(MarketplaceView));
+  it('turns the soft ceiling into the fork: top up, or wait for the next epoch', async () => {
+    useFixtureNode('active');
+    const c = await render(browse());
     await waitForText(c, 'Playground');
-    const tab = Array.from(c.querySelectorAll('[role="tab"]')).find((t) => t.textContent === 'Playground');
-    await click(tab);
+    await click(playgroundTab(c));
+    await waitForText(c, 'llama-3.1-8b-instruct');
+    await click(byTestId(c, `mkt-chip-${FIXTURE_IDS.llama8b}`));
+    await type(byTestId(c, 'mkt-play-input') as HTMLInputElement, 'hello');
+    await click(byTestId(c, 'mkt-play-send'));
+    await waitForText(c, 'This budget is at its soft ceiling — nothing was charged');
+    expect(byTestId(c, 'mkt-fork-topup')).toBeTruthy();
+    expect(byTestId(c, 'mkt-fork-ceiling')?.textContent).toContain('or wait for the next epoch, in 15 h');
+  });
+
+  it('asks to fund a subscription when none covers this epoch, and says when the marketplace is off', async () => {
+    useFixtureNode('none');
+    const c = await render(browse());
+    await waitForText(c, 'Playground');
+    await click(playgroundTab(c));
+    await waitForText(c, 'No subscription funds the playground this epoch');
     expect(byTestId(c, 'mkt-playground')?.getAttribute('data-state')).toBe('no-plan');
-    expect(c.textContent).toContain('No active plan — the playground needs one');
+    await unmountAll();
+    useFixtureNode('off');
+    const off = await render(browse());
+    await waitForText(off, 'The marketplace is off on this node');
+    expect(byTestId(off, 'mkt-marketplace')?.getAttribute('data-state')).toBe('off');
+  });
+
+  it('shows the admin-needed state when the playground may not make its key', async () => {
+    useFixtureNode('viewer');
+    const c = await render(browse());
+    await waitForText(c, 'Playground');
+    await click(playgroundTab(c));
+    await waitForText(c, 'qwen2.5-14b-instruct');
+    await type(byTestId(c, 'mkt-play-input') as HTMLInputElement, 'hello');
+    await click(byTestId(c, 'mkt-play-send'));
+    await waitForText(c, 'This needs the node-admin token');
   });
 });

@@ -12,7 +12,14 @@ export type MarketplaceDraftRequest =
   | { kind: 'topup'; offeringId: string; seller: string }
   | { kind: 'addon'; offeringId: string; seller: string };
 
+/** What another surface asks Plans to open: the composer, with a service picked, or a top-up of this epoch's budget. */
+export type PlanAsk = { kind: 'compose'; serviceId?: string } | { kind: 'top-up'; serviceId: string };
+
 interface MarketplaceDraftState {
+  /** One-shot, consumed by Plans. */
+  ask: PlanAsk | null;
+  askPlans: (ask: PlanAsk) => void;
+  takeAsk: () => PlanAsk | null;
   /** One-shot: consumed by the Plans view on mount / change. */
   request: MarketplaceDraftRequest | null;
   /** Offerings added from the Marketplace, one provider per offering (last add wins). */
@@ -28,6 +35,13 @@ interface MarketplaceDraftState {
 }
 
 export const useMarketplaceDraftStore = create<MarketplaceDraftState>((set, get) => ({
+  ask: null,
+  askPlans: (ask) => set({ ask }),
+  takeAsk: () => {
+    const a = get().ask;
+    if (a) set({ ask: null });
+    return a;
+  },
   request: null,
   queued: [],
   addToPlan: (line) => set((s) => ({
