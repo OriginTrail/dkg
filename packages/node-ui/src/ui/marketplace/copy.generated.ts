@@ -242,7 +242,7 @@ export const COPY: Record<string, string> = {
   "gate.title": "One confirmation — this epoch's funding",
   "gate.title.plan": "One confirmation — the plan",
   "gate.epoch": "Epoch {n}, paid from {source}",
-  "gate.wallet": "sends it · {eth} ETH for gas · {trac} TRAC",
+  "gate.wallet": "sends the transaction · {eth} ETH for gas",
   "gate.line.value": "{trac} TRAC",
   "gate.line.cap": "up to {price} µTRAC per token",
   "gate.line.pinned": "pinned to {seller}",

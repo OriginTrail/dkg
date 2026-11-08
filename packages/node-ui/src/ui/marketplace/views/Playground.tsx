@@ -89,6 +89,8 @@ export function Playground({ catalog }: { catalog: CatalogAnswer }): React.React
       } else if (isMarketplaceError(err) && err.code === 'epoch_ending') {
         setFork({ kind: 'ending', seconds: err.retryAfter });
       }
+      // The fork says what happened for these three; anything else is an error bubble.
+      if (isMarketplaceError(err) && ['soft_ceiling', 'no_subscription', 'epoch_ending'].includes(err.code)) return;
       const d = describeError(err);
       setMsgs((m) => [...m, { role: 'assistant', content: '', error: { copyKey: d.copyKey, code: d.code ?? 'Error' } }]);
     } finally {

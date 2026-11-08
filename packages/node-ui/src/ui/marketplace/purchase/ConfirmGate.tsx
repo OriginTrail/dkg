@@ -32,7 +32,7 @@ export function ConfirmGate({ catalog, funding, preview, services, fundsEpoch, r
         <div className="mkt-wallet" data-testid="mkt-gate-source">
           <strong data-copy="gate.epoch">{copy('gate.epoch', { n: preview.epoch, source })}</strong><br />
           {funding && <span className="mkt-mono mkt-xs" data-copy="_data">{fmtHex(funding.buyerWallet.address)}</span>}{' '}
-          {funding && <span className="mkt-muted mkt-xs" data-copy="gate.wallet">{copy('gate.wallet', { eth: funding.buyerWallet.ethEther, trac: fmtTrac(funding.buyerWallet.trac) })}</span>}
+          {funding && <span className="mkt-muted mkt-xs" data-copy="gate.wallet">{copy('gate.wallet', { eth: funding.buyerWallet.ethEther })}</span>}
         </div>
       )}
       <table className="mkt-act" data-testid="mkt-gate-lines">
