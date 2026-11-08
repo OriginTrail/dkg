@@ -15,20 +15,23 @@
  *     daemon's routes with an access key: a chat completion from the routed
  *     seller, an over-reporting receipt from a rogue handler on the seller node
  *     that takes the seller out of routing, and 503 with Retry-After at the
- *     epoch's end.
+ *     epoch's end;
+ *   - landing: the seller lands what it served, and the buyer's
+ *     reconciliation matches the landed receipt to the one it holds.
  */
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { Wallet, ethers } from 'ethers';
+import { Contract, Wallet, ethers } from 'ethers';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   EVMChainAdapter,
   SERVICE_CLASS_INFERENCE,
   hashServiceRequest,
   signServiceRequest,
+  subscriptionIdOf,
   type MarketplaceChainAdapter,
   type MarketplaceDomain,
   type ServiceRequest,
@@ -169,6 +172,8 @@ describe('serving between two nodes on Hardhat', () => {
             seller: {
               enabled: true,
               services: [MODEL_A, MODEL_B].map((model) => ({ model, pricePerUnit: String(PRICE), capacity: 2, backend: { kind: 'llamacpp', baseUrl, model: 'stub' } })),
+              // Hardhat's base fee is above the testnet ceilings.
+              landing: { baseFeeCeilingGwei: 1_000, lastStretchBaseFeeCeilingGwei: 1_000 },
             },
           },
         },
@@ -285,6 +290,35 @@ describe('serving between two nodes on Hardhat', () => {
     });
     const keys = await route('GET', '/api/marketplace/keys');
     expect(keys.body.keys[0]).toMatchObject({ label: 'test-agent', spent: String(15n * PRICE) });
+  });
+
+  it("lands what the seller served, and the buyer's reconciliation matches it to the receipt it holds", async () => {
+    // The node's first proof of the epoch, as RandomSampling records it: the Hub owner stands in.
+    const provider = createProvider();
+    const hub = new Contract(getSharedContext().hubAddress, ['function getContractAddress(string) view returns (address)'], provider);
+    const rss = new Contract(await hub.getContractAddress('RandomSamplingStorage'), [
+      'function addToNodeEpochScore(uint256 epoch, uint72 identityId, uint256 score)',
+      'function addToAllNodesEpochScore(uint256 epoch, uint256 score)',
+    ], new Wallet(HARDHAT_KEYS.DEPLOYER, provider));
+    const { epoch } = await buyerChain.getEpochTimes();
+    await (await rss.addToNodeEpochScore(epoch, sellerIdentity, 10n ** 18n)).wait();
+    await (await rss.addToAllNodesEpochScore(epoch, 10n ** 18n)).wait();
+    await provider.send('evm_increaseTime', [31]);
+    await provider.send('evm_mine', []);
+
+    // The direct call's receipt and the gateway's, one group each, in one batch.
+    selling.seller.lander.landNow();
+    expect(await selling.seller.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 30n * PRICE, counted: 30n * PRICE }], refused: 0 });
+    // Held until the gateway's job sees it landed; then matched.
+    expect((await route('GET', '/api/marketplace/reconciliation')).body.rows).toMatchObject([{ held: { count: 0 }, landed: { count: 1, matched: 1 } }]);
+    await gateway.tick();
+    const reconciled = await route('GET', '/api/marketplace/reconciliation');
+    expect(reconciled).toMatchObject({ status: 200, body: { epoch, final: false } });
+    expect(reconciled.body.rows).toEqual([{
+      subscriptionId: subscriptionIdOf(new Wallet(HARDHAT_KEYS.EXTRA2).address, epoch), budgetIndex: 0, serviceId: A, seller: Number(sellerIdentity),
+      held: { count: 0, value: '0', valueTrac: '0.0' },
+      landed: { count: 1, matched: 1, value: String(15n * PRICE), valueTrac: ethers.formatEther(15n * PRICE), counted: String(15n * PRICE), countedTrac: ethers.formatEther(15n * PRICE), txs: [expect.stringMatching(/^0x[0-9a-f]{64}$/)] },
+    }]);
   });
 
   it('takes a seller whose receipt over-reports out of routing, with a rogue handler on the seller node', async () => {

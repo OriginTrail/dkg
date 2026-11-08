@@ -132,6 +132,16 @@ describe('the gateway routes', () => {
       expect((await api('POST', '/api/marketplace/keys', bad)).status).toBe(400);
     }
   });
+
+  it("answer the reconciliation of an epoch, this one's by default, to any reader", async () => {
+    mock.__advanceEpoch();
+    const { epoch } = await chain.getEpochTimes();
+    expect(await api('GET', '/api/marketplace/reconciliation', undefined, agentToken)).toMatchObject({ status: 200, body: { epoch, final: false, rows: [] } });
+    expect(await api('GET', `/api/marketplace/reconciliation?epoch=${epoch - 1}`)).toMatchObject({ status: 200, body: { epoch: epoch - 1, final: true } });
+    expect(await api('GET', '/api/marketplace/reconciliation?epoch=soon')).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
+    gateway = undefined;
+    expect(await api('GET', '/api/marketplace/reconciliation')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
+  });
 });
 
 describe('the marketplace routes', () => {
@@ -285,6 +295,8 @@ describe('dkg marketplace', () => {
     await run('keys');
     await run('keys', 'make', '--label', 'test-agent', '--budget', '1', '--service', `0x${'0a'.repeat(32)}`, '--expires-at', '1900000000');
     await run('keys', 'revoke', 'dkgmk_0011aabb');
+    await run('reconciliation', '--epoch', '41');
+    await run('reconciliation');
     expect(calls).toEqual([
       ['GET', '/subscriptions?epoch=next', undefined],
       ['GET', '/plan', undefined],
@@ -295,6 +307,8 @@ describe('dkg marketplace', () => {
       ['GET', '/keys', undefined],
       ['POST', '/keys', { label: 'test-agent', budget: String(TRAC), rps: 5, services: [`0x${'0a'.repeat(32)}`], expiresAt: 1_900_000_000 }],
       ['POST', '/keys/dkgmk_0011aabb/revoke', undefined],
+      ['GET', '/reconciliation?epoch=41', undefined],
+      ['GET', '/reconciliation', undefined],
     ]);
     expect(print).toHaveBeenCalledWith(JSON.stringify({ ok: true }, null, 2));
   });

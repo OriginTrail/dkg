@@ -10,11 +10,12 @@
  *   - Each key has a label, a budget in wei, the services it may call (or all),
  *     a rate in calls per second, and an expiry.
  *   - A revocation takes effect at the next call.
- * Kept in a journal: makes, revocations, and what each call cost.
+ * Kept in a journal: makes, revocations, and what each call cost, which
+ * `compact` folds into each key's total.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
-import { Journal } from './journal.js';
+import { Journal, KeyedLock } from './journal.js';
 
 const PREFIX = 'dkgmk_';
 
@@ -42,10 +43,19 @@ export interface AccessKey {
   lastUsedAt: number | null;
 }
 
+type MakeEntry = {
+  type: 'make'; keyId: string; hash: string; label: string; budget: string; services: string[] | null; rps: number; expiresAt: number | null; at: number;
+  /** Once compacted: what its calls cost until then, and the last one's time. */
+  spent?: string;
+  lastUsedAt?: number | null;
+};
+
 type Entry =
-  | { type: 'make'; keyId: string; hash: string; label: string; budget: string; services: string[] | null; rps: number; expiresAt: number | null; at: number }
+  | MakeEntry
   | { type: 'revoke'; keyId: string; at: number }
   | { type: 'use'; keyId: string; value: string; at: number };
+
+type Folded = { make: MakeEntry; key: AccessKey; hash: Buffer; revokedAt?: number };
 
 export type KeyCheck =
   | { ok: true; key: AccessKey }
@@ -55,6 +65,7 @@ const hashOf = (secret: string) => createHash('sha256').update(secret).digest();
 
 export class AccessKeys {
   private readonly journal: Journal<Entry>;
+  private readonly lock = new KeyedLock();
   /** keyId => when its recent calls were let in, for the rate. */
   private readonly recent = new Map<string, number[]>();
 
@@ -67,7 +78,7 @@ export class AccessKeys {
     if (!Number.isSafeInteger(scopes.rps) || scopes.rps < 1) throw new Error('rps must be a positive integer');
     const secret = `${PREFIX}${randomBytes(24).toString('hex')}`;
     const keyId = secret.slice(0, PREFIX.length + 8);
-    await this.journal.append({
+    await this.append({
       type: 'make', keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
       services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
     });
@@ -76,7 +87,7 @@ export class AccessKeys {
 
   async revoke(keyId: string, now: number): Promise<AccessKey | null> {
     if (!(await this.fold()).has(keyId)) return null;
-    await this.journal.append({ type: 'revoke', keyId, at: now });
+    await this.append({ type: 'revoke', keyId, at: now });
     return (await this.fold()).get(keyId)!.key;
   }
 
@@ -108,23 +119,45 @@ export class AccessKeys {
 
   /** Book what a call cost against its key. */
   async charge(keyId: string, value: bigint, now: number): Promise<void> {
-    await this.journal.append({ type: 'use', keyId, value: value.toString(), at: now });
+    await this.append({ type: 'use', keyId, value: value.toString(), at: now });
   }
 
-  private async fold(): Promise<Map<string, { key: AccessKey; hash: Buffer }>> {
-    const keys = new Map<string, { key: AccessKey; hash: Buffer }>();
+  /** Rewrite the journal as each key's make, with what its calls cost folded in, and its revocation. */
+  async compact(): Promise<void> {
+    await this.lock.run('journal', async () => {
+      const entries: Entry[] = [];
+      for (const { make, key, revokedAt } of (await this.fold()).values()) {
+        entries.push({ ...make, spent: key.spent, lastUsedAt: key.lastUsedAt });
+        if (revokedAt !== undefined) entries.push({ type: 'revoke', keyId: key.keyId, at: revokedAt });
+      }
+      await this.journal.replace(entries);
+    });
+  }
+
+  private async append(entry: Entry): Promise<void> {
+    await this.lock.run('journal', () => this.journal.append(entry));
+  }
+
+  private async fold(): Promise<Map<string, Folded>> {
+    const keys = new Map<string, Folded>();
     for (const e of await this.journal.read()) {
       if (e.type === 'make') {
         keys.set(e.keyId, {
+          make: e,
           hash: Buffer.from(e.hash, 'hex'),
-          key: { keyId: e.keyId, label: e.label, budget: e.budget, spent: '0', services: e.services, rps: e.rps, expiresAt: e.expiresAt, revoked: false, lastUsedAt: null },
+          key: {
+            keyId: e.keyId, label: e.label, budget: e.budget, spent: e.spent ?? '0', services: e.services, rps: e.rps, expiresAt: e.expiresAt,
+            revoked: false, lastUsedAt: e.lastUsedAt ?? null,
+          },
         });
         continue;
       }
       const kept = keys.get(e.keyId);
       if (!kept) continue;
-      if (e.type === 'revoke') kept.key.revoked = true;
-      else {
+      if (e.type === 'revoke') {
+        kept.key.revoked = true;
+        kept.revokedAt = e.at;
+      } else {
         kept.key.spent = (BigInt(kept.key.spent) + BigInt(e.value)).toString();
         kept.key.lastUsedAt = e.at;
       }

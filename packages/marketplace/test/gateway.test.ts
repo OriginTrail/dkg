@@ -4,7 +4,8 @@
  * the real seller in the same process as the far end (`send` calls it), and a
  * stub backend: a call through to its receipt, the soft ceiling, the boundary,
  * a bad receipt taking its seller out of routing, the router's order and its
- * memory, and the keys' scopes.
+ * memory, the keys' scopes, and what landed: the held value at the gateway's
+ * tick, reconciliation, and an ended epoch made final.
  */
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -333,5 +334,102 @@ describe('the router', () => {
     router.failed(2n, 1);
     expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
     expect(await routerWith().pick(SERVICE, 1, 10n)).toBeNull();
+  });
+});
+
+describe('landing, reconciliation and pruning', () => {
+  /** The chain's time 31 seconds on, past the seller's margin for receipts just completed. */
+  function laterBy(seconds: number): void {
+    const real = chain.getEpochTimes.bind(chain);
+    vi.spyOn(chain, 'getEpochTimes').mockImplementation(async () => {
+      const t = await real();
+      return { ...t, now: t.now + seconds };
+    });
+  }
+  async function landAll(): Promise<void> {
+    seller.lander.landNow();
+    expect(await seller.lander.tick()).toMatchObject({ sent: [expect.anything()] });
+  }
+
+  it('takes the receipts that landed out of the held value at its tick, and matches them to what landed', async () => {
+    // 1,000 wei: the soft ceiling is 950, and a call costs 120 and may cost 620.
+    await setUp(1_000n);
+    expect((await call()).status).toBe(200);
+    expect((await call()).status).toBe(200);
+    laterBy(31);
+    await landAll();
+    // Landed, and still held until the tick: 240 used, 240 held and 620 is over 950.
+    expect(body(await call()).error.code).toBe('soft_ceiling');
+    await gateway.tick();
+    expect((await call()).status).toBe(200);
+
+    const { epoch } = await chain.getEpochTimes();
+    const reconciled = await gateway.reconciliation();
+    expect(reconciled).toMatchObject({ epoch, final: false });
+    expect(reconciled.rows).toEqual([{
+      subscriptionId: expect.any(String), budgetIndex: 0, serviceId: SERVICE, seller: Number(seller.gate.identityId),
+      held: { count: 1, value: '120', valueTrac: '0.00000000000000012' },
+      landed: { count: 2, matched: 2, value: '240', valueTrac: '0.00000000000000024', counted: '240', countedTrac: '0.00000000000000024', txs: [expect.any(String)] },
+    }]);
+    // Read on from where it ended: the next read finds the same groups once.
+    expect((await gateway.reconciliation()).rows[0]!.landed.count).toBe(2);
+    expect((await gateway.reconciliation(epoch + 5)).rows).toEqual([]);
+  });
+
+  it("does not match a receipt it refused, and makes an epoch final once the next one ends", async () => {
+    await setUp();
+    expect((await call()).status).toBe(200);
+    // The seller keeps and lands its own receipt of a call whose answer the node refused.
+    tamper = (answer) => (answer.ok ? { ...answer, receiptSignature: '0x00' } : answer);
+    expect(body(await call())).toMatchObject({ problem: 'bad_signature' });
+    tamper = undefined;
+    laterBy(31);
+    await landAll();
+    await gateway.tick();
+    const { epoch } = await chain.getEpochTimes();
+    const rows = (await gateway.reconciliation()).rows;
+    expect(rows).toMatchObject([{ held: { count: 0 }, landed: { count: 2, matched: 0, value: '240' } }]);
+
+    mock.__advanceEpoch();
+    expect(await gateway.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
+    await gateway.tick();
+    expect((await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n')).toHaveLength(2);
+    mock.__advanceEpoch();
+    await gateway.tick();
+    // Its rows kept, its receipts and nonce counters gone, and the keys' costs folded in.
+    const receipts = (await readFile(join(dir, 'buyer', 'buyer-receipts.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(receipts).toEqual([{ type: 'final', epoch, rows }]);
+    expect((await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8')).trim()).toBe('');
+    const keyLines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(keyLines).toMatchObject([{ type: 'make', spent: '120' }]);
+    expect((await keys.list())[0]).toMatchObject({ spent: '120', lastUsedAt: expect.any(Number) });
+    const restarted = new Gateway(gatewayDeps);
+    await restarted.load();
+    expect(await restarted.reconciliation(epoch)).toEqual({ epoch, final: true, rows });
+  });
+
+  it('runs its job at start and on a timer, and logs a tick that fails', async () => {
+    await setUp();
+    const logs: string[] = [];
+    const job = new Gateway({ ...gatewayDeps, log: (m) => logs.push(m) });
+    await job.load();
+    vi.spyOn(chain, 'getEpochTimes').mockRejectedValueOnce(new Error('socket hang up'));
+    job.start(3_600);
+    job.start(3_600);
+    await vi.waitFor(() => expect(logs).toEqual([expect.stringMatching(/gateway tick failed: socket hang up/)]));
+    await job.stop();
+    await job.stop();
+  });
+
+  it('keeps a revocation when it folds the keys', async () => {
+    await setUp();
+    const { key } = await keys.make({ label: 'revoked', budget: 1n, services: null, rps: 1, expiresAt: null }, 5);
+    await keys.charge(caller.key.keyId, 7n, 6);
+    await keys.revoke(key.keyId, 9);
+    const before = await keys.list();
+    await keys.compact();
+    expect(await keys.list()).toEqual(before);
+    const lines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    expect(lines.map((l) => l.type)).toEqual(['make', 'make', 'revoke']);
   });
 });

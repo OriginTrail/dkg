@@ -4,10 +4,10 @@
 //
 // A command for each buyer route under /api/marketplace: subscriptions, dry
 // runs, fundings and top-ups, the standing plan, the buyer wallet's funding,
-// accounts, an owner's actions on an account the node owns, and the gateway's
-// access keys. Each prints
-// the daemon's answer as JSON. Amounts on the command line are in TRAC;
-// times are chain seconds. Requests with services take a JSON file.
+// accounts, an owner's actions on an account the node owns, the gateway's
+// access keys, and the reconciliation. Each prints the daemon's answer as
+// JSON. Amounts on the command line are in TRAC; times are chain seconds.
+// Requests with services take a JSON file.
 
 import { readFile } from 'node:fs/promises';
 import { Command } from 'commander';
@@ -138,6 +138,12 @@ export function registerMarketplaceCommand(program: Command): void {
     .command('revoke <keyId>')
     .description('Revoke an access key; it stops working at its next call')
     .action((keyId: string) => call('POST', `/keys/${id(keyId)}/revoke`));
+
+  cmd
+    .command('reconciliation')
+    .description("The receipts the node holds against those landed and counted, per seller and budget: this epoch's by default")
+    .option('--epoch <epoch>', 'current or an epoch number')
+    .action((opts: { epoch?: string }) => call('GET', `/reconciliation${opts.epoch ? `?epoch=${id(opts.epoch)}` : ''}`));
 
   cmd
     .command('remove-buyer <accountId> <buyer>')

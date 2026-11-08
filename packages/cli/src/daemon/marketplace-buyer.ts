@@ -7,7 +7,8 @@
  * its operational wallets, say) leaves the marketplace off, logged, and the
  * boot goes on. A renewal that fails is logged and recorded as a notification.
  * Beside it, the buyer's gateway: OpenAI-compatible calls, paid from the
- * subscription and served by sellers over the messenger.
+ * subscription and served by sellers over the messenger, with its job, which
+ * follows what landed and makes ended epochs final.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -100,11 +101,13 @@ export interface MarketplaceGatewayOptions {
   dataDir: string;
   /** The peer for a seller's identity. The node has no lookup yet: by default it routes to no one. */
   peers?: SellerPeers;
+  log?: (message: string) => void;
 }
 
 /**
  * The buyer's gateway: its router reads offers from the Marketplace Context
  * Graph, which the node subscribes to, and reaches sellers over the messenger.
+ * Its job runs as often as the buyer's.
  */
 export async function startMarketplaceGateway(options: MarketplaceGatewayOptions): Promise<Gateway> {
   const { agent, buyer, dataDir } = options;
@@ -137,7 +140,9 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
     }),
     dir,
     modelOf: async (serviceId, epoch) => (await offers([epoch])).find((o) => o.serviceId === serviceId)?.model,
+    ...(options.log ? { log: options.log } : {}),
   });
   await gateway.load();
+  gateway.start(buyer.config.tickSeconds);
   return gateway;
 }

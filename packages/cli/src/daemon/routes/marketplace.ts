@@ -2,9 +2,11 @@
 //
 // The marketplace buyer's routes (OT-RFC-27), under /api/marketplace, beside
 // /api/pca: the buyer's subscriptions, a dry run, fundings and top-ups, the
-// standing plan, the buyer wallet's funding, the accounts it can use, and an
-// owner's actions on an account the node owns. `packages/marketplace` builds
-// each answer; this module reads the request and maps refusals.
+// standing plan, the buyer wallet's funding, the accounts it can use, an
+// owner's actions on an account the node owns, the gateway's access keys, and
+// the reconciliation of what it holds against what landed.
+// `packages/marketplace` builds each answer; this module reads the request and
+// maps refusals.
 //
 // Reads need any valid token; writes need the node-admin token. Amounts are
 // decimal strings of wei with `…Trac` siblings, times are chain seconds, and a
@@ -174,6 +176,11 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
     const plan = await buyer.store.readPlan();
     if (!plan) throw new MarketplaceRefusal('PlanNotFound');
     return planView(buyer, plan);
+  }
+  if (method === 'GET' && route === '/reconciliation') {
+    const { epoch } = await buyer.chain.getEpochTimes();
+    const asked = url.searchParams.get('epoch');
+    return gatewayOf(ctx).reconciliation(asked === null ? epoch : parseEpoch(asked, epoch));
   }
   if (method === 'GET' && route === '/funding') return fundingView(buyer);
   if (method === 'GET' && route === '/accounts') return accountsView(buyer);

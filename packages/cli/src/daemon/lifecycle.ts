@@ -2301,7 +2301,7 @@ async function runDaemonInnerWithStartupOwnership(
   const marketplace = startMarketplaceBuyer({
     config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
   });
-  const marketplaceGateway = marketplace ? await startMarketplaceGateway({ config, agent, buyer: marketplace, dataDir: dkgDir() }) : undefined;
+  const marketplaceGateway = marketplace ? await startMarketplaceGateway({ config, agent, buyer: marketplace, dataDir: dkgDir(), log }) : undefined;
   const marketplaceSeller = await startMarketplaceSeller({
     config, agent, signer: evmSigning.addresses.wallets[0]?.address, dataDir: dkgDir(), log,
   });
@@ -3751,6 +3751,7 @@ async function runDaemonInnerWithStartupOwnership(
         });
         logVolumePruner.stop();
         void marketplace?.stop();
+        void marketplaceGateway?.stop();
         void marketplaceSeller?.stop();
         backpressureMonitor.stop();
         eventLoopDelayMonitor.stop();

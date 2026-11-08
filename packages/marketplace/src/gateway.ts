@@ -26,6 +26,12 @@
  *      epoch, and the call fails;
  *   9. the receipt is kept before the answer goes back.
  * Calls on one budget run one at a time, from the ceiling to the receipt.
+ *
+ * Its job, every tick: the held receipts whose nonces the chain shows used
+ * have landed, and leave the held value the ceiling counts. An epoch before
+ * the last ended one is made final: its reconciliation is kept, and its
+ * receipts and nonce counters are dropped, as are what the access keys' calls
+ * cost, folded into each key's total.
  */
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -33,6 +39,7 @@ import {
   hashServiceRequest,
   signServiceRequest,
   subscriptionIdOf,
+  type LandedGroup,
   type MarketplaceChainAdapter,
   type MarketplaceDomain,
   type QueryInferenceReceipt,
@@ -41,6 +48,7 @@ import {
 import type { AccessKey, AccessKeys } from './keys.js';
 import { Journal, KeyedLock } from './journal.js';
 import { serviceIdOf } from './offers.js';
+import { reconcileSubscription, type ReconciledRow } from './reconcile.js';
 import type { Router } from './router.js';
 import { receiptSignerOf, DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
 import type { BuyerStore } from './store.js';
@@ -95,11 +103,14 @@ export interface GatewayDeps {
   modelOf?(serviceId: string, epoch: number): Promise<string | undefined>;
   /** The sellers' stop time before an epoch's end. Default 180. */
   stopServingSeconds?: number;
+  log?: (message: string) => void;
 }
 
 /** A call's receipt, as the buyer keeps it: `held` until it lands, or `refused` with the check it failed. */
 export interface HeldReceipt {
   callId: string;
+  /** The subscription's epoch. */
+  epoch: number;
   subscriptionId: string;
   budgetIndex: number;
   seller: string;
@@ -112,17 +123,40 @@ export interface HeldReceipt {
   problem?: string;
 }
 
+/** An epoch made final: its reconciliation, kept once its receipts are dropped. */
+interface FinalEpoch {
+  type: 'final';
+  epoch: number;
+  rows: ReconciledRow[];
+}
+
+type NonceEntry = { epoch: number; subscriptionId: string; seller: string; nonce: string };
+
+const isFinal = (e: HeldReceipt | FinalEpoch): e is FinalEpoch => (e as FinalEpoch).type === 'final';
+
 const fail = (status: number, code: string, message: string, more: Record<string, unknown> = {}, headers?: Record<string, string>): GatewayAnswer =>
   ({ status, body: { error: { code, message, type: 'marketplace' }, ...more }, ...(headers ? { headers } : {}) });
 
 export class Gateway {
-  private readonly receipts: Journal<HeldReceipt>;
-  private readonly nonceLog: Journal<{ subscriptionId: string; seller: string; nonce: string }>;
+  private readonly receipts: Journal<HeldReceipt | FinalEpoch>;
+  private readonly nonceLog: Journal<NonceEntry>;
   private readonly lock = new KeyedLock();
   private readonly nonces = new Map<string, bigint>();
+  /** subscription id and budget index => the value of its receipts held and not seen landed. */
   private readonly held = new Map<string, bigint>();
+  /** The held receipts not seen landed, by call id. */
+  private readonly unlanded = new Map<string, HeldReceipt>();
+  /** The receipts of each epoch not made final. */
+  private readonly byEpoch = new Map<number, HeldReceipt[]>();
+  /** The epochs with receipts or nonce counters not made final. */
+  private readonly epochs = new Set<number>();
+  private readonly finals = new Map<number, ReconciledRow[]>();
+  /** subscription id => the groups landed for it, read up to `toBlock`. */
+  private readonly scans = new Map<string, { toBlock: number; groups: LandedGroup[] }>();
   private readonly sessionKeys = new Map<string, ethers.Wallet>();
   private domain: MarketplaceDomain | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private ticking: Promise<void> | undefined;
 
   constructor(private readonly deps: GatewayDeps) {
     this.receipts = new Journal(join(deps.dir, 'buyer-receipts.jsonl'));
@@ -134,10 +168,60 @@ export class Gateway {
     return this.deps.keys;
   }
 
-  /** Read the receipts held and the nonce counters. Call once before serving. */
+  /** Read the receipts held, the epochs made final and the nonce counters. Call once before serving. */
   async load(): Promise<void> {
-    for (const n of await this.nonceLog.read()) this.noteNonce(n.subscriptionId, n.seller, BigInt(n.nonce));
-    for (const r of await this.receipts.read()) if (r.state === 'held') this.noteHeld(r);
+    for (const n of await this.nonceLog.read()) {
+      this.noteNonce(n.subscriptionId, n.seller, BigInt(n.nonce));
+      this.epochs.add(n.epoch);
+    }
+    for (const e of await this.receipts.read()) {
+      if (isFinal(e)) this.finals.set(e.epoch, e.rows);
+      else this.remember(e);
+    }
+  }
+
+  /** The job: a tick now, then every `tickSeconds`. */
+  start(tickSeconds: number): void {
+    if (this.timer) return;
+    const run = () => {
+      if (this.ticking) return;
+      this.ticking = this.tick()
+        .catch((err: unknown) => this.deps.log?.(`[marketplace] gateway tick failed: ${err instanceof Error ? err.message : String(err)}`))
+        .finally(() => { this.ticking = undefined; });
+    };
+    run();
+    this.timer = setInterval(run, tickSeconds * 1_000);
+    this.timer.unref?.();
+  }
+
+  async stop(): Promise<void> {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    await this.ticking;
+  }
+
+  /** The held receipts that landed leave the held value; epochs before the last ended one are made final. */
+  async tick(): Promise<void> {
+    const { epoch } = await this.deps.chain.getEpochTimes();
+    const open = [...this.unlanded.values()].filter((r) => r.epoch === epoch);
+    const used = await this.usedOf(open);
+    for (const r of open) if (used.has(r.callId)) this.forget(r);
+    const ended = [...this.epochs].filter((e) => e < epoch - 1);
+    for (const e of ended) await this.finalize(e);
+    if (ended.length > 0) await this.deps.keys.compact();
+  }
+
+  /**
+   * The receipts this node holds for an epoch's subscription against those
+   * landed and counted, per seller and budget (the node API's `GET /reconciliation`):
+   * final once the epoch has ended.
+   */
+  async reconciliation(epoch?: number): Promise<{ epoch: number; final: boolean; rows: ReconciledRow[] }> {
+    const times = await this.deps.chain.getEpochTimes();
+    const asked = epoch ?? times.epoch;
+    const kept = this.finals.get(asked);
+    if (kept) return { epoch: asked, final: true, rows: kept };
+    return { epoch: asked, final: asked < times.epoch, rows: await this.rowsOf(asked) };
   }
 
   /** The services this epoch's subscription funds, as OpenAI models. */
@@ -215,7 +299,7 @@ export class Gateway {
       if (!sessionKey) return fail(500, 'session_key_missing', "this node does not hold the subscription's session key");
       const domain = await this.domainOf();
       const request: ServiceRequest = {
-        subscriptionId, serviceId, seller: route.seller, nonce: await this.nextNonce(subscriptionId, route.seller),
+        subscriptionId, serviceId, seller: route.seller, nonce: await this.nextNonce(times.epoch, subscriptionId, route.seller),
         pricePerUnit: route.pricePerUnit, maxUnits, maxValueWei,
         issuedAt: Math.max(times.now, subscription.startsAt), expiry: Math.min(times.now + REQUEST_LIFETIME_SECONDS, stopAt),
       };
@@ -242,17 +326,17 @@ export class Gateway {
       }
       const checked = await this.checkReceipt(domain, request, callId, budgetIndex, answer);
       const entry: HeldReceipt = {
-        callId, subscriptionId, budgetIndex, seller: route.seller.toString(), keyId, request: requestToWire(request), signature,
+        callId, epoch: times.epoch, subscriptionId, budgetIndex, seller: route.seller.toString(), keyId, request: requestToWire(request), signature,
         receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
         ...(checked.problem ? { problem: checked.problem } : {}),
       };
-      await this.receipts.append(entry);
+      await this.lock.run('journal', () => this.receipts.append(entry));
+      this.remember(entry);
       if (checked.problem) {
         this.deps.router.failed(route.seller, times.epoch);
         return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
       }
       const receipt = checked.receipt!;
-      this.noteHeld(entry);
       await this.deps.keys.charge(keyId, receipt.valueWei, times.now);
       const left = budget.value - used - (this.held.get(budgetKey) ?? 0n);
       return {
@@ -312,11 +396,12 @@ export class Gateway {
   }
 
   /** The next nonce for the seller on the subscription: taken at once, so two calls never share one, and on disk before it is signed. */
-  private async nextNonce(subscriptionId: string, seller: bigint): Promise<bigint> {
+  private async nextNonce(epoch: number, subscriptionId: string, seller: bigint): Promise<bigint> {
     const key = `${subscriptionId}:${seller}`;
     const nonce = (this.nonces.get(key) ?? -1n) + 1n;
     this.nonces.set(key, nonce);
-    await this.nonceLog.append({ subscriptionId, seller: seller.toString(), nonce: nonce.toString() });
+    this.epochs.add(epoch);
+    await this.lock.run('journal', () => this.nonceLog.append({ epoch, subscriptionId, seller: seller.toString(), nonce: nonce.toString() }));
     return nonce;
   }
 
@@ -325,9 +410,72 @@ export class Gateway {
     if (nonce > (this.nonces.get(key) ?? -1n)) this.nonces.set(key, nonce);
   }
 
-  private noteHeld(r: HeldReceipt): void {
+  /** A receipt kept: in its epoch's, and, held, in the held value until it is seen landed. */
+  private remember(r: HeldReceipt): void {
+    this.byEpoch.set(r.epoch, [...(this.byEpoch.get(r.epoch) ?? []), r]);
+    this.epochs.add(r.epoch);
+    if (r.state !== 'held') return;
+    this.unlanded.set(r.callId, r);
     const key = `${r.subscriptionId}:${r.budgetIndex}`;
     this.held.set(key, (this.held.get(key) ?? 0n) + BigInt(r.receipt.valueWei));
+  }
+
+  /** A held receipt seen landed: out of the held value. */
+  private forget(r: HeldReceipt): void {
+    if (!this.unlanded.delete(r.callId)) return;
+    const key = `${r.subscriptionId}:${r.budgetIndex}`;
+    this.held.set(key, (this.held.get(key) ?? 0n) - BigInt(r.receipt.valueWei));
+  }
+
+  /** The call ids of `receipts` whose nonces the chain shows used. */
+  private async usedOf(receipts: readonly HeldReceipt[]): Promise<Set<string>> {
+    const words = new Map<string, bigint>();
+    const used = new Set<string>();
+    for (const r of receipts) {
+      const nonce = BigInt(r.request.nonce);
+      const key = `${r.subscriptionId}:${r.seller}:${nonce >> 8n}`;
+      if (!words.has(key)) words.set(key, await this.deps.chain.nonceWord(r.subscriptionId, BigInt(r.seller), nonce >> 8n));
+      if ((words.get(key)! >> (nonce & 0xffn)) & 1n) used.add(r.callId);
+    }
+    return used;
+  }
+
+  private async rowsOf(epoch: number): Promise<ReconciledRow[]> {
+    const chain = this.deps.chain;
+    const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
+    const receipts = (this.byEpoch.get(epoch) ?? []).filter((r) => r.state === 'held');
+    if (!(await chain.subscriptionExists(subscriptionId))) return [];
+    const budgets = await chain.getBudgets(subscriptionId);
+    const used = await this.usedOf(receipts);
+    return reconcileSubscription(await this.domainOf(), receipts, await this.landedFor(subscriptionId), (r) => used.has(r.callId),
+      (i) => budgets[i]?.serviceId.toLowerCase() ?? '');
+  }
+
+  /** The groups landed for a subscription, read on from where the last read ended. */
+  private async landedFor(subscriptionId: string): Promise<LandedGroup[]> {
+    const before = this.scans.get(subscriptionId);
+    const next = await this.deps.chain.listReceiptsLanded(subscriptionId, before ? before.toBlock + 1 : undefined);
+    const groups = [...(before?.groups ?? []), ...next.groups.filter((g) => !before || g.blockNumber > before.toBlock)];
+    this.scans.set(subscriptionId, { toBlock: Math.max(before?.toBlock ?? -1, next.toBlock), groups });
+    return groups;
+  }
+
+  /** Keep an ended epoch's reconciliation, and drop its receipts and nonce counters. */
+  private async finalize(epoch: number): Promise<void> {
+    const rows = await this.rowsOf(epoch);
+    await this.lock.run('journal', async () => {
+      await this.receipts.replace([...(await this.receipts.read()).filter((e) => isFinal(e) || e.epoch !== epoch), { type: 'final', epoch, rows }]);
+      await this.nonceLog.replace((await this.nonceLog.read()).filter((n) => n.epoch !== epoch));
+    });
+    this.finals.set(epoch, rows);
+    for (const r of this.byEpoch.get(epoch) ?? []) this.forget(r);
+    this.byEpoch.delete(epoch);
+    this.epochs.delete(epoch);
+    const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
+    this.scans.delete(subscriptionId);
+    for (const map of [this.nonces, this.held, this.sessionKeys]) {
+      for (const key of map.keys()) if (key.startsWith(subscriptionId)) map.delete(key);
+    }
   }
 
   /** The subscription's session key, opened once and kept in memory; `null` when this node does not hold it. */
