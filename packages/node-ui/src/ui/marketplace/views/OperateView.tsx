@@ -1,99 +1,102 @@
-// Operate (seller): the ask editor (takes effect next cycle), subscribers,
-// the statement queue, the dedicated revenue wallet shown apart from the
-// operations wallet, and the calibration export. An unconfigured seller role
-// is an explicit card. Queueing an ask and exporting do nothing yet: fixture
-// data in this step.
-import React, { useEffect, useRef, useState } from 'react';
+// Operate (seller): the Core Node gate and whether the node has proved this
+// epoch; each offering's backend and price, with the next epoch's editable;
+// this epoch's ledger (served, sent, landed, refused, missed) and the next
+// landing, with Land now; recent batches with their gas; this epoch's served
+// and weighted value and the pool so far, each ended epoch's gross; and the
+// operational wallets' ETH. Selling switched off is an explicit card.
+import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
-import { marketplaceData, noAction } from '../data.js';
-import type { OperateStatus } from '../types.js';
-import { ErrorCard, fmtClock, shortAddr } from '../purchase/shared.js';
+import { isMarketplaceOff, marketplaceApi } from '../api/client.js';
+import type { LandNowAnswer, Offering } from '../api/types.js';
+import { fmtAt, fmtHex, fmtMicro, fmtTrac, modelName, weiOfMicro } from '../amounts.js';
+import { ErrorCard, OffCard, relAt, useLoad } from '../shared.js';
+
+function landedLine(r: LandNowAnswer): { key: string; vars: Record<string, string | number> } {
+  if ('stopped' in r) return { key: `operate.stopped.${r.stopped}`, vars: {} };
+  if (r.batches.length === 0) return { key: r.waiting ? 'operate.land.waiting' : 'operate.land.none', vars: { refused: r.refused } };
+  return { key: 'operate.land.sent', vars: { n: r.batches.length, items: r.batches.reduce((s, b) => s + b.items, 0), refused: r.refused } };
+}
 
 export function OperateView(): React.ReactElement {
-  const [st, setSt] = useState<OperateStatus | null>(null);
-  const [err, setErr] = useState<unknown | null>(null);
+  const st = useLoad(() => marketplaceApi.sellerStatus());
+  const cat = useLoad(() => marketplaceApi.catalog());
   const [edits, setEdits] = useState<Record<string, string>>({});
-  const [askErr, setAskErr] = useState<{ id: string; err: unknown } | null>(null);
-  const [exportErr, setExportErr] = useState<unknown | null>(null);
+  const [updated, setUpdated] = useState<Record<string, Offering>>({});
+  const [priceErr, setPriceErr] = useState<{ id: string; err: unknown } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [opsWallet, setOpsWallet] = useState<string | null>(null);
-  const inflight = useRef(false);
+  const [landed, setLanded] = useState<LandNowAnswer | null>(null);
+  const [landErr, setLandErr] = useState<unknown>(null);
+  const label = (id: string) => modelName(cat.data?.services.find((s) => s.serviceId === id)?.label ?? fmtHex(id));
+  const epoch = cat.data?.epoch ?? null;
 
-  const load = () => {
-    if (inflight.current) return;
-    inflight.current = true;
-    marketplaceData.operateStatus().then((s) => { setSt(s); setErr(null); }).catch((e) => setErr(e)).finally(() => { inflight.current = false; });
+  const setPrice = (serviceId: string) => {
+    const wei = weiOfMicro(edits[serviceId] ?? '');
+    if (!wei || busy) return;
+    setBusy(serviceId); setPriceErr(null);
+    marketplaceApi.setNextPrice(serviceId, wei.toString())
+      .then((o) => { setUpdated((u) => ({ ...u, [serviceId]: o })); setEdits((e) => ({ ...e, [serviceId]: '' })); })
+      .catch((err: unknown) => setPriceErr({ id: serviceId, err }))
+      .finally(() => setBusy(null));
   };
-  useEffect(() => { load(); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { marketplaceData.operationsWallet().then(setOpsWallet).catch(() => setOpsWallet(null)); }, []);
-
-  const cycle = st?.cycle ?? null;
-
-  // Queueing an ask and exporting calibration data need the node; no-ops here.
-  const submitAsk = (offeringId: string, unit: 'tokens' | 'query-units') => {
-    const v = Number(edits[offeringId]);
-    if (!(v > 0) || cycle == null || busy) return;
-    noAction({ offeringId, unit, askMicroPerUnit: v, effectiveFromCycle: cycle + 1 });
+  const landNow = () => {
+    if (busy) return;
+    setBusy('land'); setLandErr(null);
+    marketplaceApi.landNow().then((r) => { setLanded(r); st.reload(); }).catch(setLandErr).finally(() => setBusy(null));
   };
-  const exportCalibration = () => { if (!busy) noAction(); };
-  void setAskErr; void setExportErr; void setBusy;
 
-  if (err && !st) {
-    return (
-      <div className="mkt-frame" data-testid="mkt-operate" data-state="error">
-        <div className="mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={err} onRetry={load} /></div>
-      </div>
-    );
-  }
-  if (!st) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
-
-  if (!st.sellerActive) {
+  if (isMarketplaceOff(st.err)) {
     return (
       <div className="mkt-frame" data-testid="mkt-operate" data-state="inactive">
-        <div className="mkt-card mkt-seatcard" data-testid="mkt-operate-inactive">
-          <h2 data-copy="operate.inactive.title">{copy('operate.inactive.title')}</h2>
-          <p className="mkt-sec mkt-sm" data-copy="operate.inactive.body">{copy('operate.inactive.body')}</p>
-          <ul className="mkt-xs mkt-sec">
-            <li data-copy="operate.inactive.item.provider">{copy('operate.inactive.item.provider')}</li>
-            <li data-copy="operate.inactive.item.offerings">{copy('operate.inactive.item.offerings')}</li>
-            <li data-copy="operate.inactive.item.revenue">{copy('operate.inactive.item.revenue')}</li>
-          </ul>
-          {err ? <ErrorCard err={err} onRetry={load} /> : null}
-        </div>
+        <OffCard selling testId="mkt-operate-inactive" />
       </div>
     );
   }
+  if (st.err && !st.data) {
+    return (
+      <div className="mkt-frame" data-testid="mkt-operate" data-state="error">
+        <div className="mkt-card"><div data-copy="operate.error">{copy('operate.error')}</div><ErrorCard err={st.err} onRetry={st.reload} /></div>
+      </div>
+    );
+  }
+  if (!st.data) return <div className="mkt-frame" data-testid="mkt-operate" data-state="loading"><div className="mkt-card mkt-muted" data-copy="state.loading">{copy('state.loading')}</div></div>;
+  const s = st.data;
+  const g = s.gate;
+  const l = s.ledger;
+  const report = landed ?? (s.lastLanding ? ('stopped' in s.lastLanding ? { batches: [], stopped: s.lastLanding.stopped } : { batches: s.lastLanding.sent.map((b) => ({ ...b, tx: b.txHash, at: 0, gasUsed: 0 })), refused: s.lastLanding.refused, waiting: s.lastLanding.waiting }) : null);
+  const line = report ? landedLine(report) : null;
 
   return (
     <div className="mkt-frame" data-testid="mkt-operate" data-state="active">
-      {err ? <ErrorCard err={err} onRetry={load} /> : null}
+      {st.err ? <ErrorCard err={st.err} onRetry={st.reload} /> : null}
       <div className="mkt-card">
         <h2 data-copy="op.ask.editor">{copy('op.ask.editor')}</h2>
-        <div className="mkt-muted mkt-xs" data-copy="operate.ask.cycle" data-testid="mkt-ask-cycle">
-          {cycle == null ? copy('operate.ask.cycle.unknown') : copy('operate.ask.cycle', { n: cycle, next: cycle + 1 })}
+        <div className="mkt-muted mkt-xs" data-copy={epoch == null ? 'operate.ask.cycle.unknown' : 'operate.ask.cycle'} data-testid="mkt-ask-cycle">
+          {epoch == null ? copy('operate.ask.cycle.unknown') : copy('operate.ask.cycle', { n: epoch, next: epoch + 1 })}
         </div>
-        {st.offerings.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.offerings.none">{copy('operate.offerings.none')}</div>}
-        {st.offerings.map((o) => {
-          const v = Number(edits[o.id]);
-          const valid = v > 0;
-          const disabledKey = cycle == null ? 'operate.ask.cycle.unknown' : !valid ? 'operate.ask.invalid' : null;
+        {s.offerings.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.offerings.none">{copy('operate.offerings.none')}</div>}
+        {s.offerings.map((o0) => {
+          const o = updated[o0.serviceId] ?? o0;
+          const wei = weiOfMicro(edits[o.serviceId] ?? '');
+          const changed = o.nextPrice !== o.price;
           return (
-            <div key={o.id} className="mkt-mhead mkt-prow" data-testid={`mkt-ask-${o.id}`}>
+            <div key={o.serviceId} className="mkt-mhead mkt-prow" data-testid={`mkt-ask-${o.serviceId}`} data-connector={o.connector}>
               <span>
-                <strong data-copy="_data">{o.id}</strong>{' '}
-                {o.offeringUal ? <span className="mkt-yours" data-copy="operate.ka">{copy('operate.ka')}</span> : <span className="mkt-muted mkt-xs" data-copy="operate.ka.none">{copy('operate.ka.none')}</span>}
-                <div className="mkt-muted mkt-xs" data-copy={o.queuedAsk ? 'operate.ask.queued' : 'operate.ask.none'}>
-                  {o.queuedAsk ? copy('operate.ask.queued', { n: o.queuedAsk.effectiveFromCycle ?? (cycle != null ? cycle + 1 : '—'), ask: o.queuedAsk.askMicroPerUnit }) : copy('operate.ask.none')}
+                <strong title={o.serviceId} data-copy="_data">{label(o.serviceId)}</strong>{' '}
+                {o.connector === 'up'
+                  ? <span className="mkt-yours" data-copy="operate.connector.up">{copy('operate.connector.up')}</span>
+                  : <span className="mkt-chipblock" data-copy="operate.connector.down">{copy('operate.connector.down')}</span>}
+                <div className="mkt-muted mkt-xs" data-copy={changed ? 'operate.ask.queued' : 'operate.ask.none'}>
+                  {changed ? copy('operate.ask.queued', { price: fmtMicro(o.nextPrice) }) : copy('operate.ask.none')}
                 </div>
-                {askErr?.id === o.id ? <ErrorCard err={askErr.err} onRetry={() => submitAsk(o.id, o.ask?.unit ?? 'tokens')}><span className="mkt-muted mkt-xs" data-copy="operate.ask.error">{copy('operate.ask.error')}</span></ErrorCard> : null}
+                {priceErr?.id === o.serviceId ? <ErrorCard err={priceErr.err} onRetry={() => setPrice(o.serviceId)}><span className="mkt-muted mkt-xs" data-copy="operate.ask.error">{copy('operate.ask.error')}</span></ErrorCard> : null}
               </span>
               <span className="mkt-mono mkt-sec mkt-askedit">
-                <span data-copy="catalog.price.micro">{o.ask ? copy('catalog.price.micro', { micro: o.ask.askMicroPerUnit, unit: o.ask.unit === 'query-units' ? 'unit' : 'tok' }) : '—'}</span>
+                <span data-copy="catalog.price.micro">{copy('catalog.price.micro', { micro: fmtMicro(o.price), unit: 'tok' })}</span>
                 {' → '}
-                <input className="mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.id}`} value={edits[o.id] ?? ''} placeholder={o.queuedAsk ? String(o.queuedAsk.askMicroPerUnit) : '…'}
-                  aria-label={copy('operate.ask.cta')} onChange={(e) => setEdits((x) => ({ ...x, [o.id]: e.target.value }))} />
-                <button type="button" className="mkt-btn" data-testid={`mkt-ask-queue-${o.id}`} data-copy="operate.ask.cta" onClick={() => submitAsk(o.id, o.ask?.unit ?? 'tokens')}
-                  disabled={!!disabledKey || busy === o.id} title={disabledKey ? copy(disabledKey) : undefined}>{busy === o.id ? copy('state.working') : copy('operate.ask.cta')}</button>
+                <input className="mkt-input mkt-input--short" inputMode="decimal" data-testid={`mkt-ask-input-${o.serviceId}`} value={edits[o.serviceId] ?? ''} placeholder={fmtMicro(o.nextPrice)}
+                  aria-label={copy('operate.ask.cta')} onChange={(e) => setEdits((x) => ({ ...x, [o.serviceId]: e.target.value }))} />
+                <button type="button" className="mkt-btn" data-testid={`mkt-ask-queue-${o.serviceId}`} data-copy="operate.ask.cta" onClick={() => setPrice(o.serviceId)}
+                  disabled={!wei || busy === o.serviceId} title={!wei ? copy('operate.ask.invalid') : undefined}>{busy === o.serviceId ? copy('state.working') : copy('operate.ask.cta')}</button>
               </span>
             </div>
           );
@@ -101,44 +104,67 @@ export function OperateView(): React.ReactElement {
         <p className="mkt-muted mkt-xs" data-copy="operate.ask.frozen.note">{copy('operate.ask.frozen.note')}</p>
       </div>
 
-      <div className="mkt-card">
-        <h2 data-copy="op.subscribers">{copy('op.subscribers', { n: st.subscribers.length })}</h2>
-        {st.subscribers.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.subscribers.none">{copy('operate.subscribers.none')}</div>}
-        {st.subscribers.map((s) => (
-          <div key={s.paymentIdentity} className="mkt-mhead mkt-prow">
-            <span className="mkt-mono" title={s.buyer} data-copy="_data">{shortAddr(s.buyer)}</span>
-            <span className="mkt-sec mkt-sm" data-copy="operate.subscriber.line">{copy('operate.subscriber.line', { offerings: s.offerings.join(' · '), t: fmtClock(s.expiresAt) })}</span>
-          </div>
-        ))}
-        {st.checkpointChains.map((c) => (
-          <div key={c.pair} className="mkt-muted mkt-xs" data-copy={c.freshness.agree ? 'stmt.freshness' : 'operate.checkpoints.none'}>
-            {copy('operate.checkpoints', { n: c.length })} · {c.freshness.agree
-              ? copy('stmt.freshness', { t: `${Math.max(1, Math.round((c.freshness.checkedAgoMs ?? 0) / 60_000))} min` })
-              : copy('operate.checkpoints.none')}
-          </div>
-        ))}
-        {st.statements.length > 0 && (
-          <div className="mkt-xs mkt-sec" data-copy="op.stmt.queue">{copy('op.stmt.queue', { n: st.statements.filter((x) => x.resolution !== 'agreed').length })}</div>
-        )}
+      <div className="mkt-card" data-testid="mkt-ledger">
+        <h2 data-copy="operate.epoch.title">{copy('operate.epoch.title')}</h2>
+        <div className="mkt-muted mkt-xs" data-copy="operate.gate">
+          {copy('operate.gate', {
+            profile: g.profile ? '✓' : '✗', table: g.shardingTable ? '✓' : '✗', stake: fmtTrac(g.stake), min: fmtTrac(g.minimumStake),
+            proved: copy(s.scoredThisEpoch ? 'operate.proved' : 'operate.proved.not'),
+          })}
+        </div>
+        <div className="mkt-sec mkt-sm" data-testid="mkt-ledger-counts" data-copy="operate.ledger">{copy('operate.ledger', { served: l.served, sent: l.sent, landed: l.landed, refused: l.refused, missed: l.missed })}</div>
+        <div className="mkt-muted mkt-xs" data-copy="operate.ledger.value">{copy('operate.ledger.value', { held: fmtTrac(l.heldValue), landed: fmtTrac(l.landedValue), counted: fmtTrac(l.counted) })}</div>
+        <div className="mkt-muted mkt-xs" data-copy="operate.thisepoch">{copy('operate.thisepoch', { served: fmtTrac(s.thisEpoch.servedValue), weighted: fmtTrac(s.thisEpoch.weightedValue), pool: fmtTrac(s.thisEpoch.poolSoFar) })}</div>
+        <div className="mkt-mhead">
+          <span className="mkt-sec mkt-sm" data-copy="operate.nextlanding">{copy('operate.nextlanding', { t: relAt(s.nextLandingAt) })}</span>
+          <button type="button" className="mkt-btn" data-testid="mkt-land-now" data-copy="operate.land.cta" onClick={landNow} disabled={busy === 'land'}>{busy === 'land' ? copy('state.working') : copy('operate.land.cta')}</button>
+        </div>
+        {line && <div className="mkt-muted mkt-xs" data-testid="mkt-land-result" data-copy={line.key}>{copy(line.key, line.vars)}</div>}
+        {landErr ? <ErrorCard err={landErr} onRetry={landNow} /> : null}
+      </div>
+
+      <div className="mkt-card" data-testid="mkt-batches">
+        <h2 data-copy="operate.batches">{copy('operate.batches')}</h2>
+        {s.batches.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.batches.none">{copy('operate.batches.none')}</div>}
+        <table className="mkt-act">
+          <tbody>
+            {s.batches.slice(0, 10).map((b) => (
+              <tr key={b.tx}>
+                <td className="mkt-mono" data-copy="_data">{fmtHex(b.tx)}</td>
+                <td className="mkt-muted" data-copy="_data">{fmtAt(b.at)}</td>
+                <td data-copy="operate.batch.items">{copy('operate.batch.items', { n: b.items })}</td>
+                <td data-copy="operate.batch.value">{copy('operate.batch.value', { value: fmtTrac(b.value), counted: fmtTrac(b.counted) })}</td>
+                <td className="mkt-muted" data-copy="operate.batch.gas">{copy('operate.batch.gas', { n: b.gasUsed.toLocaleString('en-US') })}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <h3 data-copy="operate.ended">{copy('operate.ended')}</h3>
+        {s.ended.length === 0 && <div className="mkt-muted mkt-xs" data-copy="operate.ended.none">{copy('operate.ended.none')}</div>}
+        <table className="mkt-act" data-testid="mkt-ended">
+          <tbody>
+            {s.ended.map((e) => (
+              <tr key={e.epoch}>
+                <td className="mkt-mono" data-copy="store.epoch">{copy('store.epoch', { n: e.epoch })}</td>
+                <td data-copy="operate.ended.gross">{copy('operate.ended.gross', { trac: fmtTrac(e.gross) })}</td>
+                <td className="mkt-muted" data-copy="operate.ended.pool">{copy('operate.ended.pool', { trac: fmtTrac(e.pool) })}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       <div className="mkt-card">
         <h2 data-copy="op.wallets">{copy('op.wallets')}</h2>
-        <div className="mkt-wallet rev" data-testid="mkt-revenue-wallet">
-          <strong data-copy="op.revenue.wallet">{copy('op.revenue.wallet')}</strong><br />
-          <span className="mkt-mono" data-copy="_data">{st.revenueWallet ?? copy('operate.revenue.none')}</span><br />
-          <span className="mkt-muted mkt-xs" data-copy="op.revenue.note">{copy('op.revenue.note')}</span>
-        </div>
-        <div className="mkt-wallet" data-testid="mkt-ops-wallet">
-          <strong data-copy="operate.ops.wallet">{copy('operate.ops.wallet')}</strong><br />
-          <span className="mkt-mono" data-copy="_data">{opsWallet ?? '—'}</span><br />
-          <span className="mkt-muted mkt-xs" data-copy="operate.ops.wallet.note">{copy('operate.ops.wallet.note')}</span>
-        </div>
-        {exportErr ? <ErrorCard err={exportErr} onRetry={exportCalibration}><span className="mkt-muted mkt-xs" data-copy="operate.export.error">{copy('operate.export.error')}</span></ErrorCard> : null}
-        <div className="mkt-mhead">
-          <span className="mkt-muted mkt-xs" data-copy="operate.archive">{copy('operate.archive')}</span>
-          <button type="button" className="mkt-btn" data-testid="mkt-export" data-copy="op.calibration" onClick={exportCalibration} disabled={busy === 'export'}>{busy === 'export' ? copy('state.working') : copy('op.calibration')}</button>
-        </div>
+        {s.wallets.map((w) => (
+          <div key={w.address} className="mkt-wallet" data-testid="mkt-ops-wallet">
+            <strong data-copy="operate.ops.wallet">{copy('operate.ops.wallet')}</strong><br />
+            <span className="mkt-mono" data-copy="_data">{w.address}</span><br />
+            <span className="mkt-sec mkt-xs" data-copy="operate.ops.wallet.eth">{copy('operate.ops.wallet.eth', { eth: w.ethEther })}</span><br />
+            <span className="mkt-muted mkt-xs" data-copy="operate.ops.wallet.note">{copy('operate.ops.wallet.note')}</span>
+          </div>
+        ))}
+        <div className="mkt-muted mkt-xs" data-copy="operate.identity">{copy('operate.identity', { id: s.identityId })}</div>
       </div>
     </div>
   );
