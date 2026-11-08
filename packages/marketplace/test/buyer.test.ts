@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * The buyer against MockChainAdapter's marketplace: fundings from the wallet
- * and from an account, top-ups, the checks before sending, and the job that
- * funds, prefunds and tops up from what the chain shows.
+ * and from an account, top-ups and their dry runs, the checks before sending,
+ * and the job that funds, prefunds and tops up from what the chain shows.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -202,7 +202,12 @@ describe('topping up', () => {
     const { epoch } = await chain.getEpochTimes();
     const { subscriptionId } = await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [service(A, 100n * TRAC)] });
     // The caller's cap for A differs; the stored one is kept.
-    const topUp = await buyer.topUp(subscriptionId, [{ ...service(A, 10n * TRAC), maxPricePerUnit: 1n }, service(B, 20n * TRAC, 2)]);
+    const additions = [{ ...service(A, 10n * TRAC), maxPricePerUnit: 1n }, service(B, 20n * TRAC, 2)];
+    // Its dry run raises no allowance: that would be a send.
+    const approve = vi.spyOn(chain, 'approveServiceSubscriptionsWallet');
+    expect(await buyer.dryRunTopUp(subscriptionId, additions)).toEqual({ epoch, source: { kind: 'wallet' }, value: 30n * TRAC, cost: 30n * TRAC, discountBps: 0 });
+    expect(approve).not.toHaveBeenCalled();
+    const topUp = await buyer.topUp(subscriptionId, additions);
     expect(topUp).toMatchObject({ value: 30n * TRAC, cost: 30n * TRAC });
     expect(await chain.getBudgets(subscriptionId)).toEqual([service(A, 110n * TRAC), service(B, 20n * TRAC, 2)]);
     expect(await refusal(buyer.topUp(subscriptionIdOf(SIGNER.address, epoch + 1), [service(A, TRAC)])))
@@ -221,6 +226,38 @@ describe('topping up', () => {
       .toEqual({ code: 'LimitExceeded', args: ['maxCostPerEpoch', String(100n * TRAC), String(105n * TRAC)] });
     await buyer.topUp(subscriptionId, [service(A, 40n * TRAC)]);
     expect((await chain.getSubscription(subscriptionId))!.cost).toBe(98n * TRAC);
+  });
+
+  it('dry-runs a top-up from an account at its discount, and one over the window allowance, sending nothing', async () => {
+    const accountId = await grantedAccount(100_000n * TRAC);
+    const buyer = buyerWith();
+    const { epoch } = await chain.getEpochTimes();
+    const { subscriptionId } = await buyer.fund({ epoch, source: { kind: 'account', accountId }, services: [service(A, 100n * TRAC)] });
+    const sends = (['topUpFromAccount', 'topUpFromWallet', 'fundFromAccount', 'fundFromWallet', 'approveServiceSubscriptionsWallet'] as const)
+      .map((name) => vi.spyOn(chain, name));
+    const state = async () => ({
+      subscription: await chain.getSubscription(subscriptionId),
+      budgets: await chain.getBudgets(subscriptionId),
+      window: await chain.currentWindowAllowance(accountId),
+    });
+    const before = await state();
+
+    // The addition's own value and cost: 30 TRAC at a 30% discount.
+    expect(await buyer.dryRunTopUp(subscriptionId, [service(A, 10n * TRAC), service(B, 20n * TRAC)]))
+      .toEqual({ epoch, source: { kind: 'account', accountId }, value: 30n * TRAC, cost: 21n * TRAC, discountBps: 3000 });
+    // 20,000 TRAC at a 30% discount is 14,000 TRAC, above what the window has left.
+    const left = before.window.baseRemaining + before.window.topUpBuffer;
+    expect(await buyer.dryRunTopUp(subscriptionId, [service(A, 20_000n * TRAC)])).toMatchObject({
+      cost: 14_000n * TRAC,
+      refusal: { code: 'InsufficientAllowance', args: [String(accountId), String(epoch), String(14_000n * TRAC), String(left)] },
+    });
+    // A subscription not found, or another buyer's, is refused as its top-up is.
+    expect((await refusal(buyer.dryRunTopUp(subscriptionIdOf(SIGNER.address, epoch + 1), [service(A, TRAC)])))?.code).toBe('SubscriptionNotFound');
+    const other = buyerWith({ buyerWallet: ethers.getAddress(`0x${'0c'.repeat(20)}`) });
+    expect((await refusal(other.dryRunTopUp(subscriptionId, [service(A, TRAC)])))?.code).toBe('NotSubscriptionBuyer');
+
+    for (const send of sends) expect(send).not.toHaveBeenCalled();
+    expect(await state()).toEqual(before);
   });
 });
 

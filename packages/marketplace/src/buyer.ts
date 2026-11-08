@@ -152,30 +152,26 @@ export class Buyer {
   }
 
   /**
+   * A dry run of a top-up: what adding `services` would cost, and the refusal
+   * it would meet, without sending anything. A subscription that is not found
+   * or not the buyer's is refused, as the top-up is.
+   */
+  async dryRunTopUp(subscriptionId: string, services: PlannedService[]): Promise<FundingCheck> {
+    return (await this.topUpCheck(subscriptionId, services)).check;
+  }
+
+  /**
    * Add `services` to the buyer's subscription: value to the budgets it has,
    * and the services it lacks as new budgets. A service it has keeps its class
    * and price cap.
    */
   async topUp(subscriptionId: string, services: PlannedService[]): Promise<SubscriptionTopUp> {
     return this.exclusive(async () => {
-      const times = await this.chain.getEpochTimes();
-      const subscription = await this.chain.getSubscription(subscriptionId);
-      if (!subscription) throw new MarketplaceRefusal('SubscriptionNotFound', [subscriptionId]);
-      if (ethers.getAddress(subscription.buyer) !== this.buyerWallet) {
-        throw new MarketplaceRefusal('NotSubscriptionBuyer', [subscriptionId, this.buyerWallet]);
-      }
-      const stored = await this.chain.getBudgets(subscriptionId);
-      const additions = budgetsOf(services).map((b) => {
-        const same = stored.find((s) => s.serviceId.toLowerCase() === b.serviceId.toLowerCase());
-        return same ? { ...b, serviceClass: same.serviceClass, maxPricePerUnit: same.maxPricePerUnit } : b;
-      });
-      const source: FundingSource = subscription.accountId === 0n ? { kind: 'wallet' } : { kind: 'account', accountId: subscription.accountId };
-      const newBudgets = additions.filter((b) => !stored.some((s) => s.serviceId.toLowerCase() === b.serviceId.toLowerCase())).length;
-      const check = await this.check({ epoch: subscription.epoch, source, services: additions }, times, { subscription, budgets: stored.length + newBudgets });
+      const { subscription, stored, additions, check } = await this.topUpCheck(subscriptionId, services);
       if (check.refusal) throw new MarketplaceRefusal(check.refusal.code, check.refusal.args);
       const planDigest = planDigestOf(subscription.epoch, this.buyerWallet, merged(stored, additions));
       const from = { from: this.buyerWallet };
-      if (source.kind === 'wallet') {
+      if (check.source.kind === 'wallet') {
         await this.ensureAllowance(check.value, subscription.epoch);
         return this.chain.topUpFromWallet(subscriptionId, additions, planDigest, from);
       }
@@ -259,6 +255,25 @@ export class Buyer {
       ? valueOf(plan.services) * BigInt(plan.renewUntilEpoch - epoch + 1)
       : 0n;
     await this.chain.approveServiceSubscriptionsWallet(planned > value ? planned : value, { from: this.buyerWallet });
+  }
+
+  /** A top-up's subscription, the budgets it has, what `services` add to them, and the checks of the addition. */
+  private async topUpCheck(subscriptionId: string, services: PlannedService[]) {
+    const times = await this.chain.getEpochTimes();
+    const subscription = await this.chain.getSubscription(subscriptionId);
+    if (!subscription) throw new MarketplaceRefusal('SubscriptionNotFound', [subscriptionId]);
+    if (ethers.getAddress(subscription.buyer) !== this.buyerWallet) {
+      throw new MarketplaceRefusal('NotSubscriptionBuyer', [subscriptionId, this.buyerWallet]);
+    }
+    const stored = await this.chain.getBudgets(subscriptionId);
+    const additions = budgetsOf(services).map((b) => {
+      const same = stored.find((s) => s.serviceId.toLowerCase() === b.serviceId.toLowerCase());
+      return same ? { ...b, serviceClass: same.serviceClass, maxPricePerUnit: same.maxPricePerUnit } : b;
+    });
+    const source: FundingSource = subscription.accountId === 0n ? { kind: 'wallet' } : { kind: 'account', accountId: subscription.accountId };
+    const newBudgets = additions.filter((b) => !stored.some((s) => s.serviceId.toLowerCase() === b.serviceId.toLowerCase())).length;
+    const check = await this.check({ epoch: subscription.epoch, source, services: additions }, times, { subscription, budgets: stored.length + newBudgets });
+    return { subscription, stored, additions, check };
   }
 
   /** The checks of the module comment, against the chain as it is now. */

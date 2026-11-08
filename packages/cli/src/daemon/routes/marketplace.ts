@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The marketplace's routes (OT-RFC-27), under /api/marketplace, beside
-// /api/pca: the buyer's subscriptions, a dry run, fundings and top-ups, the
-// standing plan, the buyer wallet's funding, the accounts it can use, an
-// owner's actions on an account the node owns, the gateway's access keys, and
-// the reconciliation of what it holds against what landed; and the seller's,
-// under /seller: Operate, landing now, and the next epoch's prices.
+// /api/pca: the buyer's subscriptions, fundings and top-ups and a dry run of
+// each, the standing plan, the buyer wallet's funding, the accounts it can
+// use, an owner's actions on an account the node owns, the gateway's access
+// keys, and the reconciliation of what it holds against what landed; and the
+// seller's, under /seller: Operate, landing now, and the next epoch's prices.
 // `packages/marketplace` builds each answer; this module reads the request and
 // maps refusals.
 //
@@ -187,6 +187,10 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   if (method === 'POST' && route === '/subscriptions') {
     const funded = await buyer.fund(await fundingRequestOf(buyer, req));
     return { ...txView(funded), subscription: await subscriptionAfter(buyer, funded.subscriptionId, ctx) };
+  }
+  const topUpDryRun = /^\/subscriptions\/(0x[0-9a-fA-F]{64})\/top-up\/preview$/.exec(route);
+  if (method === 'POST' && topUpDryRun) {
+    return dryRunView(buyer.chain, await buyer.dryRunTopUp(topUpDryRun[1]!.toLowerCase(), parseServices((await bodyOf(req)).services)));
   }
   const topUp = /^\/subscriptions\/(0x[0-9a-fA-F]{64})\/top-up$/.exec(route);
   if (method === 'POST' && topUp) {

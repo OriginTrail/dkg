@@ -7,7 +7,7 @@
  * the contracts together are tested on Hardhat in
  * marketplace-buyer.evm.test.ts.
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -339,6 +339,36 @@ describe('the marketplace routes', () => {
       .toMatchObject({ status: 503, body: { code: 'QueryInferencePaused', retryable: true } });
   });
 
+  it('dry-run a top-up for the node admin: its cost at the account discount and the refusal it would meet, sending nothing', async () => {
+    const { accountId } = await mock.createPublishingConvictionAccount(120_000n * TRAC);
+    await chain.setServiceSpending(accountId, true);
+    const { epoch, now } = await chain.getEpochTimes();
+    await chain.addBuyer({ accountId, buyer: SIGNER.address, maxCostPerEpoch: 100_000n * TRAC, expiresAt: now + 90 * 86_400, nonce: await chain.grantNonce(accountId) }, '0x', '0x');
+    const funded = await api('POST', '/api/marketplace/subscriptions', { epoch: 'current', source: { kind: 'account', accountId: String(accountId) }, services: plan.services });
+    const subscriptionId = funded.body.subscription.subscriptionId;
+    const sends = (['topUpFromAccount', 'topUpFromWallet', 'approveServiceSubscriptionsWallet'] as const).map((name) => vi.spyOn(chain, name));
+    const preview = `/api/marketplace/subscriptions/${subscriptionId}/top-up/preview`;
+
+    expect(await api('POST', preview, { services: plan.services })).toMatchObject({
+      status: 200,
+      body: { epoch, source: { kind: 'account', accountId: String(accountId), discountBps: 3000 }, value: String(10n * TRAC), cost: String(7n * TRAC), costTrac: '7.0', discountBps: 3000 },
+    });
+    const window = await chain.currentWindowAllowance(accountId);
+    const over = await api('POST', preview, { services: [{ ...plan.services[0], value: String(20_000n * TRAC) }] });
+    expect(over).toMatchObject({ status: 200, body: { cost: String(14_000n * TRAC) } });
+    expect(over.body.refusal).toEqual({
+      code: 'InsufficientAllowance', args: [String(accountId), String(epoch), String(14_000n * TRAC), String(window.baseRemaining + window.topUpBuffer)],
+    });
+    const agent = requestAuthentication({ kind: 'agent', agentAddress: OTHER });
+    expect(await api('POST', preview, { services: plan.services }, agent)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    expect(await api('POST', preview, { services: [] })).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
+    expect(await api('POST', `/api/marketplace/subscriptions/0x${'ab'.repeat(32)}/top-up/preview`, { services: plan.services }))
+      .toMatchObject({ status: 404, body: { code: 'SubscriptionNotFound' } });
+
+    for (const send of sends) expect(send).not.toHaveBeenCalled();
+    expect((await api('GET', '/api/marketplace/subscriptions?epoch=current')).body.subscriptions[0]).toMatchObject({ value: String(10n * TRAC), cost: String(7n * TRAC) });
+  });
+
   it('answer a funding that was sent as sent, even while the read of its subscription lags', async () => {
     vi.spyOn(chain, 'getSubscription').mockResolvedValueOnce(null);
     const sent = await api('POST', '/api/marketplace/subscriptions', { epoch: 'next', source: { kind: 'wallet' }, services: plan.services });
@@ -436,6 +466,10 @@ describe('dkg marketplace', () => {
     await run('seller');
     await run('seller', 'land');
     await run('seller', 'price', A, '25');
+    const additions = join(dir, 'additions.json');
+    await writeFile(additions, JSON.stringify({ services: plan.services }));
+    await run('top-up', `0x${'ab'.repeat(32)}`, additions, '--dry-run');
+    await run('top-up', `0x${'ab'.repeat(32)}`, additions);
     expect(calls).toEqual([
       ['GET', '/subscriptions?epoch=next', undefined],
       ['GET', '/plan', undefined],
@@ -456,6 +490,8 @@ describe('dkg marketplace', () => {
       ['GET', '/seller', undefined],
       ['POST', '/seller/land', undefined],
       ['PUT', `/seller/offerings/${A}/price`, { price: '25' }],
+      ['POST', `/subscriptions/0x${'ab'.repeat(32)}/top-up/preview`, { services: plan.services }],
+      ['POST', `/subscriptions/0x${'ab'.repeat(32)}/top-up`, { services: plan.services }],
     ]);
     expect(print).toHaveBeenCalledWith(JSON.stringify({ ok: true }, null, 2));
   });

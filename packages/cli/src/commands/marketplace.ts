@@ -65,7 +65,9 @@ export function registerMarketplaceCommand(program: Command): void {
   cmd
     .command('top-up <subscriptionId> <file>')
     .description('Add value or services to a subscription; the file is { services }')
-    .action((subscriptionId: string, file: string) => call('POST', `/subscriptions/${id(subscriptionId)}/top-up`, () => jsonFile(file)));
+    .option('--dry-run', 'only the cost and the refusal it would meet; nothing is sent')
+    .action((subscriptionId: string, file: string, opts: { dryRun?: boolean }) =>
+      call('POST', `/subscriptions/${id(subscriptionId)}/top-up${opts.dryRun ? '/preview' : ''}`, () => jsonFile(file)));
 
   const plan = cmd.command('plan').description('The standing plan and its next renewal');
   plan.command('show', { isDefault: true }).description('Show the standing plan').action(() => call('GET', '/plan'));
