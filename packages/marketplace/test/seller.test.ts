@@ -219,6 +219,10 @@ describe('a call', () => {
     const r = await requestFor(id);
     const refused = async (request: ServiceRequest, key?: ethers.Wallet) => codeOf(await seller.serve(wire(request, key)));
     expect(codeOf(await seller.serve({ request: requestToWire(r), signature: '0x12', body: BODY }))).toBe('BadRequest');
+    // Only the 64-byte form a batch item carries: the same signature in 65 bytes is refused.
+    const full = SESSION.signingKey.sign(hashServiceRequest(domain, r)).serialized;
+    expect(ethers.getBytes(full)).toHaveLength(65);
+    expect(await seller.serve({ request: requestToWire(r), signature: full, body: BODY })).toMatchObject({ ok: false, code: 'BadRequest', message: expect.stringMatching(/64 bytes/) });
     expect(codeOf(await seller.serve(wire(r, SESSION, { messages: [] })))).toBe('BadRequest');
     expect(await refused({ ...r, serviceId: `0x${'99'.repeat(32)}` })).toBe('UnknownService');
     expect(await refused({ ...r, pricePerUnit: 11n })).toBe('WrongPrice');

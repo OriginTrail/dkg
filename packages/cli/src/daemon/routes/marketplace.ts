@@ -179,8 +179,11 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   if (method === 'GET' && route === '/accounts') return accountsView(buyer);
   if (method === 'GET' && route === '/accounts/contracts') return contractsView(buyer);
 
-  // GET, POST /keys and POST /keys/{keyId}/revoke: the gateway's access keys.
-  if (route === '/keys' && method === 'GET') return { keys: await gatewayOf(ctx).keys.list() };
+  // GET, POST /keys and POST /keys/{keyId}/revoke: the gateway's access keys, the node admin's alone.
+  if (route === '/keys' && method === 'GET') {
+    if (!canAdministerNode(ctx.actor.authentication)) throw new MarketplaceRefusal('NodeAdminRequired');
+    return { keys: await gatewayOf(ctx).keys.list() };
+  }
   if (route === '/keys' && method === 'POST') {
     const { secret, key } = await gatewayOf(ctx).keys.make(scopesOf(await bodyOf(req)), Math.floor(Date.now() / 1000));
     return { ...key, secret };

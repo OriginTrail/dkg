@@ -120,7 +120,9 @@ describe('the gateway routes', () => {
     const made = await api('POST', '/api/marketplace/keys', { label: 'test-agent', budget: '1000', rps: 2 });
     expect(made).toMatchObject({ status: 200, body: { label: 'test-agent', budget: '1000', rps: 2, revoked: false } });
     expect(made.body.secret).toMatch(/^dkgmk_[0-9a-f]{48}$/);
-    const listed = await api('GET', '/api/marketplace/keys', undefined, agentToken);
+    // Their labels and budgets are the admin's business.
+    expect(await api('GET', '/api/marketplace/keys', undefined, agentToken)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    const listed = await api('GET', '/api/marketplace/keys');
     expect(listed.body.keys).toHaveLength(1);
     expect(JSON.stringify(listed.body)).not.toContain(made.body.secret);
     expect(await api('POST', `/api/marketplace/keys/${made.body.keyId}/revoke`, {}, agentToken)).toMatchObject({ status: 403 });
