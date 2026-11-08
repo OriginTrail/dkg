@@ -10,7 +10,12 @@
  *   - crafted requests from the buyer node: an exact repeat
  *     (the stored receipt), the wrong seller, an expired request, a price over
  *     the budget's cap, an unknown subscription, a replayed nonce, and a call
- *     within the stop-serving window.
+ *     within the stop-serving window;
+ *   - the buyer's gateway, started as the daemon starts it, through the
+ *     daemon's routes with an access key: a chat completion from the routed
+ *     seller, an over-reporting receipt from a rogue handler on the seller node
+ *     that takes the seller out of routing, and 503 with Retry-After at the
+ *     epoch's end.
  */
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -30,6 +35,8 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   PEER_LIMITS,
+  type Buyer,
+  type Gateway,
   decodeMessage,
   encodeMessage,
   offersFromBindings,
@@ -46,6 +53,11 @@ import {
 import { createProvider, getSharedContext, revertSnapshot, takeSnapshot } from '../../chain/test/evm-test-context.js';
 import { HARDHAT_KEYS, makeAdapterConfig, mintTokens } from '../../chain/test/hardhat-harness.js';
 import { startMarketplaceSeller, type MarketplaceSellerRuntime } from '../src/daemon/marketplace-seller.js';
+import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
+import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
+import { MARKETPLACE_GATEWAY_ROUTES } from '../src/daemon/routes/marketplace-gateway-paths.js';
+import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const CONTEXT_GRAPH = 'marketplace-serving-e2e';
 const MODEL_A = 'urn:test:model:serving-a';
@@ -68,6 +80,29 @@ let domain: MarketplaceDomain;
 let sellerIdentity: bigint;
 let subscriptionId: string;
 const session = Wallet.createRandom();
+let startSeller: () => Promise<MarketplaceSellerRuntime>;
+let gatewayBuyer: Buyer;
+let gateway: Gateway;
+const CHAT = { model: MODEL_A, messages: [{ role: 'user', content: 'synthetic question' }], max_tokens: 16 };
+const GATEWAY_CHAT = MARKETPLACE_GATEWAY_ROUTES.chat.path;
+
+/** One request through the daemon's marketplace routes: as the node admin, or with `token` as the bearer. */
+async function route(method: string, path: string, body?: unknown, token?: string): Promise<{ status: number; body: any; headers?: Record<string, string> }> {
+  const res: any = { statusCode: 0, body: '' };
+  res.writeHead = (status: number, headers?: Record<string, string>) => { res.statusCode = status; res.headers = headers; };
+  res.setHeader = () => undefined;
+  res.end = (text: string) => { res.body = text; res.writableEnded = true; };
+  const req: any = { method, url: path };
+  if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(JSON.stringify(body));
+  const url = new URL(`http://127.0.0.1${path}`);
+  const authentication = token === undefined
+    ? requestAuthentication({ kind: 'nodeOperator' })
+    : requestAuthentication({ kind: 'anonymous', mode: 'public', presentedToken: token });
+  await handleMarketplaceRoutes({
+    req, res, url, path: url.pathname, marketplace: gatewayBuyer, marketplaceGateway: gateway, actor: { authentication },
+  } as unknown as RequestContext);
+  return { status: res.statusCode, body: JSON.parse(res.body), headers: res.headers };
+}
 
 /** Send a crafted `serve`; `attempt` makes a new message of the same request, as a retry after a lost answer does. */
 async function serve(request: ServiceRequest, key: ethers.Wallet | ethers.HDNodeWallet = session, attempt = 0): Promise<ServeResponse> {
@@ -114,7 +149,7 @@ describe('serving between two nodes on Hardhat', () => {
     });
     buyerAgent = await DKGAgent.create({
       name: 'MarketplaceBuyer', dataDir: buyerDir, listenPort: 0, nodeRole: 'edge',
-      chainAdapter: new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.EXTRA1)),
+      chainAdapter: new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.EXTRA1, [HARDHAT_KEYS.EXTRA2])),
       rfc64CatalogActivation: { enabled: false },
     });
     await sellerAgent.start();
@@ -124,23 +159,26 @@ describe('serving between two nodes on Hardhat', () => {
     buyerAgent.subscribeToContextGraph(CONTEXT_GRAPH);
     await sleep(2_000);
 
-    const runtime = await startMarketplaceSeller({
-      config: {
-        marketplace: {
-          contextGraphId: CONTEXT_GRAPH,
-          seller: {
-            enabled: true,
-            services: [MODEL_A, MODEL_B].map((model) => ({ model, pricePerUnit: String(PRICE), capacity: 2, backend: { kind: 'llamacpp', baseUrl, model: 'stub' } })),
+    startSeller = async () => {
+      const runtime = (await startMarketplaceSeller({
+        config: {
+          marketplace: {
+            contextGraphId: CONTEXT_GRAPH,
+            seller: {
+              enabled: true,
+              services: [MODEL_A, MODEL_B].map((model) => ({ model, pricePerUnit: String(PRICE), capacity: 2, backend: { kind: 'llamacpp', baseUrl, model: 'stub' } })),
+            },
           },
         },
-      },
-      agent: sellerAgent,
-      signer: new Wallet(HARDHAT_KEYS.CORE_OP).address,
-      dataDir: sellerDir,
-      log: () => undefined,
-    });
-    selling = runtime!;
-    await selling.seller.tick();
+        agent: sellerAgent,
+        signer: new Wallet(HARDHAT_KEYS.CORE_OP).address,
+        dataDir: sellerDir,
+        log: () => undefined,
+      }))!;
+      await runtime.seller.tick();
+      return runtime;
+    };
+    selling = await startSeller();
     sellerIdentity = selling.seller.gate.identityId;
 
     // The buyer funds this epoch with its own session key: A under a cap the price meets, B under one it does not.
@@ -155,9 +193,23 @@ describe('serving between two nodes on Hardhat', () => {
       { serviceId: B, serviceClass: SERVICE_CLASS_INFERENCE, value: 10n ** 15n, maxPricePerUnit: 1n },
     ].sort((x, y) => (BigInt(x.serviceId) < BigInt(y.serviceId) ? -1 : 1));
     ({ subscriptionId } = await buyerChain.fundFromWallet({ epoch, sessionKey: session.address, planDigest: ethers.ZeroHash, budgets }));
+
+    // The gateway's buyer is the node's second wallet, which funds this epoch through the buyer, with a session key it keeps.
+    const second = new Wallet(HARDHAT_KEYS.EXTRA2).address;
+    await mintTokens(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, second, 10n ** 21n);
+    const config = { marketplace: { enabled: true, buyerWallet: second, tickSeconds: 3_600, contextGraphId: CONTEXT_GRAPH } };
+    gatewayBuyer = startMarketplaceBuyer({
+      config, agent: buyerAgent, wallets: [buyer, second], dataDir: buyerDir, dashDb: { insertNotification: () => undefined }, log: () => undefined,
+    })!;
+    await gatewayBuyer.fund({ epoch, source: { kind: 'wallet' }, services: [{ serviceId: A, serviceClass: SERVICE_CLASS_INFERENCE, value: 10n ** 15n, maxPricePerUnit: 10n ** 12n }] });
+    gateway = await startMarketplaceGateway({
+      config, agent: buyerAgent, buyer: gatewayBuyer, dataDir: buyerDir,
+      peers: { peerOf: async (id) => (id === sellerIdentity ? sellerAgent.peerId : null) },
+    });
   }, 180_000);
 
   afterAll(async () => {
+    await gatewayBuyer?.stop();
     await selling?.stop();
     await buyerAgent?.stop().catch(() => undefined);
     await sellerAgent?.stop().catch(() => undefined);
@@ -212,6 +264,44 @@ describe('serving between two nodes on Hardhat', () => {
     expect(upstreamCalls).toBe(before);
   });
 
+  it('serves a chat completion through the buyer gateway, with an access key, from the routed seller', async () => {
+    const minted = await route('POST', '/api/marketplace/keys', { label: 'test-agent', budget: String(10n ** 12n) });
+    expect(minted.status).toBe(200);
+    expect(minted.body.secret).toMatch(/^dkgmk_/);
+    expect((await route('POST', GATEWAY_CHAT, CHAT, '')).status).toBe(401);
+    const models = await route('GET', MARKETPLACE_GATEWAY_ROUTES.models.path, undefined, minted.body.secret);
+    expect(models.body.data.map((m: { id: string }) => m.id).sort()).toEqual([MODEL_A]);
+
+    const answer = await route('POST', GATEWAY_CHAT, CHAT, minted.body.secret);
+    expect(answer.status).toBe(200);
+    expect(answer.body).toMatchObject({
+      object: 'chat.completion', model: MODEL_A, choices: [{ message: { role: 'assistant', content: 'synthetic answer' } }],
+      marketplace: { serviceId: A, seller: Number(sellerIdentity), units: 15, value: String(15n * PRICE) },
+    });
+    const keys = await route('GET', '/api/marketplace/keys');
+    expect(keys.body.keys[0]).toMatchObject({ label: 'test-agent', spent: String(15n * PRICE) });
+  });
+
+  it('takes a seller whose receipt over-reports out of routing, with a rogue handler on the seller node', async () => {
+    await selling.stop();
+    const honest = selling.seller;
+    const rogue = sellerAgent.registerMarketplaceHandlers({
+      quote: async (payload) => encodeMessage(await honest.quote(decodeMessage(payload))),
+      serve: async (payload) => {
+        const answer = await honest.serve(decodeMessage(payload));
+        return encodeMessage(answer.ok ? { ...answer, receipt: { ...answer.receipt, units: '1000000', valueWei: String(10n ** 6n * PRICE) } } : answer);
+      },
+    }, { quote: PEER_LIMITS.quoteRequestBytes, serve: PEER_LIMITS.serveRequestBytes });
+    try {
+      const bad = await route('POST', GATEWAY_CHAT, CHAT);
+      expect(bad).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'units_over_max' } });
+      expect((await route('POST', GATEWAY_CHAT, CHAT)).body.error.code).toBe('no_seller');
+    } finally {
+      rogue();
+      selling = await startSeller();
+    }
+  });
+
   it('refuses new calls within the stop-serving window, and quotes itself unavailable', async () => {
     const call = await request({ nonce: 20n });
     const { endsAt } = await buyerChain.getEpochTimes();
@@ -224,5 +314,10 @@ describe('serving between two nodes on Hardhat', () => {
       timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
     })) as QuoteResponse;
     expect(quoted.offers[0]!.available).toBe(false);
+    // The buyer's gateway answers 503 until the next epoch starts.
+    const gap = await route('POST', GATEWAY_CHAT, CHAT);
+    expect(gap).toMatchObject({ status: 503, body: { error: { code: 'epoch_ending' } } });
+    expect(Number(gap.headers?.['Retry-After'])).toBeGreaterThan(0);
+    expect(Number(gap.headers?.['Retry-After'])).toBeLessThanOrEqual(120);
   });
 });

@@ -6,10 +6,29 @@
  * started. A setting the node cannot use (a buyer wallet that is not one of
  * its operational wallets, say) leaves the marketplace off, logged, and the
  * boot goes on. A renewal that fails is logged and recorded as a notification.
+ * Beside it, the buyer's gateway: OpenAI-compatible calls, paid from the
+ * subscription and served by sellers over the messenger.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import { Buyer, BuyerStore, resolveMarketplaceConfig, type BuyerAlert, type MarketplaceConfig } from '@origintrail-official/dkg-marketplace';
+import {
+  AccessKeys,
+  Buyer,
+  BuyerStore,
+  Gateway,
+  NO_SELLER_PEERS,
+  PEER_LIMITS,
+  Router,
+  decodeMessage,
+  encodeMessage,
+  offersFromBindings,
+  offersQuery,
+  resolveMarketplaceConfig,
+  type BuyerAlert,
+  type MarketplaceConfig,
+  type QuoteResponse,
+  type SellerPeers,
+} from '@origintrail-official/dkg-marketplace';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
 
@@ -69,4 +88,56 @@ export function startMarketplaceBuyer(options: MarketplaceBuyerOptions): Buyer |
     `and prefunds ${resolved.prefundLeadSeconds / 60} min before an epoch ends`,
   );
   return buyer;
+}
+
+export interface MarketplaceGatewayOptions {
+  config: { marketplace?: unknown };
+  agent: Pick<DKGAgent, 'sendMarketplaceMessage'> & {
+    subscribeToContextGraph(contextGraphId: string): unknown;
+    query(sparql: string, opts: { contextGraphId: string; graphSuffix: '_shared_memory' }): Promise<{ bindings: unknown[] }>;
+  };
+  buyer: Buyer;
+  dataDir: string;
+  /** The peer for a seller's identity. The node has no lookup yet: by default it routes to no one. */
+  peers?: SellerPeers;
+}
+
+/**
+ * The buyer's gateway: its router reads offers from the Marketplace Context
+ * Graph, which the node subscribes to, and reaches sellers over the messenger.
+ */
+export async function startMarketplaceGateway(options: MarketplaceGatewayOptions): Promise<Gateway> {
+  const { agent, buyer, dataDir } = options;
+  const contextGraphId = (options.config.marketplace as MarketplaceConfig | undefined)?.contextGraphId;
+  if (contextGraphId) agent.subscribeToContextGraph(contextGraphId);
+  const offers = async (epochs: number[]) => contextGraphId
+    ? offersFromBindings((await agent.query(offersQuery(epochs), { contextGraphId, graphSuffix: '_shared_memory' })).bindings as Record<string, unknown>[])
+    : [];
+  const router = new Router({
+    chain: buyer.chain,
+    offers,
+    quote: async (peerId, services) => decodeMessage(await agent.sendMarketplaceMessage(peerId, 'quote', encodeMessage({ services }), {
+      timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
+    })) as QuoteResponse,
+    peers: options.peers ?? NO_SELLER_PEERS,
+    pinned: async (serviceId) => {
+      const pinned = (await buyer.store.readPlan())?.services.find((s) => s.serviceId === serviceId)?.pinnedSeller;
+      return pinned === undefined ? [] : [pinned];
+    },
+  });
+  const dir = join(dataDir, 'marketplace');
+  const gateway = new Gateway({
+    chain: buyer.chain,
+    buyerWallet: buyer.buyerWallet,
+    store: buyer.store,
+    router,
+    keys: new AccessKeys(dir),
+    send: (peerId, payload, messageId) => agent.sendMarketplaceMessage(peerId, 'serve', payload, {
+      timeoutMs: PEER_LIMITS.serveTimeoutMs, maxReadBytes: PEER_LIMITS.serveResponseBytes, messageId,
+    }),
+    dir,
+    modelOf: async (serviceId, epoch) => (await offers([epoch])).find((o) => o.serviceId === serviceId)?.model,
+  });
+  await gateway.load();
+  return gateway;
 }

@@ -1,0 +1,321 @@
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * The buyer's gateway, router and access keys against MockChainAdapter, with
+ * the real seller in the same process as the far end (`send` calls it), and a
+ * stub backend: a call through to its receipt, the soft ceiling, the boundary,
+ * a bad receipt taking its seller out of routing, the router's order and its
+ * memory, and the keys' scopes.
+ */
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import {
+  MockChainAdapter,
+  hashQueryInferenceReceipt,
+  marketplaceChainOf,
+  type MarketplaceChainAdapter,
+  type MarketplaceDomain,
+} from '@origintrail-official/dkg-chain';
+import {
+  AccessKeys,
+  Buyer,
+  BuyerStore,
+  Gateway,
+  Router,
+  Seller,
+  decodeMessage,
+  encodeMessage,
+  receiptFromWire,
+  serviceIdOf,
+  type Connector,
+  type GatewayAnswer,
+  type GatewayDeps,
+  type Offer,
+  type QuoteResponse,
+  type ServeResponse,
+} from '../src/index.js';
+
+const NODE = new ethers.Wallet(`0x${'22'.repeat(32)}`);
+const MODEL = 'urn:test:model:gateway';
+const SERVICE = serviceIdOf(MODEL);
+const PRICE = 10n;
+const CHAT = { model: MODEL, messages: [{ role: 'user', content: 'synthetic question' }], max_tokens: 20 };
+
+let dir: string;
+let mock: MockChainAdapter;
+let chain: MarketplaceChainAdapter;
+let seller: Seller;
+let router: Router;
+let gateway: Gateway;
+let gatewayDeps: GatewayDeps;
+let keys: AccessKeys;
+let offers: Offer[];
+let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
+let reachable: boolean;
+let DOMAIN: MarketplaceDomain | undefined;
+
+const backend: Connector = { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 7, completionTokens: 5 }) };
+const body = (a: GatewayAnswer) => a.body as any;
+
+async function setUp(value = 10n ** 6n): Promise<void> {
+  // One mock chain for both ends: the node's wallet buys, and its identity sells.
+  await mock.ensureProfile();
+  const buyer = new Buyer({ chain, store: new BuyerStore(join(dir, 'buyer')), config: { enabled: true, buyerWallet: NODE.address, prefundLeadSeconds: 7_200, tickSeconds: 300 } });
+  const { epoch } = await chain.getEpochTimes();
+  await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [{ serviceId: SERVICE, serviceClass: 1, value, maxPricePerUnit: 100n }] });
+  seller = new Seller({
+    chain, dir: join(dir, 'seller'), signer: NODE.address, stopServingSeconds: 180, tickSeconds: 300,
+    services: [{ model: MODEL, serviceId: SERVICE, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend }],
+  });
+  await seller.load();
+  await seller.tick();
+  offers = [{ seller: seller.gate.identityId, serviceId: SERVICE, serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null, model: MODEL, provenance: 'upstream-claimed' }];
+  router = new Router({
+    chain,
+    offers: async () => offers,
+    quote: async (_peer, services) => {
+      if (!reachable) throw new Error('unreachable');
+      return seller.quote({ services }) as Promise<QuoteResponse>;
+    },
+    peers: { peerOf: async (id) => (id === seller.gate.identityId ? 'seller-peer' : null) },
+  });
+  keys = new AccessKeys(join(dir, 'buyer'));
+  gatewayDeps = {
+    chain, buyerWallet: NODE.address, store: buyer.store, router, keys, dir: join(dir, 'buyer'),
+    send: async (_peer, payload) => {
+      if (!reachable) throw new Error('unreachable');
+      const answer = await seller.serve(decodeMessage(payload));
+      return encodeMessage(tamper ? tamper(answer) : answer);
+    },
+    modelOf: async (serviceId) => offers.find((o) => o.serviceId === serviceId)?.model,
+  };
+  gateway = new Gateway(gatewayDeps);
+  await gateway.load();
+}
+
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'marketplace-gateway-'));
+  mock = new MockChainAdapter('mock:31337', NODE.address);
+  mock.setMockACKSigner(NODE);
+  chain = marketplaceChainOf(mock)!;
+  tamper = undefined;
+  reachable = true;
+});
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await rm(dir, { recursive: true, force: true });
+});
+
+describe('a call through the gateway', () => {
+  it('is served by the routed seller, its receipt checked and kept, and the answer is OpenAI-shaped', async () => {
+    await setUp();
+    expect(body(await gateway.models())).toEqual({ object: 'list', data: [{ id: MODEL, object: 'model', owned_by: 'dkg-marketplace', service_id: SERVICE }] });
+    const answer = await gateway.chatCompletion({ admin: true }, CHAT);
+    expect(answer.status).toBe(200);
+    expect(body(answer)).toMatchObject({
+      object: 'chat.completion', model: MODEL, choices: [{ message: { role: 'assistant', content: 'synthetic answer' } }], usage: { total_tokens: 12 },
+      marketplace: { serviceId: SERVICE, seller: Number(seller.gate.identityId), units: 12, value: '120' },
+    });
+    // The next call gets the next nonce; a restart remembers it.
+    const restarted = new Gateway(gatewayDeps);
+    await restarted.load();
+    expect((await restarted.chatCompletion({ admin: true }, CHAT)).status).toBe(200);
+  });
+
+  it('answers without a subscription, at the soft ceiling, and in the boundary gap', async () => {
+    // 700 wei: the soft ceiling is 665, and a call reserves 62 units (18 bytes, 24 of allowance, 20 tokens) × 10 wei.
+    await setUp(700n);
+    expect(body(await gateway.chatCompletion({ admin: true }, { ...CHAT, model: 'urn:test:model:none' })).error.code).toBe('no_subscription');
+    const first = await gateway.chatCompletion({ admin: true }, CHAT);
+    expect(first.status).toBe(200);
+    const ceiling = await gateway.chatCompletion({ admin: true }, CHAT);
+    expect(ceiling.status).toBe(402);
+    expect(body(ceiling)).toMatchObject({ error: { code: 'soft_ceiling' }, serviceId: SERVICE, fork: { topUp: true } });
+
+    const times = await chain.getEpochTimes();
+    vi.spyOn(chain, 'getEpochTimes').mockResolvedValue({ ...times, now: times.endsAt - 100 });
+    const gap = await gateway.chatCompletion({ admin: true }, CHAT);
+    expect(gap).toMatchObject({ status: 503, headers: { 'Retry-After': '100' } });
+    expect(body(gap).error.code).toBe('epoch_ending');
+  });
+
+  it('takes a seller whose receipt over-reports out of routing for the epoch', async () => {
+    await setUp();
+    tamper = (answer) => (answer.ok ? { ...answer, receipt: { ...answer.receipt, units: '100000', valueWei: '1000000' } } : answer);
+    const bad = await gateway.chatCompletion({ admin: true }, CHAT);
+    expect(bad.status).toBe(502);
+    expect(body(bad)).toMatchObject({ error: { code: 'bad_receipt' }, problem: 'units_over_max' });
+    tamper = undefined;
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT)).error.code).toBe('no_seller');
+  });
+
+  it.each([
+    ['result_mismatch', (a: ServeResponse) => (a.ok ? { ...a, result: { content: 'another answer' } } : a)],
+    ['other_request', (a: ServeResponse) => (a.ok ? { ...a, receipt: { ...a.receipt, requestDigest: ethers.ZeroHash } } : a)],
+    ['bad_signature', (a: ServeResponse) => (a.ok ? { ...a, receiptSignature: '0x00' } : a)],
+    ['value_mismatch', (a: ServeResponse) => (a.ok ? { ...a, receipt: { ...a.receipt, valueWei: '1' } } : a)],
+    ['other_budget', (a: ServeResponse) => (a.ok ? { ...a, budgetIndex: 3 } : a)],
+    ['malformed', (a: ServeResponse) => (a.ok ? { ...a, receipt: { ...a.receipt, units: 12 as unknown as string } } : a)],
+    ['not_a_seller_key', (a: ServeResponse) => {
+      if (!a.ok) return a;
+      const stranger = new ethers.Wallet(`0x${'66'.repeat(32)}`);
+      return { ...a, receiptSignature: stranger.signingKey.sign(hashQueryInferenceReceipt(DOMAIN!, receiptFromWire(a.receipt))).serialized };
+    }],
+  ])('refuses a receipt with %s', async (problem, t) => {
+    await setUp();
+    DOMAIN = (await chain.getMarketplaceContracts()).requestDomain;
+    tamper = t;
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ problem });
+  });
+
+  it("keeps a receipt whose signer the chain could not check, and retries a lost answer once", async () => {
+    await setUp();
+    vi.spyOn(chain, 'verifyACKIdentityDetailed').mockResolvedValueOnce({ valid: false, reason: 'rpc-error' });
+    expect((await gateway.chatCompletion({ admin: true }, CHAT)).status).toBe(200);
+    const send = gatewayDeps.send;
+    let first = true;
+    gatewayDeps.send = async (peer, payload, messageId) => {
+      if (first) { first = false; return new TextEncoder().encode('RESPONSE_GONE'); }
+      expect(messageId.endsWith(':1')).toBe(true);
+      return send(peer, payload, messageId);
+    };
+    expect((await gateway.chatCompletion({ admin: true }, CHAT)).status).toBe(200);
+  });
+
+  it('asks for a new quote after a price change, and answers without the session key', async () => {
+    await setUp();
+    tamper = () => ({ ok: false, code: 'WrongPrice', retry: true });
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ sellerCode: 'WrongPrice' });
+    tamper = () => ({ ok: false, code: 'EpochEnding', retry: true });
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ sellerCode: 'EpochEnding' });
+    tamper = undefined;
+    // A gateway that has not opened the subscription's session key, which this node does not hold.
+    const fresh = new Gateway(gatewayDeps);
+    vi.spyOn(gatewayDeps.store, 'sessionKeyAddress').mockResolvedValueOnce(null);
+    expect(await fresh.chatCompletion({ admin: true }, CHAT)).toMatchObject({ status: 500, body: { error: { code: 'session_key_missing' } } });
+    expect(fresh.keys).toBe(keys);
+    // Without a subscription, no models.
+    vi.spyOn(chain, 'subscriptionExists').mockResolvedValueOnce(false);
+    expect(body(await gateway.models()).data).toEqual([]);
+  });
+
+  it('moves on from a seller that does not answer', async () => {
+    await setUp();
+    reachable = false;
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT)).error.code).toBe('no_seller');
+    reachable = true;
+    // Left out for ten minutes.
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT)).error.code).toBe('no_seller');
+  });
+
+  it('answers 503 when the quoted seller does not answer the call', async () => {
+    await setUp();
+    gatewayDeps.send = async () => { throw new Error('timed out'); };
+    expect(await gateway.chatCompletion({ admin: true }, CHAT)).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+  });
+
+  it("passes on a seller's refusal", async () => {
+    await setUp();
+    tamper = () => ({ ok: false, code: 'UpstreamError', retry: true });
+    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ error: { code: 'seller_refused' }, sellerCode: 'UpstreamError', retry: true });
+  });
+
+  it('refuses a bad body', async () => {
+    await setUp();
+    for (const bad of [{ ...CHAT, model: '' }, { ...CHAT, stream: true }, { ...CHAT, messages: [] }, null]) {
+      expect((await gateway.chatCompletion({ admin: true }, bad)).status).toBe(400);
+    }
+  });
+});
+
+describe('access keys', () => {
+  /** A call as the gateway's route makes it: the caller checked first, then the body. */
+  const callWith = async (token: string | undefined, chat: unknown = CHAT): Promise<GatewayAnswer> => {
+    const checked = await gateway.callerOf({ admin: false, token });
+    return 'answer' in checked ? checked.answer : gateway.chatCompletion(checked.caller, chat);
+  };
+
+  it('are shown once, kept hashed, and hold their scopes: services, budget, rate, expiry, revocation', async () => {
+    await setUp();
+    const now = Math.floor(Date.now() / 1000);
+    const { secret, key } = await keys.make({ label: 'test-agent', budget: 700n, services: [SERVICE], rps: 1, expiresAt: now + 3_600 }, now);
+    expect(secret).toMatch(/^dkgmk_[0-9a-f]{48}$/);
+    expect(key).toMatchObject({ keyId: secret.slice(0, 14), label: 'test-agent', budget: '700', spent: '0', revoked: false });
+    expect(JSON.stringify(await keys.list())).not.toContain(secret.slice(14));
+
+    // Refused before the body is looked at: no key, a key of another node, a node or agent token.
+    for (const token of [undefined, `dkgmk_${'00'.repeat(24)}`, 'a-node-or-agent-token']) {
+      expect(await callWith(token, null)).toMatchObject({ status: 401 });
+    }
+    expect((await callWith(secret)).status).toBe(200);
+    expect((await keys.list())[0]!.spent).toBe('120');
+    // One call a second.
+    expect(body(await callWith(secret)).error.code).toBe('key_rate');
+    await new Promise((r) => setTimeout(r, 1_050));
+    // Out of its services, before any chain read.
+    const reads = vi.spyOn(chain, 'getEpochTimes');
+    expect(await callWith(secret, { ...CHAT, model: 'urn:test:model:other' })).toMatchObject({ status: 401, body: { error: { code: 'service_not_allowed' } } });
+    expect(reads).not.toHaveBeenCalled();
+    await new Promise((r) => setTimeout(r, 1_050));
+    // Its budget: 700 wei, 120 spent, and a call may cost 620.
+    expect(body(await callWith(secret)).error.code).toBe('key_budget');
+
+    expect(await keys.check(secret, now + 3_600)).toMatchObject({ ok: false, code: 'expired_key' });
+    await keys.revoke(key.keyId, now);
+    expect(await keys.check(secret, now)).toMatchObject({ ok: false, code: 'revoked_key' });
+    expect(await keys.revoke('dkgmk_none', now)).toBeNull();
+    await expect(keys.make({ label: 'x', budget: 1n, services: null, rps: 0, expiresAt: null }, now)).rejects.toThrow(/rps/);
+  });
+});
+
+describe('the router', () => {
+  const offer = (seller: bigint, price: bigint, epoch = 1): Offer =>
+    ({ seller, serviceId: SERVICE, serviceClass: 1, unit: 'token', pricePerUnit: price, epoch, capacity: null, model: MODEL, provenance: 'upstream-claimed' });
+  let clock: number;
+  let quoted: string[];
+  let list: Offer[];
+  const routerWith = (pinned: bigint[] = []) => new Router({
+    chain: { isShardingTableMember: async (id) => id !== 9n },
+    offers: async () => list,
+    quote: async (peer, services) => {
+      quoted.push(peer);
+      if (peer === 'peer-3') throw new Error('unreachable');
+      const id = peer.slice(5);
+      return { seller: id, epoch: 1, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
+    },
+    peers: { peerOf: async (id) => (id === 5n ? null : `peer-${id}`) },
+    pinned: async () => pinned,
+    clock: () => clock,
+  });
+
+  beforeEach(() => { clock = 0; quoted = []; list = []; });
+
+  it('orders by pin, price and latency, keeps to sellers in the table under the cap, and stays with the one that answered', async () => {
+    list = [offer(1n, 30n), offer(2n, 20n), offer(9n, 1n), offer(4n, 500n), offer(5n, 10n), offer(6n, 20n, 2)];
+    const router = routerWith();
+    router.measured(1n, 5);
+    expect(await router.pick(SERVICE, 1, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
+    expect(await routerWith([1n]).pick(SERVICE, 1, 100n)).toMatchObject({ seller: 1n });
+    // Sticky: the cheaper seller that appears later does not take over.
+    list.push(offer(7n, 15n));
+    expect(await router.pick(SERVICE, 1, 100n)).toMatchObject({ seller: 2n });
+    // Quotes are kept five minutes.
+    expect(quoted.filter((p) => p === 'peer-2')).toHaveLength(1);
+    clock += 5 * 60_000;
+    await router.pick(SERVICE, 1, 100n);
+    expect(quoted.filter((p) => p === 'peer-2')).toHaveLength(2);
+  });
+
+  it('leaves out an unreachable seller for ten minutes and a failed one for the epoch', async () => {
+    list = [offer(3n, 10n), offer(2n, 20n)];
+    const router = routerWith();
+    expect(await router.pick(SERVICE, 1, 100n)).toMatchObject({ seller: 2n });
+    clock += 10 * 60_000;
+    expect(quoted.filter((p) => p === 'peer-3')).toHaveLength(1);
+    router.failed(2n, 1);
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(await routerWith().pick(SERVICE, 1, 10n)).toBeNull();
+  });
+});

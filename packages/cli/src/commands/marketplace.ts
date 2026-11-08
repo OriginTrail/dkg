@@ -4,7 +4,8 @@
 //
 // A command for each buyer route under /api/marketplace: subscriptions, dry
 // runs, fundings and top-ups, the standing plan, the buyer wallet's funding,
-// accounts, and an owner's actions on an account the node owns. Each prints
+// accounts, an owner's actions on an account the node owns, and the gateway's
+// access keys. Each prints
 // the daemon's answer as JSON. Amounts on the command line are in TRAC;
 // times are chain seconds. Requests with services take a JSON file.
 
@@ -115,6 +116,28 @@ export function registerMarketplaceCommand(program: Command): void {
     .requiredOption('--expires-at <seconds>', 'when the grant ends, in chain seconds')
     .action((accountId: string, buyer: string, opts: { maxCost: string; expiresAt: string }) =>
       call('POST', `/accounts/${id(accountId)}/buyers/${id(buyer)}/limits`, () => limits(opts)));
+
+  const keys = cmd.command('keys').description("Access keys for the gateway, which the node's agents call it with");
+  keys.command('list', { isDefault: true }).description('The access keys, without their secrets').action(() => call('GET', '/keys'));
+  keys
+    .command('make')
+    .description('Make an access key; its secret is shown this once')
+    .requiredOption('--label <label>', 'what the key is for')
+    .requiredOption('--budget <trac>', 'the most its calls may cost together, in TRAC')
+    .option('--service <serviceId...>', 'the services it may call; all by default')
+    .option('--rps <n>', 'calls per second', '5')
+    .option('--expires-at <seconds>', 'when it stops working')
+    .action((opts: { label: string; budget: string; service?: string[]; rps: string; expiresAt?: string }) => call('POST', '/keys', () => ({
+      label: opts.label,
+      budget: ethers.parseEther(opts.budget).toString(),
+      rps: Number(opts.rps),
+      ...(opts.service ? { services: opts.service } : {}),
+      ...(opts.expiresAt ? { expiresAt: Number(opts.expiresAt) } : {}),
+    })));
+  keys
+    .command('revoke <keyId>')
+    .description('Revoke an access key; it stops working at its next call')
+    .action((keyId: string) => call('POST', `/keys/${id(keyId)}/revoke`));
 
   cmd
     .command('remove-buyer <accountId> <buyer>')

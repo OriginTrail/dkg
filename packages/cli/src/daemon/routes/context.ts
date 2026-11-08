@@ -38,7 +38,7 @@ import type { AdmissionStatsView } from '../http-utils.js';
 import type { EventLoopDelayView } from '../event-loop-delay-monitor.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
-import type { Buyer } from '@origintrail-official/dkg-marketplace';
+import type { Buyer, Gateway } from '@origintrail-official/dkg-marketplace';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -166,6 +166,8 @@ export interface RequestContext {
   routeRpcTransport?: DaemonRouteRpcTransport;
   /** The marketplace buyer (OT-RFC-27), whose job the daemon runs; absent while the marketplace is off. */
   marketplace?: Buyer;
+  /** The buyer's OpenAI-compatible gateway and its access keys; absent while the marketplace is off. */
+  marketplaceGateway?: Gateway;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;

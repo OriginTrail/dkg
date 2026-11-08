@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
 import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import { Buyer, BuyerStore, parsePlan } from '@origintrail-official/dkg-marketplace';
+import { AccessKeys, Buyer, BuyerStore, Gateway, NO_SELLER_PEERS, Router, parsePlan } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
 import { startMarketplaceBuyer } from '../src/daemon/marketplace-buyer.js';
@@ -36,22 +36,23 @@ let dir: string;
 let chain: MarketplaceChainAdapter;
 let mock: MockChainAdapter;
 let buyer: Buyer | undefined;
+let gateway: Gateway | undefined;
 
 async function api(
   method: string,
   path: string,
   body?: unknown,
   authentication = requestAuthentication({ kind: 'nodeOperator' }),
-): Promise<{ status: number; body: any; claimed: boolean }> {
+): Promise<{ status: number; body: any; claimed: boolean; headers?: Record<string, string> }> {
   const res: any = { statusCode: 0, body: '', writableEnded: false };
-  res.writeHead = (status: number) => { res.statusCode = status; };
+  res.writeHead = (status: number, headers?: Record<string, string>) => { res.statusCode = status; res.headers = headers; };
   res.setHeader = () => undefined;
   res.end = (text: string) => { res.body = text; res.writableEnded = true; };
   const req: any = { method, url: path };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${path}`);
-  await handleMarketplaceRoutes({ req, res, url, path: url.pathname, marketplace: buyer, actor: { authentication } } as unknown as RequestContext);
-  return { status: res.statusCode, body: res.body ? JSON.parse(res.body) : undefined, claimed: res.writableEnded };
+  await handleMarketplaceRoutes({ req, res, url, path: url.pathname, marketplace: buyer, marketplaceGateway: gateway, actor: { authentication } } as unknown as RequestContext);
+  return { status: res.statusCode, body: res.body ? JSON.parse(res.body) : undefined, claimed: res.writableEnded, headers: res.headers };
 }
 
 beforeEach(async () => {
@@ -67,7 +68,67 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   vi.restoreAllMocks();
+  gateway = undefined;
   await rm(dir, { recursive: true, force: true });
+});
+
+describe('the gateway routes', () => {
+  const chat = { model: 'urn:test:model:none', messages: [{ role: 'user', content: 'synthetic question' }] };
+  const agentToken = requestAuthentication({ kind: 'agent', agentAddress: OTHER });
+  const bearer = (presentedToken: string | undefined) => requestAuthentication({ kind: 'anonymous', mode: 'public', presentedToken });
+
+  beforeEach(async () => {
+    gateway = new Gateway({
+      chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
+      router: new Router({ chain, offers: async () => [], quote: async () => { throw new Error('no sellers'); }, peers: NO_SELLER_PEERS }),
+      send: async () => { throw new Error('no sellers'); },
+    });
+    await gateway.load();
+  });
+
+  it('refuse a caller without a live key with 401, before reading the body or asking the chain', async () => {
+    const reads = vi.spyOn(chain, 'getEpochTimes');
+    const now = Math.floor(Date.now() / 1000);
+    const { secret: revoked, key } = await gateway!.keys.make({ label: 'gone', budget: 1n, services: null, rps: 5, expiresAt: null }, now);
+    await gateway!.keys.revoke(key.keyId, now);
+    const { secret: expired } = await gateway!.keys.make({ label: 'old', budget: 1n, services: null, rps: 5, expiresAt: now - 1 }, now);
+    // The body's bytes are never read: a request without them would fail if they were.
+    for (const auth of [bearer(undefined), bearer(`dkgmk_${'00'.repeat(24)}`), bearer(revoked), bearer(expired), agentToken]) {
+      const answer = await api('POST', '/api/marketplace/v1/chat/completions', undefined, auth);
+      expect(answer.status).toBe(401);
+    }
+    expect(reads).not.toHaveBeenCalled();
+    expect((await api('GET', '/api/marketplace/v1/models', undefined, bearer(revoked))).status).toBe(401);
+  });
+
+  it("serve the node admin and a key holder, and answer the gateway's own refusals", async () => {
+    expect(await api('GET', '/api/marketplace/v1/models')).toMatchObject({ status: 200, body: { object: 'list', data: [] } });
+    const { secret } = await gateway!.keys.make({ label: 'agent', budget: 10n ** 18n, services: null, rps: 5, expiresAt: null }, 0);
+    expect(await api('POST', '/api/marketplace/v1/chat/completions', chat, bearer(secret))).toMatchObject({ status: 402, body: { error: { code: 'no_subscription' } } });
+    expect(await api('POST', '/api/marketplace/v1/chat/completions', 'not json', bearer(secret))).toMatchObject({ status: 400 });
+    const times = await chain.getEpochTimes();
+    vi.spyOn(chain, 'getEpochTimes').mockResolvedValue({ ...times, now: times.endsAt - 60 });
+    const gap = await api('POST', '/api/marketplace/v1/chat/completions', chat);
+    expect(gap).toMatchObject({ status: 503, body: { error: { code: 'epoch_ending' } }, headers: { 'Retry-After': '60' } });
+    gateway = undefined;
+    expect((await api('GET', '/api/marketplace/v1/models')).status).toBe(503);
+  });
+
+  it('make and revoke keys for the node admin only, and show them without their secrets', async () => {
+    expect(await api('POST', '/api/marketplace/keys', { label: 'x', budget: '1' }, agentToken)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    const made = await api('POST', '/api/marketplace/keys', { label: 'test-agent', budget: '1000', rps: 2 });
+    expect(made).toMatchObject({ status: 200, body: { label: 'test-agent', budget: '1000', rps: 2, revoked: false } });
+    expect(made.body.secret).toMatch(/^dkgmk_[0-9a-f]{48}$/);
+    const listed = await api('GET', '/api/marketplace/keys', undefined, agentToken);
+    expect(listed.body.keys).toHaveLength(1);
+    expect(JSON.stringify(listed.body)).not.toContain(made.body.secret);
+    expect(await api('POST', `/api/marketplace/keys/${made.body.keyId}/revoke`, {}, agentToken)).toMatchObject({ status: 403 });
+    expect(await api('POST', `/api/marketplace/keys/${made.body.keyId}/revoke`, {})).toMatchObject({ status: 200, body: { revoked: true } });
+    expect(await api('POST', '/api/marketplace/keys/dkgmk_none/revoke', {})).toMatchObject({ status: 404, body: { code: 'KeyNotFound' } });
+    for (const bad of [{ label: '', budget: '1' }, { label: 'x', budget: '0' }, { label: 'x', budget: '1', rps: 0 }, { label: 'x', budget: '1', services: ['0x01'] }, { label: 'x', budget: '1', expiresAt: -5 }]) {
+      expect((await api('POST', '/api/marketplace/keys', bad)).status).toBe(400);
+    }
+  });
 });
 
 describe('the marketplace routes', () => {
@@ -218,6 +279,9 @@ describe('dkg marketplace', () => {
     await run('add-buyer', '7', '--max-cost', '2.5', '--expires-at', '1900000000', '--buyer', OTHER);
     await run('limits', '7', OTHER, '--max-cost', '1', '--expires-at', '1900000000');
     await run('remove-buyer', '7', OTHER);
+    await run('keys');
+    await run('keys', 'make', '--label', 'test-agent', '--budget', '1', '--service', `0x${'0a'.repeat(32)}`, '--expires-at', '1900000000');
+    await run('keys', 'revoke', 'dkgmk_0011aabb');
     expect(calls).toEqual([
       ['GET', '/subscriptions?epoch=next', undefined],
       ['GET', '/plan', undefined],
@@ -225,6 +289,9 @@ describe('dkg marketplace', () => {
       ['POST', '/accounts/7/buyers', { maxCostPerEpoch: String(25n * 10n ** 17n), expiresAt: 1_900_000_000, buyer: OTHER }],
       ['POST', `/accounts/7/buyers/${OTHER}/limits`, { maxCostPerEpoch: String(TRAC), expiresAt: 1_900_000_000 }],
       ['DELETE', `/accounts/7/buyers/${OTHER}`, undefined],
+      ['GET', '/keys', undefined],
+      ['POST', '/keys', { label: 'test-agent', budget: String(TRAC), rps: 5, services: [`0x${'0a'.repeat(32)}`], expiresAt: 1_900_000_000 }],
+      ['POST', '/keys/dkgmk_0011aabb/revoke', undefined],
     ]);
     expect(print).toHaveBeenCalledWith(JSON.stringify({ ok: true }, null, 2));
   });

@@ -35,13 +35,17 @@ import {
   subscriptionView,
   subscriptionsView,
   txView,
+  type AccessKeyScopes,
   type Buyer,
   type FundingRequest,
+  type Gateway,
 } from '@origintrail-official/dkg-marketplace';
 import type { BuyerLimits } from '@origintrail-official/dkg-chain';
 import { canAdministerNode } from '../../auth.js';
 import { jsonResponse, readBody, respondIfChainRpcTransportError, sanitizeRpcMessage, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { handleMarketplaceGatewayRoutes } from './marketplace-gateway.js';
+import { isMarketplaceGatewayRoute } from './marketplace-gateway-paths.js';
 
 const PREFIX = '/api/marketplace';
 
@@ -62,6 +66,7 @@ const REFUSAL_STATUS: Readonly<Record<string, number>> = {
   SubscriptionNotFound: 404,
   NotABuyer: 404,
   PlanNotFound: 404,
+  KeyNotFound: 404,
   QueryInferencePaused: 503,
   QueryInferenceNotActive: 503,
   MarketplaceOff: 503,
@@ -106,6 +111,33 @@ async function fundingRequestOf(buyer: Buyer, req: IncomingMessage): Promise<Fun
   return { epoch: parseEpoch(body.epoch, epoch), source: parseSource(body.source), services: parseServices(body.services) };
 }
 
+/** An access key's scopes from a request: a label, a budget in wei, and its services, rate and expiry if it limits them. */
+function scopesOf(body: Record<string, unknown>): AccessKeyScopes {
+  if (typeof body.label !== 'string' || body.label === '' || body.label.length > 100) throw new PlanError('label must be a short text');
+  const services = body.services ?? null;
+  if (services !== null && (!Array.isArray(services) || !services.every((s) => typeof s === 'string' && ethers.isHexString(s, 32)))) {
+    throw new PlanError('services must be a list of service ids');
+  }
+  const rps = body.rps ?? 5;
+  if (typeof rps !== 'number' || !Number.isSafeInteger(rps) || rps < 1 || rps > 1_000) throw new PlanError('rps must be a whole number from 1 to 1000');
+  const expiresAt = body.expiresAt ?? null;
+  if (expiresAt !== null && (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt <= 0)) {
+    throw new PlanError('expiresAt must be a time in seconds');
+  }
+  return {
+    label: body.label,
+    budget: parseWei(body.budget, 'budget'),
+    services: services === null ? null : (services as string[]).map((s) => s.toLowerCase()),
+    rps,
+    expiresAt,
+  };
+}
+
+function gatewayOf(ctx: RequestContext): Gateway {
+  if (!ctx.marketplaceGateway) throw new MarketplaceRefusal('MarketplaceOff');
+  return ctx.marketplaceGateway;
+}
+
 /** The subscription a funding or top-up just changed; `null` while the read lags the send, which succeeded. */
 async function subscriptionAfter(buyer: Buyer, subscriptionId: string) {
   const subscription = await buyer.chain.getSubscription(subscriptionId);
@@ -147,6 +179,19 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   if (method === 'GET' && route === '/accounts') return accountsView(buyer);
   if (method === 'GET' && route === '/accounts/contracts') return contractsView(buyer);
 
+  // GET, POST /keys and POST /keys/{keyId}/revoke: the gateway's access keys.
+  if (route === '/keys' && method === 'GET') return { keys: await gatewayOf(ctx).keys.list() };
+  if (route === '/keys' && method === 'POST') {
+    const { secret, key } = await gatewayOf(ctx).keys.make(scopesOf(await bodyOf(req)), Math.floor(Date.now() / 1000));
+    return { ...key, secret };
+  }
+  const revoke = /^\/keys\/([^/]+)\/revoke$/.exec(route);
+  if (revoke && method === 'POST') {
+    const key = await gatewayOf(ctx).keys.revoke(revoke[1]!, Math.floor(Date.now() / 1000));
+    if (!key) throw new MarketplaceRefusal('KeyNotFound', [revoke[1]!]);
+    return key;
+  }
+
   const onAccount = /^\/accounts\/([^/]+)\/(buyer-consent|service-spending|buyers)$/.exec(route);
   if (method === 'POST' && onAccount) {
     const accountId = accountIdOf(onAccount[1]!);
@@ -177,13 +222,15 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
 export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path } = ctx;
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
+  // The gateway checks its own callers, before anything else.
+  if (isMarketplaceGatewayRoute(req.method, path)) return handleMarketplaceGatewayRoutes(ctx);
   const buyer = ctx.marketplace;
   if (!buyer) {
     return refuse(res, 'MarketplaceOff', 'The marketplace is off on this node: it needs marketplace.enabled and a chain with the marketplace contracts');
   }
   const method = req.method ?? 'GET';
   if (method !== 'GET' && !canAdministerNode(ctx.actor.authentication)) {
-    return refuse(res, 'NodeAdminRequired', 'A node-admin token is required to fund, sign or act as an account owner');
+    return refuse(res, 'NodeAdminRequired', 'A node-admin token is required to fund, sign, act as an account owner or manage access keys');
   }
   try {
     const result = await answer(buyer, method, decodeURIComponent(path.slice(PREFIX.length)), ctx);

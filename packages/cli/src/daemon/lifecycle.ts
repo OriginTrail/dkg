@@ -190,7 +190,7 @@ export {
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
-import { startMarketplaceBuyer } from './marketplace-buyer.js';
+import { startMarketplaceBuyer, startMarketplaceGateway } from './marketplace-buyer.js';
 import { startMarketplaceSeller } from './marketplace-seller.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import {
@@ -2301,6 +2301,7 @@ async function runDaemonInnerWithStartupOwnership(
   const marketplace = startMarketplaceBuyer({
     config, agent, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), dashDb, log,
   });
+  const marketplaceGateway = marketplace ? await startMarketplaceGateway({ config, agent, buyer: marketplace, dataDir: dkgDir() }) : undefined;
   const marketplaceSeller = await startMarketplaceSeller({
     config, agent, signer: evmSigning.addresses.wallets[0]?.address, dataDir: dkgDir(), log,
   });
@@ -3628,6 +3629,7 @@ async function runDaemonInnerWithStartupOwnership(
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         marketplace,
+        marketplaceGateway,
         emitMemoryGraphChanged,
         emitNotification,
       });

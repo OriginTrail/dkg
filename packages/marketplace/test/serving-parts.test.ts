@@ -79,6 +79,15 @@ describe('offers', () => {
     expect(offersQuery([663, 664])).toContain('VALUES ?epoch { "663" "664" }');
   });
 
+  it('carry no capacity or tokenizer when the seller states none', () => {
+    const bare: Offer = { ...offer, capacity: null, provenance: 'upstream-claimed' };
+    delete bare.tokenizerBundle;
+    const quads = offerQuads(bare);
+    expect(quads.some((q) => q.predicate.endsWith('#capacity') || q.predicate.endsWith('#tokenizerBundle'))).toBe(false);
+    expect(offersFromBindings(rowsOf(quads))).toEqual([bare]);
+    expect(offersFromBindings([{ ...rowsOf(quads)[0], unit: '"query-unit"' }])).toEqual([]);
+  });
+
   it('drop what does not hold together', () => {
     const rows = rowsOf(offerQuads(offer));
     expect(offersFromBindings([{ ...rows[0], serviceId: `"${serviceIdOf('urn:test:model:b')}"` }])).toEqual([]);
@@ -178,6 +187,10 @@ describe("the seller's settings", () => {
     [{ services: [{ ...service, backend: { ...service.backend, kind: 'unknown-kind' } }] }, /openai or llamacpp/],
     [{ services: [{ ...service, backend: { ...service.backend, apiKeyEnv: 'lower' } }] }, /environment variable/],
     [{ services: [service], stopServingSeconds: -1 }, /stopServingSeconds/],
+    [{ services: [service], tickSeconds: 0 }, /tickSeconds/],
+    [{ services: [{ ...service, backend: { ...service.backend, baseUrl: 'not a url' } }] }, /baseUrl/],
+    [{ services: [{ ...service, backend: { ...service.backend, model: '' } }] }, /backend's model/],
+    [{ services: [{ ...service, pricePerUnit: 5 }] }, /pricePerUnit/],
   ])('refuses %j', (seller, message) => {
     expect(() => resolveSellerConfig({ seller: { enabled: true, ...seller } as never })).toThrow(message);
   });
