@@ -17,8 +17,8 @@
  *   its receipt signed by an operational wallet. The call, its result and its
  *   receipt are on disk before the answer goes back; if that write fails, the
  *   answer is an error and no result. A repeat of a call already served gets
- *   the stored answer. Calls on one budget run one at a time, so a nonce is
- *   claimed once and the budget's check counts every call before it.
+ *   the stored answer. Calls on one subscription run one at a time, so a
+ *   nonce is claimed once and a budget's check counts every call before it.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
  */
@@ -248,7 +248,8 @@ export class Seller {
       if (request.issuedAt >= end) return refusal('GrantEnded');
     }
     const budgetKey = `${request.subscriptionId}:${budgetIndex}`;
-    return this.lock.run(budgetKey, async () => {
+    // One call at a time per subscription: its nonces are one set, whatever the budget.
+    return this.lock.run(request.subscriptionId, async () => {
       // 6. A nonce new to the ledger. 7. Budget left, less this seller's receipts not landed, covers the call.
       if (this.nonces.get(request.subscriptionId)?.has(request.nonce.toString())) return refusal('NonceUsed');
       const left = await chain.budgetLeft(request.subscriptionId, budgetIndex);
@@ -273,7 +274,9 @@ export class Seller {
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), unitCap)),
       });
     } catch (err) {
-      return refusal('UpstreamError', err instanceof UpstreamError ? err.message : undefined);
+      // The backend's detail (a missing key's variable, an address) stays in the log.
+      this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
+      return refusal('UpstreamError');
     }
     const input = BigInt(completion.promptTokens);
     if (input >= unitCap) return refusal('UnitsTooFew');

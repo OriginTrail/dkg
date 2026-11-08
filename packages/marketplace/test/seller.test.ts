@@ -238,6 +238,13 @@ describe('a call', () => {
     expect(await refused(await requestFor(capped))).toBe('PriceOverCap');
   });
 
+  it('takes one nonce once across budgets, however many calls come at once', async () => {
+    const id = await fund(BUYER, { services: [A, B] });
+    const r = await requestFor(id);
+    const answers = await Promise.all([seller.serve(wire(r)), seller.serve(wire({ ...r, serviceId: B }))]);
+    expect(answers.map(codeOf).sort()).toEqual(['NonceUsed', 'ok']);
+  });
+
   it('counts the receipts it has not landed against what a budget has left', async () => {
     const id = await fund();
     // 10^6 wei funded: three calls of 400,000 wei at most each fit two.
@@ -256,7 +263,8 @@ describe('a call', () => {
     expect(codeOf(await ending.serve(wire(await requestFor(id))))).toBe('EpochEnding');
 
     backend.next = new UpstreamError('the backend answered 500');
-    expect(await seller.serve(wire(await requestFor(id)))).toEqual({ ok: false, code: 'UpstreamError', retry: true, message: 'the backend answered 500' });
+    // The backend's detail stays with the seller.
+    expect(await seller.serve(wire(await requestFor(id)))).toEqual({ ok: false, code: 'UpstreamError', retry: true });
     const later = wire(await requestFor(id, { nonce: 1n }));
     vi.spyOn(chain, 'getSubscription').mockRejectedValueOnce(new Error('socket hang up'));
     expect(await seller.serve(later)).toEqual({ ok: false, code: 'Unavailable', retry: true });

@@ -4,8 +4,8 @@
  * The buyer's gateway (OT-RFC-27): an OpenAI-compatible chat completion,
  * paid for from this epoch's subscription and served by the router's seller.
  * A call goes through, in order:
- *   1. the caller: the node's admin, or a live access key within its rate,
- *      checked before the body is read (`callerOf`), then the key's services;
+ *   1. the caller: a live access key within its rate, checked before the
+ *      body is read (`callerOf`), then the key's services;
  *   2. the epoch: from the sellers' stop time to the next epoch's start, the
  *      answer is 503 with `Retry-After`;
  *   3. this epoch's subscription, and the call's service budget in it;
@@ -46,6 +46,7 @@ import { receiptSignerOf, DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
 import type { BuyerStore } from './store.js';
 import { amount } from './views.js';
 import {
+  PEER_LIMITS,
   WireError,
   decodeMessage,
   encodeMessage,
@@ -74,8 +75,10 @@ export interface GatewayAnswer {
   headers?: Record<string, string>;
 }
 
-/** Who calls, once checked: the node's admin (the UI's playground), or a live access key. */
-export type GatewayCaller = { admin: true } | { admin: false; key: AccessKey };
+/** Who calls, once checked: a live access key. A node or agent token is not one. */
+export interface GatewayCaller {
+  key: AccessKey;
+}
 
 export interface GatewayDeps {
   chain: MarketplaceChainAdapter;
@@ -151,16 +154,15 @@ export class Gateway {
   }
 
   /**
-   * The caller of a gateway route, before its body is read: the node's admin,
-   * or a live key within its rate. Anything else is refused with 401 (or 429
-   * for the rate), with no other work done. `token` is the bearer credential
-   * as presented; a node or agent token is not a key.
+   * The caller of a gateway route, before its body is read: a live key of
+   * this node within its rate. Anything else, a node or agent token included,
+   * is refused with 401 (or 429 for the rate), with no other work done.
+   * `token` is the bearer credential as presented.
    */
-  async callerOf(credential: { admin: boolean; token: string | undefined }): Promise<{ caller: GatewayCaller } | { answer: GatewayAnswer }> {
-    if (credential.admin) return { caller: { admin: true } };
-    const check = await this.deps.keys.check(credential.token, Math.floor(Date.now() / 1000));
-    if (!check.ok) return { answer: fail(check.status, check.code, 'an access key of this node, or its admin token, is needed') };
-    return { caller: { admin: false, key: check.key } };
+  async callerOf(token: string | undefined): Promise<{ caller: GatewayCaller } | { answer: GatewayAnswer }> {
+    const check = await this.deps.keys.check(token, Math.floor(Date.now() / 1000));
+    if (!check.ok) return { answer: fail(check.status, check.code, 'an access key of this node is needed') };
+    return { caller: { key: check.key } };
   }
 
   async chatCompletion(caller: GatewayCaller, raw: unknown): Promise<GatewayAnswer> {
@@ -174,7 +176,7 @@ export class Gateway {
       return fail(400, 'bad_request', err instanceof WireError ? err.message : 'bad request');
     }
     const serviceId = ethers.isHexString(call.model, 32) ? call.model.toLowerCase() : serviceIdOf(call.model);
-    if (!caller.admin && caller.key.services && !caller.key.services.includes(serviceId)) {
+    if (caller.key.services && !caller.key.services.includes(serviceId)) {
       return fail(401, 'service_not_allowed', 'the access key may not call this service');
     }
 
@@ -206,11 +208,9 @@ export class Gateway {
         const left = ceiling > used + held ? ceiling - used - held : 0n;
         return fail(402, 'soft_ceiling', 'the budget is at its soft ceiling', { serviceId, ...amount('left', left), fork: { topUp: true, nextEpochAt: times.endsAt } });
       }
-      const keyId = caller.admin ? 'admin' : caller.key.keyId;
-      if (!caller.admin) {
-        const spent = BigInt((await this.deps.keys.list()).find((k) => k.keyId === keyId)?.spent ?? '0');
-        if (spent + maxValueWei > BigInt(caller.key.budget)) return fail(402, 'key_budget', "the call could cost more than the access key's budget has left");
-      }
+      const keyId = caller.key.keyId;
+      const spent = BigInt((await this.deps.keys.list()).find((k) => k.keyId === keyId)?.spent ?? '0');
+      if (spent + maxValueWei > BigInt(caller.key.budget)) return fail(402, 'key_budget', "the call could cost more than the access key's budget has left");
       const sessionKey = await this.sessionKeyOf(subscriptionId, subscription.sessionKey);
       if (!sessionKey) return fail(500, 'session_key_missing', "this node does not hold the subscription's session key");
       const domain = await this.domainOf();
@@ -221,10 +221,15 @@ export class Gateway {
       };
       const callId = hashServiceRequest(domain, request);
       const signature = signServiceRequest(sessionKey.privateKey, domain, request);
+      const message = encodeMessage({ request: requestToWire(request), signature, body });
+      // A message over the seller's cap would be refused before it is read: that is the caller's, not the seller's.
+      if (message.length + PEER_LIMITS.envelopeBytes > PEER_LIMITS.serveRequestBytes) {
+        return fail(413, 'request_too_large', 'the call is larger than a seller takes');
+      }
       const started = Date.now();
       let answer: ServeResponse;
       try {
-        answer = await this.sendServe(route.peerId, { request: requestToWire(request), signature, body }, callId);
+        answer = await this.sendServe(route.peerId, message, callId);
       } catch {
         this.deps.router.unreachable(route.seller);
         return fail(503, 'seller_unreachable', 'the seller did not answer; try again', { serviceId });
@@ -248,7 +253,7 @@ export class Gateway {
       }
       const receipt = checked.receipt!;
       this.noteHeld(entry);
-      if (keyId !== 'admin') await this.deps.keys.charge(keyId, receipt.valueWei, times.now);
+      await this.deps.keys.charge(keyId, receipt.valueWei, times.now);
       const left = budget.value - used - (this.held.get(budgetKey) ?? 0n);
       return {
         status: 200,
@@ -298,19 +303,20 @@ export class Gateway {
   }
 
   /** One `serve`, with one retry under a new message id when the messenger lost the first answer. */
-  private async sendServe(peerId: string, message: object, callId: string): Promise<ServeResponse> {
+  private async sendServe(peerId: string, message: Uint8Array, callId: string): Promise<ServeResponse> {
     for (let attempt = 0; ; attempt++) {
-      const bytes = await this.deps.send(peerId, encodeMessage(message), `${callId}:${attempt}`);
+      const bytes = await this.deps.send(peerId, message, `${callId}:${attempt}`);
       if (attempt === 0 && new TextDecoder().decode(bytes) === 'RESPONSE_GONE') continue;
       return decodeMessage(bytes) as ServeResponse;
     }
   }
 
+  /** The next nonce for the seller on the subscription: taken at once, so two calls never share one, and on disk before it is signed. */
   private async nextNonce(subscriptionId: string, seller: bigint): Promise<bigint> {
     const key = `${subscriptionId}:${seller}`;
     const nonce = (this.nonces.get(key) ?? -1n) + 1n;
+    this.nonces.set(key, nonce);
     await this.nonceLog.append({ subscriptionId, seller: seller.toString(), nonce: nonce.toString() });
-    this.noteNonce(subscriptionId, seller.toString(), nonce);
     return nonce;
   }
 

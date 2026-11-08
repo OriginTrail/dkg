@@ -6,7 +6,7 @@
  * a bad receipt taking its seller out of routing, the router's order and its
  * memory, and the keys' scopes.
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,6 +30,7 @@ import {
   receiptFromWire,
   serviceIdOf,
   type Connector,
+  type AccessKey,
   type GatewayAnswer,
   type GatewayDeps,
   type Offer,
@@ -55,23 +56,25 @@ let offers: Offer[];
 let tamper: ((answer: ServeResponse) => ServeResponse) | undefined;
 let reachable: boolean;
 let DOMAIN: MarketplaceDomain | undefined;
+let caller: { key: AccessKey };
+const call = (chat: unknown = CHAT, g: Gateway = gateway) => g.chatCompletion(caller, chat);
 
 const backend: Connector = { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 7, completionTokens: 5 }) };
 const body = (a: GatewayAnswer) => a.body as any;
 
-async function setUp(value = 10n ** 6n): Promise<void> {
+async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<void> {
   // One mock chain for both ends: the node's wallet buys, and its identity sells.
   await mock.ensureProfile();
   const buyer = new Buyer({ chain, store: new BuyerStore(join(dir, 'buyer')), config: { enabled: true, buyerWallet: NODE.address, prefundLeadSeconds: 7_200, tickSeconds: 300 } });
   const { epoch } = await chain.getEpochTimes();
-  await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [{ serviceId: SERVICE, serviceClass: 1, value, maxPricePerUnit: 100n }] });
+  await buyer.fund({ epoch, source: { kind: 'wallet' }, services: models.map((m) => ({ serviceId: serviceIdOf(m), serviceClass: 1, value, maxPricePerUnit: 100n })) });
   seller = new Seller({
     chain, dir: join(dir, 'seller'), signer: NODE.address, stopServingSeconds: 180, tickSeconds: 300,
-    services: [{ model: MODEL, serviceId: SERVICE, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend }],
+    services: models.map((m) => ({ model: m, serviceId: serviceIdOf(m), pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed' as const, connector: backend })),
   });
   await seller.load();
   await seller.tick();
-  offers = [{ seller: seller.gate.identityId, serviceId: SERVICE, serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null, model: MODEL, provenance: 'upstream-claimed' }];
+  offers = models.map((m) => ({ seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token' as const, pricePerUnit: PRICE, epoch, capacity: null, model: m, provenance: 'upstream-claimed' as const }));
   router = new Router({
     chain,
     offers: async () => offers,
@@ -93,6 +96,7 @@ async function setUp(value = 10n ** 6n): Promise<void> {
   };
   gateway = new Gateway(gatewayDeps);
   await gateway.load();
+  caller = { key: (await keys.make({ label: 'test-agent', budget: 10n ** 30n, services: null, rps: 1_000, expiresAt: null }, 0)).key };
 }
 
 beforeEach(async () => {
@@ -112,7 +116,7 @@ describe('a call through the gateway', () => {
   it('is served by the routed seller, its receipt checked and kept, and the answer is OpenAI-shaped', async () => {
     await setUp();
     expect(body(await gateway.models())).toEqual({ object: 'list', data: [{ id: MODEL, object: 'model', owned_by: 'dkg-marketplace', service_id: SERVICE }] });
-    const answer = await gateway.chatCompletion({ admin: true }, CHAT);
+    const answer = await call();
     expect(answer.status).toBe(200);
     expect(body(answer)).toMatchObject({
       object: 'chat.completion', model: MODEL, choices: [{ message: { role: 'assistant', content: 'synthetic answer' } }], usage: { total_tokens: 12 },
@@ -121,22 +125,31 @@ describe('a call through the gateway', () => {
     // The next call gets the next nonce; a restart remembers it.
     const restarted = new Gateway(gatewayDeps);
     await restarted.load();
-    expect((await restarted.chatCompletion({ admin: true }, CHAT)).status).toBe(200);
+    expect((await call(CHAT, restarted)).status).toBe(200);
+  });
+
+  it('runs calls on two services of one subscription at once, each with its own nonce', async () => {
+    const other = 'urn:test:model:gateway-two';
+    await setUp(10n ** 6n, [MODEL, other]);
+    const answers = await Promise.all([call(), call({ ...CHAT, model: other })]);
+    expect(answers.map((a) => a.status)).toEqual([200, 200]);
+    const nonces = (await readFile(join(dir, 'buyer', 'buyer-nonces.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l).nonce);
+    expect(nonces.sort()).toEqual(['0', '1']);
   });
 
   it('answers without a subscription, at the soft ceiling, and in the boundary gap', async () => {
     // 700 wei: the soft ceiling is 665, and a call reserves 62 units (18 bytes, 24 of allowance, 20 tokens) × 10 wei.
     await setUp(700n);
-    expect(body(await gateway.chatCompletion({ admin: true }, { ...CHAT, model: 'urn:test:model:none' })).error.code).toBe('no_subscription');
-    const first = await gateway.chatCompletion({ admin: true }, CHAT);
+    expect(body(await call({ ...CHAT, model: 'urn:test:model:none' })).error.code).toBe('no_subscription');
+    const first = await call();
     expect(first.status).toBe(200);
-    const ceiling = await gateway.chatCompletion({ admin: true }, CHAT);
+    const ceiling = await call();
     expect(ceiling.status).toBe(402);
     expect(body(ceiling)).toMatchObject({ error: { code: 'soft_ceiling' }, serviceId: SERVICE, fork: { topUp: true } });
 
     const times = await chain.getEpochTimes();
     vi.spyOn(chain, 'getEpochTimes').mockResolvedValue({ ...times, now: times.endsAt - 100 });
-    const gap = await gateway.chatCompletion({ admin: true }, CHAT);
+    const gap = await call();
     expect(gap).toMatchObject({ status: 503, headers: { 'Retry-After': '100' } });
     expect(body(gap).error.code).toBe('epoch_ending');
   });
@@ -144,11 +157,11 @@ describe('a call through the gateway', () => {
   it('takes a seller whose receipt over-reports out of routing for the epoch', async () => {
     await setUp();
     tamper = (answer) => (answer.ok ? { ...answer, receipt: { ...answer.receipt, units: '100000', valueWei: '1000000' } } : answer);
-    const bad = await gateway.chatCompletion({ admin: true }, CHAT);
+    const bad = await call();
     expect(bad.status).toBe(502);
     expect(body(bad)).toMatchObject({ error: { code: 'bad_receipt' }, problem: 'units_over_max' });
     tamper = undefined;
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT)).error.code).toBe('no_seller');
+    expect(body(await call()).error.code).toBe('no_seller');
   });
 
   it.each([
@@ -167,13 +180,13 @@ describe('a call through the gateway', () => {
     await setUp();
     DOMAIN = (await chain.getMarketplaceContracts()).requestDomain;
     tamper = t;
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ problem });
+    expect(body(await call())).toMatchObject({ problem });
   });
 
   it("keeps a receipt whose signer the chain could not check, and retries a lost answer once", async () => {
     await setUp();
     vi.spyOn(chain, 'verifyACKIdentityDetailed').mockResolvedValueOnce({ valid: false, reason: 'rpc-error' });
-    expect((await gateway.chatCompletion({ admin: true }, CHAT)).status).toBe(200);
+    expect((await call()).status).toBe(200);
     const send = gatewayDeps.send;
     let first = true;
     gatewayDeps.send = async (peer, payload, messageId) => {
@@ -181,20 +194,20 @@ describe('a call through the gateway', () => {
       expect(messageId.endsWith(':1')).toBe(true);
       return send(peer, payload, messageId);
     };
-    expect((await gateway.chatCompletion({ admin: true }, CHAT)).status).toBe(200);
+    expect((await call()).status).toBe(200);
   });
 
   it('asks for a new quote after a price change, and answers without the session key', async () => {
     await setUp();
     tamper = () => ({ ok: false, code: 'WrongPrice', retry: true });
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ sellerCode: 'WrongPrice' });
+    expect(body(await call())).toMatchObject({ sellerCode: 'WrongPrice' });
     tamper = () => ({ ok: false, code: 'EpochEnding', retry: true });
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ sellerCode: 'EpochEnding' });
+    expect(body(await call())).toMatchObject({ sellerCode: 'EpochEnding' });
     tamper = undefined;
     // A gateway that has not opened the subscription's session key, which this node does not hold.
     const fresh = new Gateway(gatewayDeps);
     vi.spyOn(gatewayDeps.store, 'sessionKeyAddress').mockResolvedValueOnce(null);
-    expect(await fresh.chatCompletion({ admin: true }, CHAT)).toMatchObject({ status: 500, body: { error: { code: 'session_key_missing' } } });
+    expect(await call(CHAT, fresh)).toMatchObject({ status: 500, body: { error: { code: 'session_key_missing' } } });
     expect(fresh.keys).toBe(keys);
     // Without a subscription, no models.
     vi.spyOn(chain, 'subscriptionExists').mockResolvedValueOnce(false);
@@ -204,36 +217,39 @@ describe('a call through the gateway', () => {
   it('moves on from a seller that does not answer', async () => {
     await setUp();
     reachable = false;
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT)).error.code).toBe('no_seller');
+    expect(body(await call()).error.code).toBe('no_seller');
     reachable = true;
     // Left out for ten minutes.
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT)).error.code).toBe('no_seller');
+    expect(body(await call()).error.code).toBe('no_seller');
   });
 
   it('answers 503 when the quoted seller does not answer the call', async () => {
     await setUp();
     gatewayDeps.send = async () => { throw new Error('timed out'); };
-    expect(await gateway.chatCompletion({ admin: true }, CHAT)).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
+    expect(await call()).toMatchObject({ status: 503, body: { error: { code: 'seller_unreachable' } } });
   });
 
   it("passes on a seller's refusal", async () => {
     await setUp();
     tamper = () => ({ ok: false, code: 'UpstreamError', retry: true });
-    expect(body(await gateway.chatCompletion({ admin: true }, CHAT))).toMatchObject({ error: { code: 'seller_refused' }, sellerCode: 'UpstreamError', retry: true });
+    expect(body(await call())).toMatchObject({ error: { code: 'seller_refused' }, sellerCode: 'UpstreamError', retry: true });
   });
 
-  it('refuses a bad body', async () => {
-    await setUp();
+  it('refuses a bad body, and a call larger than a seller takes without blaming the seller', async () => {
+    await setUp(10n ** 12n);
     for (const bad of [{ ...CHAT, model: '' }, { ...CHAT, stream: true }, { ...CHAT, messages: [] }, null]) {
-      expect((await gateway.chatCompletion({ admin: true }, bad)).status).toBe(400);
+      expect((await call(bad)).status).toBe(400);
     }
+    const large = await call({ ...CHAT, messages: [{ role: 'user', content: 'x'.repeat(600 * 1024) }] });
+    expect(large).toMatchObject({ status: 413, body: { error: { code: 'request_too_large' } } });
+    expect((await call()).status).toBe(200);
   });
 });
 
 describe('access keys', () => {
   /** A call as the gateway's route makes it: the caller checked first, then the body. */
   const callWith = async (token: string | undefined, chat: unknown = CHAT): Promise<GatewayAnswer> => {
-    const checked = await gateway.callerOf({ admin: false, token });
+    const checked = await gateway.callerOf(token);
     return 'answer' in checked ? checked.answer : gateway.chatCompletion(checked.caller, chat);
   };
 
@@ -250,7 +266,7 @@ describe('access keys', () => {
       expect(await callWith(token, null)).toMatchObject({ status: 401 });
     }
     expect((await callWith(secret)).status).toBe(200);
-    expect((await keys.list())[0]!.spent).toBe('120');
+    expect((await keys.list()).find((k) => k.keyId === key.keyId)!.spent).toBe('120');
     // One call a second.
     expect(body(await callWith(secret)).error.code).toBe('key_rate');
     await new Promise((r) => setTimeout(r, 1_050));

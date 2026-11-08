@@ -83,6 +83,8 @@ const session = Wallet.createRandom();
 let startSeller: () => Promise<MarketplaceSellerRuntime>;
 let gatewayBuyer: Buyer;
 let gateway: Gateway;
+/** An access key of the buyer node, made in the first gateway test. */
+let gatewayKey: string;
 const CHAT = { model: MODEL_A, messages: [{ role: 'user', content: 'synthetic question' }], max_tokens: 16 };
 const GATEWAY_CHAT = MARKETPLACE_GATEWAY_ROUTES.chat.path;
 
@@ -265,10 +267,13 @@ describe('serving between two nodes on Hardhat', () => {
   });
 
   it('serves a chat completion through the buyer gateway, with an access key, from the routed seller', async () => {
-    const minted = await route('POST', '/api/marketplace/keys', { label: 'test-agent', budget: String(10n ** 12n) });
+    const minted = await route('POST', '/api/marketplace/keys', { label: 'test-agent', budget: String(10n ** 12n), rps: 100 });
     expect(minted.status).toBe(200);
     expect(minted.body.secret).toMatch(/^dkgmk_/);
+    gatewayKey = minted.body.secret;
+    // No key, and the node admin's token, which is not one.
     expect((await route('POST', GATEWAY_CHAT, CHAT, '')).status).toBe(401);
+    expect((await route('POST', GATEWAY_CHAT, CHAT)).status).toBe(401);
     const models = await route('GET', MARKETPLACE_GATEWAY_ROUTES.models.path, undefined, minted.body.secret);
     expect(models.body.data.map((m: { id: string }) => m.id).sort()).toEqual([MODEL_A]);
 
@@ -293,9 +298,9 @@ describe('serving between two nodes on Hardhat', () => {
       },
     }, { quote: PEER_LIMITS.quoteRequestBytes, serve: PEER_LIMITS.serveRequestBytes });
     try {
-      const bad = await route('POST', GATEWAY_CHAT, CHAT);
+      const bad = await route('POST', GATEWAY_CHAT, CHAT, gatewayKey);
       expect(bad).toMatchObject({ status: 502, body: { error: { code: 'bad_receipt' }, problem: 'units_over_max' } });
-      expect((await route('POST', GATEWAY_CHAT, CHAT)).body.error.code).toBe('no_seller');
+      expect((await route('POST', GATEWAY_CHAT, CHAT, gatewayKey)).body.error.code).toBe('no_seller');
     } finally {
       rogue();
       selling = await startSeller();
@@ -315,7 +320,7 @@ describe('serving between two nodes on Hardhat', () => {
     })) as QuoteResponse;
     expect(quoted.offers[0]!.available).toBe(false);
     // The buyer's gateway answers 503 until the next epoch starts.
-    const gap = await route('POST', GATEWAY_CHAT, CHAT);
+    const gap = await route('POST', GATEWAY_CHAT, CHAT, gatewayKey);
     expect(gap).toMatchObject({ status: 503, body: { error: { code: 'epoch_ending' } } });
     expect(Number(gap.headers?.['Retry-After'])).toBeGreaterThan(0);
     expect(Number(gap.headers?.['Retry-After'])).toBeLessThanOrEqual(120);

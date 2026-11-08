@@ -93,7 +93,8 @@ describe('the gateway routes', () => {
     await gateway!.keys.revoke(key.keyId, now);
     const { secret: expired } = await gateway!.keys.make({ label: 'old', budget: 1n, services: null, rps: 5, expiresAt: now - 1 }, now);
     // The body's bytes are never read: a request without them would fail if they were.
-    for (const auth of [bearer(undefined), bearer(`dkgmk_${'00'.repeat(24)}`), bearer(revoked), bearer(expired), agentToken]) {
+    // A node or agent token is not a key, nor is the node admin's.
+    for (const auth of [bearer(undefined), bearer(`dkgmk_${'00'.repeat(24)}`), bearer(revoked), bearer(expired), agentToken, requestAuthentication({ kind: 'nodeOperator' })]) {
       const answer = await api('POST', '/api/marketplace/v1/chat/completions', undefined, auth);
       expect(answer.status).toBe(401);
     }
@@ -101,17 +102,17 @@ describe('the gateway routes', () => {
     expect((await api('GET', '/api/marketplace/v1/models', undefined, bearer(revoked))).status).toBe(401);
   });
 
-  it("serve the node admin and a key holder, and answer the gateway's own refusals", async () => {
-    expect(await api('GET', '/api/marketplace/v1/models')).toMatchObject({ status: 200, body: { object: 'list', data: [] } });
-    const { secret } = await gateway!.keys.make({ label: 'agent', budget: 10n ** 18n, services: null, rps: 5, expiresAt: null }, 0);
+  it("serve a key holder, and answer the gateway's own refusals", async () => {
+    const { secret } = await gateway!.keys.make({ label: 'agent', budget: 10n ** 18n, services: null, rps: 100, expiresAt: null }, 0);
+    expect(await api('GET', '/api/marketplace/v1/models', undefined, bearer(secret))).toMatchObject({ status: 200, body: { object: 'list', data: [] } });
     expect(await api('POST', '/api/marketplace/v1/chat/completions', chat, bearer(secret))).toMatchObject({ status: 402, body: { error: { code: 'no_subscription' } } });
     expect(await api('POST', '/api/marketplace/v1/chat/completions', 'not json', bearer(secret))).toMatchObject({ status: 400 });
     const times = await chain.getEpochTimes();
     vi.spyOn(chain, 'getEpochTimes').mockResolvedValue({ ...times, now: times.endsAt - 60 });
-    const gap = await api('POST', '/api/marketplace/v1/chat/completions', chat);
+    const gap = await api('POST', '/api/marketplace/v1/chat/completions', chat, bearer(secret));
     expect(gap).toMatchObject({ status: 503, body: { error: { code: 'epoch_ending' } }, headers: { 'Retry-After': '60' } });
     gateway = undefined;
-    expect((await api('GET', '/api/marketplace/v1/models')).status).toBe(503);
+    expect((await api('GET', '/api/marketplace/v1/models', undefined, bearer(secret))).status).toBe(503);
   });
 
   it('make and revoke keys for the node admin only, and show them without their secrets', async () => {

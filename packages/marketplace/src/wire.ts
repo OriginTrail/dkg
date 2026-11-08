@@ -24,6 +24,8 @@ export const PEER_LIMITS = Object.freeze({
   /** What a buyer reads back (`maxReadBytes`). */
   quoteResponseBytes: 64 * 1024,
   serveResponseBytes: 2 * 1024 * 1024,
+  /** What the messenger's envelope adds to a message, at most; a buyer keeps its payload under the cap by this much. */
+  envelopeBytes: 4 * 1024,
   quoteTimeoutMs: 10_000,
   serveTimeoutMs: 120_000,
   /** At most this many services in one quote. */
