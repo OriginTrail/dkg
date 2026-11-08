@@ -45,6 +45,7 @@ import {
   type QueryInferenceReceipt,
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
+import { NO_FX, type Fx } from './config.js';
 import type { AccessKey, AccessKeys } from './keys.js';
 import { Journal, KeyedLock } from './journal.js';
 import { serviceIdOf } from './offers.js';
@@ -103,6 +104,8 @@ export interface GatewayDeps {
   modelOf?(serviceId: string, epoch: number): Promise<string | undefined>;
   /** The sellers' stop time before an epoch's end. Default 180. */
   stopServingSeconds?: number;
+  /** The reference rate the catalog shows USD by; none by default. */
+  fx?: Fx;
   log?: (message: string) => void;
 }
 
@@ -121,6 +124,23 @@ export interface HeldReceipt {
   receiptSignature: string;
   state: 'held' | 'refused';
   problem?: string;
+}
+
+/** How many calls `activity` answers. */
+const ACTIVITY_LIMIT = 200;
+
+/** A call through the gateway, as the activity lists it (`Call`). */
+export interface CallView {
+  callId: string;
+  /** When the seller completed it, in chain seconds. */
+  at: number;
+  serviceId: string;
+  seller: number;
+  keyId: string;
+  units: number;
+  value: string;
+  valueTrac: string;
+  state: 'held' | 'landed' | 'missed';
 }
 
 /** An epoch made final: its reconciliation, kept once its receipts are dropped. */
@@ -166,6 +186,51 @@ export class Gateway {
   /** The access keys callers present. */
   get keys(): AccessKeys {
     return this.deps.keys;
+  }
+
+  get router(): Router {
+    return this.deps.router;
+  }
+
+  get chain(): MarketplaceChainAdapter {
+    return this.deps.chain;
+  }
+
+  get buyerWallet(): string {
+    return this.deps.buyerWallet;
+  }
+
+  get fx(): Fx {
+    return this.deps.fx ?? NO_FX;
+  }
+
+  /** The value of a budget's receipts this node holds and has not seen landed. */
+  heldValue(subscriptionId: string, budgetIndex: number): bigint {
+    return this.held.get(`${subscriptionId.toLowerCase()}:${budgetIndex}`) ?? 0n;
+  }
+
+  /**
+   * An epoch's calls (`Call`), newest first, at most `ACTIVITY_LIMIT`, or one
+   * access key's: held while the chain shows its nonce unused, landed once it
+   * shows it used, and missed once the epoch ended without it. An epoch made
+   * final keeps its reconciliation, not its calls.
+   */
+  async activity(epoch?: number, keyId?: string): Promise<{ calls: CallView[] }> {
+    const times = await this.deps.chain.getEpochTimes();
+    const asked = epoch ?? times.epoch;
+    const receipts = (this.byEpoch.get(asked) ?? []).filter((r) => r.state === 'held' && (keyId === undefined || r.keyId === keyId));
+    const used = await this.usedOf(receipts);
+    const calls: CallView[] = receipts.map((r) => ({
+      callId: r.callId,
+      at: r.receipt.completedAt,
+      serviceId: r.request.serviceId,
+      seller: Number(r.seller),
+      keyId: r.keyId,
+      units: Number(r.receipt.units),
+      ...amount('value', BigInt(r.receipt.valueWei)),
+      state: used.has(r.callId) ? 'landed' : asked < times.epoch ? 'missed' : 'held',
+    }));
+    return { calls: calls.sort((a, b) => b.at - a.at).slice(0, ACTIVITY_LIMIT) };
   }
 
   /** Read the receipts held, the epochs made final and the nonce counters. Call once before serving. */
@@ -456,7 +521,9 @@ export class Gateway {
   /** The groups landed for a subscription, read on from where the last read ended. */
   private async landedFor(subscriptionId: string): Promise<LandedGroup[]> {
     const before = this.scans.get(subscriptionId);
-    const next = await this.deps.chain.listReceiptsLanded(subscriptionId, before ? before.toBlock + 1 : undefined);
+    // The first read starts at the block of the funding, or at the settlement's deployment when that is not known.
+    const from = before ? before.toBlock + 1 : (await this.deps.store.fundingBlock(subscriptionId)) ?? undefined;
+    const next = await this.deps.chain.listReceiptsLanded(subscriptionId, from);
     const groups = [...(before?.groups ?? []), ...next.groups.filter((g) => !before || g.blockNumber > before.toBlock)];
     this.scans.set(subscriptionId, { toBlock: Math.max(before?.toBlock ?? -1, next.toBlock), groups });
     return groups;

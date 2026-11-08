@@ -16,7 +16,7 @@ import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type Mark
 import { AccessKeys, Buyer, BuyerStore, Gateway, NO_SELLER_PEERS, Router, Seller, parsePlan } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
-import { startMarketplaceBuyer } from '../src/daemon/marketplace-buyer.js';
+import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -145,6 +145,67 @@ describe('the gateway routes', () => {
     expect(await api('GET', '/api/marketplace/reconciliation?epoch=soon')).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
     gateway = undefined;
     expect(await api('GET', '/api/marketplace/reconciliation')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
+  });
+});
+
+describe('the catalog routes', () => {
+  const agent = requestAuthentication({ kind: 'agent', agentAddress: OTHER });
+  let own: bigint;
+
+  beforeEach(async () => {
+    await mock.ensureProfile();
+    own = await chain.getIdentityId();
+    const { epoch } = await chain.getEpochTimes();
+    const offers = [{ seller: own, serviceId: A, serviceClass: 1, unit: 'token' as const, pricePerUnit: 10n, epoch, capacity: null, model: 'urn:test:model:a', provenance: 'upstream-claimed' as const }];
+    gateway = new Gateway({
+      chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
+      router: new Router({ chain, offers: async () => offers, quote: async () => { throw new Error('no sellers'); }, peers: NO_SELLER_PEERS }),
+      send: async () => { throw new Error('no sellers'); },
+    });
+    await gateway.load();
+  });
+
+  it('answer the catalog, a service, a storefront and the activity to any reader', async () => {
+    const { epoch } = await chain.getEpochTimes();
+    expect(await api('GET', '/api/marketplace/catalog', undefined, agent)).toMatchObject({
+      status: 200, body: { epoch, fx: { tracUsd: null, source: 'none' }, services: [{ serviceId: A, label: 'urn:test:model:a', priceMin: '10', offers: [{ seller: Number(own), available: null }] }] },
+    });
+    expect(await api('GET', `/api/marketplace/services/${A}`, undefined, agent)).toMatchObject({ status: 200, body: { serviceId: A, sellers: [{ identityId: Number(own) }] } });
+    expect(await api('GET', `/api/marketplace/services/0x${'99'.repeat(32)}`)).toMatchObject({ status: 404, body: { code: 'ServiceNotFound' } });
+    expect((await api('GET', '/api/marketplace/services/a-model')).status).toBe(404);
+    expect(await api('GET', `/api/marketplace/sellers/${own}`, undefined, agent)).toMatchObject({ status: 200, body: { identityId: Number(own), gate: { profile: true }, offers: [{ serviceId: A }] } });
+    vi.spyOn(chain, 'profileExists').mockResolvedValue(false);
+    expect(await api('GET', '/api/marketplace/sellers/77')).toMatchObject({ status: 404, body: { code: 'SellerNotFound' } });
+    expect(await api('GET', '/api/marketplace/activity', undefined, agent)).toMatchObject({ status: 200, body: { calls: [] } });
+    expect(await api('GET', '/api/marketplace/activity?key=dkgmk_none&epoch=current')).toMatchObject({ status: 200, body: { calls: [] } });
+    expect(await api('GET', '/api/marketplace/activity?epoch=soon')).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
+    gateway = undefined;
+    expect(await api('GET', '/api/marketplace/catalog')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
+  });
+
+  it("show each budget's held value as the gateway counts it", async () => {
+    const { epoch } = await chain.getEpochTimes();
+    await chain.approveServiceSubscriptionsWallet(10n ** 24n);
+    await chain.fundFromWallet({
+      epoch, sessionKey: OTHER, planDigest: ethers.ZeroHash,
+      budgets: [{ serviceId: A, serviceClass: 1, value: 10n ** 6n, maxPricePerUnit: 100n }],
+    });
+    vi.spyOn(gateway!, 'heldValue').mockReturnValue(7n);
+    expect((await api('GET', '/api/marketplace/subscriptions?epoch=current')).body.subscriptions[0].budgets[0]).toMatchObject({ held: '7', left: String(10n ** 6n) });
+    gateway = undefined;
+    expect((await api('GET', '/api/marketplace/subscriptions?epoch=current')).body.subscriptions[0].budgets[0]).toMatchObject({ held: '0' });
+  });
+
+  it('take the reference rate from the settings when the gateway starts, and none when it is not a rate', async () => {
+    const agentStub = { sendMarketplaceMessage: vi.fn(), subscribeToContextGraph: vi.fn(), query: vi.fn(async () => ({ bindings: [] })) };
+    const log = vi.fn();
+    const started = await startMarketplaceGateway({ config: { marketplace: { fx: { tracUsd: 0.5 } } }, agent: agentStub, buyer: buyer!, dataDir: dir, log });
+    expect(started.fx).toEqual({ tracUsd: 0.5, source: 'config', asOf: null });
+    await started.stop();
+    const refused = await startMarketplaceGateway({ config: { marketplace: { fx: { tracUsd: 'a lot' } } }, agent: agentStub, buyer: buyer!, dataDir: dir, log });
+    expect(refused.fx).toEqual({ tracUsd: null, source: 'none', asOf: null });
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/tracUsd .*no USD/));
+    await refused.stop();
   });
 });
 
@@ -343,6 +404,11 @@ describe('dkg marketplace', () => {
     await run('keys', 'revoke', 'dkgmk_0011aabb');
     await run('reconciliation', '--epoch', '41');
     await run('reconciliation');
+    await run('catalog');
+    await run('service', A);
+    await run('storefront', '7');
+    await run('activity', '--epoch', '4', '--key', 'dkgmk_0011aabb');
+    await run('activity');
     await run('seller');
     await run('seller', 'land');
     await run('seller', 'price', A, '25');
@@ -358,6 +424,11 @@ describe('dkg marketplace', () => {
       ['POST', '/keys/dkgmk_0011aabb/revoke', undefined],
       ['GET', '/reconciliation?epoch=41', undefined],
       ['GET', '/reconciliation', undefined],
+      ['GET', '/catalog', undefined],
+      ['GET', `/services/${A}`, undefined],
+      ['GET', '/sellers/7', undefined],
+      ['GET', '/activity?epoch=4&key=dkgmk_0011aabb', undefined],
+      ['GET', '/activity', undefined],
       ['GET', '/seller', undefined],
       ['POST', '/seller/land', undefined],
       ['PUT', `/seller/offerings/${A}/price`, { price: '25' }],

@@ -16,6 +16,7 @@ import {
   MockChainAdapter,
   hashQueryInferenceReceipt,
   marketplaceChainOf,
+  subscriptionIdOf,
   type MarketplaceChainAdapter,
   type MarketplaceDomain,
 } from '@origintrail-official/dkg-chain';
@@ -374,6 +375,33 @@ describe('landing, reconciliation and pruning', () => {
     // Read on from where it ended: the next read finds the same groups once.
     expect((await gateway.reconciliation()).rows[0]!.landed.count).toBe(2);
     expect((await gateway.reconciliation(epoch + 5)).rows).toEqual([]);
+
+    // The calls, newest first: the two that landed, and the one still held, whose value the held value counts.
+    const { subscriptionId } = reconciled.rows[0]!;
+    expect(gateway.heldValue(subscriptionId.toUpperCase().replace('0X', '0x'), 0)).toBe(120n);
+    const { calls } = await gateway.activity();
+    expect(calls.map((c) => c.state)).toEqual(['held', 'landed', 'landed']);
+    expect(calls[0]).toMatchObject({ serviceId: SERVICE, seller: Number(seller.gate.identityId), keyId: caller.key.keyId, units: 12, value: '120' });
+    expect((await gateway.activity(undefined, 'dkgmk_none')).calls).toEqual([]);
+    // Once the epoch ends, what did not land is missed.
+    mock.__advanceEpoch();
+    expect((await gateway.activity(epoch)).calls.map((c) => c.state)).toEqual(['missed', 'landed', 'landed']);
+  });
+
+  it('reads what landed from the block its subscription was funded in', async () => {
+    await setUp();
+    expect((await call()).status).toBe(200);
+    const { epoch } = await chain.getEpochTimes();
+    const subscriptionId = subscriptionIdOf(NODE.address, epoch);
+    const funded = await gatewayDeps.store.fundingBlock(subscriptionId);
+    expect(funded).toBeGreaterThan(0);
+    const reads = vi.spyOn(chain, 'listReceiptsLanded');
+    await gateway.reconciliation();
+    expect(reads).toHaveBeenCalledWith(subscriptionId, funded);
+    // Without the record, from the settlement's deployment.
+    const elsewhere = new Gateway({ ...gatewayDeps, store: new BuyerStore(join(dir, 'elsewhere')) });
+    await elsewhere.reconciliation();
+    expect(reads).toHaveBeenLastCalledWith(subscriptionId, undefined);
   });
 
   it("does not match a receipt it refused, and makes an epoch final once the next one ends", async () => {

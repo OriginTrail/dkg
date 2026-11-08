@@ -136,11 +136,18 @@ export class Buyer {
       const budgets = budgetsOf(request.services);
       const planDigest = planDigestOf(request.epoch, this.buyerWallet, budgets);
       const from = { from: this.buyerWallet };
+      let funded: SubscriptionFunding;
       if (request.source.kind === 'wallet') {
         await this.ensureAllowance(check.value, request.epoch);
-        return this.chain.fundFromWallet({ epoch: request.epoch, sessionKey, planDigest, budgets }, from);
+        funded = await this.chain.fundFromWallet({ epoch: request.epoch, sessionKey, planDigest, budgets }, from);
+      } else {
+        funded = await this.chain.fundFromAccount({ accountId: request.source.accountId, epoch: request.epoch, sessionKey, planDigest, budgets }, from);
       }
-      return this.chain.fundFromAccount({ accountId: request.source.accountId, epoch: request.epoch, sessionKey, planDigest, budgets }, from);
+      // Where reading what landed for it starts; without it, reading starts at the settlement's deployment.
+      await this.store.recordFunding(funded.subscriptionId, funded.blockNumber).catch((err: unknown) => {
+        this.deps.log?.(`[marketplace] the funding block of ${funded.subscriptionId} was not kept: ${err instanceof Error ? err.message : String(err)}`);
+      });
+      return funded;
     });
   }
 

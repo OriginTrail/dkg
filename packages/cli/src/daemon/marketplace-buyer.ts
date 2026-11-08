@@ -24,6 +24,8 @@ import {
   encodeMessage,
   offersFromBindings,
   offersQuery,
+  NO_FX,
+  resolveFx,
   resolveMarketplaceConfig,
   type BuyerAlert,
   type MarketplaceConfig,
@@ -129,6 +131,12 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
     },
   });
   const dir = join(dataDir, 'marketplace');
+  let fx = NO_FX;
+  try {
+    fx = resolveFx(options.config.marketplace as MarketplaceConfig | undefined);
+  } catch (err) {
+    options.log?.(`[marketplace] ${err instanceof Error ? err.message : String(err)}: the catalog shows no USD`);
+  }
   const gateway = new Gateway({
     chain: buyer.chain,
     buyerWallet: buyer.buyerWallet,
@@ -140,6 +148,7 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
     }),
     dir,
     modelOf: async (serviceId, epoch) => (await offers([epoch])).find((o) => o.serviceId === serviceId)?.model,
+    fx,
     ...(options.log ? { log: options.log } : {}),
   });
   await gateway.load();

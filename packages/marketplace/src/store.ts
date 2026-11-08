@@ -5,7 +5,9 @@
  *   - `plan.json`, the standing plan the user confirmed;
  *   - `session-keys.json`, one session key per subscription, sealed as the
  *     node seals its operational wallets' keys (core's node key store: the
- *     node's `wallets.key`, and `DKG_WALLETS_PASSPHRASE` when it is set).
+ *     node's `wallets.key`, and `DKG_WALLETS_PASSPHRASE` when it is set);
+ *   - `fundings.json`, the block each subscription was funded in, where reading
+ *     what landed for it starts.
  *
  * A session key is written before the funding that names it is sent, so a
  * crash never leaves a funded subscription whose key is lost. Each file is
@@ -74,6 +76,18 @@ export class BuyerStore {
     await mkdir(this.dir, { recursive: true });
     await writeAtomically(join(this.dir, 'session-keys.json'), `${JSON.stringify(keys, null, 2)}\n`);
     return wallet;
+  }
+
+  /** The block a subscription was funded in, as the buyer recorded it; `null` when it did not. */
+  async fundingBlock(subscriptionId: string): Promise<number | null> {
+    return (await readJson<Record<string, number>>(join(this.dir, 'fundings.json')))?.[subscriptionId.toLowerCase()] ?? null;
+  }
+
+  async recordFunding(subscriptionId: string, blockNumber: number): Promise<void> {
+    const fundings = (await readJson<Record<string, number>>(join(this.dir, 'fundings.json'))) ?? {};
+    fundings[subscriptionId.toLowerCase()] = blockNumber;
+    await mkdir(this.dir, { recursive: true });
+    await writeAtomically(join(this.dir, 'fundings.json'), `${JSON.stringify(fundings, null, 2)}\n`);
   }
 
   /** The stored session key's address, without opening it; `null` when none is stored. */

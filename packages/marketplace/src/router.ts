@@ -111,6 +111,23 @@ export class Router {
     for (const key of this.quotes.keys()) if (key.startsWith(`${seller}:`)) this.quotes.delete(key);
   }
 
+  /** The offers of `epochs`, as routing reads them. */
+  offersOf(epochs: number[]): Promise<Offer[]> {
+    return this.deps.offers(epochs);
+  }
+
+  /** What the last quote from `seller` said of `serviceId`, and when it came, in seconds; `undefined` while none has. */
+  lastQuote(seller: bigint, serviceId: string): { available: boolean; at: number } | undefined {
+    const kept = this.quotes.get(`${seller}:${serviceId}`);
+    if (!kept) return undefined;
+    return { available: kept.quote.offers.find((o) => o.serviceId === serviceId)?.available ?? false, at: Math.floor(kept.at / 1_000) };
+  }
+
+  /** This node's measured time for a call to `seller`, in milliseconds; `null` before its first call. */
+  latencyOf(seller: bigint): number | null {
+    return this.latency.get(seller.toString()) ?? null;
+  }
+
   /** How long a call to the seller took, in milliseconds. */
   measured(seller: bigint, ms: number): void {
     const before = this.latency.get(seller.toString());

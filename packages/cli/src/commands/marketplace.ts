@@ -146,6 +146,25 @@ export function registerMarketplaceCommand(program: Command): void {
     .option('--epoch <epoch>', 'current or an epoch number')
     .action((opts: { epoch?: string }) => call('GET', `/reconciliation${opts.epoch ? `?epoch=${id(opts.epoch)}` : ''}`));
 
+  cmd.command('catalog').description("This epoch's services, with their sellers' offers and prices").action(() => call('GET', '/catalog'));
+  cmd
+    .command('service <serviceId>')
+    .description('One service, with a row per seller')
+    .action((serviceId: string) => call('GET', `/services/${id(serviceId)}`));
+  cmd
+    .command('storefront <identityId>')
+    .description('One seller: its Core Node gate, offers and served value in recent epochs')
+    .action((identityId: string) => call('GET', `/sellers/${id(identityId)}`));
+  cmd
+    .command('activity')
+    .description("The calls through the gateway, this epoch's by default, and whether each is held, landed or missed")
+    .option('--epoch <epoch>', 'current, next or an epoch number')
+    .option('--key <keyId>', "one access key's calls")
+    .action((opts: { epoch?: string; key?: string }) => {
+      const query = new URLSearchParams({ ...(opts.epoch ? { epoch: opts.epoch } : {}), ...(opts.key ? { key: opts.key } : {}) }).toString();
+      return call('GET', `/activity${query ? `?${query}` : ''}`);
+    });
+
   const sell = cmd.command('seller').description("The node's selling: its Core Node gate, offerings, ledger and landing");
   sell
     .command('status', { isDefault: true })

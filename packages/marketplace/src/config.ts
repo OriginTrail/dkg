@@ -27,6 +27,32 @@ export interface MarketplaceConfig {
   contextGraphId?: string;
   /** Selling: off unless `seller.enabled`, and only while the node is a Core Node. */
   seller?: SellerConfig;
+  /** A reference rate the catalog shows USD by; none by default. */
+  fx?: { tracUsd?: number; source?: string; asOf?: number };
+}
+
+/** The catalog's reference rate (`Fx`): USD per TRAC, where it comes from and when it was read; a null rate hides USD. */
+export interface Fx {
+  tracUsd: number | null;
+  source: string;
+  asOf: number | null;
+}
+
+export const NO_FX: Readonly<Fx> = Object.freeze({ tracUsd: null, source: 'none', asOf: null });
+
+/** The reference rate from the settings. */
+export function resolveFx(config: MarketplaceConfig | undefined): Fx {
+  const fx = config?.fx;
+  if (fx === undefined) return { ...NO_FX };
+  const tracUsd = fx.tracUsd ?? null;
+  if (tracUsd !== null && (typeof tracUsd !== 'number' || !Number.isFinite(tracUsd) || tracUsd <= 0)) {
+    throw new Error('marketplace.fx.tracUsd must be a positive number of USD per TRAC');
+  }
+  const asOf = fx.asOf ?? null;
+  if (asOf !== null && (!Number.isSafeInteger(asOf) || asOf <= 0)) throw new Error('marketplace.fx.asOf must be a time in seconds');
+  const source = fx.source ?? (tracUsd === null ? NO_FX.source : 'config');
+  if (typeof source !== 'string' || source === '') throw new Error('marketplace.fx.source must say where the rate comes from');
+  return { tracUsd, source, asOf };
 }
 
 export interface SellerConfig {

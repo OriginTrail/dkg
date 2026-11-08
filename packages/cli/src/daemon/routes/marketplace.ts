@@ -22,6 +22,7 @@ import {
   accountsView,
   addBuyer,
   buyerConsent,
+  catalogView,
   contractsView,
   dryRunView,
   fundingView,
@@ -35,6 +36,8 @@ import {
   refusalOf,
   removeBuyer,
   sellerStatusView,
+  sellerView,
+  serviceDetailView,
   setBuyerLimits,
   setNextPriceView,
   setServiceSpending,
@@ -45,6 +48,7 @@ import {
   type Buyer,
   type FundingRequest,
   type Gateway,
+  type HeldValue,
   type Seller,
 } from '@origintrail-official/dkg-marketplace';
 import type { BuyerLimits } from '@origintrail-official/dkg-chain';
@@ -147,10 +151,16 @@ function gatewayOf(ctx: RequestContext): Gateway {
   return ctx.marketplaceGateway;
 }
 
+/** The gateway's held value of a budget, while the gateway runs. */
+function heldOf(ctx: RequestContext): HeldValue | undefined {
+  const gateway = ctx.marketplaceGateway;
+  return gateway ? (subscriptionId, budgetIndex) => gateway.heldValue(subscriptionId, budgetIndex) : undefined;
+}
+
 /** The subscription a funding or top-up just changed; `null` while the read lags the send, which succeeded. */
-async function subscriptionAfter(buyer: Buyer, subscriptionId: string) {
+async function subscriptionAfter(buyer: Buyer, subscriptionId: string, ctx: RequestContext) {
   const subscription = await buyer.chain.getSubscription(subscriptionId);
-  return subscription ? subscriptionView(buyer.chain, subscription) : null;
+  return subscription ? subscriptionView(buyer.chain, subscription, heldOf(ctx)) : null;
 }
 
 /** The answer to a seller route, under /seller, or `undefined` when none matches. */
@@ -168,20 +178,20 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
   if (method === 'GET' && route === '/subscriptions') {
     const { epoch } = await buyer.chain.getEpochTimes();
     const asked = url.searchParams.get('epoch');
-    return subscriptionsView(buyer, asked === null ? [epoch, epoch + 1] : [parseEpoch(asked, epoch)]);
+    return subscriptionsView(buyer, asked === null ? [epoch, epoch + 1] : [parseEpoch(asked, epoch)], heldOf(ctx));
   }
   if (method === 'POST' && route === '/subscriptions/preview') {
     return dryRunView(buyer.chain, await buyer.dryRun(await fundingRequestOf(buyer, req)));
   }
   if (method === 'POST' && route === '/subscriptions') {
     const funded = await buyer.fund(await fundingRequestOf(buyer, req));
-    return { ...txView(funded), subscription: await subscriptionAfter(buyer, funded.subscriptionId) };
+    return { ...txView(funded), subscription: await subscriptionAfter(buyer, funded.subscriptionId, ctx) };
   }
   const topUp = /^\/subscriptions\/(0x[0-9a-fA-F]{64})\/top-up$/.exec(route);
   if (method === 'POST' && topUp) {
     const subscriptionId = topUp[1]!.toLowerCase();
     const sent = await buyer.topUp(subscriptionId, parseServices((await bodyOf(req)).services));
-    return { ...txView(sent), subscription: await subscriptionAfter(buyer, subscriptionId) };
+    return { ...txView(sent), subscription: await subscriptionAfter(buyer, subscriptionId, ctx) };
   }
   if (route === '/plan' && method === 'PUT') {
     const plan = parsePlan(await bodyOf(req));
@@ -192,6 +202,17 @@ async function answer(buyer: Buyer, method: string, route: string, ctx: RequestC
     const plan = await buyer.store.readPlan();
     if (!plan) throw new MarketplaceRefusal('PlanNotFound');
     return planView(buyer, plan);
+  }
+  // The catalog, from the offers in the Marketplace Context Graph, and the gateway's calls.
+  if (method === 'GET' && route === '/catalog') return catalogView(gatewayOf(ctx));
+  const service = /^\/services\/(0x[0-9a-fA-F]{64})$/.exec(route);
+  if (method === 'GET' && service) return serviceDetailView(gatewayOf(ctx), service[1]!);
+  const storefront = /^\/sellers\/([1-9]\d{0,20})$/.exec(route);
+  if (method === 'GET' && storefront) return sellerView(gatewayOf(ctx), BigInt(storefront[1]!));
+  if (method === 'GET' && route === '/activity') {
+    const { epoch } = await buyer.chain.getEpochTimes();
+    const asked = url.searchParams.get('epoch');
+    return gatewayOf(ctx).activity(asked === null ? epoch : parseEpoch(asked, epoch), url.searchParams.get('key') ?? undefined);
   }
   if (method === 'GET' && route === '/reconciliation') {
     const { epoch } = await buyer.chain.getEpochTimes();

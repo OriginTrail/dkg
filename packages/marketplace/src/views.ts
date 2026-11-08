@@ -44,8 +44,11 @@ async function sourceView(chain: MarketplaceChainAdapter, source: FundingSource,
   return { kind: 'account' as const, accountId: source.accountId.toString(), discountBps: bps };
 }
 
-/** A subscription and its budgets: what each used and has left on chain, and its soft ceiling. */
-export async function subscriptionView(chain: MarketplaceChainAdapter, s: Subscription) {
+/** A budget's receipts this node holds and has not seen landed, as the gateway counts them. */
+export type HeldValue = (subscriptionId: string, budgetIndex: number) => bigint;
+
+/** A subscription and its budgets: what each used and has left on chain, what the node holds, and its soft ceiling. */
+export async function subscriptionView(chain: MarketplaceChainAdapter, s: Subscription, held?: HeldValue) {
   const budgets = await chain.getBudgets(s.subscriptionId);
   const source: FundingSource = s.accountId === 0n ? { kind: 'wallet' } : { kind: 'account', accountId: s.accountId };
   return {
@@ -68,8 +71,7 @@ export async function subscriptionView(chain: MarketplaceChainAdapter, s: Subscr
         ...amount('value', b.value),
         ...amount('maxPricePerUnit', b.maxPricePerUnit),
         ...amount('used', used),
-        // Receipts held and not landed yet: the gateway counts them; this view does not read them yet.
-        ...amount('held', 0n),
+        ...amount('held', held?.(s.subscriptionId, budgetIndex) ?? 0n),
         ...amount('left', left),
         ...amount('softCeiling', (b.value * SOFT_CEILING_PERCENT) / 100n),
       };
@@ -78,11 +80,11 @@ export async function subscriptionView(chain: MarketplaceChainAdapter, s: Subscr
 }
 
 /** The buyer's subscriptions in `epochs`, those it has. */
-export async function subscriptionsView(buyer: Buyer, epochs: readonly number[]) {
+export async function subscriptionsView(buyer: Buyer, epochs: readonly number[], held?: HeldValue) {
   const subscriptions = [];
   for (const epoch of epochs) {
     const s = await buyer.chain.getSubscription(subscriptionIdOf(buyer.buyerWallet, epoch));
-    if (s) subscriptions.push(await subscriptionView(buyer.chain, s));
+    if (s) subscriptions.push(await subscriptionView(buyer.chain, s, held));
   }
   return { subscriptions };
 }

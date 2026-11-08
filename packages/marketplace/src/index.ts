@@ -5,7 +5,7 @@
  * standing plan, what it keeps on disk, an account owner's actions, the shapes
  * the node API returns, the seller with its backends, offers and the peer
  * protocol's messages, its ledger and landing loop, and the buyer's gateway
- * with its router, access keys and reconciliation. Off unless
+ * with its router, access keys, reconciliation and catalog. Off unless
  * `marketplace.enabled`.
  */
 export * from './config.js';
@@ -26,3 +26,4 @@ export * from './keys.js';
 export * from './router.js';
 export * from './reconcile.js';
 export * from './gateway.js';
+export * from './catalog.js';

@@ -91,6 +91,8 @@ describe('funding from the wallet', () => {
     const subscriptionId = subscriptionIdOf(SIGNER.address, epoch);
     expect(funded.subscriptionId).toBe(subscriptionId);
     expect((await chain.getSubscription(subscriptionId))!.sessionKey).toBe(await store.sessionKeyAddress(subscriptionId));
+    // The block it was funded in, where reading what landed for it starts.
+    expect(await store.fundingBlock(subscriptionId)).toBe(funded.blockNumber);
     // The plan runs through epoch 3: three epochs of 100 TRAC approved, one spent.
     expect(await chain.getServiceSubscriptionsWalletAllowance(SIGNER.address)).toBe(200n * TRAC);
 
@@ -98,6 +100,16 @@ describe('funding from the wallet', () => {
     expect((await buyer.dryRun({ ...request, epoch: epoch + 2 })).refusal).toEqual({ code: 'InvalidFundingRequest', args: ['epoch'] });
     const tooMany = Array.from({ length: 17 }, (_, i) => service(ethers.toBeHex(i + 1, 32), TRAC));
     expect((await buyer.dryRun({ ...request, epoch: epoch + 1, services: tooMany })).refusal?.code).toBe('InvalidFundingRequest');
+  });
+
+  it('funds even when the funding block cannot be kept, and says so', async () => {
+    const logs: string[] = [];
+    const buyer = new Buyer({ chain, store, config: { enabled: true, buyerWallet: SIGNER.address, prefundLeadSeconds: 7_200, tickSeconds: 300 }, log: (m) => logs.push(m) });
+    vi.spyOn(store, 'recordFunding').mockRejectedValueOnce(new Error('the disk is full'));
+    const { epoch } = await chain.getEpochTimes();
+    const funded = await buyer.fund({ epoch, source: { kind: 'wallet' }, services: [service(A, TRAC)] });
+    expect(await store.fundingBlock(funded.subscriptionId)).toBeNull();
+    expect(logs).toEqual([expect.stringMatching(/funding block .* was not kept: the disk is full/)]);
   });
 
   it('serializes fundings: the second of two for one epoch is refused before it is sent', async () => {
