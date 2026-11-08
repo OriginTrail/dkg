@@ -475,7 +475,7 @@ const RPC_USAGE_SNAPSHOT_RAW_CONSUMERS = [
   'queryInferenceStorage.batchState', 'queryInferenceStorage.nonceWord', 'queryInferenceStorage.budgetUsed',
   'queryInferenceStorage.fundingIn', 'queryInferenceStorage.getEpochTotals', 'queryInferenceStorage.getNodeEpoch',
   'shardingTableStorage.getNode', 'randomSamplingStorage.getNodeEpochScore',
-  'parametersStorage.protocolTreasury', 'marketplace wallet balance',
+  'parametersStorage.protocolTreasury', 'marketplace wallet balance', 'marketplace wallet nonce', 'marketplace base fee',
 
   // Background views coalesced into one request, and the bytecode check before it.
   'multicall3.aggregate3',

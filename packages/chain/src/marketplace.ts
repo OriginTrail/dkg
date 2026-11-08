@@ -20,6 +20,7 @@
  */
 import { ethers } from 'ethers';
 import type { ChainAdapter, TxResult } from './chain-adapter.js';
+import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 
 /** `ServiceSubscriptionsStorage.CLASS_INFERENCE`: units are tokens. */
@@ -210,8 +211,29 @@ export interface ReceiptsLanded {
   groupDigest: string;
 }
 
+/** A group that landed, with the transaction that landed it. */
+export interface LandedGroup extends ReceiptsLanded {
+  txHash: string;
+  blockNumber: number;
+}
+
+/**
+ * A receipt batch's send: the durable record before it is broadcast, and the
+ * hash of each speed-up before that is broadcast.
+ */
+export interface ReceiptBatchSendOptions {
+  /** Awaited once the batch is signed, before it is broadcast, with the wallet and nonce it took; a throw sends nothing. */
+  onBroadcast?: (signal: PreBroadcastSignal & { wallet: string }) => Promise<void> | void;
+  /** Awaited before each same-nonce replacement of a stuck batch is broadcast; a throw sends no replacement. */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
+}
+
+/** What became of a batch's transaction: it landed, with its groups; it reverted; or `null` while it is not mined. */
+export type ReceiptBatchOutcome = { landed: ReceiptBatch } | { reverted: true } | null;
+
 /** A batch that landed: its `ReceiptBatchAccepted` event and its groups. */
 export interface ReceiptBatch extends TxResult {
+  gasUsed: bigint;
   seller: bigint;
   /** `receiptsDigest` of all its receipt digests, in order. */
   batchDigest: string;
@@ -333,8 +355,19 @@ export interface MarketplaceChain {
   /** The accounts whose `BuyerAdded` events name `buyer`, ascending: those that granted it, revoked or not. */
   listBuyerAccounts?(buyer: string): Promise<bigint[]>;
   // QueryInferenceSettlement.
-  /** Sent from a registered operational wallet, as a random-sampling proof is. */
-  submitReceiptBatch?(groups: ReceiptGroup[]): Promise<ReceiptBatch>;
+  /**
+   * Sent from a registered operational wallet, as a random-sampling proof is.
+   * Simulated first: a fault rejects with the revert and sends nothing. A
+   * batch that is mined and reverts rejects with `receipt.status` 0.
+   */
+  submitReceiptBatch?(groups: ReceiptGroup[], opts?: ReceiptBatchSendOptions): Promise<ReceiptBatch>;
+  getReceiptBatchOutcome?(txHash: string): Promise<ReceiptBatchOutcome>;
+  /**
+   * The groups landed for the subscription (`ReceiptsLanded`, its id indexed),
+   * oldest first, from `fromBlock` (the settlement's deployment by default) to
+   * the head; `toBlock` is the head read, where the next read can start after.
+   */
+  listReceiptsLanded?(subscriptionId: string, fromBlock?: number): Promise<{ groups: LandedGroup[]; toBlock: number }>;
   budgetLeft?(subscriptionId: string, budgetIndex: number): Promise<bigint>;
   stakeFactor?(identityId: bigint): Promise<bigint>;
   epochPool?(epoch: number): Promise<bigint>;
@@ -359,6 +392,10 @@ export interface MarketplaceChain {
   getProtocolTreasury?(): Promise<string>;
   /** A wallet's ETH and TRAC. */
   getWalletBalances?(address: string): Promise<{ eth: bigint; trac: bigint }>;
+  /** How many of a wallet's transactions are mined: its next nonce at the latest block. */
+  getMinedNonce?(address: string): Promise<number>;
+  /** The latest block's base fee in wei; `null` on a chain without one. */
+  getBaseFee?(): Promise<bigint | null>;
 }
 
 /**

@@ -2110,7 +2110,7 @@ export class EVMChainAdapterBase {
    */
   protected async dispatchSerializedV10Write(
     signer: EvmSigner,
-    label: 'publish' | 'update',
+    label: 'publish' | 'update' | 'receipt batch',
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,

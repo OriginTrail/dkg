@@ -5,7 +5,7 @@
  * the contracts' refusals as decoded reverts (`err.revert.name`), as the EVM
  * adapter throws them.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
@@ -218,6 +218,43 @@ describe('mock marketplace: receipt batches', () => {
     const item = receiptItemOf(r, receipt, signServiceRequest(SESSION.privateKey, requestDomain, r));
     const late = await chain.submitReceiptBatch([{ subscriptionId, budgetIndex: 0, minCounted: 0n, items: [item] }]).catch((e: unknown) => e);
     expect(receiptBatchFaultOf(late)).toEqual({ groupIndex: 0, itemIndex: null, fault: 'OutsideEpoch' });
+  });
+
+  it('records a batch before it lands, and reads back its outcome, its groups, the wallet nonce and the base fee', async () => {
+    chain.seedIdentity(SIGNER.address, 7n);
+    const { epoch } = await chain.getEpochTimes();
+    await chain.approveServiceSubscriptionsWallet(TRAC);
+    const { subscriptionId } = await chain.fundFromWallet({ epoch, sessionKey: SESSION.address, planDigest: PLAN, budgets: [budget(SERVICE_A, 10_000n)] });
+    const sub = (await chain.getSubscription(subscriptionId))!;
+    const { requestDomain } = await chain.getMarketplaceContracts();
+    const r: ServiceRequest = {
+      subscriptionId, serviceId: SERVICE_A, seller: 7n, nonce: 0n, pricePerUnit: 10n, maxUnits: 10n, maxValueWei: 100n,
+      issuedAt: sub.startsAt, expiry: sub.startsAt + 600,
+    };
+    const receipt = { requestDigest: hashServiceRequest(requestDomain, r), resultCommitment: ethers.keccak256('0x02'), units: 10n, valueWei: 100n, completedAt: r.issuedAt };
+    const groups = [{ subscriptionId, budgetIndex: 0, minCounted: 0n, items: [receiptItemOf(r, receipt, signServiceRequest(SESSION.privateKey, requestDomain, r))] }];
+
+    // A hook that fails sends nothing.
+    await expect(chain.submitReceiptBatch(groups, { onBroadcast: () => { throw new Error('the ledger is full'); } })).rejects.toThrow(/ledger/);
+    expect(await chain.nonceWord(subscriptionId, 7n, 0n)).toBe(0n);
+    expect(await chain.getMinedNonce(SIGNER.address)).toBe(0);
+    // No score in the epoch, no batch.
+    const score = vi.spyOn(chain, 'getNodeEpochScore').mockResolvedValueOnce(0n);
+    expect(await revertName(chain.submitReceiptBatch(groups))).toBe('NoNodeScore');
+    score.mockRestore();
+
+    const signals: unknown[] = [];
+    const batch = await chain.submitReceiptBatch(groups, { onBroadcast: async (s) => { signals.push({ ...s, used: await chain.nonceWord(subscriptionId, 7n, 0n) }); } });
+    expect(signals).toEqual([{ txHash: batch.hash, nonce: 0, wallet: SIGNER.address, used: 0n }]);
+    expect(batch.gasUsed).toBeGreaterThan(0n);
+    expect(await chain.getReceiptBatchOutcome(batch.hash)).toEqual({ landed: batch });
+    expect(await chain.getReceiptBatchOutcome(ethers.ZeroHash)).toBeNull();
+    const landed = await chain.listReceiptsLanded(subscriptionId);
+    expect(landed).toEqual({ groups: [{ ...batch.groups[0], txHash: batch.hash, blockNumber: batch.blockNumber }], toBlock: batch.blockNumber });
+    expect(await chain.listReceiptsLanded(subscriptionId, batch.blockNumber + 1)).toEqual({ groups: [], toBlock: batch.blockNumber });
+    expect((await chain.listReceiptsLanded(ethers.ZeroHash)).groups).toEqual([]);
+    expect(await chain.getMinedNonce(SIGNER.address)).toBe(1);
+    expect(await chain.getBaseFee()).toBe(10n ** 6n);
   });
 
   it('refuses a batch from a node with no profile, and one out of bounds', async () => {

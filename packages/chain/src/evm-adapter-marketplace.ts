@@ -7,11 +7,10 @@
  * `QueryInferenceSettlement` and `QueryInferenceStorage`.
  *
  * Mixin holder in the pattern of `evm-adapter-conviction.ts`, mixed into
- * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). It extends
- * `RandomSamplingMethods` for one method, `sendRandomSamplingTx`: a receipt
- * batch is sent as a proof is, from any registered operational wallet,
+ * `EVMChainAdapter` with `applyMixins` (evm-adapter.ts). A receipt batch is
+ * sent as a random-sampling proof is, from any registered operational wallet,
  * preferring an idle one, and again from the primary wallet on
- * `ProfileDoesntExist`.
+ * `ProfileDoesntExist`, with a hook of the caller's before its broadcast.
  *
  * - Every address comes from the Hub by name on each call, through
  *   `resolveContract`'s address memo, which a Hub rotation clears.
@@ -25,7 +24,8 @@ import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type { TxResult } from './chain-adapter.js';
 import { loadAbi } from './evm-adapter-abi.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
-import { RandomSamplingMethods } from './evm-adapter-random-sampling.js';
+import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import type { EvmSigner } from './evm-signer.js';
 import {
   BUYER_GRANT_TYPES,
   compactSignature,
@@ -43,8 +43,12 @@ import {
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
+  type LandedGroup,
   type ReceiptBatch,
+  type ReceiptBatchOutcome,
+  type ReceiptBatchSendOptions,
   type ReceiptGroup,
+  type ReceiptsLanded,
   type ServiceBudget,
   type ServiceSpending,
   type Subscription,
@@ -94,7 +98,7 @@ function subscriptionTopUpOf(receipt: ethers.TransactionReceipt): SubscriptionTo
  * and `ReceiptsLanded` events that `settlement` logged. `null` when no batch
  * was accepted.
  */
-export function decodeReceiptBatch(logs: ReadonlyArray<Log>, settlement: string): Omit<ReceiptBatch, keyof TxResult> | null {
+export function decodeReceiptBatch(logs: ReadonlyArray<Log>, settlement: string): Omit<ReceiptBatch, keyof TxResult | 'gasUsed'> | null {
   const [accepted] = eventsOf(logs, 'QueryInferenceSettlement', settlement, 'ReceiptBatchAccepted');
   if (!accepted) return null;
   return {
@@ -104,16 +108,20 @@ export function decodeReceiptBatch(logs: ReadonlyArray<Log>, settlement: string)
     value: BigInt(accepted.value),
     counted: BigInt(accepted.counted),
     stakeFactor18: BigInt(accepted.stakeFactor18),
-    groups: eventsOf(logs, 'QueryInferenceSettlement', settlement, 'ReceiptsLanded').map((g) => ({
-      subscriptionId: String(g.subscriptionId),
-      budgetIndex: Number(g.budgetIndex),
-      seller: BigInt(g.seller),
-      itemCount: Number(g.itemCount),
-      value: BigInt(g.value),
-      counted: BigInt(g.counted),
-      stakeFactor18: BigInt(g.stakeFactor18),
-      groupDigest: String(g.groupDigest),
-    })),
+    groups: eventsOf(logs, 'QueryInferenceSettlement', settlement, 'ReceiptsLanded').map(landedOf),
+  };
+}
+
+function landedOf(g: ethers.Result): ReceiptsLanded {
+  return {
+    subscriptionId: String(g.subscriptionId),
+    budgetIndex: Number(g.budgetIndex),
+    seller: BigInt(g.seller),
+    itemCount: Number(g.itemCount),
+    value: BigInt(g.value),
+    counted: BigInt(g.counted),
+    stakeFactor18: BigInt(g.stakeFactor18),
+    groupDigest: String(g.groupDigest),
   };
 }
 
@@ -126,7 +134,7 @@ function requireToken(token: Contract | undefined): Contract {
   return token;
 }
 
-export class MarketplaceMethods extends RandomSamplingMethods {
+export class MarketplaceMethods extends EVMChainAdapterBase {
   async getMarketplaceContracts(): Promise<MarketplaceContracts> {
     await this.init();
     const contracts = await Promise.all([
@@ -416,21 +424,96 @@ export class MarketplaceMethods extends RandomSamplingMethods {
 
   // --------------------------------------------- QueryInferenceSettlement
 
-  async submitReceiptBatch(groups: ReceiptGroup[]): Promise<ReceiptBatch> {
+  /**
+   * Sent as a random-sampling proof is: from a registered operational wallet,
+   * preferring an idle one, and from the primary when that wallet turns out
+   * unregistered. Prepared (simulated) and signed first, so a fault rejects
+   * before anything is sent; then `opts.onBroadcast`, then the broadcast. A
+   * stuck batch is sped up at its nonce, each replacement after
+   * `opts.onBeforeReplacementBroadcast`.
+   */
+  async submitReceiptBatch(groups: ReceiptGroup[], opts: ReceiptBatchSendOptions = {}): Promise<ReceiptBatch> {
     await this.init();
     const arg = groups.map(({ subscriptionId, budgetIndex, minCounted, items }) => ({ subscriptionId, budgetIndex, minCounted, items }));
+    const sendFrom = async (signer: EvmSigner) => {
+      const qs = await this.resolveContract('QueryInferenceSettlement');
+      return this.dispatchSerializedV10Write(
+        signer,
+        'receipt batch',
+        opts.onBroadcast ? (signal) => opts.onBroadcast!({ ...signal, wallet: signer.address }) : undefined,
+        async () => this.signPreparedTransaction(await this.prepareAcrossProviders(qs, 'submitReceiptBatch', [arg], signer, 'marketplace submitReceiptBatch')),
+        (hash) => { throw new Error(`Receipt batch ${hash} was sent but has no receipt`); },
+        undefined,
+        opts.onBeforeReplacementBroadcast,
+      );
+    };
     const receipt = await this.withHubStaleRetryAny(async () => {
+      const signer = await this.nextRandomSamplingSigner();
       try {
-        const qs = await this.resolveContract('QueryInferenceSettlement');
-        return await this.sendRandomSamplingTx(qs, 'submitReceiptBatch', [arg], 'marketplace submitReceiptBatch');
+        return await sendFrom(signer);
       } catch (err) {
+        if (signer.address.toLowerCase() !== this.signer.address.toLowerCase() && enrichEvmError(err) === 'ProfileDoesntExist') {
+          this.registeredOperationalAddresses.delete(signer.address.toLowerCase());
+          this.clearIdentityIdForAddress(signer.address);
+          return sendFrom(this.signer);
+        }
         enrichEvmError(err);
         throw err;
       }
     });
-    const batch = decodeReceiptBatch(receipt.logs, receipt.to ?? '');
+    const batch = this.landedBatchOf(receipt);
     if (!batch) throw new Error(`Receipt batch ${receipt.hash} succeeded but logged no ReceiptBatchAccepted`);
-    return { ...txResultOf(receipt), ...batch };
+    return batch;
+  }
+
+  async getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome> {
+    await this.init();
+    const receipt = await this.getTransactionReceiptWithFailover(txHash);
+    if (!receipt) return null;
+    const batch = receipt.status === 1 ? this.landedBatchOf(receipt) : null;
+    return batch ? { landed: batch } : { reverted: true };
+  }
+
+  /** Read in pages; nothing is cached. */
+  async listReceiptsLanded(subscriptionId: string, fromBlock = 0): Promise<{ groups: LandedGroup[]; toBlock: number }> {
+    await this.init();
+    const qs = await this.resolveContract('QueryInferenceSettlement');
+    const address = await qs.getAddress();
+    const label = 'listReceiptsLanded';
+    const deployed = await this.resolveContractDeployBlock(address, label, 'QueryInferenceSettlement');
+    const filter = qs.filters.ReceiptsLanded(subscriptionId);
+    const connected = new Map<JsonRpcProvider, Contract>();
+    const groups: LandedGroup[] = [];
+    let preferred: JsonRpcProvider | undefined;
+    for (let lo = Math.max(fromBlock, deployed.fromBlock); lo <= deployed.head; lo += BUYER_SCAN_PAGE_BLOCKS) {
+      const page = await this.queryEventLogsPage(
+        qs, filter, lo, Math.min(lo + BUYER_SCAN_PAGE_BLOCKS - 1, deployed.head), deployed.scanProviders, connected, `${label} ReceiptsLanded`, preferred,
+      );
+      preferred = page.provider;
+      for (const log of page.logs) {
+        for (const g of eventsOf([log], 'QueryInferenceSettlement', address, 'ReceiptsLanded')) {
+          groups.push({ ...landedOf(g), txHash: log.transactionHash, blockNumber: log.blockNumber });
+        }
+      }
+    }
+    return { groups, toBlock: deployed.head };
+  }
+
+  async getMinedNonce(address: string): Promise<number> {
+    await this.init();
+    return this.readTipProvider('marketplace wallet nonce', (p) => p.getTransactionCount(address, 'latest'));
+  }
+
+  async getBaseFee(): Promise<bigint | null> {
+    await this.init();
+    const block = await this.readTipProvider('marketplace base fee', (p) => p.getBlock('latest'));
+    return block?.baseFeePerGas ?? null;
+  }
+
+  /** The batch a successful receipt of the Hub's `QueryInferenceSettlement` records; `null` when it logged none. */
+  private landedBatchOf(receipt: ethers.TransactionReceipt): ReceiptBatch | null {
+    const batch = decodeReceiptBatch(receipt.logs, receipt.to ?? '');
+    return batch ? { ...txResultOf(receipt), gasUsed: receipt.gasUsed, ...batch } : null;
   }
 
   async budgetLeft(subscriptionId: string, budgetIndex: number): Promise<bigint> {

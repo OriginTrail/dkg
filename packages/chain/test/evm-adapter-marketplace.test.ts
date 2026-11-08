@@ -8,7 +8,9 @@
  *     strings the contracts' typehashes;
  *   - each write once: a wallet funding and top-up, an account's opt-in,
  *     grant, prefunding of the next epoch, top-up, limits and removal, and a
- *     receipt batch that lands.
+ *     receipt batch that lands, with its hook before the broadcast, its
+ *     outcome, its groups read back from the logs, and a batch mined and
+ *     reverted.
  * One snapshot per test, as the other adapter suites take.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -247,7 +249,7 @@ describe('the marketplace mixin on Hardhat', () => {
     await expect(node.fundFromAccount(request, { from: Wallet.createRandom().address })).rejects.toThrow(/not one of this node's operational wallets/);
   });
 
-  it('lands a receipt batch from the seller, and refuses its nonces a second time', async () => {
+  it('lands a receipt batch, recorded before it is sent and read back after, and refuses its nonces a second time', async () => {
     const { hubAddress, coreProfileId } = getSharedContext();
     const sellerId = BigInt(coreProfileId);
     const buyer = walletBuyer.getSignerAddress();
@@ -298,7 +300,20 @@ describe('the marketplace mixin on Hardhat', () => {
       subscriptionId, budgetIndex, minCounted: 0n, items: served.filter((s) => s.budgetIndex === budgetIndex).map((s) => s.item),
     }));
 
-    const batch = await seller.submitReceiptBatch(groups);
+    // The hook runs once the batch is signed, before it is sent: nothing of it is on chain yet.
+    const signals: Array<{ txHash: string; nonce?: number; wallet: string; mined: unknown }> = [];
+    const batch = await seller.submitReceiptBatch(groups, {
+      onBroadcast: async (s) => { signals.push({ ...s, mined: await seller.getReceiptBatchOutcome(s.txHash) }); },
+    });
+    expect(signals).toEqual([{ txHash: batch.hash, nonce: expect.any(Number), wallet: seller.getSignerAddress(), mined: null }]);
+    expect(await seller.getMinedNonce(seller.getSignerAddress())).toBe(signals[0]!.nonce! + 1);
+    expect(batch.gasUsed).toBeGreaterThan(0n);
+    expect(await seller.getReceiptBatchOutcome(batch.hash)).toEqual({ landed: batch });
+    const landed = await walletBuyer.listReceiptsLanded(subscriptionId);
+    expect(landed.groups).toEqual(batch.groups.map((g) => ({ ...g, txHash: batch.hash, blockNumber: batch.blockNumber })));
+    expect(landed.toBlock).toBeGreaterThanOrEqual(batch.blockNumber);
+    expect((await walletBuyer.listReceiptsLanded(subscriptionId, batch.blockNumber + 1)).groups).toEqual([]);
+    expect(await seller.getBaseFee()).toBeGreaterThan(0n);
     expect(batch).toMatchObject({
       success: true, seller: sellerId, itemCount: 3, value: 500_000n + 2_000_000n, counted: 500_000n + 10n ** 6n,
       batchDigest: receiptsDigest(served.map((s) => s.digest)),
@@ -323,5 +338,12 @@ describe('the marketplace mixin on Hardhat', () => {
 
     const again = await seller.submitReceiptBatch(groups).catch((e: unknown) => e);
     expect(receiptBatchFaultOf(again)).toEqual({ groupIndex: 0, itemIndex: 0, fault: 'DuplicateNonce' });
+
+    // A batch mined and reverted: sent past the simulation, with its own gas limit, by a wallet that is no node's.
+    const sender = new Wallet(HARDHAT_KEYS.EXTRA2, createProvider());
+    const data = new ethers.Interface(loadAbi('QueryInferenceSettlement')).encodeFunctionData('submitReceiptBatch', [groups]);
+    const signed = await sender.signTransaction(await sender.populateTransaction({ to: contracts.queryInferenceSettlement, data, gasLimit: 1_000_000 }));
+    await createProvider().broadcastTransaction(signed).catch(() => undefined);
+    expect(await seller.getReceiptBatchOutcome(ethers.keccak256(signed))).toEqual({ reverted: true });
   });
 });

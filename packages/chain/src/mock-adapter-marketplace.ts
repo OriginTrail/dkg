@@ -50,7 +50,10 @@ import {
   type MarketplaceContracts,
   type MarketplaceWriteOptions,
   type NodeEpoch,
+  type LandedGroup,
   type ReceiptBatch,
+  type ReceiptBatchOutcome,
+  type ReceiptBatchSendOptions,
   type ReceiptGroup,
   type ReceiptsLanded,
   type ServiceBudget,
@@ -148,7 +151,13 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     allowances: new Map<string, bigint>(),
     /** accountId => what services spent of its base allowance and of its top-up buffer. */
     spent: new Map<bigint, { window: bigint; topUp: bigint }>(),
+    /** transaction hash => the batch it landed. */
+    batches: new Map<string, ReceiptBatch>(),
+    /** wallet => how many of its batches were sent: its next nonce. */
+    sent: new Map<string, number>(),
   };
+  /** The base fee the mock's latest block reports, in wei. */
+  mockBaseFee: bigint | null = 10n ** 6n;
 
   async getMarketplaceContracts(): Promise<MarketplaceContracts> {
     const chainId = await this.getEvmChainId();
@@ -333,14 +342,15 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
 
   // --------------------------------------------- QueryInferenceSettlement
 
-  async submitReceiptBatch(groups: ReceiptGroup[]): Promise<ReceiptBatch> {
+  async submitReceiptBatch(groups: ReceiptGroup[], opts: ReceiptBatchSendOptions = {}): Promise<ReceiptBatch> {
     const seller = await this.getIdentityId();
     if (seller === 0n) revert('ProfileDoesntExist', 0n);
+    const { epoch, now } = await this.getEpochTimes();
+    if ((await this.getNodeEpochScore(epoch, seller)) === 0n) revert('NoNodeScore', seller, epoch);
     const itemCount = groups.reduce((n, g) => n + g.items.length, 0);
     if (groups.length === 0 || groups.length > BATCH_STATE.maxGroups || itemCount === 0 || itemCount > BATCH_STATE.maxItems) {
       revert('BatchOutOfBounds', groups.length, itemCount);
     }
-    const { epoch, now } = await this.getEpochTimes();
     const domain = requestDomain(await this.getEvmChainId(), ADDRESSES.queryInferenceStorage);
     // Checked in full before anything is written: a fault refuses the whole batch.
     const nonces = new Map<string, Set<bigint>>();
@@ -395,6 +405,12 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
         value, counted, stakeFactor18: SCALE18, groupDigest: receiptsDigest(groupDigests),
       });
     });
+    // Checked in full, as a simulation: now the hook, then the broadcast.
+    const wallet = ethers.getAddress(this.signerAddress);
+    const nonce = this.marketplace.sent.get(wallet) ?? 0;
+    const tx = this.txResult(true);
+    await opts.onBroadcast?.({ txHash: tx.hash, nonce, wallet });
+    this.marketplace.sent.set(wallet, nonce + 1);
     for (const [nonceKey, batchNonces] of nonces) {
       const stored = this.marketplace.usedNonces.get(nonceKey) ?? new Set<bigint>();
       for (const nonce of batchNonces) stored.add(nonce);
@@ -402,8 +418,9 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
     }
     for (const [budgetKey, value] of used) this.marketplace.budgetUsed.set(budgetKey, value);
     for (const group of landed) this.countServed(seller, epoch, group.subscriptionId, group.counted);
-    return {
-      ...this.txResult(true),
+    const batch: ReceiptBatch = {
+      ...tx,
+      gasUsed: BigInt(60_000 + 15_000 * itemCount),
       seller,
       batchDigest: receiptsDigest(digests),
       itemCount,
@@ -412,6 +429,29 @@ export abstract class MockMarketplaceMethods implements MarketplaceChain {
       stakeFactor18: SCALE18,
       groups: landed,
     };
+    this.marketplace.batches.set(tx.hash, batch);
+    return batch;
+  }
+
+  async getReceiptBatchOutcome(txHash: string): Promise<ReceiptBatchOutcome> {
+    const batch = this.marketplace.batches.get(txHash);
+    return batch ? { landed: { ...batch, groups: batch.groups.map((g) => ({ ...g })) } } : null;
+  }
+
+  async listReceiptsLanded(subscriptionId: string, fromBlock = 0): Promise<{ groups: LandedGroup[]; toBlock: number }> {
+    const batches = [...this.marketplace.batches.values()];
+    const groups = batches.filter((b) => b.blockNumber >= fromBlock).flatMap((b) => b.groups
+      .filter((g) => key(g.subscriptionId) === key(subscriptionId))
+      .map((g) => ({ ...g, txHash: b.hash, blockNumber: b.blockNumber })));
+    return { groups, toBlock: Math.max(fromBlock - 1, ...batches.map((b) => b.blockNumber)) };
+  }
+
+  async getMinedNonce(address: string): Promise<number> {
+    return this.marketplace.sent.get(ethers.getAddress(address)) ?? 0;
+  }
+
+  async getBaseFee(): Promise<bigint | null> {
+    return this.mockBaseFee;
   }
 
   async budgetLeft(subscriptionId: string, budgetIndex: number): Promise<bigint> {
