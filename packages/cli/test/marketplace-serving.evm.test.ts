@@ -16,8 +16,9 @@
  *     seller, an over-reporting receipt from a rogue handler on the seller node
  *     that takes the seller out of routing, and 503 with Retry-After at the
  *     epoch's end;
- *   - landing: the seller lands what it served, and the buyer's
- *     reconciliation matches the landed receipt to the one it holds.
+ *   - landing: the seller lands what it served when its node's route is
+ *     asked, Operate shows it, and the buyer's reconciliation matches the
+ *     landed receipt to the one it holds.
  */
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -107,6 +108,20 @@ async function route(method: string, path: string, body?: unknown, token?: strin
     req, res, url, path: url.pathname, marketplace: gatewayBuyer, marketplaceGateway: gateway, actor: { authentication },
   } as unknown as RequestContext);
   return { status: res.statusCode, body: JSON.parse(res.body), headers: res.headers };
+}
+
+/** One request through the seller node's marketplace routes, as its node admin. */
+async function sellerRoute(method: string, path: string): Promise<{ status: number; body: any }> {
+  const res: any = { statusCode: 0, body: '' };
+  res.writeHead = (status: number) => { res.statusCode = status; };
+  res.setHeader = () => undefined;
+  res.end = (text: string) => { res.body = text; res.writableEnded = true; };
+  const url = new URL(`http://127.0.0.1${path}`);
+  await handleMarketplaceRoutes({
+    req: { method, url: path }, res, url, path: url.pathname, marketplaceSeller: selling.seller,
+    actor: { authentication: requestAuthentication({ kind: 'nodeOperator' }) },
+  } as unknown as RequestContext);
+  return { status: res.statusCode, body: JSON.parse(res.body) };
 }
 
 /** Send a crafted `serve`; `attempt` makes a new message of the same request, as a retry after a lost answer does. */
@@ -306,9 +321,17 @@ describe('serving between two nodes on Hardhat', () => {
     await provider.send('evm_increaseTime', [31]);
     await provider.send('evm_mine', []);
 
-    // The direct call's receipt and the gateway's, one group each, in one batch.
-    selling.seller.lander.landNow();
-    expect(await selling.seller.lander.tick()).toMatchObject({ sent: [{ items: 2, value: 30n * PRICE, counted: 30n * PRICE }], refused: 0 });
+    // Landing now, through the seller node's route: the direct call's receipt and the gateway's, one group each, in one batch.
+    const landed = await sellerRoute('POST', '/api/marketplace/seller/land');
+    expect(landed).toMatchObject({ status: 200, body: { batches: [{ items: 2, value: String(30n * PRICE), counted: String(30n * PRICE) }], refused: 0 } });
+    expect(await sellerRoute('GET', '/api/marketplace/seller')).toMatchObject({
+      status: 200,
+      body: {
+        identityId: Number(sellerIdentity), gate: { profile: true, shardingTable: true }, scoredThisEpoch: true,
+        ledger: { served: 0, landed: 2, landedValue: String(30n * PRICE) }, batches: [{ tx: landed.body.batches[0].tx, items: 2 }],
+        thisEpoch: { servedValue: String(30n * PRICE) }, lastLanding: { refused: 0, waiting: false },
+      },
+    });
     // Held until the gateway's job sees it landed; then matched.
     expect((await route('GET', '/api/marketplace/reconciliation')).body.rows).toMatchObject([{ held: { count: 0 }, landed: { count: 1, matched: 1 } }]);
     await gateway.tick();

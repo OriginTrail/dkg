@@ -2303,7 +2303,7 @@ async function runDaemonInnerWithStartupOwnership(
   });
   const marketplaceGateway = marketplace ? await startMarketplaceGateway({ config, agent, buyer: marketplace, dataDir: dkgDir(), log }) : undefined;
   const marketplaceSeller = await startMarketplaceSeller({
-    config, agent, signer: evmSigning.addresses.wallets[0]?.address, dataDir: dkgDir(), log,
+    config, agent, signer: evmSigning.addresses.wallets[0]?.address, wallets: evmSigning.addresses.wallets.map((w) => w.address), dataDir: dkgDir(), log,
   });
 
   // Classify configured graphs before migrating legacy readiness. Explicit
@@ -3630,6 +3630,7 @@ async function runDaemonInnerWithStartupOwnership(
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         marketplace,
         marketplaceGateway,
+        marketplaceSeller: marketplaceSeller?.seller,
         emitMemoryGraphChanged,
         emitNotification,
       });

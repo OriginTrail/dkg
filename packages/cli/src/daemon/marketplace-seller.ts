@@ -29,6 +29,8 @@ export interface MarketplaceSellerOptions {
   };
   /** The operational wallet that signs receipts: the primary one. */
   signer: string | undefined;
+  /** The node's operational wallets, which Operate lists. */
+  wallets?: readonly string[];
   /** The node's data directory; the seller keeps its ledger and prices under `marketplace/`. */
   dataDir: string;
   log: (message: string) => void;
@@ -72,6 +74,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     stopServingSeconds: resolved.stopServingSeconds,
     tickSeconds: resolved.tickSeconds,
     landing: resolved.landing,
+    ...(options.wallets ? { wallets: options.wallets } : {}),
     ...(contextGraphId ? { shareOffers: async (quads) => { await agent.share(contextGraphId, quads); } } : {}),
     log,
   });

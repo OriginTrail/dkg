@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
 import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import { AccessKeys, Buyer, BuyerStore, Gateway, NO_SELLER_PEERS, Router, parsePlan } from '@origintrail-official/dkg-marketplace';
+import { AccessKeys, Buyer, BuyerStore, Gateway, NO_SELLER_PEERS, Router, Seller, parsePlan } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
 import { startMarketplaceBuyer } from '../src/daemon/marketplace-buyer.js';
@@ -37,6 +37,7 @@ let chain: MarketplaceChainAdapter;
 let mock: MockChainAdapter;
 let buyer: Buyer | undefined;
 let gateway: Gateway | undefined;
+let seller: Seller | undefined;
 
 async function api(
   method: string,
@@ -51,7 +52,9 @@ async function api(
   const req: any = { method, url: path };
   if (body !== undefined) req.__dkgPrebufferedBody = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
   const url = new URL(`http://127.0.0.1${path}`);
-  await handleMarketplaceRoutes({ req, res, url, path: url.pathname, marketplace: buyer, marketplaceGateway: gateway, actor: { authentication } } as unknown as RequestContext);
+  await handleMarketplaceRoutes({
+    req, res, url, path: url.pathname, marketplace: buyer, marketplaceGateway: gateway, marketplaceSeller: seller, actor: { authentication },
+  } as unknown as RequestContext);
   return { status: res.statusCode, body: res.body ? JSON.parse(res.body) : undefined, claimed: res.writableEnded, headers: res.headers };
 }
 
@@ -69,6 +72,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   gateway = undefined;
+  seller = undefined;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -141,6 +145,48 @@ describe('the gateway routes', () => {
     expect(await api('GET', '/api/marketplace/reconciliation?epoch=soon')).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
     gateway = undefined;
     expect(await api('GET', '/api/marketplace/reconciliation')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
+  });
+});
+
+describe('the seller routes', () => {
+  const SERVICE = `0x${'0b'.repeat(32)}`;
+  const agent = requestAuthentication({ kind: 'agent', agentAddress: OTHER });
+
+  beforeEach(async () => {
+    await mock.ensureProfile();
+    seller = new Seller({
+      chain, dir: join(dir, 'seller'), signer: SIGNER.address, stopServingSeconds: 180, tickSeconds: 300,
+      services: [{
+        model: 'urn:test:model:b', serviceId: SERVICE, pricePerUnit: 10n, capacity: null, provenance: 'upstream-claimed',
+        connector: { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 1, completionTokens: 1 }) },
+      }],
+    });
+    await seller.load();
+    await seller.tick();
+  });
+
+  it('show Operate to any reader, and land or set the next price for the node admin only', async () => {
+    expect(await api('GET', '/api/marketplace/seller', undefined, agent)).toMatchObject({
+      status: 200,
+      body: { gate: { profile: true, shardingTable: true }, scoredThisEpoch: true, offerings: [{ serviceId: SERVICE, connector: 'up', price: '10', nextPrice: '10' }], batches: [] },
+    });
+    expect(await api('POST', '/api/marketplace/seller/land', {}, agent)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    expect(await api('POST', '/api/marketplace/seller/land', {})).toMatchObject({ status: 200, body: { batches: [], stopped: 'nothing-ready' } });
+    const price = `/api/marketplace/seller/offerings/${SERVICE}/price`;
+    expect(await api('PUT', price, { price: '25' }, agent)).toMatchObject({ status: 403, body: { code: 'NodeAdminRequired' } });
+    expect(await api('PUT', price, { price: '25' })).toMatchObject({ status: 200, body: { serviceId: SERVICE, price: '10', nextPrice: '25' } });
+    for (const bad of [{ price: '0' }, { price: 25 }, {}]) expect(await api('PUT', price, bad)).toMatchObject({ status: 400, body: { code: 'InvalidRequest' } });
+    expect(await api('PUT', `/api/marketplace/seller/offerings/0x${'99'.repeat(32)}/price`, { price: '5' })).toMatchObject({ status: 404, body: { code: 'ServiceNotFound' } });
+    expect((await api('GET', '/api/marketplace/seller/elsewhere')).status).toBe(404);
+  });
+
+  it('answer for a node that sells without buying, and 503 while selling is off', async () => {
+    buyer = undefined;
+    expect((await api('GET', '/api/marketplace/seller')).status).toBe(200);
+    expect(await api('GET', '/api/marketplace/plan')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
+    seller = undefined;
+    expect(await api('GET', '/api/marketplace/seller')).toMatchObject({ status: 503, body: { code: 'MarketplaceOff', retryable: true } });
+    expect(await api('POST', '/api/marketplace/seller/land', {})).toMatchObject({ status: 503, body: { code: 'MarketplaceOff' } });
   });
 });
 
@@ -297,6 +343,9 @@ describe('dkg marketplace', () => {
     await run('keys', 'revoke', 'dkgmk_0011aabb');
     await run('reconciliation', '--epoch', '41');
     await run('reconciliation');
+    await run('seller');
+    await run('seller', 'land');
+    await run('seller', 'price', A, '25');
     expect(calls).toEqual([
       ['GET', '/subscriptions?epoch=next', undefined],
       ['GET', '/plan', undefined],
@@ -309,6 +358,9 @@ describe('dkg marketplace', () => {
       ['POST', '/keys/dkgmk_0011aabb/revoke', undefined],
       ['GET', '/reconciliation?epoch=41', undefined],
       ['GET', '/reconciliation', undefined],
+      ['GET', '/seller', undefined],
+      ['POST', '/seller/land', undefined],
+      ['PUT', `/seller/offerings/${A}/price`, { price: '25' }],
     ]);
     expect(print).toHaveBeenCalledWith(JSON.stringify({ ok: true }, null, 2));
   });

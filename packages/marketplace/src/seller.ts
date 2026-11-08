@@ -10,8 +10,9 @@
  *   tick; until the first tick it serves nothing. A tick whose reads of it fail
  *   keeps what the last one read.
  * - **Prices.** A service's price per unit, in wei, is set per epoch. The
- *   current epoch's is frozen the first time it is used and kept on disk; the
- *   settings' price applies to epochs not frozen yet.
+ *   current epoch's is frozen the first time it is used and kept on disk. The
+ *   next epoch's can be set ahead of it; the settings' price applies to epochs
+ *   neither frozen nor set.
  * - **Offers.** At every tick it shares an offer for each service, for the
  *   current and the next epoch, into the Marketplace Context Graph.
  * - **Each call** is checked, cheapest check first, then
@@ -45,7 +46,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { UpstreamError, type Connector } from './connector.js';
 import { KeyedLock } from './journal.js';
-import { DEFAULT_LANDING, Lander, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
+import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, type OfferQuad } from './offers.js';
 import {
@@ -84,6 +85,8 @@ export interface SellerDeps {
   services: SellerService[];
   /** The operational wallet that signs receipts. */
   signer: string;
+  /** The node's operational wallets, which send its batches; the signer's alone by default. */
+  wallets?: readonly string[];
   stopServingSeconds: number;
   tickSeconds: number;
   /** The landing loop's settings; the defaults otherwise. */
@@ -107,6 +110,8 @@ export class Seller {
   private identityId = 0n;
   private open = false;
   private domain: MarketplaceDomain | undefined;
+  /** service id => whether its backend answered the last call. */
+  private readonly backends = new Map<string, 'up' | 'down'>();
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
   private shared = new Set<string>();
@@ -124,6 +129,46 @@ export class Seller {
   /** The identity it serves as, and whether it serves now. */
   get gate(): { identityId: bigint; open: boolean } {
     return { identityId: this.identityId, open: this.open };
+  }
+
+  get chain(): MarketplaceChainAdapter {
+    return this.deps.chain;
+  }
+
+  /** The node's operational wallets. */
+  get wallets(): readonly string[] {
+    return this.deps.wallets ?? [this.deps.signer];
+  }
+
+  /** Whether a service's backend answered its last call: `up` until one fails. */
+  backendOf(serviceId: string): 'up' | 'down' {
+    return this.backends.get(serviceId.toLowerCase()) ?? 'up';
+  }
+
+  /** When the next landing is due, in chain seconds. */
+  nextLandingAt(times: EpochTimes): number {
+    return nextLandingAt(times, this.landing, this.deps.tickSeconds);
+  }
+
+  /** Land now, due or not: what the tick did. */
+  async landNow(): Promise<LandingReport> {
+    this.lander.landNow();
+    this.lastLanding = await this.lander.tick(this.open);
+    return this.lastLanding;
+  }
+
+  /** A service's price this epoch, which freezes it, and the next epoch's. */
+  async pricesOf(serviceId: string): Promise<{ price: bigint; nextPrice: bigint }> {
+    const service = this.serviceOf(serviceId);
+    const { epoch } = await this.deps.chain.getEpochTimes();
+    return { price: await this.priceFor(service, epoch, epoch), nextPrice: await this.priceFor(service, epoch + 1, epoch) };
+  }
+
+  /** Set a service's price for the next epoch; this epoch's stays as it is frozen. */
+  async setNextPrice(serviceId: string, price: bigint): Promise<void> {
+    const service = this.serviceOf(serviceId);
+    const { epoch } = await this.deps.chain.getEpochTimes();
+    await this.lock.run('prices', () => this.storePrice(service.serviceId, epoch + 1, price));
   }
 
   /** Read the ledger and the frozen prices. Call once before serving. */
@@ -287,7 +332,9 @@ export class Seller {
         messages: call.body.messages,
         maxTokens: Number(minBig(BigInt(call.body.max_tokens), unitCap)),
       });
+      this.backends.set(service.serviceId, 'up');
     } catch (err) {
+      this.backends.set(service.serviceId, 'down');
       // The backend's detail (a missing key's variable, an address) stays in the log.
       this.deps.log?.(`[marketplace] the backend of ${service.model} failed: ${err instanceof UpstreamError ? err.message : String(err)}`);
       return refusal('UpstreamError');
@@ -348,15 +395,25 @@ export class Seller {
     if (stored() !== undefined) return BigInt(stored()!);
     if (epoch !== current) return service.pricePerUnit;
     return this.lock.run('prices', async () => {
-      if (stored() !== undefined) return BigInt(stored()!);
-      const prices = { ...this.prices, [service.serviceId]: { ...this.prices[service.serviceId], [String(epoch)]: service.pricePerUnit.toString() } };
-      await mkdir(this.deps.dir, { recursive: true });
-      const file = join(this.deps.dir, 'seller-prices.json');
-      await writeFile(`${file}.tmp`, `${JSON.stringify(prices, null, 2)}\n`, { mode: 0o600 });
-      await rename(`${file}.tmp`, file);
-      this.prices = prices;
-      return service.pricePerUnit;
+      if (stored() === undefined) await this.storePrice(service.serviceId, epoch, service.pricePerUnit);
+      return BigInt(stored()!);
     });
+  }
+
+  /** Keep a price for an epoch on disk: written beside the prices file, then renamed over it. Under the prices lock. */
+  private async storePrice(serviceId: string, epoch: number, price: bigint): Promise<void> {
+    const prices = { ...this.prices, [serviceId]: { ...this.prices[serviceId], [String(epoch)]: price.toString() } };
+    await mkdir(this.deps.dir, { recursive: true });
+    const file = join(this.deps.dir, 'seller-prices.json');
+    await writeFile(`${file}.tmp`, `${JSON.stringify(prices, null, 2)}\n`, { mode: 0o600 });
+    await rename(`${file}.tmp`, file);
+    this.prices = prices;
+  }
+
+  private serviceOf(serviceId: string): SellerService {
+    const service = this.services.get(serviceId.toLowerCase());
+    if (!service) throw new Error(`this node sells no service ${serviceId}`);
+    return service;
   }
 }
 

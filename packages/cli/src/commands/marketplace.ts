@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// ─── dkg marketplace — the marketplace buyer (OT-RFC-27) ─────────────
+// ─── dkg marketplace — the marketplace buyer and seller (OT-RFC-27) ──
 //
-// A command for each buyer route under /api/marketplace: subscriptions, dry
-// runs, fundings and top-ups, the standing plan, the buyer wallet's funding,
+// A command for each route under /api/marketplace: subscriptions, dry runs,
+// fundings and top-ups, the standing plan, the buyer wallet's funding,
 // accounts, an owner's actions on an account the node owns, the gateway's
-// access keys, and the reconciliation. Each prints the daemon's answer as
-// JSON. Amounts on the command line are in TRAC; times are chain seconds.
-// Requests with services take a JSON file.
+// access keys, the reconciliation, and the seller's Operate, landing and
+// prices. Each prints the daemon's answer as JSON. Amounts on the command
+// line are in TRAC but prices per unit, which are in wei; times are chain
+// seconds. Requests with services take a JSON file.
 
 import { readFile } from 'node:fs/promises';
 import { Command } from 'commander';
@@ -43,7 +44,7 @@ function limits(opts: { maxCost: string; expiresAt: string }): { maxCostPerEpoch
 export function registerMarketplaceCommand(program: Command): void {
   const cmd = program
     .command('marketplace')
-    .description('Marketplace buyer: subscriptions, the standing plan, funding and accounts (OT-RFC-27)');
+    .description('Marketplace: the buyer\'s subscriptions, plan, funding and accounts, and the seller\'s Operate (OT-RFC-27)');
 
   cmd
     .command('subscriptions')
@@ -144,6 +145,17 @@ export function registerMarketplaceCommand(program: Command): void {
     .description("The receipts the node holds against those landed and counted, per seller and budget: this epoch's by default")
     .option('--epoch <epoch>', 'current or an epoch number')
     .action((opts: { epoch?: string }) => call('GET', `/reconciliation${opts.epoch ? `?epoch=${id(opts.epoch)}` : ''}`));
+
+  const sell = cmd.command('seller').description("The node's selling: its Core Node gate, offerings, ledger and landing");
+  sell
+    .command('status', { isDefault: true })
+    .description('The gate, the offerings and their prices, the ledger, the next landing and recent batches')
+    .action(() => call('GET', '/seller'));
+  sell.command('land').description('Land the receipts that are ready, due or not').action(() => call('POST', '/seller/land'));
+  sell
+    .command('price <serviceId> <wei>')
+    .description("Set a service's price for the next epoch, in wei per unit; this epoch's stays as it is")
+    .action((serviceId: string, wei: string) => call('PUT', `/seller/offerings/${id(serviceId)}/price`, () => ({ price: wei })));
 
   cmd
     .command('remove-buyer <accountId> <buyer>')

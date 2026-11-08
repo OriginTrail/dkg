@@ -83,6 +83,8 @@ export const DEFAULT_LANDING: Readonly<LandingSettings> = Object.freeze({
 
 /** A batch a tick landed. */
 export interface LandedBatch {
+  /** Its record in the ledger. */
+  batchId: string;
   txHash: string;
   items: number;
   value: bigint;
@@ -117,6 +119,20 @@ export function secondsToNextTick(times: EpochTimes, tickSeconds: number, finalL
   const final = times.endsAt - finalLandingSeconds;
   if (finalLandingSeconds > 0 && times.now < final && final < next) next = final;
   return Math.max(1, next - times.now);
+}
+
+/**
+ * When a landing is next due, in chain seconds: the next landing time, or the
+ * last stretch's start or the final tick if sooner; in the last stretch, the
+ * next tick.
+ */
+export function nextLandingAt(times: EpochTimes, s: LandingSettings, tickSeconds: number): number {
+  const stretch = times.endsAt - s.lastStretchMinutes * 60;
+  if (times.now >= stretch) return times.now + secondsToNextTick(times, tickSeconds, s.finalLandingSeconds);
+  const interval = s.landingIntervalMinutes * 60;
+  const next = times.startsAt + (Math.floor((times.now - times.startsAt) / interval) + 1) * interval;
+  const final = s.finalLandingSeconds > 0 ? times.endsAt - s.finalLandingSeconds : stretch;
+  return Math.min(next, stretch, final);
 }
 
 /**
@@ -289,7 +305,7 @@ export class Lander {
           onBeforeReplacementBroadcast: (signal) => ledger.recordSpeedup(batchId, signal.txHash),
         });
         await this.landed(ledger.batch(batchId)!, landed);
-        report.sent.push({ txHash: landed.hash, items: landed.itemCount, value: landed.value, counted: landed.counted });
+        report.sent.push({ batchId, txHash: landed.hash, items: landed.itemCount, value: landed.value, counted: landed.counted });
         return true;
       } catch (err) {
         if (broadcast) {

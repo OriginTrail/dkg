@@ -21,6 +21,7 @@ export * from './offers.js';
 export * from './ledger.js';
 export * from './landing.js';
 export * from './seller.js';
+export * from './operate.js';
 export * from './keys.js';
 export * from './router.js';
 export * from './reconcile.js';

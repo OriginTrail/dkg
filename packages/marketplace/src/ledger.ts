@@ -143,6 +143,16 @@ export class SellerLedger {
     return this.batches.get(batchId);
   }
 
+  /** The batches that landed, newest first, at most `limit`. */
+  landedBatches(limit: number): BatchRecord[] {
+    return [...this.batches.values()].filter((b) => b.state === 'landed').sort((a, b) => b.at - a.at).slice(0, limit);
+  }
+
+  /** The epochs it holds, with calls or pruned to a summary, oldest first. */
+  epochs(): number[] {
+    return [...new Set([...this.summaries.keys(), ...[...this.calls.values()].map((c) => c.call.epoch)])].sort((a, b) => a - b);
+  }
+
   /** An epoch's counts by state, the value held, landed and counted, and its batches, oldest first. */
   epochReport(epoch: number): { summary: EpochSummary; batches: BatchRecord[] } {
     const batches = [...this.batches.values()].filter((b) => b.epoch === epoch);

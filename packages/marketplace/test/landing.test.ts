@@ -325,7 +325,7 @@ describe('a batch', () => {
     await serve(seller, 1, 0, 300n);
     later(31);
     seller.lander.landNow();
-    expect(await seller.lander.tick()).toEqual({ sent: [{ txHash: expect.any(String), items: 3, value: 600n, counted: 600n }], refused: 0, waiting: false });
+    expect(await seller.lander.tick()).toEqual({ sent: [{ batchId: expect.any(String), txHash: expect.any(String), items: 3, value: 600n, counted: 600n }], refused: 0, waiting: false });
     expect(await chain.budgetLeft(main, 0)).toBe(10n ** 6n - 400n);
     expect(await chain.budgetLeft(small, 0)).toBe(100n);
   });

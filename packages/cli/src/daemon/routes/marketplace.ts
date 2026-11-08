@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The marketplace buyer's routes (OT-RFC-27), under /api/marketplace, beside
+// The marketplace's routes (OT-RFC-27), under /api/marketplace, beside
 // /api/pca: the buyer's subscriptions, a dry run, fundings and top-ups, the
 // standing plan, the buyer wallet's funding, the accounts it can use, an
 // owner's actions on an account the node owns, the gateway's access keys, and
-// the reconciliation of what it holds against what landed.
+// the reconciliation of what it holds against what landed; and the seller's,
+// under /seller: Operate, landing now, and the next epoch's prices.
 // `packages/marketplace` builds each answer; this module reads the request and
 // maps refusals.
 //
@@ -24,6 +25,7 @@ import {
   contractsView,
   dryRunView,
   fundingView,
+  landNowView,
   parseEpoch,
   parsePlan,
   parseServices,
@@ -32,7 +34,9 @@ import {
   planView,
   refusalOf,
   removeBuyer,
+  sellerStatusView,
   setBuyerLimits,
+  setNextPriceView,
   setServiceSpending,
   subscriptionView,
   subscriptionsView,
@@ -41,6 +45,7 @@ import {
   type Buyer,
   type FundingRequest,
   type Gateway,
+  type Seller,
 } from '@origintrail-official/dkg-marketplace';
 import type { BuyerLimits } from '@origintrail-official/dkg-chain';
 import { canAdministerNode } from '../../auth.js';
@@ -69,6 +74,8 @@ const REFUSAL_STATUS: Readonly<Record<string, number>> = {
   NotABuyer: 404,
   PlanNotFound: 404,
   KeyNotFound: 404,
+  ServiceNotFound: 404,
+  SellerNotFound: 404,
   QueryInferencePaused: 503,
   QueryInferenceNotActive: 503,
   MarketplaceOff: 503,
@@ -144,6 +151,15 @@ function gatewayOf(ctx: RequestContext): Gateway {
 async function subscriptionAfter(buyer: Buyer, subscriptionId: string) {
   const subscription = await buyer.chain.getSubscription(subscriptionId);
   return subscription ? subscriptionView(buyer.chain, subscription) : null;
+}
+
+/** The answer to a seller route, under /seller, or `undefined` when none matches. */
+async function sellerAnswer(seller: Seller, method: string, route: string, req: IncomingMessage): Promise<unknown> {
+  if (method === 'GET' && route === '/seller') return sellerStatusView(seller);
+  if (method === 'POST' && route === '/seller/land') return landNowView(seller);
+  const price = /^\/seller\/offerings\/(0x[0-9a-fA-F]{64})\/price$/.exec(route);
+  if (method === 'PUT' && price) return setNextPriceView(seller, price[1]!.toLowerCase(), parseWei((await bodyOf(req)).price, 'price'));
+  return undefined;
 }
 
 /** The answer to `method route`, or `undefined` when no route matches. */
@@ -234,16 +250,21 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
   if (path !== PREFIX && !path.startsWith(`${PREFIX}/`)) return;
   // The gateway checks its own callers, before anything else.
   if (isMarketplaceGatewayRoute(req.method, path)) return handleMarketplaceGatewayRoutes(ctx);
+  const selling = path === `${PREFIX}/seller` || path.startsWith(`${PREFIX}/seller/`);
   const buyer = ctx.marketplace;
-  if (!buyer) {
-    return refuse(res, 'MarketplaceOff', 'The marketplace is off on this node: it needs marketplace.enabled and a chain with the marketplace contracts');
+  const seller = ctx.marketplaceSeller;
+  if (selling ? !seller : !buyer) {
+    return refuse(res, 'MarketplaceOff', selling
+      ? 'Selling is off on this node: it needs marketplace.seller.enabled and a chain with the marketplace contracts'
+      : 'The marketplace is off on this node: it needs marketplace.enabled and a chain with the marketplace contracts');
   }
   const method = req.method ?? 'GET';
   if (method !== 'GET' && !canAdministerNode(ctx.actor.authentication)) {
-    return refuse(res, 'NodeAdminRequired', 'A node-admin token is required to fund, sign, act as an account owner or manage access keys');
+    return refuse(res, 'NodeAdminRequired', 'A node-admin token is required to fund, sign, act as an account owner, manage access keys, land or set prices');
   }
   try {
-    const result = await answer(buyer, method, decodeURIComponent(path.slice(PREFIX.length)), ctx);
+    const route = decodeURIComponent(path.slice(PREFIX.length));
+    const result = selling ? await sellerAnswer(seller!, method, route, req) : await answer(buyer!, method, route, ctx);
     if (result === undefined) return jsonResponse(res, 404, { error: 'Not found' });
     return jsonResponse(res, 200, result);
   } catch (err) {
