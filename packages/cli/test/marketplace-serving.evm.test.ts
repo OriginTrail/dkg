@@ -21,7 +21,9 @@
  *     epoch's end;
  *   - landing: the seller lands what it served when its node's route is
  *     asked, Operate shows it, and the buyer's reconciliation matches the
- *     landed receipt to the one it holds.
+ *     landed receipt to the one it holds;
+ *   - a seller that restarts shares its offers again, signed later, and
+ *     calls route by the new copies.
  */
 import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -349,6 +351,29 @@ describe('serving between two nodes on Hardhat', () => {
       landed: { count: 1, matched: 1, value: String(15n * PRICE), valueTrac: ethers.formatEther(15n * PRICE), counted: String(15n * PRICE), countedTrac: ethers.formatEther(15n * PRICE), txs: [expect.stringMatching(/^0x[0-9a-f]{64}$/)] },
     }]);
   });
+
+  it('shares its offers again after a restart, signed later, and the buyer routes by the new copies', async () => {
+    const { epoch } = await buyerChain.getEpochTimes();
+    const before = Math.max(...(await gateway.router.offersOf([epoch])).map((o) => o.signedAt));
+    await selling.stop();
+    // A later chain time, so the restarted seller signs later than its last copies.
+    await createProvider().send('evm_increaseTime', [5]);
+    await createProvider().send('evm_mine', []);
+    selling = await startSeller();
+    // Its shared memory holds the new copies at once: the share was not refused.
+    const own = await sellerAgent.query(offersQuery([epoch]), { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' });
+    expect(offersFromBindings(own.bindings as Record<string, unknown>[]).filter((o) => o.signedAt > before)).toHaveLength(2);
+    // The buyer pulls a graph in use again about once a minute.
+    let offers = await gateway.router.offersOf([epoch]);
+    for (let i = 0; i < 600 && !offers.every((o) => o.signedAt > before); i++) {
+      await sleep(250);
+      offers = await gateway.router.offersOf([epoch]);
+    }
+    expect(offers.map((o) => o.serviceId).sort()).toEqual([A, B].sort());
+    expect(offers.every((o) => o.signedAt > before && o.peerId === sellerAgent.peerId)).toBe(true);
+    const answer = await route('POST', GATEWAY_CHAT, CHAT, gatewayKey);
+    expect(answer).toMatchObject({ status: 200, body: { marketplace: { seller: Number(sellerIdentity) } } });
+  }, 200_000);
 
   it('takes a seller whose receipt over-reports out of routing, with a rogue handler on the seller node', async () => {
     await selling.stop();

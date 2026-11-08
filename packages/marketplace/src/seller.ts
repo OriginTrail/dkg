@@ -17,6 +17,8 @@
  *   current and the next epoch, into the Marketplace Context Graph: each names
  *   the node's peer id, and the receipts' operational wallet signs it. One
  *   whose price changed is shared again, signed later: buyers keep the newest.
+ *   So is each one half an epoch after its last copy, which shared memory
+ *   keeps for a limited time.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. The call, its result and its
@@ -382,8 +384,10 @@ export class Seller {
   }
 
   /**
-   * Share the offers due: each service's, for this epoch and the next, when it was not shared at its price yet.
-   * Each is signed at the chain's time, and later than the one before it, since buyers keep the newest.
+   * Share the offers due: each service's, for this epoch and the next, when it was not shared at its price yet, or
+   * half an epoch after its last copy. Shared memory drops a copy a while after it is written (30 days by default),
+   * so the offer always has one younger than half an epoch. Each is signed at the chain's time, and later than the
+   * one before it, since buyers keep the newest.
    */
   private async shareNewOffers(times: EpochTimes): Promise<void> {
     const quads: OfferQuad[] = [];
@@ -393,7 +397,7 @@ export class Seller {
         const price = await this.priceFor(s, epoch, times.epoch);
         const key = `${s.serviceId}:${epoch}`;
         const last = this.shared.get(key);
-        if (last?.price === price) continue;
+        if (last?.price === price && times.now - last.signedAt < (times.endsAt - times.startsAt) / 2) continue;
         const signedAt = Math.max(times.now, (last?.signedAt ?? 0) + 1);
         due.set(key, { price, signedAt });
         quads.push(...offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {

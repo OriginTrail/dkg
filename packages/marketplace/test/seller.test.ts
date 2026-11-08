@@ -197,6 +197,24 @@ describe('the gate, quotes and offers', () => {
     expect(copies[1]!.signedAt).toBeGreaterThan(copies[0]!.signedAt);
     expect(copies[2]!.signedAt).toBeGreaterThan(copies[1]!.signedAt);
   });
+
+  it('shares its offers again half an epoch after their last copies, which shared memory keeps for a limited time', async () => {
+    const seller = sellerWith();
+    await seller.load();
+    await seller.tick();
+    const real = chain.getEpochTimes.bind(chain);
+    const { startsAt, endsAt } = await real();
+    const half = (endsAt - startsAt) / 2;
+    const first = offersIn(shared[0]!)[0]!.signedAt;
+    const at = (now: number) => vi.spyOn(chain, 'getEpochTimes').mockImplementation(async () => ({ ...(await real()), now }));
+    at(first + half - 1);
+    await seller.tick();
+    expect(shared).toHaveLength(1);
+    at(first + half);
+    await seller.tick();
+    expect(shared).toHaveLength(2);
+    expect(offersIn(shared[1]!).map((o) => o.signedAt)).toEqual([first + half, first + half, first + half, first + half]);
+  });
 });
 
 describe('the job', () => {
