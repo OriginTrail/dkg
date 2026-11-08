@@ -2,7 +2,8 @@
 
 /**
  * The seller (OT-RFC-27): a Core Node that serves its services to any buyer
- * whose subscription funds them, and signs a receipt for each call.
+ * whose subscription funds them, signs a receipt for each call, and lands the
+ * receipts on chain (landing.ts).
  *
  * - **The gate.** It serves only while it is a Core Node: it has a profile and
  *   a place in the sharding table, which takes the minimum stake. Read at every
@@ -15,12 +16,15 @@
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. The call, its result and its
- *   receipt are on disk before the answer goes back; if that write fails, the
- *   answer is an error and no result. A repeat of a call already served gets
- *   the stored answer. Calls on one subscription run one at a time, so a
+ *   receipt are in the ledger before the answer goes back; if that write fails,
+ *   the answer is an error and no result. A repeat of a call already served
+ *   gets the stored answer. Calls on one subscription run one at a time, so a
  *   nonce is claimed once and a budget's check counts every call before it.
  * - **The end of the epoch.** Within `stopServingSeconds` of it, new calls are
  *   refused: their receipts could not land in time.
+ * - **The job.** Ticks every `tickSeconds` from the epoch's start, and once
+ *   more `finalLandingSeconds` before its end: the gate, the offers, then
+ *   landing, each on its own, so one failing leaves the others.
  */
 import { join } from 'node:path';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
@@ -38,7 +42,9 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import { UpstreamError, type Connector } from './connector.js';
-import { Journal, KeyedLock } from './journal.js';
+import { KeyedLock } from './journal.js';
+import { DEFAULT_LANDING, Lander, secondsToNextTick, type LandingReport, type LandingSettings } from './landing.js';
+import { SellerLedger, type ServedCall } from './ledger.js';
 import { offerQuads, type OfferQuad } from './offers.js';
 import {
   WireError,
@@ -50,10 +56,8 @@ import {
   serveRequestFromWire,
   type InferenceBody,
   type QuoteResponse,
-  type ReceiptWire,
   type ServeAnswer,
   type ServeResponse,
-  type ServiceRequestWire,
 } from './wire.js';
 
 /** New calls stop this long before an epoch ends. */
@@ -80,43 +84,37 @@ export interface SellerDeps {
   signer: string;
   stopServingSeconds: number;
   tickSeconds: number;
+  /** The landing loop's settings; the defaults otherwise. */
+  landing?: LandingSettings;
   /** Shares quads into the Marketplace Context Graph's shared memory. */
   shareOffers?: (quads: OfferQuad[]) => Promise<void>;
   log?: (message: string) => void;
 }
 
-/** One served call, as the ledger keeps it. */
-export interface ServedCall {
-  requestDigest: string;
-  subscriptionId: string;
-  budgetIndex: number;
-  /** The request as served: `seller` is this node's identity. */
-  request: ServiceRequestWire;
-  signature: string;
-  receipt: ReceiptWire;
-  receiptSignature: string;
-  result: { content: string };
-}
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 export class Seller {
   readonly services: ReadonlyMap<string, SellerService>;
-  private readonly ledger: Journal<ServedCall>;
+  readonly ledger: SellerLedger;
+  readonly lander: Lander;
+  /** What the last tick's landing did. */
+  lastLanding: LandingReport | undefined;
+  private readonly landing: LandingSettings;
   private readonly lock = new KeyedLock();
-  private readonly served = new Map<string, ServedCall>();
-  private readonly nonces = new Map<string, Set<string>>();
-  /** subscription id and budget index => the value of receipts not landed yet. */
-  private readonly unlanded = new Map<string, bigint>();
   private prices: Record<string, Record<string, string>> = {};
   private identityId = 0n;
   private open = false;
   private domain: MarketplaceDomain | undefined;
   private shared = new Set<string>();
-  private timer: ReturnType<typeof setInterval> | undefined;
+  private running = false;
+  private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking: Promise<void> | undefined;
 
   constructor(private readonly deps: SellerDeps) {
     this.services = new Map(deps.services.map((s) => [s.serviceId.toLowerCase(), s]));
-    this.ledger = new Journal(join(deps.dir, 'seller-ledger.jsonl'));
+    this.landing = deps.landing ?? DEFAULT_LANDING;
+    this.ledger = new SellerLedger(deps.dir);
+    this.lander = new Lander({ chain: deps.chain, ledger: this.ledger, settings: this.landing, ...(deps.log ? { log: deps.log } : {}) });
   }
 
   /** The identity it serves as, and whether it serves now. */
@@ -126,7 +124,7 @@ export class Seller {
 
   /** Read the ledger and the frozen prices. Call once before serving. */
   async load(): Promise<void> {
-    for (const call of await this.ledger.read()) this.remember(call);
+    await this.ledger.load();
     try {
       this.prices = JSON.parse(await readFile(join(this.deps.dir, 'seller-prices.json'), 'utf8'));
     } catch (err) {
@@ -134,49 +132,45 @@ export class Seller {
     }
   }
 
-  /** The gate, then the offers of the current and the next epoch. */
-  async tick(): Promise<void> {
+  /** The gate, the offers of the current and the next epoch, then landing. Returns the seconds to the next tick. */
+  async tick(): Promise<number> {
     const chain = this.deps.chain;
     this.identityId = await chain.getIdentityId();
     this.open = this.identityId > 0n && await chain.isShardingTableMember(this.identityId);
     this.domain ??= (await chain.getMarketplaceContracts()).requestDomain;
-    if (!this.open || !this.deps.shareOffers) return;
     const times = await chain.getEpochTimes();
-    const quads: OfferQuad[] = [];
-    const keys: string[] = [];
-    for (const epoch of [times.epoch, times.epoch + 1]) {
-      for (const s of this.services.values()) {
-        const price = await this.priceFor(s, epoch, times.epoch);
-        const key = `${s.serviceId}:${epoch}:${price}`;
-        if (this.shared.has(key)) continue;
-        keys.push(key);
-        quads.push(...offerQuads({
-          seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
-          pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
-          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}),
-        }));
-      }
+    if (this.open && this.deps.shareOffers) {
+      await this.shareNewOffers(times).catch((err: unknown) => this.deps.log?.(`[marketplace] the offers were not shared: ${messageOf(err)}`));
     }
-    if (quads.length === 0) return;
-    await this.deps.shareOffers(quads);
-    for (const key of keys) this.shared.add(key);
+    this.lastLanding = await this.lander.tick(this.open).catch((err: unknown) => {
+      this.deps.log?.(`[marketplace] landing failed: ${messageOf(err)}`);
+      return undefined;
+    });
+    return secondsToNextTick(times, this.deps.tickSeconds, this.landing.finalLandingSeconds);
   }
 
   start(): void {
-    if (this.timer) return;
-    const run = () => {
-      if (this.ticking) return;
+    if (this.running) return;
+    this.running = true;
+    const run = (): void => {
       this.ticking = this.tick()
-        .catch((err: unknown) => this.deps.log?.(`[marketplace] seller tick failed: ${err instanceof Error ? err.message : String(err)}`))
-        .finally(() => { this.ticking = undefined; });
+        .catch((err: unknown) => {
+          this.deps.log?.(`[marketplace] seller tick failed: ${messageOf(err)}`);
+          return this.deps.tickSeconds;
+        })
+        .then((seconds) => {
+          this.ticking = undefined;
+          if (!this.running) return;
+          this.timer = setTimeout(run, seconds * 1_000);
+          this.timer.unref?.();
+        });
     };
     run();
-    this.timer = setInterval(run, this.deps.tickSeconds * 1_000);
-    this.timer.unref?.();
   }
 
   async stop(): Promise<void> {
-    if (this.timer) clearInterval(this.timer);
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     await this.ticking;
   }
@@ -203,7 +197,7 @@ export class Seller {
     try {
       return await this.checkAndServe(raw);
     } catch (err) {
-      this.deps.log?.(`[marketplace] a call could not be served: ${err instanceof Error ? err.message : String(err)}`);
+      this.deps.log?.(`[marketplace] a call could not be served: ${messageOf(err)}`);
       return refusal('Unavailable');
     }
   }
@@ -219,7 +213,7 @@ export class Seller {
     // The request as this seller would have been named in it: a request for another seller recovers to another key.
     const request: ServiceRequest = { ...call.request, seller: this.identityId };
     const requestDigest = hashServiceRequest(this.domain, request);
-    const before = this.served.get(requestDigest);
+    const before = this.ledger.served(requestDigest);
     if (before) return before.signature === call.signature ? answerOf(before) : refusal('BadSignature');
 
     const chain = this.deps.chain;
@@ -247,14 +241,13 @@ export class Seller {
       const end = await chain.grantEnd(subscription.accountId, subscription.buyer, subscription.grantNonce);
       if (request.issuedAt >= end) return refusal('GrantEnded');
     }
-    const budgetKey = `${request.subscriptionId}:${budgetIndex}`;
     // One call at a time per subscription: its nonces are one set, whatever the budget.
     return this.lock.run(request.subscriptionId, async () => {
       // 6. A nonce new to the ledger. 7. Budget left, less this seller's receipts not landed, covers the call.
-      if (this.nonces.get(request.subscriptionId)?.has(request.nonce.toString())) return refusal('NonceUsed');
+      if (this.ledger.nonceUsed(request.subscriptionId, request.nonce.toString())) return refusal('NonceUsed');
       const left = await chain.budgetLeft(request.subscriptionId, budgetIndex);
-      if (left - (this.unlanded.get(budgetKey) ?? 0n) < request.maxValueWei) return refusal('BudgetExhausted');
-      return this.run(service, request, call, requestDigest, budgetIndex);
+      if (left - this.ledger.unlanded(request.subscriptionId, budgetIndex) < request.maxValueWei) return refusal('BudgetExhausted');
+      return this.run(service, request, call, requestDigest, budgetIndex, times.epoch);
     });
   }
 
@@ -265,6 +258,7 @@ export class Seller {
     call: { signature: string; body: InferenceBody },
     requestDigest: string,
     budgetIndex: number,
+    epoch: number,
   ): Promise<ServeResponse> {
     const unitCap = minBig(request.maxUnits, request.maxValueWei / request.pricePerUnit);
     let completion;
@@ -295,24 +289,37 @@ export class Seller {
       requestDigest,
       subscriptionId: request.subscriptionId,
       budgetIndex,
+      epoch,
       request: requestToWire(request),
       signature: call.signature,
       receipt: receiptToWire(receipt),
       receiptSignature,
       result: { content },
     };
-    await this.ledger.append(served);
-    this.remember(served);
+    await this.ledger.recordServed(served);
     return answerOf(served);
   }
 
-  private remember(call: ServedCall): void {
-    this.served.set(call.requestDigest, call);
-    const nonces = this.nonces.get(call.subscriptionId) ?? new Set<string>();
-    nonces.add(call.request.nonce);
-    this.nonces.set(call.subscriptionId, nonces);
-    const key = `${call.subscriptionId}:${call.budgetIndex}`;
-    this.unlanded.set(key, (this.unlanded.get(key) ?? 0n) + BigInt(call.receipt.valueWei));
+  /** Share the offers not shared yet: each service's, for this epoch and the next, at its price. */
+  private async shareNewOffers(times: EpochTimes): Promise<void> {
+    const quads: OfferQuad[] = [];
+    const keys: string[] = [];
+    for (const epoch of [times.epoch, times.epoch + 1]) {
+      for (const s of this.services.values()) {
+        const price = await this.priceFor(s, epoch, times.epoch);
+        const key = `${s.serviceId}:${epoch}:${price}`;
+        if (this.shared.has(key)) continue;
+        keys.push(key);
+        quads.push(...offerQuads({
+          seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
+          pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
+          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}),
+        }));
+      }
+    }
+    if (quads.length === 0) return;
+    await this.deps.shareOffers!(quads);
+    for (const key of keys) this.shared.add(key);
   }
 
   /** The price of `service` in `epoch`, frozen and stored once the epoch is current. */

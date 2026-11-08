@@ -5,8 +5,9 @@
  * the seller's ledger and the buyer's receipts and nonce counters. An append
  * is on disk (fsync) before it returns, so what it records survives a crash
  * right after. A torn last line, from a crash during an append, is skipped.
+ * Its owner may replace it whole, to prune it, keeping appends out meanwhile.
  */
-import { mkdir, open, readFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 export class Journal<T> {
@@ -21,6 +22,22 @@ export class Journal<T> {
     } finally {
       await handle.close();
     }
+  }
+
+  /** Replace its lines with `entries`: written beside it, on disk, then renamed over it, so a crash leaves the old or the new. */
+  async replace(entries: readonly T[]): Promise<void> {
+    const dir = dirname(this.file);
+    await mkdir(dir, { recursive: true });
+    const next = `${this.file}.next`;
+    const handle = await open(next, 'w', 0o600);
+    try {
+      await handle.writeFile(entries.map((e) => `${JSON.stringify(e)}\n`).join(''));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(next, this.file);
+    await syncDirectory(dir);
   }
 
   async read(): Promise<T[]> {
@@ -41,6 +58,20 @@ export class Journal<T> {
       }
     }
     return entries;
+  }
+}
+
+/** The rename in `dir` on disk too, where the platform opens a directory. */
+async function syncDirectory(dir: string): Promise<void> {
+  try {
+    const handle = await open(dir, 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    // A platform that cannot open a directory keeps the rename as its file system does.
   }
 }
 

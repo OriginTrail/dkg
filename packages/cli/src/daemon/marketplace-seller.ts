@@ -4,8 +4,9 @@
  * The daemon's marketplace seller (OT-RFC-27): built at boot when
  * `marketplace.seller.enabled` is set and the chain has the marketplace. It
  * answers `quote` and `serve` over the messenger, and its job checks the Core
- * Node gate and shares its offers into the Marketplace Context Graph. A setting
- * it cannot use leaves selling off, logged, and the boot goes on.
+ * Node gate, shares its offers into the Marketplace Context Graph and lands
+ * its receipts. A setting it cannot use leaves selling off, logged, and the
+ * boot goes on.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -70,6 +71,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     signer,
     stopServingSeconds: resolved.stopServingSeconds,
     tickSeconds: resolved.tickSeconds,
+    landing: resolved.landing,
     ...(contextGraphId ? { shareOffers: async (quads) => { await agent.share(contextGraphId, quads); } } : {}),
     log,
   });

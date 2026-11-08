@@ -5,7 +5,7 @@
  * order, the cut to the request's units, the signed receipt, the
  * ledger, and a repeat answered from it.
  */
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -169,6 +169,34 @@ describe('the job', () => {
     expect(seller.gate.open).toBe(true);
     expect(shared).toHaveLength(1);
     expect(receiptSignerOf(domain, { requestDigest: ethers.ZeroHash, resultCommitment: ethers.ZeroHash, units: 1n, valueWei: 1n, completedAt: 1 }, '0x00')).toBeNull();
+  });
+
+  it('lands even when its offers fail to share, logs what failed, and goes on to the next tick', async () => {
+    const logs: string[] = [];
+    const seller = new Seller({
+      chain, dir, services: [serviceOf(MODEL_A)], signer: SELLER.address, stopServingSeconds: 180, tickSeconds: 300,
+      shareOffers: async () => { throw new Error('the graph is away'); },
+      log: (m) => logs.push(m),
+    });
+    await seller.load();
+    const landing = vi.spyOn(seller.lander, 'tick').mockRejectedValueOnce(new Error('no chain'));
+    expect(await seller.tick()).toBeGreaterThan(0);
+    expect(logs).toEqual([expect.stringMatching(/offers were not shared: the graph is away/), expect.stringMatching(/landing failed: no chain/)]);
+    expect(landing).toHaveBeenCalledWith(true);
+
+    // The job: a tick that throws is logged and the next is set; one that runs sets the next too.
+    vi.spyOn(chain, 'getIdentityId').mockRejectedValueOnce(new Error('socket hang up'));
+    seller.start();
+    await vi.waitFor(() => expect(logs.at(-1)).toMatch(/seller tick failed: socket hang up/));
+    await seller.stop();
+    seller.start();
+    await vi.waitFor(() => expect(seller.lastLanding).toEqual({ stopped: 'not-due' }));
+    await seller.stop();
+  });
+
+  it('refuses to start on a price file it cannot read', async () => {
+    await mkdir(join(dir, 'seller-prices.json'));
+    await expect(sellerWith().load()).rejects.toThrow();
   });
 });
 

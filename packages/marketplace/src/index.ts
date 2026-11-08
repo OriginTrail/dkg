@@ -4,8 +4,8 @@
  * The NeuroSymbolic Marketplace (OT-RFC-27) in the node: the buyer, its
  * standing plan, what it keeps on disk, an account owner's actions, the shapes
  * the node API returns, the seller with its backends, offers and the peer
- * protocol's messages, and the buyer's gateway with its router and access
- * keys. Off unless `marketplace.enabled`.
+ * protocol's messages, its ledger and landing loop, and the buyer's gateway
+ * with its router and access keys. Off unless `marketplace.enabled`.
  */
 export * from './config.js';
 export * from './plan.js';
@@ -17,6 +17,8 @@ export * from './wire.js';
 export * from './journal.js';
 export * from './connector.js';
 export * from './offers.js';
+export * from './ledger.js';
+export * from './landing.js';
 export * from './seller.js';
 export * from './keys.js';
 export * from './router.js';

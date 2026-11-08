@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { SERVICE_CLASS_INFERENCE } from '@origintrail-official/dkg-chain';
 import {
+  DEFAULT_LANDING,
   Journal,
   KeyedLock,
   UpstreamError,
@@ -173,8 +174,12 @@ describe("the seller's settings", () => {
     expect(resolveSellerConfig(undefined)).toBeNull();
     expect(resolveSellerConfig({ seller: { services: [service] } })).toBeNull();
     expect(resolveSellerConfig({ contextGraphId: 'cg', seller: { enabled: true, services: [service] } })).toEqual({
-      contextGraphId: 'cg', stopServingSeconds: 180, tickSeconds: 300,
+      contextGraphId: 'cg', stopServingSeconds: 180, tickSeconds: 300, landing: DEFAULT_LANDING,
       services: [{ model: 'urn:test:model:a', serviceId: serviceIdOf('urn:test:model:a'), pricePerUnit: 1000n, capacity: null, provenance: 'weights-pinned', backend: service.backend }],
+    });
+    const landing = { landingIntervalMinutes: 60, finalLandingSeconds: 0, nearLimitShare: 0, baseFeeCeilingGwei: 0.5, lastStretchBaseFeeCeilingGwei: 2 };
+    expect(resolveSellerConfig({ seller: { enabled: true, services: [service], landing } })!.landing).toEqual({
+      ...DEFAULT_LANDING, landingIntervalMinutes: 60, finalLandingSeconds: 0, nearLimitShare: 0, baseFeeCeiling: 500_000_000n, lastStretchBaseFeeCeiling: 2_000_000_000n,
     });
   });
 
@@ -191,6 +196,10 @@ describe("the seller's settings", () => {
     [{ services: [{ ...service, backend: { ...service.backend, baseUrl: 'not a url' } }] }, /baseUrl/],
     [{ services: [{ ...service, backend: { ...service.backend, model: '' } }] }, /backend's model/],
     [{ services: [{ ...service, pricePerUnit: 5 }] }, /pricePerUnit/],
+    [{ services: [service], landing: { landingIntervalMinutes: 0 } }, /landingIntervalMinutes must be a whole number of at least 1/],
+    [{ services: [service], landing: { maxFaultDrops: 1.5 } }, /maxFaultDrops/],
+    [{ services: [service], landing: { nearLimitShare: 2 } }, /nearLimitShare must be a share from 0 to 1/],
+    [{ services: [service], landing: { baseFeeCeilingGwei: 0 } }, /baseFeeCeilingGwei must be a positive number of gwei/],
   ])('refuses %j', (seller, message) => {
     expect(() => resolveSellerConfig({ seller: { enabled: true, ...seller } as never })).toThrow(message);
   });

@@ -6,6 +6,7 @@
  */
 import { ethers } from 'ethers';
 import type { ConnectorSettings } from './connector.js';
+import { DEFAULT_LANDING, type LandingSettings } from './landing.js';
 import { serviceIdOf } from './offers.js';
 import { DEFAULT_STOP_SERVING_SECONDS } from './seller.js';
 
@@ -33,8 +34,33 @@ export interface SellerConfig {
   services?: SellerServiceConfig[];
   /** New calls stop this long before an epoch ends. Default 180. */
   stopServingSeconds?: number;
-  /** How often the seller checks its gate and shares its offers. Default 300. */
+  /** How often the seller checks its gate, shares its offers and lands, from the epoch's start. Default 300. */
   tickSeconds?: number;
+  /** The landing loop; each setting has its default. */
+  landing?: LandingConfig;
+}
+
+export interface LandingConfig {
+  /** Default 120. */
+  landingIntervalMinutes?: number;
+  /** Land at every tick this near the end. Default 20. */
+  lastStretchMinutes?: number;
+  /** One more tick this long before the end; 0 turns it off. Default 60. */
+  finalLandingSeconds?: number;
+  /** Land once a budget's unlanded value reaches this share of what it has left; 0 turns it off. Default 0.5. */
+  nearLimitShare?: number;
+  /** Send nothing this near the end. Default 30. */
+  endMarginSeconds?: number;
+  /** Land only receipts completed this long before the chain's time. Default 30. */
+  completedMarginSeconds?: number;
+  /** Default 3. */
+  maxBatchesPerTick?: number;
+  /** Default 8. */
+  maxFaultDrops?: number;
+  /** Send nothing while the base fee is above this, in gwei. Default 0.25. */
+  baseFeeCeilingGwei?: number;
+  /** The ceiling in the last stretch, in gwei. Default 1. */
+  lastStretchBaseFeeCeilingGwei?: number;
 }
 
 export interface SellerServiceConfig {
@@ -62,6 +88,7 @@ export interface ResolvedSellerConfig {
   services: ResolvedSellerService[];
   stopServingSeconds: number;
   tickSeconds: number;
+  landing: LandingSettings;
 }
 
 export interface ResolvedMarketplaceConfig {
@@ -149,5 +176,37 @@ export function resolveSellerConfig(config: MarketplaceConfig | undefined): Reso
   if (!Number.isInteger(stop) || stop < 0) throw new Error('marketplace.seller.stopServingSeconds must be a whole number of seconds');
   const tick = seller.tickSeconds ?? DEFAULT_TICK_SECONDS;
   if (!Number.isInteger(tick) || tick < 1) throw new Error('marketplace.seller.tickSeconds must be a positive integer');
-  return { contextGraphId: config?.contextGraphId, services, stopServingSeconds: stop, tickSeconds: tick };
+  return { contextGraphId: config?.contextGraphId, services, stopServingSeconds: stop, tickSeconds: tick, landing: resolveLanding(seller.landing) };
+}
+
+type WholeLandingSetting = Exclude<keyof LandingConfig & keyof LandingSettings, 'nearLimitShare'>;
+
+/** The landing settings with their defaults; whole numbers but the share and the ceilings. */
+function resolveLanding(config: LandingConfig | undefined): LandingSettings {
+  const at = (name: string) => `marketplace.seller.landing.${name}`;
+  const whole = (name: WholeLandingSetting, least: number): number => {
+    const value = config?.[name] ?? DEFAULT_LANDING[name];
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < least) throw new Error(`${at(name)} must be a whole number of at least ${least}`);
+    return value;
+  };
+  const gwei = (name: 'baseFeeCeilingGwei' | 'lastStretchBaseFeeCeilingGwei', fallback: bigint): bigint => {
+    const value = config?.[name];
+    if (value === undefined) return fallback;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error(`${at(name)} must be a positive number of gwei`);
+    return BigInt(Math.round(value * 1e9));
+  };
+  const share = config?.nearLimitShare ?? DEFAULT_LANDING.nearLimitShare;
+  if (typeof share !== 'number' || !(share >= 0 && share <= 1)) throw new Error(`${at('nearLimitShare')} must be a share from 0 to 1`);
+  return {
+    landingIntervalMinutes: whole('landingIntervalMinutes', 1),
+    lastStretchMinutes: whole('lastStretchMinutes', 0),
+    finalLandingSeconds: whole('finalLandingSeconds', 0),
+    nearLimitShare: share,
+    endMarginSeconds: whole('endMarginSeconds', 0),
+    completedMarginSeconds: whole('completedMarginSeconds', 0),
+    maxBatchesPerTick: whole('maxBatchesPerTick', 1),
+    maxFaultDrops: whole('maxFaultDrops', 0),
+    baseFeeCeiling: gwei('baseFeeCeilingGwei', DEFAULT_LANDING.baseFeeCeiling),
+    lastStretchBaseFeeCeiling: gwei('lastStretchBaseFeeCeilingGwei', DEFAULT_LANDING.lastStretchBaseFeeCeiling),
+  };
 }
