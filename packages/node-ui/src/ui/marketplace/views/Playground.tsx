@@ -1,8 +1,8 @@
 // The playground: a chat with a service this epoch's subscription funds,
-// through the node's gateway. The gateway takes access keys only, so the page
-// makes one for itself with `POST /keys` (the node-admin token's) and keeps
-// its secret in memory, never in storage; the node's own token never goes to
-// the gateway. Under each answer, what it cost and who served it; at the soft
+// through the node's gateway. The gateway takes access keys only, so on the
+// first send the page makes one for itself with `POST /keys` (the node-admin
+// token's) and keeps its secret in memory, never in storage; the node's own
+// token never goes to the gateway, and one playground key per browser is live. Under each answer, what it cost and who served it; at the soft
 // ceiling, the fork inline: top up, or wait for the next epoch.
 import React, { useState } from 'react';
 import { copy } from '../copy.generated.js';
@@ -16,14 +16,43 @@ import { useMarketplaceDraftStore } from '../draftStore.js';
 let pageKey: { secret: string; keyId: string; expiresAt: number } | null = null;
 const KEY_LIFETIME_SECONDS = 3_600;
 
+/**
+ * The keyId of the last playground key this browser made, never its secret:
+ * the next key revokes it, so at most one playground key per browser is live.
+ */
+export const PLAYGROUND_KEY_STORAGE = 'dkg-marketplace-playground-key';
+const KEY_ID_RE = /^dkgmk_[0-9a-f]{8}$/;
+
+function lastKeyId(): string | null {
+  try {
+    const v = localStorage.getItem(PLAYGROUND_KEY_STORAGE);
+    return v && KEY_ID_RE.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberKeyId(keyId: string): void {
+  try { localStorage.setItem(PLAYGROUND_KEY_STORAGE, keyId); } catch { /* storage unavailable: the key still expires within the hour */ }
+}
+
 /** Forget the page's key (tests, and a key the gateway no longer takes). */
 export function forgetPlaygroundKey(): void { pageKey = null; }
 
+/**
+ * The page's key, made on the first send. The key made before it, by this
+ * page or an earlier one in this browser, is revoked first; a revoke that
+ * fails (that key expired, or was revoked elsewhere) does not stop the new one.
+ */
 async function playgroundKey(budget: string): Promise<{ secret: string; keyId: string }> {
   const now = Math.floor(Date.now() / 1000);
   if (pageKey && pageKey.expiresAt - 60 > now) return pageKey;
+  const previous = pageKey?.keyId ?? lastKeyId();
+  pageKey = null;
+  if (previous) await marketplaceApi.revokeKey(previous).catch(() => undefined);
   const made = await marketplaceApi.makeKey({ label: copy('play.key.label'), budget, services: null, rps: 2, expiresAt: now + KEY_LIFETIME_SECONDS });
   pageKey = { secret: made.secret, keyId: made.keyId, expiresAt: made.expiresAt ?? now + KEY_LIFETIME_SECONDS };
+  rememberKeyId(made.keyId);
   return pageKey;
 }
 
