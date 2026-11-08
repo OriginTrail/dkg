@@ -191,7 +191,7 @@ export function Composer({ catalog, funding, draft, onChange, fundsEpoch, endsAt
         );
       })}
 
-      <label className="mkt-field mkt-xs" data-testid="mkt-renew">
+      <label className="mkt-fork mkt-xs" data-testid="mkt-renew">
         <input type="checkbox" checked={draft.renew} onChange={(e) => set({ renew: e.target.checked })} />{' '}
         <span data-copy="composer.renew">{copy('composer.renew')}</span>{' '}
         {draft.renew && (
