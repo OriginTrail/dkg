@@ -125,6 +125,12 @@ function landedOf(g: ethers.Result): ReceiptsLanded {
   };
 }
 
+/** The batch a successful receipt of `QueryInferenceSettlement` records; `null` when it logged none. */
+function landedBatchOf(receipt: ethers.TransactionReceipt): ReceiptBatch | null {
+  const batch = decodeReceiptBatch(receipt.logs, receipt.to ?? '');
+  return batch ? { ...txResultOf(receipt), gasUsed: receipt.gasUsed, ...batch } : null;
+}
+
 function budgetArgs(budgets: readonly ServiceBudget[]): ServiceBudget[] {
   return budgets.map(({ serviceId, serviceClass, value, maxPricePerUnit }) => ({ serviceId, serviceClass, value, maxPricePerUnit }));
 }
@@ -461,7 +467,7 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
         throw err;
       }
     });
-    const batch = this.landedBatchOf(receipt);
+    const batch = landedBatchOf(receipt);
     if (!batch) throw new Error(`Receipt batch ${receipt.hash} succeeded but logged no ReceiptBatchAccepted`);
     return batch;
   }
@@ -470,7 +476,7 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     await this.init();
     const receipt = await this.getTransactionReceiptWithFailover(txHash);
     if (!receipt) return null;
-    const batch = receipt.status === 1 ? this.landedBatchOf(receipt) : null;
+    const batch = receipt.status === 1 ? landedBatchOf(receipt) : null;
     return batch ? { landed: batch } : { reverted: true };
   }
 
@@ -510,11 +516,6 @@ export class MarketplaceMethods extends EVMChainAdapterBase {
     return block?.baseFeePerGas ?? null;
   }
 
-  /** The batch a successful receipt of the Hub's `QueryInferenceSettlement` records; `null` when it logged none. */
-  private landedBatchOf(receipt: ethers.TransactionReceipt): ReceiptBatch | null {
-    const batch = decodeReceiptBatch(receipt.logs, receipt.to ?? '');
-    return batch ? { ...txResultOf(receipt), gasUsed: receipt.gasUsed, ...batch } : null;
-  }
 
   async budgetLeft(subscriptionId: string, budgetIndex: number): Promise<bigint> {
     await this.init();
