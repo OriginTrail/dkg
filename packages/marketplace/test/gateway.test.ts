@@ -16,8 +16,10 @@ import {
   MockChainAdapter,
   hashQueryInferenceReceipt,
   marketplaceChainOf,
+  requestDomain,
   subscriptionIdOf,
   type MarketplaceChainAdapter,
+  type MarketplaceContracts,
   type MarketplaceDomain,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -29,8 +31,11 @@ import {
   Seller,
   decodeMessage,
   encodeMessage,
+  SIGNER_TTL_MS,
+  hashOffer,
   receiptFromWire,
   serviceIdOf,
+  signOffer,
   type Connector,
   type AccessKey,
   type GatewayAnswer,
@@ -71,12 +76,16 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
   const { epoch } = await chain.getEpochTimes();
   await buyer.fund({ epoch, source: { kind: 'wallet' }, services: models.map((m) => ({ serviceId: serviceIdOf(m), serviceClass: 1, value, maxPricePerUnit: 100n })) });
   seller = new Seller({
-    chain, dir: join(dir, 'seller'), signer: NODE.address, stopServingSeconds: 180, tickSeconds: 300,
+    chain, dir: join(dir, 'seller'), signer: NODE.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
     services: models.map((m) => ({ model: m, serviceId: serviceIdOf(m), pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed' as const, connector: backend })),
   });
   await seller.load();
   await seller.tick();
-  offers = models.map((m) => ({ seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token' as const, pricePerUnit: PRICE, epoch, capacity: null, model: m, provenance: 'upstream-claimed' as const }));
+  const domain = (await chain.getMarketplaceContracts()).requestDomain;
+  offers = await Promise.all(models.map((m) => signOffer(chain, NODE.address, domain, {
+    seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
+    model: m, provenance: 'upstream-claimed', peerId: 'seller-peer',
+  })));
   router = new Router({
     chain,
     offers: async () => offers,
@@ -84,7 +93,6 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
       if (!reachable) throw new Error('unreachable');
       return seller.quote({ services }) as Promise<QuoteResponse>;
     },
-    peers: { peerOf: async (id) => (id === seller.gate.identityId ? 'seller-peer' : null) },
   });
   keys = new AccessKeys(join(dir, 'buyer'));
   gatewayDeps = {
@@ -289,13 +297,34 @@ describe('access keys', () => {
 });
 
 describe('the router', () => {
-  const offer = (seller: bigint, price: bigint, epoch = 1): Offer =>
-    ({ seller, serviceId: SERVICE, serviceClass: 1, unit: 'token', pricePerUnit: price, epoch, capacity: null, model: MODEL, provenance: 'upstream-claimed' });
+  const domain = requestDomain(31337, ethers.Wallet.createRandom().address);
+  /** Each seller's operational wallet, made at runtime; the chain below maps it to the seller. */
+  const wallets = new Map<bigint, ethers.HDNodeWallet>();
+  const walletOf = (seller: bigint) => wallets.get(seller) ?? wallets.set(seller, ethers.Wallet.createRandom()).get(seller)!;
+  /** An offer of `seller` in epoch 1, naming `peer-<seller>`, signed by the seller's wallet. */
+  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string } = {}): Offer => {
+    const unsigned = {
+      seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, pricePerUnit: price, epoch: over.epoch ?? 1, capacity: null,
+      model: MODEL, provenance: 'upstream-claimed' as const, peerId: over.peerId ?? `peer-${seller}`,
+    };
+    return { ...unsigned, signature: (over.by ?? walletOf(seller)).signingKey.sign(hashOffer(domain, unsigned)).serialized };
+  };
   let clock: number;
   let quoted: string[];
   let list: Offer[];
+  /** The wallets the chain was asked about, in order; while `chainDown`, every read fails. */
+  let identityReads: string[];
+  let chainDown: boolean;
   const routerWith = (pinned: bigint[] = []) => new Router({
-    chain: { isShardingTableMember: async (id) => id !== 9n },
+    chain: {
+      isShardingTableMember: async (id) => id !== 9n,
+      getMarketplaceContracts: async () => ({ requestDomain: domain }) as MarketplaceContracts,
+      getIdentityIdForAddress: async (address) => {
+        identityReads.push(address);
+        if (chainDown) throw new Error('socket hang up');
+        return [...wallets].find(([, w]) => w.address === address)?.[0] ?? 0n;
+      },
+    },
     offers: async () => list,
     quote: async (peer, services) => {
       quoted.push(peer);
@@ -303,15 +332,61 @@ describe('the router', () => {
       const id = peer.slice(5);
       return { seller: id, epoch: 1, offers: services.map((s) => ({ serviceId: s, pricePerUnit: String(list.find((o) => String(o.seller) === id)!.pricePerUnit), available: true, capacity: null })) };
     },
-    peers: { peerOf: async (id) => (id === 5n ? null : `peer-${id}`) },
     pinned: async () => pinned,
     clock: () => clock,
   });
 
-  beforeEach(() => { clock = 0; quoted = []; list = []; });
+  beforeEach(() => { clock = 0; quoted = []; list = []; identityReads = []; chainDown = false; wallets.clear(); });
+
+  it('keeps only the offers an operational wallet of their seller signed, asking the chain once per wallet for five minutes', async () => {
+    const stranger = ethers.Wallet.createRandom();
+    list = [
+      offer(1n, 30n),
+      offer(2n, 20n, { by: stranger }),
+      offer(3n, 10n, { by: walletOf(1n) }),
+      { ...offer(4n, 10n), signature: '0x' },
+      { ...offer(5n, 10n), pricePerUnit: 9n },
+    ];
+    const router = routerWith();
+    expect((await router.offersOf([1])).map((o) => o.seller)).toEqual([1n]);
+    // A wallet of no node, a wallet of another node, no signature, and a field changed after signing are all left out.
+    expect(identityReads).toHaveLength(3);
+    expect(identityReads.filter((a) => a === walletOf(1n).address)).toHaveLength(1);
+    expect(identityReads).toContain(stranger.address);
+    expect(await router.pick(SERVICE, 1, 100n)).toEqual({ seller: 1n, peerId: 'peer-1', pricePerUnit: 30n });
+    expect(quoted).toEqual(['peer-1']);
+    expect(identityReads).toHaveLength(3);
+
+    // Five minutes on, the chain is asked again, and what it says now applies: the wallet is no longer one of the seller's.
+    clock += SIGNER_TTL_MS - 1;
+    await router.offersOf([1]);
+    expect(identityReads).toHaveLength(3);
+    wallets.delete(1n);
+    clock += 1;
+    expect(await router.offersOf([1])).toEqual([]);
+    expect(identityReads).toHaveLength(6);
+  });
+
+  it('leaves out an offer while the chain cannot say who signed it, and asks again at the next read', async () => {
+    list = [offer(1n, 30n)];
+    const router = routerWith();
+    chainDown = true;
+    expect(await router.offersOf([1])).toEqual([]);
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(quoted).toEqual([]);
+    chainDown = false;
+    expect((await router.offersOf([1])).map((o) => o.seller)).toEqual([1n]);
+    expect(identityReads).toHaveLength(3);
+  });
+
+  it("dials the peer an offer names, and routes only when it answers as the offer's seller", async () => {
+    list = [offer(8n, 10n, { peerId: 'peer-2' }), offer(2n, 20n)];
+    expect(await routerWith().pick(SERVICE, 1, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });
+    expect(quoted).toEqual(['peer-2', 'peer-2']);
+  });
 
   it('orders by pin, price and latency, keeps to sellers in the table under the cap, and stays with the one that answered', async () => {
-    list = [offer(1n, 30n), offer(2n, 20n), offer(9n, 1n), offer(4n, 500n), offer(5n, 10n), offer(6n, 20n, 2)];
+    list = [offer(1n, 30n), offer(2n, 20n), offer(9n, 1n), offer(4n, 500n), offer(5n, 10n, { by: walletOf(8n) }), offer(6n, 20n, { epoch: 2 })];
     const router = routerWith();
     router.measured(1n, 5);
     expect(await router.pick(SERVICE, 1, 100n)).toEqual({ seller: 2n, peerId: 'peer-2', pricePerUnit: 20n });

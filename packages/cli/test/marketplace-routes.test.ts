@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { ethers } from 'ethers';
 import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import { AccessKeys, Buyer, BuyerStore, Gateway, NO_SELLER_PEERS, Router, Seller, parsePlan } from '@origintrail-official/dkg-marketplace';
+import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signOffer } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
 import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
@@ -85,7 +85,7 @@ describe('the gateway routes', () => {
   beforeEach(async () => {
     gateway = new Gateway({
       chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
-      router: new Router({ chain, offers: async () => [], quote: async () => { throw new Error('no sellers'); }, peers: NO_SELLER_PEERS }),
+      router: new Router({ chain, offers: async () => [], quote: async () => { throw new Error('no sellers'); } }),
       send: async () => { throw new Error('no sellers'); },
     });
     await gateway.load();
@@ -157,10 +157,13 @@ describe('the catalog routes', () => {
     await mock.ensureProfile();
     own = await chain.getIdentityId();
     const { epoch } = await chain.getEpochTimes();
-    const offers = [{ seller: own, serviceId: A, serviceClass: 1, unit: 'token' as const, pricePerUnit: 10n, epoch, capacity: null, model: 'urn:test:model:a', provenance: 'upstream-claimed' as const }];
+    const offers = [await signOffer(chain, SIGNER.address, (await chain.getMarketplaceContracts()).requestDomain, {
+      seller: own, serviceId: A, serviceClass: 1, unit: 'token', pricePerUnit: 10n, epoch, capacity: null, model: 'urn:test:model:a',
+      provenance: 'upstream-claimed', peerId: 'seller-peer',
+    })];
     gateway = new Gateway({
       chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
-      router: new Router({ chain, offers: async () => offers, quote: async () => { throw new Error('no sellers'); }, peers: NO_SELLER_PEERS }),
+      router: new Router({ chain, offers: async () => offers, quote: async () => { throw new Error('no sellers'); } }),
       send: async () => { throw new Error('no sellers'); },
     });
     await gateway.load();
@@ -222,7 +225,7 @@ describe('the seller routes', () => {
   beforeEach(async () => {
     await mock.ensureProfile();
     seller = new Seller({
-      chain, dir: join(dir, 'seller'), signer: SIGNER.address, stopServingSeconds: 180, tickSeconds: 300,
+      chain, dir: join(dir, 'seller'), signer: SIGNER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
       services: [{
         model: 'urn:test:model:b', serviceId: SERVICE, pricePerUnit: 10n, capacity: null, provenance: 'upstream-claimed',
         connector: { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 1, completionTokens: 1 }) },

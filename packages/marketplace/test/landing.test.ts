@@ -64,7 +64,7 @@ const later = (seconds: number) => { clock += seconds; };
 
 function sellerWith(landing: Partial<LandingSettings> = {}): Seller {
   return new Seller({
-    chain, dir, signer: SELLER.address, stopServingSeconds: 180, tickSeconds: 300,
+    chain, dir, signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
     services: [{ model: MODEL, serviceId: A, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend }],
     landing: { ...DEFAULT_LANDING, ...landing },
     log: (m) => logs.push(m),

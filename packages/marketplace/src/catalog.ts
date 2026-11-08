@@ -3,7 +3,8 @@
 /**
  * What the node API's catalog routes return, in the shapes of the UI data
  * contract: this epoch's services, from the offers the node reads out of the
- * Marketplace Context Graph, of sellers in the sharding table (`Service`,
+ * Marketplace Context Graph that their sellers signed (the router keeps no
+ * others), of sellers in the sharding table (`Service`,
  * `Offer`); one service with a row per seller (`ServiceDetail`); and one
  * seller's storefront (`Seller`), with its served value per epoch from the
  * chain. A seller's availability is its last quote's, and its latency this

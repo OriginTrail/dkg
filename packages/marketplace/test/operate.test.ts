@@ -66,7 +66,7 @@ const backend: Connector = {
 
 async function started(): Promise<Seller> {
   const seller = new Seller({
-    chain, dir, signer: SELLER.address, wallets: [SELLER.address], stopServingSeconds: 180, tickSeconds: 300,
+    chain, dir, signer: SELLER.address, peerId: 'seller-peer', wallets: [SELLER.address], stopServingSeconds: 180, tickSeconds: 300,
     services: [{ model: MODEL, serviceId: A, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend }],
   });
   await seller.load();

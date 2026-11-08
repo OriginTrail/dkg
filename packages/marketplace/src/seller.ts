@@ -14,7 +14,8 @@
  *   next epoch's can be set ahead of it, until that epoch starts; the settings'
  *   price applies to epochs neither frozen nor set.
  * - **Offers.** At every tick it shares an offer for each service, for the
- *   current and the next epoch, into the Marketplace Context Graph.
+ *   current and the next epoch, into the Marketplace Context Graph: each names
+ *   the node's peer id, and the receipts' operational wallet signs it.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. The call, its result and its
@@ -49,7 +50,7 @@ import { UpstreamError, type Connector } from './connector.js';
 import { KeyedLock } from './journal.js';
 import { DEFAULT_LANDING, Lander, nextLandingAt, secondsToNextTick, secondsToRetry, type LandingReport, type LandingSettings } from './landing.js';
 import { SellerLedger, type ServedCall } from './ledger.js';
-import { offerQuads, type OfferQuad } from './offers.js';
+import { offerQuads, signOffer, type OfferQuad } from './offers.js';
 import {
   WireError,
   quoteRequestFromWire,
@@ -84,8 +85,10 @@ export interface SellerDeps {
   /** Where the seller's ledger and frozen prices go. */
   dir: string;
   services: SellerService[];
-  /** The operational wallet that signs receipts. */
+  /** The operational wallet that signs receipts and offers. */
   signer: string;
+  /** The node's own libp2p peer id: its offers name it, and buyers dial it. */
+  peerId: string;
   /** The node's operational wallets, which send its batches; the signer's alone by default. */
   wallets?: readonly string[];
   stopServingSeconds: number;
@@ -376,7 +379,7 @@ export class Seller {
     return answerOf(served);
   }
 
-  /** Share the offers not shared yet: each service's, for this epoch and the next, at its price. */
+  /** Share the offers not shared yet: each service's, for this epoch and the next, at its price, signed. */
   private async shareNewOffers(times: EpochTimes): Promise<void> {
     const quads: OfferQuad[] = [];
     const keys: string[] = [];
@@ -386,11 +389,11 @@ export class Seller {
         const key = `${s.serviceId}:${epoch}:${price}`;
         if (this.shared.has(key)) continue;
         keys.push(key);
-        quads.push(...offerQuads({
+        quads.push(...offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {
           seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
           pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
-          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}),
-        }));
+          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}), peerId: this.deps.peerId,
+        })));
       }
     }
     if (quads.length === 0) return;

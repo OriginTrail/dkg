@@ -5,28 +5,27 @@
  *   1. Candidates: the epoch's offers at or under the budget's price cap, from
  *      sellers in the sharding table.
  *   2. Order: pinned sellers, then price, then this node's measured latency.
- *   3. Quotes from the first three, kept five minutes.
+ *   3. Quotes from the first three, kept five minutes, each from the peer its
+ *      offer names, which must answer as the offer's seller.
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
  *
- * How a seller's identity becomes a peer to dial is `SellerPeers`, one
- * interface: the node has no lookup yet, so it routes to no one.
+ * Every offer the buyer reads comes through `offersOf`, which keeps only
+ * those the chain says an operational wallet of their seller signed: the
+ * wallet's identity is `IdentityStorage.getIdentityId`, the read the
+ * settlement makes of a batch's sender. The chain's answer for a wallet is
+ * kept five minutes; a read that fails keeps nothing, and its offers are left
+ * out until the chain answers.
  */
-import type { MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
-import type { Offer } from './offers.js';
+import type { MarketplaceChainAdapter, MarketplaceDomain } from '@origintrail-official/dkg-chain';
+import { offerSignerOf, type Offer } from './offers.js';
 import type { QuoteResponse } from './wire.js';
-
-/** The peer to dial for a seller's identity, or `null` when it is not known. */
-export interface SellerPeers {
-  peerOf(identityId: bigint): Promise<string | null>;
-}
-
-/** No lookup: every seller is unknown, so the gateway answers `no_seller`. */
-export const NO_SELLER_PEERS: SellerPeers = { peerOf: async () => null };
 
 export const QUOTE_TTL_MS = 5 * 60_000;
 export const UNREACHABLE_MS = 10 * 60_000;
+/** How long the chain's answer of which identity a wallet signs for is kept. */
+export const SIGNER_TTL_MS = 5 * 60_000;
 const QUOTED_CANDIDATES = 3;
 
 export interface Route {
@@ -36,11 +35,10 @@ export interface Route {
 }
 
 export interface RouterDeps {
-  chain: Pick<MarketplaceChainAdapter, 'isShardingTableMember'>;
-  /** The offers of the given epochs, from the Marketplace Context Graph. */
+  chain: Pick<MarketplaceChainAdapter, 'getMarketplaceContracts' | 'getIdentityIdForAddress' | 'isShardingTableMember'>;
+  /** The offers of the given epochs, from the Marketplace Context Graph, their signatures not checked. */
   offers(epochs: number[]): Promise<Offer[]>;
   quote(peerId: string, services: string[]): Promise<QuoteResponse>;
-  peers: SellerPeers;
   /** Sellers tried first for a service: the standing plan's pinned seller. */
   pinned?: (serviceId: string) => Promise<readonly bigint[]>;
   /** Milliseconds. */
@@ -53,6 +51,9 @@ export class Router {
   private readonly unreachableUntil = new Map<string, number>();
   private readonly failedIn = new Map<string, number>();
   private readonly latency = new Map<string, number>();
+  /** wallet => the identity the chain says it signs for, and when that was read. */
+  private readonly signers = new Map<string, { identityId: bigint; at: number }>();
+  private domain: MarketplaceDomain | undefined;
   private readonly clock: () => number;
 
   constructor(private readonly deps: RouterDeps) {
@@ -63,7 +64,7 @@ export class Router {
   async pick(serviceId: string, epoch: number, maxPricePerUnit: bigint): Promise<Route | null> {
     const now = this.clock();
     const pinned = (await this.deps.pinned?.(serviceId)) ?? [];
-    const offers = (await this.deps.offers([epoch])).filter((o) =>
+    const offers = (await this.offersOf([epoch])).filter((o) =>
       o.serviceId === serviceId && o.epoch === epoch && o.pricePerUnit <= maxPricePerUnit
       && this.failedIn.get(o.seller.toString()) !== epoch
       && (this.unreachableUntil.get(o.seller.toString()) ?? 0) <= now);
@@ -83,13 +84,11 @@ export class Router {
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
     for (const offer of candidates.slice(0, QUOTED_CANDIDATES)) {
-      const peerId = await this.deps.peers.peerOf(offer.seller);
-      if (!peerId) continue;
-      const quote = await this.quoteOf(offer.seller, peerId, serviceId, now);
+      const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, now);
       const quoted = quote?.offers.find((q) => q.serviceId === serviceId);
       if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) continue;
       this.sticky.set(serviceId, offer.seller);
-      return { seller: offer.seller, peerId, pricePerUnit: BigInt(quoted.pricePerUnit) };
+      return { seller: offer.seller, peerId: offer.peerId, pricePerUnit: BigInt(quoted.pricePerUnit) };
     }
     return null;
   }
@@ -111,9 +110,18 @@ export class Router {
     for (const key of this.quotes.keys()) if (key.startsWith(`${seller}:`)) this.quotes.delete(key);
   }
 
-  /** The offers of `epochs`, as routing reads them. */
-  offersOf(epochs: number[]): Promise<Offer[]> {
-    return this.deps.offers(epochs);
+  /** The offers of `epochs` that an operational wallet of their seller signed, as the chain says now. */
+  async offersOf(epochs: number[]): Promise<Offer[]> {
+    const offers = await this.deps.offers(epochs);
+    this.domain ??= (await this.deps.chain.getMarketplaceContracts()).requestDomain;
+    const now = this.clock();
+    for (const [wallet, read] of this.signers) if (now - read.at >= SIGNER_TTL_MS) this.signers.delete(wallet);
+    const signed: Offer[] = [];
+    for (const offer of offers) {
+      const signer = offerSignerOf(this.domain, offer);
+      if (signer && (await this.identityOf(signer, now)) === offer.seller) signed.push(offer);
+    }
+    return signed;
   }
 
   /** What the last quote from `seller` said of `serviceId`, and when it came, in seconds; `undefined` while none has. */
@@ -152,5 +160,18 @@ export class Router {
   private forget(seller: bigint): void {
     this.requote(seller);
     for (const [service, s] of this.sticky) if (s === seller) this.sticky.delete(service);
+  }
+
+  /** The identity `wallet` is an operational wallet of (0 for none), kept from the last read; `undefined` while the chain cannot say. */
+  private async identityOf(wallet: string, now: number): Promise<bigint | undefined> {
+    const kept = this.signers.get(wallet);
+    if (kept) return kept.identityId;
+    try {
+      const identityId = await this.deps.chain.getIdentityIdForAddress(wallet);
+      this.signers.set(wallet, { identityId, at: now });
+      return identityId;
+    } catch {
+      return undefined;
+    }
   }
 }

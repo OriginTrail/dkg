@@ -4,9 +4,9 @@
  * The daemon's marketplace seller (OT-RFC-27): built at boot when
  * `marketplace.seller.enabled` is set and the chain has the marketplace. It
  * answers `quote` and `serve` over the messenger, and its job checks the Core
- * Node gate, shares its offers into the Marketplace Context Graph and lands
- * its receipts. A setting it cannot use leaves selling off, logged, and the
- * boot goes on.
+ * Node gate, shares its offers, signed and naming the node's peer id, into the
+ * Marketplace Context Graph and lands its receipts. A setting it cannot use
+ * leaves selling off, logged, and the boot goes on.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -24,10 +24,10 @@ import {
 
 export interface MarketplaceSellerOptions {
   config: { marketplace?: unknown };
-  agent: Pick<DKGAgent, 'marketplaceChain' | 'registerMarketplaceHandlers'> & {
+  agent: Pick<DKGAgent, 'marketplaceChain' | 'registerMarketplaceHandlers' | 'peerId'> & {
     share(contextGraphId: string, quads: OfferQuad[]): Promise<unknown>;
   };
-  /** The operational wallet that signs receipts: the primary one. */
+  /** The operational wallet that signs receipts and offers: the primary one. */
   signer: string | undefined;
   /** The node's operational wallets, which Operate lists. */
   wallets?: readonly string[];
@@ -71,6 +71,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     dir: join(dataDir, 'marketplace'),
     services,
     signer,
+    peerId: agent.peerId,
     stopServingSeconds: resolved.stopServingSeconds,
     tickSeconds: resolved.tickSeconds,
     landing: resolved.landing,

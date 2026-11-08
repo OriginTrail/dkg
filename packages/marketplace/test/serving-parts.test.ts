@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { randomBytes } from 'node:crypto';
-import { SERVICE_CLASS_INFERENCE } from '@origintrail-official/dkg-chain';
+import { ethers } from 'ethers';
+import { SERVICE_CLASS_INFERENCE, requestDomain } from '@origintrail-official/dkg-chain';
 import {
   DEFAULT_LANDING,
   Journal,
@@ -22,6 +23,7 @@ import {
   encodeMessage,
   inferenceBodyFromWire,
   offerQuads,
+  offerSignerOf,
   offersFromBindings,
   offersQuery,
   quoteRequestFromWire,
@@ -30,6 +32,7 @@ import {
   requestFromWire,
   resolveSellerConfig,
   serviceIdOf,
+  signOffer,
   type Offer,
 } from '../src/index.js';
 
@@ -62,10 +65,16 @@ describe('the wire', () => {
 });
 
 describe('offers', () => {
-  const offer: Offer = {
+  const wallet = ethers.Wallet.createRandom();
+  const domain = requestDomain(31337, ethers.Wallet.createRandom().address);
+  /** Signs as the chain adapter signs for a wallet it holds. */
+  const holder = { signTypedDataAs: async (_address: string, d: ethers.TypedDataDomain, t: Record<string, ethers.TypedDataField[]>, v: Record<string, unknown>) => wallet.signTypedData(d, t, v) };
+  const unsigned: Omit<Offer, 'signature'> = {
     seller: 7n, serviceId: serviceIdOf('urn:test:model:a'), serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token', pricePerUnit: 10n ** 12n,
-    epoch: 663, capacity: 4, model: 'urn:test:model:a', provenance: 'weights-pinned', tokenizerBundle: 'test-bundle',
+    epoch: 663, capacity: 4, model: 'urn:test:model:a', provenance: 'weights-pinned', tokenizerBundle: 'test-bundle', peerId: 'seller-peer',
   };
+  let offer: Offer;
+  beforeEach(async () => { offer = await signOffer(holder, wallet.address, domain, unsigned); });
   /** The rows a query of these quads returns: each value as the store gives it back. */
   const rowsOf = (quads: ReturnType<typeof offerQuads>) => {
     const row: Record<string, string> = { offer: quads[0]!.subject };
@@ -73,28 +82,49 @@ describe('offers', () => {
     return [row];
   };
 
-  it('go out as quads with one subject per seller, service and epoch, and come back as offers', () => {
+  it('go out as quads under a subject named after the signature, and come back as offers', () => {
     const quads = offerQuads(offer);
-    expect(new Set(quads.map((q) => q.subject))).toEqual(new Set([`urn:dkg:marketplace:offer:7:${offer.serviceId}:663`]));
+    expect(new Set(quads.map((q) => q.subject))).toEqual(new Set([`urn:dkg:marketplace:offer:${ethers.keccak256(offer.signature)}`]));
     expect(offersFromBindings(rowsOf(quads))).toEqual([offer]);
     expect(offersQuery([663, 664])).toContain('VALUES ?epoch { "663" "664" }');
+    expect(offersQuery([663])).not.toContain('OPTIONAL');
   });
 
-  it('carry no capacity or tokenizer when the seller states none', () => {
+  it('carry a capacity of 0 and an empty tokenizer when the seller states none', () => {
     const bare: Offer = { ...offer, capacity: null, provenance: 'upstream-claimed' };
     delete bare.tokenizerBundle;
     const quads = offerQuads(bare);
-    expect(quads.some((q) => q.predicate.endsWith('#capacity') || q.predicate.endsWith('#tokenizerBundle'))).toBe(false);
+    expect(quads.find((q) => q.predicate.endsWith('#capacity'))!.object).toBe('"0"');
+    expect(quads.find((q) => q.predicate.endsWith('#tokenizerBundle'))!.object).toBe('""');
     expect(offersFromBindings(rowsOf(quads))).toEqual([bare]);
     expect(offersFromBindings([{ ...rowsOf(quads)[0], unit: '"query-unit"' }])).toEqual([]);
   });
 
-  it('drop what does not hold together', () => {
+  it('drop what does not hold together, and what is not signed', () => {
     const rows = rowsOf(offerQuads(offer));
     expect(offersFromBindings([{ ...rows[0], serviceId: `"${serviceIdOf('urn:test:model:b')}"` }])).toEqual([]);
     expect(offersFromBindings([{ ...rows[0], pricePerUnit: '"ten"' }])).toEqual([]);
     expect(offersFromBindings([{ ...rows[0], seller: '"0"' }])).toEqual([]);
-    expect(offersFromBindings([{ ...rows[0], capacity: undefined as unknown as string }])[0]!.capacity).toBeNull();
+    expect(offersFromBindings([{ ...rows[0], capacity: '"four"' }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], provenance: '"self-reported"' }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], tokenizerBundle: undefined as unknown as string }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], peerId: '""' }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], signature: undefined as unknown as string }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], signature: '"unsigned"' }])).toEqual([]);
+  });
+
+  it('are signed over every field, and recover to their signer in their domain only', () => {
+    expect(offerSignerOf(domain, offer)).toBe(wallet.address);
+    expect(offerSignerOf(requestDomain(1, domain.verifyingContract), offer)).not.toBe(wallet.address);
+    const tampered: Partial<Omit<Offer, 'signature'>>[] = [
+      { seller: 8n }, { serviceId: serviceIdOf('urn:test:model:b') }, { serviceClass: 2 }, { unit: 'query-unit' as 'token' },
+      { pricePerUnit: 10n ** 12n + 1n }, { epoch: 664 }, { capacity: null }, { capacity: 5 }, { model: 'urn:test:model:b' },
+      { provenance: 'upstream-claimed' }, { tokenizerBundle: 'other-bundle' }, { tokenizerBundle: undefined }, { peerId: 'other-peer' },
+    ];
+    for (const change of tampered) expect(offerSignerOf(domain, { ...offer, ...change }), JSON.stringify(Object.keys(change))).not.toBe(wallet.address);
+    // A signature that recovers to no one, and a field that does not fit its type.
+    expect(offerSignerOf(domain, { ...offer, signature: '0x00' })).toBeNull();
+    expect(offerSignerOf(domain, { ...offer, pricePerUnit: 1n << 96n })).toBeNull();
   });
 });
 

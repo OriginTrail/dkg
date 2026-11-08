@@ -78,7 +78,7 @@ async function newDir(): Promise<string> {
 /** A seller as the daemon starts it: loaded, and through its first tick. */
 async function sellerOf(key: string, opts: { landing?: Partial<LandingSettings>; dir?: string; chain?: MarketplaceChainAdapter } = {}): Promise<Seller> {
   const seller = new Seller({
-    chain: opts.chain ?? chainOf(key), dir: opts.dir ?? await newDir(), signer: new Wallet(key).address, stopServingSeconds: 180, tickSeconds: 300,
+    chain: opts.chain ?? chainOf(key), dir: opts.dir ?? await newDir(), signer: new Wallet(key).address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
     services: [{ model: MODEL, serviceId: SERVICE, pricePerUnit: PRICE, capacity: null, provenance: 'upstream-claimed', connector: backend }],
     landing: { ...LANDING, ...opts.landing },
   });

@@ -3,8 +3,11 @@
  * Serving end to end on the evm-module's Hardhat chain: a seller node and a
  * buyer node over libp2p on loopback, the seller started as the daemon starts
  * it, and a stub OpenAI-compatible model on loopback (no model download).
- *   - the seller shares its offers into the Marketplace Context Graph, and the
- *     buyer node reads them from its shared memory;
+ *   - the seller shares its offers into the Marketplace Context Graph, each
+ *     naming its node's peer id and signed by its operational wallet, and the
+ *     buyer node reads them from its shared memory: its gateway finds the
+ *     seller from them alone. (The nodes connect on loopback so that shared
+ *     memory syncs; dialing by peer id on a real network is not shown here.)
  *   - a quote, and a call served with a receipt the seller's operational
  *     wallet signed, which the chain shows is a key of a Core Node;
  *   - crafted requests from the buyer node: an exact repeat
@@ -43,6 +46,7 @@ import {
   type Gateway,
   decodeMessage,
   encodeMessage,
+  offerSignerOf,
   offersFromBindings,
   offersQuery,
   receiptFromWire,
@@ -224,10 +228,7 @@ describe('serving between two nodes on Hardhat', () => {
       config, agent: buyerAgent, wallets: [buyer, second], dataDir: buyerDir, dashDb: { insertNotification: () => undefined }, log: () => undefined,
     })!;
     await gatewayBuyer.fund({ epoch, source: { kind: 'wallet' }, services: [{ serviceId: A, serviceClass: SERVICE_CLASS_INFERENCE, value: 10n ** 15n, maxPricePerUnit: 10n ** 12n }] });
-    gateway = await startMarketplaceGateway({
-      config, agent: buyerAgent, buyer: gatewayBuyer, dataDir: buyerDir,
-      peers: { peerOf: async (id) => (id === sellerIdentity ? sellerAgent.peerId : null) },
-    });
+    gateway = await startMarketplaceGateway({ config, agent: buyerAgent, buyer: gatewayBuyer, dataDir: buyerDir });
   }, 180_000);
 
   afterAll(async () => {
@@ -240,7 +241,7 @@ describe('serving between two nodes on Hardhat', () => {
     for (const dir of dirs) await rm(dir, { recursive: true, force: true });
   }, 60_000);
 
-  it('is a Core Node, and its offers reach the buyer through the Marketplace Context Graph', async () => {
+  it('is a Core Node, and its signed offers reach the buyer through the Marketplace Context Graph', async () => {
     expect(selling.seller.gate.open).toBe(true);
     const { epoch } = await buyerChain.getEpochTimes();
     let offers: ReturnType<typeof offersFromBindings> = [];
@@ -251,6 +252,10 @@ describe('serving between two nodes on Hardhat', () => {
     }
     expect(offers.map((o) => `${o.serviceId}:${o.epoch}`).sort()).toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
     expect(offers.every((o) => o.seller === sellerIdentity && o.pricePerUnit === PRICE && o.provenance === 'weights-pinned')).toBe(true);
+    // Each names the seller node's peer, and the chain says its operational wallet signed it: the gateway's router keeps them all.
+    expect(offers.every((o) => o.peerId === sellerAgent.peerId)).toBe(true);
+    expect(offers.every((o) => offerSignerOf(domain, o) === new Wallet(HARDHAT_KEYS.CORE_OP).address)).toBe(true);
+    expect(await gateway.router.offersOf([epoch, epoch + 1])).toHaveLength(4);
   });
 
   it('quotes over the messenger, and serves a call with a receipt a Core Node key signed', async () => {
@@ -297,6 +302,7 @@ describe('serving between two nodes on Hardhat', () => {
     const models = await route('GET', MARKETPLACE_GATEWAY_ROUTES.models.path, undefined, minted.body.secret);
     expect(models.body.data.map((m: { id: string }) => m.id).sort()).toEqual([MODEL_A]);
 
+    // Routed by the seller's signed offer alone: the peer it dials is the one the offer names.
     const answer = await route('POST', GATEWAY_CHAT, CHAT, minted.body.secret);
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { MockChainAdapter, SERVICE_CLASS_INFERENCE, marketplaceChainOf, type MarketplaceChainAdapter } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, SERVICE_CLASS_INFERENCE, marketplaceChainOf, type MarketplaceChainAdapter, type MarketplaceDomain } from '@origintrail-official/dkg-chain';
 import {
   AccessKeys,
   BuyerStore,
@@ -19,6 +19,7 @@ import {
   MarketplaceRefusal,
   Router,
   catalogView,
+  hashOffer,
   resolveFx,
   sellerView,
   serviceDetailView,
@@ -40,11 +41,17 @@ let router: Router;
 let gateway: Gateway;
 let own: bigint;
 let epoch: number;
+let domain: MarketplaceDomain;
+/** Each seller's operational wallet, made at runtime and known to the mock chain as the seller's. */
+let wallets: Map<bigint, ethers.HDNodeWallet>;
 
-const offer = (seller: bigint, serviceId: string, pricePerUnit: bigint, at = epoch): Offer => ({
-  seller, serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token', pricePerUnit, epoch: at, capacity: null,
-  model: serviceId === A ? 'urn:test:model:catalog-a' : 'urn:test:model:catalog-b', provenance: 'upstream-claimed',
-});
+const offer = (seller: bigint, serviceId: string, pricePerUnit: bigint, at = epoch): Offer => {
+  const unsigned = {
+    seller, serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token' as const, pricePerUnit, epoch: at, capacity: null,
+    model: serviceId === A ? 'urn:test:model:catalog-a' : 'urn:test:model:catalog-b', provenance: 'upstream-claimed' as const, peerId: `peer-${seller}`,
+  };
+  return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashOffer(domain, unsigned)).serialized };
+};
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'marketplace-catalog-'));
@@ -53,17 +60,21 @@ beforeEach(async () => {
   chain = marketplaceChainOf(mock)!;
   own = await chain.getIdentityId();
   ({ epoch } = await chain.getEpochTimes());
+  domain = (await chain.getMarketplaceContracts()).requestDomain;
+  wallets = new Map([own, OTHER, OUTSIDE].map((id) => [id, ethers.Wallet.createRandom()]));
+  for (const [id, wallet] of wallets) mock.seedIdentity(wallet.address, id);
   vi.spyOn(chain, 'isShardingTableMember').mockImplementation(async (id) => id !== OUTSIDE);
   const offers = [
     offer(own, A, 10n), offer(own, A, 12n, epoch + 1),
     offer(OTHER, A, 9n), offer(OTHER, A, 8n), offer(OTHER, B, 5n),
     offer(OUTSIDE, A, 1n),
+    // Not signed by a wallet of its seller: left out everywhere.
+    { ...offer(OTHER, B, 1n), seller: own },
   ];
   router = new Router({
     chain,
     offers: async () => offers,
     quote: async (_peer, services) => ({ seller: String(OTHER), epoch, offers: services.map((serviceId) => ({ serviceId, pricePerUnit: '8', available: true, capacity: null })) }),
-    peers: { peerOf: async (id) => (id === OTHER ? 'peer-9' : null) },
   });
   gateway = new Gateway({
     chain, buyerWallet: NODE.address, store: new BuyerStore(dir), router, keys: new AccessKeys(dir), dir,
@@ -107,6 +118,7 @@ describe('the catalog', () => {
       covered: { left: String(10n ** 6n), leftTrac: ethers.formatEther(10n ** 6n) },
     });
     expect(catalog.services.find((s) => s.serviceId === B)).not.toHaveProperty('covered');
+    expect(catalog.services.find((s) => s.serviceId === B)!.offers.map((o) => o.seller)).toEqual([Number(OTHER)]);
     // No subscription, nothing covered.
     vi.spyOn(chain, 'subscriptionExists').mockResolvedValue(false);
     expect((await catalogView(gateway)).services.every((s) => !('covered' in s))).toBe(true);

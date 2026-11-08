@@ -7,8 +7,9 @@
  * its operational wallets, say) leaves the marketplace off, logged, and the
  * boot goes on. A renewal that fails is logged and recorded as a notification.
  * Beside it, the buyer's gateway: OpenAI-compatible calls, paid from the
- * subscription and served by sellers over the messenger, with its job, which
- * follows what landed and makes ended epochs final.
+ * subscription and served by sellers over the messenger, each dialed by the
+ * peer id its signed offer names, with its job, which follows what landed and
+ * makes ended epochs final.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -17,7 +18,6 @@ import {
   Buyer,
   BuyerStore,
   Gateway,
-  NO_SELLER_PEERS,
   PEER_LIMITS,
   Router,
   decodeMessage,
@@ -30,7 +30,6 @@ import {
   type BuyerAlert,
   type MarketplaceConfig,
   type QuoteResponse,
-  type SellerPeers,
 } from '@origintrail-official/dkg-marketplace';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
@@ -101,15 +100,13 @@ export interface MarketplaceGatewayOptions {
   };
   buyer: Buyer;
   dataDir: string;
-  /** The peer for a seller's identity. The node has no lookup yet: by default it routes to no one. */
-  peers?: SellerPeers;
   log?: (message: string) => void;
 }
 
 /**
  * The buyer's gateway: its router reads offers from the Marketplace Context
- * Graph, which the node subscribes to, and reaches sellers over the messenger.
- * Its job runs as often as the buyer's.
+ * Graph, which the node subscribes to, keeps those their sellers signed, and
+ * reaches sellers over the messenger. Its job runs as often as the buyer's.
  */
 export async function startMarketplaceGateway(options: MarketplaceGatewayOptions): Promise<Gateway> {
   const { agent, buyer, dataDir } = options;
@@ -124,7 +121,6 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
     quote: async (peerId, services) => decodeMessage(await agent.sendMarketplaceMessage(peerId, 'quote', encodeMessage({ services }), {
       timeoutMs: PEER_LIMITS.quoteTimeoutMs, maxReadBytes: PEER_LIMITS.quoteResponseBytes,
     })) as QuoteResponse,
-    peers: options.peers ?? NO_SELLER_PEERS,
     pinned: async (serviceId) => {
       const pinned = (await buyer.store.readPlan())?.services.find((s) => s.serviceId === serviceId)?.pinnedSeller;
       return pinned === undefined ? [] : [pinned];
@@ -147,7 +143,7 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
       timeoutMs: PEER_LIMITS.serveTimeoutMs, maxReadBytes: PEER_LIMITS.serveResponseBytes, messageId,
     }),
     dir,
-    modelOf: async (serviceId, epoch) => (await offers([epoch])).find((o) => o.serviceId === serviceId)?.model,
+    modelOf: async (serviceId, epoch) => (await router.offersOf([epoch])).find((o) => o.serviceId === serviceId)?.model,
     fx,
     ...(options.log ? { log: options.log } : {}),
   });

@@ -23,9 +23,13 @@ import {
   type ServiceRequest,
 } from '@origintrail-official/dkg-chain';
 import {
+  MARKETPLACE_NS,
   Seller,
   UpstreamError,
   cutTo,
+  offerSignerOf,
+  offerSubject,
+  offersFromBindings,
   receiptFromWire,
   receiptSignerOf,
   requestToWire,
@@ -33,6 +37,7 @@ import {
   serviceIdOf,
   type Completion,
   type Connector,
+  type Offer,
   type OfferQuad,
   type SellerService,
   type ServeAnswer,
@@ -75,10 +80,22 @@ function sellerWith(over: { stopServingSeconds?: number; price?: bigint } = {}):
     dir,
     services: [serviceOf(MODEL_A, over.price), serviceOf(MODEL_B, over.price)],
     signer: SELLER.address,
+    peerId: 'seller-peer',
     stopServingSeconds: over.stopServingSeconds ?? 180,
     tickSeconds: 300,
     shareOffers: async (quads) => { shared.push(quads); },
   });
+}
+
+/** The offers among shared quads, read back as a buyer's query returns them: a row per subject. */
+function offersIn(quads: OfferQuad[]): Offer[] {
+  const rows = new Map<string, Record<string, string>>();
+  for (const q of quads) {
+    const row = rows.get(q.subject) ?? { offer: q.subject };
+    if (q.predicate.startsWith(MARKETPLACE_NS)) row[q.predicate.slice(MARKETPLACE_NS.length)] = q.object;
+    rows.set(q.subject, row);
+  }
+  return offersFromBindings([...rows.values()]);
 }
 
 /** Fund the current epoch (or the next) for `buyer`, with `budgets` of A and B. */
@@ -134,16 +151,20 @@ describe('the gate, quotes and offers', () => {
     expect((await seller.quote({ services: [A] })).offers[0]!.available).toBe(false);
   });
 
-  it('shares an offer per service for this epoch and the next, once, and quotes its frozen price', async () => {
+  it('shares an offer per service for this epoch and the next, once, signed and naming its peer, and quotes its frozen price', async () => {
     const seller = sellerWith();
     await seller.load();
     await seller.tick();
     await seller.tick();
     expect(shared).toHaveLength(1);
     const { epoch } = await chain.getEpochTimes();
-    const subjects = new Set(shared[0]!.map((q) => q.subject));
-    expect(subjects.size).toBe(4);
-    expect([...subjects]).toContain(`urn:dkg:marketplace:offer:${seller.gate.identityId}:${A}:${epoch + 1}`);
+    const offers = offersIn(shared[0]!);
+    expect(offers.map((o) => `${o.serviceId}:${o.epoch}`).sort()).toEqual([`${A}:${epoch}`, `${A}:${epoch + 1}`, `${B}:${epoch}`, `${B}:${epoch + 1}`].sort());
+    expect(new Set(shared[0]!.map((q) => q.subject))).toEqual(new Set(offers.map((o) => offerSubject(o.signature))));
+    for (const o of offers) {
+      expect(o).toMatchObject({ seller: seller.gate.identityId, pricePerUnit: PRICE, capacity: 4, peerId: 'seller-peer' });
+      expect(offerSignerOf(domain, o)).toBe(SELLER.address);
+    }
     expect(await seller.quote({ services: [A, `0x${'99'.repeat(32)}`] })).toEqual({
       seller: String(seller.gate.identityId), epoch, offers: [{ serviceId: A, pricePerUnit: '10', available: true, capacity: 4 }],
     });
@@ -153,8 +174,7 @@ describe('the gate, quotes and offers', () => {
     await repriced.load();
     await repriced.tick();
     expect((await repriced.quote({ services: [A] })).offers[0]!.pricePerUnit).toBe('10');
-    const prices = shared[1]!.filter((q) => q.predicate.endsWith('#pricePerUnit') && q.subject.includes(`:${A}:`));
-    expect(prices.map((q) => q.object).sort()).toEqual(['"10"', '"20"']);
+    expect(offersIn(shared[1]!).filter((o) => o.serviceId === A).map((o) => String(o.pricePerUnit)).sort()).toEqual(['10', '20']);
     await expect(repriced.quote({ services: ['0x01'] })).rejects.toThrow(/32 bytes/);
   });
 });
@@ -174,7 +194,7 @@ describe('the job', () => {
   it('lands even when its offers fail to share, logs what failed, and goes on to the next tick', async () => {
     const logs: string[] = [];
     const seller = new Seller({
-      chain, dir, services: [serviceOf(MODEL_A)], signer: SELLER.address, stopServingSeconds: 180, tickSeconds: 300,
+      chain, dir, services: [serviceOf(MODEL_A)], signer: SELLER.address, peerId: 'seller-peer', stopServingSeconds: 180, tickSeconds: 300,
       shareOffers: async () => { throw new Error('the graph is away'); },
       log: (m) => logs.push(m),
     });
