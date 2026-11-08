@@ -11,25 +11,34 @@ import { ErrorCard, sellerName, useLoad } from '../shared.js';
 
 export function Reconciliation({ catalog, epoch }: { catalog: CatalogAnswer; epoch: number }): React.ReactElement {
   const [asked, setAsked] = useState(epoch);
-  const r = useLoad<ReconciliationAnswer>(() => marketplaceApi.reconciliation(asked));
-  const label = (id: string) => modelName(catalog.services.find((x) => x.serviceId === id)?.label ?? id);
-  const pick = (e: number) => { if (e !== asked) { setAsked(e); setTimeout(r.reload, 0); } };
-  const rows = r.data?.epoch === asked ? r.data.rows : [];
-  const held = rows.reduce((s, x) => s + x.held.count, 0);
-  const landed = rows.reduce((s, x) => s + x.landed.count, 0);
-  const matched = rows.reduce((s, x) => s + x.landed.matched, 0);
   return (
-    <div className="mkt-card" data-testid="mkt-reconciliation" data-epoch={asked} data-final={r.data?.final ?? false}>
+    <div className="mkt-card" data-testid="mkt-reconciliation" data-epoch={asked}>
       <div className="mkt-mhead">
         <h2 data-copy="recon.title">{copy('recon.title', { n: asked })}</h2>
         <span className="mkt-fchips">
           {[epoch, epoch - 1].map((e) => (
-            <button key={e} type="button" className={asked === e ? 'on' : ''} data-testid={`mkt-recon-${e}`} data-copy={e === epoch ? 'recon.this' : 'recon.last'} onClick={() => pick(e)}>
+            <button key={e} type="button" className={asked === e ? 'on' : ''} data-testid={`mkt-recon-${e}`} data-copy={e === epoch ? 'recon.this' : 'recon.last'} onClick={() => setAsked(e)}>
               {copy(e === epoch ? 'recon.this' : 'recon.last')}
             </button>
           ))}
         </span>
       </div>
+      <ReconciledRows key={asked} catalog={catalog} epoch={asked} />
+      <div className="mkt-muted mkt-xs" data-copy="recon.note">{copy('recon.note')}</div>
+    </div>
+  );
+}
+
+/** One epoch's reconciliation, loaded afresh for each epoch asked. */
+function ReconciledRows({ catalog, epoch }: { catalog: CatalogAnswer; epoch: number }): React.ReactElement {
+  const r = useLoad<ReconciliationAnswer>(() => marketplaceApi.reconciliation(epoch));
+  const label = (id: string) => modelName(catalog.services.find((x) => x.serviceId === id)?.label ?? id);
+  const rows = r.data?.rows ?? [];
+  const held = rows.reduce((s, x) => s + x.held.count, 0);
+  const landed = rows.reduce((s, x) => s + x.landed.count, 0);
+  const matched = rows.reduce((s, x) => s + x.landed.matched, 0);
+  return (
+    <div data-testid="mkt-recon-body" data-final={r.data?.final ?? false}>
       {r.err && !r.data ? <ErrorCard err={r.err} onRetry={r.reload} /> : null}
       {r.data && (
         <div className={r.data.final ? 'mkt-stmtline' : 'mkt-muted mkt-xs'} data-copy={r.data.final ? 'recon.line.final' : 'recon.line.open'}>
@@ -52,7 +61,6 @@ export function Reconciliation({ catalog, epoch }: { catalog: CatalogAnswer; epo
           </tbody>
         </table>
       )}
-      <div className="mkt-muted mkt-xs" data-copy="recon.note">{copy('recon.note')}</div>
     </div>
   );
 }

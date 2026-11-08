@@ -34,6 +34,9 @@ describe('marketplace Plans', () => {
     expect(byTestId(c, 'mkt-next-epoch')?.textContent).toContain('Epoch 665 is funded');
     expect(byTestId(c, `mkt-addon-row-${FIXTURE_IDS.mistral24b}`)).toBeTruthy();
     await waitForText(c, 'So far: this node holds 19 receipts · 200 landed, 199 matched');
+    await click(byTestId(c, 'mkt-recon-663'));
+    await waitForText(c, 'Final: 200 receipts landed, 199 matched this node\'s · 0 held');
+    expect(byTestId(c, 'mkt-reconciliation')?.getAttribute('data-epoch')).toBe('663');
     expect(byTestId(c, 'mkt-activity')?.textContent).toContain('dkgmk_1a2b3c4d');
     expect(byTestId(c, 'mkt-treasury')?.textContent).toContain('This node may spend up to 20 TRAC per epoch');
     expect(c.textContent).not.toContain(MISSING_COPY);
@@ -80,6 +83,35 @@ describe('marketplace Plans', () => {
     expect(writes[1].body).toEqual({ epoch: 'current', source: { kind: 'account', accountId: '7' }, services: [{ serviceId: FIXTURE_IDS.qwen14b, serviceClass: 'inference', value: '2000000000000000000', maxPricePerUnit: '700000000000' }] });
     expect(writes[2].body).toMatchObject({ renew: true, renewUntilEpoch: 670 });
     expect(c.textContent).not.toContain(MISSING_COPY);
+  });
+
+  it('sends a funding once: when the plan fails to save, a retry saves the plan alone', async () => {
+    const sent: string[] = [];
+    const node = fixtureFetch('none');
+    let failPlan = true;
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method !== 'GET') sent.push(`${method} ${String(input)}`);
+      if (method === 'PUT' && failPlan) {
+        failPlan = false;
+        return new Response(JSON.stringify({ error: 'disk full', code: 'Error', retryable: false }), { status: 500 });
+      }
+      return node(input, init);
+    });
+    const c = await render(plans());
+    await waitForText(c, 'Compose your plan');
+    await click(byTestId(c, `mkt-pick-${FIXTURE_IDS.qwen14b}`));
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 664');
+    await click(byTestId(c, 'mkt-compose-continue'));
+    await click(byTestId(c, 'mkt-gate-confirm'));
+    await waitForText(c, 'The epoch is funded, but the plan was not saved');
+    expect(byTestId(c, 'mkt-key-step')).toBeTruthy();
+    await click(byTestId(c, 'mkt-plan-retry'));
+    await flush(50);
+    expect(byTestId(c, 'mkt-plan-unsaved')).toBeNull();
+    expect(sent.filter((x) => x === 'POST /api/marketplace/subscriptions')).toHaveLength(1);
+    expect(sent.filter((x) => x === 'PUT /api/marketplace/plan')).toHaveLength(2);
   });
 
   it('shows the dry run\'s refusal and holds the confirmation back', async () => {

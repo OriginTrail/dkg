@@ -160,7 +160,7 @@ export const COPY: Record<string, string> = {
   "off.buyer.body": "It needs marketplace.enabled in the node's config and a chain with the marketplace contracts.",
   "off.seller.title": "Selling is off on this node",
   "off.seller.body": "It needs marketplace.seller.enabled in the node's config, a chain with the marketplace contracts and a Core Node identity.",
-  "err.generic": "Something went wrong — nothing was changed",
+  "err.generic": "Something went wrong — the node did not say what",
   "err.off": "The marketplace is off on this node",
   "err.admin": "This needs the node-admin token",
   "err.notfound": "The node has no such route — it may run an older version",
@@ -385,7 +385,9 @@ export const COPY: Record<string, string> = {
   "gallery.sect.activity": "recent calls by key",
   "gallery.sect.refusals": "refusals in plain words, the code one reveal deeper",
   "gallery.sect.states": "off, admin-needed and empty states",
-  "gallery.key.gone": "Secret dismissed — only the prefix {key} remains"
+  "gallery.key.gone": "Secret dismissed — only the prefix {key} remains",
+  "flow.plan.failed": "The epoch is funded, but the plan was not saved: it won't renew until it is.",
+  "flow.plan.retry": "Save the plan again"
 };
 
 export function copy(key: string, params?: Record<string, string | number>): string {

@@ -8,6 +8,7 @@ import { copy } from '../copy.generated.js';
 import { marketplaceApi } from '../api/client.js';
 import type { CatalogAnswer, FundedAnswer, Funding } from '../api/types.js';
 import { fmtHex, fmtTrac } from '../amounts.js';
+import { ErrorCard } from '../shared.js';
 import { Composer, PreviewLine, fundingRequestOf, servicesOf, usePreview, type Draft } from './Composer.js';
 import { ConfirmGate } from './ConfirmGate.js';
 import { KeyStep } from './KeyStep.js';
@@ -28,25 +29,41 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
   const [funded, setFunded] = useState<FundedAnswer | null>(null);
+  const [planErr, setPlanErr] = useState<unknown>(null);
   const { preview, err: previewErr, busy: previewBusy } = usePreview(draft, catalog, fundsEpoch);
   const services = servicesOf(draft, catalog);
   const renewUntil = Number(draft.renewUntil);
   const renewOk = !draft.renew || (Number.isInteger(renewUntil) && renewUntil >= catalog.epoch);
   const continueKey = !services ? 'composer.empty' : !renewOk ? 'composer.renew.invalid' : fundsEpoch && preview?.refusal ? 'composer.refused' : null;
 
+  const savePlan = () => marketplaceApi.savePlan({ services: services!, source: draft.source, renew: draft.renew, ...(draft.renew ? { renewUntilEpoch: renewUntil } : {}) });
+
+  // Funding goes out once: a retry after it was sent only saves the plan again.
   const confirm = async () => {
     if (!services || busy) return;
     setBusy(true); setErr(null);
+    let sent = funded;
     try {
-      if (fundsEpoch) setFunded(await marketplaceApi.fund(fundingRequestOf(draft, services)));
-      await marketplaceApi.savePlan({ services, source: draft.source, renew: draft.renew, ...(draft.renew ? { renewUntilEpoch: renewUntil } : {}) });
-      if (fundsEpoch && onboarding) setPhase('done');
-      else onDone();
+      if (fundsEpoch && !sent) { sent = await marketplaceApi.fund(fundingRequestOf(draft, services)); setFunded(sent); }
     } catch (e) {
-      setErr(e);
-    } finally {
-      setBusy(false);
+      setErr(e); setBusy(false); return;
     }
+    try {
+      await savePlan();
+      setPlanErr(null);
+    } catch (e) {
+      setBusy(false);
+      if (!sent) { setErr(e); return; }
+      setPlanErr(e); setPhase('done'); return;
+    }
+    setBusy(false);
+    if (sent && onboarding) setPhase('done');
+    else onDone();
+  };
+  const retryPlan = () => {
+    if (busy) return;
+    setBusy(true);
+    savePlan().then(() => setPlanErr(null)).catch(setPlanErr).finally(() => setBusy(false));
   };
 
   const step = phase === 'done' ? 3 : 2;
@@ -78,7 +95,15 @@ export function FundFlow({ catalog, funding, initial, fundsEpoch, onboarding, on
             <strong data-copy="flow.funded">{copy('flow.funded', { n: funded?.subscription?.epoch ?? preview?.epoch ?? catalog.epoch, trac: fmtTrac(funded?.subscription?.value ?? preview?.value ?? '0') })}</strong>{' '}
             {funded && <span className="mkt-muted mkt-xs mkt-mono" data-copy="flow.tx">{copy('flow.tx', { tx: fmtHex(funded.txHash), block: funded.blockNumber })}</span>}
           </div>
-          <KeyStep budgetTrac={fmtTrac(funded?.subscription?.value ?? preview?.value ?? '0')} onPlans={onDone} />
+          {planErr ? (
+            <ErrorCard err={planErr}>
+              <span className="mkt-xs" data-testid="mkt-plan-unsaved" data-copy="flow.plan.failed">{copy('flow.plan.failed')}</span>
+              <button type="button" className="mkt-btn" data-testid="mkt-plan-retry" data-copy="flow.plan.retry" onClick={retryPlan} disabled={busy}>{copy('flow.plan.retry')}</button>
+            </ErrorCard>
+          ) : null}
+          {onboarding
+            ? <KeyStep budgetTrac={fmtTrac(funded?.subscription?.value ?? preview?.value ?? '0')} onPlans={onDone} />
+            : <div className="mkt-fork"><button type="button" className="mkt-btn" data-copy="ctl.done" onClick={onDone}>{copy('ctl.done')}</button></div>}
         </>
       )}
     </div>
