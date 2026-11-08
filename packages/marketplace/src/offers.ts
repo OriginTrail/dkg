@@ -12,9 +12,10 @@
  *
  * It also names the seller node's libp2p peer id, which buyers dial, and one
  * of the node's operational wallets signs it: an EIP-712 `Offer` over every
- * other field, in the request domain. No contract reads it. A buyer keeps an
- * offer only when the chain says its signer is an operational wallet of the
- * offer's seller (router.ts).
+ * other field, in the request domain, `signedAt` included. No contract reads
+ * it. A buyer keeps an offer only when the chain says its signer is an
+ * operational wallet of the offer's seller, and of a seller's offers for one
+ * service and epoch only the newest (router.ts).
  *
  * Shared memory keeps every writer's triples under a subject side by side. So
  * an offer's subject is named after its signature, which only its seller can
@@ -49,6 +50,8 @@ export interface Offer {
   tokenizerBundle?: string;
   /** The seller node's libp2p peer id, which buyers dial. */
   peerId: string;
+  /** When the seller signed it, in chain seconds. */
+  signedAt: number;
   /** An operational wallet's EIP-712 signature over every other field. */
   signature: string;
 }
@@ -79,6 +82,7 @@ export const OFFER_TYPES = {
     { name: 'provenance', type: 'string' },
     { name: 'tokenizerBundle', type: 'string' },
     { name: 'peerId', type: 'string' },
+    { name: 'signedAt', type: 'uint64' },
   ],
 };
 
@@ -92,7 +96,7 @@ function signedFields(offer: Omit<Offer, 'signature'>): Record<string, unknown> 
   return {
     seller: offer.seller, serviceId: offer.serviceId, serviceClass: offer.serviceClass, unit: offer.unit,
     pricePerUnit: offer.pricePerUnit, epoch: offer.epoch, capacity: offer.capacity ?? 0, model: offer.model,
-    provenance: offer.provenance, tokenizerBundle: offer.tokenizerBundle ?? '', peerId: offer.peerId,
+    provenance: offer.provenance, tokenizerBundle: offer.tokenizerBundle ?? '', peerId: offer.peerId, signedAt: offer.signedAt,
   };
 }
 
@@ -143,12 +147,14 @@ export function offerQuads(offer: Offer): OfferQuad[] {
     quad(P('provenance'), literal(offer.provenance)),
     quad(P('tokenizerBundle'), literal(offer.tokenizerBundle ?? '')),
     quad(P('peerId'), literal(offer.peerId)),
+    quad(P('signedAt'), literal(offer.signedAt)),
     quad(P('signature'), literal(offer.signature)),
   ];
 }
 
 const FIELDS = [
-  'seller', 'serviceId', 'serviceClass', 'unit', 'pricePerUnit', 'epoch', 'capacity', 'model', 'provenance', 'tokenizerBundle', 'peerId', 'signature',
+  'seller', 'serviceId', 'serviceClass', 'unit', 'pricePerUnit', 'epoch', 'capacity', 'model', 'provenance', 'tokenizerBundle', 'peerId',
+  'signedAt', 'signature',
 ] as const;
 
 /** The query for the offers of `epochs`, over the Marketplace Context Graph's shared memory. */
@@ -164,6 +170,10 @@ function valueOf(term: unknown): string | undefined {
   const match = /^"((?:[^"\\]|\\.)*)"(?:\^\^<[^>]*>|@[\w-]+)?$/s.exec(term);
   return match ? (JSON.parse(`"${match[1]}"`) as string) : term;
 }
+
+/** A decimal count that is a safe integer: 0, or no leading zero. */
+const isCount = (value: string | undefined): value is string =>
+  value !== undefined && /^(0|[1-9]\d*)$/.test(value) && Number.isSafeInteger(Number(value));
 
 /**
  * The well-formed offers among a query's rows, each field as it was written;
@@ -182,11 +192,11 @@ export function offersFromBindings(rows: ReadonlyArray<Record<string, unknown>>)
     const provenance = v('provenance');
     const tokenizerBundle = v('tokenizerBundle');
     const peerId = v('peerId');
+    const signedAt = v('signedAt');
     const signature = v('signature');
     if (!seller || !/^[1-9]\d*$/.test(seller) || !serviceId || !ethers.isHexString(serviceId, 32)) continue;
     if (!price || !/^\d+$/.test(price) || !Number.isSafeInteger(epoch) || !model || serviceIdOf(model) !== serviceId.toLowerCase()) continue;
-    if (v('serviceClass') !== 'inference' || v('unit') !== 'token') continue;
-    if (!capacity || !/^(0|[1-9]\d*)$/.test(capacity) || !Number.isSafeInteger(Number(capacity))) continue;
+    if (v('serviceClass') !== 'inference' || v('unit') !== 'token' || !isCount(capacity) || !isCount(signedAt)) continue;
     if (provenance !== 'weights-pinned' && provenance !== 'upstream-claimed') continue;
     if (tokenizerBundle === undefined || !peerId || !signature || !ethers.isHexString(signature)) continue;
     offers.push({
@@ -201,6 +211,7 @@ export function offersFromBindings(rows: ReadonlyArray<Record<string, unknown>>)
       provenance,
       ...(tokenizerBundle ? { tokenizerBundle } : {}),
       peerId,
+      signedAt: Number(signedAt),
       signature,
     });
   }

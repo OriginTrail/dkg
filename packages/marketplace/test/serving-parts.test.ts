@@ -72,6 +72,7 @@ describe('offers', () => {
   const unsigned: Omit<Offer, 'signature'> = {
     seller: 7n, serviceId: serviceIdOf('urn:test:model:a'), serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token', pricePerUnit: 10n ** 12n,
     epoch: 663, capacity: 4, model: 'urn:test:model:a', provenance: 'weights-pinned', tokenizerBundle: 'test-bundle', peerId: 'seller-peer',
+    signedAt: 1_800_000_000,
   };
   let offer: Offer;
   beforeEach(async () => { offer = await signOffer(holder, wallet.address, domain, unsigned); });
@@ -109,6 +110,8 @@ describe('offers', () => {
     expect(offersFromBindings([{ ...rows[0], provenance: '"self-reported"' }])).toEqual([]);
     expect(offersFromBindings([{ ...rows[0], tokenizerBundle: undefined as unknown as string }])).toEqual([]);
     expect(offersFromBindings([{ ...rows[0], peerId: '""' }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], signedAt: '"soon"' }])).toEqual([]);
+    expect(offersFromBindings([{ ...rows[0], signedAt: '"01"' }])).toEqual([]);
     expect(offersFromBindings([{ ...rows[0], signature: undefined as unknown as string }])).toEqual([]);
     expect(offersFromBindings([{ ...rows[0], signature: '"unsigned"' }])).toEqual([]);
   });
@@ -120,6 +123,7 @@ describe('offers', () => {
       { seller: 8n }, { serviceId: serviceIdOf('urn:test:model:b') }, { serviceClass: 2 }, { unit: 'query-unit' as 'token' },
       { pricePerUnit: 10n ** 12n + 1n }, { epoch: 664 }, { capacity: null }, { capacity: 5 }, { model: 'urn:test:model:b' },
       { provenance: 'upstream-claimed' }, { tokenizerBundle: 'other-bundle' }, { tokenizerBundle: undefined }, { peerId: 'other-peer' },
+      { signedAt: 1_800_000_001 },
     ];
     for (const change of tampered) expect(offerSignerOf(domain, { ...offer, ...change }), JSON.stringify(Object.keys(change))).not.toBe(wallet.address);
     // A signature that recovers to no one, and a field that does not fit its type.

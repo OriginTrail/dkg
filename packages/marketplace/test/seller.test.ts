@@ -177,6 +177,26 @@ describe('the gate, quotes and offers', () => {
     expect(offersIn(shared[1]!).filter((o) => o.serviceId === A).map((o) => String(o.pricePerUnit)).sort()).toEqual(['10', '20']);
     await expect(repriced.quote({ services: ['0x01'] })).rejects.toThrow(/32 bytes/);
   });
+
+  it('shares an offer again when its price changes, back to an earlier one too, each copy signed later than the last', async () => {
+    const seller = sellerWith();
+    await seller.load();
+    await seller.tick();
+    const { epoch, startsAt } = await chain.getEpochTimes();
+    const nextOfA = (quads: OfferQuad[]) => offersIn(quads).filter((o) => o.serviceId === A && o.epoch === epoch + 1);
+    await seller.setNextPrice(A, 30n);
+    await seller.tick();
+    await seller.setNextPrice(A, PRICE);
+    await seller.tick();
+    await seller.tick();
+    // Only A's next offer was shared again, once per change.
+    expect(shared.map((quads) => offersIn(quads).length)).toEqual([4, 1, 1]);
+    const copies = shared.map((quads) => nextOfA(quads)[0]!);
+    expect(copies.map((o) => o.pricePerUnit)).toEqual([PRICE, 30n, PRICE]);
+    expect(copies[0]!.signedAt).toBeGreaterThanOrEqual(startsAt);
+    expect(copies[1]!.signedAt).toBeGreaterThan(copies[0]!.signedAt);
+    expect(copies[2]!.signedAt).toBeGreaterThan(copies[1]!.signedAt);
+  });
 });
 
 describe('the job', () => {

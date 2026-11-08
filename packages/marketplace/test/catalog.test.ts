@@ -45,10 +45,11 @@ let domain: MarketplaceDomain;
 /** Each seller's operational wallet, made at runtime and known to the mock chain as the seller's. */
 let wallets: Map<bigint, ethers.HDNodeWallet>;
 
-const offer = (seller: bigint, serviceId: string, pricePerUnit: bigint, at = epoch): Offer => {
+const offer = (seller: bigint, serviceId: string, pricePerUnit: bigint, at = epoch, signedAt = 1): Offer => {
   const unsigned = {
     seller, serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token' as const, pricePerUnit, epoch: at, capacity: null,
     model: serviceId === A ? 'urn:test:model:catalog-a' : 'urn:test:model:catalog-b', provenance: 'upstream-claimed' as const, peerId: `peer-${seller}`,
+    signedAt,
   };
   return { ...unsigned, signature: wallets.get(seller)!.signingKey.sign(hashOffer(domain, unsigned)).serialized };
 };
@@ -65,8 +66,9 @@ beforeEach(async () => {
   for (const [id, wallet] of wallets) mock.seedIdentity(wallet.address, id);
   vi.spyOn(chain, 'isShardingTableMember').mockImplementation(async (id) => id !== OUTSIDE);
   const offers = [
-    offer(own, A, 10n), offer(own, A, 12n, epoch + 1),
-    offer(OTHER, A, 9n), offer(OTHER, A, 8n), offer(OTHER, B, 5n),
+    // The next epoch's price set again, before that epoch starts: the later copy replaces the first, whatever the order read.
+    offer(own, A, 10n), offer(own, A, 12n, epoch + 1, 2), offer(own, A, 11n, epoch + 1, 1),
+    offer(OTHER, A, 8n, epoch, 2), offer(OTHER, A, 9n, epoch, 1), offer(OTHER, B, 5n),
     offer(OUTSIDE, A, 1n),
     // Not signed by a wallet of its seller: left out everywhere.
     { ...offer(OTHER, B, 1n), seller: own },

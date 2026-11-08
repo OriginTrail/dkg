@@ -31,7 +31,7 @@ interface Offers {
 
 const offerKey = (o: { seller: bigint; serviceId: string }) => `${o.seller}:${o.serviceId}`;
 
-/** This and the next epoch's offers of sellers in the sharding table, the last one read per seller, service and epoch. */
+/** This and the next epoch's offers of sellers in the sharding table: the router keeps one per seller, service and epoch, the newest. */
 async function offersNow(gateway: Gateway): Promise<Offers> {
   const { epoch } = await gateway.chain.getEpochTimes();
   const members = new Map<bigint, boolean>();

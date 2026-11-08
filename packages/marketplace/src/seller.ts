@@ -15,7 +15,8 @@
  *   price applies to epochs neither frozen nor set.
  * - **Offers.** At every tick it shares an offer for each service, for the
  *   current and the next epoch, into the Marketplace Context Graph: each names
- *   the node's peer id, and the receipts' operational wallet signs it.
+ *   the node's peer id, and the receipts' operational wallet signs it. One
+ *   whose price changed is shared again, signed later: buyers keep the newest.
  * - **Each call** is checked, cheapest check first, then
  *   served by the service's backend, cut to the units the request allows, and
  *   its receipt signed by an operational wallet. The call, its result and its
@@ -118,7 +119,8 @@ export class Seller {
   private readonly backends = new Map<string, 'up' | 'down'>();
   /** The chain's time as the last tick read it, and when, by this host's clock. */
   private lastTimes: { times: EpochTimes; at: number } | undefined;
-  private shared = new Set<string>();
+  /** service id and epoch => the price and `signedAt` of its offer as last shared. */
+  private readonly shared = new Map<string, { price: bigint; signedAt: number }>();
   private running = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private ticking: Promise<void> | undefined;
@@ -379,26 +381,31 @@ export class Seller {
     return answerOf(served);
   }
 
-  /** Share the offers not shared yet: each service's, for this epoch and the next, at its price, signed. */
+  /**
+   * Share the offers due: each service's, for this epoch and the next, when it was not shared at its price yet.
+   * Each is signed at the chain's time, and later than the one before it, since buyers keep the newest.
+   */
   private async shareNewOffers(times: EpochTimes): Promise<void> {
     const quads: OfferQuad[] = [];
-    const keys: string[] = [];
+    const due = new Map<string, { price: bigint; signedAt: number }>();
     for (const epoch of [times.epoch, times.epoch + 1]) {
       for (const s of this.services.values()) {
         const price = await this.priceFor(s, epoch, times.epoch);
-        const key = `${s.serviceId}:${epoch}:${price}`;
-        if (this.shared.has(key)) continue;
-        keys.push(key);
+        const key = `${s.serviceId}:${epoch}`;
+        const last = this.shared.get(key);
+        if (last?.price === price) continue;
+        const signedAt = Math.max(times.now, (last?.signedAt ?? 0) + 1);
+        due.set(key, { price, signedAt });
         quads.push(...offerQuads(await signOffer(this.deps.chain, this.deps.signer, this.domain!, {
           seller: this.identityId, serviceId: s.serviceId, serviceClass: SERVICE_CLASS_INFERENCE, unit: 'token',
           pricePerUnit: price, epoch, capacity: s.capacity, model: s.model, provenance: s.provenance,
-          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}), peerId: this.deps.peerId,
+          ...(s.tokenizerBundle ? { tokenizerBundle: s.tokenizerBundle } : {}), peerId: this.deps.peerId, signedAt,
         })));
       }
     }
     if (quads.length === 0) return;
     await this.deps.shareOffers!(quads);
-    for (const key of keys) this.shared.add(key);
+    for (const [key, copy] of due) this.shared.set(key, copy);
   }
 
   /** The price of `service` in `epoch`, frozen and stored once the epoch is current. */

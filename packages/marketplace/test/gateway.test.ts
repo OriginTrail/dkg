@@ -84,7 +84,7 @@ async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<voi
   const domain = (await chain.getMarketplaceContracts()).requestDomain;
   offers = await Promise.all(models.map((m) => signOffer(chain, NODE.address, domain, {
     seller: seller.gate.identityId, serviceId: serviceIdOf(m), serviceClass: 1, unit: 'token', pricePerUnit: PRICE, epoch, capacity: null,
-    model: m, provenance: 'upstream-claimed', peerId: 'seller-peer',
+    model: m, provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
   })));
   router = new Router({
     chain,
@@ -301,11 +301,11 @@ describe('the router', () => {
   /** Each seller's operational wallet, made at runtime; the chain below maps it to the seller. */
   const wallets = new Map<bigint, ethers.HDNodeWallet>();
   const walletOf = (seller: bigint) => wallets.get(seller) ?? wallets.set(seller, ethers.Wallet.createRandom()).get(seller)!;
-  /** An offer of `seller` in epoch 1, naming `peer-<seller>`, signed by the seller's wallet. */
-  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string } = {}): Offer => {
+  /** An offer of `seller` in epoch 1, naming `peer-<seller>`, signed at 1 by the seller's wallet. */
+  const offer = (seller: bigint, price: bigint, over: { epoch?: number; by?: ethers.HDNodeWallet; peerId?: string; signedAt?: number } = {}): Offer => {
     const unsigned = {
       seller, serviceId: SERVICE, serviceClass: 1, unit: 'token' as const, pricePerUnit: price, epoch: over.epoch ?? 1, capacity: null,
-      model: MODEL, provenance: 'upstream-claimed' as const, peerId: over.peerId ?? `peer-${seller}`,
+      model: MODEL, provenance: 'upstream-claimed' as const, peerId: over.peerId ?? `peer-${seller}`, signedAt: over.signedAt ?? 1,
     };
     return { ...unsigned, signature: (over.by ?? walletOf(seller)).signingKey.sign(hashOffer(domain, unsigned)).serialized };
   };
@@ -377,6 +377,21 @@ describe('the router', () => {
     chainDown = false;
     expect((await router.offersOf([1])).map((o) => o.seller)).toEqual([1n]);
     expect(identityReads).toHaveLength(3);
+  });
+
+  it("keeps a seller's newest offer for a service and epoch, among those its wallet signed", async () => {
+    // The newer copy's price is over the cap: routing goes by it, and asks no quote.
+    list = [offer(1n, 30n, { signedAt: 5 }), offer(1n, 500n, { signedAt: 6 })];
+    const router = routerWith();
+    expect((await router.offersOf([1])).map((o) => o.pricePerUnit)).toEqual([500n]);
+    expect(await router.pick(SERVICE, 1, 100n)).toBeNull();
+    expect(quoted).toEqual([]);
+    // A newer copy someone else signed hides nothing; of two copies signed at once, the higher signature is kept.
+    const tied = [offer(2n, 20n, { signedAt: 5 }), offer(2n, 21n, { signedAt: 5 })];
+    list = [offer(1n, 30n, { signedAt: 5 }), offer(1n, 10n, { signedAt: 9, by: ethers.Wallet.createRandom() }), ...tied];
+    const newest = tied[0]!.signature.localeCompare(tied[1]!.signature) > 0 ? tied[0]! : tied[1]!;
+    const kept = (await router.offersOf([1])).sort((a, b) => Number(a.seller - b.seller));
+    expect(kept.map((o) => [o.seller, o.pricePerUnit])).toEqual([[1n, 30n], [2n, newest.pricePerUnit]]);
   });
 
   it("dials the peer an offer names, and routes only when it answers as the offer's seller", async () => {

@@ -159,7 +159,7 @@ describe('the catalog routes', () => {
     const { epoch } = await chain.getEpochTimes();
     const offers = [await signOffer(chain, SIGNER.address, (await chain.getMarketplaceContracts()).requestDomain, {
       seller: own, serviceId: A, serviceClass: 1, unit: 'token', pricePerUnit: 10n, epoch, capacity: null, model: 'urn:test:model:a',
-      provenance: 'upstream-claimed', peerId: 'seller-peer',
+      provenance: 'upstream-claimed', peerId: 'seller-peer', signedAt: 1,
     })];
     gateway = new Gateway({
       chain, buyerWallet: SIGNER.address, store: buyer!.store, keys: new AccessKeys(dir), dir,
