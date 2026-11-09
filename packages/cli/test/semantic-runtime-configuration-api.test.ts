@@ -658,7 +658,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'new-call', 'missing-acknowledgement'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'declared-child', 'revoked', 'new-call', 'missing-acknowledgement'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -695,7 +695,17 @@ describe('TypeScript direct tools through shared authorization and effects', () 
         data: { resultData: { runData: { Component: [{ data: { main: [[{ json: { value: 12 } }]] } }] } } } });
     }));
     try {
-      await f.approve();
+      let overrides = {};
+      if (mode === 'declared-child') {
+        const child = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [], source: 'export function run() { return 42; }' });
+        const childOperation = { graphId: graph, operationIri: 'urn:child:declared-only' };
+        await f.manager.programs.approve({ ...childOperation, program: child, allowedCallers: [caller], typescript: { children: [] } });
+        const saved = await f.manager.programs.getSource(f.program);
+        const program = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', source: saved.source,
+          requiredTools: [n8nTool], permittedPrograms: [child.programIri], requestedPermissions: { graphId: graph, n8n } });
+        overrides = { program, typescript: { children: [childOperation] } };
+      }
+      await f.approve(overrides);
       await f.client.routes.create({ ...f.operation, targetPeerId: f.agent.peerId });
       const prepared = f.client.programs.prepareInvocation({ ...f.operation, inputs: [{ text: 'original' }] });
       await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
@@ -710,6 +720,12 @@ describe('TypeScript direct tools through shared authorization and effects', () 
         return;
       }
       interrupted = false;
+      if (mode === 'revoked') {
+        expect(f.target.runtime!.store.revokeCapability(`urn:sr:capability:${prepared.invocationId}`, Date.now())).toBe(true);
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+        expect(dispatches).toBe(1);
+        return;
+      }
       publishedVersion = 'foreign-version';
       await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       expect(dispatches).toBe(1);

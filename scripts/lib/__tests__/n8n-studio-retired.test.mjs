@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -39,3 +39,29 @@ test('invalid inputs on a retired leaf give a confirmed upgrade error before dis
     assert.equal(dispatched, 1); assert.equal(body.code, 'POC_REQUEST_REJECTED');
   } finally { bridge.close(); rmSync(state, { recursive: true, force: true }); }
 });
+
+for (const id of ['google-sheets', 'google-drive']) for (const route of ['/invoke', '/studio/invoke']) {
+  test(`${id} requires export authorization on ${route} before SDK dispatch`, async () => {
+    const state = mkdtempSync(join(tmpdir(), 'export-gate-')), tokenFile = join(state, 'export');
+    const secret = 'fixture-export-key-'.repeat(3); writeFileSync(tokenFile, secret);
+    const graphId = 'test-export', kaRef = 'urn:test:' + id, sourceHash = 'a'.repeat(64), descriptor = component(id);
+    let dispatches = 0;
+    const bridge = createCapabilityBridge({ graphId, owner: '0x' + '1'.repeat(40), exportTokenFile: tokenFile,
+      agent: { query: async () => ({ bindings: [{ program: kaRef }] }) },
+      client: { programs: { getSource: async () => ({ sourceHash, version: '1' }), invoke: async () => { dispatches++; throw Error('fixture-stop'); } } },
+      config: { programBindings: [{ contextGraphId: graphId, operationIri: kaRef, enabled: true, program: { sourceHash }, n8n: {} }], n8nNative: { workflows: [] } },
+      definitions: [{ kind: 'component', kaRef, descriptor, enabled: true, requiresExportAuthorization: true }],
+      studioOptions: { state, headerCredential: { id: 'unit', name: 'Unit' }, credentials: {} } });
+    try {
+      for (const token of [undefined, 'wrong-key', secret]) {
+        const request = Readable.from([Buffer.from(JSON.stringify({ kaRef, sourceHash, invocationId: randomUUID(), input: {
+          itemsJson: JSON.stringify(descriptor.sampleItems), paramsJson: JSON.stringify(Object.fromEntries(Object.entries(descriptor.parameters).map(([k,v]) => [k,v.default]))), executionId: '' } }))]);
+        request.method = 'POST'; request.headers = { authorization: 'Bearer l1-owner-a', ...(token ? { 'x-dkg-export-token': token } : {}) };
+        let status; const response = { writeHead(v) { status = v; }, end() {} };
+        await bridge.handle(request, response, '/spike/ka/accounts/account-a/capabilities' + route);
+        if (token !== secret) { assert.equal(status, 403); assert.equal(dispatches, 0); }
+        else assert.equal(dispatches, 1);
+      }
+    } finally { bridge.close(); rmSync(state, { recursive: true, force: true }); }
+  });
+}

@@ -197,7 +197,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         const selected = (await list()).find(item => item.kaRef === value.kaRef && item.sourceHash === value.sourceHash);
         if (!selected) { json(res, 409, { error: 'Approved KA version changed' }); return true; }
         if (!selected.available) { json(res, 409, { error: 'This component needs an operator connection before invocation.' }); return true; }
-        if (selected.kind === 'google-sheets-export') authorizeExport(req);
+        if (selected.requiresExportAuthorization) authorizeExport(req);
         json(res, 200, await invoke(selected, value.input, value.invocationId));
       } else json(res, 405, { error: 'Method unavailable' });
     } catch (error) { json(res, error.status ?? 400, { code: error.code ?? 'POC_REQUEST_REJECTED',

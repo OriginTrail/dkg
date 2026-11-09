@@ -5,7 +5,7 @@ import { component, normalizeComponentInput } from './component-registry.mjs';
 import { component as componentV1, normalizeComponentInput as normalizeComponentInputV1 } from './component-registry-v1.mjs';
 import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
-import { n8nObservationScope, n8nExecutionMatches, n8nWorkflowSha256 } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { n8nObservationScope, n8nExecutionMatches, n8nPinnedExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
@@ -51,8 +51,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const pending = (async () => {
       const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
       // Remote Program invocation is inside the pinned native graph, not an
-      // invoke_program child of this wrapper. Empty child grants also permit
-      // acknowledged native execution reconciliation after a slow response.
+      // invoke_program child of this wrapper. Native recovery inspects recorded effects; declared child pins
+      // in older saved wrappers remain authority checks, not evidence of execution.
       const nativeRemote = compiled.executor !== 'dkg' && definition.nodes.some(n => n.componentId === 'invoke-dkg-program');
       const sourceHash = createHash('sha256').update(sourceText).digest('hex');
       let source;
@@ -152,6 +152,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     if (!row) throw reject('Inactive event endpoint.');
     const { compiled, workflow } = await get(row.ka_ref);
     if (compiled.mode !== 'webhook') throw reject('This endpoint is not a webhook.');
+    if (!workflow.approved) throw reject('Event workflow approval changed.');
+    validateStudioCapabilities(compiled.definition, await listCapabilities());
     const invocationId = workflowUuid(value.invocationId), itemsJson = JSON.stringify(value.items);
     const previous = provider.db.prepare('SELECT * FROM events WHERE provider_id=? AND execution_id=?').get(row.provider_id, invocationId);
     if (previous && previous.input_json !== itemsJson) throw reject('This event identity already belongs to different input.');
@@ -181,7 +183,7 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         const a = activation(row.ka_ref); if (!a.active) continue;
         let compiled, workflow;
         try {
-          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled);
+          ({ compiled, workflow } = await get(row.ka_ref)); eventAuthorized(row.ka_ref, compiled, true);
           validateStudioCapabilities(compiled.definition, await listCapabilities());
           if (!workflow.approved) throw reject('Event workflow approval changed.');
         } catch {
@@ -192,7 +194,14 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
         const native = await provider.api('/workflows/' + row.provider_id);
         const published = { ...native.activeVersion, settings: native.settings };
         const executions = await provider.api('/executions?limit=20&workflowId=' + encodeURIComponent(row.provider_id));
-        for (const e of executions.data.slice().reverse()) {
+        const reserved = provider.db.prepare('SELECT execution_id FROM events WHERE ka_ref=? AND receipt_json IS NULL').all(row.ka_ref);
+        const candidates = new Map(executions.data.map(e => [String(e.id), e]));
+        // Pending identities must remain inspectable even after leaving the last page.
+        for (const pending of reserved) if (!candidates.has(pending.execution_id)) {
+          const detail = await provider.api('/executions/' + pending.execution_id + '?includeData=true');
+          candidates.set(pending.execution_id, detail);
+        }
+        for (const e of [...candidates.values()].reverse()) {
           if (e.status !== 'success' || Date.parse(e.startedAt) < a.startedAt || !/^\d{1,20}$/.test(String(e.id))) continue;
           const detail = await provider.api('/executions/' + e.id + '?includeData=true');
           const scope = n8nObservationScope(graphId, owner, row.provider_id) + ' trigger';
@@ -202,6 +211,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
           if (old?.receipt_json) continue;
           const invocationId = old?.invocation_id ?? eventUuid(row.ka_ref, String(e.id));
           if (!old) {
+            // The quota closes admission, not inspection of reserved identities.
+            if (activation(row.ka_ref).count >= 5) continue;
             eventAuthorized(row.ka_ref, compiled);
             const current = activation(row.ka_ref); current.count++;
             provider.db.prepare('INSERT INTO events (provider_id,execution_id,ka_ref,invocation_id) VALUES (?,?,?,?)').run(row.provider_id, String(e.id), row.ka_ref, invocationId);
@@ -228,7 +239,10 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     validateStudioCapabilities(compiled.definition,await listCapabilities());
     const native=await provider.api('/executions/'+encodeURIComponent(String(value.executionId))+'?includeData=true');
     const installed = await provider.api('/workflows/'+value.workflowId);
-    if(String(native.id)!==value.executionId || native.workflowId!==value.workflowId || n8nWorkflowSha256(installed)!==compiled.grant.workflowSha256 || !n8nExecutionMatches(installed,native.workflowData)) throw reject('Native execution does not match the approved workflow.');
+    const published = installed.activeVersion ? { ...installed.activeVersion, settings: installed.settings } : installed;
+    if (installed.active !== true || installed.id !== value.workflowId || String(native.id) !== value.executionId
+      || !n8nPinnedExecutionMatches(published, native, compiled.grant, published.versionId))
+      throw reject('Native execution does not match the approved workflow.');
     return dkg.call(value,workflow,value.workflowId);
   }
   const timer = setInterval(() => void poll(), 3000); timer.unref();
