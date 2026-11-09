@@ -201,6 +201,8 @@ keep their original pins and behavior. Select the exact field in input A and inp
 with fuzzy comparison disabled. All matches are retained, including one-to-many/many-to-many
 results, within the existing twenty-record/8 KiB result bound. Overlapping properties prefer
 input A; map independent provenance into separate named fields before joining to preserve both.
+With `keepNonMatches`, native n8n adds `_source: input1` or `_source: input2` to identify
+the unmatched input (and overwrites any existing `_source` property).
 This exposes n8n's native Merge v3.2 settings; no new join engine or domain-specific mapping is added.
 
 Provision the installed local n8n runtime with its official CLI while that owned
@@ -306,6 +308,17 @@ node examples/n8n-capability/verify-components-native.mjs /tmp/n8n-component-fix
 node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture --prepare
 # Import/publish the four generated studio-fixtures with the official CLI and restart that fixture.
 node examples/n8n-capability/verify-studio-native.mjs /tmp/n8n-component-fixture http://127.0.0.1:45780
+```
+
+The field-join regression runs eight generated Merge cases on n8n 2.43.8 with
+distinct left/right field names, all three join modes, duplicate matches and
+append-only compatibility. It imports and executes through the native CLI in a
+fresh temporary SQLite state, then removes that state; it needs no running
+server, account credentials or partner data. Use a Node version supported by
+that n8n installation:
+
+```sh
+node examples/n8n-capability/verify-field-join-native.mjs /path/to/node_modules/n8n /tmp/field-join-report.json
 ```
 
 ```sh
