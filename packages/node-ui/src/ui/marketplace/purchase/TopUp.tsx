@@ -25,6 +25,27 @@ import { usePreview } from './usePreview.js';
 /** What a top-up's dry run is asked about: the subscription, and what to add. */
 interface Addition { subscriptionId: string; service: ServiceRequest }
 
+/**
+ * A top-up this subscription holds with no form on show for it: one brought
+ * back after a reload, or one whose form another flow replaced. Its budget
+ * may no longer offer a top-up (past its soft ceiling, or no longer an
+ * add-on), so the page shows it here, and opens its form, with its key, on
+ * request.
+ */
+export function WaitingTopUp({ catalog, subscription, serviceId, onOpen }: {
+  catalog: CatalogAnswer; subscription: Subscription; serviceId: string; onOpen: () => void;
+}): React.ReactElement | null {
+  const held = useSyncExternalStore(topUpAttempts.subscribe, () => topUpAttempts.held(subscription.subscriptionId, serviceId));
+  if (!held) return null;
+  const name = modelName(catalog.services.find((s) => s.serviceId === serviceId)?.label ?? serviceId);
+  return (
+    <div className="mkt-notice" role="status" data-testid={`mkt-topup-waiting-${serviceId}`} data-phase={held.kind === 'reserving' ? 'sending' : held.kind}>
+      <span data-copy="topup.waiting">{copy('topup.waiting', { name, n: subscription.epoch, trac: fmtTrac(held.attempt.service.value) })}</span>{' '}
+      <button type="button" className="mkt-linkbtn" data-testid={`mkt-topup-open-${serviceId}`} data-copy="topup.waiting.open" onClick={onOpen}>{copy('topup.waiting.open')}</button>
+    </div>
+  );
+}
+
 export function TopUp({ catalog, subscription, serviceId, onDone, onCancel }: {
   catalog: CatalogAnswer; subscription: Subscription; serviceId: string; onDone: () => void; onCancel: () => void;
 }): React.ReactElement {

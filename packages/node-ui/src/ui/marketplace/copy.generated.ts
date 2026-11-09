@@ -303,6 +303,8 @@ export const COPY = {
   "topup.after": "The budget becomes {trac} TRAC",
   "topup.cta": "Confirm top-up",
   "topup.sent": "{name} topped up · tx {tx}",
+  "topup.waiting": "A top-up of {trac} TRAC to {name} for epoch {n} has no answer from the node yet",
+  "topup.waiting.open": "Open it",
   "topup.sent.shown": "{name} topped up · the budget shows it",
   "topup.class.unknown": "Neither the subscription nor this epoch's catalog names this service's class, so no top-up can be asked for",
   "topup.unknown": "The node did not say whether this top-up went through. Retry sends it again with the same key, which the node carries out once: no other top-up of this budget starts until the node answers.",

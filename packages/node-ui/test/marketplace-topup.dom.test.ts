@@ -122,6 +122,45 @@ describe('marketplace top-ups', () => {
     expect(sessionStorage.length).toBe(0);
   });
 
+  // A top-up whose answer was lost, after it lands and the page reloads: its budget no longer offers a form for it.
+  const pastItsForm: Array<[string, string, (c: HTMLElement) => Promise<void>]> = [
+    ['a budget at its soft ceiling, past the ceiling once it lands', FIXTURE_IDS.llama8b, async (c) => {
+      await click(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`));
+      await type(byTestId(c, 'mkt-topup-amount'), '0.5');
+    }],
+    ['a service added to the subscription, off the add-on list once it lands', FIXTURE_IDS.mistral24b, async (c) => {
+      await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+    }],
+  ];
+  for (const [what, serviceId, openForm] of pastItsForm) {
+    it(`shows a top-up of ${what}, after a reload, and settles it with its key`, async () => {
+      const node = topUpNode();
+      node.first.push('lose');
+      let c = await render(plans());
+      await waitForText(c, 'This budget is at its soft ceiling');
+      await openForm(c);
+      await flush(300);
+      await waitForText(c, 'Costs');
+      await click(byTestId(c, 'mkt-topup-confirm'));
+      await waitForText(c, 'it does not show the top-up');
+      await node.land();
+      await reloadPage();
+
+      c = await render(plans());
+      await waitForText(c, 'has no answer from the node yet');
+      expect(byTestId(c, `mkt-topup-${serviceId}`)).toBeNull();
+      expect(byTestId(c, `mkt-addon-${serviceId}`)).toBeNull();
+      await click(byTestId(c, `mkt-topup-open-${serviceId}`));
+      await waitForText(c, 'it shows the top-up');
+      expect(byTestId(c, `mkt-topup-waiting-${serviceId}`)).toBeNull();
+      await click(byTestId(c, 'mkt-topup-retry'));
+      await waitForText(c, 'topped up · tx');
+      expect(new Set(topUps(node.requests).map(keyOf)).size).toBe(1);
+      expect(node.landings).toBe(1);
+      expect(sessionStorage.length).toBe(0);
+    });
+  }
+
   it('reads the budget again on request after a lost answer, with Retry alone while it cannot be read', async () => {
     const node = topUpNode();
     node.first.push('lose');

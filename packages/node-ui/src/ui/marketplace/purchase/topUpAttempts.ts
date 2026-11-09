@@ -64,6 +64,11 @@ const attemptId = (a: Attempt) => idOf(a.subscriptionId, a.service.serviceId);
 const attempts = new Map<string, Held>();
 /** The budgets whose stored top-up was looked for. */
 const looked = new Set<string>();
+/** The subscriptions whose stored top-ups were all looked for. */
+const scanned = new Set<string>();
+/** The last list of held services `pending` answered, by subscription: the same list while they are the same. */
+const listed = new Map<string, readonly string[]>();
+const NONE: readonly string[] = [];
 /** The read of the budget each held top-up waits for, by number: a later read replaces an earlier one. */
 const reads = new Map<string, number>();
 let readCount = 0;
@@ -221,6 +226,32 @@ function heldBy(subscriptionId: string, serviceId: string): Held | null {
   return attempts.get(id) ?? null;
 }
 
+/**
+ * The services of `subscriptionId` with a top-up held, whatever their budgets
+ * show: confirmed in this page, or kept in session storage from before a
+ * reload. A page can then show each one, with its key, though no form for it
+ * can be opened from its budget any more.
+ */
+function pendingOf(subscriptionId: string | null): readonly string[] {
+  if (subscriptionId === null) return NONE;
+  if (!scanned.has(subscriptionId)) {
+    scanned.add(subscriptionId);
+    const prefix = storageKey(idOf(subscriptionId, ''));
+    try {
+      for (let i = 0; i < window.sessionStorage.length; i += 1) {
+        const k = window.sessionStorage.key(i);
+        if (k?.startsWith(prefix)) heldBy(subscriptionId, k.slice(prefix.length));
+      }
+    } catch { /* storage unavailable: those confirmed in this page are all there are */ }
+  }
+  const at = idOf(subscriptionId, '');
+  const now = [...attempts.keys()].filter((id) => id.startsWith(at)).map((id) => id.slice(at.length)).sort();
+  const before = listed.get(subscriptionId);
+  if (before && before.length === now.length && before.every((x, i) => x === now[i])) return before;
+  listed.set(subscriptionId, now);
+  return now;
+}
+
 export const topUpAttempts = {
   subscribe(listener: () => void): () => void {
     listeners.add(listener);
@@ -228,6 +259,8 @@ export const topUpAttempts = {
   },
 
   held: heldBy,
+
+  pending: pendingOf,
 
   /** Read the budget of a top-up brought back from storage, unless a read is on its way. A form asks this when it opens. */
   check(subscriptionId: string, serviceId: string): void {
@@ -291,5 +324,7 @@ export function forgetTopUpAttempts(): void {
   generation += 1;
   attempts.clear();
   looked.clear();
+  scanned.clear();
+  listed.clear();
   reads.clear();
 }

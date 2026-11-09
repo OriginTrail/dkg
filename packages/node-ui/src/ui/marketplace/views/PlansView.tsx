@@ -18,7 +18,8 @@ import { lineFor, type Draft } from '../purchase/Composer.js';
 import { Meters } from '../purchase/Meters.js';
 import { Activity, Reconciliation } from '../purchase/Ledger.js';
 import { ProgressSteps } from '../purchase/ProgressSteps.js';
-import { TopUp } from '../purchase/TopUp.js';
+import { TopUp, WaitingTopUp } from '../purchase/TopUp.js';
+import { topUpAttempts } from '../purchase/topUpAttempts.js';
 import { Treasury } from '../purchase/Treasury.js';
 
 /** The flow on show; `confirmed` is the confirmation it made, once the coordinator holds it. */
@@ -153,6 +154,8 @@ export function PlansView(): React.ReactElement {
     seenCompleted.current = completed.length;
     if (started || saved) reloadAll();
   });
+  // The top-ups this epoch's subscription holds, whatever its budgets show: each waits for the node's answer.
+  const heldTopUps = useSyncExternalStore(topUpAttempts.subscribe, () => topUpAttempts.pending(current?.subscriptionId ?? null));
   // The flow on show made a confirmation; the onboarding one is on show with no flow asked for, and is one from here.
   const confirmed = (id: number) => setFlow((f) => ({ ...(f ?? { kind: 'fund', epoch: 'current' }), confirmed: id }));
 
@@ -246,9 +249,14 @@ export function PlansView(): React.ReactElement {
     flowNode = fundFlow(shown, false);
   }
   const readErr = cat.err ?? subs.err;
+  // A held top-up with no form on show for it, its own budget's or another's: the way back to it.
+  const waitingTopUps = heldTopUps
+    .filter((id) => !(shown?.kind === 'top-up' && shown.serviceId === id))
+    .map((id) => <WaitingTopUp key={id} catalog={catalog} subscription={current} serviceId={id} onOpen={() => setFlow({ kind: 'top-up', serviceId: id })} />);
   return (
     <div className="mkt-frame" data-testid="mkt-plans" data-state="active">
       {notices}
+      {waitingTopUps}
       {flowNode}
       {readErr ? <ErrorCard err={readErr} onRetry={reloadAll} /> : null}
       {planErr}
