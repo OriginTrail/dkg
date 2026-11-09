@@ -104,6 +104,7 @@ export function GetSponsoredPanel({
   const faucet = isTestnetChain(chainId) ? faucetUrl(chainId) : undefined;
 
   const trackAccount = usePcaStore((s) => s.trackAccount);
+  const trackedIds = usePcaStore((s) => s.trackedIds);
   const { copied, copy } = useCopy();
 
   // GAP-3 discovery (#1344) — surface which PCA(s) already sponsor this node's wallets
@@ -327,6 +328,26 @@ export function GetSponsoredPanel({
                 const s = sponsorRowStatus(r.coverage);
                 return <WalletRow key={r.wallet} address={r.wallet} status={s.text} statusTone={s.tone} />;
               })}
+              {/* The PCA exists but approves none of these wallets yet: it can still go in the
+                  list, read-only, to view its funding, expiry and owner. It covers nothing. */}
+              {approvedCount === 0 && (
+                trackedIds.includes(probed.accountId) ? (
+                  <p className="v10-pca-detail-hint" data-testid="pca-sponsor-tracked">
+                    PCA #{probed.accountId} is in your list. It gives no discount until the owner approves these wallets.
+                  </p>
+                ) : (
+                  <div className="v10-pca-overview-cta-group">
+                    <button
+                      type="button"
+                      className="v10-pca-card-btn ds-btn ds-sm"
+                      data-testid="pca-sponsor-track"
+                      onClick={() => trackAccount(probed.accountId)}
+                    >
+                      Add PCA #{probed.accountId} to your list
+                    </button>
+                  </div>
+                )
+              )}
             </div>
           )}
         </section>

@@ -65,21 +65,37 @@ export function isTestnetChain(chainId: string | null | undefined): boolean {
   return PCA_TESTNET_CHAINS.has(numeric);
 }
 
+/** Whole days to or since expiry (rounded), or null when the expiry isn't known. */
+export interface ExpiryDistance {
+  /** At or past the expiry time. */
+  past: boolean;
+  days: number;
+}
+
+/** The one expiry calculation both labels below render from. `expiresAtTimestamp` is unix SECONDS. */
+export function expiryDistance(
+  expiresAtTimestamp: number | undefined,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): ExpiryDistance | null {
+  if (!expiresAtTimestamp || expiresAtTimestamp <= 0) return null;
+  const diff = expiresAtTimestamp - nowSec;
+  return { past: diff <= 0, days: Math.round(Math.abs(diff) / 86400) };
+}
+
+const dayUnit = (days: number) => `day${days === 1 ? '' : 's'}`;
+
 /**
  * Wall-clock expiry label (UX §6.4 — every expiry surface leads with wall-clock,
- * the epoch index is demoted to a tooltip). `expiresAtTimestamp` is unix SECONDS.
+ * the epoch index is demoted to a tooltip).
  */
 export function formatRelativeExpiry(
   expiresAtTimestamp?: number,
   nowSec: number = Math.floor(Date.now() / 1000),
 ): string {
-  if (!expiresAtTimestamp || expiresAtTimestamp <= 0) return 'Expiry unknown';
-  const diff = expiresAtTimestamp - nowSec;
-  const days = Math.round(Math.abs(diff) / 86400);
-  if (diff <= 0) {
-    return days === 0 ? 'Expired today' : `Expired ~${days} day${days === 1 ? '' : 's'} ago`;
-  }
-  return `Expires in ~${days} day${days === 1 ? '' : 's'}`;
+  const d = expiryDistance(expiresAtTimestamp, nowSec);
+  if (!d) return 'Expiry unknown';
+  if (d.past) return d.days === 0 ? 'Expired today' : `Expired ~${d.days} ${dayUnit(d.days)} ago`;
+  return `Expires in ~${d.days} ${dayUnit(d.days)}`;
 }
 
 /**
@@ -91,10 +107,8 @@ export function formatExpiryShort(
   expiresAtTimestamp?: number,
   nowSec: number = Math.floor(Date.now() / 1000),
 ): string | null {
-  if (!expiresAtTimestamp || expiresAtTimestamp <= 0) return null;
-  const diff = expiresAtTimestamp - nowSec;
-  const days = Math.round(Math.abs(diff) / 86400);
-  const unit = `day${days === 1 ? '' : 's'}`;
-  if (diff > 0) return `~${days} ${unit}`;
-  return days === 0 ? 'Expired today' : `Expired ${days} ${unit} ago`;
+  const d = expiryDistance(expiresAtTimestamp, nowSec);
+  if (!d) return null;
+  if (!d.past) return `~${d.days} ${dayUnit(d.days)}`;
+  return d.days === 0 ? 'Expired today' : `Expired ${d.days} ${dayUnit(d.days)} ago`;
 }

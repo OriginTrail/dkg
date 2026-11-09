@@ -556,3 +556,50 @@ describe('ConvictionOverview — failed approval checks', () => {
     await unmount();
   });
 });
+
+describe('ConvictionOverview — Already have a PCA? hands the ID to Get added', () => {
+  it('checks the typed ID in Get added, can add an unapproved PCA, and reopens without a stale ID', async () => {
+    mocks.fetchWalletsBalances.mockResolvedValue({ wallets: [WALLET0], balances: [], chainId: '84532', rpcUrl: null });
+    mocks.fetchPca.mockImplementation(async (id: string, key?: string) => {
+      const base = { ...snapFixture(id), owner: '0xSOMEONEELSE0000000000000000000000000000' };
+      return key ? { ...base, probedKey: { key, registered: false, adapterSupported: true } } : base;
+    });
+    const { container, unmount } = await render(React.createElement(ConvictionOverview));
+    await waitForText(container, 'Already have a PCA?');
+
+    const input = container.querySelector('[data-testid="pca-check-input"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, '7');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      (container.querySelector('[data-testid="pca-check-submit"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // Get added opens with #7 already checked: no typing in the dialog.
+    await waitForText(document.body, 'Approved on PCA #7: 0 of 1 wallets');
+    const dialogInput = () => document.querySelector('input[aria-label="PCA ID from owner"]') as HTMLInputElement | null;
+    expect(dialogInput()?.value).toBe('7');
+    expect(usePcaStore.getState().trackedIds).not.toContain('7'); // nothing approved, so not added by itself
+
+    // The PCA exists, so it can still go in the list, read-only.
+    await act(async () => {
+      (document.querySelector('[data-testid="pca-sponsor-track"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usePcaStore.getState().trackedIds).toContain('7');
+    await waitForText(document.body, 'PCA #7 is in your list');
+
+    // Close, then reopen from the Get added card: the dialog starts empty.
+    await act(async () => {
+      (Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Close') as HTMLButtonElement)
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(dialogInput()).toBeNull();
+    await act(async () => {
+      (container.querySelector('button[aria-label="Get added to a PCA"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await waitForText(document.body, 'Have a PCA ID?');
+    expect(dialogInput()?.value).toBe('');
+    await unmount();
+  });
+});
