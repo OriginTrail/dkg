@@ -85,7 +85,8 @@ function AppShell() {
   useEffect(() => {
     if (lastNarrow.current === narrow) return; // only a crossing, not the first render
     lastNarrow.current = narrow;
-    closeNarrowPanel();
+    // Shows the page: closes a floating panel, and an expanded one does not carry over.
+    useLayoutStore.getState().revealCentre();
   }, [narrow, closeNarrowPanel]);
   const [, setVpTick] = useState(0);
 

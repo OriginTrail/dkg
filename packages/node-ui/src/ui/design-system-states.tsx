@@ -2,11 +2,11 @@
  * State matrix for the design system reference page (development only, see
  * DESIGN.md). Each cell is the real component in one state.
  *
- * A browser can't hold an element in :hover or :focus, so the page copies every
- * such rule from the loaded stylesheets onto a class (`.ds-btn:hover` becomes
- * `.ds-btn.dsp-hover`). The looks stay the app's own: nothing here restyles them.
+ * A browser can't hold an element in :hover or :focus, so each component's own
+ * hover and focus rule also names a preview class (`.ds-btn:is(:hover, .dsp-hover)`
+ * in 27-ds-components.css). A cell sets that class and gets the same declarations.
  */
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { Loader2, RefreshCw } from 'lucide-react';
 import { Button, type ButtonVariant } from './components/ds/Button.js';
 import { ContextGraphChip } from './components/ds/ContextGraphChip.js';
@@ -14,40 +14,6 @@ import { Toggle } from './components/ds/Toggle.js';
 
 export const STATES = ['Default', 'Hover', 'Focus', 'Disabled', 'Loading', 'Error'] as const;
 export type State = (typeof STATES)[number];
-
-const PSEUDO = /:hover|:focus-visible|:focus(?![\w-])/g;
-const TOP_LEVEL_COMMA = /,(?![^(]*\))/;
-
-/** The parts of a selector list that need a state, rewritten to use the forcing classes. Empty when none do. */
-export function forcedSelector(selector: string): string {
-  return selector.split(TOP_LEVEL_COMMA)
-    .filter((part) => part.search(PSEUDO) >= 0)
-    .map((part) => part.trim().replace(PSEUDO, (pseudo) => (pseudo === ':hover' ? '.dsp-hover' : '.dsp-focus')))
-    .join(', ');
-}
-
-function forcedRules(rules: CSSRuleList): string {
-  return Array.from(rules).map((rule) => {
-    const { selectorText, style } = rule as CSSStyleRule;
-    if (selectorText) {
-      const selector = forcedSelector(selectorText);
-      return selector ? `${selector} { ${style.cssText} }` : '';
-    }
-    const imported = (rule as CSSImportRule).styleSheet;
-    if (imported) return forcedSheet(imported);
-    const nested = (rule as CSSGroupingRule).cssRules;
-    const inner = nested ? forcedRules(nested) : '';
-    return inner ? `${rule.cssText.slice(0, rule.cssText.indexOf('{'))} { ${inner} }` : '';
-  }).filter(Boolean).join('\n');
-}
-
-function forcedSheet(sheet: CSSStyleSheet): string {
-  try {
-    return forcedRules(sheet.cssRules);
-  } catch {
-    return ''; // A stylesheet from another origin, such as web fonts, can't be read.
-  }
-}
 
 interface Cell {
   /** Forces the hover or focus look. */
@@ -146,34 +112,25 @@ const cellFor = (row: MatrixRow, state: State): Cell => ({
   label: `${row.name}, ${state}`,
 });
 
-export const StateMatrix: React.FC = () => {
-  const [forced, setForced] = useState('');
-  useEffect(() => {
-    setForced(Array.from(document.styleSheets).map(forcedSheet).filter(Boolean).join('\n'));
-  }, []);
-  return (
-    <>
-      <style>{forced}</style>
-      <div className="ds-table-scroll"><table className="dsp-matrix">
-        <thead>
-          <tr>
-            <th scope="col">Component</th>
-            {STATES.map((state) => <th key={state} scope="col">{state}</th>)}
-          </tr>
-        </thead>
-        <tbody>
-          {ROWS.map((row) => (
-            <tr key={row.name}>
-              <th scope="row"><b>{row.name}</b>{row.note ? <span>{row.note}</span> : null}</th>
-              {STATES.map((state) => (
-                <td key={state} data-state={state}>
-                  {row.states.includes(state) ? row.render(cellFor(row, state)) : <span className="dsp-none" title="This component has no such state">—</span>}
-                </td>
-              ))}
-            </tr>
+export const StateMatrix: React.FC = () => (
+  <div className="ds-table-scroll"><table className="dsp-matrix">
+    <thead>
+      <tr>
+        <th scope="col">Component</th>
+        {STATES.map((state) => <th key={state} scope="col">{state}</th>)}
+      </tr>
+    </thead>
+    <tbody>
+      {ROWS.map((row) => (
+        <tr key={row.name}>
+          <th scope="row"><b>{row.name}</b>{row.note ? <span>{row.note}</span> : null}</th>
+          {STATES.map((state) => (
+            <td key={state} data-state={state}>
+              {row.states.includes(state) ? row.render(cellFor(row, state)) : <span className="dsp-none" title="This component has no such state">—</span>}
+            </td>
           ))}
-        </tbody>
-      </table></div>
-    </>
-  );
-};
+        </tr>
+      ))}
+    </tbody>
+  </table></div>
+);
