@@ -537,7 +537,9 @@ describe('serving between two nodes on Hardhat', () => {
     expect((await sellerAgent.chain.getKnowledgeAssetUpdateContext!(kaId)).endEpoch).toBe(BigInt(epoch + 2 * TERM_EPOCHS));
     expect(await sellerToken.balanceOf(SELLER_WALLET)).toBeLessThan(tokens);
     expect(await listings()).toMatchObject({ [A]: { listed: true, kaId: String(kaId), validUntilEpoch: epoch + 2 * TERM_EPOCHS } });
-    const routed = await until(async () => (await gateway.router.offersOf([epoch + TERM_EPOCHS + 1]))[0], (o) => o !== undefined);
+    // The seller offers A and B again since its restart after the over-reporting handler, and extends both: the
+    // buyer's list holds both, in no fixed order.
+    const routed = await until(async () => (await gateway.router.offersOf([epoch + TERM_EPOCHS + 1])).find((o) => o.serviceId === A), (o) => o !== undefined);
     expect(routed).toMatchObject({ seller: sellerIdentity, serviceId: A });
   }, 180_000);
 });
