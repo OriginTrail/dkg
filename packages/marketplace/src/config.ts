@@ -23,7 +23,11 @@ export interface MarketplaceConfig {
   prefundLeadMinutes?: number;
   /** How often the buyer's job runs. Default 300. */
   tickSeconds?: number;
-  /** The Marketplace Context Graph, where sellers share their offers and buyers read them. */
+  /**
+   * The Marketplace Context Graph, where sellers share their offers and buyers read them. A graph that admits every
+   * node: registered on chain as public, or in its owner's wallet namespace (`0x<owner>/<name>`), whose owner's
+   * signed policy a node fetches from its peers. A node shares into it and reads it once it is admitted.
+   */
   contextGraphId?: string;
   /** Selling: off unless `seller.enabled`, and only while the node is a Core Node. */
   seller?: SellerConfig;

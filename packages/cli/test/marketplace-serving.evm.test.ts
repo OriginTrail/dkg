@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
  * Serving end to end on the evm-module's Hardhat chain: a seller node and a
- * buyer node over libp2p on loopback, the seller started as the daemon starts
- * it, and a stub OpenAI-compatible model on loopback (no model download).
+ * buyer node over libp2p on loopback, with the node's default settings (the
+ * RFC-64 catalog carries shared memory), the seller started as the daemon
+ * starts it, and a stub OpenAI-compatible model on loopback (no model
+ * download). A third node only creates the Marketplace Context Graph: an open
+ * graph in its owner's wallet namespace, not registered on chain, which
+ * admits the seller and the buyer as it admits any node.
  *   - the seller shares its offers into the Marketplace Context Graph, each
- *     naming its node's peer id and signed by its operational wallet, and the
- *     buyer node reads them from its shared memory: its gateway finds the
- *     seller from them alone. (The nodes connect on loopback so that shared
- *     memory syncs; dialing by peer id on a real network is not shown here.)
+ *     naming its node's peer id and signed by its operational wallet, each its
+ *     own Knowledge Asset, with no transaction, and the buyer node reads them
+ *     from its shared memory: its gateway finds the seller from them alone.
+ *     (The nodes connect on loopback so that shared memory syncs; dialing by
+ *     peer id on a real network is not shown here.)
  *   - a quote, and a call served with a receipt the seller's operational
  *     wallet signed, which the chain shows is a key of a Core Node;
  *   - crafted requests from the buyer node: an exact repeat
@@ -22,6 +27,8 @@
  *   - landing: the seller lands what it served when its node's route is
  *     asked, Operate shows it, and the buyer's reconciliation matches the
  *     landed receipt to the one it holds;
+ *   - a price set for the next epoch is shared again, and the buyer keeps
+ *     the newer copy;
  *   - a seller that restarts shares its offers again, signed later, and
  *     calls route by the new copies.
  */
@@ -62,6 +69,8 @@ import {
 } from '@origintrail-official/dkg-marketplace';
 import { createProvider, getSharedContext, revertSnapshot, takeSnapshot } from '../../chain/test/evm-test-context.js';
 import { HARDHAT_KEYS, makeAdapterConfig, mintTokens } from '../../chain/test/hardhat-harness.js';
+import { MemoryAuthorityIndexStore } from '../../chain/test/helpers/context-graph-authority-index.js';
+import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { startMarketplaceSeller, type MarketplaceSellerRuntime } from '../src/daemon/marketplace-seller.js';
 import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
@@ -69,7 +78,6 @@ import { MARKETPLACE_GATEWAY_ROUTES } from '../src/daemon/routes/marketplace-gat
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
-const CONTEXT_GRAPH = 'marketplace-serving-e2e';
 const MODEL_A = 'urn:test:model:serving-a';
 const MODEL_B = 'urn:test:model:serving-b';
 const A = serviceIdOf(MODEL_A);
@@ -82,12 +90,17 @@ let snapshot: string;
 let dirs: string[] = [];
 let upstream: Server;
 let upstreamCalls = 0;
+let ownerAgent: DKGAgent;
 let sellerAgent: DKGAgent;
 let buyerAgent: DKGAgent;
+/** The Marketplace Context Graph: in the owner's wallet namespace, so its id says whose policy it is. */
+let contextGraph: string;
 let selling: MarketplaceSellerRuntime;
 let buyerChain: MarketplaceChainAdapter;
 let domain: MarketplaceDomain;
 let sellerIdentity: bigint;
+/** The seller's operational wallet's transaction count before it first shares. */
+let sellerNonce: number;
 let subscriptionId: string;
 const session = Wallet.createRandom();
 let startSeller: () => Promise<MarketplaceSellerRuntime>;
@@ -166,30 +179,34 @@ describe('serving between two nodes on Hardhat', () => {
     const baseUrl = `http://127.0.0.1:${(upstream.address() as { port: number }).port}/v1`;
 
     const { rpcUrl, hubAddress } = getSharedContext();
-    const [sellerDir, buyerDir] = [await mkdtemp(join(tmpdir(), 'mkt-seller-')), await mkdtemp(join(tmpdir(), 'mkt-buyer-'))];
-    dirs = [sellerDir, buyerDir];
+    const [ownerDir, sellerDir, buyerDir] = await Promise.all(['owner', 'seller', 'buyer'].map((n) => mkdtemp(join(tmpdir(), `mkt-${n}-`))));
+    dirs = [ownerDir!, sellerDir!, buyerDir!];
+    // As the daemon wires its nodes: the chain adapter keeps the finalized Context Graph index, and the catalog is on.
+    const adapter = (key: string, more: string[] = []) => new EVMChainAdapter({
+      ...makeAdapterConfig(rpcUrl, hubAddress, key, more), localContextGraphAuthorityIndexStore: new MemoryAuthorityIndexStore(),
+    });
+    ownerAgent = await DKGAgent.create({ name: 'MarketplaceOwner', dataDir: ownerDir!, listenPort: 0, nodeRole: 'edge', chainAdapter: adapter(HARDHAT_KEYS.EXTRA3) });
     sellerAgent = await DKGAgent.create({
-      name: 'MarketplaceSeller', dataDir: sellerDir, listenPort: 0, nodeRole: 'core',
-      chainAdapter: new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP)),
-      rfc64CatalogActivation: { enabled: false },
+      name: 'MarketplaceSeller', dataDir: sellerDir!, listenPort: 0, nodeRole: 'core',
+      chainAdapter: adapter(HARDHAT_KEYS.CORE_OP), kaNumberAllocator: makeTestKaNumberAllocator(),
     });
     buyerAgent = await DKGAgent.create({
-      name: 'MarketplaceBuyer', dataDir: buyerDir, listenPort: 0, nodeRole: 'edge',
-      chainAdapter: new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.EXTRA1, [HARDHAT_KEYS.EXTRA2])),
-      rfc64CatalogActivation: { enabled: false },
+      name: 'MarketplaceBuyer', dataDir: buyerDir!, listenPort: 0, nodeRole: 'edge', chainAdapter: adapter(HARDHAT_KEYS.EXTRA1, [HARDHAT_KEYS.EXTRA2]),
     });
-    await sellerAgent.start();
-    await buyerAgent.start();
-    await buyerAgent.connectTo(sellerAgent.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
-    await sellerAgent.createContextGraph({ id: CONTEXT_GRAPH, name: 'Marketplace', description: 'Offers' });
-    buyerAgent.subscribeToContextGraph(CONTEXT_GRAPH);
-    await sleep(2_000);
+    for (const agent of [ownerAgent, sellerAgent, buyerAgent]) await agent.start();
+    const dialable = (agent: DKGAgent) => agent.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await sellerAgent.connectTo(dialable(ownerAgent));
+    await buyerAgent.connectTo(dialable(ownerAgent));
+    await buyerAgent.connectTo(dialable(sellerAgent));
+    const owner = ownerAgent.getDefaultAgentAddress()!.toLowerCase();
+    contextGraph = `${owner}/marketplace-serving-e2e`;
+    await ownerAgent.createContextGraph({ id: contextGraph, name: 'Marketplace', description: 'Offers', accessPolicy: 0, callerAgentAddress: owner });
 
     startSeller = async () => {
       const runtime = (await startMarketplaceSeller({
         config: {
           marketplace: {
-            contextGraphId: CONTEXT_GRAPH,
+            contextGraphId: contextGraph,
             seller: {
               enabled: true,
               services: [MODEL_A, MODEL_B].map((model) => ({ model, pricePerUnit: String(PRICE), capacity: 2, backend: { kind: 'llamacpp', baseUrl, model: 'stub' } })),
@@ -206,6 +223,7 @@ describe('serving between two nodes on Hardhat', () => {
       await runtime.seller.tick();
       return runtime;
     };
+    sellerNonce = await createProvider().getTransactionCount(new Wallet(HARDHAT_KEYS.CORE_OP).address);
     selling = await startSeller();
     sellerIdentity = selling.seller.gate.identityId;
 
@@ -225,19 +243,20 @@ describe('serving between two nodes on Hardhat', () => {
     // The gateway's buyer is the node's second wallet, which funds this epoch through the buyer, with a session key it keeps.
     const second = new Wallet(HARDHAT_KEYS.EXTRA2).address;
     await mintTokens(createProvider(), hubAddress, HARDHAT_KEYS.DEPLOYER, second, 10n ** 21n);
-    const config = { marketplace: { enabled: true, buyerWallet: second, tickSeconds: 3_600, contextGraphId: CONTEXT_GRAPH } };
+    const config = { marketplace: { enabled: true, buyerWallet: second, tickSeconds: 3_600, contextGraphId: contextGraph } };
     gatewayBuyer = startMarketplaceBuyer({
-      config, agent: buyerAgent, wallets: [buyer, second], dataDir: buyerDir, dashDb: { insertNotification: () => undefined }, log: () => undefined,
+      config, agent: buyerAgent, wallets: [buyer, second], dataDir: buyerDir!, dashDb: { insertNotification: () => undefined }, log: () => undefined,
     })!;
     await gatewayBuyer.fund({ epoch, source: { kind: 'wallet' }, services: [{ serviceId: A, serviceClass: SERVICE_CLASS_INFERENCE, value: 10n ** 15n, maxPricePerUnit: 10n ** 12n }] });
-    gateway = await startMarketplaceGateway({ config, agent: buyerAgent, buyer: gatewayBuyer, dataDir: buyerDir });
+    // The gateway subscribes the buyer node to the graph once the graph admits it.
+    gateway = await startMarketplaceGateway({ config, agent: buyerAgent, buyer: gatewayBuyer, dataDir: buyerDir! });
   }, 180_000);
 
   afterAll(async () => {
+    await gateway?.stop();
     await gatewayBuyer?.stop();
     await selling?.stop();
-    await buyerAgent?.stop().catch(() => undefined);
-    await sellerAgent?.stop().catch(() => undefined);
+    for (const agent of [buyerAgent, sellerAgent, ownerAgent]) await agent?.stop().catch(() => undefined);
     await new Promise((resolve) => upstream?.close(resolve));
     await revertSnapshot(snapshot);
     for (const dir of dirs) await rm(dir, { recursive: true, force: true });
@@ -247,8 +266,8 @@ describe('serving between two nodes on Hardhat', () => {
     expect(selling.seller.gate.open).toBe(true);
     const { epoch } = await buyerChain.getEpochTimes();
     let offers: ReturnType<typeof offersFromBindings> = [];
-    for (let i = 0; i < 40 && offers.length < 4; i++) {
-      const result = await buyerAgent.query(offersQuery([epoch, epoch + 1]), { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' });
+    for (let i = 0; i < 240 && offers.length < 4; i++) {
+      const result = await buyerAgent.query(offersQuery([epoch, epoch + 1]), { contextGraphId: contextGraph, graphSuffix: '_shared_memory' });
       offers = offersFromBindings(result.bindings as Record<string, unknown>[]);
       if (offers.length < 4) await sleep(250);
     }
@@ -258,7 +277,11 @@ describe('serving between two nodes on Hardhat', () => {
     expect(offers.every((o) => o.peerId === sellerAgent.peerId)).toBe(true);
     expect(offers.every((o) => offerSignerOf(domain, o) === new Wallet(HARDHAT_KEYS.CORE_OP).address)).toBe(true);
     expect(await gateway.router.offersOf([epoch, epoch + 1])).toHaveLength(4);
-  });
+    // Each its own Knowledge Asset of the seller's, shared with no transaction.
+    const assets = await buyerAgent.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?offer <https://dkg.network/marketplace#signature> ?s } }');
+    expect(new Set(assets.bindings.map((row) => String(row['g']))).size).toBe(4);
+    expect(await createProvider().getTransactionCount(new Wallet(HARDHAT_KEYS.CORE_OP).address)).toBe(sellerNonce);
+  }, 120_000);
 
   it('quotes over the messenger, and serves a call with a receipt a Core Node key signed', async () => {
     const quoted = decodeMessage(await buyerAgent.sendMarketplaceMessage(sellerAgent.peerId, 'quote', encodeMessage({ services: [A, B] }), {
@@ -352,6 +375,19 @@ describe('serving between two nodes on Hardhat', () => {
     }]);
   });
 
+  it('shares an offer again when its next price is set, and the buyer keeps the newer copy', async () => {
+    const { epoch } = await buyerChain.getEpochTimes();
+    await selling.seller.setNextPrice(A, 2n * PRICE);
+    await selling.seller.tick();
+    const nextOfA = async () => (await gateway.router.offersOf([epoch + 1])).find((o) => o.serviceId === A);
+    let next = await nextOfA();
+    for (let i = 0; i < 240 && next?.pricePerUnit !== 2n * PRICE; i++) {
+      await sleep(250);
+      next = await nextOfA();
+    }
+    expect(next).toMatchObject({ seller: sellerIdentity, pricePerUnit: 2n * PRICE, peerId: sellerAgent.peerId });
+  }, 120_000);
+
   it('shares its offers again after a restart, signed later, and the buyer routes by the new copies', async () => {
     const { epoch } = await buyerChain.getEpochTimes();
     const before = Math.max(...(await gateway.router.offersOf([epoch])).map((o) => o.signedAt));
@@ -360,12 +396,9 @@ describe('serving between two nodes on Hardhat', () => {
     await createProvider().send('evm_increaseTime', [5]);
     await createProvider().send('evm_mine', []);
     selling = await startSeller();
-    // Its shared memory holds the new copies at once: the share was not refused.
-    const own = await sellerAgent.query(offersQuery([epoch]), { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' });
-    expect(offersFromBindings(own.bindings as Record<string, unknown>[]).filter((o) => o.signedAt > before)).toHaveLength(2);
-    // The buyer pulls a graph in use again about once a minute.
+    // The new copies reach the buyer's shared memory, and its router keeps them over the old ones.
     let offers = await gateway.router.offersOf([epoch]);
-    for (let i = 0; i < 600 && !offers.every((o) => o.signedAt > before); i++) {
+    for (let i = 0; i < 240 && !offers.every((o) => o.signedAt > before); i++) {
       await sleep(250);
       offers = await gateway.router.offersOf([epoch]);
     }
@@ -373,7 +406,7 @@ describe('serving between two nodes on Hardhat', () => {
     expect(offers.every((o) => o.signedAt > before && o.peerId === sellerAgent.peerId)).toBe(true);
     const answer = await route('POST', GATEWAY_CHAT, CHAT, gatewayKey);
     expect(answer).toMatchObject({ status: 200, body: { marketplace: { seller: Number(sellerIdentity) } } });
-  }, 200_000);
+  }, 120_000);
 
   it('takes a seller whose receipt over-reports out of routing, with a rogue handler on the seller node', async () => {
     await selling.stop();

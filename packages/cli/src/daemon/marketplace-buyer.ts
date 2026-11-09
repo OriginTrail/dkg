@@ -33,6 +33,7 @@ import {
 } from '@origintrail-official/dkg-marketplace';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../config.js';
+import { subscribeWhenAdmitted } from './marketplace-context-graph.js';
 
 export interface MarketplaceBuyerOptions {
   config: Pick<DkgConfig, 'marketplace'>;
@@ -94,10 +95,7 @@ export function startMarketplaceBuyer(options: MarketplaceBuyerOptions): Buyer |
 
 export interface MarketplaceGatewayOptions {
   config: { marketplace?: unknown };
-  agent: Pick<DKGAgent, 'sendMarketplaceMessage'> & {
-    subscribeToContextGraph(contextGraphId: string): unknown;
-    query(sparql: string, opts: { contextGraphId: string; graphSuffix: '_shared_memory' }): Promise<{ bindings: unknown[] }>;
-  };
+  agent: DKGAgent;
   buyer: Buyer;
   dataDir: string;
   log?: (message: string) => void;
@@ -105,13 +103,13 @@ export interface MarketplaceGatewayOptions {
 
 /**
  * The buyer's gateway: its router reads offers from the Marketplace Context
- * Graph, which the node subscribes to, keeps those their sellers signed, and
- * reaches sellers over the messenger. Its job runs as often as the buyer's.
+ * Graph, which the node subscribes to once the graph admits it, keeps those
+ * their sellers signed, and reaches sellers over the messenger. Its job runs
+ * as often as the buyer's.
  */
 export async function startMarketplaceGateway(options: MarketplaceGatewayOptions): Promise<Gateway> {
   const { agent, buyer, dataDir } = options;
   const contextGraphId = (options.config.marketplace as MarketplaceConfig | undefined)?.contextGraphId;
-  if (contextGraphId) agent.subscribeToContextGraph(contextGraphId);
   const offers = async (epochs: number[]) => contextGraphId
     ? offersFromBindings((await agent.query(offersQuery(epochs), { contextGraphId, graphSuffix: '_shared_memory' })).bindings as Record<string, unknown>[])
     : [];
@@ -149,5 +147,14 @@ export async function startMarketplaceGateway(options: MarketplaceGatewayOptions
   });
   await gateway.load();
   gateway.start(buyer.config.tickSeconds);
+  if (contextGraphId) {
+    // Asked until the graph admits the node, or until the gateway stops.
+    const stopAdmission = subscribeWhenAdmitted(agent, contextGraphId, { ...(options.log ? { log: options.log } : {}) });
+    const stopJob = gateway.stop.bind(gateway);
+    gateway.stop = () => {
+      stopAdmission();
+      return stopJob();
+    };
+  }
   return gateway;
 }

@@ -17,7 +17,9 @@ import { ChainRpcTransportError, MockChainAdapter, marketplaceChainOf, type Mark
 import { AccessKeys, Buyer, BuyerStore, Gateway, Router, Seller, parsePlan, signOffer } from '@origintrail-official/dkg-marketplace';
 import { ApiClient } from '../src/api-client.js';
 import { registerMarketplaceCommand } from '../src/commands/marketplace.js';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { startMarketplaceBuyer, startMarketplaceGateway } from '../src/daemon/marketplace-buyer.js';
+import { subscribeWhenAdmitted } from '../src/daemon/marketplace-context-graph.js';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -434,6 +436,57 @@ describe("the daemon's buyer at boot", () => {
     vi.spyOn(chain, 'getServiceSpending').mockRejectedValue(new Error('socket hang up'));
     await started.tick();
     expect(options.dashDb.insertNotification).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'marketplace_renewal_failed', source: 'marketplace' }));
+  });
+});
+
+describe('the Marketplace Context Graph at boot', () => {
+  /** A node whose admission reads answer `answers` in turn, as the subscribe route reads them. */
+  const nodeAnswering = (...answers: Array<{ outcome: string; onChainId?: bigint }>) => ({
+    findLocalAgentForContextGraph: async () => undefined,
+    listLocalAgents: () => [],
+    getDefaultAgentAddress: () => OTHER,
+    resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => answers.shift() ?? { outcome: 'unavailable' }),
+    subscribeToContextGraph: vi.fn(),
+    reconcileRfc64CatalogResponsibilityV1: vi.fn(async () => undefined),
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('asks again while the admission cannot be read, then subscribes as the graph admits it', async () => {
+    vi.useFakeTimers();
+    const node = nodeAnswering({ outcome: 'unavailable' }, { outcome: 'allowed', onChainId: 7n }, { outcome: 'allowed', onChainId: 7n });
+    node.subscribeToContextGraph.mockImplementationOnce(() => { throw new Error('the node is stopping'); });
+    const onAdmitted = vi.fn();
+    subscribeWhenAdmitted(node as unknown as DKGAgent, 'graph', { onAdmitted });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(node.subscribeToContextGraph).not.toHaveBeenCalled();
+    // The readiness repeat's delays: 15 s, then 30 s.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(node.subscribeToContextGraph).toHaveBeenCalledTimes(1);
+    expect(onAdmitted).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(node.subscribeToContextGraph).toHaveBeenLastCalledWith('graph', { syncMode: 'always-on', onChainId: '7' });
+    expect(node.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledWith('graph');
+    expect(onAdmitted).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(node.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(3);
+  });
+
+  it('subscribes to no graph that refuses the node, and asks no more once stopped', async () => {
+    vi.useFakeTimers();
+    const log = vi.fn();
+    const refusing = nodeAnswering({ outcome: 'denied' });
+    subscribeWhenAdmitted(refusing as unknown as DKGAgent, 'graph', { log });
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(refusing.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(1);
+    expect(refusing.subscribeToContextGraph).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('does not admit this node'));
+    const waiting = nodeAnswering({ outcome: 'unavailable' }, { outcome: 'allowed' });
+    const stop = subscribeWhenAdmitted(waiting as unknown as DKGAgent, 'graph');
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(waiting.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledTimes(1);
+    expect(waiting.subscribeToContextGraph).not.toHaveBeenCalled();
   });
 });
 

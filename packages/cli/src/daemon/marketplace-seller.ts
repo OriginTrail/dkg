@@ -5,8 +5,10 @@
  * `marketplace.seller.enabled` is set and the chain has the marketplace. It
  * answers `quote` and `serve` over the messenger, and its job checks the Core
  * Node gate, shares its offers, signed and naming the node's peer id, into the
- * Marketplace Context Graph and lands its receipts. A setting it cannot use
- * leaves selling off, logged, and the boot goes on.
+ * Marketplace Context Graph and lands its receipts. Offers are shared once the
+ * graph admits the node, each copy as its own Knowledge Asset, and at once
+ * when it does. A setting it cannot use leaves selling off, logged, and the
+ * boot goes on.
  */
 import { join } from 'node:path';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
@@ -19,14 +21,12 @@ import {
   refusal,
   resolveSellerConfig,
   type MarketplaceConfig,
-  type OfferQuad,
 } from '@origintrail-official/dkg-marketplace';
+import { shareOfferAsset, subscribeWhenAdmitted } from './marketplace-context-graph.js';
 
 export interface MarketplaceSellerOptions {
   config: { marketplace?: unknown };
-  agent: Pick<DKGAgent, 'marketplaceChain' | 'registerMarketplaceHandlers' | 'peerId'> & {
-    share(contextGraphId: string, quads: OfferQuad[]): Promise<unknown>;
-  };
+  agent: DKGAgent;
   /** The operational wallet that signs receipts and offers: the primary one. */
   signer: string | undefined;
   /** The node's operational wallets, which Operate lists. */
@@ -66,6 +66,7 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     return undefined;
   }
   const contextGraphId = resolved.contextGraphId;
+  let admitted = false;
   const seller = new Seller({
     chain,
     dir: join(dataDir, 'marketplace'),
@@ -76,7 +77,12 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     tickSeconds: resolved.tickSeconds,
     landing: resolved.landing,
     ...(options.wallets ? { wallets: options.wallets } : {}),
-    ...(contextGraphId ? { shareOffer: async (quads) => { await agent.share(contextGraphId, quads); } } : {}),
+    ...(contextGraphId ? {
+      shareOffer: async (quads) => {
+        if (!admitted) throw new Error(`"${contextGraphId}" has not admitted this node yet`);
+        await shareOfferAsset(agent, contextGraphId, quads);
+      },
+    } : {}),
     log,
   });
   await seller.load();
@@ -93,10 +99,18 @@ export async function startMarketplaceSeller(options: MarketplaceSellerOptions):
     },
   }, { quote: PEER_LIMITS.quoteRequestBytes, serve: PEER_LIMITS.serveRequestBytes });
   seller.start();
+  const stopAdmission = contextGraphId ? subscribeWhenAdmitted(agent, contextGraphId, {
+    log,
+    onAdmitted: () => {
+      admitted = true;
+      void seller.tick().catch(() => undefined);
+    },
+  }) : undefined;
   log(`[marketplace] selling ${services.length} service(s); receipts signed by ${signer}`);
   return {
     seller,
     async stop() {
+      stopAdmission?.();
       dispose();
       await seller.stop();
     },
