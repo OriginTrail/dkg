@@ -198,7 +198,7 @@ describe('ConvictionDetailView §8A owner-gating', () => {
     setInputValue(container.querySelector('.v10-pca-address-crux input.v10-form-input') as HTMLInputElement, '0x' + '1'.repeat(40));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     await act(async () => { findBtn(container, 'Check').dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    await waitForText(container, 'Couldn’t determine whether');
+    await waitForText(container, 'Couldn’t check whether');
     await unmount();
   });
 

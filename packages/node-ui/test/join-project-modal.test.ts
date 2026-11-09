@@ -222,7 +222,7 @@ describe('formatJoinRequestError', () => {
 
     const msg = formatJoinRequestError(err);
 
-    expect(msg).toContain("couldn't deliver");
+    expect(msg).toContain("couldn't reach any curator");
     expect(msg).toContain('discovered more peers');
   });
 
