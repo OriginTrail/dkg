@@ -500,8 +500,12 @@
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
+/* `backwards`, not `both`: a kept last frame leaves a transform on this scroll
+   box, and a transformed box becomes the containing block of every fixed
+   overlay inside it (modals, drawers, tooltips), which then cover only the
+   centre panel instead of the window. */
 .v10-center-content-enter {
-  animation: v10CenterContentEnter 180ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: v10CenterContentEnter 180ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 @media (prefers-reduced-motion: reduce) {
   .v10-center-content-enter { animation: none; }
