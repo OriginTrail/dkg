@@ -717,7 +717,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'oversized', 'declared-child', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -751,7 +751,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       if (interrupted) throw new Error('interrupted-after-durable-ack');
       const snapshot = structuredClone(definition); snapshot.nodes[0]!.parameters = {} as any;
       return Response.json({ id: '42', workflowId, workflowVersionId: definition.versionId, status: 'success', workflowData: snapshot,
-        data: { resultData: { runData: { Component: [{ data: { main: [[{ json: { value: 12 } }]] } }] } } } });
+        data: { resultData: { runData: { Component: [{ data: { main: [Array.from({ length: mode === 'oversized' ? 201 : 1 }, () => ({ json: { value: 12 } }))] } }] } } } });
     }));
     try {
       let overrides = {};
@@ -794,7 +794,8 @@ describe('TypeScript direct tools through shared authorization and effects', () 
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_REQUIRES_RECONCILIATION' });
       } else {
         const result = await f.client.programs.invoke(prepared);
-        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: { ok: true, itemsJson: '[{"value":12}]' } }]);
+        expect(result.outputs).toMatchObject([{ n8nExecutionId: '42', output: mode === 'oversized'
+          ? { ok: false, itemsJson: '[]', error: expect.stringContaining('twenty records') } : { ok: true, itemsJson: '[{"value":12}]' } }]);
         expect(await f.client.programs.invoke(prepared)).toEqual(result);
         const stored = await f.store.query(`SELECT ?output WHERE { GRAPH ?g { <${result.executionIri}> <${SR}output> ?output } }`);
         expect(JSON.stringify(stored)).toContain('n8nExecutionId');

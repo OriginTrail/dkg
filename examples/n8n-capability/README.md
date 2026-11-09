@@ -518,3 +518,23 @@ native or legacy adapter dispatch. Historical templates remain readable but thei
 unpinned helper executions are refused. Install the current component and save a
 new Studio revision to use it; helper-containing Studio graphs use compiler
 contract 5, preserving older source serialization and invocation identities.
+
+
+### Event URLs, cross-graph exports and oversized results
+
+Studio history is readable without disclosing its event capability URL. Only an
+owner can receive `eventPath`; protected workflows additionally require the current
+`x-dkg-export-token` header on the history request. A deliberately shared event URL
+still delegates bounded webhook invocation. Direct service history omits the URL
+unless its caller explicitly supplies a disclosure authorization callback.
+Account-bound nOS Studio remains manual-only and never discloses an event URL.
+
+Program export analysis resolves each child by both `contextGraphId` and
+`operationIri`, including descendants in other graphs. Unreadable, missing,
+mismatched or cyclic bindings conservatively require operator export authorization.
+The catalog bounds traversal and requires an exact known native workflow digest.
+
+A completed native result over the record limit produces `ok: false` and empty
+record sets. Its receipt can be persisted and replayed without redispatch. Trace
+counts remain accurate; when records were omitted to bound processing, the trace
+marks `outputOmitted: "record-limit"` instead of claiming a hash of unprocessed data.

@@ -165,11 +165,18 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     provider.db.prepare('UPDATE events SET receipt_json=? WHERE provider_id=? AND execution_id=?').run(JSON.stringify(receipt), row.provider_id, invocationId);
     return receipt;
   }
-  async function history(ref) {
-    await get(ref);
+  async function history(ref, mayDiscloseEvent) {
+    const { compiled, workflow } = await get(ref);
     const row = provider.row(ref), a = activation(ref);
+    let disclose = false;
+    if (row.event_key && workflow.approved && a.active && a.expiresAt > Date.now() && mayDiscloseEvent) {
+      const capabilities = await listCapabilities();
+      const needsExport = workflow.requiresExportAuthorization || compiled.definition.nodes.some(n =>
+        capabilities.some(c => c.kaRef === n.kaRef && c.sourceHash === n.sourceHash && c.requiresExportAuthorization));
+      disclose = mayDiscloseEvent(needsExport) === true;
+    }
     return { activation: { active: !!a.active && a.expiresAt > Date.now() && a.count < 5, count: a.count ?? 0, expiresAt: a.expiresAt },
-      ...(row.event_key && a.active ? { eventPath: '/spike/ka/events/' + row.event_key } : {}),
+      ...(disclose ? { eventPath: '/spike/ka/events/' + row.event_key } : {}),
       executions: provider.db.prepare('SELECT invocation_id,execution_id,receipt_json FROM events WHERE ka_ref=? ORDER BY rowid DESC LIMIT 20').all(ref)
         .map(r => ({ invocationId: r.invocation_id, triggerExecutionId: r.execution_id, receipt: r.receipt_json ? JSON.parse(r.receipt_json) : null })) };
   }

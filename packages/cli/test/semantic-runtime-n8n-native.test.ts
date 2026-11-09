@@ -201,6 +201,21 @@ it('withholds acknowledged output after the operator output policy changes', asy
   expect(f.fetch).not.toHaveBeenCalled();
 });
 
+it.each([201, 10000])('confirms a completed %s-record rejection with bounded output and truthful trace', async count => {
+  const f = fixture();
+  f.execution.data.resultData.runData.Component[0].data.main = [Array.from({length:count}, () => ({json:{value:1}}))];
+  const result = await f.adapter().dispatch(authorization, input);
+  expect(JSON.parse(result.output).output).toMatchObject({ok:false,itemsJson:'[]',portsJson:'{}',error:expect.stringContaining('twenty records')});
+  expect(await f.adapter().resume!(authorization,input)).toEqual(result);expect(f.posts()).toBe(1);
+  f.grant.result!.traceNodes=['Component'];
+  const traced=collectN8nExecutionResult(f.grant,f.execution);
+  expect(JSON.parse(traced.traceJson as string)).toEqual([{node:'Component',status:'completed',items:[count],outputOmitted:'record-limit'}]);
+});
+it('rejects malformed native port shapes independently of overflow', () => {
+  const f=fixture(); f.execution.data.resultData.runData.Component[0].data.main=[{invalid:true}];
+  expect(()=>collectN8nExecutionResult(f.grant,f.execution)).toThrow('N8N_EXECUTION_DATA_INVALID');
+});
+
 it('verifies the captured n8n 2.43.8 Studio Read Write execution with the published definition pin', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/n8n-2.43.8-studio-read-write.json', import.meta.url), 'utf8'));
   const { published, execution } = fixture;
