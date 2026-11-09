@@ -259,6 +259,58 @@ describe('marketplace top-ups', () => {
     });
   }
 
+  it('shows what a top-up added once the node answers it after another service\'s top-up replaced its form, and keeps that form as it is', async () => {
+    const node = topUpNode();
+    node.first.push('hold');
+    const c = await topUpLlama();
+    const meter = () => byTestId(c, `mkt-meter-${FIXTURE_IDS.llama8b}`);
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitUntil(() => topUps(node.requests).length === 1, 'the top-up to be sent');
+    // Another service's top-up replaces the form while the node has not answered.
+    await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+    await type(byTestId(c, 'mkt-topup-amount'), '0.7');
+    await flush(300);
+    await waitForText(c, 'Costs 0.7 TRAC from the buyer wallet for epoch 664');
+    expect(byTestId(c, `mkt-topup-waiting-${FIXTURE_IDS.llama8b}`)).toBeTruthy();
+    expect(meter()?.getAttribute('data-state')).toBe('ceiling');
+    expect(meter()?.textContent).toContain('left of 0.5 TRAC');
+    const asked = node.requests.length;
+    await node.land();
+    // The answer reaches no form: the budget shows what it added, and offers no other top-up.
+    await waitUntil(() => meter()?.getAttribute('data-state') === 'active', 'the budget to show the top-up');
+    expect(meter()?.textContent).toContain('left of 1 TRAC');
+    expect(byTestId(c, `mkt-topup-${FIXTURE_IDS.llama8b}`)).toBeNull();
+    expect(byTestId(c, `mkt-topup-waiting-${FIXTURE_IDS.llama8b}`)).toBeNull();
+    const reads = node.requests.slice(asked).filter((r) => r.method === 'GET').map((r) => r.url);
+    expect(reads).toEqual(expect.arrayContaining(['/api/marketplace/subscriptions', '/api/marketplace/funding']));
+    // The replacing form stays as it is: its draft, its dry run and its Confirm, with no new dry run asked for.
+    expect(byTestId(c, 'mkt-topup')?.textContent).toContain('Add mistral-small-24b-instruct to epoch 664');
+    expect((byTestId(c, 'mkt-topup-amount') as HTMLInputElement).value).toBe('0.7');
+    expect(byTestId(c, 'mkt-topup')?.textContent).toContain('Costs 0.7 TRAC');
+    expect((byTestId(c, 'mkt-topup-confirm') as HTMLButtonElement).disabled).toBe(false);
+    expect(node.requests.slice(asked).some((r) => r.url.endsWith('/top-up/preview'))).toBe(false);
+    expect(byTestId(c, 'mkt-topup-sent')).toBeNull();
+    expect(node.landings).toBe(1);
+    expect(sessionStorage.length).toBe(0);
+  });
+
+  it('shows what a top-up added as soon as the node answers it, with its form still on show', async () => {
+    const node = topUpNode();
+    const c = await render(plans());
+    await waitForText(c, 'Not on your plan yet');
+    await click(byTestId(c, `mkt-addon-${FIXTURE_IDS.mistral24b}`));
+    await flush(300);
+    await waitForText(c, 'Costs 1 TRAC from the buyer wallet for epoch 664');
+    expect(byTestId(c, `mkt-meter-${FIXTURE_IDS.mistral24b}`)).toBeNull();
+    await click(byTestId(c, 'mkt-topup-confirm'));
+    await waitForText(c, 'mistral-small-24b-instruct topped up');
+    // Before Done: the service leaves the add-on list, and its budget shows.
+    await waitUntil(() => !byTestId(c, `mkt-addon-row-${FIXTURE_IDS.mistral24b}`), 'the service to leave the add-on list');
+    expect(byTestId(c, `mkt-meter-${FIXTURE_IDS.mistral24b}`)?.textContent).toContain('left of 1 TRAC');
+    expect(byTestId(c, 'mkt-topup-sent')).toBeTruthy();
+    expect(node.landings).toBe(1);
+  });
+
   it('sends nothing, and keeps nothing waiting, when the budget cannot be read before the first send', async () => {
     const node = topUpNode();
     const c = await topUpLlama();

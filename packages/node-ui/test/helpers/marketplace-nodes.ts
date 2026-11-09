@@ -127,6 +127,8 @@ export type FirstSend =
   | 'answer'
   /** The node takes the key, but its answer never comes back; the transaction lands at `land()`. */
   | 'lose'
+  /** The node takes the key, and its answer comes back once the transaction lands at `land()`. */
+  | 'hold'
   /** The node takes the key and the transaction lands, but the answer stops partway through its body. */
   | 'cut'
   /** This answer comes back instead, from in front of the node or as its refusal, and the key is not taken. */
@@ -203,7 +205,7 @@ export function topUpNode() {
       }
       const how = control.first.shift() ?? 'answer';
       if (typeof how === 'function') return how();
-      const answer = how === 'lose' ? new Promise<string>((resolve) => { onTheirWay.push(() => commit(input, init).then(resolve)); }) : commit(input, init);
+      const answer = how === 'lose' || how === 'hold' ? new Promise<string>((resolve) => { onTheirWay.push(() => commit(input, init).then(resolve)); }) : commit(input, init);
       keys.set(key, { body: raw, answer });
       if (how === 'lose') throw new TypeError('Failed to fetch');
       const text = await answer;

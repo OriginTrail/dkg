@@ -156,6 +156,19 @@ export function PlansView(): React.ReactElement {
   });
   // The top-ups this epoch's subscription holds, whatever its budgets show: each waits for the node's answer.
   const heldTopUps = useSyncExternalStore(topUpAttempts.subscribe, () => topUpAttempts.pending(current?.subscriptionId ?? null));
+  // A top-up the node carried out adds to a budget and takes from its source. The subscriptions and the funding are read
+  // again when its answer comes, whatever became of its form, and nothing else is: reading a missing plan again shows the
+  // loading frame, which would close the flow on show.
+  const toppedUp = useSyncExternalStore(topUpAttempts.subscribe, topUpAttempts.completed);
+  const seenToppedUp = useRef(toppedUp);
+  const { reload: reloadSubs } = subs;
+  const { reload: reloadFunding } = funding;
+  useEffect(() => {
+    if (toppedUp === seenToppedUp.current) return;
+    seenToppedUp.current = toppedUp;
+    reloadSubs();
+    reloadFunding();
+  }, [toppedUp, reloadSubs, reloadFunding]);
   // The flow on show made a confirmation; the onboarding one is on show with no flow asked for, and is one from here.
   const confirmed = (id: number) => setFlow((f) => ({ ...(f ?? { kind: 'fund', epoch: 'current' }), confirmed: id }));
 

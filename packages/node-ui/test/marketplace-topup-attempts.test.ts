@@ -52,6 +52,8 @@ describe('marketplace top-up attempts', () => {
     expect(sessionStorage.length).toBe(0);
     expect(node.posts).toHaveLength(1);
     expect(seen).toEqual(['reserving', 'sending', null]);
+    // Listed as carried out, by its key, for a page to read what it added.
+    expect(topUpAttempts.completed()).toEqual([(JSON.parse(node.posts[0]) as { idempotencyKey: string }).idempotencyKey]);
     unsubscribe();
   });
 

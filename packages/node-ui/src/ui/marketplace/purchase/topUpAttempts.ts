@@ -72,6 +72,8 @@ const NONE: readonly string[] = [];
 /** The read of the budget each held top-up waits for, by number: a later read replaces an earlier one. */
 const reads = new Map<string, number>();
 let readCount = 0;
+/** The keys of the top-ups the node carried out, in the order it answered them. */
+let completed: readonly string[] = [];
 /** Bumped when the page forgets everything: work begun before then changes nothing. */
 let generation = 0;
 const listeners = new Set<() => void>();
@@ -200,7 +202,11 @@ async function deliver(id: string, attempt: Attempt, retry: boolean): Promise<Ou
   put(id, { kind: 'sending', attempt, retry });
   try {
     const answer = await marketplaceApi.topUp(attempt.subscriptionId, requestOf(attempt));
-    if (gen === generation) drop(id, attempt);
+    if (gen === generation) {
+      // Listed for the page whatever became of the form that sent it: on show, replaced or closed.
+      completed = [...completed, attempt.idempotencyKey];
+      drop(id, attempt);
+    }
     return { kind: 'sent', answer };
   } catch (e) {
     if (gen !== generation) return HELD;
@@ -261,6 +267,9 @@ export const topUpAttempts = {
   held: heldBy,
 
   pending: pendingOf,
+
+  /** The top-ups the node carried out, by key, in the order it answered them: a page read after the last one shows what they added. */
+  completed: (): readonly string[] => completed,
 
   /** Read the budget of a top-up brought back from storage, unless a read is on its way. A form asks this when it opens. */
   check(subscriptionId: string, serviceId: string): void {
@@ -327,4 +336,5 @@ export function forgetTopUpAttempts(): void {
   scanned.clear();
   listed.clear();
   reads.clear();
+  completed = [];
 }
