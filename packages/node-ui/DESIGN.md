@@ -40,7 +40,7 @@ All colours are CSS variables. Never write a hex value in a component: use the t
 
 **Canvas colours.** graph-viz draws on a canvas and can't read CSS variables. Graph views take a plain `GraphPalette` for an explicit theme (`graphPalette(theme)` in `graph-palette.ts`, or `useGraphPalette()` in a component) and pass it to the option builders; `test/graph-palette.test.ts` keeps its values in step with the tokens.
 
-**Contrast.** Readable text clears 4.5:1 on the surface it sits on, in both themes; non-text marks (icons, layer bars, borders that carry meaning) clear 3:1. `test/context-graph-contrast.test.ts` checks the main pairs.
+**Contrast.** Readable text clears 4.5:1 on the surface it sits on, in both themes; non-text marks (icons, layer bars, borders that carry meaning) clear 3:1. `browser-regressions/shell/badge-contrast.spec.ts` checks the main pairs and every badge and count on every surface, reading colours from the browser (`pnpm --dir packages/node-ui test:e2e:shell`).
 
 ## Type
 
