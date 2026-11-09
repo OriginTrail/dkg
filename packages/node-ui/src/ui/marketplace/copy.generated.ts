@@ -362,6 +362,8 @@ export const COPY = {
   "access.used": "last used {t}",
   "access.used.never": "never used",
   "access.spent": "{spent} of {budget} TRAC spent · {left} TRAC left",
+  "access.spent.reserved": "{spent} of {budget} TRAC spent · {reserved} TRAC reserved · {left} TRAC left",
+  "access.reserved.note": "Reserved is held for calls not yet settled, and counts against the budget: a call that got no answer stays reserved at its most until its epoch is final, about two epochs on.",
   "admin.access": "Access keys are the node admin's alone: open the dashboard with the node-admin token to see, mint or revoke them.",
   "operate.connector.up": "backend up",
   "operate.connector.down": "backend down",

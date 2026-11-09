@@ -29,8 +29,8 @@ const A = '0x1d2c3b4a5f6e7d8c9b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c';
 }) satisfies CatalogAnswer;
 
 // The keys list never carries a secret; the key just made carries it once.
-({ keys: [{ keyId: 'dkgmk_0011aabb', label: 'agent', budget: '1000000000000000000', spent: '0', services: null, rps: 100, expiresAt: null, revoked: false, lastUsedAt: null }] }) satisfies KeysAnswer;
-({ keyId: 'dkgmk_0011aabb', label: 'agent', budget: '1', spent: '0', services: [A], rps: 5, expiresAt: 1_800_000_000, revoked: false, lastUsedAt: null, secret: 'dkgmk_0011aabb' }) satisfies MadeKey;
+({ keys: [{ keyId: 'dkgmk_0011aabb', label: 'agent', budget: '1000000000000000000', spent: '0', reserved: '250000000000000', services: null, rps: 100, expiresAt: null, revoked: false, lastUsedAt: null }] }) satisfies KeysAnswer;
+({ keyId: 'dkgmk_0011aabb', label: 'agent', budget: '1', spent: '0', reserved: '0', services: [A], rps: 5, expiresAt: 1_800_000_000, revoked: false, lastUsedAt: null, secret: 'dkgmk_0011aabb' }) satisfies MadeKey;
 
 // A subscription whose budget names its class as the chain stores it.
 ({

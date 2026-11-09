@@ -204,9 +204,9 @@ export function fixtureWorld(nowMs = Date.now()) {
     ],
   });
   const keys: Key[] = [
-    { keyId: KEY_A, label: 'my-agent', budget: tracWei('2').toString(), spent: tracWei('0.61').toString(), services: null, rps: 5, expiresAt: null, revoked: false, lastUsedAt: now - 300 },
-    { keyId: KEY_B, label: 'ci-bot', budget: tracWei('0.5').toString(), spent: tracWei('0.09').toString(), services: [I.qwen14b, I.qwen7b], rps: 2, expiresAt: now + 23 * DAY, revoked: false, lastUsedAt: now - 3_600 },
-    { keyId: 'dkgmk_9c0d1e2f', label: 'old-demo', budget: tracWei('0.2').toString(), spent: tracWei('0.02').toString(), services: null, rps: 5, expiresAt: null, revoked: true, lastUsedAt: now - 40 * DAY },
+    { keyId: KEY_A, label: 'my-agent', budget: tracWei('2').toString(), spent: tracWei('0.61').toString(), reserved: '0', services: null, rps: 5, expiresAt: null, revoked: false, lastUsedAt: now - 300 },
+    { keyId: KEY_B, label: 'ci-bot', budget: tracWei('0.5').toString(), spent: tracWei('0.09').toString(), reserved: tracWei('0.2').toString(), services: [I.qwen14b, I.qwen7b], rps: 2, expiresAt: now + 23 * DAY, revoked: false, lastUsedAt: now - 3_600 },
+    { keyId: 'dkgmk_9c0d1e2f', label: 'old-demo', budget: tracWei('0.2').toString(), spent: tracWei('0.02').toString(), reserved: '0', services: null, rps: 5, expiresAt: null, revoked: true, lastUsedAt: now - 40 * DAY },
   ];
   const batch = (n: number, minsAgo: number, items: number, value: string, counted: string) => ({
     tx: txHash(0xb0 + n), at: now - minsAgo * 60, items, ...amount('value', tracWei(value)), ...amount('counted', tracWei(counted)), gasUsed: 182_000 + items * 1_900,
@@ -404,7 +404,7 @@ export function fixtureAnswer(scenario: FixtureScenario, req: FixtureRequest, no
   if (method === 'PUT' && route === '/plan') return { status: 200, body: planOf(world, body as unknown as PlanRequest) };
   if (method === 'POST' && route === '/keys') {
     const made: MadeKey = {
-      keyId: FIXTURE_SECRET.slice(0, 14), label: String(body.label ?? 'key'), budget: String(body.budget ?? '0'), spent: '0',
+      keyId: FIXTURE_SECRET.slice(0, 14), label: String(body.label ?? 'key'), budget: String(body.budget ?? '0'), spent: '0', reserved: '0',
       services: (body.services as string[] | null | undefined) ?? null, rps: Number(body.rps ?? 5), expiresAt: (body.expiresAt as number | null | undefined) ?? null,
       revoked: false, lastUsedAt: null, secret: FIXTURE_SECRET,
     };

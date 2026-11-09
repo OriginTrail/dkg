@@ -252,12 +252,18 @@ export interface Reconciled {
 
 export interface ReconciliationAnswer { epoch: number; final: boolean; rows: Reconciled[] }
 
-/** An access key, never with its secret. Budget and spent are wei. */
+/** An access key, never with its secret. Budget, spent and reserved are wei. */
 export interface Key {
   keyId: string;
   label: string;
   budget: string;
   spent: string;
+  /**
+   * Held for calls whose receipts have not settled: an unanswered call at its
+   * most, until its epoch is final. The gateway takes a call only while spent,
+   * reserved and the call's most value stay within the budget.
+   */
+  reserved: string;
   /** The services it may call; null for every service the subscription funds. */
   services: string[] | null;
   rps: number;

@@ -47,7 +47,7 @@ export function MarketplaceGalleryView(): React.ReactElement {
   const confirming: Confirming = {
     kind: 'fund', request: { epoch: world.epoch, source, services }, preview, plan: { services, source, renew: true, renewUntilEpoch: world.epoch + 6 },
   };
-  const made: MadeKey = { ...world.keys[0], keyId: FIXTURE_SECRET.slice(0, 14), label: 'my-agent', spent: '0', lastUsedAt: null, secret: FIXTURE_SECRET };
+  const made: MadeKey = { ...world.keys[0], keyId: FIXTURE_SECRET.slice(0, 14), label: 'my-agent', spent: '0', reserved: '0', lastUsedAt: null, secret: FIXTURE_SECRET };
   const served = world.chat(world.labels[FIXTURE_IDS.qwen14b], FIXTURE_IDS.qwen14b).marketplace;
   const noop = () => undefined;
 

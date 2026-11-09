@@ -64,6 +64,19 @@ describe('marketplace Access', () => {
     expect(c.textContent).not.toContain(MISSING_COPY);
   });
 
+  it('counts what a key holds for calls not yet settled against its budget, beside what it spent', async () => {
+    useFixtureNode('active');
+    const c = await render(access());
+    await waitForText(c, 'ci-bot');
+    // 0.09 spent and 0.2 reserved of 0.5: the gateway takes calls only within the 0.21 left.
+    const bot = byTestId(c, 'mkt-key-dkgmk_5e6f7a8b');
+    expect(bot?.textContent).toContain('0.09 of 0.5 TRAC spent · 0.2 TRAC reserved · 0.21 TRAC left');
+    expect(bot?.textContent).toContain('58% of budget');
+    // A key with nothing reserved reads as before.
+    expect(byTestId(c, 'mkt-key-dkgmk_1a2b3c4d')?.textContent).toContain('0.61 of 2 TRAC spent · 1.39 TRAC left');
+    expect(byTestId(c, 'mkt-reserved-note')?.textContent).toContain('Reserved is held for calls not yet settled');
+  });
+
   it('mints a key with the budget, services, rate and expiry entered, and shows its secret once, with the gateway\'s base URL', async () => {
     // Only the clock is fixed, so the expiry is exact; timers stay real.
     const now = Date.UTC(2026, 10, 9, 12, 0, 0);

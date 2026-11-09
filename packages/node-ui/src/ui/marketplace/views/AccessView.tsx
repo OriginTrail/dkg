@@ -1,7 +1,8 @@
-// Access: the gateway's keys, in TRAC: label and prefix, budget used and
-// left, the services a key may call, its rate, expiry and last use, and which
-// service its calls mostly went to. Minting shows the secret once; revoking
-// stops the key at its next call. Keys are the node admin's alone.
+// Access: the gateway's keys, in TRAC: label and prefix, budget spent,
+// reserved for calls not yet settled, and left, the services a key may call,
+// its rate, expiry and last use, and which service its calls mostly went to.
+// Minting shows the secret once; revoking stops the key at its next call.
+// Keys are the node admin's alone.
 import React, { useMemo, useState } from 'react';
 import { copy } from '../copy.generated.js';
 import { isMarketplaceAbsent, isMarketplaceOff, marketplaceApi, needsNodeAdmin } from '../api/client.js';
@@ -12,6 +13,9 @@ import { KeyOnce } from '../purchase/KeyStep.js';
 
 type Expiry = 'never' | '7' | '30' | '90';
 const DAY = 86_400;
+
+/** What a key holds for calls not yet settled; a node from before reserved values answers without one. */
+const reservedOf = (k: Key): bigint => BigInt(k.reserved ?? '0');
 
 export function AccessView(): React.ReactElement {
   const keys = useLoad(() => marketplaceApi.keys());
@@ -132,26 +136,31 @@ export function AccessView(): React.ReactElement {
           const total = Object.values(mix).reduce((s, v) => s + v, 0n);
           const top = Object.entries(mix).sort((a, b) => (b[1] > a[1] ? 1 : b[1] < a[1] ? -1 : 0))[0];
           const other = top && total > 0n ? Math.round(100 - pctOf(top[1], total)) : 0;
-          const left = BigInt(k.budget) - BigInt(k.spent);
+          // The gateway counts what is reserved against the budget as it does what is spent.
+          const reserved = reservedOf(k);
+          const committed = BigInt(k.spent) + reserved;
+          const left = BigInt(k.budget) - committed;
+          const spentKey = reserved > 0n ? 'access.spent.reserved' : 'access.spent';
           return (
             <div key={k.keyId} className={`mkt-krow${k.revoked ? ' revoked' : ''}`} data-testid={`mkt-key-${k.keyId}`} data-revoked={k.revoked}>
               <span>
                 <strong data-copy="_data">{k.label}</strong>{' '}
                 <span className="mkt-mono mkt-muted mkt-xs" data-copy="_data">{k.keyId}…</span>
-                <div className="mkt-muted mkt-xs" data-copy="access.spent">
-                  {copy('access.spent', { spent: fmtTrac(k.spent), budget: fmtTrac(k.budget), left: fmtTrac(left > 0n ? left : 0n) })}
+                <div className="mkt-muted mkt-xs" data-copy={spentKey}>
+                  {copy(spentKey, { spent: fmtTrac(k.spent), reserved: fmtTrac(reserved), budget: fmtTrac(k.budget), left: fmtTrac(left > 0n ? left : 0n) })}
                   {top ? ` · ${copy('access.mix.mostly', { top: label_(top[0]) })}${other > 0 ? ` · ${copy('access.mix.other', { pct: other })}` : ''}` : ''}
                 </div>
                 <div className="mkt-muted mkt-xs" data-copy="access.scopes">{scopeOf(k)}</div>
                 {revokeErr?.keyId === k.keyId ? <ErrorCard err={revokeErr.err} onRetry={() => revoke(k.keyId)}><span className="mkt-muted mkt-xs" data-copy="access.error.revoke">{copy('access.error.revoke')}</span></ErrorCard> : null}
               </span>
-              <span className="mkt-chipleft" data-copy="access.cap">{copy('access.cap', { pct: Math.round(pctOf(k.spent, k.budget)) })}</span>
+              <span className="mkt-chipleft" data-copy="access.cap">{copy('access.cap', { pct: Math.round(pctOf(committed, k.budget)) })}</span>
               {k.revoked
                 ? <span className="mkt-chipblock" data-copy="key.revoked">{copy('key.revoked')}</span>
                 : <button type="button" className="mkt-btn" data-testid={`mkt-revoke-${k.keyId}`} data-copy="access.revoke.btn" onClick={() => revoke(k.keyId)} disabled={busy === k.keyId}>{busy === k.keyId ? copy('state.working') : copy('access.revoke.btn')}</button>}
             </div>
           );
         })}
+        {keys.data.keys.some((k) => reservedOf(k) > 0n) && <p className="mkt-muted mkt-xs" data-testid="mkt-reserved-note" data-copy="access.reserved.note">{copy('access.reserved.note')}</p>}
         <p className="mkt-muted mkt-xs" data-copy="access.revoke">{copy('access.revoke')}</p>
       </div>
     </div>
