@@ -69,6 +69,21 @@ export class ProgramTraceRecorder {
   }
 }
 function message(error: unknown) { return (error instanceof Error ? error.message : String(error)).slice(0, 2048); }
+/** Recovery uses every recorded call identity, including earlier attempts. A
+ * new diagnostic start must never erase evidence used to prohibit mixed replay.
+ * Preserve conflicting identities as well as deduplicating repeated events.
+ */
+export function readProgramCallHistory(store: SemanticRuntimeStore, executionIri: string): Pick<ProgramCallTrace, 'id' | 'kind' | 'target'>[] {
+  const calls = new Map<string, Pick<ProgramCallTrace, 'id' | 'kind' | 'target'>>();
+  for (const record of store.runtimeEventsAfter(executionIri, 0n)) {
+    if (record.eventType !== EVENT) continue;
+    const event = decode(record.cbor) as any;
+    if (event.type !== 'call') continue;
+    const { id, kind, target } = event.call;
+    calls.set(JSON.stringify([id, kind, target]), { id, kind, target });
+  }
+  return [...calls.values()];
+}
 export function readProgramTrace(store: SemanticRuntimeStore, executionIri: string): ProgramExecutionTrace | undefined {
   let trace: ProgramExecutionTrace | undefined;
   for (const record of store.runtimeEventsAfter(executionIri, 0n)) {

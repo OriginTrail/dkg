@@ -109,9 +109,10 @@ export function n8nPinnedExecutionMatches(
   return n8nWorkflowSha256(structural(source)) === n8nWorkflowSha256(structural(execution.workflowData));
 }
 
+export const N8N_VALUE_MAX_BYTES = 16_384;
 export function assertN8nValue(schema: SemanticQueryOutputSchema, value: unknown, kind: 'INPUT' | 'OUTPUT'): void {
   try {
-    canonicalizeJson(value as CanonicalJsonValue, { maxBytes: 16_384, maxDepth: 12 });
+    canonicalizeJson(value as CanonicalJsonValue, { maxBytes: N8N_VALUE_MAX_BYTES, maxDepth: 12 });
     assertSemanticQueryOutput({ outputSchema: schema, outputSchemaSha256: queryOutputSchemaSha256(schema) }, value);
   } catch { throw new Error(`INVALID_N8N_${kind}`); }
 }

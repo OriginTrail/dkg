@@ -1,3 +1,4 @@
+import { normalizeComponentInputSource } from './guest-sources/component-v1.mjs';
 /** Public component descriptors. Credentials and operator endpoints never enter this registry. */
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
@@ -115,6 +116,6 @@ export const componentContract = {
 export function componentProgramSource(id) {
   const descriptor = component(id);
   return `// nos-n8n-component-v1:${id}\nimport { invoke_tool } from '@origintrail-official/dkg-graph-computer/program';\n`
-    + `const descriptor = ${JSON.stringify(descriptor)};\nconst normalize = ${normalizeComponentInput.toString()};\n`
+    + `const descriptor = ${JSON.stringify(descriptor)};\nconst normalize = ${normalizeComponentInputSource};\n`
     + `export function run(input: unknown) { return invoke_tool('urn:dkg:tool:n8n', normalize(descriptor, input)); }\n`;
 }

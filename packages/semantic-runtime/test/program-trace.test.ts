@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it, expect } from 'vitest';
 import { SemanticRuntimeStore } from '../src/persistence.js';
-import { ProgramTraceRecorder, readProgramTrace } from '../src/program-trace.js';
+import { ProgramTraceRecorder, readProgramTrace, readProgramCallHistory } from '../src/program-trace.js';
 const cleanups: (() => void)[] = [];
 afterEach(() => { for (const close of cleanups.splice(0)) close(); });
 function fixture() {
@@ -18,6 +18,21 @@ function fixture() {
   return { store, file, trace: new ProgramTraceRecorder(store, 'exec') };
 }
 describe('Program call traces', () => {
+  it('retains all call identities across empty attempts, including conflicting mixed calls', async () => {
+    const { store, file, trace } = fixture();
+    await trace.call('1', 'tool', 'urn:native', async () => 1);
+    trace.finish(new Error('interrupted'));
+    const next = new ProgramTraceRecorder(store, 'exec');
+    await next.call('1', 'program', 'urn:child', async () => 2);
+    new ProgramTraceRecorder(store, 'exec'); // Crash before the first callback.
+    expect(readProgramTrace(store, 'exec')?.calls).toEqual([]);
+    const reopened = new SemanticRuntimeStore(file);
+    try {
+      expect(readProgramCallHistory(reopened, 'exec')).toEqual([
+        { id: '1', kind: 'tool', target: 'urn:native' }, { id: '1', kind: 'program', target: 'urn:child' },
+      ]);
+    } finally { reopened.close(); }
+  });
   it('preserves dispatch order for concurrent calls and survives reopening', async () => {
     const { store, file, trace } = fixture(); let resolve!: (v: number) => void;
     const first = trace.call('1', 'tool', 'urn:first', () => new Promise<number>(r => resolve = r));

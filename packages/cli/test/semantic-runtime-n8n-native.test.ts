@@ -164,6 +164,8 @@ describe('native n8n component execution receipts', () => {
     const f = fixture();
     f.execution.data.resultData.runData.Component = [1, 2].map(() => ({ data: { main: [[{ json: { text: 'x'.repeat(4200) } }]] } }));
     expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
+    f.execution.data.resultData.runData.Component = [{ data: { main: [[{ json: { text: '💫'.repeat(2200) } }]] } }];
+    expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, itemsJson: '[]' });
     f.grant.result!.ports = ['true', 'false'];
     f.execution.data.resultData.runData.Component = [{ data: { main: [10, 11].map(length => Array.from({ length }, () => ({ json: { value: 1 } }))) } }];
     expect(collectN8nExecutionResult(f.grant, f.execution)).toMatchObject({ ok: false, portsJson: '{}' });

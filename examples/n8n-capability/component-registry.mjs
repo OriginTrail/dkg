@@ -1,3 +1,4 @@
+import { resolveComponentValueSource, validateComponentUrlSource, normalizeComponentInputSource } from './guest-sources/component-v2.mjs';
 /** Public component descriptors. Credentials and operator endpoints never enter this registry. */
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
@@ -134,7 +135,7 @@ export function normalizeComponentInput(descriptor, value) {
 }
 
 export function componentValidationSource() {
-  return `const resolveComponentValue = ${resolveComponentValue.toString()};\nconst validateComponentUrl = ${validateComponentUrl.toString()};\nconst normalize = ${normalizeComponentInput.toString()};\n`;
+  return `const resolveComponentValue = ${resolveComponentValueSource};\nconst validateComponentUrl = ${validateComponentUrlSource};\nconst normalize = ${normalizeComponentInputSource};\n`;
 }
 
 const stringSchema = maxLength => ({ type: 'string', maxLength });
