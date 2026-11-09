@@ -14,18 +14,14 @@
  *     most it may cost before it is sent, and is charged what it cost after.
  *     A call whose cost is not known yet (one its seller refused or never
  *     answered) keeps its reservation until the gateway knows.
- * Kept in a journal: makes, revocations, and what each call cost. The journal
- * is read once; the keys are kept in memory and every append updates them.
- * `compact` folds each key's calls into its total: the gateway's job runs it,
- * and so does every `compactEvery`th charge, so the journal stays short.
+ * Kept in the buyer's ledger (buyer-ledger.ts), with the gateway's calls: the
+ * keys as made and revoked, and what each call charged, in the call's own
+ * record. The ledger is read once, and keeps the keys in memory.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { join } from 'node:path';
-import { Journal, KeyedLock } from './journal.js';
+import { BuyerLedger } from './buyer-ledger.js';
 
 const PREFIX = 'dkgmk_';
-/** Charges between two compactions of the journal. */
-export const KEYS_COMPACT_EVERY = 1_000;
 
 export interface AccessKeyScopes {
   label: string;
@@ -51,65 +47,21 @@ export interface AccessKey {
   lastUsedAt: number | null;
 }
 
-type MakeEntry = {
-  type: 'make'; keyId: string; hash: string; label: string; budget: string; services: string[] | null; rps: number; expiresAt: number | null; at: number;
-  /** Once compacted: what its calls cost until then, and the last one's time. */
-  spent?: string;
-  lastUsedAt?: number | null;
-};
-
-type Entry =
-  | MakeEntry
-  | { type: 'revoke'; keyId: string; at: number }
-  | { type: 'use'; keyId: string; value: string; at: number };
-
-type Folded = { make: MakeEntry; key: AccessKey; hash: Buffer; revokedAt?: number };
-
 export type KeyCheck =
   | { ok: true; key: AccessKey }
   | { ok: false; status: 401 | 429; code: 'missing_key' | 'unknown_key' | 'revoked_key' | 'expired_key' | 'key_rate' };
 
 const hashOf = (secret: string) => createHash('sha256').update(secret).digest();
 
-/** An entry folded into the keys. */
-function apply(keys: Map<string, Folded>, e: Entry): void {
-  if (e.type === 'make') {
-    keys.set(e.keyId, {
-      make: e,
-      hash: Buffer.from(e.hash, 'hex'),
-      key: {
-        keyId: e.keyId, label: e.label, budget: e.budget, spent: e.spent ?? '0', services: e.services, rps: e.rps, expiresAt: e.expiresAt,
-        revoked: false, lastUsedAt: e.lastUsedAt ?? null,
-      },
-    });
-    return;
-  }
-  const kept = keys.get(e.keyId);
-  if (!kept) return;
-  if (e.type === 'revoke') {
-    kept.key.revoked = true;
-    kept.revokedAt = e.at;
-  } else {
-    kept.key.spent = (BigInt(kept.key.spent) + BigInt(e.value)).toString();
-    // A call charged once its epoch is made final may be older than the last one charged.
-    kept.key.lastUsedAt = Math.max(kept.key.lastUsedAt ?? e.at, e.at);
-  }
-}
-
 export class AccessKeys {
-  private readonly journal: Journal<Entry>;
-  private readonly lock = new KeyedLock();
+  /** Where the keys are kept, with the gateway's calls. */
+  readonly ledger: BuyerLedger;
   /** keyId => when its recent calls were let in, for the rate. */
   private readonly recent = new Map<string, number[]>();
-  /** keyId => what its calls in flight, or whose cost is not known yet, may still cost. */
-  private readonly reserved = new Map<string, bigint>();
-  /** The keys, folded from the journal once and kept up to date. */
-  private loading: Promise<Map<string, Folded>> | undefined;
-  /** Charges in the journal since it was last compacted. */
-  private uses = 0;
 
-  constructor(dir: string, private readonly compactEvery = KEYS_COMPACT_EVERY) {
-    this.journal = new Journal(join(dir, 'access-keys.jsonl'));
+  /** @param dirOrLedger the buyer's directory, whose ledger it opens, or the ledger itself */
+  constructor(dirOrLedger: string | BuyerLedger) {
+    this.ledger = typeof dirOrLedger === 'string' ? new BuyerLedger(dirOrLedger) : dirOrLedger;
   }
 
   /** Make a key. Its secret is returned this once and never kept. */
@@ -117,21 +69,19 @@ export class AccessKeys {
     if (!Number.isSafeInteger(scopes.rps) || scopes.rps < 1) throw new Error('rps must be a positive integer');
     const secret = `${PREFIX}${randomBytes(24).toString('hex')}`;
     const keyId = secret.slice(0, PREFIX.length + 8);
-    await this.append({
-      type: 'make', keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
+    const key = await this.ledger.makeKey({
+      keyId, hash: hashOf(secret).toString('hex'), label: scopes.label, budget: scopes.budget.toString(),
       services: scopes.services, rps: scopes.rps, expiresAt: scopes.expiresAt, at: now,
     });
-    return { secret, key: { ...(await this.keys()).get(keyId)!.key } };
+    return { secret, key };
   }
 
-  async revoke(keyId: string, now: number): Promise<AccessKey | null> {
-    if (!(await this.keys()).has(keyId)) return null;
-    await this.append({ type: 'revoke', keyId, at: now });
-    return { ...(await this.keys()).get(keyId)!.key };
+  revoke(keyId: string, now: number): Promise<AccessKey | null> {
+    return this.ledger.revokeKey(keyId, now);
   }
 
-  async list(): Promise<AccessKey[]> {
-    return [...(await this.keys()).values()].map((k) => ({ ...k.key }));
+  list(): Promise<AccessKey[]> {
+    return this.ledger.keyList();
   }
 
   /**
@@ -143,7 +93,7 @@ export class AccessKeys {
     if (!secret) return { ok: false, status: 401, code: 'missing_key' };
     const presented = hashOf(secret);
     let found: AccessKey | undefined;
-    for (const { key, hash } of (await this.keys()).values()) {
+    for (const { key, hash } of await this.ledger.heldKeys()) {
       if (timingSafeEqual(presented, hash)) found = key;
     }
     if (!found) return { ok: false, status: 401, code: 'unknown_key' };
@@ -161,86 +111,21 @@ export class AccessKeys {
    * reserving nothing, when what its calls cost, what is reserved and `value`
    * would pass its budget.
    */
-  async reserve(keyId: string, value: bigint): Promise<boolean> {
-    const kept = (await this.keys()).get(keyId);
-    if (!kept) return false;
-    if (BigInt(kept.key.spent) + this.reservedOf(keyId) + value > BigInt(kept.key.budget)) return false;
-    this.hold(keyId, value);
-    return true;
+  reserve(keyId: string, value: bigint): Promise<boolean> {
+    return this.ledger.reserve(keyId, value);
   }
 
   /** Reserve `value` whatever the key has left: a call whose cost is not known yet, read back at load. */
   hold(keyId: string, value: bigint): void {
-    this.reserved.set(keyId, this.reservedOf(keyId) + value);
+    this.ledger.hold(keyId, value);
   }
 
   release(keyId: string, value: bigint): void {
-    const left = this.reservedOf(keyId) - value;
-    if (left > 0n) this.reserved.set(keyId, left);
-    else this.reserved.delete(keyId);
+    this.ledger.release(keyId, value);
   }
 
   /** What the key's calls in flight, or whose cost is not known yet, may still cost. */
   reservedOf(keyId: string): bigint {
-    return this.reserved.get(keyId) ?? 0n;
-  }
-
-  /** Book what a call cost against its key. */
-  async charge(keyId: string, value: bigint, now: number): Promise<void> {
-    await this.append({ type: 'use', keyId, value: value.toString(), at: now });
-  }
-
-  /** A call settled: charged what it cost, and its reservation released. */
-  async settle(keyId: string, reserved: bigint, value: bigint, now: number): Promise<void> {
-    try {
-      await this.charge(keyId, value, now);
-    } finally {
-      this.release(keyId, reserved);
-    }
-  }
-
-  /** Rewrite the journal as each key's make, with what its calls cost folded in, and its revocation. */
-  async compact(): Promise<void> {
-    await this.lock.run('journal', async () => this.compactNow(await this.keys()));
-  }
-
-  private async compactNow(keys: Map<string, Folded>): Promise<void> {
-    const entries: Entry[] = [];
-    for (const { make, key, revokedAt } of keys.values()) {
-      entries.push({ ...make, spent: key.spent, lastUsedAt: key.lastUsedAt });
-      if (revokedAt !== undefined) entries.push({ type: 'revoke', keyId: key.keyId, at: revokedAt });
-    }
-    await this.journal.replace(entries);
-    this.uses = 0;
-  }
-
-  /**
-   * An entry on disk, then in the keys. Every `compactEvery`th charge compacts the journal; a compaction that fails
-   * leaves the journal as it is, and the next charge tries again.
-   */
-  private async append(entry: Entry): Promise<void> {
-    await this.lock.run('journal', async () => {
-      const keys = await this.keys();
-      await this.journal.append(entry);
-      apply(keys, entry);
-      if (entry.type === 'use' && ++this.uses >= this.compactEvery) await this.compactNow(keys).catch(() => undefined);
-    });
-  }
-
-  /** The keys: the journal folded once, on first use; a read that fails is tried again at the next use. */
-  private keys(): Promise<Map<string, Folded>> {
-    if (!this.loading) {
-      const loading = this.journal.read().then((entries) => {
-        const keys = new Map<string, Folded>();
-        for (const e of entries) apply(keys, e);
-        this.uses = entries.filter((e) => e.type === 'use').length;
-        return keys;
-      });
-      loading.catch(() => {
-        if (this.loading === loading) this.loading = undefined;
-      });
-      this.loading = loading;
-    }
-    return this.loading;
+    return this.ledger.reservedOf(keyId);
   }
 }

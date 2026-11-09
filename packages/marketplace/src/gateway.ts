@@ -28,13 +28,14 @@
  *      ten minutes on, or at the stop time if that is sooner; `maxUnits` the
  *      input's UTF-8 bytes, which a tokenizer never exceeds, plus `max_tokens`
  *      and an allowance per message; `maxValueWei` those units at the quoted
- *      price. The call is on disk (gateway-book.ts) before it is sent;
+ *      price. The call is on disk (buyer-ledger.ts) before it is sent;
  *   9. the seller's answer, and its receipt's checks: it answers this request,
  *      `units` within `maxUnits`, `valueWei` the units at the price, the result
  *      is what it commits to, and an operational key of the seller's Core Node
  *      signed it. A receipt that fails takes the seller out of routing for the
  *      epoch, and the call fails;
- *  10. the receipt is kept before the answer goes back, and the key charged.
+ *  10. the receipt is kept, with the key's charge in the same record, before
+ *      the answer goes back.
  * A call whose client goes away before it is sent leaves its queue, or stops,
  * and is never signed, sent or charged. Once sent, a call counts whatever
  * comes back, since its seller may land a receipt for any request the session
@@ -50,10 +51,9 @@
  * landed, and leave the value the ceiling counts. A call of an ended epoch
  * that did not land leaves its key's reservation. An epoch before the last
  * ended one is made final: its reconciliation is kept, and its receipts and
- * nonce counters are dropped, as are what the access keys' calls cost, folded
- * into each key's total.
+ * nonce counters are dropped, what they cost folded into each key's total, in
+ * the ledger's one compaction (buyer-ledger.ts).
  */
-import { join } from 'node:path';
 import { ethers } from 'ethers';
 import {
   hashServiceRequest,
@@ -69,10 +69,10 @@ import {
   type Subscription,
 } from '@origintrail-official/dkg-chain';
 import { NO_FX, type Fx } from './config.js';
-import { CallBook, exposureOf, isKept, type HeldReceipt } from './gateway-book.js';
+import type { BuyerLedger } from './buyer-ledger.js';
+import { exposureOf, isKept, type CallBook, type HeldReceipt } from './gateway-book.js';
 import { CallerGone, Turns, TurnsFull, type TurnLimits } from './gateway-turns.js';
 import type { AccessKey, AccessKeys } from './keys.js';
-import { Journal, KeyedLock } from './journal.js';
 import { serviceIdOf } from './offers.js';
 import { reconcileSubscription, type ReconciledRow } from './reconcile.js';
 import type { Route, Router } from './router.js';
@@ -135,11 +135,10 @@ export interface GatewayDeps {
   /** Where the subscriptions' session keys are. */
   store: BuyerStore;
   router: Router;
+  /** The access keys callers present; their ledger keeps the gateway's calls and nonce counters too. */
   keys: AccessKeys;
   /** Send a `serve` message to a seller and read the answer's bytes. */
   send(peerId: string, payload: Uint8Array, messageId: string): Promise<Uint8Array>;
-  /** Where the receipts and nonce counters go. */
-  dir: string;
   /** The model URN of a service in an epoch, from the offers, for listing models. */
   modelOf?(serviceId: string, epoch: number): Promise<string | undefined>;
   /** The sellers' stop time before an epoch's end. Default 180. */
@@ -178,15 +177,6 @@ export interface CallView {
   problem?: string;
 }
 
-/** An epoch made final: its reconciliation, kept once its receipts are dropped. */
-interface FinalEpoch {
-  type: 'final';
-  epoch: number;
-  rows: ReconciledRow[];
-}
-
-type NonceEntry = { epoch: number; subscriptionId: string; seller: string; nonce: string };
-
 /** A call in its budget's turn: what the checks before it found. */
 interface BudgetCall {
   caller: GatewayCaller;
@@ -205,8 +195,6 @@ interface BudgetCall {
   signal: AbortSignal | undefined;
 }
 
-const isFinal = (e: HeldReceipt | FinalEpoch): e is FinalEpoch => (e as FinalEpoch).type === 'final';
-
 const fail = (status: number, code: string, message: string, more: Record<string, unknown> = {}, headers?: Record<string, string>): GatewayAnswer =>
   ({ status, body: { error: { code, message, type: 'marketplace' }, ...more }, ...(headers ? { headers } : {}) });
 /** The answer to a call too near the epoch's end, at the chain's time `now`. */
@@ -217,17 +205,12 @@ const epochEnding = (endsAt: number, now: number): GatewayAnswer =>
 const gone = (): GatewayAnswer => fail(499, 'client_gone', 'the client went away before its call was sent');
 
 export class Gateway {
-  private readonly receipts: Journal<HeldReceipt | FinalEpoch>;
-  private readonly nonceLog: Journal<NonceEntry>;
-  private readonly lock = new KeyedLock();
+  /** The nonce counters, the calls and the epochs made final: the keys' ledger. */
+  private readonly ledger: BuyerLedger;
   private readonly turns: Turns;
   private readonly clock: () => number;
-  private readonly nonces = new Map<string, bigint>();
-  /** The calls sent and not made final, and what each may still cost. */
+  /** The calls sent and not made final, and what each may still cost: the ledger's. */
   private readonly book: CallBook;
-  /** The epochs with calls or nonce counters not made final. */
-  private readonly epochs = new Set<number>();
-  private readonly finals = new Map<number, ReconciledRow[]>();
   /** subscription id => the groups landed for it, read up to `toBlock`. */
   private readonly scans = new Map<string, { toBlock: number; groups: LandedGroup[] }>();
   private readonly sessionKeys = new Map<string, ethers.Wallet>();
@@ -236,11 +219,10 @@ export class Gateway {
   private ticking: Promise<void> | undefined;
 
   constructor(private readonly deps: GatewayDeps) {
-    this.receipts = new Journal(join(deps.dir, 'buyer-receipts.jsonl'));
-    this.nonceLog = new Journal(join(deps.dir, 'buyer-nonces.jsonl'));
+    this.ledger = deps.keys.ledger;
+    this.book = this.ledger.calls;
     this.turns = new Turns(deps.turns);
     this.clock = deps.clock ?? Date.now;
-    this.book = new CallBook(deps.keys);
   }
 
   /** The access keys callers present. */
@@ -294,23 +276,10 @@ export class Gateway {
     return { calls: calls.sort((a, b) => b.at - a.at).slice(0, ACTIVITY_LIMIT) };
   }
 
-  /** Read the calls kept, the epochs made final and the nonce counters. Call once before serving. */
+  /** Read the calls kept, the epochs made final and the nonce counters (the ledger). Call once before serving. */
   async load(): Promise<void> {
-    for (const n of await this.nonceLog.read()) {
-      this.noteNonce(n.subscriptionId, n.seller, BigInt(n.nonce));
-      this.epochs.add(n.epoch);
-    }
-    // A call's last record is what the node knows of it.
-    const calls = new Map<string, HeldReceipt>();
-    for (const e of await this.receipts.read()) {
-      if (isFinal(e)) this.finals.set(e.epoch, e.rows);
-      else calls.set(e.callId, e);
-    }
-    for (const r of [...calls.values()].sort((a, b) => a.epoch - b.epoch)) {
-      this.book.restore(r);
-      this.epochs.add(r.epoch);
-      if (r.state === 'open') this.unsettled(r);
-    }
+    await this.ledger.load();
+    for (const r of this.ledger.openCalls()) this.unsettled(r);
   }
 
   /** The job: a tick now, then every `tickSeconds`. */
@@ -346,9 +315,7 @@ export class Gateway {
     const ended = this.book.keyHeldBefore(epoch);
     const landed = await this.usedOf(ended);
     for (const r of ended) if (!landed.has(r.callId)) this.book.release(r);
-    const finals = [...this.epochs].filter((e) => e < epoch - 1);
-    for (const e of finals) await this.finalize(e);
-    if (finals.length > 0) await this.deps.keys.compact();
+    for (const e of this.ledger.epochsBefore(epoch - 1)) await this.finalize(e);
   }
 
   /**
@@ -359,7 +326,7 @@ export class Gateway {
   async reconciliation(epoch?: number): Promise<{ epoch: number; final: boolean; rows: ReconciledRow[] }> {
     const times = await this.deps.chain.getEpochTimes();
     const asked = epoch ?? times.epoch;
-    const kept = this.finals.get(asked);
+    const kept = this.ledger.final(asked);
     if (kept) return { epoch: asked, final: true, rows: kept };
     return { epoch: asked, final: asked < times.epoch, rows: await this.rowsOf(asked) };
   }
@@ -475,7 +442,7 @@ export class Gateway {
       if (now > c.stopAt - MIN_REQUEST_SECONDS) return epochEnding(c.times.endsAt, now);
       const request: ServiceRequest = {
         subscriptionId: c.subscriptionId, serviceId: c.serviceId, seller: route.seller,
-        nonce: await this.nextNonce(c.times.epoch, c.subscriptionId, route.seller),
+        nonce: await this.ledger.takeNonce(c.times.epoch, c.subscriptionId, route.seller),
         pricePerUnit: route.pricePerUnit, maxUnits, maxValueWei,
         issuedAt: Math.max(c.times.now - ISSUED_BEFORE_SECONDS, c.subscription.startsAt),
         expiry: Math.min(now + REQUEST_LIFETIME_SECONDS, c.stopAt),
@@ -494,8 +461,7 @@ export class Gateway {
         request: requestToWire(request), signature, state: 'open',
       };
       // On disk before it goes, with the key's reservation: a node that stops while it waits still counts it.
-      await this.write({ ...kept, problem: 'sent' });
-      this.book.record({ ...kept, problem: 'sent' });
+      await this.ledger.recordSent({ ...kept, problem: 'sent' });
       sent = true;
       return await this.sendAndKeep(c, route, domain, request, message, kept, used);
     } finally {
@@ -537,16 +503,19 @@ export class Gateway {
     const checked = await this.checkReceipt(domain, request, kept.callId, c.budgetIndex, answer);
     // The key's reservation is the call's while it is held; checked, its receipt settles it below.
     const reserved = this.book.isKeyHeld(kept.callId) ? request.maxValueWei : 0n;
-    await this.keep({
+    const record: HeldReceipt = {
       ...kept, receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
       ...(checked.problem ? { problem: checked.problem } : {}),
-    });
+    };
     if (checked.problem) {
+      await this.ledger.recordResult(record);
       router.failed(route.seller, c.times.epoch);
       return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
     }
     const receipt = checked.receipt!;
-    await this.deps.keys.settle(kept.keyId, reserved, receipt.valueWei, c.times.now);
+    // Kept and charged to its key in one record; then its reservation goes.
+    await this.ledger.recordResult(record, { value: receipt.valueWei, at: c.times.now });
+    this.deps.keys.release(kept.keyId, reserved);
     const left = c.budget.value - used - this.book.heldValue(c.budgetKey);
     return {
       status: 200,
@@ -603,37 +572,10 @@ export class Gateway {
     }
   }
 
-  /** The next nonce for the seller on the subscription: taken at once, so two calls never share one, and on disk before it is signed. */
-  private async nextNonce(epoch: number, subscriptionId: string, seller: bigint): Promise<bigint> {
-    const key = `${subscriptionId}:${seller}`;
-    const nonce = (this.nonces.get(key) ?? -1n) + 1n;
-    this.nonces.set(key, nonce);
-    this.epochs.add(epoch);
-    await this.lock.run('journal', () => this.nonceLog.append({ epoch, subscriptionId, seller: seller.toString(), nonce: nonce.toString() }));
-    return nonce;
-  }
-
-  private noteNonce(subscriptionId: string, seller: string, nonce: bigint): void {
-    const key = `${subscriptionId}:${seller}`;
-    if (nonce > (this.nonces.get(key) ?? -1n)) this.nonces.set(key, nonce);
-  }
-
-  /** A call's record on disk. */
-  private async write(r: HeldReceipt): Promise<void> {
-    await this.lock.run('journal', () => this.receipts.append(r));
-  }
-
-  /** What came back for a sent call, in its record's place: counted at once, then on disk. A write that fails still leaves it counted while the node runs. */
-  private async keep(r: HeldReceipt): Promise<void> {
-    this.epochs.add(r.epoch);
-    this.book.record(r);
-    await this.write(r);
-  }
-
   /** A call its seller refused or never answered, kept; past `MAX_UNSETTLED_PER_SELLER` in its epoch, the seller is out for the rest of it. */
   private async keepUnsettled(r: HeldReceipt): Promise<void> {
     this.unsettled(r);
-    await this.keep(r);
+    await this.ledger.recordResult(r);
   }
 
   private unsettled(r: HeldReceipt): void {
@@ -676,27 +618,19 @@ export class Gateway {
   }
 
   /**
-   * Keep an ended epoch's reconciliation, and drop its calls and nonce counters. A refused or open call whose request
-   * landed charges its key the most the request allowed, which is all this node can tell of what landed for it; one
-   * that did not land charges nothing. A crash between the charge and the journal's rewrite charges it again.
+   * Keep an ended epoch's reconciliation, and drop its calls and nonce counters: the ledger's compaction. A refused or
+   * open call whose request landed charges its key the most the request allowed, which is all this node can tell of
+   * what landed for it, in the same rewrite; one that did not land charges nothing.
    */
   private async finalize(epoch: number): Promise<void> {
     const rows = await this.rowsOf(epoch);
     const unknown = this.book.callsOf(epoch).filter((r) => !isKept(r));
     const landed = await this.usedOf(unknown);
-    for (const r of unknown) if (landed.has(r.callId)) await this.deps.keys.charge(r.keyId, exposureOf(r), r.request.issuedAt);
-    await this.lock.run('journal', async () => {
-      await this.receipts.replace([...(await this.receipts.read()).filter((e) => isFinal(e) || e.epoch !== epoch), { type: 'final', epoch, rows }]);
-      await this.nonceLog.replace((await this.nonceLog.read()).filter((n) => n.epoch !== epoch));
-    });
-    this.finals.set(epoch, rows);
+    const charges = unknown.filter((r) => landed.has(r.callId)).map((r) => ({ keyId: r.keyId, value: exposureOf(r), at: r.request.issuedAt }));
     const subscriptionId = subscriptionIdOf(this.deps.buyerWallet, epoch);
-    this.book.drop(epoch, subscriptionId);
-    this.epochs.delete(epoch);
+    await this.ledger.finalize(epoch, subscriptionId, rows, charges);
     this.scans.delete(subscriptionId);
-    for (const map of [this.nonces, this.sessionKeys]) {
-      for (const key of map.keys()) if (key.startsWith(subscriptionId)) map.delete(key);
-    }
+    for (const key of this.sessionKeys.keys()) if (key.startsWith(subscriptionId)) this.sessionKeys.delete(key);
   }
 
   /** The subscription's session key, opened once and kept in memory; `null` when this node does not hold it. */

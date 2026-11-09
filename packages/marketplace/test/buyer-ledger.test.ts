@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * The buyer's ledger (buyer-ledger.ts) on its own: the journals it replaces,
+ * read once and left as they are; its one compaction; and what it does with a
+ * key it does not hold. The gateway's and the keys' behaviour over it is in
+ * gateway-durability, gateway-legacy-journals and gateway-keys.
+ */
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { BUYER_LEDGER_FILE, BuyerLedger, type HeldReceipt, type KeyRecord } from '../src/index.js';
+
+const FIXTURE = join(__dirname, 'fixtures', 'legacy-buyer-journals');
+const SUB = (n: number) => `0x${n.toString(16).padStart(64, '0')}`;
+const KEY: KeyRecord = { keyId: 'dkgmk_00000001', hash: '00'.repeat(32), label: 'k', budget: '1000', services: null, rps: 1, expiresAt: null, at: 0 };
+
+let dir: string;
+const jsonl = (entries: unknown[]) => entries.map((e) => `${JSON.stringify(e)}\n`).join('');
+const ledgerLines = async () => (await readFile(join(dir, BUYER_LEDGER_FILE), 'utf8')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+/** A call of `epoch` on subscription `sub`, nonce `nonce`: accepted with a receipt worth `value`, or open. */
+function callOf(epoch: number, sub: string, nonce: number, value?: bigint, keyId = KEY.keyId): HeldReceipt {
+  return {
+    callId: `0x${(epoch * 1_000 + nonce).toString(16).padStart(64, '0')}`, epoch, subscriptionId: sub, budgetIndex: 0, seller: '1', keyId,
+    request: { subscriptionId: sub, serviceId: sub, seller: '1', nonce: String(nonce), pricePerUnit: '1', maxUnits: '100', maxValueWei: '100', issuedAt: 5, expiry: 9 },
+    signature: '0x',
+    ...(value === undefined
+      ? { state: 'open' as const, problem: 'sent' }
+      : { state: 'held' as const, receipt: { requestDigest: sub, resultCommitment: sub, units: String(value), valueWei: String(value), completedAt: 6 }, receiptSignature: '0x' }),
+  };
+}
+
+beforeEach(async () => {
+  dir = await mkdtemp(join(tmpdir(), 'marketplace-buyer-ledger-'));
+});
+afterEach(async () => {
+  await rm(dir, { recursive: true, force: true });
+});
+
+describe('the journals the ledger replaces', () => {
+  it('are read once, into a journal of its own that alone is read from then on, and left as they were', async () => {
+    await cp(FIXTURE, dir, { recursive: true });
+    const before = await Promise.all(['buyer-receipts.jsonl', 'buyer-nonces.jsonl', 'access-keys.jsonl'].map((f) => readFile(join(dir, f), 'utf8')));
+    const ledger = new BuyerLedger(dir);
+    await ledger.load();
+    // The fixture's nonce counter for epoch 3 reached 4: the next request takes 5.
+    expect(await ledger.takeNonce(3, '0x90bce2dfb937aa3522f61d7260c286bdf54514237c905ed2bbb09999be9cf38c', 1n)).toBe(5n);
+    expect((await ledgerLines()).map((l) => l.type)).toEqual(['key', 'key', 'revoke', 'final', 'nonce', 'call', 'call', 'call', 'call', 'call', 'nonce']);
+    const after = await Promise.all(['buyer-receipts.jsonl', 'buyer-nonces.jsonl', 'access-keys.jsonl'].map((f) => readFile(join(dir, f), 'utf8')));
+    expect(after).toEqual(before);
+    // What the old journals say once the ledger has its own is not read.
+    await writeFile(join(dir, 'buyer-nonces.jsonl'), jsonl([{ epoch: 3, subscriptionId: SUB(9), seller: '1', nonce: '50' }]));
+    const restarted = new BuyerLedger(dir);
+    expect(await restarted.takeNonce(3, SUB(9), 1n)).toBe(0n);
+  });
+
+  it('keep the highest nonce of each counter and the last record of each call, and drop what names no key', async () => {
+    await writeFile(join(dir, 'access-keys.jsonl'), jsonl([
+      { type: 'revoke', keyId: 'dkgmk_ffffffff', at: 1 },
+      { type: 'use', keyId: 'dkgmk_ffffffff', value: '9', at: 1 },
+      { type: 'make', ...KEY },
+      { type: 'use', keyId: KEY.keyId, value: '4', at: 3 },
+    ]));
+    await writeFile(join(dir, 'buyer-nonces.jsonl'), jsonl([
+      { epoch: 2, subscriptionId: SUB(2), seller: '1', nonce: '3' },
+      { epoch: 2, subscriptionId: SUB(2), seller: '1', nonce: '1' },
+    ]));
+    await writeFile(join(dir, 'buyer-receipts.jsonl'), jsonl([callOf(2, SUB(2), 0), callOf(2, SUB(2), 0, 4n), { type: 'final', epoch: 1, rows: [] }]));
+    const ledger = new BuyerLedger(dir);
+    expect(await ledger.keyList()).toEqual([expect.objectContaining({ keyId: KEY.keyId, spent: '4', lastUsedAt: 3, revoked: false })]);
+    expect(await ledger.takeNonce(2, SUB(2), 1n)).toBe(4n);
+    // The call's last record is its receipt, whose cost the key's total holds already.
+    expect(ledger.calls.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 4n)]);
+    expect(ledger.calls.heldValue(`${SUB(2)}:0`)).toBe(4n);
+    expect(ledger.final(1)).toEqual([]);
+    expect((await ledgerLines()).filter((l) => l.type === 'revoke')).toEqual([]);
+  });
+
+  it('leave no journal of the ledger when there is nothing in them', async () => {
+    const ledger = new BuyerLedger(dir);
+    await ledger.load();
+    expect(await ledger.keyList()).toEqual([]);
+    await expect(readFile(join(dir, BUYER_LEDGER_FILE))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('stop a node whose ledger journal cannot even be looked for', async () => {
+    const file = join(dir, 'not-a-directory');
+    await writeFile(file, '');
+    await expect(new BuyerLedger(file).load()).rejects.toMatchObject({ code: 'ENOTDIR' });
+  });
+});
+
+describe("the ledger's compaction", () => {
+  it("drops the epoch's calls and nonce counters, folds what they charged into each key, and keeps every other epoch's", async () => {
+    const ledger = new BuyerLedger(dir);
+    await ledger.makeKey(KEY);
+    await ledger.makeKey({ ...KEY, keyId: 'dkgmk_00000002' });
+    for (const epoch of [1, 2]) {
+      await ledger.takeNonce(epoch, SUB(epoch), 1n);
+      await ledger.recordSent(callOf(epoch, SUB(epoch), 0));
+      await ledger.recordResult(callOf(epoch, SUB(epoch), 0, 7n), { value: 7n, at: 10 + epoch });
+    }
+    await ledger.finalize(1, SUB(1), [], [{ keyId: KEY.keyId, value: 3n, at: 20 }]);
+    expect(await ledgerLines()).toEqual([
+      { type: 'key', ...KEY, spent: '10', lastUsedAt: 20 },
+      { type: 'key', ...KEY, keyId: 'dkgmk_00000002', spent: '0', lastUsedAt: null },
+      { type: 'final', epoch: 1, rows: [] },
+      { type: 'nonce', epoch: 2, subscriptionId: SUB(2), seller: '1', nonce: '0' },
+      { type: 'call', ...callOf(2, SUB(2), 0, 7n), charge: { value: '7', at: 12 } },
+    ]);
+    expect((await ledger.keyList())[0]).toMatchObject({ spent: '17', lastUsedAt: 20 });
+    // Made final again, its reconciliation takes the place of the first.
+    await ledger.finalize(1, SUB(1), [{ subscriptionId: SUB(1) } as never], []);
+    expect((await ledgerLines()).filter((l) => l.type === 'final')).toEqual([{ type: 'final', epoch: 1, rows: [{ subscriptionId: SUB(1) }] }]);
+    const restarted = new BuyerLedger(dir);
+    expect(await restarted.keyList()).toEqual(await ledger.keyList());
+    expect(restarted.calls.callsOf(2)).toEqual([callOf(2, SUB(2), 0, 7n)]);
+  });
+
+  it('keeps what another ledger over the same journal wrote', async () => {
+    const one = new BuyerLedger(dir);
+    await one.makeKey(KEY);
+    await one.takeNonce(1, SUB(1), 1n);
+    const two = new BuyerLedger(dir);
+    await two.load();
+    await two.takeNonce(2, SUB(2), 1n);
+    await two.recordSent(callOf(2, SUB(2), 0));
+    await one.finalize(1, SUB(1), [], []);
+    const third = new BuyerLedger(dir);
+    expect(await third.takeNonce(2, SUB(2), 1n)).toBe(1n);
+    expect(third.calls.callsOf(2)).toHaveLength(1);
+  });
+});
+
+describe('a key the ledger does not hold', () => {
+  it('cannot be revoked, reserves nothing, and is charged nothing', async () => {
+    const ledger = new BuyerLedger(dir);
+    expect(await ledger.revokeKey('dkgmk_none', 1)).toBeNull();
+    expect(await ledger.reserve('dkgmk_none', 1n)).toBe(false);
+    await ledger.recordResult(callOf(1, SUB(1), 0, 5n, 'dkgmk_none'), { value: 5n, at: 2 });
+    await ledger.finalize(1, SUB(1), [], [{ keyId: 'dkgmk_none', value: 5n, at: 3 }]);
+    expect(await ledger.keyList()).toEqual([]);
+    expect(await ledgerLines()).toEqual([{ type: 'final', epoch: 1, rows: [] }]);
+  });
+});
