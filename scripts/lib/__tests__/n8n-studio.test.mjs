@@ -384,13 +384,44 @@ test('activation waiting on provider cleanup cannot overwrite a later revocation
     const denied = assert.rejects(f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {}), /activation changed/);
     await entered.promise;
     const revocationId = randomUUID();
-    await f.service.activate({ kaRef: w.kaRef, active: false, activationId: revocationId }, () => {});
-    resume.resolve(); await denied;
+    const locallyRevoked = Promise.withResolvers(), deactivate = f.repository.deactivate;
+    f.repository.deactivate = (...args) => { const changed = deactivate(...args); locallyRevoked.resolve(); return changed; };
+    const revoking = f.service.activate({ kaRef: w.kaRef, active: false, activationId: revocationId }, () => {});
+    await locallyRevoked.promise;
+    assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
+    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    // Local revocation is immediate; provider cleanup waits for the earlier operation.
+    resume.resolve(); await Promise.all([denied, revoking]);
     assert.deepEqual(f.repository.activation(w.kaRef), { active: false, activationId: revocationId });
     assert.equal(f.repository.row(w.kaRef).event_key, null);
     assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
     assert.equal([...f.native.values()][0].active, false);
   } finally { resume.resolve(); f.close(); }
+});
+
+test('schedule deactivation orders cleanup after an earlier pending publication', async () => {
+  const f = environment(); let release;
+  try {
+    const w = await f.service.save(definition(['schedule', 'edit-fields'], [[0,0,1,0]]), () => {});
+    let entered, revoked;
+    const reached = new Promise(resolve => { entered = resolve; });
+    const localRevoked = new Promise(resolve => { revoked = resolve; });
+    const wait = new Promise(resolve => { release = resolve; });
+    const setPublished = f.provider.setPublished;
+    f.provider.setPublished = async (ref, active) => { if (active) { entered(); await wait; } return setPublished(ref, active); };
+    const deactivate = f.repository.deactivate;
+    f.repository.deactivate = (...args) => { const changed = deactivate(...args); revoked(); return changed; };
+    const activating = f.service.activate({ kaRef: w.kaRef, active: true, activationId: randomUUID() }, () => {});
+    await reached;
+    const deactivating = f.service.activate({ kaRef: w.kaRef, active: false, activationId: randomUUID() }, () => {});
+    await localRevoked;
+    assert.equal(f.repository.activation(w.kaRef).active, false);
+    release(); await Promise.all([activating, deactivating]);
+    assert.equal(f.native.get(f.repository.row(w.kaRef).provider_id).active, false);
+    assert.equal(f.repository.row(w.kaRef).unpublish_pending, null);
+    assert.equal(f.repository.row(w.kaRef).event_key, null);
+    assert.equal(f.invocations.length, 0);
+  } finally { release?.(); f.close(); }
 });
 
 test('schedule deactivation fences an invocation already awaiting catalog inspection', async () => {
