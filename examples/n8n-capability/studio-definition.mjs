@@ -86,9 +86,10 @@ export function validateStudioCapabilities(definition, capabilities) {
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {
   const definition = normalizeStudio(value);
   if (definition.nodes.some(n => n.componentId === 'run-program')) return compileProgramWorkflow(definition);
-  const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
+  const compiler = 4; // Native wrappers declare only the tool they actually invoke.
+  const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
   const kaRef = STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20), workflowName = 'nOS Studio ' + revision;
-  const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, 2, definition])).digest('hex').slice(0, 32);
+  const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, compiler, definition])).digest('hex').slice(0, 32);
   const scopeName = n8nObservationScope(graphId, owner, workflowId);
   const root = definition.nodes.find(n => n.id === definition.entryId), mode = component(root.componentId).mode;
   const nodes = [], connections = {}, pieces = new Map();
@@ -138,12 +139,13 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
     ...componentContract, outputSchema: { ...componentContract.outputSchema, properties: { ...componentContract.outputSchema.properties, traceJson: { type: 'string', maxLength: 8192 } },
       required: [...componentContract.outputSchema.required, 'traceJson'] },
     result: { nodes: [...new Set(sinks.map(s => s.node))], sinks, traceNodes: definition.nodes.map(n => pieces.get(n.id).resultNode), allowObservation: false } };
-  return { definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
+  return { compiler, definition, kaRef, workflowId, workflowName, workflow, grant, mode, requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
 }
 
 export function studioProgramSource(compiled, grant = compiled.grant) {
   if (compiled.executor === 'dkg') return programWorkflowSource(compiled);
-  const metadata = { definition: compiled.definition, grant, mode: compiled.mode };
+  const metadata = { definition: compiled.definition, grant, mode: compiled.mode,
+    ...(compiled.compiler === 4 ? { compiler: 4 } : {}) };
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
   const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
   return marker + Buffer.from(JSON.stringify(metadata)).toString('base64') + '\n'
@@ -157,8 +159,10 @@ export function readStudio(source) {
   if (typeof source !== 'string' || !source.startsWith(marker) || source.length > 65536) fail('Saved Studio source is invalid.');
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
   const definition = normalizeStudio(data.definition);
-  const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
-  const compiled = { definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
+  if (data.compiler !== undefined && data.compiler !== 4) fail('Unknown Studio compiler contract.');
+  const compiler = data.compiler ?? 2;
+  const revision = createHash('sha256').update(JSON.stringify({ compiler, definition })).digest('hex');
+  const compiled = { ...(data.compiler === 4 ? { compiler: 4 } : {}), definition, grant: data.grant, mode: data.mode, kaRef: STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20),
     requiresExportAuthorization: definition.nodes.some(n => component(n.componentId).writes) };
   if (studioProgramSource(compiled) !== source) fail('Saved Studio source differs from its reviewed definition.');
   return compiled;

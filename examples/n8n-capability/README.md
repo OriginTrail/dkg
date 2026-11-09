@@ -255,6 +255,19 @@ Studio sources use their original compiler and child pins, and retired component
 revisions remain available to their saved graphs; choose **Use current component
 version** before editing an older component into a new graph. Historical local
 HTTP demo calls are blocked when n8n's SSRF protection is enabled.
+
+New native Studio saves use compiler contract 4: the wrapper invokes only its
+pinned n8n tool and declares no child Programs. DKG-executed Program workflows
+retain their child grants. Re-saving an existing native definition creates a new
+Program revision and approval instead of reusing its older child-bearing grant.
+Old sources and pending invocation identities remain unchanged; this is not a
+migration or automatic reauthorization of historical executions.
+
+A native invocation with a durable provider acknowledgement can reconcile the
+same execution after inspection fails or the runtime restarts. Studio retries
+that reconciliation once under the original invocation ID. The runtime still
+requires the approved source, empty child grants, the original native effect and
+current authority; it cannot dispatch another provider call during continuation.
 Execute
 Sub-workflow invokes the installed native echo example. Google Sheets creates
 one spreadsheet per input batch and appends scalar rows using RAW cell input.

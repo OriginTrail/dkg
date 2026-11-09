@@ -133,7 +133,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
   let executionAuthorityRequired = priorExecution !== null;
   // A prior failed/paused invocation may disclose authorized diagnostics only:
   // the existing-state branch below rejects it before guest or receipt work.
-  const expectedStatus = priorExecution?.status ?? 'active';
+  let expectedStatus = priorExecution?.status ?? 'active';
   let joiningInvocation = false;
   const checkCapability = () => {
     if (executionAuthorityRequired) {
@@ -216,7 +216,12 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
     const manifest = new TextEncoder().encode(artifact.manifest), planId = hashCanonicalPlan(manifest);
     runtime.store.registerStrategyArtifact({ artifactHash: planId, strategyId: program.programIri, version: program.version,
       canonicalPlan: manifest, sourceRef: program.programIri, reviewState: 'approved', createdAt: Date.now() });
-    if (continuation) runtime.store.setExecutionStatus(executionIri, 'active');
+    if (continuation) {
+      runtime.store.setExecutionStatus(executionIri, 'active');
+      // This continuation owns the failed -> active transition. All subsequent
+      // capability checks must fence that state; revocation/expiry/epochs still apply.
+      expectedStatus = 'active';
+    }
     else runtime.store.createExecution({ executionId: executionIri, planId, partitionId: hashParts([graph]),
       status: 'active', graphRevision: identity, policyEpoch: 1n, rootProcessId: executionIri, leaseEpoch: 0n });
     const authority = {

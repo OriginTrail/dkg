@@ -658,7 +658,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it.each(['complete', 'new-call', 'missing-acknowledgement'])('reconciles native results without dispatching new work (%s)', async mode => {
+  it.each(['complete', 'new-call', 'missing-acknowledgement', 'revoke', 'expire', 'epoch'])('reconciles native results without dispatching new work (%s)', async mode => {
     const extraCall = mode === 'new-call';
     const n8nTool = 'urn:dkg:tool:n8n', workflowId = 'native-inspection';
     const definition = { versionId: 'published-native-1', nodes: [{ id: 'component', name: 'Component',
@@ -706,6 +706,13 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       await expect(f.client.programs.invoke({ ...prepared, inputs: [{ text: 'changed' }] })).rejects.toMatchObject({ code: 'INVOCATION_LAYER_CONFLICT' });
       if (mode === 'missing-acknowledgement') {
         await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ code: 'INVOCATION_NOT_RETRYABLE' });
+        expect(dispatches).toBe(1);
+        return;
+      }
+      if (['revoke', 'expire', 'epoch'].includes(mode)) {
+        invalidateExecutionCapability(f.target, prepared.invocationId, mode as AuthorityChange);
+        await restartNode(f.target);
+        await expect(f.client.programs.invoke(prepared)).rejects.toMatchObject({ status: 403 });
         expect(dispatches).toBe(1);
         return;
       }
