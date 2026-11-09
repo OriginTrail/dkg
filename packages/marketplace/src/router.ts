@@ -5,8 +5,10 @@
  *   1. Candidates: the epoch's offers at or under the budget's price cap, from
  *      sellers in the sharding table.
  *   2. Order: pinned sellers, then price, then this node's measured latency.
- *   3. Quotes from the first three, kept five minutes, each from the peer its
- *      offer names, which must answer as the offer's seller.
+ *   3. Quotes from the first three, kept five minutes, and only for their own
+ *      epoch, each from the peer its offer names, which must answer as the
+ *      offer's seller. A quote that does not read as one
+ *      (`quoteResponseFromWire`) counts as no answer.
  *   4. It stays with the seller that answered, so each seller gets one run of
  *      nonces, and moves on when a seller is unreachable, for ten minutes, or
  *      returns a receipt that fails the buyer's checks, for the rest of the epoch.
@@ -24,7 +26,7 @@
  */
 import type { MarketplaceChainAdapter, MarketplaceDomain } from '@origintrail-official/dkg-chain';
 import { offerSignerOf, type Offer } from './offers.js';
-import type { QuoteResponse } from './wire.js';
+import { quoteResponseFromWire, type QuoteResponse } from './wire.js';
 
 export const QUOTE_TTL_MS = 5 * 60_000;
 export const UNREACHABLE_MS = 10 * 60_000;
@@ -42,7 +44,8 @@ export interface RouterDeps {
   chain: Pick<MarketplaceChainAdapter, 'getMarketplaceContracts' | 'getIdentityIdForAddress' | 'isShardingTableMember'>;
   /** The offers of the given epochs, from the Marketplace Context Graph, their signatures not checked. */
   offers(epochs: number[]): Promise<Offer[]>;
-  quote(peerId: string, services: string[]): Promise<QuoteResponse>;
+  /** A seller's answer to `quote`, as it came: the router reads it with `quoteResponseFromWire`. */
+  quote(peerId: string, services: string[]): Promise<unknown>;
   /** Sellers tried first for a service: the standing plan's pinned seller. */
   pinned?: (serviceId: string) => Promise<readonly bigint[]>;
   /** Milliseconds. */
@@ -87,7 +90,7 @@ export class Router {
       return (this.latency.get(a.seller.toString()) ?? Infinity) - (this.latency.get(b.seller.toString()) ?? Infinity);
     });
     for (const offer of candidates.slice(0, QUOTED_CANDIDATES)) {
-      const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, now);
+      const quote = await this.quoteOf(offer.seller, offer.peerId, serviceId, epoch, now);
       const quoted = quote?.offers.find((q) => q.serviceId === serviceId);
       if (!quote || quote.epoch !== epoch || !quoted?.available || BigInt(quoted.pricePerUnit) > maxPricePerUnit) continue;
       this.sticky.set(serviceId, offer.seller);
@@ -157,12 +160,14 @@ export class Router {
     this.latency.set(seller.toString(), before === undefined ? ms : (before * 3 + ms) / 4);
   }
 
-  private async quoteOf(seller: bigint, peerId: string, serviceId: string, now: number): Promise<QuoteResponse | null> {
+  /** The seller's quote for `serviceId` in `epoch`: the one kept, while it is for that epoch and within its five minutes, or a new one. */
+  private async quoteOf(seller: bigint, peerId: string, serviceId: string, epoch: number, now: number): Promise<QuoteResponse | null> {
     const key = `${seller}:${serviceId}`;
     const kept = this.quotes.get(key);
-    if (kept && now - kept.at < QUOTE_TTL_MS) return kept.quote;
+    if (kept && kept.quote.epoch === epoch && now - kept.at < QUOTE_TTL_MS) return kept.quote;
     try {
-      const quote = await this.deps.quote(peerId, [serviceId]);
+      // A quote that does not read as one counts as no answer.
+      const quote = quoteResponseFromWire(await this.deps.quote(peerId, [serviceId]));
       if (quote.seller !== seller.toString()) return null;
       this.quotes.set(key, { at: now, quote });
       return quote;
