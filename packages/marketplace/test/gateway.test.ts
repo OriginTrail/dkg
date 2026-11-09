@@ -7,7 +7,7 @@
  * memory, the keys' scopes, and what landed: the held value at the gateway's
  * tick, reconciliation, and an ended epoch made final.
  */
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +36,7 @@ import {
   receiptFromWire,
   serviceIdOf,
   signOffer,
+  type Completion,
   type Connector,
   type AccessKey,
   type GatewayAnswer,
@@ -66,7 +67,9 @@ let DOMAIN: MarketplaceDomain | undefined;
 let caller: { key: AccessKey };
 const call = (chat: unknown = CHAT, g: Gateway = gateway) => g.chatCompletion(caller, chat);
 
-const backend: Connector = { kind: 'openai', complete: async () => ({ content: 'synthetic answer', promptTokens: 7, completionTokens: 5 }) };
+/** What the stub backend answers: 12 units by default. */
+let completion: Completion;
+const backend: Connector = { kind: 'openai', complete: async () => completion };
 const body = (a: GatewayAnswer) => a.body as any;
 
 async function setUp(value = 10n ** 6n, models: string[] = [MODEL]): Promise<void> {
@@ -116,6 +119,7 @@ beforeEach(async () => {
   chain = marketplaceChainOf(mock)!;
   tamper = undefined;
   reachable = true;
+  completion = { content: 'synthetic answer', promptTokens: 7, completionTokens: 5 };
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -308,6 +312,48 @@ describe('access keys', () => {
     expect(await keys.check(secret, now)).toMatchObject({ ok: false, code: 'revoked_key' });
     expect(await keys.revoke('dkgmk_none', now)).toBeNull();
     await expect(keys.make({ label: 'x', budget: 1n, services: null, rps: 0, expiresAt: null }, now)).rejects.toThrow(/rps/);
+  });
+
+  it("keep one key's calls on two services at once within its budget", async () => {
+    const other = 'urn:test:model:gateway-two';
+    await setUp(10n ** 6n, [MODEL, other]);
+    // A call may cost 430 wei (43 units: 18 bytes, 24 of allowance, 1 token), and costs all of it: the backend
+    // overruns, and the seller cuts the answer to the request's units. The key's budget fits one such call, not two.
+    completion = { content: 'a long synthetic answer', promptTokens: 30, completionTokens: 100 };
+    const { key } = await keys.make({ label: 'tight', budget: 500n, services: null, rps: 1_000, expiresAt: null }, 0);
+    const chat = { ...CHAT, max_tokens: 1 };
+    const answers = await Promise.all([gateway.chatCompletion({ key }, chat), gateway.chatCompletion({ key }, { ...chat, model: other })]);
+    expect(answers.map((a) => a.status).sort()).toEqual([200, 402]);
+    expect(answers.map((a) => body(a).error?.code ?? body(a).marketplace.value).sort()).toEqual(['430', 'key_budget']);
+    expect((await keys.list()).find((k) => k.keyId === key.keyId)).toMatchObject({ spent: '430', reserved: '0' });
+  });
+
+  it('settle a reservation once, carry the open ones through a fold, and read the costs of older journals', async () => {
+    await setUp();
+    const keyId = caller.key.keyId;
+    expect(await keys.reserve(keyId, 'call-1', 100n, 5)).toBe(true);
+    expect(await keys.reserve('dkgmk_none', 'call-2', 1n, 5)).toBe(false);
+    expect(await keys.reservations()).toEqual([{ callId: 'call-1', keyId, value: 100n }]);
+    expect((await keys.list())[0]).toMatchObject({ spent: '0', reserved: '100', lastUsedAt: null });
+    await keys.settle('call-1', 60n);
+    await keys.settle('call-1', 90n);
+    await keys.settle('call-9', 90n);
+    expect((await keys.list())[0]).toMatchObject({ spent: '60', reserved: '0', lastUsedAt: 5 });
+    // An open reservation survives a fold, and is settled after it.
+    expect(await keys.reserve(keyId, 'call-3', 40n, 7)).toBe(true);
+    const before = await keys.list();
+    await keys.compact();
+    expect(await keys.list()).toEqual(before);
+    await keys.settle('call-3', 0n);
+    expect((await keys.list())[0]).toMatchObject({ spent: '60', reserved: '0', lastUsedAt: 5 });
+    // A journal from before reservations books each call's cost on its own line.
+    await appendFile(join(dir, 'buyer', 'access-keys.jsonl'), `${JSON.stringify({ type: 'use', keyId, value: '15', at: 9 })}\n`);
+    expect((await keys.list())[0]).toMatchObject({ spent: '75', lastUsedAt: 9 });
+    // A reservation left open when the node stopped is settled at nothing when its gateway starts.
+    expect(await keys.reserve(keyId, 'call-4', 30n, 10)).toBe(true);
+    await new Gateway(gatewayDeps).load();
+    expect(await keys.reservations()).toEqual([]);
+    expect((await keys.list())[0]).toMatchObject({ spent: '75', reserved: '0' });
   });
 });
 
@@ -554,15 +600,17 @@ describe('landing, reconciliation and pruning', () => {
     await job.stop();
   });
 
-  it('keeps a revocation when it folds the keys', async () => {
+  it('keeps a revocation and an open reservation when it folds the keys', async () => {
     await setUp();
     const { key } = await keys.make({ label: 'revoked', budget: 1n, services: null, rps: 1, expiresAt: null }, 5);
-    await keys.charge(caller.key.keyId, 7n, 6);
+    await keys.reserve(caller.key.keyId, 'call-1', 7n, 6);
+    await keys.settle('call-1', 7n);
+    await keys.reserve(caller.key.keyId, 'call-2', 3n, 7);
     await keys.revoke(key.keyId, 9);
     const before = await keys.list();
     await keys.compact();
     expect(await keys.list()).toEqual(before);
     const lines = (await readFile(join(dir, 'buyer', 'access-keys.jsonl'), 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
-    expect(lines.map((l) => l.type)).toEqual(['make', 'make', 'revoke']);
+    expect(lines.map((l) => l.type)).toEqual(['make', 'reserve', 'make', 'revoke']);
   });
 });

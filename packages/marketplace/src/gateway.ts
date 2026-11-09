@@ -12,21 +12,28 @@
  *   4. a seller, from the router;
  *   5. the soft ceiling: what the budget used on chain, the receipts this node
  *      holds, and this call's most value stay under 95% of the budget;
- *   6. the key's own budget;
- *   7. the request, signed by the subscription's session key: a nonce from a
+ *   6. the request, signed by the subscription's session key: a nonce from a
  *      counter per subscription and seller, written before it is signed;
  *      `issuedAt` the chain's time and never before `startsAt`; an expiry ten
  *      minutes on, or at the stop time if that is sooner; `maxUnits` the input's
  *      UTF-8 bytes, which a tokenizer never exceeds, plus `max_tokens` and an
  *      allowance per message; `maxValueWei` those units at the quoted price;
+ *   7. the key's own budget: the call's most value is reserved against the
+ *      key, in one step with the check that the budget has it beside what the
+ *      key's calls cost and hold reserved, so calls on other services at once
+ *      never take the key past its budget;
  *   8. the seller's answer, and its receipt's checks: it answers this request,
  *      `units` within `maxUnits`, `valueWei` the units at the price, completed
  *      between the request's issue and its expiry, as settlement requires, the
  *      result is what it commits to, and an operational key of the seller's
  *      Core Node signed it. A receipt that fails takes the seller out of
  *      routing for the epoch, and the call fails;
- *   9. the receipt is kept before the answer goes back.
- * Calls on one budget run one at a time, from the ceiling to the receipt.
+ *   9. the key's reservation is settled at the receipt's value, or at nothing
+ *      when no receipt passed, and the receipt is kept before the answer goes
+ *      back.
+ * Calls on one budget run one at a time, from the ceiling to the receipt;
+ * calls on others run at once. A reservation left open when the node stopped
+ * is settled at nothing when it starts again.
  *
  * Its job, every tick: the held receipts whose nonces the chain shows used
  * have landed, and leave the held value the ceiling counts. An epoch before
@@ -232,7 +239,10 @@ export class Gateway {
     return { calls: calls.sort((a, b) => b.at - a.at).slice(0, ACTIVITY_LIMIT) };
   }
 
-  /** Read the receipts held, the epochs made final and the nonce counters. Call once before serving. */
+  /**
+   * Read the receipts held, the epochs made final and the nonce counters, and settle at nothing the keys'
+   * reservations of calls the node stopped during. Call once before serving.
+   */
   async load(): Promise<void> {
     for (const n of await this.nonceLog.read()) {
       this.noteNonce(n.subscriptionId, n.seller, BigInt(n.nonce));
@@ -242,6 +252,7 @@ export class Gateway {
       if (isFinal(e)) this.finals.set(e.epoch, e.rows);
       else this.remember(e);
     }
+    for (const r of await this.deps.keys.reservations()) await this.deps.keys.settle(r.callId, 0n);
   }
 
   /** The job: a tick now, then every `tickSeconds`. */
@@ -357,8 +368,6 @@ export class Gateway {
         return fail(402, 'soft_ceiling', 'the budget is at its soft ceiling', { serviceId, ...amount('left', left), fork: { topUp: true, nextEpochAt: times.endsAt } });
       }
       const keyId = caller.key.keyId;
-      const spent = BigInt((await this.deps.keys.list()).find((k) => k.keyId === keyId)?.spent ?? '0');
-      if (spent + maxValueWei > BigInt(caller.key.budget)) return fail(402, 'key_budget', "the call could cost more than the access key's budget has left");
       const sessionKey = await this.sessionKeyOf(subscriptionId, subscription.sessionKey);
       if (!sessionKey) return fail(500, 'session_key_missing', "this node does not hold the subscription's session key");
       const domain = await this.domainOf();
@@ -374,21 +383,28 @@ export class Gateway {
       if (message.length + PEER_LIMITS.envelopeBytes > PEER_LIMITS.serveRequestBytes) {
         return fail(413, 'request_too_large', 'the call is larger than a seller takes');
       }
+      if (!(await this.deps.keys.reserve(keyId, callId, maxValueWei, times.now))) {
+        return fail(402, 'key_budget', "the call could cost more than the access key's budget has left");
+      }
       const started = Date.now();
       let answer: ServeResponse;
       try {
         answer = await this.sendServe(route.peerId, message, callId);
       } catch {
+        await this.deps.keys.settle(callId, 0n);
         this.deps.router.unreachable(route.seller);
         return fail(503, 'seller_unreachable', 'the seller did not answer; try again', { serviceId });
       }
       this.deps.router.measured(route.seller, Date.now() - started);
       if (!answer.ok) {
+        await this.deps.keys.settle(callId, 0n);
         if (answer.code === 'WrongPrice') this.deps.router.requote(route.seller);
         else if (answer.retry && answer.code !== 'EpochEnding') this.deps.router.unreachable(route.seller);
         return fail(502, 'seller_refused', `the seller refused the call: ${answer.code}`, { sellerCode: answer.code, retry: answer.retry });
       }
       const checked = await this.checkReceipt(domain, request, callId, budgetIndex, answer);
+      // The key pays for the call before the receipt is kept: a stop between the two leaves no receipt the key did not pay for.
+      await this.deps.keys.settle(callId, checked.receipt?.valueWei ?? 0n);
       const entry: HeldReceipt = {
         callId, epoch: times.epoch, subscriptionId, budgetIndex, seller: route.seller.toString(), keyId, request: requestToWire(request), signature,
         receipt: answer.receipt, receiptSignature: answer.receiptSignature, state: checked.problem ? 'refused' : 'held',
@@ -401,7 +417,6 @@ export class Gateway {
         return fail(502, 'bad_receipt', `the seller's receipt failed a check: ${checked.problem}`, { problem: checked.problem });
       }
       const receipt = checked.receipt!;
-      await this.deps.keys.charge(keyId, receipt.valueWei, times.now);
       const left = budget.value - used - (this.held.get(budgetKey) ?? 0n);
       return {
         status: 200,
